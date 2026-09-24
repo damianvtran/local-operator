@@ -752,7 +752,9 @@ async def test_actual_registry_key_login_input_cancel_and_persistence(desktop):
     operation_id = started.json()["result"]["id"]
     awaiting = await wait_for_state(client, operation_id, "input_required")
     assert awaiting["input_required"]
-    assert (await client.post("/v1/auth/login", json={"provider": "radient"})).status_code == 409
+    # A second start no longer answers 409: it SUPERSEDES the active operation
+    # (see `test_a_new_sign_in_supersedes_a_leftover_one`), so that case is not
+    # exercised here -- it would cancel the operation this test goes on to finish.
     secret = "registry-login-secret"
     response = await client.post(
         f"/v1/auth/operations/{operation_id}/input",
@@ -911,3 +913,1004 @@ async def test_unmanaged_mode_keeps_the_schedules_surface_open(desktop, monkeypa
         401,
         403,
     )
+
+
+# ---------------------------------------------------------------------------
+# Suggested models, first-run defaults and key validation on the desktop routes
+# ---------------------------------------------------------------------------
+
+
+async def test_provider_census_carries_the_suggested_model(desktop):
+    """The renderer shows "Suggested: ..." from THIS field; it carries no table."""
+    client, _ = desktop
+    rows = {
+        row["id"]: row
+        for row in (await client.get("/v1/auth/providers")).json()["result"]["providers"]
+    }
+    assert rows["anthropic"]["suggested_model"] == {
+        "id": "claude-opus-5-5",
+        "name": "Claude Opus 5.5",
+    }
+    assert rows["deepseek"]["suggested_model"]["id"] == "deepseek-flash"
+    assert rows["ollama"]["suggested_model"] is None
+    assert rows["typesafe"]["suggested_model"] is None
+    # Per method, because the route decides the spelling (Kimi).
+    kimi = {m["method_id"]: m["suggested_model"]["id"] for m in rows["kimi"]["auth_methods"]}
+    assert kimi == {"kimi": "k3", "kimi:api-key": "kimi-k3"}
+
+
+async def test_key_save_on_an_empty_config_sets_the_suggested_default(desktop):
+    client, app = desktop
+    response = await client.put(
+        "/v1/auth/providers/deepseek/key", json={"value": "sk-first-run-secret"}
+    )
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["valid"] is None  # the conftest stubs the live check
+    assert result["defaults_applied"] == {
+        "hosting": "deepseek",
+        "model": "deepseek-flash",
+        "model_name": "DeepSeek Flash",
+        "receipt": "Set default hosting to 'deepseek', model to 'deepseek-flash'.",
+    }
+    assert "sk-first-run-secret" not in response.text
+    # The side effect, read from disk through a fresh manager.
+    on_disk = ConfigManager(app.state.config_manager.config_dir)
+    assert on_disk.get_config_value("hosting") == "deepseek"
+    assert on_disk.get_config_value("model_name") == "deepseek-flash"
+
+
+async def test_key_save_leaves_an_existing_working_choice_alone(desktop):
+    client, app = desktop
+    app.state.config_manager.set_config_value("hosting", "anthropic")
+    app.state.config_manager.set_config_value("model_name", "claude-sonnet-5")
+    response = await client.put("/v1/auth/providers/deepseek/key", json={"value": "sk-second"})
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["defaults_applied"] is None
+    on_disk = ConfigManager(app.state.config_manager.config_dir)
+    assert on_disk.get_config_value("hosting") == "anthropic"
+    assert on_disk.get_config_value("model_name") == "claude-sonnet-5"
+
+
+async def test_key_save_fills_an_empty_model_for_the_configured_provider(desktop):
+    client, app = desktop
+    app.state.config_manager.set_config_value("hosting", "deepseek")
+    app.state.config_manager.set_config_value("model_name", "")
+    response = await client.put("/v1/auth/providers/deepseek/key", json={"value": "sk-fill"})
+    applied = response.json()["result"]["defaults_applied"]
+    assert applied["hosting"] == "deepseek" and applied["model"] == "deepseek-flash"
+    assert ConfigManager(app.state.config_manager.config_dir).get_config_value("model_name") == (
+        "deepseek-flash"
+    )
+
+
+async def test_key_save_reads_config_written_elsewhere_since_boot(desktop):
+    """The server's manager is re-read: a hosting chosen by the TUI after this
+    server booted must not be treated as empty (and then overwritten)."""
+    client, app = desktop
+    ConfigManager(app.state.config_manager.config_dir).set_config_value("hosting", "anthropic")
+    response = await client.put("/v1/auth/providers/deepseek/key", json={"value": "sk-elsewhere"})
+    assert response.json()["result"]["defaults_applied"] is None
+    assert ConfigManager(app.state.config_manager.config_dir).get_config_value("hosting") == (
+        "anthropic"
+    )
+
+
+async def test_a_rejected_key_is_refused_and_not_stored(desktop, monkeypatch):
+    from local_operator.providers import key_check
+
+    async def rejected(_provider, _key, **_kwargs):
+        return key_check.KeyCheck(False, "DeepSeek rejected this API key. Check it and try again.")
+
+    monkeypatch.setattr(key_check, "check_api_key", rejected)
+    client, app = desktop
+    response = await client.put("/v1/auth/providers/deepseek/key", json={"value": "sk-bad-key"})
+    assert response.status_code == 422
+    assert response.json()["detail"] == "DeepSeek rejected this API key. Check it and try again."
+    assert "sk-bad-key" not in response.text
+    assert not app.state.desktop_auth.store.list_credentials("deepseek")
+    # No defaults either: nothing usable was connected.
+    assert not ConfigManager(app.state.config_manager.config_dir).get_config_value("hosting")
+
+
+async def test_a_verified_key_reports_valid(desktop, monkeypatch):
+    from local_operator.providers import key_check
+
+    async def accepted(_provider, _key, **_kwargs):
+        return key_check.KeyCheck(True, None)
+
+    monkeypatch.setattr(key_check, "check_api_key", accepted)
+    client, app = desktop
+    response = await client.put("/v1/auth/providers/deepseek/key", json={"value": "sk-good"})
+    result = response.json()["result"]
+    assert (result["valid"], result["reason"]) == (True, None)
+    assert app.state.desktop_auth.store.list_credentials("deepseek")
+
+
+def _stub_login(monkeypatch, provider: str, login):
+    definition = registry.get_provider_definition(provider)
+    assert definition is not None
+    monkeypatch.setitem(registry._BY_ID, provider, dataclasses.replace(definition, login=login))
+
+
+async def test_the_first_login_reply_carries_the_auth_url(desktop, monkeypatch):
+    """The reported bug: the browser never opened until "reopen", because the
+    first reply was snapshotted before the flow ran a step (auth_url null)."""
+    client, _ = desktop
+    release = asyncio.Event()
+
+    async def login(callbacks, *, signal=None, **_kwargs):
+        await asyncio.sleep(0.01)  # a real flow binds a port and builds PKCE first
+        from local_operator.providers.oauth.callback_server import report_flow_details
+
+        await report_flow_details(
+            callbacks, launch_url="http://localhost:54549/launch", expires_in=300
+        )
+        callbacks.on_auth_url("https://radienthq.com/authorize?x=1", instructions=None)
+        await release.wait()
+        return {"type": "oauth", "access": "a", "refresh": "r", "expires": 1}
+
+    _stub_login(monkeypatch, "radient", login)
+    started = (await client.post("/v1/auth/login", json={"provider": "radient"})).json()["result"]
+    assert started["state"] == "waiting"
+    assert started["auth_url"] == "https://radienthq.com/authorize?x=1"
+    assert started["launch_url"] == "http://localhost:54549/launch"
+    # The flow's own deadline, not the host's 900 s cap.
+    assert 290 <= started["expires_in"] <= 300
+    assert started["input_optional"] is False
+    release.set()
+    done = await wait_for_state(client, started["id"], "succeeded")
+    assert done["auth_url"] is None and done["launch_url"] is None
+
+
+async def test_a_device_flow_publishes_its_user_code(desktop, monkeypatch):
+    client, _ = desktop
+
+    async def login(callbacks, *, signal=None, **_kwargs):
+        from local_operator.providers.oauth.callback_server import report_flow_details
+
+        await report_flow_details(callbacks, user_code="WXYZ-1234", expires_in=600)
+        callbacks.on_auth_url("https://auth.x.ai/device", instructions="Enter code: WXYZ-1234")
+        await asyncio.Event().wait()
+
+    _stub_login(monkeypatch, "xai-oauth", login)
+    started = (await client.post("/v1/auth/login", json={"provider": "xai-oauth"})).json()["result"]
+    assert started["user_code"] == "WXYZ-1234"
+    # Kept for compatibility with renderers that print it.
+    assert started["instructions"] == "Enter code: WXYZ-1234"
+    assert 590 <= started["expires_in"] <= 600
+
+
+async def test_the_flow_timeout_reads_expired_not_failed(desktop, monkeypatch):
+    client, _ = desktop
+
+    async def login(callbacks, *, signal=None, **_kwargs):
+        from local_operator.providers.oauth.callback_server import LoginTimeoutError
+
+        raise LoginTimeoutError()
+
+    _stub_login(monkeypatch, "radient", login)
+    operation_id = (await client.post("/v1/auth/login", json={"provider": "radient"})).json()[
+        "result"
+    ]["id"]
+    done = await wait_for_state(client, operation_id, "expired", "failed")
+    assert done["state"] == "expired"
+    assert "expired" in done["message"].lower()
+
+
+async def test_a_new_sign_in_supersedes_a_leftover_one(desktop, monkeypatch):
+    """A 409 here blocked exactly the retry that was the user's way out."""
+    client, _ = desktop
+
+    async def login(callbacks, *, signal=None, **_kwargs):
+        callbacks.on_auth_url("https://radienthq.com/authorize", instructions=None)
+        await asyncio.Event().wait()
+
+    _stub_login(monkeypatch, "radient", login)
+    first = (await client.post("/v1/auth/login", json={"provider": "radient"})).json()["result"]
+    second = await client.post("/v1/auth/login", json={"provider": "radient"})
+    assert second.status_code == 200, second.text
+    assert second.json()["result"]["id"] != first["id"]
+    old = (await client.get(f"/v1/auth/operations/{first['id']}")).json()["result"]
+    assert old["state"] == "cancelled"
+    assert old["message"] == "Replaced by a new sign-in."
+    # A DIFFERENT provider supersedes too; only one flow is ever live.
+    third = await client.post("/v1/auth/login", json={"provider": "openrouter"})
+    assert third.status_code == 200
+    replaced = (await client.get(f"/v1/auth/operations/{second.json()['result']['id']}")).json()[
+        "result"
+    ]
+    assert replaced["state"] == "cancelled"
+
+
+async def test_an_optional_paste_keeps_the_browser_primary(desktop, monkeypatch):
+    """Anthropic: the paste box is a fallback; the copy must lead with the browser."""
+    client, _ = desktop
+
+    async def login(callbacks, *, signal=None, **_kwargs):
+        callbacks.on_auth_url("https://claude.ai/oauth/authorize", instructions=None)
+        await callbacks.on_manual_code_input()
+        await asyncio.Event().wait()
+
+    _stub_login(monkeypatch, "anthropic", login)
+    started = (await client.post("/v1/auth/login", json={"provider": "anthropic"})).json()["result"]
+    assert started["input_optional"] is True
+    waiting = await wait_for_state(client, started["id"], "waiting")
+    for _ in range(200):
+        waiting = (await client.get(f"/v1/auth/operations/{started['id']}")).json()["result"]
+        if waiting["input_required"]:
+            break
+        await asyncio.sleep(0)
+    assert waiting["input_required"] is True
+    assert waiting["state"] == "waiting"
+    assert waiting["message"].startswith("Finish signing in in your browser")
+    assert "Paste the key" not in waiting["message"]
+
+
+async def test_oauth_success_applies_and_reports_the_suggested_default(desktop, monkeypatch):
+    client, app = desktop
+
+    async def login(callbacks, *, signal=None, **_kwargs):
+        callbacks.on_auth_url("https://claude.ai/oauth/authorize", instructions=None)
+        return {"type": "oauth", "access": "at", "refresh": "rt", "expires": 1}
+
+    _stub_login(monkeypatch, "anthropic", login)
+    started = (await client.post("/v1/auth/login", json={"provider": "anthropic"})).json()["result"]
+    done = await wait_for_state(client, started["id"], "succeeded")
+    assert done["defaults_applied"] == {
+        "hosting": "anthropic",
+        "model": "claude-opus-5-5",
+        "model_name": "Claude Opus 5.5",
+        "receipt": "Set default hosting to 'anthropic', model to 'claude-opus-5-5'.",
+    }
+    on_disk = ConfigManager(app.state.config_manager.config_dir)
+    assert on_disk.get_config_value("hosting") == "anthropic"
+    assert on_disk.get_config_value("model_name") == "claude-opus-5-5"
+
+
+async def test_concurrent_starts_leave_exactly_one_live_flow(desktop, monkeypatch):
+    """Review round 1, #2: superseding awaits the old flow's teardown, and two
+    starts interleaving across that await both created a flow. The teardown here
+    takes real time, like a loopback server closing, which is what opened the
+    window."""
+    client, app = desktop
+    live = 0
+    peak = 0
+
+    async def login(callbacks, *, signal=None, **_kwargs):
+        nonlocal live, peak
+        live += 1
+        peak = max(peak, live)
+        try:
+            callbacks.on_auth_url("https://radienthq.com/authorize", instructions=None)
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0.05)
+            live -= 1
+
+    _stub_login(monkeypatch, "radient", login)
+    # One start first, so both concurrent ones have an active op to supersede --
+    # the interleaving the reviewer measured.
+    await client.post("/v1/auth/login", json={"provider": "radient"})
+    replies = await asyncio.gather(
+        client.post("/v1/auth/login", json={"provider": "radient"}),
+        client.post("/v1/auth/login", json={"provider": "radient"}),
+        client.post("/v1/auth/login", json={"provider": "radient"}),
+    )
+    assert all(reply.status_code == 200 for reply in replies)
+    running = [
+        op for op in app.state.desktop_auth.operations.values() if op.task and not op.task.done()
+    ]
+    assert len(running) == 1
+    assert live == 1
+    assert peak == 1, "two flows were live at once"
+
+
+async def _real_callback_flow(callbacks, *, signal=None, timeout=300.0, open_browser=None):
+    """A REAL ``OAuthCallbackFlow`` (loopback server, paste race and all) whose
+    only fake is the token exchange -- so the paste prompt is cancelled exactly
+    as production cancels it, without being awaited."""
+    from local_operator.providers.oauth.callback_server import (
+        CallbackFlowOptions,
+        OAuthCallbackFlow,
+    )
+
+    class _Flow(OAuthCallbackFlow):
+        async def generate_auth_url(self, state: str, redirect_uri: str) -> str:
+            return f"https://claude.ai/oauth/authorize?state={state}&redirect_uri={redirect_uri}"
+
+        async def exchange_token(self, code, state, redirect_uri):
+            return {"type": "oauth", "access": "at", "refresh": "rt", "expires": 1}
+
+    # Port 0: an OS-assigned port, so this never fights the real 54545.
+    flow = _Flow(
+        CallbackFlowOptions(preferred_port=0, timeout_seconds=timeout),
+        callbacks,
+        open_browser=open_browser or (lambda _url: None),
+        signal=signal,
+    )
+    return await flow.run()
+
+
+@pytest.mark.parametrize(
+    ("ending", "terminal"),
+    [("timeout", "expired"), ("denied", "failed"), ("callback", "succeeded")],
+)
+async def test_an_optional_paste_sign_in_ends_in_its_terminal_state(
+    desktop, monkeypatch, ending, terminal
+):
+    """QA round 1, Q1: when the flow ended, it cancelled the paste prompt's task
+    without awaiting it, and that task's ``finally`` then reset the op to
+    ``waiting`` -- so an expired or failed Anthropic/Z.AI sign-in read as live
+    forever. Each ending must stay the terminal state it reached.
+
+    The ``callback`` arm needs one more step to be able to fail (review round 2,
+    NIT 2): in production the defaults write runs through ``asyncio.to_thread``,
+    whose yield lets the prompt's ``finally`` run BEFORE ``succeeded`` is written,
+    so the old unconditional reset was accidentally harmless there. Making that
+    write non-yielding puts the late ``finally`` after the terminal state, which
+    is the ordering the fix must survive -- any scheduling change that removes
+    the yield would otherwise reintroduce the bug with this test still green."""
+    client, _ = desktop
+    if ending == "callback":
+        from local_operator.server.utils import desktop_auth
+
+        async def inline(fn, /, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        monkeypatch.setattr(desktop_auth.asyncio, "to_thread", inline)
+
+    async def login(callbacks, *, signal=None, **_kwargs):
+        timeout = 0.2 if ending == "timeout" else 30.0
+        return await _real_callback_flow(callbacks, signal=signal, timeout=timeout)
+
+    _stub_login(monkeypatch, "anthropic", login)
+    started = (await client.post("/v1/auth/login", json={"provider": "anthropic"})).json()["result"]
+    assert started["input_optional"] is True
+    # The prompt is open: this is the state whose `finally` used to clobber.
+    snapshot: dict[str, Any] = {}
+    for _ in range(500):
+        snapshot = (await client.get(f"/v1/auth/operations/{started['id']}")).json()["result"]
+        if snapshot["input_required"]:
+            break
+        await asyncio.sleep(0)
+    assert snapshot["input_required"] is True
+    if ending != "timeout":
+        from urllib.parse import parse_qs, urlsplit
+
+        query = parse_qs(urlsplit(started["auth_url"]).query)
+        redirect, state = query["redirect_uri"][0], query["state"][0]
+        params = (
+            {"error": "access_denied", "state": state}
+            if ending == "denied"
+            else {"code": "c0de", "state": state}
+        )
+        async with AsyncClient() as loopback:
+            await loopback.get(redirect, params=params)
+    done = None
+    for _ in range(400):
+        done = (await client.get(f"/v1/auth/operations/{started['id']}")).json()["result"]
+        if done["state"] in ("expired", "failed", "succeeded", "cancelled"):
+            break
+        await asyncio.sleep(0.01)
+    assert done is not None and done["state"] == terminal, done
+    # Let every cancelled prompt task run its `finally`, then look again: the
+    # regression was a LATE overwrite, so the first terminal read proves nothing.
+    for _ in range(20):
+        await asyncio.sleep(0)
+    after = (await client.get(f"/v1/auth/operations/{started['id']}")).json()["result"]
+    assert after["state"] == terminal
+    assert after["input_required"] is False
+
+
+async def test_the_desktop_never_opens_a_system_browser_for_any_provider(desktop, monkeypatch):
+    """QA round 1, Q3: the registry forwarded the desktop's no-op opener to
+    Anthropic and OpenAI only, so Z.AI and Radient fell back to
+    ``webbrowser.open`` and the BACKEND opened a second tab beside the
+    renderer's. Every callback provider, through the real registry thunk and the
+    real flow constructor; only ``run`` is replaced, so no network is used."""
+    import webbrowser
+
+    from local_operator.providers.oauth import callback_server
+
+    system_opens: list[str] = []
+    monkeypatch.setattr(webbrowser, "open", lambda url, *a, **k: system_opens.append(url))
+
+    async def run(self):
+        # What the real `run` does with the opener, minus the network.
+        self._open_browser("https://provider.invalid/authorize")
+        return {"type": "oauth", "access": "at", "refresh": "rt", "expires": 1}
+
+    monkeypatch.setattr(callback_server.OAuthCallbackFlow, "run", run)
+    client, _ = desktop
+    browser_providers = [
+        p.id for p in registry.PROVIDER_REGISTRY if p.login is not None and p.callback_port
+    ]
+    assert {"anthropic", "openai", "zai-oauth", "radient"} <= set(browser_providers)
+    for provider in browser_providers:
+        started = (await client.post("/v1/auth/login", json={"provider": provider})).json()[
+            "result"
+        ]
+        done = await wait_for_state(client, started["id"], "succeeded", "failed")
+        assert done["state"] == "succeeded", (provider, done)
+    assert system_opens == []
+
+
+async def test_every_browser_login_forwards_the_callers_opener():
+    """The same seam from the other side: the opener a host passes is the one
+    the flow calls, for every callback provider (a name list dropped two)."""
+    from local_operator.providers.oauth import callback_server
+    from local_operator.providers.oauth.callback_server import LoginCallbacks
+
+    original = callback_server.OAuthCallbackFlow.run
+
+    async def run(self):
+        self._open_browser("https://provider.invalid/authorize")
+        return {}
+
+    callback_server.OAuthCallbackFlow.run = run  # type: ignore[method-assign]
+    try:
+        for provider in registry.PROVIDER_REGISTRY:
+            if provider.login is None or not provider.callback_port:
+                continue
+            opened: list[str] = []
+            await provider.login(LoginCallbacks(), signal=None, open_browser=opened.append)
+            assert opened == ["https://provider.invalid/authorize"], provider.id
+    finally:
+        callback_server.OAuthCallbackFlow.run = original  # type: ignore[method-assign]
+
+
+async def test_a_pasted_key_in_a_login_operation_is_checked_like_a_saved_one(desktop, monkeypatch):
+    """QA round 1, Q2: ``POST /v1/auth/login`` + ``/input`` stored a fake key
+    unchecked. It now runs the same check as ``PUT .../key``; a rejection is a
+    422 that leaves the prompt open for a corrected paste."""
+    from local_operator.providers import key_check
+
+    verdicts = {"sk-bad": key_check.KeyCheck(False, "OpenRouter rejected this API key.")}
+    checked: list[str] = []
+
+    async def check(provider, key, **_kwargs):
+        checked.append(provider)
+        return verdicts.get(key, key_check.KeyCheck(True, None))
+
+    monkeypatch.setattr(key_check, "check_api_key", check)
+    client, app = desktop
+    operation_id = (await client.post("/v1/auth/login", json={"provider": "openrouter"})).json()[
+        "result"
+    ]["id"]
+    awaiting = await wait_for_state(client, operation_id, "input_required")
+    refused = await client.post(
+        f"/v1/auth/operations/{operation_id}/input",
+        json={"value": "sk-bad", "prompt_id": awaiting["prompt_id"]},
+    )
+    assert refused.status_code == 422
+    assert refused.json()["detail"] == "OpenRouter rejected this API key."
+    assert "sk-bad" not in refused.text
+    assert not app.state.desktop_auth.store.list_credentials("openrouter")
+    still = (await client.get(f"/v1/auth/operations/{operation_id}")).json()["result"]
+    assert still["state"] == "input_required" and still["prompt_id"] == awaiting["prompt_id"]
+    accepted = await client.post(
+        f"/v1/auth/operations/{operation_id}/input",
+        json={"value": "sk-good", "prompt_id": awaiting["prompt_id"]},
+    )
+    assert accepted.status_code == 200
+    await wait_for_state(client, operation_id, "succeeded")
+    assert app.state.desktop_auth.store.list_credentials("openrouter")[0].data["key"] == "sk-good"
+    assert checked == ["openrouter", "openrouter"]
+
+
+async def test_an_oauth_paste_is_not_sent_to_the_key_check(desktop, monkeypatch):
+    """The check is for KEYS: an authorization code pasted into Anthropic's
+    fallback box is not an API key and must never be sent to a provider as one."""
+    from local_operator.providers import key_check
+
+    checked: list[str] = []
+
+    async def check(provider, key, **_kwargs):
+        checked.append(provider)
+        return key_check.KeyCheck(False, "should not run")
+
+    monkeypatch.setattr(key_check, "check_api_key", check)
+
+    async def login(callbacks, *, signal=None, **_kwargs):
+        callbacks.on_auth_url("https://claude.ai/oauth/authorize", instructions=None)
+        pasted = await callbacks.on_manual_code_input()
+        assert pasted == "code#state"
+        return {"type": "oauth", "access": "at", "refresh": "rt", "expires": 1}
+
+    _stub_login(monkeypatch, "anthropic", login)
+    client, _ = desktop
+    started = (await client.post("/v1/auth/login", json={"provider": "anthropic"})).json()["result"]
+    snapshot: dict[str, Any] = {}
+    for _ in range(200):
+        snapshot = (await client.get(f"/v1/auth/operations/{started['id']}")).json()["result"]
+        if snapshot["input_required"]:
+            break
+        await asyncio.sleep(0)
+    reply = await client.post(
+        f"/v1/auth/operations/{started['id']}/input",
+        json={"value": "code#state", "prompt_id": snapshot["prompt_id"]},
+    )
+    assert reply.status_code == 200
+    await wait_for_state(client, started["id"], "succeeded")
+    assert checked == []
+
+
+#: Every login whose paste prompt reads something that is NOT an API key, and
+#: why. The walk below fails for any paste-accepting provider that is neither
+#: checked nor named here, so a new provider cannot slip in unchecked.
+_PASTE_NOT_A_KEY = {
+    "anthropic": "the fallback box reads an OAuth authorization code (code#state)",
+    "zai-oauth": "the fallback box reads an OAuth authorization code or redirect URL",
+}
+
+
+def test_every_paste_prompt_is_classified_for_the_key_check():
+    """Review round 2, MAJOR 1: the key check was keyed on the login FLAVOUR, so
+    ``alibaba-token-plan-oauth`` -- a device login whose prompt reads the
+    ``sk-sp-`` key -- was never checked. Walk every provider a host offers a
+    prompt for and require an explicit answer: checked as a key, or exempt with
+    a reason."""
+    offered = [p for p in registry.PROVIDER_REGISTRY if p.login and p.accepts_paste_prompt]
+    required = {p.id for p in offered if p.paste_prompt_required}
+    assert "alibaba-token-plan-oauth" in required
+    unclassified = [
+        p.id for p in offered if not p.paste_is_api_key and p.id not in _PASTE_NOT_A_KEY
+    ]
+    assert unclassified == [], f"paste prompts with no key-check decision: {unclassified}"
+    # An exemption is only honest while it is true.
+    for provider_id in _PASTE_NOT_A_KEY:
+        definition = registry.get_provider_definition(provider_id)
+        assert definition is not None and not definition.paste_is_api_key, provider_id
+    # Every REQUIRED prompt in the registry today reads a key (the flavour gate
+    # checked all but one of them); a required non-key prompt must be a
+    # deliberate addition to the exemptions, never a silent default.
+    assert {p.id for p in offered if p.paste_is_api_key} >= required
+
+
+@pytest.mark.parametrize(
+    "provider_id",
+    sorted(p.id for p in registry.PROVIDER_REGISTRY if p.login and p.paste_is_api_key),
+)
+async def test_a_rejected_key_pasted_into_any_key_prompt_is_refused(
+    desktop, monkeypatch, provider_id
+):
+    """The route-level half of the walk, through each provider's REAL login: a
+    definite rejection answers 422, stores nothing, and leaves the same prompt
+    open. ``alibaba-token-plan-oauth`` is the row the flavour gate let through;
+    its login reads the key before any network step, so no request is made."""
+    from local_operator.providers import key_check
+
+    checked: list[str] = []
+
+    async def check(provider, key, **_kwargs):
+        checked.append(provider)
+        return key_check.KeyCheck(False, "rejected by the test")
+
+    monkeypatch.setattr(key_check, "check_api_key", check)
+    client, app = desktop
+    started = (await client.post("/v1/auth/login", json={"provider": provider_id})).json()
+    operation_id = started["result"]["id"]
+    awaiting = await wait_for_state(client, operation_id, "input_required")
+    refused = await client.post(
+        f"/v1/auth/operations/{operation_id}/input",
+        json={"value": "sk-sp-fake", "prompt_id": awaiting["prompt_id"]},
+    )
+    assert refused.status_code == 422, refused.text
+    assert checked == [provider_id]
+    storage = registry.credential_provider_id(provider_id)
+    assert not app.state.desktop_auth.store.list_credentials(storage)
+    still = (await client.get(f"/v1/auth/operations/{operation_id}")).json()["result"]
+    assert still["state"] == "input_required"
+    assert still["prompt_id"] == awaiting["prompt_id"]
+    await client.delete(f"/v1/auth/operations/{operation_id}")
+
+
+def _port_is_free(port: int) -> bool:
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+        return True
+
+
+async def test_a_burst_of_starts_leaves_no_fixed_callback_port_bound(desktop, monkeypatch):
+    """QA round 2, Q1: a burst of simultaneous starts could leave a superseded
+    flow's listener on the fixed callback port with no live operation, and every
+    later sign-in then advertised an ephemeral redirect port. The REAL Radient
+    flow (its fixed port moved to a free one so this never touches 54549), four
+    starts at once, several rounds; after each round the one live flow must own
+    the fixed port, and once everything is cancelled nothing may hold it."""
+    import socket
+    from urllib.parse import parse_qs, urlsplit
+
+    from local_operator.providers.oauth import radient
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        fixed = int(probe.getsockname()[1])
+    monkeypatch.setattr(radient, "CALLBACK_PORT", fixed)
+    client, app = desktop
+
+    async def start_after(turns: int):
+        for _ in range(turns):
+            await asyncio.sleep(0)
+        return await client.post("/v1/auth/login", json={"provider": "radient"})
+
+    # Staggered by 0..N loop turns: a supersede must eventually land on every
+    # step of the old flow's bind, including the one yield that used to orphan
+    # its listener. A plain simultaneous burst hits it only by scheduling luck.
+    for _round in range(24):
+        replies = await asyncio.gather(
+            start_after(0), start_after(_round), start_after(_round + 1), start_after(_round * 2)
+        )
+        assert all(reply.status_code == 200 for reply in replies)
+        host = app.state.desktop_auth
+        running = [op for op in host.operations.values() if op.task and not op.task.done()]
+        assert len(running) == 1
+        live = await wait_for_state(client, running[0].id, "waiting")
+        redirect = parse_qs(urlsplit(live["auth_url"]).query)["redirect_uri"][0]
+        assert urlsplit(redirect).port == fixed, "the live flow lost the fixed port"
+        for op in list(host.operations.values()):
+            await host.cancel(op)
+        assert _port_is_free(fixed), f"round {_round}: the fixed port is still bound"
+
+
+async def test_a_hung_teardown_does_not_block_later_starts(desktop, monkeypatch):
+    """Review round 2, MINOR 2: ``start`` holds its lock across the cancel of the
+    op it supersedes, so a teardown that never returns used to wedge EVERY later
+    start. The first flow here ignores its cancellation until released; a second
+    and a third start must still complete, each within the teardown bound."""
+    from local_operator.server.utils import desktop_auth
+
+    monkeypatch.setattr(desktop_auth, "CANCEL_TEARDOWN_TIMEOUT_S", 0.2)
+    release = asyncio.Event()
+    calls = 0
+
+    async def login(callbacks, *, signal=None, **_kwargs):
+        nonlocal calls
+        calls += 1
+        hangs = calls == 1
+        callbacks.on_auth_url("https://radienthq.com/authorize", instructions=None)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            if hangs:
+                # A teardown that does not return: absorb the cancellation and
+                # keep waiting, as a stuck provider flow would.
+                while not release.is_set():
+                    try:
+                        await release.wait()
+                    except asyncio.CancelledError:
+                        continue
+
+    _stub_login(monkeypatch, "radient", login)
+    client, app = desktop
+    first = (await client.post("/v1/auth/login", json={"provider": "radient"})).json()["result"]
+    try:
+        second, third = await asyncio.wait_for(
+            asyncio.gather(
+                client.post("/v1/auth/login", json={"provider": "radient"}),
+                client.post("/v1/auth/login", json={"provider": "radient"}),
+            ),
+            timeout=5.0,
+        )
+        assert second.status_code == third.status_code == 200
+        host = app.state.desktop_auth
+        stale = host.operations[first["id"]]
+        assert stale.state == "cancelled"
+        assert stale.task is not None and not stale.task.done(), "the stuck flow should linger"
+        assert stale.task in host._lingering
+        # Exactly one of the two newer starts is live (whichever took the lock
+        # last); the stuck one is the only other unfinished task.
+        newer = {second.json()["result"]["id"], third.json()["result"]["id"]}
+        running = {
+            op.id
+            for op in host.operations.values()
+            if op.task and not op.task.done() and op.id != first["id"]
+        }
+        assert len(running) == 1 and running <= newer
+        # And the abandoned flow is not charged to later starts: a fourth start
+        # supersedes only the live one. Asserted structurally, not on a clock
+        # (review round 3, MINOR 3; AGENTS.md "Wait on the event"): the stuck
+        # task was cancelled exactly ONCE, by the second start. A re-cancel --
+        # which is what re-charges the teardown bound -- would make it two.
+        assert stale.task.cancelling() == 1
+        fourth = await client.post("/v1/auth/login", json={"provider": "radient"})
+        assert fourth.status_code == 200
+        assert stale.task.cancelling() == 1, "a later start re-cancelled the lingering flow"
+        # And neither may a repeated DELETE on it (review round 3, MINOR 2).
+        deleted = await client.delete(f"/v1/auth/operations/{first['id']}")
+        assert deleted.status_code == 200
+        assert stale.task.cancelling() == 1, "DELETE re-cancelled the lingering flow"
+    finally:
+        release.set()
+        await asyncio.sleep(0)
+
+
+@pytest.mark.parametrize("first", ["start", "close"])
+async def test_close_racing_a_start_leaves_no_flow_running(desktop, monkeypatch, first):
+    """Review round 2, MINOR 3: ``close`` did not take the start lock, so a start
+    that created its op between ``close``'s iteration and its ``clear()`` left a
+    flow running past ``store.close()``. Now a start either lands before close
+    (and is cancelled by it) or after (and is refused) -- never in between.
+
+    ``first="start"`` is the ordering the LOCK guards: the start is mid-way
+    through superseding the existing op (awaiting its teardown) when close
+    begins, so it has already passed the closed check. ``first="close"`` is the
+    ordering the closed flag guards: a start queued behind close."""
+    started: list[asyncio.Task[Any]] = []
+
+    async def login(callbacks, *, signal=None, **_kwargs):
+        started.append(asyncio.current_task())  # type: ignore[arg-type]
+        callbacks.on_auth_url("https://radienthq.com/authorize", instructions=None)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            # A teardown that yields, so close's cancel is a real await -- the
+            # window a racing start used to fall into.
+            await asyncio.sleep(0.02)
+
+    _stub_login(monkeypatch, "radient", login)
+    client, app = desktop
+    await client.post("/v1/auth/login", json={"provider": "radient"})
+    host = app.state.desktop_auth
+    if first == "start":
+        racing = asyncio.create_task(host.start("radient"))
+        await asyncio.sleep(0)  # into the supersede's teardown await
+        closing = asyncio.create_task(host.close())
+    else:
+        closing = asyncio.create_task(host.close())
+        racing = asyncio.create_task(host.start("radient"))
+    await closing
+    outcome = (await asyncio.gather(racing, return_exceptions=True))[0]
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert all(task.done() for task in started), "a flow outlived close()"
+    assert host.operations == {}
+    if first == "close":
+        from local_operator.server.utils.desktop_auth import SignInUnavailableError
+
+        assert isinstance(outcome, SignInUnavailableError), outcome
+    else:
+        # It won the lock, so it created its op -- and close then cancelled it.
+        assert not isinstance(outcome, BaseException), outcome
+        assert outcome.state == "cancelled", outcome
+    # Nothing left for the fixture's own close to find.
+    app.state.desktop_auth = None
+
+
+async def test_a_start_after_close_answers_503(desktop):
+    """Review round 3, NIT 2: a start refused because the server is shutting down
+    is not an invalid request, so it is not 422. 503 is also what the renderer's
+    ``isServerUnreachable`` reads as "the backend is not answering"."""
+    client, app = desktop
+    await client.get("/v1/auth/providers")  # builds the host
+    host = app.state.desktop_auth
+    await host.close()
+    refused = await client.post("/v1/auth/login", json={"provider": "radient"})
+    assert refused.status_code == 503, refused.text
+    assert "shuts down" in refused.json()["detail"]
+    # An unknown provider is still the caller's mistake: 422, unchanged.
+    app.state.desktop_auth = None
+    unknown = await client.post("/v1/auth/login", json={"provider": "no-such-provider"})
+    assert unknown.status_code == 422, unknown.text
+
+
+@pytest.mark.parametrize("returns_from", ["provider_login", "controller"])
+async def test_an_abandoned_flow_that_finishes_late_writes_nothing(
+    desktop, monkeypatch, returns_from
+):
+    """Review round 3, MINOR 2: a flow that absorbs its cancellation and then
+    RETURNS a credential after the teardown bound used to flip its op from
+    ``cancelled`` to ``succeeded``, store the credential and rewrite
+    ``config.yml`` defaults for the provider the user had walked away from. Once
+    cancelled, every one of those writes is a no-op: state, auth URL, stored
+    credentials and the config file are all exactly as the cancel left them.
+
+    ``provider_login`` returns through the real ``ProviderController.login``,
+    whose aborted-signal check refuses the credential write. ``controller``
+    replaces that method with one that ignores the signal and returns normally,
+    so the HOST's own guards (terminal state, login defaults) are pinned on their
+    own rather than only behind the controller's."""
+    from local_operator.providers.controller import ProviderController
+    from local_operator.server.utils import desktop_auth
+
+    monkeypatch.setattr(desktop_auth, "CANCEL_TEARDOWN_TIMEOUT_S", 0.05)
+    cancelled = asyncio.Event()
+    release = asyncio.Event()
+    applied: list[str] = []
+    real_apply = desktop_auth.apply_desktop_login_defaults
+
+    def spy_apply(manager, provider_id, *, oauth):
+        applied.append(provider_id)
+        return real_apply(manager, provider_id, oauth=oauth)
+
+    monkeypatch.setattr(desktop_auth, "apply_desktop_login_defaults", spy_apply)
+
+    async def login(callbacks, *, signal=None, **_kwargs):
+        callbacks.on_auth_url("https://radienthq.com/authorize", instructions=None)
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # Swallow the cancel and carry on, as a stuck provider flow would.
+            cancelled.set()
+        await release.wait()
+        # A late progress callback, then a credential.
+        callbacks.on_auth_url("https://radienthq.com/authorize?late=1", instructions=None)
+        return {"type": "oauth", "access": "a", "refresh": "r", "expires": 1}
+
+    if returns_from == "controller":
+
+        async def controller_login(self, provider_id, **kwargs):
+            definition = registry.get_provider_definition(provider_id)
+            assert definition is not None
+            await login(self._login_callbacks(definition), **kwargs)
+            return "Logged in."
+
+        monkeypatch.setattr(ProviderController, "login", controller_login)
+    else:
+        _stub_login(monkeypatch, "radient", login)
+    client, app = desktop
+    config_file = Path(app.state.config_manager.config_dir) / "config.yml"
+    config_before = config_file.read_bytes() if config_file.exists() else None
+    started = (await client.post("/v1/auth/login", json={"provider": "radient"})).json()["result"]
+    host = app.state.desktop_auth
+    op = host.operations[started["id"]]
+
+    deleted = await client.delete(f"/v1/auth/operations/{op.id}")
+    assert deleted.json()["result"]["state"] == "cancelled"
+    assert cancelled.is_set() and op.task is not None and not op.task.done()
+    assert op.task in host._lingering
+
+    release.set()
+    await asyncio.wait_for(op.task, timeout=5.0)
+
+    after = (await client.get(f"/v1/auth/operations/{op.id}")).json()["result"]
+    assert after["state"] == "cancelled", after
+    assert after["auth_url"] is None, "a late callback repainted the abandoned op"
+    assert applied == [], "login defaults were applied for an abandoned sign-in"
+    assert not host.store.list_credentials("radient"), "an abandoned sign-in stored a credential"
+    assert (config_file.read_bytes() if config_file.exists() else None) == config_before
+
+
+async def test_a_second_cancel_of_a_lingering_flow_returns_at_once(desktop, monkeypatch):
+    """Review round 3, MINOR 2: ``cancel`` on an op already abandoned used to
+    cancel the stuck task again and wait out the full bound a second time. It now
+    returns without touching the task -- asserted on the task's own cancel count,
+    not on a clock."""
+    from local_operator.server.utils import desktop_auth
+
+    monkeypatch.setattr(desktop_auth, "CANCEL_TEARDOWN_TIMEOUT_S", 0.05)
+    release = asyncio.Event()
+
+    async def login(callbacks, *, signal=None, **_kwargs):
+        callbacks.on_auth_url("https://radienthq.com/authorize", instructions=None)
+        while not release.is_set():
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                pass
+
+    _stub_login(monkeypatch, "radient", login)
+    client, app = desktop
+    started = (await client.post("/v1/auth/login", json={"provider": "radient"})).json()["result"]
+    host = app.state.desktop_auth
+    op = host.operations[started["id"]]
+    try:
+        await host.cancel(op)
+        assert op.task is not None and not op.task.done()
+        assert op.task.cancelling() == 1
+        waits: list[Any] = []
+        real_wait = asyncio.wait
+
+        async def counting_wait(*args, **kwargs):
+            waits.append(args)
+            return await real_wait(*args, **kwargs)
+
+        monkeypatch.setattr(desktop_auth.asyncio, "wait", counting_wait)
+        await host.cancel(op)
+        assert waits == [], "a second cancel waited on the teardown bound again"
+        assert op.task.cancelling() == 1, "a second cancel re-cancelled the task"
+        assert op.state == "cancelled"
+    finally:
+        release.set()
+        if op.task is not None:
+            await asyncio.wait_for(op.task, timeout=5.0)
+
+
+def test_each_event_loop_keeps_its_own_start_lock():
+    """Review round 3, MINOR 1: the lock used to be ONE slot, swapped whenever the
+    running loop changed. With two loops live at once, a call from loop B
+    replaced it while a task on loop A held the old one, so the next start on A
+    got a fresh, unheld lock and ran alongside the holder. Reproduced exactly:
+    A1 holds the lock on loop A, loop B (another thread) asks for its lock, then
+    A2 on loop A must wait for A1."""
+    import threading
+
+    from local_operator.server.utils.desktop_auth import DesktopAuth
+
+    host = DesktopAuth(MagicMock(), None, None)
+    loop_b_locked = threading.Event()
+    b_lock: list[asyncio.Lock] = []
+
+    def on_loop_b() -> None:
+        async def take() -> None:
+            lock = host._lock()
+            b_lock.append(lock)
+            async with lock:
+                loop_b_locked.set()
+
+        asyncio.run(take())
+
+    async def on_loop_a() -> dict[str, bool]:
+        a1_holds = asyncio.Event()
+        a1_release = asyncio.Event()
+        a2_entered = asyncio.Event()
+
+        async def a1() -> None:
+            async with host._lock():
+                a1_holds.set()
+                await a1_release.wait()
+
+        async def a2() -> None:
+            async with host._lock():
+                a2_entered.set()
+
+        first = asyncio.create_task(a1())
+        await a1_holds.wait()
+        held = host._lock()
+        # Loop B asks for a lock while A1 still holds loop A's.
+        other = threading.Thread(target=on_loop_b)
+        other.start()
+        await asyncio.to_thread(other.join)
+        assert loop_b_locked.is_set()
+        second = asyncio.create_task(a2())
+        for _ in range(5):
+            await asyncio.sleep(0)
+        result = {
+            "same_lock_on_a": host._lock() is held,
+            "b_got_its_own": b_lock[0] is not held,
+            "a2_entered_while_a1_held": a2_entered.is_set(),
+        }
+        a1_release.set()
+        await asyncio.gather(first, second)
+        result["a2_entered_after"] = a2_entered.is_set()
+        return result
+
+    assert asyncio.run(on_loop_a()) == {
+        "same_lock_on_a": True,
+        "b_got_its_own": True,
+        "a2_entered_while_a1_held": False,
+        "a2_entered_after": True,
+    }
+
+
+def test_every_callback_login_accepts_the_desktop_opener():
+    """Review round 2, NIT 1: the forwarding rule, structurally. ``_lazy_login``
+    forwards ``open_browser`` only to a login whose signature names it, and the
+    desktop passes a no-op opener because its renderer opens the URL -- so a
+    callback-port provider whose login does not accept it silently falls back
+    to ``webbrowser.open``. Checked on the real login functions' signatures, so
+    no flow class or ``run`` patch can hide a miss."""
+    import importlib
+    import inspect
+
+    missing: list[str] = []
+    for provider in registry.PROVIDER_REGISTRY:
+        if provider.login is None or provider.callback_port is None:
+            continue
+        # A ``_lazy_login`` thunk names its target in its closure; resolve it,
+        # because the thunk's own signature always has ``open_browser``. A login
+        # that is not a thunk is checked as itself.
+        cells = dict(zip(provider.login.__code__.co_freevars, provider.login.__closure__ or ()))
+        target: Any = provider.login
+        if "module" in cells and "attr" in cells:
+            module = importlib.import_module(cells["module"].cell_contents)
+            target = getattr(module, cells["attr"].cell_contents)
+        if "open_browser" not in inspect.signature(target).parameters:
+            missing.append(provider.id)
+    assert missing == []

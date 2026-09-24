@@ -2990,6 +2990,94 @@ class TestTheManagerDerivesTheAuthRemedy:
         assert hint is not None and "`/mcp`" in hint
 
 
+class TestTheRefusedChallengeLedger:
+    """A recorded 401/403-with-no-OAuth must not outlive the condition (R3-m2).
+
+    ``OAUTH_CHALLENGES[url] = False`` is what makes the desktop catalog call a
+    row ``needs_sign_in`` + ``add_key`` — "it refused us and has no OAuth". Only a
+    connect can disprove it, and only a successful one: a transient 403 (a WAF or
+    a rate-limit edge that later cleared) used to keep the row claiming it for
+    the life of the daemon, and a key bound on that claim is a SECOND credential
+    header beside the one the server already sends.
+
+    Driven through the real ``_connect_server`` with the transport seam faked,
+    because the clear has to sit on the SUCCESS path and nowhere else: a failed
+    connect is the very thing that records the observation.
+    """
+
+    URL = "https://mcp.example.invalid/rpc"
+
+    def _manager(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+        from local_operator.mcp import auth as auth_mod
+        from local_operator.mcp.config import add_server
+        from local_operator.mcp.manager import McpManager
+
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+        (tmp_path / "home").mkdir(exist_ok=True)
+        add_server("acme", url=self.URL, scope="global", cwd=tmp_path)
+        monkeypatch.setattr(auth_mod, "OAUTH_CHALLENGES", {})
+        auth_mod.OAUTH_CHALLENGES[self.URL] = False
+        return McpManager(str(tmp_path))
+
+    @pytest.mark.asyncio
+    async def test_a_connect_that_succeeds_forgets_the_recorded_refusal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from local_operator.mcp import auth as auth_mod
+
+        manager = self._manager(tmp_path, monkeypatch)
+
+        async def fake_open(stack: Any, name: str, handed_cfg: Any, *args: Any, **_: Any) -> Any:
+            return ServerConnection(name=name, config=handed_cfg, session=cast(Any, object()))
+
+        async def no_tools(session: Any) -> list[Any]:
+            return []
+
+        monkeypatch.setattr(manager, "_open_transport_and_session", fake_open)
+        monkeypatch.setattr(manager, "_list_all_tools", no_tools)
+
+        await manager.connect_configured_server("acme", interactive=False)
+
+        assert auth_mod.OAUTH_CHALLENGES == {}, "the refusal record outlived the connect"
+
+    @pytest.mark.asyncio
+    async def test_a_connect_that_fails_keeps_the_recorded_refusal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unconditional clearing would be the same defect pointing the other way."""
+        from local_operator.mcp import auth as auth_mod
+
+        manager = self._manager(tmp_path, monkeypatch)
+
+        async def fake_open(*args: Any, **_: Any) -> Any:
+            raise RuntimeError("the server is down")
+
+        monkeypatch.setattr(manager, "_open_transport_and_session", fake_open)
+
+        with pytest.raises(Exception):
+            await manager.connect_configured_server("acme", interactive=False)
+
+        assert auth_mod.OAUTH_CHALLENGES.get(self.URL) is False
+
+    def test_a_true_observation_is_never_downgraded(self) -> None:
+        """``forget_refused_challenge`` drops a refusal, never an authorization server.
+
+        A ``True`` entry is evidence a discovery FOUND one, which a later success
+        does not disprove — and dropping it would put the user back on the
+        dead-end "no OAuth server was discovered" message.
+        """
+        from local_operator.mcp import auth as auth_mod
+
+        url = self.URL
+        auth_mod.OAUTH_CHALLENGES[url] = True
+        try:
+            auth_mod.forget_refused_challenge(url)
+            assert auth_mod.OAUTH_CHALLENGES[url] is True
+        finally:
+            auth_mod.OAUTH_CHALLENGES.pop(url, None)
+
+
 class TestMcpRecoveryNotice:
     """The RECOVERY half of the model-visible MCP pair.
 

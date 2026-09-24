@@ -471,6 +471,13 @@ logger = logging.getLogger(__name__)
 #: the cap so a chatty child cannot grow a live session without limit.
 TRAJECTORY_CAP = 500
 
+#: How long a child's streamed text may sit in the relay before it is written
+#: to the trajectory as one coalesced ``message_update`` row (see
+#: ``_make_relay.flush_text``). 250 ms keeps the subagent page visibly
+#: streaming (4 Hz) while writing ~1/50th of the rows a per-token relay did;
+#: any non-text event flushes immediately, so the bound only ever delays text.
+SUBAGENT_TEXT_FLUSH_S = 0.25
+
 
 #: The read-only inventory a ``scout`` child is filtered down to. Allowlist,
 #: not tier-filter: approval tiers drift as tools are added, and a scout's
@@ -1291,9 +1298,83 @@ def _make_relay(
     #: so it keeps rising past the cap and never reissues a number an evicted
     #: event already used — see :data:`TRAJECTORY_SEQ_KEY`.
     relayed = 0
+    #: Text deltas of the CURRENT assistant message not yet written to the
+    #: trajectory, and the timer that will write them. See ``flush_text``.
+    pending_text: list[str] = []
+    pending_event: list[MessageUpdateEvent] = []
+    flush_handle: list[asyncio.TimerHandle] = []
+
+    def append_record(record: dict[str, Any]) -> None:
+        nonlocal relayed
+        # Stamped BEFORE the append and never revised, because this is the
+        # identity the subagent page keys its rows by and the eviction two
+        # lines below is precisely what makes list position unusable for
+        # that (see TRAJECTORY_SEQ_KEY). Overwritten unconditionally rather
+        # than defaulted, so an event that somehow already carries the key
+        # cannot inject a duplicate identity into its parent's page.
+        record[TRAJECTORY_SEQ_KEY] = relayed
+        relayed += 1
+        job.trajectory.append(record)
+        overflow = len(job.trajectory) - TRAJECTORY_CAP
+        if overflow > 0:
+            del job.trajectory[:overflow]
+
+    def flush_text(*, from_timer: bool = False) -> None:
+        """Write the buffered text deltas as ONE ``message_update`` row.
+
+        WHY TEXT IS COALESCED. The loop yields one ``MessageUpdateEvent`` per
+        provider text chunk -- roughly one per token. Appending each as its own
+        trajectory row had two costs, both measured with
+        ``scripts/bench_subagent_fanout.py``:
+
+        * the WINDOW: a child streaming a long answer filled the 500-row cap
+          with deltas (489 of 500 rows in a 3-turn run), evicting the tool
+          calls the subagent page exists to show -- the same defect the
+          reasoning skip above fixed for the thinking channel;
+        * the LOOP: every append invalidates the parent's roster memo, so the
+          parent's 50 ms coalescer re-froze and re-shipped rows at token rate
+          for every streaming child. With a viewer attached that refresh was
+          about half of all process CPU at 16 children.
+
+        LOSSLESS FOR THE PAGE. The page folds ``message_update`` rows by
+        concatenating their ``delta`` per message id
+        (``tui/widgets/subagent_view.py``) and ``message_end`` then adopts the
+        authoritative text, so one row holding the concatenation renders the
+        same text as the N rows it replaces. The page still streams, at the
+        ``SUBAGENT_TEXT_FLUSH_S`` cadence instead of per token.
+
+        ORDER IS PRESERVED because every non-delta event flushes FIRST, so a
+        coalesced row can never land after a later event and the relay's
+        monotonic stamp still orders rows exactly as the child emitted them.
+        """
+        while flush_handle:
+            flush_handle.pop().cancel()
+        if not pending_text or not pending_event:
+            pending_text.clear()
+            pending_event.clear()
+            return
+        latest = pending_event[-1]
+        delta = "".join(pending_text)
+        pending_text.clear()
+        pending_event.clear()
+        if job is None or job.trajectory is None:
+            return
+        record = latest.model_dump(mode="json")
+        record["delta"] = delta
+        append_record(record)
+        if from_timer:
+            # A boundary flush rides the event that caused it, which already
+            # reaches the parent's roster coalescer through the comms watcher.
+            # A TIMER flush has no such event behind it, so it says so itself
+            # -- otherwise a child that streams prose and then goes quiet would
+            # leave its last quarter-second of text unpublished until its next
+            # event. Transient: the durable roster sidecar holds no trajectory.
+            notify = getattr(jobs_manager, "_notify_transient_job_change", None)
+            if callable(notify):
+                notify()
 
     async def relay(event: AgentEvent) -> None:
-        nonlocal relayed, streaming
+        nonlocal streaming
         # The model's private reasoning is display-only and has NO row on the
         # subagent page, so it must not consume a slot in this bounded window:
         # reasoning is one event per reasoning token, and 250 of them per model
@@ -1303,24 +1384,27 @@ def _make_relay(
         # would still spend a slot per model call on a row nothing can paint,
         # so the family is dropped here and the parent's own stream keeps
         # receiving it untouched.
-        if (
-            job is not None
-            and job.trajectory is not None
-            and not isinstance(event, ReasoningDeltaEvent)
-        ):
-            record = event.model_dump(mode="json")
-            # Stamped BEFORE the append and never revised, because this is the
-            # identity the subagent page keys its rows by and the eviction two
-            # lines below is precisely what makes list position unusable for
-            # that (see TRAJECTORY_SEQ_KEY). Overwritten unconditionally rather
-            # than defaulted, so an event that somehow already carries the key
-            # cannot inject a duplicate identity into its parent's page.
-            record[TRAJECTORY_SEQ_KEY] = relayed
-            relayed += 1
-            job.trajectory.append(record)
-            overflow = len(job.trajectory) - TRAJECTORY_CAP
-            if overflow > 0:
-                del job.trajectory[:overflow]
+        if isinstance(event, MessageUpdateEvent) and event.delta:
+            # Buffered, not appended: see ``flush_text``. A text chunk for a
+            # DIFFERENT message than the buffered one flushes first, so one
+            # coalesced row never spans two messages.
+            if pending_event and getattr(pending_event[-1].message, "id", None) != getattr(
+                event.message, "id", None
+            ):
+                flush_text()
+            pending_text.append(event.delta)
+            pending_event[:] = [event]
+            if not flush_handle:
+                flush_handle.append(
+                    asyncio.get_running_loop().call_later(
+                        SUBAGENT_TEXT_FLUSH_S, lambda: flush_text(from_timer=True)
+                    )
+                )
+        elif not isinstance(event, ReasoningDeltaEvent):
+            # Any other event is a boundary: the buffered text precedes it.
+            flush_text()
+            if job is not None and job.trajectory is not None:
+                append_record(event.model_dump(mode="json"))
         progress: str | None = None
         if isinstance(event, ToolExecutionStartEvent):
             streaming = False
@@ -2066,6 +2150,10 @@ async def _construct_child_session(
             _env_details(cwd),
             datetime.now().strftime("%Y-%m-%d"),
             goal=parent_session.goal,
+            # ...and its LIFECYCLE STATE, so a goal the parent has already
+            # settled is not handed to the child as standing work. Read off the
+            # live holder for the same reason the text is.
+            goal_status=getattr(parent_session, "goal_status", ""),
             user_instructions=user_instructions,
             repo_guidance=repo_guidance,
             credentials=names,

@@ -70,6 +70,11 @@ from rich.style import Style
 from rich.text import Text
 from textual.widgets import Static
 
+#: The aside prompt, re-exported so ``tui/app.py``'s
+#: ``from ...aside_panel import ASIDE_PROMPT`` keeps working unchanged. The text
+#: lives at SESSION level (``local_operator.session.aside``) because a prompt
+#: owned by this widget was a prompt the desktop path never sent at all.
+from local_operator.session.aside import ASIDE_PROMPT  # noqa: F401 — re-export
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets import overlay
 from local_operator.tui.widgets.assistant import flatten
@@ -130,26 +135,6 @@ CHROME_ROWS = 4
 #: ``-squeezed`` now drops BOTH padding rows symmetrically rather than the
 #: asymmetric 1/0 the missing bottom row used to produce.
 SQUEEZE_ROWS = PANEL_HEIGHT_MARGIN + CHROME_ROWS + PANEL_PADDING_ROWS + 2
-
-#: The prompt the side question is wrapped in. Three instructions, each earning
-#: its line: OFF THE RECORD so the model does not treat the question as a new
-#: task and start narrating a plan; TEXT ONLY because the request does carry
-#: the live tool catalogue (it has to, to stay on the working turn's cache
-#: prefix) and on Anthropic even ``tool_choice`` reads ``auto`` on the wire
-#: (see ``Session.complete_aside``), so the prompt is the model-facing half of
-#: "calls nothing" and a call it makes anyway is discarded unread; and
-#: answer-from-context because the whole reason to ask here rather than in the
-#: chat is that the agent already knows.
-ASIDE_PROMPT = """<aside>
-The user has stepped aside to ask you something about this session. This is OFF
-THE RECORD: neither their question nor your answer joins the conversation, and
-no work is being asked for. Answer from the context you already have, briefly
-and directly, in prose. Answer in text only: do not call any tool (a tool call
-here is discarded unread), do not propose a plan, and do not ask a follow-up
-question. If your context does not answer it, say so plainly.
-Question:
-{question}
-</aside>"""
 
 #: Marker on a question row, and the indent every line of prose sits at.
 #:

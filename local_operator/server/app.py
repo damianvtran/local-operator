@@ -45,6 +45,8 @@ from local_operator.server.routes import (
     desktop_catalogues,
     desktop_claim,
     desktop_lifecycle,
+    desktop_mcp,
+    desktop_mesh,
     desktop_profiles,
     desktop_radient,
     desktop_runtimes,
@@ -354,6 +356,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if desktop_sessions_host is not None:
             await desktop_sessions_host.close()
             app.state.desktop_sessions = None
+        # A sessionless MCP test / sign-in owns a spawned server child until
+        # its operation tears the manager down; cancelling and JOINING it here
+        # runs that teardown, so a shutdown mid-operation leaves no orphan.
+        mcp_host_state = getattr(app.state, "desktop_mcp_host", None)
+        if mcp_host_state is not None:
+            await mcp_host_state.close()
+            app.state.desktop_mcp_host = None
         # Off-record panels belong to this HTTP lifetime, not the durable session.
         app.state.desktop_asides = None
         app.state.desktop_receipts = None
@@ -634,6 +643,9 @@ app.include_router(desktop_sessions.router)
 app.include_router(desktop_catalogues.router)
 app.include_router(desktop_profiles.router)
 app.include_router(desktop_lifecycle.router)
+# `/v1/desktop/mcp` and its two POSTs: literal paths, no collision with the
+# session-scoped `/v1/desktop/sessions/{id}/mcp` above.
+app.include_router(desktop_mcp.router)
 app.include_router(desktop_radient.router)
 # `/v1/desktop/tunnel` is a literal path, so it collides with nothing above it
 # whatever the order: no sibling declares a single-segment `/v1/desktop/{...}`
@@ -652,6 +664,15 @@ app.include_router(desktop_wakes.router)
 # collides with no template above it, and declaration order is what decides a
 # collision if one is ever introduced.
 app.include_router(desktop_runtimes.router)
+# The MESH surface (`features.peers`/`features.session_transfer`): the peer catalogue,
+# the networks tab's read, invite/remove, the transfer route and `include_peers`
+# listings. Registered after every module above it for the reason each block above
+# gives — FastAPI matches in declaration order — and its templates
+# (`/v1/desktop/peers`, `/v1/desktop/networks`, `/v1/desktop/networks/{net}/…`,
+# `/v1/desktop/sessions/{id}/transfer`) collide with no template declared earlier:
+# the sessions router has no single-segment `/v1/desktop/{...}` path and no `/transfer`
+# child, and no block above declares `/peers` or `/networks`.
+app.include_router(desktop_mesh.router)
 
 # Add CORS middleware
 app.add_middleware(

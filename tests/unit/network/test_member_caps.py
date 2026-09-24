@@ -281,6 +281,13 @@ def test_a_grant_opens_the_move_op_on_an_already_open_link(
         frame = {"op": "net_session_move", "phase": "status", "locality": "remote"}
         before = link.request({**frame, "req": 71})
         assert before is not None and before["op"] == "error"
+        # THE CAPABILITY IS WHAT REFUSED IT, ASSERTED BY NAME (review round 1, T1).
+        # This cell used to accept any error whose sentence was not the by-name "not
+        # implemented" refusal — and once mobility started refusing a frame with no
+        # conversation id, that let the cell pass with the capability check DISABLED
+        # (mutation-measured: ``OP_CAPABILITY["net_session_move"] = "list"`` kept it
+        # green). It read as coverage for the grant without testing the grant.
+        assert "does not hold the 'move' capability" in before["message"], before
         assert "not implemented" not in before["message"], "refused by capability first"
 
         granted = server_a.control_dispatch(

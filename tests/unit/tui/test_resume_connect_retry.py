@@ -1383,3 +1383,1026 @@ async def test_the_verdict_keeps_its_next_step_on_one_row_at_eighty_columns(monk
         # And it is still TWO authored statements, so the wider widths cannot
         # silently rejoin it into the paragraph this replaced.
         assert _gave_up("the runtime is not responding").count("\n") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_resume_onto_a_live_owner_paints_first_and_binds_behind(monkeypatch, tmp_path):
+    """PAINT FIRST, ATTACH BEHIND: a conversation on disk opens without a dial.
+
+    The blocking `connect` held `/resume` on the owner's canonical sync before
+    anything was drawn — 15 s and a refusal against a busy owner, and the whole
+    redial budget (about 42 s) against a silent one. With a transcript on disk
+    the conversation is adopted as a cold viewer instead and the ordinary eager
+    engage binds it behind the paint, so this asserts the three halves: NO dial
+    on the request path, the adopted session is that cold viewer, and the engage
+    was started for it. The redial tests above keep the dial path (their root
+    holds no transcript), which is the fallback this branch degrades to.
+    """
+    app = _app(monkeypatch, tmp_path)
+    record = _record(90909, "the remote")
+    directory = tmp_path / "sessions" / "remote-1"
+    directory.mkdir(parents=True)
+    (directory / "transcript.jsonl").write_text("", encoding="utf-8")
+    dials: list[Any] = []
+    colds: list[str] = []
+    engaged: list[str] = []
+    cold_viewer = FakeSession()
+
+    async def connect(*_args, **_kwargs):
+        dials.append("connect")
+        return FakeSession()
+
+    async def cold(session_id, **_kwargs):
+        colds.append(session_id)
+        return cold_viewer
+
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.find_runtime_record",
+        lambda _root, _concrete: (record, 90909),
+    )
+    monkeypatch.setattr("local_operator.session.attached.AttachedSession.connect", connect)
+    monkeypatch.setattr("local_operator.session.attached.AttachedSession.cold", cold)
+    monkeypatch.setattr(
+        OperatorApp, "_engage_runtime_eagerly", lambda self: engaged.append("engage")
+    )
+
+    async with _running(app):
+        engaged.clear()
+        await app._attach_or_refuse(tmp_path, "remote-1")
+
+        assert dials == [], "a conversation on disk must not wait on the owner's sync to paint"
+        assert colds == ["remote-1"]
+        assert app._session is cold_viewer
+        assert engaged == ["engage"], "the bind behind the paint was never started"
+        assert _notices(app) == [], "a paint-first open narrates no redial"
+
+
+# --- The paint-first attach's own narration and bound (UX round 1, U1-U5) ---
+#
+# Paint-first opens a REAL cold viewer and the ordinary background engage binds
+# it behind the paint. Against a frozen owner that engage says nothing until it
+# fails (~45 s), so these drive the real `/resume` arm with a real
+# `AttachedSession.cold` and a stand-in `engage_runtime` that parks until the
+# test releases it — the frozen owner, without a process — and shortened
+# narrate/bound timers.
+
+
+class _FrozenOwner:
+    """`engage_runtime` for an owner that does not answer until ``thaw()``."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self._gate = asyncio.Event()
+        self.fail: BaseException | None = None
+
+    def thaw(self, *, fail: BaseException | None = None) -> None:
+        self.fail = fail
+        self._gate.set()
+
+    async def __call__(self, *_args, **_kwargs) -> None:
+        self.calls += 1
+        await self._gate.wait()
+        if self.fail is not None:
+            raise self.fail
+
+
+async def _paint_first(monkeypatch, tmp_path, frozen: _FrozenOwner) -> OperatorApp:
+    from local_operator.config import ConfigManager
+
+    ConfigManager(config_dir=tmp_path).update_config({"hosting": "test", "model_name": "mock"})
+    directory = tmp_path / "sessions" / "frozen-1"
+    directory.mkdir(parents=True)
+    (directory / "transcript.jsonl").write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.find_runtime_record",
+        lambda _root, _concrete: (_record(90909, "frozen"), 90909),
+    )
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", frozen)
+    monkeypatch.setattr(app_module, "ATTACH_BEHIND_NARRATE_S", 0.2)
+    # Room between the two marks, because the tests read "still trying" and
+    # the verdict as separate states: at 0.6 s, a host at load ~200 fired both
+    # timers inside one `pilot.pause()`, and the narration was never observable
+    # (the round-2 suite run, 2 of these tests, pre-existing on `63bc96f4`).
+    monkeypatch.setattr(app_module, "ATTACH_BEHIND_BOUND_S", 3.0)
+    return _app(monkeypatch, tmp_path)
+
+
+async def _pump(pilot, predicate, *, timeout: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        await pilot.pause()
+        if predicate():
+            return True
+        await asyncio.sleep(0.02)
+    return predicate()
+
+
+@pytest.mark.asyncio
+async def test_a_frozen_owner_is_narrated_then_judged_not_left_starting(monkeypatch, tmp_path):
+    """U1: the wait is told something true, on a schedule, and ends in a verdict.
+
+    Before: the band read `starting…` alone for 42 s and the first sentence came
+    at ~45 s (measured in a real pty). The redial's own "still trying, about N s"
+    row now arrives at the narrate mark, and the bound restates it as the owner
+    not answering and ends the pending state rather than staying optimistic.
+    """
+    frozen = _FrozenOwner()
+    app = await _paint_first(monkeypatch, tmp_path, frozen)
+    async with _running(app) as pilot:
+        await app._attach_or_refuse(tmp_path, "frozen-1")
+        # The engage is a worker: it reaches `engage_runtime` a loop turn later.
+        assert await _pump(pilot, lambda: frozen.calls == 1), "the attach never started"
+        assert app._starting_shown, "the band did not say the attach is pending"
+        assert await _pump(
+            pilot, lambda: any("still trying" in n for n in _notices(app))
+        ), _notices(app)
+        assert await _pump(
+            pilot, lambda: any("is not answering" in n for n in _notices(app))
+        ), _notices(app)
+        rows = [n for n in _notices(app) if "frozen-1" in n]
+        assert len(rows) == 1, ("the verdict must restate the narration, not add a row", rows)
+        assert "no runtime yet" not in rows[0]
+        assert not app._starting_shown, "`starting…` outlived the verdict"
+        frozen.thaw(fail=ConnectionError("gone"))
+        await _pump(pilot, lambda: not app._warm_engage_started)
+
+
+@pytest.mark.asyncio
+async def test_a_bind_landing_inside_the_bound_retires_the_narration(monkeypatch, tmp_path):
+    """U3: the "still trying" row does not outlive the attach it described."""
+    frozen = _FrozenOwner()
+    app = await _paint_first(monkeypatch, tmp_path, frozen)
+    monkeypatch.setattr(app_module, "ATTACH_BEHIND_BOUND_S", 30.0)
+    async with _running(app) as pilot:
+        await app._attach_or_refuse(tmp_path, "frozen-1")
+        assert await _pump(pilot, lambda: any("still trying" in n for n in _notices(app)))
+        # The owner answers: the facade leaves cold the way a real bind does.
+        monkeypatch.setattr(type(app._session), "is_cold", property(lambda _self: False))
+        frozen.thaw()
+        assert await _pump(pilot, lambda: not app._starting_shown)
+        assert not [n for n in _notices(app) if "frozen-1" in n], _notices(app)
+
+
+@pytest.mark.asyncio
+async def test_a_bind_landing_after_the_verdict_restates_it(monkeypatch, tmp_path):
+    """U3: a late answer restates the verdict rather than leaving it standing."""
+    frozen = _FrozenOwner()
+    app = await _paint_first(monkeypatch, tmp_path, frozen)
+    async with _running(app) as pilot:
+        await app._attach_or_refuse(tmp_path, "frozen-1")
+        assert await _pump(pilot, lambda: any("is not answering" in n for n in _notices(app)))
+        monkeypatch.setattr(type(app._session), "is_cold", property(lambda _self: False))
+        frozen.thaw()
+        assert await _pump(
+            pilot, lambda: any("is answering again" in n for n in _notices(app))
+        ), _notices(app)
+        assert not any("is not answering" in n for n in _notices(app))
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_sent_before_the_attach_keeps_the_pending_cue(monkeypatch, tmp_path):
+    """U4: `starting…` survives the prompt being accepted, until its send returns.
+
+    The background engage yields to the prompt's foreground bind and clears its
+    own flag; the band used to flip to `working` in that frame while nothing had
+    reached the owner.
+    """
+    frozen = _FrozenOwner()
+    app = await _paint_first(monkeypatch, tmp_path, frozen)
+    monkeypatch.setattr(app_module, "ATTACH_BEHIND_BOUND_S", 30.0)
+    release = asyncio.Event()
+
+    async def parked_prompt(self, *_args, **_kwargs):  # noqa: ANN001
+        await release.wait()
+        return ""
+
+    async with _running(app) as pilot:
+        await app._attach_or_refuse(tmp_path, "frozen-1")
+        monkeypatch.setattr(type(app._session), "prompt", parked_prompt)
+        # The engage surrenders, which is what cleared the cue before.
+        app._set_starting(False)
+        app._start_turn_for(app._interaction, "sent while attaching")
+        await pilot.pause()
+        assert app._starting_shown, "the pending cue vanished when the prompt was accepted"
+        band = app._status
+        assert band is not None and band._starting and band._streaming
+        assert "starting…" in band.render_text(100).plain
+        release.set()
+        assert await _pump(pilot, lambda: not app._starting_shown)
+        frozen.thaw(fail=ConnectionError("gone"))
+
+
+# --- A message sent during the paint-first wait (UX round 2, U6/U8) ---
+#
+# The message's own FOREGROUND bind preempts the background engage, which then
+# fails by design. Before: the watch settled on that failure (no row, no bound,
+# no verdict for as long as the bind took), and when the bind itself failed —
+# "owner did not send its state", the welcome read against a frozen owner — the
+# generic branch printed that transport sentence, left the echo standing as if
+# sent and did not give the text back: the message was gone, 4/4 in UX round 2.
+
+
+def _user_rows(app: OperatorApp) -> list[str]:
+    from local_operator.tui.widgets.transcript import UserBlock
+
+    views = list(app.query(TranscriptView))
+    if not views:
+        return []
+    return [block.text() for block in views[0].blocks() if isinstance(block, UserBlock)]
+
+
+async def _compose_and_send(pilot, app: OperatorApp, text: str) -> None:  # noqa: ANN001
+    """Type into the REAL composer and press enter: the echo row and the accepted
+    draft are painted by the submit path, which is the half U6 lost."""
+    from local_operator.tui.widgets.editor import Editor
+
+    editor = app.query_one(Editor)
+    editor.focus()
+    await pilot.pause()
+    editor.text = text
+    await pilot.pause()
+    await pilot.press("enter")
+    await pilot.pause()
+
+
+async def _send_during_attach(  # noqa: ANN001
+    monkeypatch, tmp_path, frozen, prompt, *, bound_s: float = 2.0
+):
+    """`/resume` a frozen owner, then SUBMIT a message while it is still pending.
+
+    ``prompt`` stands in for the facade's send, so the test controls what the
+    message's own bind does. The engage is failed the way a preempted
+    background engage fails — the moment the prompt is in flight.
+    """
+    app = await _paint_first(monkeypatch, tmp_path, frozen)
+    # AFTER `_paint_first`, which sets its own; and before the attach, because
+    # the watch arms its timers from the module values when it is created. The
+    # narration and the verdict are read as separate states, so the bound sits
+    # well past the narrate mark on a loaded host.
+    monkeypatch.setattr(app_module, "ATTACH_BEHIND_BOUND_S", bound_s)
+    ctx = _running(app)
+    pilot = await ctx.__aenter__()
+    await app._attach_or_refuse(tmp_path, "frozen-1")
+    assert await _pump(pilot, lambda: frozen.calls == 1)
+    monkeypatch.setattr(type(app._session), "prompt", prompt)
+    await _compose_and_send(pilot, app, "sent while attaching")
+    # The background engage yields to the foreground bind and fails.
+    frozen.thaw(fail=ConnectionError("preempted"))
+    await _pump(pilot, lambda: not app._warm_engage_started)
+    return app, pilot, ctx
+
+
+@pytest.mark.asyncio
+async def test_a_message_sent_early_in_the_wait_keeps_the_narration(monkeypatch, tmp_path):
+    """U6: a preempted engage must not silence the wait while the attach is pending."""
+    frozen = _FrozenOwner()
+    release = asyncio.Event()
+
+    async def parked(self, *_a, **_k):  # noqa: ANN001
+        await release.wait()
+        raise ConnectionError("owner did not send its state")
+
+    # EVENT-BASED, not a wall-clock window (QA round 3, Q-1): at 0.2 s / 2.0 s a
+    # loaded host's single pump could straddle both marks, so the narration was
+    # never observed as its own state. The bound is parked far away, the
+    # narration is awaited by predicate, and the bound is then FIRED — the
+    # attempt's own timer callback — so the verdict is a second observed state.
+    app, pilot, ctx = await _send_during_attach(
+        monkeypatch, tmp_path, frozen, parked, bound_s=600.0
+    )
+    try:
+        # The engage has FAILED; the narration and the bound must still come.
+        assert not app._warm_engage_started, "the fixture must fail the engage first"
+        assert await _pump(pilot, lambda: any("still trying" in n for n in _notices(app))), (
+            "the preempted engage silenced the narration",
+            _notices(app),
+        )
+        (attempt,) = app._attach_behind_attempts.values()
+        assert attempt.phase == "narrated" and attempt._timers, "the bound is not armed"
+        attempt._judge()
+        assert await _pump(
+            pilot, lambda: any("is not answering" in n for n in _notices(app))
+        ), _notices(app)
+        assert not app._starting_shown, "`starting…` outlived the verdict"
+        release.set()
+        assert await _pump(pilot, lambda: any("was not sent" in n for n in _notices(app)))
+        rows = [n for n in _notices(app) if "frozen-1" in n]
+        assert len(rows) == 1, ("one account of the wait, restated, not a stack", rows)
+    finally:
+        await ctx.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_a_message_whose_bind_fails_during_the_wait_comes_back(monkeypatch, tmp_path):
+    """U6/U8: never delivered ⇒ echo down, draft back, one row in product words."""
+    frozen = _FrozenOwner()
+
+    async def refused(self, *_a, **_k):  # noqa: ANN001
+        raise ConnectionError("owner did not send its state")
+
+    app, pilot, ctx = await _send_during_attach(monkeypatch, tmp_path, frozen, refused)
+    try:
+        assert await _pump(pilot, lambda: any("was not sent" in n for n in _notices(app)))
+        from local_operator.tui.widgets.editor import Editor
+
+        assert app.query_one(Editor).text.strip() == "sent while attaching", "the text was lost"
+        assert _user_rows(app) == [], "the echo of a message nobody received still stands"
+        texts = _notices(app)
+        assert not any("owner did not send its state" in n for n in texts), texts
+        assert not app._starting_shown
+        # A second attempt against the same silent owner is the same state again.
+        await _compose_and_send(pilot, app, "again")
+        assert await _pump(pilot, lambda: not app._interaction.active_workers)
+        assert len([n for n in _notices(app) if "was not sent" in n]) == 1, _notices(app)
+    finally:
+        await ctx.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_a_message_whose_bind_lands_settles_the_narration(monkeypatch, tmp_path):
+    """U6: the preempting message's successful bind settles the wait it took over."""
+    frozen = _FrozenOwner()
+    release = asyncio.Event()
+
+    async def delivered(self, *_a, **_k):  # noqa: ANN001
+        await release.wait()
+        monkeypatch.setattr(type(self), "is_cold", property(lambda _self: False))
+        return ""
+
+    app, pilot, ctx = await _send_during_attach(
+        monkeypatch, tmp_path, frozen, delivered, bound_s=30.0
+    )
+    try:
+        assert await _pump(pilot, lambda: any("still trying" in n for n in _notices(app)))
+        release.set()
+        assert await _pump(pilot, lambda: not app._attach_behind_attempts)
+        assert await _pump(pilot, lambda: not [n for n in _notices(app) if "frozen-1" in n])
+        assert _user_rows(app) == ["sent while attaching"], "a delivered message lost its row"
+    finally:
+        await ctx.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_the_paint_first_verdict_keeps_its_next_step_whole_at_eighty_columns(
+    monkeypatch, tmp_path
+):
+    """U9: at an 80-column pane "send a message to retry" split across two rows.
+
+    Measured in UX round 2 on the one-sentence verdict. The next step is now its
+    own authored row, the redial give-up's pattern, and this pins the RENDERED
+    rows at 80 columns rather than the authored string.
+    """
+    frozen = _FrozenOwner()
+    app = await _paint_first(monkeypatch, tmp_path, frozen)
+    async with app.run_test(size=(80, 24)) as pilot:  # type: ignore[attr-defined]
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        await app._attach_or_refuse(tmp_path, "frozen-1")
+        assert await _pump(pilot, lambda: any("is not answering" in n for n in _notices(app)))
+        rows = [row.strip() for row in _rendered_notice_rows(app)]
+        assert "Send a message to retry." in rows, rows
+        frozen.thaw(fail=ConnectionError("gone"))
+        await _pump(pilot, lambda: not app._warm_engage_started)
+
+
+@pytest.mark.asyncio
+async def test_the_paint_first_narration_quotes_its_own_bound(monkeypatch, tmp_path):
+    """U7/D5: the row said "about 42 s in total" and was judged at 27 s."""
+    frozen = _FrozenOwner()
+    app = await _paint_first(monkeypatch, tmp_path, frozen)
+    monkeypatch.setattr(app_module, "ATTACH_BEHIND_BOUND_S", 27.0)
+    async with _running(app) as pilot:
+        await app._attach_or_refuse(tmp_path, "frozen-1")
+        assert await _pump(pilot, lambda: any("still trying" in n for n in _notices(app)))
+        row = next(n for n in _notices(app) if "still trying" in n)
+        assert "about 27\u00a0s in total" in row, row
+        assert f"{app_module.RESUME_CONNECT_BOUND_S:g}\u00a0s" not in row, row
+        frozen.thaw(fail=ConnectionError("gone"))
+        await _pump(pilot, lambda: not app._warm_engage_started)
+
+
+# --- The same wait across conversation SWITCHES (UX round 3, U10-U12) ---
+#
+# Every step of the return path used to decide WHICH conversation and WHICH echo
+# row it was repairing from the screen: the withdrawal took the newest submit's
+# rows out of the view in front, the "back in the composer" row was painted into
+# whatever conversation was showing, and the narration watch bailed the moment
+# the binding epoch moved. These drive the REAL sidebar prepare/commit between a
+# paint-first conversation (a real `AttachedSession.cold` behind `/resume`) and
+# ordinary sidebar conversations, and assert per conversation.
+
+
+def _view_rows(view: TranscriptView) -> tuple[list[str], list[str]]:
+    """(user row texts, notice texts) of ONE transcript, whichever is on screen."""
+    from local_operator.tui.widgets.transcript import UserBlock
+
+    users = [b.text() for b in view.blocks() if isinstance(b, UserBlock)]
+    notices = [b._text for b in view.blocks() if isinstance(b, NoticeBlock)]
+    return users, notices
+
+
+def _returned_rows(notices: list[str]) -> list[str]:
+    # Matched on the stable FACT of the sentence (the owner did not answer the
+    # message), not its wording, so the arms discriminate on behaviour: the
+    # pre-fix head's copy ("…is back in the composer") matches too.
+    return [n for n in notices if "did not answer" in n]
+
+
+class _HeldSend:
+    """`prompt` for the paint-first facade: each send parks until the test settles it."""
+
+    def __init__(self) -> None:
+        self.gates: list[asyncio.Event] = []
+        self.outcomes: list[BaseException | None] = []
+        self.delivered: list[str] = []
+
+    def install(self, monkeypatch, session) -> None:  # noqa: ANN001
+        held = self
+
+        async def prompt(self_, text, *_a, **_k):  # noqa: ANN001
+            gate = asyncio.Event()
+            held.gates.append(gate)
+            held.outcomes.append(None)
+            index = len(held.gates) - 1
+            await gate.wait()
+            outcome = held.outcomes[index]
+            if outcome is not None:
+                raise outcome
+            held.delivered.append(text)
+            return ""
+
+        monkeypatch.setattr(type(session), "prompt", prompt)
+
+    def refuse_all(self) -> None:
+        for index, gate in enumerate(self.gates):
+            if not gate.is_set():
+                self.outcomes[index] = ConnectionError("owner did not send its state")
+                gate.set()
+
+
+async def _to_sidebar(app: OperatorApp, pilot, remote) -> None:  # noqa: ANN001
+    from tests.unit.tui.test_sidebar_swap_reset import _switch
+
+    await _switch(app, pilot, remote)
+
+
+def _sidebar_remote(name: str):  # noqa: ANN202
+    from tests.unit.tui.test_sidebar_swap_reset import SidebarRemote, _message
+
+    return SidebarRemote(
+        name,
+        history=[_message("user", f"{name} question"), _message("assistant", f"{name} answer")],
+    )
+
+
+@asynccontextmanager
+async def _paint_first_with_sends(monkeypatch, tmp_path, *, bound_s: float = 30.0):
+    """A paint-first `/resume` of a frozen owner, with sends the test settles."""
+    frozen = _FrozenOwner()
+    app = await _paint_first(monkeypatch, tmp_path, frozen)
+    monkeypatch.setattr(app_module, "ATTACH_BEHIND_BOUND_S", bound_s)
+    sends = _HeldSend()
+    async with _running(app) as pilot:
+        await app._attach_or_refuse(tmp_path, "frozen-1")
+        assert await _pump(pilot, lambda: frozen.calls >= 1)
+        owner = app._session
+        sends.install(monkeypatch, owner)
+        try:
+            yield app, pilot, owner, sends, frozen
+        finally:
+            sends.refuse_all()
+            frozen.thaw(fail=ConnectionError("gone"))
+            for _ in range(10):
+                await pilot.pause()
+
+
+async def _back_to(app: OperatorApp, pilot, owner) -> None:  # noqa: ANN001
+    """Return to the paint-first conversation through the same sidebar commit."""
+    await _to_sidebar(app, pilot, owner)
+    assert app._session is owner, "the switch back did not land on the sending conversation"
+
+
+@pytest.mark.asyncio
+async def test_a_send_then_a_switch_away_and_back_keeps_one_row_and_its_verdict(
+    monkeypatch, tmp_path
+):
+    """Arm 1: send, switch away, come back; the return lands where the message was sent.
+
+    Before: the round trip moved the binding epoch, the watch bailed on every
+    step, and the conversation was left with a sent row, a "still trying" that
+    never judged, and the text in the composer with no account (U10/U12).
+    """
+    async with _paint_first_with_sends(monkeypatch, tmp_path, bound_s=3.0) as ctx:
+        app, pilot, owner, sends, _frozen = ctx
+        await _compose_and_send(pilot, app, "GONE-A")
+        assert await _pump(pilot, lambda: len(sends.gates) == 1)
+        await _to_sidebar(app, pilot, _sidebar_remote("side-b"))
+        await _back_to(app, pilot, owner)
+        # The bound is the attempt's: it still lands, in THIS conversation.
+        assert await _pump(
+            pilot,
+            lambda: any("is not answering" in n for n in _view_rows(app._transcript_view())[1]),
+        ), _view_rows(app._transcript_view())
+        sends.refuse_all()
+        from local_operator.tui.widgets.editor import Editor
+
+        assert await _pump(
+            pilot, lambda: bool(_returned_rows(_view_rows(app._transcript_view())[1]))
+        )
+        users, notices = _view_rows(app._transcript_view())
+        assert users.count("GONE-A") == 0, ("a returned message is still drawn as sent", users)
+        assert len([n for n in notices if "frozen-1" in n]) == 1, notices
+        assert app.query_one(Editor).text.strip() == "GONE-A"
+        # Following the row's own advice against an owner that is STILL silent:
+        # back in via the sidebar the viewer is display-only until its connect
+        # lands, so Enter is refused by that arm's gate with the draft kept —
+        # and nothing may add a second row for the message.
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await pilot.press("enter")
+        for _ in range(10):
+            await pilot.pause()
+        users, notices = _view_rows(app._transcript_view())
+        assert users.count("GONE-A") == 0, ("following the advice drew a sent row", users)
+        assert editor.text.strip() == "GONE-A"
+        assert len(_returned_rows(notices)) == 1, notices
+
+
+@pytest.mark.asyncio
+async def test_two_sends_then_a_switch_withdraw_both_rows_from_their_own_view(
+    monkeypatch, tmp_path
+):
+    """Arm 2: two sends inside the window, a switch, both come back (U10 repro B, Q-2)."""
+    async with _paint_first_with_sends(monkeypatch, tmp_path) as ctx:
+        app, pilot, owner, sends, _frozen = ctx
+        view_a = app._transcript_view()
+        await _compose_and_send(pilot, app, "TWO-1")
+        assert await _pump(pilot, lambda: len(sends.gates) == 1)
+        await _compose_and_send(pilot, app, "TWO-2")
+        assert await _pump(pilot, lambda: _view_rows(view_a)[0].count("TWO-2") == 1)
+        side = _sidebar_remote("side-b")
+        await _to_sidebar(app, pilot, side)
+        view_b = app._transcript_view()
+        assert view_b is not view_a
+        sends.refuse_all()
+        # The second send's bind runs once the first releases the provider lock.
+        assert await _pump(pilot, lambda: len(sends.gates) == 2)
+        sends.refuse_all()
+        source_a = app._sidebar_sources["frozen-1"]
+        assert await _pump(pilot, lambda: not source_a.active_workers)
+        users_a, notices_a = _view_rows(view_a)
+        assert "TWO-1" not in users_a and "TWO-2" not in users_a, (
+            "a message that came back is still drawn as sent in its own view",
+            users_a,
+        )
+        users_b, notices_b = _view_rows(view_b)
+        assert not _returned_rows(notices_b), ("the other conversation was told", notices_b)
+        await _back_to(app, pilot, owner)
+        users, notices = _view_rows(app._transcript_view())
+        assert "TWO-1" not in users and "TWO-2" not in users, users
+        assert len(_returned_rows(notices)) == 1, ("one row for one state", notices)
+        from local_operator.tui.widgets.editor import Editor
+
+        held = [app.query_one(Editor).text.strip(), *[d.text.strip() for d in source_a.unsent]]
+        assert sorted(held) == ["TWO-1", "TWO-2"], ("both texts came back to their owner", held)
+
+
+@pytest.mark.asyncio
+async def test_two_returned_sends_then_a_delivered_resend_leave_one_row(monkeypatch, tmp_path):
+    """U10 repro C / QA Q-2: two sends come back, the resend goes out ONCE, ONE row.
+
+    Before: the withdrawal took only the NEWEST submit's rows, so the older
+    message stayed drawn as sent above the row saying it came back, and
+    resending it put the same message in the transcript twice.
+    """
+    async with _paint_first_with_sends(monkeypatch, tmp_path) as ctx:
+        app, pilot, _owner, sends, _frozen = ctx
+        from local_operator.tui.widgets.editor import Editor
+
+        await _compose_and_send(pilot, app, "TWO-1")
+        assert await _pump(pilot, lambda: len(sends.gates) == 1)
+        await _compose_and_send(pilot, app, "TWO-2")
+        sends.refuse_all()
+        assert await _pump(pilot, lambda: len(sends.gates) == 2)
+        sends.refuse_all()
+        assert await _pump(pilot, lambda: not app._interaction.active_workers)
+        users, notices = _view_rows(app._transcript_view())
+        assert "TWO-1" not in users and "TWO-2" not in users, users
+        assert len(_returned_rows(notices)) == 1, notices
+        editor = app.query_one(Editor)
+        assert editor.text.strip() in ("TWO-1", "TWO-2")
+        resent = editor.text.strip()
+        sends.gates.clear()
+        sends.outcomes.clear()
+        editor.focus()
+        await pilot.pause()
+        await pilot.press("enter")
+        assert await _pump(pilot, lambda: len(sends.gates) == 1)
+        sends.gates[0].set()
+        assert await _pump(pilot, lambda: [d.strip() for d in sends.delivered] == [resent])
+        users, _ = _view_rows(app._transcript_view())
+        assert users.count(resent) == 1, ("one delivered message, one row", users)
+
+
+@pytest.mark.asyncio
+async def test_a_return_while_another_conversation_is_shown_lands_in_its_own(monkeypatch, tmp_path):
+    """Arm 3: the refusal fires while a DIFFERENT conversation is on screen (U11)."""
+    async with _paint_first_with_sends(monkeypatch, tmp_path) as ctx:
+        app, pilot, owner, sends, _frozen = ctx
+        view_a = app._transcript_view()
+        await _compose_and_send(pilot, app, "GONE-H")
+        assert await _pump(pilot, lambda: len(sends.gates) == 1)
+        await _to_sidebar(app, pilot, _sidebar_remote("side-b"))
+        from local_operator.tui.widgets.editor import Editor
+
+        sends.refuse_all()
+        source_a = app._sidebar_sources["frozen-1"]
+        assert await _pump(pilot, lambda: not source_a.active_workers)
+        users_b, notices_b = _view_rows(app._transcript_view())
+        assert not _returned_rows(notices_b), (
+            "painted into the conversation switched TO",
+            notices_b,
+        )
+        assert app.query_one(Editor).text.strip() == "", "the other composer was filled"
+        assert "GONE-H" not in _view_rows(view_a)[0], "the echo stayed in its parked view"
+        assert source_a.draft.text.strip() == "GONE-H", "the owning composer did not get it"
+        await _back_to(app, pilot, owner)
+        users, notices = _view_rows(app._transcript_view())
+        assert "GONE-H" not in users, users
+        assert len(_returned_rows(notices)) == 1, notices
+        assert app.query_one(Editor).text.strip() == "GONE-H"
+
+
+@pytest.mark.asyncio
+async def test_a_second_and_third_conversation_never_see_the_return(monkeypatch, tmp_path):
+    """Arm 4: switch to a second, then a third conversation; the return stays home."""
+    async with _paint_first_with_sends(monkeypatch, tmp_path) as ctx:
+        app, pilot, owner, sends, _frozen = ctx
+        await _compose_and_send(pilot, app, "GONE-3")
+        assert await _pump(pilot, lambda: len(sends.gates) == 1)
+        await _to_sidebar(app, pilot, _sidebar_remote("side-b"))
+        view_b = app._transcript_view()
+        await _to_sidebar(app, pilot, _sidebar_remote("side-c"))
+        view_c = app._transcript_view()
+        sends.refuse_all()
+        source_a = app._sidebar_sources["frozen-1"]
+        assert await _pump(pilot, lambda: not source_a.active_workers)
+        for view in (view_b, view_c):
+            assert not _returned_rows(_view_rows(view)[1]), _view_rows(view)
+        await _back_to(app, pilot, owner)
+        users, notices = _view_rows(app._transcript_view())
+        assert "GONE-3" not in users and len(_returned_rows(notices)) == 1, (users, notices)
+
+
+@pytest.mark.asyncio
+async def test_a_row_narrated_while_away_reaches_its_verdict_after_the_switch_back(
+    monkeypatch, tmp_path
+):
+    """Arm 5 (U12): away across the narrate mark, back before the bound.
+
+    Before: the switch back re-bound the facade, the watch's `_current()` was
+    false from then on, and "still trying, about 27 s in total" stood 19 s past
+    its own bound with nothing in its place.
+    """
+    async with _paint_first_with_sends(monkeypatch, tmp_path, bound_s=3.0) as ctx:
+        app, pilot, owner, _sends, _frozen = ctx
+        started = time.monotonic()
+        await _to_sidebar(app, pilot, _sidebar_remote("side-b"))
+        # Across the narrate mark while away: nothing about it in B.
+        assert await _pump(pilot, lambda: time.monotonic() - started > 0.5)
+        assert not [n for n in _view_rows(app._transcript_view())[1] if "frozen-1" in n]
+        await _back_to(app, pilot, owner)
+        assert await _pump(
+            pilot,
+            lambda: any("is not answering" in n for n in _view_rows(app._transcript_view())[1]),
+        ), ("the re-narrated row never reached its verdict", _view_rows(app._transcript_view()))
+        rows = [n for n in _view_rows(app._transcript_view())[1] if "frozen-1" in n]
+        assert len(rows) == 1, ("one account of the wait", rows)
+        assert not app._starting_shown, "`starting…` beside the verdict"
+
+
+@pytest.mark.asyncio
+async def test_the_returned_rows_actionable_half_stays_whole_at_eighty_columns(
+    monkeypatch, tmp_path
+):
+    """U13: the descriptive half may wrap; the half the user acts on may not."""
+    frozen = _FrozenOwner()
+
+    async def refused(self, *_a, **_k):  # noqa: ANN001
+        raise ConnectionError("owner did not send its state")
+
+    app = await _paint_first(monkeypatch, tmp_path, frozen)
+    async with app.run_test(size=(80, 24)) as pilot:  # type: ignore[attr-defined]
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        await app._attach_or_refuse(tmp_path, "frozen-1")
+        assert await _pump(pilot, lambda: frozen.calls >= 1)
+        monkeypatch.setattr(type(app._session), "prompt", refused)
+        await _compose_and_send(pilot, app, "NARROW-E")
+        assert await _pump(pilot, lambda: any("was not sent" in n for n in _notices(app)))
+        rows = [row.strip() for row in _rendered_notice_rows(app)]
+        assert "It is back in the composer: send it again to retry." in rows, rows
+        frozen.thaw(fail=ConnectionError("gone"))
+        await _pump(pilot, lambda: not app._warm_engage_started)
+
+
+# --- The account OUTLIVES the attempt (agent review round 4, F-1; UX U14; QA Q-1) ---
+#
+# Every switch arm above asserts BEFORE any bind lands, which is why they all
+# passed while the account could still be lost: the row's only holder was the
+# attempt, which ends when a carrier binds, and the view it was painted into is
+# replaced when the switch back's connect re-commits the conversation. These
+# arms land a bind at each of the three points that matter and assert that the
+# account is either on screen or genuinely no longer owed — never silently gone.
+
+
+class _Coldness:
+    """`is_cold` for the paint-first facade, moved by the test the way a bind moves it.
+
+    Only the paint-first facade's class is patched; the sidebar doubles are
+    `SidebarRemote`s and keep their own answer.
+    """
+
+    def __init__(self, monkeypatch, session) -> None:  # noqa: ANN001
+        self.cold = True
+        state = self
+        monkeypatch.setattr(type(session), "is_cold", property(lambda _self: state.cold))
+
+
+@pytest.mark.asyncio
+async def test_a_landing_between_the_capture_and_the_return_still_accounts_for_it(
+    monkeypatch, tmp_path
+):
+    """F-1a: the engage binds, the facade resyncs, THEN the message's bind fails.
+
+    Before (``c09c0608``): ``landed`` closed the attempt, so the return found it
+    "not alive" and said nothing — the text went back to the composer with no
+    row and no notice at all. ``3424719f`` painted the row; this pins that.
+    """
+    async with _paint_first_with_sends(monkeypatch, tmp_path) as ctx:
+        app, pilot, owner, sends, frozen = ctx
+        from local_operator.tui.widgets.editor import Editor
+
+        coldness = _Coldness(monkeypatch, owner)
+        await _compose_and_send(pilot, app, "SILENT")
+        assert await _pump(pilot, lambda: len(sends.gates) == 1)
+        # The engage binds the attach: the attempt is over.
+        coldness.cold = False
+        frozen.thaw()
+        assert await _pump(pilot, lambda: not app._attach_behind_attempts)
+        # ...and the facade is cold again (a resync: `not _ready_for_events`)
+        # when the message's own bind is refused.
+        coldness.cold = True
+        sends.refuse_all()
+        source = app._interaction
+        assert await _pump(pilot, lambda: not source.active_workers)
+        users, notices = _view_rows(app._transcript_view())
+        assert "SILENT" not in users, ("a returned message is still drawn as sent", users)
+        assert app.query_one(Editor).text.strip() == "SILENT"
+        assert len(_returned_rows(notices)) == 1, (
+            "the text came back with no account of how it got there",
+            notices,
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_landing_after_the_row_is_painted_keeps_it_through_the_recommit(
+    monkeypatch, tmp_path
+):
+    """F-1b / QA Q-1: the switch back's connect re-commits a fresh view on the bind.
+
+    Before: the row lived only in the widget it was painted into, and the
+    connect worker's re-commit swapped that view out as soon as the owner
+    answered — taking the "is answering again" restatement with it (U3 says a
+    row that stated an outcome is restated, never silently removed).
+    """
+    async with _paint_first_with_sends(monkeypatch, tmp_path) as ctx:
+        app, pilot, owner, sends, frozen = ctx
+        from local_operator.tui.widgets.editor import Editor
+
+        coldness = _Coldness(monkeypatch, owner)
+        await _compose_and_send(pilot, app, "GONE-R")
+        assert await _pump(pilot, lambda: len(sends.gates) == 1)
+        await _to_sidebar(app, pilot, _sidebar_remote("side-b"))
+        sends.refuse_all()
+        source_a = app._sidebar_sources["frozen-1"]
+        assert await _pump(pilot, lambda: not source_a.active_workers)
+        await _back_to(app, pilot, owner)
+        before = app._transcript_view()
+        assert len(_returned_rows(_view_rows(before)[1])) == 1, _view_rows(before)
+        # The owner answers: the engage binds and the switch back's connect
+        # worker re-commits the conversation over a fresh replay.
+        coldness.cold = False
+        frozen.thaw()
+
+        def settled() -> bool:
+            notices = _view_rows(app._transcript_view())[1]
+            return any("is answering again" in n for n in notices)
+
+        assert await _pump(pilot, settled), (
+            "the recovered account left with the replaced view",
+            app._transcript_view() is before,
+            _view_rows(app._transcript_view()),
+        )
+        for _ in range(20):
+            await pilot.pause()
+        rows = [n for n in _view_rows(app._transcript_view())[1] if "frozen-1" in n]
+        assert len(rows) == 1 and "is answering again" in rows[0], rows
+        assert app.query_one(Editor).text.strip() == "GONE-R"
+
+
+@pytest.mark.asyncio
+async def test_the_owner_answering_while_the_user_is_away_is_shown_on_return(monkeypatch, tmp_path):
+    """U14: the account of a returned message, when the owner answers while away.
+
+    Before: the bind restated the row in the parked view (or the attempt closed
+    first), and the conversation came back without it — the text sat in the
+    composer with nothing saying how it got there, or that the owner is back.
+    """
+    async with _paint_first_with_sends(monkeypatch, tmp_path) as ctx:
+        app, pilot, owner, sends, frozen = ctx
+        from local_operator.tui.widgets.editor import Editor
+
+        coldness = _Coldness(monkeypatch, owner)
+        await _compose_and_send(pilot, app, "GONE-W")
+        assert await _pump(pilot, lambda: len(sends.gates) == 1)
+        sends.refuse_all()
+        source_a = app._interaction
+        assert await _pump(pilot, lambda: not source_a.active_workers)
+        assert len(_returned_rows(_view_rows(app._transcript_view())[1])) == 1
+        await _to_sidebar(app, pilot, _sidebar_remote("side-b"))
+        view_b = app._transcript_view()
+        # The owner answers while the user is away.
+        coldness.cold = False
+        frozen.thaw()
+        assert await _pump(pilot, lambda: not app._attach_behind_attempts)
+        assert not [n for n in _view_rows(view_b)[1] if "frozen-1" in n], _view_rows(view_b)
+        # The return is served by a REBUILT presentation, not the parked one:
+        # the cache misses whenever the conversation changed while away (a
+        # bind that landed is such a change), which is the shape UX walked in
+        # a real pty. A row that lived only in the parked widget is gone then.
+        parked = app._sidebar_presentations.pop("frozen-1", None)
+        assert parked is not None, "precondition: the conversation was parked"
+        await _back_to(app, pilot, owner)
+        assert app._transcript_view() is not parked.replay.view
+        for _ in range(20):
+            await pilot.pause()
+        rows = [n for n in _view_rows(app._transcript_view())[1] if "frozen-1" in n]
+        assert len(rows) == 1 and "is answering again" in rows[0], (
+            "the conversation came back without its account",
+            rows,
+        )
+        assert app.query_one(Editor).text.strip() == "GONE-W"
+
+
+@pytest.mark.asyncio
+async def test_a_retired_conversation_leaves_nothing_in_the_attempt_table(monkeypatch, tmp_path):
+    """m-1: a judged attempt whose conversation is then retired does not linger."""
+    async with _paint_first_with_sends(monkeypatch, tmp_path, bound_s=0.6) as ctx:
+        app, pilot, _owner, _sends, _frozen = ctx
+        assert await _pump(pilot, lambda: any("is not answering" in n for n in _notices(app)))
+        source = app._interaction
+        assert source.token in app._attach_behind_attempts
+        app._retire_attach_behind(source)
+        assert source.token not in app._attach_behind_attempts
+        assert source.attach_behind_account is None
+
+
+# --- A bind that is NOT one of the attempt's carriers settles the account too ---
+# (UX round 5, U15 and its item 4; QA round 5, Q-1/Q-2.) The arms above release
+# the bind through the attempt's own warm engage, which is a carrier, so they
+# restate the row on every head. In the real product the carriers have long
+# failed by the time the owner answers after a switch back, and the bind is
+# delivered by the SIDEBAR'S OWN CONNECT (`_start_sidebar_connection` →
+# `bind_runtime` → re-commit), which reported to nothing: the row stayed
+# "did not answer — send it again" for the rest of the session, above the reply
+# the resend produced.
+
+
+def _refreeze(frozen: _FrozenOwner) -> None:
+    """Every engage from now on waits again, like an owner that is still silent."""
+    frozen._gate = asyncio.Event()
+    frozen.fail = None
+
+
+async def _returned_then_back_with_carriers_spent(
+    app, pilot, owner, sends, frozen, text
+):  # noqa: ANN001, ANN202
+    """Send, switch away, the message comes back, switch back; no carrier is left."""
+    await _compose_and_send(pilot, app, text)
+    assert await _pump(pilot, lambda: len(sends.gates) == 1)
+    await _to_sidebar(app, pilot, _sidebar_remote("side-b"))
+    sends.refuse_all()
+    source = app._sidebar_sources["frozen-1"]
+    assert await _pump(pilot, lambda: not source.active_workers)
+    await _back_to(app, pilot, owner)
+    # The switch back's engage fails like the real one does against a silent
+    # owner (its own envelope), so NO carrier of the attempt is left alive.
+    frozen.thaw(fail=ConnectionError("gone"))
+    assert await _pump(pilot, lambda: not app._warm_engage_started)
+    _refreeze(frozen)
+    for _ in range(5):
+        await pilot.pause()
+    assert len(_returned_rows(_view_rows(app._transcript_view())[1])) == 1
+    return source
+
+
+@pytest.mark.asyncio
+async def test_a_bind_by_the_sidebar_connect_after_a_switch_back_settles_the_account(
+    monkeypatch, tmp_path
+):
+    """U15 / Q-1: the switch back's own connect binds; the row says the owner is back.
+
+    Before (``91b361dc``): only a CARRIER's bind reached the account, so the
+    connect bound, re-committed, and the row kept "did not answer — send it
+    again" with the owner answering. The settled row must then survive further
+    view swaps, exactly once each time.
+    """
+    async with _paint_first_with_sends(monkeypatch, tmp_path) as ctx:
+        app, pilot, owner, sends, frozen = ctx
+        coldness = _Coldness(monkeypatch, owner)
+        source = await _returned_then_back_with_carriers_spent(
+            app, pilot, owner, sends, frozen, "GONE-C"
+        )
+        # The owner answers, and the bind is the SIDEBAR CONNECT's, not a carrier's.
+        app._start_sidebar_connection(source)
+        coldness.cold = False
+        frozen.thaw()
+
+        def rows() -> list[str]:
+            return [n for n in _view_rows(app._transcript_view())[1] if "frozen-1" in n]
+
+        assert await _pump(pilot, lambda: any("is answering again" in n for n in rows())), (
+            "a bind that was not a carrier left the outcome row unsettled",
+            rows(),
+        )
+        assert len(rows()) == 1, rows()
+        assert not _returned_rows(rows()), rows()
+        # Survives the next swaps, one copy each time.
+        for _ in range(2):
+            await _to_sidebar(app, pilot, _sidebar_remote("side-b"))
+            await _back_to(app, pilot, owner)
+            assert rows() == ["session frozen-1 is answering again"], rows()
+
+
+@pytest.mark.asyncio
+async def test_a_delivered_resend_leaves_no_failure_row_standing(monkeypatch, tmp_path):
+    """UX round 5, item 4: following "send it again" after the owner came back.
+
+    The facade is bound by a path that is not a carrier and does not re-commit
+    the conversation, so the resend goes out over an already-bound facade and is
+    never an ``_AttachBehindSend``. Before (``91b361dc``): delivered exactly
+    once, and the row above it still said the message was not sent and to send
+    it again, over an empty composer.
+    """
+    async with _paint_first_with_sends(monkeypatch, tmp_path) as ctx:
+        app, pilot, owner, sends, frozen = ctx
+        from local_operator.tui.widgets.editor import Editor
+
+        coldness = _Coldness(monkeypatch, owner)
+        source = await _returned_then_back_with_carriers_spent(
+            app, pilot, owner, sends, frozen, "GONE-D"
+        )
+        coldness.cold = False
+        source.display_only = False
+        sends.gates.clear()
+        sends.outcomes.clear()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await pilot.press("enter")
+        assert await _pump(pilot, lambda: len(sends.gates) == 1)
+        sends.gates[0].set()
+        assert await _pump(pilot, lambda: [d.strip() for d in sends.delivered] == ["GONE-D"])
+        for _ in range(5):
+            await pilot.pause()
+        users, notices = _view_rows(app._transcript_view())
+        assert users.count("GONE-D") == 1, users
+        assert not _returned_rows(notices), (
+            "a failure row stands above the delivered message",
+            notices,
+        )
+        assert not editor.text.strip()
+
+
+@pytest.mark.asyncio
+async def test_retiring_a_conversation_takes_its_row_off_the_view(monkeypatch, tmp_path):
+    """QA round 5, Q-2: the row goes with the account, even detached from its ancestry."""
+    async with _paint_first_with_sends(monkeypatch, tmp_path, bound_s=600.0) as ctx:
+        app, pilot, _owner, _sends, _frozen = ctx
+        assert await _pump(pilot, lambda: any("still trying" in n for n in _notices(app)))
+        source = app._interaction
+        view = app._transcript_view()
+        # QA's `test_c3` end state: the table and the account were cleared,
+        # and the row stood on the view with nothing left to take it down.
+        assert [n for n in _view_rows(view)[1] if "frozen-1" in n]
+        app._retire_attach_behind(source)
+        for _ in range(3):
+            await pilot.pause()
+        assert not [n for n in _view_rows(view)[1] if "frozen-1" in n], _view_rows(view)
+        assert source.attach_behind_account is None

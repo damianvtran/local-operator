@@ -138,6 +138,11 @@ class EffortSupport:
 _ANTHROPIC_FULL = EffortSupport(("low", "medium", "high", "xhigh", "max"), default="high")
 _ANTHROPIC_NO_XHIGH = EffortSupport(("low", "medium", "high", "max"), default="high")
 _ANTHROPIC_BASE = EffortSupport(("low", "medium", "high"), default="high")
+# Opus 5.5 is the one Anthropic model whose documented default is NOT `high`:
+# "The API defaults to `high` (`medium` on Claude Opus 5.5)" (effort doc, read
+# 2026-09-24). The seed is sent as `output_config.effort`, so seeding `high`
+# here would silently run every turn one rung above the model's own default.
+_ANTHROPIC_OPUS_5_5 = EffortSupport(("low", "medium", "high", "xhigh", "max"), default="medium")
 
 # OpenAI. The GPT-5 and GPT-6 ladders are not interchangeable: choosing the
 # cheapest rung for a naming errand sent `none` to GPT-6 and got HTTP 400,
@@ -191,6 +196,10 @@ _EFFORT_TABLE: tuple[tuple[re.Pattern[str], EffortSupport], ...] = (
     # `output_config: {"effort": "high"}` on every request. Three digits is
     # generous for a generation number and cannot swallow a date.
     (re.compile(r"claude-[a-z]+-4[.-](?:[7-9]|\d{2,3})(?!\d)"), _ANTHROPIC_FULL),
+    # Ahead of the 5+ arm, which would otherwise claim it with `high`. `(?!\d)`
+    # stops `5-55` and deliberately lets a punctuated suffix through
+    # (`claude-opus-5-5-1`, a dated snapshot): same generation, same default.
+    (re.compile(r"claude-opus-5[.-]5(?!\d)"), _ANTHROPIC_OPUS_5_5),
     (re.compile(r"claude-[a-z]+-(?:[5-9]|\d{2,3})(?!\d)"), _ANTHROPIC_FULL),
     (re.compile(r"gpt-5(?!\d)"), _OPENAI_GPT5),
     (re.compile(r"gpt-(?:[6-9]|\d{2,})"), _OPENAI_GPT6),
@@ -222,9 +231,10 @@ def default_effort(model_id: str) -> str | None:
 
     Seeded onto the spec so the band can state a real level from boot rather
     than the word "reasoning". Only safe because the provider says so: for
-    Anthropic, sending ``high`` and sending nothing are documented as the same
-    request, so the seed changes no behaviour and only stops the band from
-    understating what is already happening.
+    Anthropic, sending the model's documented default (``high``, or ``medium``
+    on Opus 5.5) and sending nothing are the same request, so the seed changes
+    no behaviour and only stops the band from understating what is already
+    happening.
     """
     support = effort_support(model_id)
     return support.default if support is not None else None

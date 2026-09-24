@@ -114,8 +114,52 @@ CHECKPOINT_CUSTOM_TYPE = "frontend_state_checkpoint_v1"
 
 TRANSCRIPT_NAME = "transcript.jsonl"
 
+#: The glyph every USER-role gutter starts with, whoever the speaker is named
+#: as. The painter inks a user turn by this glyph rather than by the word
+#: ``you``, because an agent-opened session's first turn is a user turn with a
+#: different speaker (:func:`opener_gutter`).
+USER_GUTTER_MARK = "▸"
+
 #: Role gutters for the preview body.
-GUTTERS = {"user": "▸ you", "assistant": "▪ lop"}
+GUTTERS = {"user": f"{USER_GUTTER_MARK} you", "assistant": "▪ lop"}
+
+#: The preview meta row's suffix for an agent-opened session. The LITERAL the
+#: desktop sidebar draws on the same row (local-operator-ui #448), so the two
+#: surfaces use one vocabulary for one fact.
+AGENT_OPENED_MARK = "agent-opened"
+
+
+def opener_role(opened_by: Any) -> str:
+    """The opener's role from a row's ``opened_by``, or ``""`` when unknown.
+
+    One normalization for every TUI surface that names the opener (the picker
+    preview here, the sidebar's hover text). Whitespace is collapsed because the
+    role is self-reported by the agent's environment and a newline in it would
+    split a one-row label across rows.
+    """
+    agent = opened_by.get("agent") if isinstance(opened_by, dict) else None
+    return " ".join(agent.split()) if isinstance(agent, str) else ""
+
+
+def opener_gutter(opened_by: Any) -> str | None:
+    """The first user turn's gutter for an AGENT-OPENED session, else ``None``.
+
+    A workstream (``opened_by`` not ``None``, see ``resume.workstream_opened_by``)
+    was opened by an agent, so its first user turn is the delegating agent's
+    prompt, not the operator's words. Labelled ``▸ you`` it told the operator,
+    positively and wrongly, that a machine-started session was his — the
+    2026-09-18 incident restated as a label (PR #1436 design review round 1,
+    D1). Named after the opener's role when it is known, and ``agent`` when
+    every member is ``None``: that fact is certain even when the name is not.
+
+    ONLY THE FIRST user turn, deliberately. Later user turns may be the agent
+    continuing the run (``lop exec --resume``) or the operator resuming it, and
+    the transcript does not record which; relabelling them would be a guess.
+    """
+    if opened_by is None:
+        return None
+    return f"{USER_GUTTER_MARK} {opener_role(opened_by) or 'agent'}"
+
 
 #: Markdown emphasis strippers (D5). Measured over 58 previewable sessions:
 #: ``code`` in 74%, ``**bold**`` 57%, ``## heading`` 34%, ``- bullet`` 43%,
@@ -196,11 +240,20 @@ def verbose_entries(entries: Iterable[dict[str, Any]]) -> list[PreviewTurn]:
     return out
 
 
-def wrap_turns(turns: Sequence[PreviewTurn], width: int, height: int) -> list[tuple[str, str]]:
+def wrap_turns(
+    turns: Sequence[PreviewTurn],
+    width: int,
+    height: int,
+    *,
+    first_user_gutter: str | None = None,
+) -> list[tuple[str, str]]:
     """``(kind, line)`` for the preview body, oldest-first from the TOP.
 
     ``kind`` is ``"gutter"``, ``"blank"``, or the turn's role, so the caller
     styles without re-parsing.
+
+    ``first_user_gutter`` replaces ``▸ you`` on the FIRST user turn only — the
+    agent-opened case, see :func:`opener_gutter` for why only that one.
 
     D18 — OPENS AT THE FIRST USER TURN, and leading assistant turns are DROPPED
     rather than scrolled past. Measured: 36 of 141 transcripts open on
@@ -226,6 +279,7 @@ def wrap_turns(turns: Sequence[PreviewTurn], width: int, height: int) -> list[tu
         turns = list(turns)[first_user:]
 
     out: list[tuple[str, str]] = []
+    opener = first_user_gutter
     for turn in turns:
         if turn.role == GAP_ROLE:
             # A MARKER, not a gutter: it names something the reader cannot see
@@ -234,7 +288,10 @@ def wrap_turns(turns: Sequence[PreviewTurn], width: int, height: int) -> list[tu
             out.append(("marker", turn.text))
             out.append(("blank", ""))
             continue
-        out.append(("gutter", GUTTERS.get(turn.role, f"▪ {turn.role}")))
+        gutter = GUTTERS.get(turn.role, f"▪ {turn.role}")
+        if turn.role == "user" and opener is not None:
+            gutter, opener = opener, None
+        out.append(("gutter", gutter))
         for paragraph in demark(turn.text).splitlines():
             if not paragraph.strip():
                 continue

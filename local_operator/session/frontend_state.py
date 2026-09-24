@@ -2676,6 +2676,30 @@ class FrontendSessionState(BaseModel):
     #: (embedded SDK, test double) from failing the whole refresh.
     conversation_title_forked: bool = False
     goal: str = ""
+    #: NEW. "" (none) | "active" | "done". `done` coexists with a non-empty
+    #: `goal` ONLY between the judge's ACHIEVED verdict and the chip's dismissal:
+    #: the pairing is what lets a surface strike the objective it is still
+    #: showing, rather than having to forget it to stop displaying it.
+    goal_status: str = ""
+    #: NEW. The live judge's state (see `GoalJudgeState.to_wire`).
+    #:
+    #: Annotated with a SUBSCRIPTED ``dict[str, Any]`` ON PURPOSE, and the reason
+    #: is the guard rather than the type: the attach-frame guard derives the
+    #: field set it polices from the ANNOTATION STRING (`_collection_fields`),
+    #: so a bare ``dict | None`` would make this field invisible to the check
+    #: that exists to stop exactly this class of field — while its bytes would
+    #: still ride the frame. The subscript is what forces the explicit
+    #: size-policy review `attention`'s own comment asks for.
+    goal_judge: dict[str, Any] | None = None
+    #: NEW. Settled goals, newest first, at most `GOAL_HISTORY_MAX` entries —
+    #: bounded at ENTRY by the record and yielded at the WIRE by
+    #: `_bound_goal_record_in_place` when the frame it would ride is full.
+    goal_history: list[dict[str, Any]] = Field(default_factory=list)
+    #: NEW. The entries were dropped by the WIRE bound, not absent. Mirrors
+    #: `model_catalogue_truncated`, which exists for this exact lie: a pane that
+    #: silently under-reports the history reads as "no completed goals", which
+    #: is the bug the flag exists to prevent.
+    goal_history_truncated: bool = False
     active_agent: str = ""
     active_team: str = ""
     selected_model: FrontendModelSpec | None = None
@@ -3232,6 +3256,14 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
         if isinstance(components, list) and len(components) > USAGE_COMPONENT_CAP:
             snapshot["usage_components"] = _capped_components(components)
         _bound_live_events_in_place(snapshot)
+        # The goal record is bounded at ENTRY by `GoalState` (a swept history, a
+        # clipped judge reason) and yielded HERE at the wire, because an entry
+        # cap is not a wire bound: the frame this field rides is the one the
+        # socket refuses, so it is the field that gives way when the frame it
+        # would ride is over the line. Before the per-job pass and therefore
+        # before the catalogue's residual search, so the bytes it yields are
+        # available to the fields below rather than spent twice.
+        _bound_goal_record_in_place(payload, snapshot)
         jobs = snapshot.get("jobs")
         if isinstance(jobs, list):
             # Share one text budget across the roster so the frame does not grow
@@ -3346,6 +3378,62 @@ def _frame_line_bytes(payload: dict[str, Any]) -> int:
     bounds any attach that will outlive this reserve.
     """
     return len(json.dumps({"op": "result", "req": 9_999_999_999, "data": payload}).encode()) + 1
+
+
+def _bound_goal_record_in_place(payload: dict[str, Any], snapshot: dict[str, Any]) -> None:
+    """Yield the goal record's PAYLOAD when the frame it would ride is over the line.
+
+    ``goal_history`` is bounded at ENTRY by the record (a swept list of clipped
+    entries), and that is still not a wire bound: the entry cap says how big the
+    list may get, not that the frame carrying it fits. A frame that has none to
+    give would therefore be refused by the socket, which is the failure this
+    field must never be the cause of — so when the frame is over, the record
+    becomes its KEY SKELETON and nothing else:
+
+    * the HISTORY is dropped entirely and ``goal_history_truncated`` is set — the
+      flag is what keeps a reader from reading an empty list as "no completed
+      goals", the lie ``model_catalogue_truncated`` exists to prevent;
+    * the JUDGE is yielded to ``None``.
+
+    The whole payload yields rather than a clipped share of it, and the reason is
+    the measured price of the alternative: keeping the judge's four keys with its
+    reason clipped to 200 characters costs **287 B** of a frame that has none to
+    give, to render one tooltip line — against 20 B for the key alone. The judge
+    is also the one part of this record that is a LIVE projection rather than
+    accumulated data: the next frame rebuilds it from the session, while the
+    fields this frame is over for are the bounded ones whose budgets are already
+    spent. ``None`` is a shape the contract already defines (the field is
+    ``dict[str, Any] | None`` and a reader must tolerate its absence), so this
+    degrades the tooltip rather than lying about anything.
+
+    Neither ``goal``, ``goal_status`` nor any count is touched: the ACTIVE goal
+    and whether it is DONE are the two things on this frame a user is looking at,
+    and they are the whole reason the skeleton is kept.
+
+    Measured the way the neighbouring bounds measure — :func:`_frame_line_bytes`
+    over the frame as it will actually be sent, not arithmetic over parts —
+    because a budget measured any other way is a budget for a frame nobody sends.
+    It runs BEFORE the per-job text pass and therefore before the catalogue's
+    residual search (which must stay LAST, so it can spend what nothing else
+    will): the bytes this yields are then available to those passes rather than
+    being freed after they have already settled. The trade that ordering makes,
+    stated so a later editor does not "fix" it: on a frame that is over the line
+    for reasons this record cannot fix (a roster past every cap), the record
+    yields even though the frame still would not fit. The alternative — yielding
+    it after the catalogue has fitted itself — clips the catalogue to make room
+    for a record that is then thrown away, which loses both.
+    """
+    history = snapshot.get("goal_history")
+    judge = snapshot.get("goal_judge")
+    if not history and not isinstance(judge, dict):
+        return
+    if _frame_line_bytes(payload) <= _MODEL_CATALOGUE_LINE_LIMIT:
+        return
+    if isinstance(history, list) and history:
+        snapshot["goal_history"] = []
+        snapshot["goal_history_truncated"] = True
+    if isinstance(judge, dict):
+        snapshot["goal_judge"] = None
 
 
 def _bound_live_events_in_place(snapshot: dict[str, Any]) -> None:
@@ -4618,6 +4706,30 @@ class _TrajectoryWindows:
         return _FrozenSequence(itertools.chain(entry.rows[dropped:], _freeze_rows(rows[start:])))
 
 
+def _fold_goal_status(session: Any) -> str:
+    """The goal's status, with the migration default for pre-lifecycle sessions.
+
+    THE one place that default lives. A session restored from a build that
+    predates the judged-goal record has a ``goal`` text and no status at all,
+    and the only act that could have put that text there was the user typing
+    ``/goal <text>`` — the one act that expresses "pursue this". Reading it as
+    absent would silently un-set a standing objective the user still expects to
+    be pursued, which is the one direction of this migration that loses work, so
+    it reads as ACTIVE. The consequence is bounded and inspectable: a restored
+    active goal is judged at the next turn end, and the re-arm rule refuses to
+    start one by itself, so a stale restored goal spends nothing until the user
+    does something.
+
+    Reading it in the FOLD rather than in each reader is deliberate: `/goal`, the
+    status band and the desktop chip all read this one projection, so there is no
+    second place for the two to disagree.
+    """
+    status = str(getattr(session, "goal_status", "") or "")
+    if status:
+        return status
+    return "active" if str(getattr(session, "goal", "") or "") else ""
+
+
 class FrontendStateStore:
     """Atomic snapshot/update store shared by local and remote sessions.
 
@@ -5585,6 +5697,13 @@ class FrontendStateStore:
             conversation_title_user_set=bool(getattr(title_state, "user_set", False)),
             conversation_title_forked=bool(getattr(session, "wears_inherited_title", False)),
             goal=str(getattr(session, "goal", "") or ""),
+            # The migration default for a restored pre-lifecycle goal lives in
+            # `_fold_goal_status` (the `getattr(..., default)` shape here is the
+            # same reduced-facade convention `conversation_title_forked`
+            # documents above: an embedded SDK or a test double has no record).
+            goal_status=_fold_goal_status(session),
+            goal_judge=getattr(session, "goal_judge", None),
+            goal_history=getattr(session, "goal_history", []),
             active_agent=str(getattr(session, "active_agent", "") or ""),
             active_team=str(getattr(session, "active_team_name", "") or ""),
             selected_model=(
@@ -6476,11 +6595,40 @@ class FrontendStateStore:
         # Execution stays local to each manager; presentation follows the shared
         # graph. Snapshot its ledgers once, without per-node scans or disk reads.
         comms = getattr(session, "_subagent_comms", None)
+        # A CHILD session shares its root's comms registry, so an unscoped read
+        # below would project the whole fan-out -- every sibling's retained
+        # trajectory re-frozen at each of this child's boundaries, O(N) per
+        # child and O(N^2) across N children on the one shared loop (see
+        # ``SubagentComms.descendant_ids``). A child's roster is its own
+        # subtree; ``None`` means "this is the root, keep the whole graph".
+        scope = _child_scope(session, comms)
+        # ONE registry pass for the whole tick. ``_with_lineage``, the released
+        # memo's fingerprint and ``_released_predicate`` each ask the registry
+        # about one job at a time, and every such ``comms.node``/``nodes`` call
+        # builds a fresh ``RosterPass`` -- a walk of every record plus a
+        # snapshot of every manager. Over an N-job roster that was N passes per
+        # tick, O(N^2) on the parent's 50 ms coalescer (measured: 16 children
+        # spent more time building passes than projecting rows). The view below
+        # answers those reads from a single pass; see ``_TickComms``.
+        if comms is not None and callable(getattr(comms, "roster_pass", None)):
+            comms = _TickComms(comms)
+        # The session's OWN ledger always stays (a child's bash jobs are not
+        # graph records). Keyed by object identity: the graph hands back the
+        # same job objects, and model equality would compare trajectories.
+        own = {id(job) for job in rows} if scope is not None else set()
         graph_jobs = getattr(comms, "job_rows", None)
         if callable(graph_jobs):
             graph_rows = graph_jobs()
             if isinstance(graph_rows, Sequence):
-                rows = graph_rows
+                rows = (
+                    graph_rows
+                    if scope is None
+                    else [
+                        job
+                        for job in graph_rows
+                        if str(getattr(job, "id", "") or "") in scope or id(job) in own
+                    ]
+                )
         # The window and the paused set come from the LIVE manager and the comms
         # record, exactly as ``tui/app.py``'s owner-side filter reads them: one
         # source for the rule, so the dock and the canonical roster cannot drift
@@ -6546,6 +6694,8 @@ class FrontendStateStore:
             graph_nodes = nodes()
             for node in graph_nodes if isinstance(graph_nodes, Sequence) else []:
                 if node.job_id in known:
+                    continue
+                if scope is not None and node.job_id not in scope:
                     continue
                 # After a cold restart nested execution ledgers no longer exist,
                 # but the shared durable graph still does. These are reader rows
@@ -6702,6 +6852,78 @@ def _wire_launch_prompts(value: Any) -> dict[str, str]:
             text = text[:JOB_LAUNCH_PROMPT_WIRE_CHARS] + "\u2026"
         bounded[identity] = text
     return bounded
+
+
+class _TickComms:
+    """A comms registry view that answers node reads from ONE roster pass.
+
+    Built per ``FrontendStateStore._jobs`` call and dropped at its end, so it is
+    exactly as fresh as the tick that made it -- the same guarantee a
+    ``RosterPass`` documents ("a SNAPSHOT, deliberately never retained across
+    calls"). Only the READ methods the projection uses are served from the
+    pass (``node``, ``nodes``); everything else is forwarded to the live
+    registry unchanged, so no write or lifecycle call can see a stale view.
+
+    The pass is built lazily, on the first read, so a tick over a roster with
+    no comms records pays nothing.
+    """
+
+    __slots__ = ("_comms", "_pass", "_nodes", "_by_id")
+
+    def __init__(self, comms: Any) -> None:
+        self._comms = comms
+        self._pass: Any = None
+        self._nodes: list[Any] | None = None
+        self._by_id: dict[str, Any] = {}
+
+    def _roster(self) -> Any:
+        if self._pass is None:
+            self._pass = self._comms.roster_pass()
+        return self._pass
+
+    def nodes(self) -> list[Any]:
+        if self._nodes is None:
+            self._nodes = list(self._roster().nodes())
+        return list(self._nodes)
+
+    def node(self, job_id: str) -> Any:
+        # Resolved through the pass's own ``node_for`` so alias handling (an
+        # attempt id that resolves to its durable record) is the registry's,
+        # not a second implementation of it.
+        if job_id not in self._by_id:
+            self._by_id[job_id] = self._roster().node_for(job_id)
+        return self._by_id[job_id]
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._comms, name)
+
+
+def _child_scope(session: Any, comms: Any) -> set[str] | None:
+    """The job ids a CHILD session's roster may project, or ``None`` for a root.
+
+    A session is a child when it carries a ``_job_id`` its (shared) comms
+    registry knows. Such a session sees exactly its own descendants -- what a
+    viewer of that child can navigate to -- instead of the root's whole graph;
+    see ``SubagentComms.descendant_ids`` for the measured cost of the unscoped
+    read. Total and fail-open to the OLD behaviour: a registry without the
+    method, or one that raises, keeps the full graph (``None``), because an
+    over-wide roster is only slow, while an empty one would hide real rows.
+    """
+    job_id = getattr(session, "_job_id", None)
+    if not job_id or comms is None:
+        return None
+    is_child = getattr(comms, "is_child", None)
+    descendant_ids = getattr(comms, "descendant_ids", None)
+    if not callable(is_child) or not callable(descendant_ids):
+        return None
+    try:
+        if not is_child(job_id):
+            return None
+        ids = descendant_ids(job_id)
+        return {str(item) for item in ids} if isinstance(ids, Iterable) else None
+    except Exception:  # noqa: BLE001 - scoping is an optimisation, never a gate
+        logger.debug("child roster scope unavailable for %s", job_id, exc_info=True)
+        return None
 
 
 def _with_lineage(job: JobState, comms: Any) -> JobState:

@@ -41,6 +41,13 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     # Protocol member's type is never evaluated at runtime.
     from local_operator.session.frontend_state import FrontendSessionState
 
+    # Same shape, same reason: ``mark_goal_done`` returns the settled entry, and
+    # naming the real type keeps the caller's ``entry`` from degrading to ``Any``
+    # (``tui/app.py`` passes it straight into ``goal_done_answer``). ``GoalState``
+    # too: the judge's own record is what ``GoalRecordProtocol.goal_judge_state``
+    # hands the driver beside the wire shape.
+    from local_operator.session.goal import GoalHistoryEntry, GoalJudgeState
+
 
 def unanswered_tail_call_ids(messages: Sequence[Any]) -> set[str]:
     """Calls in the CURRENT turn's latest group that have no result yet.
@@ -335,10 +342,23 @@ class SessionProtocol(Protocol):
         self,
         turns: list[AgentMessage],
         *,
+        aside_instruction: bool = True,
         on_delta: Callable[[str], None] | None = None,
         on_usage: Callable[[Usage], None] | None = None,
     ) -> str:
         """Answer a side question against the live context WITHOUT joining it.
+
+        ``aside_instruction`` says whether ``turns`` still need the off-record
+        instruction applied. True (the default) is for a caller sending the RAW
+        question — the seams (``ServingSessionHandle``, ``TuiSessionHandle``)
+        wrap the last user turn, which is how every remote surface gets the
+        instruction. False is the caller's declaration that it supplied its OWN
+        instruction and the seam must not add a second: the TUI's ``/btw``
+        overlay wraps ``ASIDE_PROMPT`` itself, and its goal-loop judge sends
+        ``LOOP_JUDGE_PROMPT``, which is not an aside at all. IMPLEMENTATIONS
+        THAT DO NOT WRAP accept the flag and ignore it (``Session.complete_aside``
+        is the bare primitive), so a caller can pass it at every hop without
+        knowing which hop it holds.
 
         Reads what a real turn reads — the live system blocks and the whole
         message list — and writes nothing: no transcript entry, no append to
@@ -606,7 +626,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 126 public members and a POSITIVE
+    than stylistic. This protocol carries 127 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -638,7 +658,9 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     two members because the wire tells a renderer both the fact and the
     in-flight state, 125 once a refused gate reply needed a surface to reach the
     pane that pressed APPROVE, 126 once the operator-prompt notice gave that pane
-    the sentence naming what a signature is about to authorise), so recompute it rather
+    the sentence naming what a signature is about to authorise, 127 once a
+    paint-first open needed ``attach_behind`` to narrate the attach behind its
+    paint), so recompute it rather
     than adjusting it by the size of your own change.
 
     ====================================================  ==================
@@ -795,6 +817,11 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     #: Why this viewer opened WITHOUT live state, when that was not the
     #: ordinary "no runtime was running" case. ``""`` when it was ordinary.
     degraded_reason: str
+    #: The launcher opened this viewer cold in FRONT of a live owner it binds to
+    #: behind the paint (paint-first `lop --resume` / `/resume`), so the TUI
+    #: narrates and bounds that attach. Viewer-only: an owner has no owner to
+    #: attach to.
+    attach_behind: bool
     #: Whether the saved preview this viewer opened against was partial.
     saved_preview_partial: bool
 
@@ -1628,4 +1655,123 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     @property
     def active_team_name(self) -> str:
         """Name of the team this session manages (``""`` when none)."""
+        ...
+
+
+@runtime_checkable
+class GoalRecordProtocol(Protocol):
+    """The judged-goal RECORD's owner-side surface — the ``Session``'s, not a viewer's.
+
+    Why this is neither :class:`SessionProtocol` nor :class:`ViewerSessionProtocol`,
+    which is the only interesting question about it:
+
+    * Not on ``SessionProtocol``, because four of these members MUTATE the record
+      (``arm_goal``, ``mark_goal_done``, ``delete_goal``, ``dismiss_goal``) and a
+      follower must never write the owner's goal — that is the second-writer
+      class the ownership rule (``goal_judge.owns_the_session``) exists to
+      prevent. A protocol is a promise, and promising every ``SessionProtocol``
+      implementation the right to settle someone else's goal would be a false
+      one. ``isinstance`` on a ``runtime_checkable`` protocol checks member
+      PRESENCE, so declaring them here would also make the facade claim to have
+      them when it does not.
+    * Not on ``ViewerSessionProtocol``, because the TUI reaches these through
+      ``self._session``, which may hold either kind — and pyright would then
+      still (correctly) refuse the reads on the owner's own session.
+
+    So it is a THIRD, owner-side protocol, and a host narrows to it deliberately:
+    ``isinstance(session, GoalRecordProtocol)`` is False on an attached facade,
+    which is the truthful answer to "is this session's goal mine to write?".
+
+    **A follower is not left without the acts.** It reaches all four by the
+    ROUTED slash command — ``/goal`` is not in ``frontend_state``'s
+    ``_FRONTEND_LOCAL_SLASHES``, so the follower's ``/goal --clear``/``--done``/
+    ``--dismiss`` runs on the owner and comes back as the owner's own receipt
+    (``tui/app.py::_goal_slash_result``). Adding routed implementations of these
+    four to ``AttachedSession`` would be a SECOND path to the same acts beside
+    that established one, which is why the facade is left alone here.
+
+    What it covers and why: the five members the TUI calls DIRECTLY (pyright
+    reported twelve attribute errors for them against ``SessionProtocol``), plus
+    the record's read side and the judge's journal writer, which the TUI reaches
+    through delibate ``getattr`` probes with follower-safe defaults. Those probes
+    stay probes — a viewer rendering an empty card for a record it cannot see is
+    the honest outcome — but the names they spell must still be declared
+    somewhere, or a rename degrades to a silent ``None``
+    (``tests/unit/session/test_viewer_protocol.py`` is the guard that says so,
+    and it knows this protocol by name).
+    """
+
+    @property
+    def goal_status(self) -> str:
+        """The standing goal's lifecycle state: ``"" | "active" | "done"``."""
+        ...
+
+    @property
+    def goal_judge(self) -> dict[str, Any] | None:
+        """The live judge state in its wire shape, or ``None`` with no goal."""
+        ...
+
+    @property
+    def goal_history(self) -> list[dict[str, Any]]:
+        """Settled goals, newest first, as wire dicts."""
+        ...
+
+    @property
+    def goal_turn_serial(self) -> int:
+        """The monotone turn counter the judge samples at a turn end."""
+        ...
+
+    @property
+    def goal_judge_state(self) -> "GoalJudgeState":
+        """The judge's RECORD, not the wire dict — what the driver reads.
+
+        Distinct from :attr:`goal_judge` on purpose: the wire shape drops the
+        breaker's ``failures`` counter, and the driver needs it to honour the
+        breaker across a restart. Declared because BOTH owning hosts read it off
+        the session binding, and because a rename that silently returned
+        ``None`` here would stop the judge re-arming rather than failing.
+        """
+        ...
+
+    @property
+    def goal_token(self) -> str:
+        """The goal's identity — minted when it is armed, empty when unset.
+
+        Declared here rather than probed because the judge captures it once per
+        iteration and drops a verdict the goal has since moved away from; a
+        rename that silently returned ``""`` would disarm every judge run instead
+        of failing.
+        """
+        ...
+
+    def arm_goal(self, text: str) -> str:
+        """``/goal <text>``: store the objective, mark it active, arm the judge."""
+        ...
+
+    def mark_goal_done(self, reason: str = "") -> "GoalHistoryEntry | None":
+        """Settle the standing goal as DONE and record it; ``None`` if there was none."""
+        ...
+
+    def delete_goal(self) -> str:
+        """``/goal --clear``: delete the goal, record nothing, return what went."""
+        ...
+
+    def dismiss_goal(self) -> bool:
+        """Drop the done chip; ``False`` when there is nothing to dismiss."""
+        ...
+
+    def history_view(self, limit: int | None = None) -> list[dict[str, Any]]:
+        """``/goal --history``'s payload: settled goals, newest first."""
+        ...
+
+    def note_goal_judge(
+        self,
+        *,
+        state: str | None = None,
+        run: int | None = None,
+        verdict: str | None = None,
+        reason: str | None = None,
+        failures: int | None = None,
+    ) -> None:
+        """Journal one judge transition and publish it — the judge's only writer."""
         ...

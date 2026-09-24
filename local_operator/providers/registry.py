@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import dataclasses
 import importlib
+import inspect
 import os
 from collections.abc import Iterable
 from pathlib import Path
@@ -51,6 +52,21 @@ EnvKeys = str | tuple[str, ...] | Callable[[], str | None] | None
 #: ``ProviderDefinition.__post_init__``, which is what carries the requirement
 #: from the flow that has it out to the hosts that must honour it.
 PASTE_PROMPT_ATTR = "__lo_requires_paste_prompt__"
+
+#: Attribute a login callable sets on itself to declare "the text my prompt
+#: reads is an API KEY" -- as opposed to an OAuth authorization code, which is
+#: what Anthropic's and Z.AI's fallback box reads. Read by
+#: ``ProviderDefinition.__post_init__`` into ``paste_is_api_key``, the question a
+#: host asks before sending a paste to a provider as a key (the desktop's
+#: ``POST /v1/auth/operations/{id}/input`` runs ``key_check`` on it).
+#:
+#: A separate tag from :data:`PASTE_PROMPT_ATTR` because the two are different
+#: facts: a required prompt is not always a key, and an optional one could be.
+#: It is NOT the login flavour either: keying the check on
+#: ``login_kind == "api_key"`` let ``alibaba-token-plan-oauth`` -- a DEVICE
+#: login whose first step reads the ``sk-sp-`` inference key -- store a
+#: fabricated key unchecked (review round 2, MAJOR 1).
+PASTE_IS_API_KEY_ATTR = "__lo_paste_is_api_key__"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -124,6 +140,13 @@ class ProviderDefinition:
     #: providers shipped unloggable-into: the requirement lived in the login
     #: body and nothing carried it out to the hosts.
     requires_paste_prompt: bool = False
+    #: Whether the text this login's paste prompt reads is an API KEY -- the
+    #: value a host must validate with the provider before the flow stores it.
+    #: Derived in ``__post_init__`` from :data:`PASTE_IS_API_KEY_ATTR` on the
+    #: login callable, for the same reason ``requires_paste_prompt`` is: the
+    #: flow that reads the paste is the only thing that knows what it is, and a
+    #: per-row flag would be one more line a new provider could forget.
+    paste_is_api_key: bool = False
     #: This provider serves DECISION-model calls, never chat completions.
     #:
     #: TypeSafe's Jev is the case this exists for: every host we reach it
@@ -158,6 +181,8 @@ class ProviderDefinition:
             # ``object.__setattr__`` — the documented way to complete a frozen
             # instance's own construction.
             object.__setattr__(self, "requires_paste_prompt", True)
+        if not self.paste_is_api_key and getattr(self.login, PASTE_IS_API_KEY_ATTR, False):
+            object.__setattr__(self, "paste_is_api_key", True)
 
     @property
     def login_kind(self) -> str | None:
@@ -199,13 +224,20 @@ class ProviderDefinition:
         return self.requires_paste_prompt or self.paste_code_flow
 
 
-def _lazy_login(module: str, attr: str, *, requires_paste_prompt: bool = False) -> LoginFn:
+def _lazy_login(
+    module: str,
+    attr: str,
+    *,
+    requires_paste_prompt: bool = False,
+    paste_is_api_key: bool = False,
+) -> LoginFn:
     """Dynamic-import thunk: keeps OAuth deps out of startup imports.
 
-    ``requires_paste_prompt`` is carried on the returned callable rather than
-    passed to the provider entry, because the whole point of the thunk is that
-    the real login module is NOT imported at registry build time — so the only
-    place the requirement can be stated without paying that import is here.
+    ``requires_paste_prompt`` and ``paste_is_api_key`` are carried on the
+    returned callable rather than passed to the provider entry, because the
+    whole point of the thunk is that the real login module is NOT imported at
+    registry build time — so the only place either fact can be stated without
+    paying that import is here.
     """
 
     async def login(
@@ -216,12 +248,22 @@ def _lazy_login(module: str, attr: str, *, requires_paste_prompt: bool = False) 
         **kwargs: Any,
     ) -> dict[str, Any]:
         fn = getattr(importlib.import_module(module), attr)
-        if attr in ("login_anthropic", "login_openai"):
+        # Forward the opener to EVERY login that takes one, decided by the
+        # callee's own signature rather than a name list. The list this replaced
+        # named only Anthropic and OpenAI, so Z.AI and Radient -- which accept
+        # ``open_browser`` too -- silently fell back to ``webbrowser.open``: the
+        # desktop passes a no-op opener because its renderer opens the URL, and
+        # a dropped opener made the BACKEND open a second browser tab (QA round
+        # 1, Q3). Device flows take no opener and no ``**kwargs``, so passing it
+        # unconditionally would be a TypeError there instead.
+        if "open_browser" in inspect.signature(fn).parameters:
             return await fn(callbacks, signal=signal, open_browser=open_browser, **kwargs)
         return await fn(callbacks, signal=signal, **kwargs)
 
     if requires_paste_prompt:
         setattr(login, PASTE_PROMPT_ATTR, True)
+    if paste_is_api_key:
+        setattr(login, PASTE_IS_API_KEY_ATTR, True)
     return login
 
 
@@ -299,6 +341,7 @@ def create_api_key_login(provider_label: str, auth_url: str, instructions: str =
         return key
 
     setattr(login, PASTE_PROMPT_ATTR, True)
+    setattr(login, PASTE_IS_API_KEY_ATTR, True)
     setattr(login, "__lo_api_key_login__", True)
     return login
 
@@ -591,6 +634,9 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
             "local_operator.providers.oauth.qwencloud",
             "login_qwencloud_token_plan",
             requires_paste_prompt=True,
+            # The prompt reads the inference key the wire then sends, so it is
+            # checked like any pasted key even though the login is a device flow.
+            paste_is_api_key=True,
         ),
         store_credentials_as="alibaba-token-plan",
         base_url="https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",

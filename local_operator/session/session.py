@@ -63,6 +63,7 @@ from local_operator.compaction.cutpoint import (
     ELISION_INJECTION_COUNT_KEY,
     PRESERVED_TURN_ELISION_ID,
     PRESERVED_TURN_ELISION_ID_PREFIX,
+    RENDERED_INJECTION_KEY,
 )
 from local_operator.compaction.marker import (
     COMPACTION_MARKER_TYPE,
@@ -107,6 +108,7 @@ from local_operator.harness.redaction import current_tool_source, set_shape_hit_
 # the renderer calls it and nothing outside needs it — so it is deliberately NOT
 # reachable from ``local_operator.session.session``.
 from local_operator.harness.render import _default_convert_to_llm, _is_todo_reminder
+from local_operator.harness.replay_bound import bound_replay_payloads
 from local_operator.harness.subagent import (
     SubagentModelUnavailable,
     read_effort_tier_selectors,
@@ -133,18 +135,23 @@ from local_operator.harness.types import (
     LoopConfig,
     Message,
     MessageStartEvent,
+    MessageUpdateEvent,
     ModelChangeEvent,
     ModelSpec,
     NoticeEvent,
     PeerMessageDeliveredEvent,
+    ReasoningDeltaEvent,
     SteeringDeliveredEvent,
     StreamEvent,
     StreamTextDelta,
     StreamToolCallDelta,
     StreamUsageEvent,
     TextContent,
+    ToolCall,
+    ToolCallComposeEvent,
     ToolContext,
     ToolExecutionEndEvent,
+    ToolExecutionUpdateEvent,
     ToolResult,
     Usage,
     WakeDeliveredEvent,
@@ -175,7 +182,7 @@ from local_operator.prompts_api import (
 )
 from local_operator.redaction_shapes import ShapeReport
 from local_operator.references import expand_references
-from local_operator.session.goal import GoalState
+from local_operator.session.goal import GoalHistoryEntry, GoalJudgeState, GoalState
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.model_selection import SELECTED_MODEL_CUSTOM_TYPE
 from local_operator.session.naming import (
@@ -459,6 +466,19 @@ _PRE_ABORT_DROP_NOTICE_AT = 3
 #: that needs everything to stop regardless has the stronger rung: the ``abort``
 #: control op cancels the children, and ``lop stop`` ends the process.
 _STOPPED_WORK_RESIDUE_TYPES = frozenset({HUB_MESSAGE_TYPE, JOB_RESULT_MESSAGE_TYPE})
+
+#: Event families a provider stream produces at TOKEN rate. An unobserved
+#: subagent does not fold these into its own frontend store (see ``_emit``):
+#: nothing can read that store's live seed, and at N children the per-token
+#: fold was the largest single cost on the shared loop. Everything that
+#: changes durable or billed state (message/tool boundaries, usage, turn
+#: edges) is deliberately NOT in this set.
+_PER_TOKEN_EVENT_TYPES = (
+    MessageUpdateEvent,
+    ReasoningDeltaEvent,
+    ToolCallComposeEvent,
+    ToolExecutionUpdateEvent,
+)
 
 #: The builtin tools whose createIf gate reads a field only a SESSION can fill
 #: (``subagent_launcher``, ``jobs``, ``wake_scheduler``, ``subagent_comms``, the
@@ -838,6 +858,66 @@ _PERSISTABLE_CUSTOM_TYPES: frozenset[str] = frozenset(
         # resume time; the harness must not replay a claim it cannot re-verify.
     }
 )
+
+
+#: What the model is told when it answers an aside with a tool call.
+#:
+#: Off the record there is nothing to run: the aside request carries the live tool
+#: catalogue only to stay on the working turn's cached prefix (see
+#: ``Session.complete_aside``), so a ``tool_use`` in the answer is inert. Sending
+#: the model its own call back, followed by this refusal, is what makes the one
+#: bounded retry a CORRECTION — the retry runs with ``tools=[]`` *and* with the
+#: rejected call and its error result in the request, so the model can see why it
+#: is being asked again instead of repeating the same answer into silence.
+ASIDE_TOOL_CALL_REFUSAL = (
+    "This was an off-the-record aside: tool calls are not available here, so this "
+    "call was rejected and nothing ran. Answer the user's question in plain text "
+    "or markdown."
+)
+
+
+def _collect_tool_call_delta(state: dict[int, dict[str, Any]], event: Any) -> None:
+    """Fold one ``StreamToolCallDelta`` into the per-``index`` accumulator.
+
+    The same grammar ``AgentLoop._assemble_tool_call`` uses, deliberately: a
+    provider streams one call as a sequence of fragments (the id first or last,
+    the name in pieces, the arguments a few bytes at a time), and a second
+    reading of that shape is a second place for it to drift.
+    """
+    entry = state.setdefault(event.index, {"id": "", "name": "", "arg_parts": []})
+    if event.id:
+        entry["id"] = event.id
+    if event.name:
+        entry["name"] += event.name
+    if event.argument_delta:
+        entry["arg_parts"].append(event.argument_delta)
+
+
+def _assemble_aside_tool_calls(state: dict[int, dict[str, Any]]) -> list[ToolCall]:
+    """The calls the wire carried, in ``index`` order, as the provider sent them.
+
+    ``raw_arguments`` keeps the exact JSON string that streamed, so a provider
+    that requires the verbatim form gets back what it sent; ``arguments`` is the
+    parsed mapping when the string parses to one and empty when it does not —
+    ``AgentLoop._assemble_tool_call`` leaves ``{}`` there too, because this turn
+    exists to correct the model, not to validate its arguments.
+    """
+    calls: list[ToolCall] = []
+    for _, entry in sorted(state.items()):
+        raw = "".join(entry["arg_parts"]).strip()
+        arguments: dict[str, Any] = {}
+        if raw:
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                arguments = parsed
+        call = ToolCall(name=entry["name"], arguments=arguments, raw_arguments=raw or None)
+        if entry["id"]:
+            call.id = entry["id"]
+        calls.append(call)
+    return calls
 
 
 def _pair_spliced_tool_results(messages: list[Message]) -> list[Message]:
@@ -2065,6 +2145,16 @@ class Session:
         self._goal_state = goal_state if goal_state is not None else GoalState()
         self._variables = variables
         self._job_id = job_id
+        #: Settled model-owned jobs whose auto-delivery was declined because a
+        #: turn was streaming (see ``_on_job_completed``), in settle order. The
+        #: turn's ``finally`` hands them over once it is idle again; see
+        #: ``_deliver_deferred_job_results``. Holds the JOB OBJECT and its
+        #: settled text, not just the id: the manager sweeps a settled row
+        #: ``retention_ms`` (5 min) after it settles, on any read, so a turn
+        #: that outlives that window would find nothing to re-look-up (review
+        #: round 1, R1-1). Holding the object keeps ``consumed`` observable
+        #: too, since ``wait`` flips it on this same instance.
+        self._deferred_job_results: dict[str, tuple[Any, str]] = {}
         self._job_label = job_label
         self._parent_display_name = parent_display_name
         self._subagent_comms = subagent_comms
@@ -2887,6 +2977,21 @@ class Session:
         # nothing has subscribed yet, so hosts read the restored state when
         # they build their chrome.
         self._restore_attachment()
+        # The judged-goal RECORD, beside the attachment above and after it: the
+        # attachment carries the goal's text (every build writes it, including
+        # the ones that predate this record), while status, judge state and
+        # history live in their own sidecar (see `_restore_goal_record`).
+        self._restore_goal_record()
+        # ...and a goal that came back with NO token gets one, so the judge can
+        # run on it (``GoalState.ensure_token``). This is the R9 migration
+        # itself: a build that predates the record leaves the goal's text in
+        # ``attachment.json`` and no ``goal.json`` at all, and the fold reports
+        # that goal as `active` — so without this the very case R9 was written
+        # for answered `active` on every surface and never ran (agent review
+        # round 1, MAJOR-3). Deliberately after ``_restore_goal_record`` and not
+        # inside it: a record ON disk keeps its own token, so the only goal this
+        # can touch is one that never had an identity to preserve.
+        self._goal_state.ensure_token()
         # Owned here, not by the browser tool, for the same reason the wake
         # scheduler is: _build_tool_context runs at the start of EVERY turn, so
         # a handle the tool stored on the ToolContext lived exactly one turn.
@@ -4139,7 +4244,18 @@ class Session:
         changes, _ = self._system_state_delta(desired)
         if changes:
             history.append(self._system_state_message(changes))
-        return blocks, self._render_history([*history, *turns])
+        # The ASIDE must be bounded by the same rule as the turn it runs beside,
+        # for two reasons that are really one. A helper or the compaction
+        # advisor is a second conversation request over the same transcript, so
+        # leaving it unbounded re-sends exactly the payload the turn just
+        # elided (measured: the same tool row was 8,190 chars on the turn and
+        # 123,780 here). And ``complete_aside`` is deliberately byte-identical
+        # to the turn so it READS THE TURN'S PROVIDER CACHE -- a bound applied
+        # at one site and not the other diverges them at the turn's LAST
+        # message, which is precisely where the cached prefix ends. Applying
+        # the same deterministic function to the same messages is what keeps
+        # the two identical; the turn's own seam is ``harness/loop.py``.
+        return blocks, bound_replay_payloads(self._render_history([*history, *turns]))
 
     @property
     def model(self) -> ModelSpec:
@@ -4645,6 +4761,72 @@ class Session:
         """
         return self._goal_state.agent_name
 
+    @property
+    def goal_status(self) -> str:
+        """The standing goal's lifecycle state: ``"" | "active" | "done"``.
+
+        Reports what the HOLDER knows, not what it should be read as: the
+        migration default for a goal restored from a pre-lifecycle build lives
+        in the frontend fold (``_fold_goal_status``), which is the one place every
+        reader goes through — spreading it here would give the fold and this
+        accessor two chances to disagree.
+        """
+        return self._goal_state.status
+
+    @property
+    def goal_judge(self) -> "dict[str, Any] | None":
+        """The live judge state in its WIRE shape, or ``None`` with no goal set.
+
+        Folded straight onto the frontend state, so this is the same dict a
+        viewer already renders: no caller has to know the holder keeps a
+        dataclass, and ``failures`` deliberately does not ride it (see
+        :meth:`GoalJudgeState.to_wire`).
+        """
+        if not self._goal_state.text:
+            return None
+        return self._goal_state.judge.to_wire()
+
+    @property
+    def goal_history(self) -> "list[dict[str, Any]]":
+        """Settled goals, newest first, as wire dicts (see :meth:`history_view`)."""
+        return self._goal_state.history_view()
+
+    @property
+    def goal_token(self) -> str:
+        """The identity of the ACTIVE goal, re-minted on every arming.
+
+        The judge captures this before its provider call and drops a verdict whose
+        token has moved. It is the identity the goal's ``text`` cannot provide: a
+        user may set the SAME words twice, and the second arming is new work whose
+        in-flight verdict must not be applied to it.
+        """
+        return self._goal_state.token
+
+    @property
+    def goal_turn_serial(self) -> int:
+        """The monotone turn counter (``_generation``) a host reads for the judge.
+
+        Published because the ``AgentEndEvent`` that carries it does not reach
+        every host in the shape that needs it: the runtime reads it off the event,
+        while the TUI's own turn-end message carries no counter at all, so its
+        hook samples the session instead. Same number, one accessor.
+        """
+        return self._generation
+
+    @property
+    def goal_judge_state(self) -> GoalJudgeState:
+        """The judge's RECORD object, for the driver that reads and writes it.
+
+        Distinct from :attr:`goal_judge` on purpose: that one is the WIRE shape,
+        which is ``None`` with no goal and deliberately omits the breaker's
+        ``failures`` counter (a number whose only meaning is internal). The
+        driver needs the record itself — it reads ``state`` to decide whether to
+        re-arm and ``failures`` to honour the breaker across a restart — and
+        giving it a subscription of the wire dict would make it read a document
+        that was never meant to carry what it needs.
+        """
+        return self._goal_state.judge
+
     def set_goal(self, text: str) -> str:
         """Set (or clear, with an empty string) the standing objective.
 
@@ -4653,13 +4835,140 @@ class Session:
         provider call: idle changes apply to the next turn, and mid-turn changes
         apply to the next model step. Only that tail changes — never the cached
         prefix or an in-flight request.
+
+        The non-empty half delegates to :meth:`arm_goal`, which is the ONE
+        routine that starts a goal's life. A ``set`` returning only the text
+        left the record's status, judge state, token and history on the
+        PREVIOUS goal, and the two durable halves then disagreed about which
+        goal is current (agent review round 2, MAJOR-5): a new objective set
+        over a SETTLED one inherited ``status="done"``, so ``GoalJudge``'s
+        ``_enabled`` refused it, the card struck the new text through as
+        achieved, and the prompt withheld ``<goal>`` on the very ``!= "done"``
+        gate this feature added — a goal silently inert, which is the failure
+        mode the judged goal exists to remove. Over an ACTIVE goal the same
+        path also kept the departed goal's token, and the token is the judge's
+        staleness guard, so a replaced goal dropped nothing.
+
+        What a prior goal's HISTORY does is ``arm``'s rule, and the reason the
+        plain replacement can adopt it unchanged: a goal already SETTLED is
+        left in the history it was recorded into at settle time (its chip
+        window is a display state, not a second settle), and a goal that was
+        still ``active`` is appended as ``superseded``. So a plain ``--goal``
+        replacement is exactly as non-destructive to the outgoing objective as
+        ``/goal B`` over ``/goal A``, and no branch here loses one.
         """
-        stored = self._goal_state.set(text)
-        # Same tail, same fate on resume as the team/agent briefs, so the goal
-        # is journalled by the same mechanism rather than a second one.
+        if not (text or "").strip():
+            # A CLEARED goal is ``/goal --clear``'s act, so it goes through the
+            # ONE routine that performs it rather than a second blanking here —
+            # and the two DID differ: this branch journalled the attachment
+            # alone, while ``_restore_goal_record`` supplies the goal TEXT from
+            # ``goal.json`` whenever the attachment carries none. Clearing only
+            # the tail left the sidecar holding the objective, and the next
+            # ``--resume`` read it straight back (measured: a later
+            # ``lop exec --resume SID --loop 1`` STARTED a loop on a goal an
+            # earlier run had cleared, instead of refusing for want of one).
+            # ``delete_goal`` also takes the token with it, which is what stops
+            # a late verdict against the departed goal matching the next text.
+            self.delete_goal()
+            return ""
+        return self.arm_goal(text)
+
+    def arm_goal(self, text: str) -> str:
+        """``/goal <text>``: set the objective, mark it active, arm the judge.
+
+        The ONE entry point for the four hosts that implement ``/goal``, so the
+        ordering that makes ``/goal B`` non-destructive to ``/goal A`` (see
+        :meth:`GoalState.arm`) cannot be got wrong host by host. Journals and
+        publishes once, the way :meth:`set_goal` pairs them.
+
+        ``set_goal``'s non-empty half delegates here rather than re-deriving the
+        same rule: a plain replacement (the mobile relay, ``lop --goal``) starts
+        a NEW life exactly as ``/goal <text>`` does (agent review round 2,
+        MAJOR-5). Only its EMPTY half is its own — and that one delegates to
+        ``delete_goal`` for the same reason.
+        """
+        stored = self._goal_state.arm(text)
         self._persist_attachment()
+        self._persist_goal_record()
         self.refresh_frontend_state()
         return stored
+
+    def mark_goal_done(self, reason: str = "") -> GoalHistoryEntry | None:
+        """Mark the standing goal DONE and record it, or ``None`` if there was none.
+
+        ``reason`` carries the judge's own words when a model verdict asked for
+        this, and stays "" when the user typed ``/goal --done`` — that is a
+        person's judgement with no model behind it, and dressing it in a model's
+        voice would be a lie about who spoke.
+        """
+        entry = self._goal_state.mark_done(reason)
+        if entry is None:
+            return None
+        self._persist_goal_record()
+        self.refresh_frontend_state()
+        return entry
+
+    def delete_goal(self) -> str:
+        """``/goal --clear``: delete the goal and record NOTHING. Returns what went.
+
+        The attachment is re-journalled because the goal's TEXT is its business
+        too (it is what a downgrade or a pre-lifecycle restore reads) — leaving
+        it behind would resurrect the deleted goal at the next resume.
+        """
+        went = self._goal_state.delete()
+        self._persist_attachment()
+        self._persist_goal_record()
+        self.refresh_frontend_state()
+        return went
+
+    def dismiss_goal(self) -> bool:
+        """Drop the done chip; ``False`` when there is nothing to dismiss.
+
+        The paired attachment write is deliberate, not redundant: after a
+        dismissal the goal is GONE (that is what the chip was the last trace
+        of), so the text must leave ``attachment.json`` with it.
+        """
+        if not self._goal_state.dismiss():
+            return False
+        self._persist_attachment()
+        self._persist_goal_record()
+        self.refresh_frontend_state()
+        return True
+
+    def history_view(self, limit: int | None = None) -> list[dict[str, Any]]:
+        """``/goal --history``'s payload: settled goals, newest first, wire dicts."""
+        return self._goal_state.history_view(limit)
+
+    def note_goal_judge(
+        self,
+        *,
+        state: str | None = None,
+        run: int | None = None,
+        verdict: str | None = None,
+        reason: str | None = None,
+        failures: int | None = None,
+    ) -> None:
+        """Journal one judge transition and publish it — the judge's only writer.
+
+        Every argument is optional so a caller states only what moved, and the
+        journal is written on TRANSITION only: the judge moves on every turn end,
+        and journalling each tick would be pure I/O for a value that did not move
+        (the rule ``_persist_attachment`` documents for the attachment, which
+        binds harder here).
+        """
+        judge = self._goal_state.judge
+        if state is not None:
+            judge.state = state
+        if run is not None:
+            judge.run = int(run)
+        if verdict is not None:
+            judge.verdict = verdict
+        if reason is not None:
+            judge.reason = reason
+        if failures is not None:
+            judge.failures = int(failures)
+        self._persist_goal_record()
+        self.refresh_frontend_state()
 
     @property
     def active_team_name(self) -> str:
@@ -4776,6 +5085,68 @@ class Session:
             agent=self._goal_state.agent_name or self._unresolved_agent,
             goal=self._goal_state.text,
         )
+
+    def _persist_goal_record(self) -> None:
+        """Journal the judged-goal record to its own sidecar beside the transcript.
+
+        Called on TRANSITION only — a status change, a history append, a judge
+        state change — never per tick: the judge moves on every turn end and a
+        per-turn write would be pure I/O for a value that did not move. The rule
+        ``_persist_attachment`` documents for the attachment binds harder here,
+        which is why the writes are driven from the mutators rather than from
+        every caller.
+
+        Suppressed during a restore for the same reason the attachment write is:
+        a value that just came off disk must not be journalled straight back.
+        Best-effort by contract (see ``write_goal_record``) and guarded against a
+        reduced test double whose transcript has no directory.
+        """
+        from local_operator.resume import write_goal_record
+
+        if self._restoring_attachment:
+            return
+        try:
+            directory = self._transcript.directory
+        except Exception:  # noqa: BLE001 — a reduced host must not lose its turn
+            return
+        write_goal_record(directory, self._goal_state.to_payload())
+
+    def _restore_goal_record(self) -> None:
+        """Rebuild the judged-goal record from ``goal.json``, if there is one.
+
+        Set STRAIGHT onto the holder, never through :meth:`arm_goal`: this is a
+        read of disk state, not a user action, so it must not re-journal (and
+        must not mint a token, which would make the parent's in-flight verdict
+        unmatchable in a session that is merely resuming).
+
+        A missing or unreadable document leaves exactly the pre-lifecycle state —
+        the goal text from ``attachment.json`` and no record — which is the
+        migration case ``_fold_goal_status`` reads as ``active``.
+
+        The ATTACHMENT's text wins when both documents carry one: it is written
+        by every build (including the ones that predate this record), so a
+        divergence means an older build has moved the goal since this record was
+        written and the record's text is the stale one. The record supplies the
+        text only when the attachment had none.
+        """
+        from local_operator.resume import read_goal_record
+
+        try:
+            directory = self._transcript.directory
+        except Exception:  # noqa: BLE001 — a reduced host has no record to restore
+            return
+        payload = read_goal_record(directory)
+        if payload is None:
+            return
+        record = GoalState.from_payload(payload)
+        holder = self._goal_state
+        if not holder.text and record.text:
+            holder.set(record.text)
+        holder.status = record.status
+        holder.judge = record.judge
+        holder.history = record.history
+        holder.token = record.token
+        holder.created_at = record.created_at
 
     def _clear_unresolved(self, slot: str) -> None:
         """Forget a carried unresolved name because the user acted on that slot.
@@ -5768,6 +6139,7 @@ class Session:
         message_id: str | None = None,
         producer_command_id: str | None = None,
         admitted: asyncio.Future[None] | None = None,
+        harness_injected: bool = False,
     ) -> None:
         """Run one user turn to completion (awaitable) or raise.
 
@@ -5776,6 +6148,16 @@ class Session:
         marked user row is on disk, while the model turn may continue afterward.
         ``message_id`` remains independent conversation identity; ordinary local
         prompts omit producer provenance even if a host supplies a message id.
+
+        ``harness_injected`` says the row this call mints was NOT typed by a
+        person — it is harness chrome (the goal judge's continuation prompt is
+        the first caller). It stamps the STRUCTURAL provenance marker on the row
+        (:data:`RENDERED_INJECTION_KEY`), which is the only provenance signal
+        that survives a change to the chrome's wording: the row is still
+        persisted as a ``role="user"`` message, because the transcript has to
+        record why the conversation continued, and it is still announced to
+        every front end — the surfaces suppress it by the shared decision, not
+        by not being told. Defaults ``False`` so no existing caller changes.
 
         ``images`` are attachments the user pasted into their prompt; they
         ride the same message as the text so the model sees them as one
@@ -5910,6 +6292,16 @@ class Session:
                     ),
                 )
             user = Message.user(text, images, **({"id": message_id} if message_id else {}))
+            if harness_injected:
+                # The stamp goes on the row THIS call mints, at the one place
+                # the row is born, so no caller can mint a chrome row without
+                # it. `provider_payload` is invisible to the model and to every
+                # provider, and it already rides BOTH wires — the live
+                # `message_start` event (`MessageStartEvent.message`) and the
+                # durable journal row (`encode_message_payload` keeps a non-None
+                # payload) — so this needs no new field and no protocol bump.
+                # See `docs/DESKTOP_API.md` for what a viewer does with it.
+                user.provider_payload = {RENDERED_INJECTION_KEY: True}
             initial: list[AgentMessage] = [catchup, user] if catchup is not None else [user]
             await self._run_turn_pipeline(
                 initial,
@@ -8828,11 +9220,35 @@ class Session:
         # while still streaming, and every event INSIDE the turn was admitted
         # already — so only the normal end is new work.
         store = getattr(self, "_frontend_state_store", None)
-        if store is not None and (
-            self._has_ui
-            or store.has_subscribers
-            or self._is_streaming
-            or isinstance(event, (AgentStartEvent, AgentEndEvent))
+        # A SUBAGENT with nothing subscribed to its own store skips the fold for
+        # the per-token families. The reasoning above (keep the seed warm for a
+        # viewer that has not arrived yet) is sound for a session a frontend can
+        # join; a child's store is not one -- every surface that shows a child
+        # reads its PARENT's roster, its trajectory and its transcript, never
+        # ``child.subscribe_frontend``. Folding each token there was pure cost:
+        # a ``model_dump`` plus a live-seed rebuild per delta, for every child,
+        # on the one loop the parent shares (measured: 128k folds for 16
+        # children in ``scripts/bench_subagent_fanout.py``). The boundaries still
+        # fold -- message/tool starts and ends, turn edges, usage -- so the
+        # child's spend, outcome and checkpoint are exactly what they were, and
+        # a subscriber arriving later flips ``has_subscribers`` and gets every
+        # delta from then on. ``_has_ui`` does not exempt a child: it is
+        # inherited from the parent and says the PARENT has a terminal.
+        per_token_skip = (
+            self._job_id is not None
+            and store is not None
+            and not store.has_subscribers
+            and isinstance(event, _PER_TOKEN_EVENT_TYPES)
+        )
+        if (
+            store is not None
+            and not per_token_skip
+            and (
+                self._has_ui
+                or store.has_subscribers
+                or self._is_streaming
+                or isinstance(event, (AgentStartEvent, AgentEndEvent))
+            )
         ):
             # Replay-changing commits precede their public events. Publish the
             # scalar first so retained viewers cannot select a stale tail after
@@ -9209,6 +9625,14 @@ class Session:
             signal.abort("interrupted")
         try:
             await self._ensure_selected_model()
+            # Imported HERE, once per real turn, rather than at module scope:
+            # `harness.rows` gathers the chrome prompts from
+            # `session.goal_loop`/`session.session` behind a function precisely
+            # to avoid importing the session at module scope, and importing
+            # rows from the session's own module is the direction that keeps
+            # that arrangement working.
+            from local_operator.harness.rows import is_harness_chrome
+
             for message in initial:
                 await self._transcript.append_message(
                     message,
@@ -9227,19 +9651,25 @@ class Session:
                 # prompt invisible in the TUI. Emitting here, at the append
                 # point, is the single source both read. Wake/continuation
                 # internals are CustomMessage, so this stays user-authored only.
-                # The auto-continuation prompt is the one user-shaped Message
-                # that is harness chrome, not the user's words: announcing it
-                # would stack "context was just compacted" user rows on every
-                # front end for prompts the human never typed (the same
-                # exemption LOOP_PROMPT gets in the TUI). Matching is by text
-                # equality, so a user who typed the continuation sentence
-                # verbatim would lose their announcement — vanishingly
-                # unlikely, and the TUI registry documents its equivalent
-                # inherent limit.
+                #
+                # HARNESS CHROME IS EXEMPT, through the ONE shared decision
+                # (`harness.rows.is_harness_chrome`) rather than by comparing
+                # against one prompt: a chrome row is a user-shaped Message that
+                # no person typed, so announcing it asks every front end to paint
+                # the harness's words as the operator's own — which is exactly
+                # what a desktop viewer did with the loop prompt before this.
+                # The row is still PERSISTED (the append above is what makes it
+                # durable, and the transcript must record why the conversation
+                # continued); only the live announcement is withheld. Matching is
+                # on the shared predicate, so a fourth chrome prompt is covered
+                # here in the same commit that teaches the predicate about it,
+                # and a user who typed one of these strings verbatim would lose
+                # their announcement — vanishingly unlikely, and the limit the
+                # TUI's own echo registry documents.
                 if (
                     isinstance(message, Message)
                     and message.role == "user"
-                    and message.text != _CONTINUATION_PROMPT
+                    and not is_harness_chrome(message.text)
                 ):
                     await self._emit(MessageStartEvent(message=message))
 
@@ -9535,6 +9965,7 @@ class Session:
             self._discard_queued_notices()
             self._signal = None
             self._is_streaming = False
+            self._deliver_deferred_job_results()
 
     async def _drop_pre_aborted_turn(
         self,
@@ -10703,7 +11134,42 @@ class Session:
         if getattr(job, "consumed", False) or job.type not in ("task", "bash"):
             return
         if self._is_streaming:
+            # DEFERRED, never dropped. Returning here used to be the whole
+            # story, on the theory that a streaming turn "either waited or can
+            # 'jobs'". It frequently does neither: a model launches a batch,
+            # does other work, and ends its turn with "I'll wait for the
+            # children to report back" -- and every child that settled while
+            # that turn was still streaming was then never delivered by
+            # anything. The parent sat idle forever with finished children
+            # (reproduced: two children settling during the parent's own tool
+            # call produced ZERO deliveries after the turn ended). That is the
+            # "session wedged waiting on its subagents" report. The turn's
+            # ``finally`` now re-offers these once it is idle, and the
+            # ``consumed`` re-check there keeps a result the turn DID collect
+            # through ``wait`` from arriving twice.
+            self._deferred_job_results[job_id] = (job, text)
             return
+        self._deliver_job_results([(job_id, text, job)])
+
+    def _deliver_job_results(self, results: list[tuple[str, str, Any]]) -> None:
+        """Queue settled jobs' results as ONE fresh idle-time turn.
+
+        One turn for the whole batch, not one per job: N children that settle
+        during one parent turn are one piece of news, and a turn per child cost
+        N model calls and N completion notifications for it (review round 1,
+        R1-2). Each result keeps its own ``CustomMessage`` -- the same shape a
+        single live delivery has always produced -- so every consumer that reads
+        one (the transcript, the stopped-work residue check, the TUI) sees the
+        rows it already understands.
+        """
+        if not results:
+            return
+        messages = [self._job_result_message(job_id, text, job) for job_id, text, job in results]
+        self._spawn_background(self._prompt_messages(list(messages)))
+
+    @staticmethod
+    def _job_result_message(job_id: str, text: str, job: Any) -> CustomMessage:
+        """The model-facing row for one settled job's result."""
         label = getattr(job, "label", job_id)
         status = getattr(job, "status", "completed")
         summary = (text or "").strip()
@@ -10714,12 +11180,48 @@ class Session:
             if summary
             else f"background job '{label}' {status}."
         )
-        message = CustomMessage(
+        return CustomMessage(
             custom_type=JOB_RESULT_MESSAGE_TYPE,
             attribution="user",
             details={"job_id": job_id, "text": delivery},
         )
-        self._spawn_background(self._prompt_messages([message]))
+
+    def _deliver_deferred_job_results(self) -> None:
+        """Hand over job results that settled while a turn was streaming.
+
+        Called from the turn pipeline's ``finally`` AFTER ``_is_streaming`` is
+        cleared, so it runs exactly when ``_on_job_completed`` would have
+        accepted the delivery in the first place. Everything deferred during
+        the turn goes out as ONE ``_prompt_messages`` turn (see
+        ``_deliver_job_results``), in settle order.
+
+        Reads the JOB OBJECT captured at settle time, never a fresh ledger
+        lookup: the manager sweeps a settled row five minutes after it settles,
+        so a long parent turn (a build, a slow tool) would otherwise find the
+        row gone and drop the result -- the very loss this path exists to close
+        (review round 1, R1-1). The one re-check that remains is ``consumed``,
+        read on that same object: a result the turn collected with ``wait`` is
+        not delivered a second time. A disposed session delivers nothing.
+        Never raises into the turn's ``finally``.
+        """
+        if not self._deferred_job_results:
+            return
+        pending = list(self._deferred_job_results.items())
+        self._deferred_job_results.clear()
+        if self._disposed:
+            return
+        results: list[tuple[str, str, Any]] = []
+        for job_id, (job, text) in pending:
+            try:
+                if getattr(job, "consumed", False):
+                    continue
+                results.append((job_id, text, job))
+            except Exception:  # noqa: BLE001 - a delivery must not fail the turn's teardown
+                logger.warning("deferred job delivery failed for %s", job_id, exc_info=True)
+        try:
+            self._deliver_job_results(results)
+        except Exception:  # noqa: BLE001 - a delivery must not fail the turn's teardown
+            logger.warning("deferred job delivery failed", exc_info=True)
 
     async def _reject_steering(self, command_id: str, reason: str) -> None:
         """Terminally reject one accepted-but-undurable producer steer."""
@@ -13042,10 +13544,28 @@ class Session:
         self,
         turns: Sequence[AgentMessage],
         *,
+        aside_instruction: bool = True,
         on_delta: Callable[[str], None] | None = None,
         on_usage: Callable[[Usage], None] | None = None,
     ) -> str:
         """Answer a side question against the live context WITHOUT joining it.
+
+        ``aside_instruction`` is ACCEPTED AND NOT ACTED ON, and both halves of
+        that are deliberate. This primitive never wraps: it is the shared bottom
+        of callers that own their own instruction — the TUI's ``/btw`` overlay
+        formats ``ASIDE_PROMPT`` itself, and the goal-loop judge sends
+        ``LOOP_JUDGE_PROMPT``, which must never be framed as an aside — so there
+        is nothing here for the flag to switch. It is in the signature so a
+        caller can state the same intent against whichever hop it happens to
+        hold: ``tui/app.py`` reaches this method directly when it owns the
+        session, and an ``AttachedSession`` (whose flag crosses the wire to the
+        seam that does apply the wrap) when it is only viewing one. One call site
+        that had to branch would be one call site that can get the branch wrong.
+        THE LANDMINE, documented rather than hidden: making this primitive honour
+        a True here would apply ``ASIDE_PROMPT`` to the judge's question — the
+        one request ``session/aside.py`` and both seams state must never receive
+        it — so the wrap belongs at the seams, and the flag rides the call to
+        reach them.
 
         This is ``complete_once``'s opposite number. ``complete_once`` is for
         errands that need the provider but not the conversation (auto-naming);
@@ -13104,12 +13624,35 @@ class Session:
         call and NOTHING else — the model "answered" the question by reaching
         for ``read``. That would surface as an empty answer on the card, which
         reads as a provider fault. So when the stream carried a tool call and
-        no text, the request is retried once with ``tools=[]``: the tools block
-        is the front of the prefix, so this retry is a full re-process at
-        write price, but it is bounded to that rare case rather than paid on
-        every aside, and it gives the user an answer instead of a blank. An
-        answer that mixes text and a tool call is returned as its text
-        without a retry; the text is what was asked for.
+        no text, the request is retried ONCE, with the model's own rejected
+        call appended to the message list for THIS request only — the assistant
+        turn exactly as the wire carried it (id, name, arguments), followed by
+        one error tool result per call id saying the call was not run because
+        tool calls are unavailable off the record — and with ``tools=[]`` so the
+        wire offers nothing to call. The pairing is not cosmetic: an assistant
+        turn carrying ``tool_calls`` with no matching result for every id is a
+        400 on every provider wire (the same rule :meth:`_wire_legal_snapshot`
+        exists to hold), so the retry would be REJECTED rather than answered.
+        None of that append reaches the live context, the transcript or the
+        session's event fan-out: it is built into a copy of the request.
+
+        The tools block is the front of the prefix, so this retry is a full
+        re-process at write price, but it is bounded to that rare case rather
+        than paid on every aside. An answer that mixes text and a tool call is
+        returned as its text without a retry; the text is what was asked for.
+        An empty answer that carried NO call (a refusal, a length stop) is the
+        provider's answer and is returned as ``""`` — retrying it would only pay
+        the full prefix twice.
+
+        The retry is BOUNDED TO ONE, and a second bare call (or an empty answer
+        after it) raises :class:`AsideUnanswered` rather than returning ``""``.
+        The empty string is what made this the silent case: the UI renders it as
+        an unexplained blank, when what actually happened is that the model
+        would not answer in text. The raise is the honest outcome, and it is the
+        correct one for the goal-loop judge, which reaches this method with
+        ``LOOP_JUDGE_PROMPT`` and counts a raise as a judge failure
+        (``MAX_LOOP_JUDGE_FAILURES``) — a judge that cannot answer in text has
+        failed to judge.
 
         ``on_usage`` fires once per provider call, so a single aside may
         deliver TWO usage figures when that retry runs — the first call's
@@ -13141,6 +13684,11 @@ class Session:
         )
         parts: list[str] = []
         called_tool = False
+        # Per-index accumulation of the call the wire carried, keyed by the
+        # delta's own ``index``: an answer that is nothing BUT a call is handed
+        # back to the model on the retry below, so its fragments have to be
+        # reassembled into the turn the provider actually sent.
+        calls: dict[int, dict[str, Any]] = {}
         async for event in self._stream_fn(request, None):
             if isinstance(event, StreamTextDelta):
                 parts.append(event.delta)
@@ -13148,18 +13696,40 @@ class Session:
                     on_delta(event.delta)
             elif isinstance(event, StreamToolCallDelta):
                 # Inert by design (see the docstring): recorded only so an
-                # answer that was NOTHING BUT a call can be retried below.
+                # answer that was NOTHING BUT a call can be corrected below.
                 called_tool = True
+                _collect_tool_call_delta(calls, event)
             elif isinstance(event, StreamUsageEvent) and on_usage is not None:
                 on_usage(event.usage)
         if parts or not called_tool:
             return "".join(parts)
         # Tool call and no text: the model tried to act instead of answering.
-        # Retry once with no tools at all — off the cache prefix, but bounded
-        # to this case. ``tools=[]`` never reaches the Anthropic mapping, so
-        # the wire genuinely offers nothing to call.
+        # Hand the rejected call back — the assistant turn verbatim, paired with
+        # one error result per call id — and retry once with no tools at all.
+        # ``tools=[]`` never reaches the Anthropic mapping, so the wire genuinely
+        # offers nothing to call; the appended turn tells the model WHY it is
+        # being asked again rather than leaving it to repeat itself in silence.
+        #
+        # Built into a COPY of the request: the live context, the transcript and
+        # the event fan-out are untouched by this, which is the no-trace contract
+        # the docstring states — the correction exists only inside this request.
         logger.debug("aside answered with a bare tool call; retrying without tools")
-        retry = request.model_copy(update={"tools": []})
+        rejected = _assemble_aside_tool_calls(calls)
+        correction: list[AgentMessage] = [
+            Message(role="assistant", content=[], tool_calls=rejected)
+        ]
+        correction.extend(
+            Message(
+                role="tool",
+                content=[TextContent(text=ASIDE_TOOL_CALL_REFUSAL)],
+                tool_call_id=call.id,
+                tool_name=call.name,
+            )
+            for call in rejected
+        )
+        retry = request.model_copy(
+            update={"tools": [], "messages": [*request.messages, *correction]}
+        )
         async for event in self._stream_fn(retry, None):
             if isinstance(event, StreamTextDelta):
                 parts.append(event.delta)
@@ -13167,7 +13737,17 @@ class Session:
                     on_delta(event.delta)
             elif isinstance(event, StreamUsageEvent) and on_usage is not None:
                 on_usage(event.usage)
-        return "".join(parts)
+        if parts:
+            return "".join(parts)
+        # A second bare call, or an empty answer AFTER being corrected: the model
+        # will not answer this in text, so say so rather than return the empty
+        # string the card renders as an unexplained blank. Imported here rather
+        # than at module scope for the reason the other ``session.errors``
+        # imports in this file are lazy: the module is a leaf this file may not
+        # import at the top without a cycle.
+        from local_operator.session.errors import AsideUnanswered
+
+        raise AsideUnanswered()
 
     async def advise_compaction(self, turns: Sequence[AgentMessage]) -> str:
         """One off-loop request asking the model WHEN to compact (BETA).
