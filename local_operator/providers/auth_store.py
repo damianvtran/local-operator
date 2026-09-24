@@ -34,9 +34,10 @@ request (a Radient grant died twice in ~17 hours on this machine):
 * :data:`REFRESH_SEND_UNCONFIRMED_KEY` — a write-ahead marker, armed before
   the POST, recording that this row's refresh token was presented by an
   exchange whose outcome is not settled. A token whose send is unconfirmed is
-  never presented again while that lasts: the full hour for an outcome that
-  never arrived, one block window for an answer that proved nothing, and not at
-  all for a failure httpx reports as provably pre-send.
+  never presented again while that lasts: one exchange window
+  (:data:`UNCONFIRMED_SEND_TTL_S`) for an outcome that never arrived, one block
+  window for an answer that proved nothing, and not at all for a failure httpx
+  reports as provably pre-send.
 * :data:`AUTH_REFRESH_LEASE_MS` outliving
   :data:`PROVIDER_REFRESH_TOTAL_BUDGET_S` — the wall-clock cap this store puts
   on one exchange, which is NOT the providers' per-operation httpx timeout — so
@@ -205,19 +206,46 @@ GRANT_DEAD_AT_KEY = "grant_dead_at"
 #: (see :data:`REFRESH_SEND_UNCONFIRMED_KEY` and :data:`SEND_SHAPE_UNKNOWN`).
 #:
 #: The marker exists to stop us re-presenting a token an exchange may already
-#: have spent, and the price of believing it is one interactive sign-in, so it
-#: must be BOUNDED. An hour covers a restart, a slow session or a user who
-#: stepped away, and after it lapses we present the stored token again, which is
-#: exactly the behaviour every boot had BEFORE this marker existed. So the
-#: expiry can only degrade to the status quo ante, never to something worse.
+#: have spent, so the only window it may cover is the one in which such an
+#: exchange could still be running — and that window is already named here: the
+#: invariant is *never re-present a token while an exchange may be in flight
+#: anywhere*, and :data:`AUTH_REFRESH_LEASE_MS` is the store's own statement of
+#: it (the wall-clock cap on one exchange plus a per-operation timeout of margin
+#: for the holder's descheduling). DERIVED from those two numbers rather than
+#: typed, so this bound cannot drift below the window it must outlive: 90 + 30 =
+#: 120 s. The alternative — a per-op timeout of margin on its own — is the
+#: arithmetic that produced the lease's own defect, where two constants that had
+#: to keep an order drifted apart.
 #:
-#: THIS IS THE COST, stated as a number rather than as "at most one sign-in"
-#: (review round 1, R3): for the in-doubt shape the account is suppressed for up
-#: to an hour. It is reserved for the shape where the exchange's outcome truly
-#: never arrived — a transport stall, a process death mid-POST — because that is
-#: the shape this PR exists for and the only one whose evidence is
-#: "the token may have been spent and there is no way to know".
-UNCONFIRMED_SEND_TTL_S = 3600.0
+#: SUPERSEDES the deliberate one-hour bound of review round 1, R3, and the thing
+#: that bound got wrong is what makes this a defect fix rather than a tuning: an
+#: hour is not "at most one sign-in", it is LONGER THAN THE BEARER IT IS ARMED
+#: AGAINST. Radient mints ``expires_in = 3600`` minus a 5-minute skew
+#: (``providers/oauth/radient.py``) — 55 minutes of usable bearer — and a refresh
+#: is triggered exactly when that bearer is due or expired, which is the moment a
+#: marker gets armed. So a marker armed then outlives the bearer by construction,
+#: and from bearer death to marker expiry there is no usable bearer and no
+#: permitted refresh: a guaranteed outage, not the "degraded" state the hour was
+#: meant to buy. Measured on the operator's machine: 640 consecutive poll
+#: refusals (~1.8 h at the connector's 10 s cadence) on a credential whose bearer
+#: had already expired, while every surface reported an expired login.
+#:
+#: 120 s is strictly inside the bearer's own life, so the worst case after one
+#: unconfirmed send is a ~2-minute deferral that clears itself, with two honest
+#: exits: the refresh lands (the token was never spent), or the next attempt
+#: earns ``invalid_grant``, the tombstone is written and the surfaces say "sign in
+#: again" — the same verdict the hour produced, 58 minutes earlier.
+#:
+#: The two boundaries are pinned by tests so a later edit cannot re-break either:
+#: GREATER than :data:`AUTH_REFRESH_LEASE_MS` (a peer that takes the lease the
+#: instant it expires arms a marker of its own for the same token, and a bound
+#: that lapsed before that peer's exchange could still be on the wire would
+#: re-present a token that may already be spent) and SHORTER than the 55-minute
+#: bearer the marker is armed against.
+#:
+#: What this costs, stated plainly: the round-1 property "you have an hour to
+#: notice and sign in" is gone. What it buys: an outage becomes a deferral.
+UNCONFIRMED_SEND_TTL_S = AUTH_REFRESH_LEASE_MS / 1000 + PROVIDER_REFRESH_HTTP_TIMEOUT_S
 
 #: How long an ANSWERED send marker stays live — :data:`SEND_SHAPE_ANSWERED`.
 #:
@@ -360,10 +388,18 @@ class RefreshUnconfirmedError(AuthStoreError):
     credential is bad, and the remedy is not "sign in again" even though that is
     the only way to recover *immediately* — the state also self-heals at the
     marker's expiry (:data:`UNCONFIRMED_SEND_TTL_S` / :data:`ANSWERED_SEND_TTL_S`),
-    which is why the message names both. A caller that switches on the class
-    (``list_oauth_accesses`` does, to log the state rather than debug-swallow it)
-    can tell "retry shortly" from "this credential is unusable", which is the same
-    distinction the MCP sibling draws with ``McpRefreshContendedError``.
+    which is why the message names both. Since
+    :data:`UNCONFIRMED_SEND_TTL_S` is bounded by one exchange window rather than
+    by an hour, that self-healing exit is now the ordinary one and a sign-in is
+    the ESCALATION for a deferral that outlives it: the message says so, and the
+    surfaces that render it (``tunnels/gateway.py``'s ``RELAY_DETAIL`` and
+    ``tunnels/cli.py``'s status line) say so too, because "your login expired,
+    sign in" is what this state used to be reported as and it was wrong twice —
+    the check had run, and nothing about the login had changed. A caller that
+    switches on the class (``list_oauth_accesses`` does, to log the state rather
+    than debug-swallow it) can tell "deferred" from "this credential is
+    unusable", which is the same distinction the MCP sibling draws with
+    ``McpRefreshContendedError``.
 
     ``_resolve`` treats it as an ordinary failed refresh — a ``DEFAULT_BLOCK_MS``
     block and move on — and that is deliberate after review round 1. The state it
@@ -535,6 +571,19 @@ def _send_marker_is_live(marker: Any, refresh_token: str | None, *, now_ms: int)
     return bool(refresh_token) and digest == _refresh_token_digest(refresh_token)
 
 
+def _self_clearing_minutes() -> int:
+    """The deferral's own bound in whole minutes, for the sentences that name it.
+
+    Derived from the constant rather than typed into the messages that quote it:
+    the reason :data:`UNCONFIRMED_SEND_TTL_S` is derived at all is that a reader
+    must be told a window that matches the rule, and a hard-coded "2 minutes" in
+    a log line is the same drift in prose. It quotes the LONGEST a deferral can
+    last (the :data:`SEND_SHAPE_ANSWERED` shape clears sooner), so every sentence
+    built on it is an upper bound and never an over-promise.
+    """
+    return int(UNCONFIRMED_SEND_TTL_S // 60)
+
+
 def _refresh_request_never_sent(exc: BaseException) -> bool:
     """Whether an ``httpx`` failure happened BEFORE the request reached the wire.
 
@@ -556,8 +605,8 @@ def _refresh_request_never_sent(exc: BaseException) -> bool:
     wrongly-trusted one costs the whole token family.
 
     The first revision of this change omitted this rule entirely, which made a
-    token endpoint on a CLOSED PORT suppress the account for an hour over a
-    request nothing ever received (review round 1, R2). The annotation is
+    token endpoint on a CLOSED PORT suppress the account for the marker's whole
+    window over a request nothing ever received (review round 1, R2). The annotation is
     ``BaseException`` because the predicate is TOTAL over exceptions by
     construction: it answers "was this demonstrably pre-send?", and anything it
     does not recognise — including ``asyncio.CancelledError`` — answers ``False``,
@@ -603,6 +652,40 @@ def _caused_by_never_sent(exc: BaseException) -> bool:
             return True
         node = node.__cause__ or node.__context__
     return False
+
+
+#: Refresh exchanges a bounded caller has handed off to this module (see
+#: :meth:`AuthStore.detached_refresh`).
+#:
+#: A STRONG reference, and it is load-bearing rather than tidiness: asyncio keeps
+#: only a weak reference to a task, so a bare ``create_task`` whose result nobody
+#: awaits can be collected mid-await. Here that would cancel an exchange after its
+#: marker was armed and before its answer arrived — manufacturing, in the
+#: supervisor meant to prevent it, exactly the in-doubt state the marker exists to
+#: record. The done-callback drops each task from this set (which is what keeps it
+#: bounded) and closes the store the exchange ran on.
+_DETACHED_REFRESHES: set[asyncio.Task[dict[str, Any] | None]] = set()
+
+
+def _release_detached_refresh(task: asyncio.Task[dict[str, Any] | None], store: AuthStore) -> None:
+    """Retire a detached exchange: drop the reference, close its own store.
+
+    The store is closed HERE, by the supervisor, and never by the caller: the
+    whole point of a detached exchange is that it outlives the call that started
+    it, and a caller's ``closing(AuthStore())`` would close the connection under a
+    live exchange — losing the marker resolution and the rotation to "cannot
+    operate on a closed database".
+
+    The outcome is retrieved because a caller that gave up at its own bound never
+    awaits this task, and the loop logs an unretrieved exception on a task nobody
+    waits for as "Task exception was never retrieved". Every outcome here is an
+    expected one — a deferral, a transport failure, a dead grant — so that line
+    would be noise on the ordinary path rather than a signal.
+    """
+    _DETACHED_REFRESHES.discard(task)
+    if not task.cancelled():
+        task.exception()
+    store.close()
 
 
 class _SerializedConnection:
@@ -1494,8 +1577,9 @@ class AuthStore:
         expired lease arms a marker of its own for the SAME token. Rewriting that
         peer's marker from here — which the first version of this method permitted
         by checking only that a dict was present — re-bounds an outcome that is
-        still unknown from an hour to a minute, and 61 s later the store presents
-        a token the peer's exchange may already have spent. That is review round
+        still unknown from one exchange window to one block window, and a block
+        window later the store presents a token the peer's exchange may already
+        have spent. That is review round
         2's M1, and the reuse-detection POST this whole change exists to prevent.
         ``holder`` is the same ``pid:uuid`` the lease rows carry, compared the same
         way :meth:`_release_refresh_lease` compares it, so "this marker is mine"
@@ -1576,7 +1660,7 @@ class AuthStore:
           (:data:`SEND_SHAPE_ANSWERED`), which keeps the token un-presented while
           the failure is fresh and lets the account heal on the window the
           cascade already refuses it for, rather than for the in-doubt shape's
-          full hour.
+          whole window.
 
         Returns whether the marker was removed.
         """
@@ -1877,17 +1961,21 @@ class AuthStore:
                         "refresh for credential %s (%s) was NOT attempted: its stored "
                         "refresh token was presented by an exchange whose outcome is not "
                         "settled, and presenting it again may revoke the whole token "
-                        "family — retry shortly, or run /login %s to sign in again now",
+                        "family — this clears by itself within about %d minutes, and only "
+                        "if it persists is /login %s the remedy",
                         row.id,
                         row.provider,
+                        _self_clearing_minutes(),
                         row.provider,
                     )
                     raise RefreshUnconfirmedError(
                         f"OAuth refresh for '{row.provider}' was deferred: the stored "
                         "refresh token was presented by an exchange whose outcome is not "
                         "settled, so it is not presented again while that lasts "
-                        "(presenting it may revoke the whole token family); retry "
-                        f"shortly, or run /login {row.provider} to sign in again now"
+                        "(presenting it may revoke the whole token family). This is not a "
+                        "verdict about the login and it clears by itself within about "
+                        f"{_self_clearing_minutes()} minutes; sign in again only if it "
+                        "persists past that"
                     )
                 armed: dict[str, Any] | None = None
                 if presented:
@@ -1991,7 +2079,7 @@ class AuthStore:
                         # failure is fresh evidence of a provider having a bad
                         # minute, not of an exchange whose outcome never arrived.
                         # The shorter bound is what keeps a 5xx from costing the
-                        # account the in-doubt shape's hour (review round 1, R3).
+                        # account the in-doubt shape's window (review round 1, R3).
                         self._rebound_send_marker(row.id, armed, SEND_SHAPE_ANSWERED)
                     # ``{exc}`` alone renders an empty tail for the httpx transport
                     # errors whose str() is empty, which is how a timed-out refresh
@@ -2115,6 +2203,89 @@ class AuthStore:
         if row is None:
             return None
         return await self._ensure_oauth_fresh(row)
+
+    def refresh_deferred(self, credential_id: int) -> bool:
+        """Whether an unsettled send is holding this row's refresh off right now.
+
+        READ-ONLY, and deliberately not :meth:`send_unconfirmed` even though the
+        two answer the same question: that one CLEARS a marker it finds dead on
+        the way past, and a status surface must be able to ask without changing
+        anything. It is the exact condition :meth:`_ensure_oauth_fresh` defers
+        on — a LIVE marker for the token this row stores, and an access token
+        that is no longer inside its own lifetime. A LIVE BEARER IS NOT A
+        DEFERRAL: the marker is about the refresh token and proves nothing about
+        a bearer that still works, so that case keeps being served (the same
+        escape ``_holds_live_bearer`` gives the refresh path). A tombstoned grant
+        is not one either — the IdP refused it, which is a verdict about the
+        credential rather than a wait.
+
+        It lives here so the surfaces can say "a refresh is in doubt and is being
+        retried" from the row, with the rule in the module that owns the marker,
+        instead of each surface re-deriving liveness from the marker payload.
+        """
+        row = self.get_credential(credential_id)
+        if row is None or not isinstance(row.data, dict):
+            return False
+        data = dict(row.data)
+        if self._grant_dead_at(data) is not None:
+            return False
+        now_ms = self._now_ms()
+        if not _send_marker_is_live(
+            data.get(REFRESH_SEND_UNCONFIRMED_KEY),
+            self._presented_refresh_token(data),
+            now_ms=now_ms,
+        ):
+            return False
+        return not self._holds_live_bearer(data, now_ms=now_ms)
+
+    def detached_refresh(self, credential_id: int) -> asyncio.Task[dict[str, Any] | None]:
+        """Start a refresh exchange that OUTLIVES a bounded caller's own wait.
+
+        For a caller whose answer is bounded but whose EXCHANGE must not be
+        cancelled — the tunnel status surface, whose verdict a desktop route
+        polls on open. ``asyncio.wait_for`` around the exchange itself cancels it
+        at the bound, and a ``CancelledError`` is a ``BaseException``: it reaches
+        none of ``_ensure_oauth_fresh``'s handlers, so the write-ahead send
+        marker stays armed with nothing left to resolve it. On a due bearer that
+        is not a degraded state but an outage (see
+        :data:`UNCONFIRMED_SEND_TTL_S`), so such a caller stops WAITING instead —
+        by bounding its wait with ``asyncio.wait``, which leaves the task alone,
+        rather than with a ``wait_for`` around the exchange or around a shield of
+        it (both of which are the same defect with different amounts of stdlib
+        ceremony). This is the task such a caller hands off.
+
+        The exchange gets its OWN store, and that is a correctness requirement
+        rather than tidiness: a bounded caller is inside
+        ``with closing(AuthStore())``, so an exchange still running when the
+        caller returns would write its marker resolution and its rotation into a
+        closed sqlite connection. The new store is built from this one's own
+        path and config, so it reads the same database and the row the caller
+        already resolved. Single-flight is NOT weakened by the second store:
+        :meth:`_try_refresh_lease` is one atomic upsert judged by ``rowcount``
+        against the shared database, not a per-process lock, so a second
+        exchange — a second caller, or a peer process — loses the lease and is
+        served the stored row instead.
+
+        The caller must NOT try to free the lease when it gives up waiting. The call
+        that used to be in `report.py` is deleted rather than re-pointed, and the
+        precise reason is worth keeping: ``_release_refresh_lease`` is
+        HOLDER-SCOPED and this exchange's lease belongs to the supervisor's store,
+        so a release from the caller's store is a no-op — a line that reads like a
+        safety mechanism while doing nothing. It would be a real hazard the moment
+        it became effective (a release keyed on the credential alone, or routed
+        through this store), because a freed lease lets a peer take it and re-present
+        the token while this POST is on the wire. The exchange's own ``finally`` is
+        the only release.
+        """
+        store = AuthStore(
+            self._db_path,
+            config_dir=self._config_dir,
+            config_overrides=self._config_overrides,
+        )
+        task = asyncio.create_task(store.ensure_oauth_fresh_or_raise(credential_id))
+        _DETACHED_REFRESHES.add(task)
+        task.add_done_callback(lambda finished: _release_detached_refresh(finished, store))
+        return task
 
     # -- selection: stickiness + round-robin -------------------------------------
 

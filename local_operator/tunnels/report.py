@@ -16,11 +16,19 @@ Two rules the code below keeps, both of them lessons from that incident:
 * A check that cannot run reports that it could not run. Neither a lost network
   nor an unreadable store is allowed to read as "your login is dead", which is
   what sent an offline machine to a login it did not need.
+* A state the store is WAITING OUT is reported as that wait. A refresh the store
+  deferred (its token's last exchange is unsettled) is neither a dead login nor
+  an unanswerable check, so `login_verdict` gives it its own state — `deferred` —
+  read from the row and never memoised, and every surface prints it without a
+  command: it clears by itself, and a sign-in offered for it is advice to fix
+  something that is not broken.
 * A check that costs a network call is BOUNDED, and a negative answer is reused
   for the window in which re-asking cannot learn anything new. The login verdict
   is the one check here that reaches the network at all (see REFRESH_WAIT_S and
   VERDICT_TTL_S): it is read by routes the desktop polls on open, so an unbounded
-  call there is a stalled poll rather than a slow answer.
+  call there is a stalled poll rather than a slow answer. Bounded, NOT CANCELLED:
+  the exchange it waits for is handed to the store's supervisor, so giving up on
+  the ANSWER cannot strand the write-ahead marker only that answer can resolve.
 """
 
 from __future__ import annotations
@@ -37,6 +45,7 @@ from local_operator.providers.auth_store import (
     AuthStore,
     AuthStoreError,
     CredentialInvalidError,
+    RefreshUnconfirmedError,
 )
 from local_operator.tunnels import config, gateway, state
 
@@ -74,6 +83,12 @@ VERDICT_TTL_S = DEFAULT_BLOCK_MS / 1000
 #: :func:`_verdict_key`), and expires on its own within :data:`VERDICT_TTL_S`, so
 #: it caches no fact this process is not allowed to know. Purging is opportunistic
 #: on write.
+#:
+#: It holds verdicts the CHECK produced, and never the deferral
+#: (`login_verdict`'s `deferred`): that one is read from the row ahead of the memo,
+#: so it cannot be masked by an entry composed before it became true, and it needs
+#: no remembering because it costs nothing to re-decide. The memo's whole job is
+#: the verdicts that spent a token-endpoint POST.
 _VERDICTS: dict[tuple[str, int, int], tuple[dict[str, Any], float]] = {}
 
 
@@ -86,6 +101,14 @@ def _verdict_key(store: AuthStore, credential_id: int, updated_at: int) -> tuple
     row, so a re-login — or a refresh another process landed — composes a different
     key and the verdict is decided again; a FAILED refresh writes nothing, which is
     what lets a verdict hold across the very failures it describes.
+
+    One thing ``updated_at`` deliberately does NOT move for: a send-marker write
+    (``_update_payload(..., moves_write_stamp=False)``), because the marker is the
+    store's own bookkeeping about a request rather than a change to the credential.
+    So the state that marker describes — the deferral — is read from the row BEFORE
+    this key is consulted instead of being memoised (``login_verdict``): a memo
+    composed while the marker was absent would otherwise answer for the whole
+    :data:`VERDICT_TTL_S` after it appeared.
     """
     return (str(store.db_path), credential_id, updated_at)
 
@@ -216,6 +239,38 @@ async def login_verdict(value: dict[str, Any]) -> dict[str, Any]:
     turn that into one bounded wait per window, and `unknown` is what the wait
     resolves to when it expires: the check did not finish, which is a fact about
     this machine and not a verdict about the login.
+
+    BOUNDED, NOT CANCELLED (the defect this shape exists for). `wait_for` around
+    the exchange itself cancels it at the bound, and a cancelled exchange reaches
+    none of the store's handlers: its write-ahead send marker stays armed with
+    nothing left to resolve it, which on a due bearer is a window of refusal the
+    phone renders as an expired login. So the exchange is handed to the store's
+    supervisor (``AuthStore.detached_refresh``, which owns it and the store it
+    runs on) and only the WAITING is bounded — with ``asyncio.wait``, not with a
+    shielded ``wait_for`` (see the comment at the call for the measured reason).
+
+    THE LEASE STAYS WITH THE EXCHANGE, and the reason the caller cannot help with
+    it is worth stating: the lease is taken on the supervisor's store and
+    ``_release_refresh_lease`` is holder-scoped, so a release from this store would
+    be a no-op rather than a hazard — which is exactly why the call that used to be
+    here is deleted instead of left as reassurance. The hazard is real if anything
+    ever frees that lease while the exchange is alive: a peer could then take it and
+    re-present the same token concurrently, the reuse-detection POST that revokes
+    the whole family. The exchange's own ``finally`` is the only release.
+
+    THE DEFERRAL IS A STATE, AND IT IS READ FROM THE ROW — ``deferred``, below —
+    because the check it describes cannot produce it: a refresh whose token is in
+    doubt returns (or raises) immediately, so it costs nothing to re-decide and
+    it is the one verdict here whose truth moves on its own, inside the window
+    the memo would otherwise hold it for. It is therefore taken BEFORE the memo and
+    never remembered, and that ordering is the whole of the protection: a memo
+    written just before a marker appeared (a timeout, a transport failure that left
+    the marker behind) keeps the key it was stored under — a marker write does not
+    move `updated_at`, which is what the key is built from — so a memo-first order
+    would answer `unknown` for the rest of :data:`VERDICT_TTL_S` while the row was
+    in fact deferred. Reading the row first also means the reverse is true: once the
+    marker clears, the next poll recomputes rather than holding a stale `deferred`
+    for the remainder of the window.
     """
     selected = value.get("credential_id")
     dead: dict[str, Any] = {"credential_id": selected, "state": "login_required"}
@@ -225,27 +280,66 @@ async def login_verdict(value: dict[str, Any]) -> dict[str, Any]:
         row = store.get_credential(selected)
         if row is None or row.provider != "radient" or row.credential_type != "oauth":
             return dead
+        if store.refresh_deferred(selected):
+            # The row itself says an exchange's outcome is unsettled and the
+            # bearer it holds is spent, so the store will not present that token
+            # again until the marker expires or an exchange resolves it. That is
+            # a state, not a failure, and it CLEARS BY ITSELF: the surfaces print
+            # it without a command and without "sign-in expired", which is what
+            # this case used to be reported as (`unknown`, rendered as "could not
+            # be checked", wrong twice — the check did run, and no network had
+            # anything to do with it).
+            return {"credential_id": selected, "state": "deferred"}
         key = _verdict_key(store, selected, row.updated_at)
         remembered = _remembered_verdict(key)
         if remembered is not None:
             return remembered
+        task = store.detached_refresh(selected)
+        # Bound the WAIT, never the work — and not with `wait_for(shield(task))`,
+        # which is the same intent one stdlib layer up: on Python 3.14 `shield`
+        # installs a `_log_on_exception` callback on the inner task when the outer
+        # is cancelled, so every abandoned exchange that later failed (a 5xx, a
+        # stalled read, an answer that never arrived) logged a full
+        # "AuthStoreError exception in shielded future" traceback through the
+        # loop's exception handler — measured here, one per occurrence, on the
+        # ORDINARY path of this change. `asyncio.wait` has no such callback and
+        # the same guarantee (the task is not cancelled when the wait times out),
+        # so the exchange's outcome is reported by the exchange and by nothing
+        # else. Measured: shield ⇒ 1 loop-level error; asyncio.wait ⇒ 0.
+        done, _pending = await asyncio.wait({task}, timeout=REFRESH_WAIT_S)
+        if not done:
+            # The caller stops WAITING; the exchange does not stop. It is still
+            # running on its own store and its own lease, and it — not this
+            # caller — owns resolving the marker: a landed rotation, a pre-send
+            # failure and an answered refusal all resolve it there, and an answer
+            # that never arrives leaves it armed until it expires.
+            #
+            # The `store._release_refresh_lease(selected)` call that used to sit
+            # here is DELETED, and the precise reason matters because the obvious
+            # one is wrong: `_release_refresh_lease` is holder-scoped, and the lease
+            # now belongs to the supervisor's own `AuthStore`, so that call against
+            # THIS store is a no-op — a line that reads like a safety mechanism and
+            # does nothing (measured: re-adding it changes no assertion in the suite).
+            # What must not happen is the thing it looks like it does: freeing the
+            # lease would let a peer take it and re-present the token while this
+            # POST is on the wire — the reuse-detection POST that revokes the whole
+            # family — so the release stays where it is meaningful, in the
+            # exchange's own `finally`.
+            return _remember_verdict(key, {"credential_id": selected, "state": "unknown"})
         try:
-            await asyncio.wait_for(store.ensure_oauth_fresh_or_raise(selected), REFRESH_WAIT_S)
+            await task
         except CredentialInvalidError:
             return _remember_verdict(key, dead)
+        except RefreshUnconfirmedError:
+            # The marker went live between the row read above and the exchange
+            # taking the lease — a peer, or an earlier exchange of our own — so
+            # this arm is the same state as the early return, reached the other
+            # way. Caught BEFORE the `AuthStoreError` arm it subclasses, because
+            # an unexpected-order regression here would report a self-clearing
+            # deferral as "could not be checked" again.
+            return {"credential_id": selected, "state": "deferred"}
         except AuthStoreError:
             # Reachable row, unusable answer: the network, not the login.
-            return _remember_verdict(key, {"credential_id": selected, "state": "unknown"})
-        except asyncio.TimeoutError:
-            # `wait_for` CANCELLED the refresh, and a cancellation reaches neither
-            # of `_ensure_oauth_fresh`'s release paths (`CancelledError` is not an
-            # `Exception`), so the cross-process refresh LEASE it took is still
-            # held. Left alone it would block the desktop's own Radient calls with
-            # `refresh_did_not_land` until it expired (`AUTH_REFRESH_LEASE_MS`), so
-            # it is freed here. Only this process's own lease — the release is
-            # scoped to this holder — so a peer's is untouched, and the store's own
-            # `dispose`-shaped helper is the same call its failure paths make.
-            store._release_refresh_lease(selected)
             return _remember_verdict(key, {"credential_id": selected, "state": "unknown"})
     return {"credential_id": selected, "state": "ok"}
 

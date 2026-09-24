@@ -1499,6 +1499,283 @@ async def test_tunnel_status_separates_a_network_fault_from_an_unusable_login(
     assert TERMINAL_DETAIL[REFUSED] not in receipt
 
 
+async def _status_receipt_with_a_deferred_refresh(tmp_path, monkeypatch, connection) -> str:
+    """`lop tunnel status` for a row whose refresh the store is WAITING OUT.
+
+    The state itself is set up on the row rather than provoked through a failing
+    endpoint: it is a marker an exchange left behind (see
+    `auth_store.REFRESH_SEND_UNCONFIRMED_KEY`), and a live marker plus a spent
+    bearer is exactly what the store defers on. The refresh fn is stubbed to a
+    transport failure so that a regression here cannot reach Radient from a test.
+    """
+    from local_operator.providers import auth_store
+    from local_operator.tunnels import cli
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    with closing(AuthStore()) as store:
+        row = store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "account_id": "qa",
+                "access": "stored-access",
+                "refresh": "rotating-token",
+                "expires": 1,
+            },
+        )
+        store._arm_send_marker(row.id, "rotating-token")
+    config.save(_stored(connection, credential_id=row.id))
+
+    async def refresh(credentials):  # noqa: ANN001 — the store's own refresh fn
+        raise httpx.ConnectError("the refresh must never be attempted here")
+
+    monkeypatch.setattr(auth_store.AuthStore, "_refresh_fn", lambda self, provider: refresh)
+    api = AsyncMock()
+    api.request.side_effect = httpx.ConnectError("network is unreachable")
+    monkeypatch.setattr(cli, "RadientTunnels", lambda *_: api)
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+    return await dispatch(parser.parse_args(["tunnel", "status"]))
+
+
+@pytest.mark.asyncio
+async def test_tunnel_status_says_a_deferral_is_self_clearing(
+    tmp_path, monkeypatch, connection
+) -> None:
+    """A state the store is waiting out is printed as that wait — and offers nothing.
+
+    This case used to arrive as `unknown` and print "Login: could not be checked (a
+    refresh could not reach Radient)", which was wrong twice: the check DID run
+    (from the row, in this build) and no network had anything to do with it. It is
+    the outage's own state, so the line has to say the one thing the operator needs
+    — it clears by itself — and it must offer no sign-in, because signing in for it
+    is advice to fix something that is not broken.
+    """
+    from local_operator.tunnels import report
+
+    receipt = await _status_receipt_with_a_deferred_refresh(tmp_path, monkeypatch, connection)
+
+    login_lines = [line for line in receipt.splitlines() if line.startswith("Login:")]
+    assert len(login_lines) == 1, receipt
+    assert "refresh deferred" in login_lines[0]
+    assert "two minutes" in login_lines[0], "the self-clearing window must be on the line"
+    assert "sign-in expired" not in login_lines[0]
+    assert "could not be checked" not in login_lines[0]
+    assert "run lop login radient" not in receipt, "a self-clearing state offers no command"
+    assert "sign-in expired" not in receipt
+
+    # ...and `remedy()` returns None for it for free, because it only ever offers
+    # the command for `login_required` — asserted rather than assumed, since it is
+    # what the desktop renders as a callout.
+    assert report.remedy({"stopped": False}, {"remedy": None}, {"state": "deferred"}) is None
+
+
+@pytest.mark.asyncio
+async def test_tunnel_status_reports_a_deferral_in_the_machine_shape_too(
+    tmp_path, monkeypatch, connection
+) -> None:
+    """The JSON surface carries the state and no remedy, so the desktop can tell
+    "wait this out" from "sign in" without parsing a sentence."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    await _status_receipt_with_a_deferred_refresh(tmp_path, monkeypatch, connection)
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+    payload = json.loads(await dispatch(parser.parse_args(["tunnel", "status", "--json"])))
+
+    assert payload["login"] == {
+        "credential_id": config.load()["credential_id"],
+        "state": "deferred",
+    }
+    assert payload["remedy"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_memoised_verdict_cannot_mask_a_deferral(tmp_path, monkeypatch, connection) -> None:
+    """A marker write does not move `updated_at`, so the memo must not answer for it.
+
+    `report._verdict_key` is the row's write stamp, and a send-marker write is
+    deliberately stamp-free (`_update_payload(..., moves_write_stamp=False)`), so a
+    verdict memoised BEFORE a marker appeared shares its key with the deferral that
+    marker now describes. Reading the deferral out of the row ahead of the memo is
+    what keeps that from masking it — this is the test that fails if the early
+    return is folded back into the memo, which is the shape the same `unknown`
+    answer used to have for a whole `VERDICT_TTL_S`.
+
+    The first call's failure is a post-send one on purpose: it leaves the marker
+    armed, which is the state a memo composed in that window would have to describe.
+    """
+    from local_operator.providers import auth_store
+    from local_operator.tunnels import report
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    with closing(AuthStore()) as store:
+        row = store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "account_id": "qa",
+                "access": "stale-access",
+                "refresh": "rotating-token",
+                "expires": 1,
+            },
+        )
+    config.save(_stored(connection, credential_id=row.id))
+
+    async def post_send(credentials):  # noqa: ANN001 — the store's own refresh fn
+        raise httpx.ReadTimeout("the request was written and no answer came back")
+
+    monkeypatch.setattr(auth_store.AuthStore, "_refresh_fn", lambda self, provider: post_send)
+
+    first = await report.login_verdict({"credential_id": row.id})
+    assert first["state"] == "unknown", "the first call's own result, not the row's state"
+    # The unsuccessful exchange left its marker behind, and the row is now deferred
+    # while its write stamp — the memo's key — is unchanged.
+    with closing(AuthStore()) as store:
+        assert store.refresh_deferred(row.id) is True
+
+    second = await report.login_verdict({"credential_id": row.id})
+    assert second == {"credential_id": row.id, "state": "deferred"}
+
+
+@pytest.mark.asyncio
+async def test_a_bounded_login_check_leaves_the_exchange_and_its_lease_alone(
+    tmp_path, monkeypatch, connection
+) -> None:
+    """The read that gives up must not cancel the exchange, nor free its lease.
+
+    `login_verdict` is the caller this PR is about, so it is driven HERE rather
+    than through a hand-made bounded caller: the regression to look for is the
+    `wait_for` around the exchange itself, and it is this test that fails when that
+    shape comes back (measured by re-applying it). The lease half is asserted from a
+    SECOND store on the same database, which is what a peer process would see — the
+    caller-side `_release_refresh_lease` that this PR deletes cannot fail here,
+    because it is inert against the supervisor's holder (that inertness is asserted
+    directly in `test_auth_store.py`), and a test that claimed otherwise would be
+    describing a line rather than a property. What a peer must not be able to do
+    while the POST is on the wire is take that lease: presenting the same refresh
+    token twice concurrently is the reuse-detection POST that revokes the family.
+    """
+    from local_operator.providers import auth_store
+    from local_operator.tunnels import report
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    # Only the WAIT is shortened; the exchange is gated on an event below, so it
+    # cannot complete early whatever this bound is.
+    monkeypatch.setattr(report, "REFRESH_WAIT_S", 0.25)
+    with closing(AuthStore()) as store:
+        row = store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "account_id": "qa",
+                "access": "stale-access",
+                "refresh": "rotating-token",
+                "expires": 1,
+            },
+        )
+    config.save(_stored(connection, credential_id=row.id))
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def stalling(credentials):  # noqa: ANN001 — the store's own refresh fn
+        entered.set()
+        await release.wait()
+        return {"access": "fresh-access", "refresh": "rotated", "expires": 4_000_000_000}
+
+    monkeypatch.setattr(auth_store.AuthStore, "_refresh_fn", lambda self, provider: stalling)
+
+    verdict = await report.login_verdict({"credential_id": row.id})
+    await asyncio.wait_for(entered.wait(), 5)
+    # The caller reported the bound it hit, not a verdict about the login...
+    assert verdict == {"credential_id": row.id, "state": "unknown"}
+
+    # ...and the exchange it stopped waiting for is still on the wire, holding the
+    # lease and the marker, which is all a peer needs to be told to wait.
+    with closing(AuthStore()) as peer:
+        assert peer._try_refresh_lease(row.id) is False, "the lease was freed under it"
+        assert peer.send_unconfirmed(row.id, "rotating-token") is True
+
+    # Let it finish: the exchange's own exit resolves the row (rotation persisted)
+    # and is the only thing that releases the lease.
+    release.set()
+    awaited = list(auth_store._DETACHED_REFRESHES)
+    assert awaited, "the supervisor holds no reference to the exchange it started"
+    await asyncio.gather(*awaited, return_exceptions=True)
+    with closing(AuthStore()) as store:
+        settled = store.get_credential(row.id)
+        assert settled is not None
+        assert settled.data.get("access") == "fresh-access"
+        assert settled.data.get("refresh") == "rotated"
+        assert auth_store.REFRESH_SEND_UNCONFIRMED_KEY not in settled.data
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_exchange_that_fails_logs_nothing_at_the_loop(
+    tmp_path, monkeypatch, connection
+) -> None:
+    """The shipped bound leaves the exchange alone — and SILENTLY so.
+
+    The obvious spelling, ``wait_for(asyncio.shield(task), bound)``, is the same
+    intent one stdlib layer up and costs a loop-level error on Python 3.14: when the
+    outer future is cancelled, `shield` installs a callback that reports the inner
+    task's later failure as "AuthStoreError exception in shielded future", with a
+    traceback, through the loop's exception handler (measured on 3.14.3: shield ⇒ 1
+    loop-level error, `asyncio.wait` ⇒ 0). That fires on this change's ORDINARY
+    path — a 5xx, a stalled read, an answer that never arrived — so what a reader of
+    the connector's or the desktop server's log would find during the outage is a
+    crash that never happened. `asyncio.wait` bounds the wait, leaves the task
+    uncancelled, and reports nothing; this test records the loop's own exception
+    handler and holds it to that.
+    """
+    from local_operator.providers import auth_store
+    from local_operator.tunnels import report
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(report, "REFRESH_WAIT_S", 0.25)
+    with closing(AuthStore()) as store:
+        row = store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "account_id": "qa",
+                "access": "stale-access",
+                "refresh": "rotating-token",
+                "expires": 1,
+            },
+        )
+    config.save(_stored(connection, credential_id=row.id))
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def failing(credentials):  # noqa: ANN001 — the store's own refresh fn
+        entered.set()
+        await release.wait()
+        raise httpx.ConnectError("the exchange fails after the caller walked away")
+
+    monkeypatch.setattr(auth_store.AuthStore, "_refresh_fn", lambda self, provider: failing)
+
+    loop = asyncio.get_running_loop()
+    reported: list[str] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: reported.append(context["message"]))
+    try:
+        verdict = await report.login_verdict({"credential_id": row.id})
+        await asyncio.wait_for(entered.wait(), 5)
+        assert verdict == {"credential_id": row.id, "state": "unknown"}
+        release.set()
+        pending = list(auth_store._DETACHED_REFRESHES)
+        assert pending, "the exchange was not supervised"
+        # The exchange's failure lands here, with the caller long gone.
+        await asyncio.gather(*pending, return_exceptions=True)
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous)
+
+    assert reported == [], f"the abandoned exchange logged at the loop level: {reported}"
+
+
 @pytest.mark.asyncio
 async def test_tunnel_status_names_a_refused_grant_as_a_dead_login(
     tmp_path, monkeypatch, connection
@@ -1583,6 +1860,83 @@ async def test_the_real_connector_client_classifies_its_own_failures(
         # what sent an offline computer to /login radient.
         assert reached == []
         assert "log in again" not in str(failure.value)
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_refresh_is_reported_as_a_deferral_not_an_expired_login(
+    tmp_path, monkeypatch, connection
+):
+    """A store that will not present the token yet is not a login that has expired.
+
+    This is the phone's own sentence. `RadientTunnels.request` raises ONE `ValueError`
+    for every refresh failure it cannot name itself, so the distinction has to be read
+    off the chain, and the real client is what raises it here — a hand-made chain
+    would prove nothing about what the connector actually sees.
+
+    The row is set up in the state the store DEFERS on rather than failing an
+    endpoint: a live in-doubt marker for the token it holds, and a bearer that is
+    spent. That is the outage's shape (the marker is armed before a POST, so the
+    state survives a process that died mid-exchange), and the reason it deserves its
+    own answer is that nothing about the login has changed.
+    """
+    from local_operator.providers import auth_store
+    from local_operator.tunnels import gateway, service
+    from local_operator.tunnels.api import RadientTunnels
+    from local_operator.tunnels.gateway import AUTHORIZATION_DEFERRED, REFUSED
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    with closing(AuthStore()) as store:
+        row = store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "account_id": "only",
+                "access": "stored-access",
+                "refresh": "rotating-token",
+                "expires": 1,
+            },
+        )
+        store._arm_send_marker(row.id, "rotating-token")
+
+    reached: list[str] = []
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        reached.append(request.url.path)
+        return httpx.Response(200, json={"result": {}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as client:
+        with pytest.raises(ValueError) as failure:
+            await RadientTunnels(row.id, client).request("GET")
+
+    # The store's own verdict is in the CHAIN, which is where every classifier here
+    # reads it — the prose is deliberately the same for every refresh failure.
+    assert isinstance(failure.value.__cause__, auth_store.RefreshUnconfirmedError)
+    assert reached == [], "a deferred refresh must not reach the tunnel API"
+
+    assert service.authorization_failure_reason(failure.value) == AUTHORIZATION_DEFERRED
+    verdict = service.classify_failure(failure.value)
+    assert verdict.kind not in service.PARKING_KINDS, "a self-clearing state must not park"
+    assert verdict.kind == "transient"
+    assert verdict.reason == AUTHORIZATION_DEFERRED
+
+    # What the copy may and may not say, on both surfaces: no command (this
+    # sentence travels to readers that cannot run one), no expired login, no
+    # billing, and the self-clearing window named. `REFUSED` is asserted alongside
+    # as the contrast — it is the sentence a phone used to render for this state.
+    relay = gateway.RELAY_DETAIL[AUTHORIZATION_DEFERRED]
+    terminal = gateway.TERMINAL_DETAIL[AUTHORIZATION_DEFERRED]
+    for sentence in (relay, terminal):
+        assert "lop " not in sentence
+        assert "/login" not in sentence
+        assert "billing" not in sentence
+        assert "expired" not in sentence
+        assert "two minutes" in sentence, "the window is what a reader decides with"
+    assert "expired" in gateway.RELAY_DETAIL[REFUSED], "the contrast this copy exists for"
+    assert gateway.TERMINAL_REMEDY[AUTHORIZATION_DEFERRED] == "lop tunnel status"
+    assert "sign-in refresh" in gateway.REASON_LABEL[AUTHORIZATION_DEFERRED]
+    # A code with a `RELAY_DETAIL` entry is one a phone can be handed, so the
+    # vocabulary must also have a terminal sentence and a label for it.
+    assert gateway.REASON_LABEL[AUTHORIZATION_DEFERRED] != AUTHORIZATION_DEFERRED
 
 
 @pytest.mark.asyncio

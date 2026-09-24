@@ -2658,6 +2658,283 @@ class TestTheRotatingRefreshTokenIsNeverRePresented:
         assert GRANT_DEAD_AT_KEY not in after.data, "the login kept a dead grant's tombstone"
         assert REFRESH_SEND_UNCONFIRMED_KEY not in after.data, "the login kept a send marker"
 
+    async def test_the_deferral_a_surface_reads_is_the_one_the_store_enforces(
+        self, store: AuthStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`refresh_deferred` and the refresh path must agree, in BOTH directions.
+
+        The status surfaces read the deferral off the row (so it cannot be masked by
+        the verdict memo) while the refresh path decides it inline, so the two are a
+        pair that a later edit could drift apart: a condition added to
+        `_ensure_oauth_fresh` and not to `refresh_deferred` would leave
+        `lop tunnel status` describing a state the store is not in. Both directions
+        are asserted because they fail differently — a SPENT bearer is the state that
+        must be reported, and a live-but-due bearer is the one that must NOT be (the
+        marker is about the refresh token and proves nothing about a bearer that
+        still works, which is the escape the refresh path takes too).
+
+        The refresh fn is stubbed to a hard failure so a broken escape fails here
+        instead of posting to Radient from a test.
+        """
+
+        async def must_not_be_called(creds: dict[str, Any]) -> dict[str, Any]:
+            raise AuthStoreError("the escape must be taken, not a POST")
+
+        monkeypatch.setattr(AuthStore, "_refresh_fn", lambda self_, provider: must_not_be_called)
+
+        spent = self._row(store, expires=store._now_ms() - 1_000)
+        store._arm_send_marker(spent.id, "rotating-token")
+        assert store.refresh_deferred(spent.id) is True
+        with pytest.raises(RefreshUnconfirmedError):
+            await store.ensure_oauth_fresh_or_raise(spent.id)
+
+        # DUE (inside the refresh skew) but not expired: the state a marker must not
+        # suppress, and the one the refresh path answers with the stored bearer.
+        due_but_live = self._row(store, expires=store._now_ms() + 30_000)
+        store._arm_send_marker(due_but_live.id, "rotating-token")
+        assert store.refresh_deferred(due_but_live.id) is False
+        assert await store.ensure_oauth_fresh_or_raise(due_but_live.id) is not None
+
+    async def test_a_bounded_caller_stops_waiting_without_cancelling_the_exchange(
+        self, store: AuthStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The defect this PR exists for: a bounded READ must not cancel an exchange.
+
+        `tunnels/report.py` waits 2 s for a login verdict, and that wait used to be
+        a ``wait_for`` around the exchange ITSELF — so the exchange was cancelled,
+        and a ``CancelledError`` is a ``BaseException`` that reaches none of
+        `_ensure_oauth_fresh`'s handlers. The write-ahead marker stayed armed with
+        nothing left to resolve it, which on a due bearer is not a degraded state
+        but an outage (see `UNCONFIRMED_SEND_TTL_S`). The caller now hands the
+        exchange to a supervisor and bounds only its own WAIT, so every outcome the
+        exchange can have still resolves the row on the EXCHANGE's own terms, none
+        of them changed by the caller's bound.
+
+        No wall clock decides anything here: the exchange is gated on an event this
+        test holds, so it cannot complete while the caller is being abandoned, and
+        the bound the caller waits is only the thing that must FIRE.
+        """
+        import httpx
+
+        from local_operator.providers.auth_store import (
+            REFRESH_SEND_UNCONFIRMED_KEY,
+            SEND_SHAPE_ANSWERED,
+            SEND_SHAPE_UNKNOWN,
+        )
+        from local_operator.providers.oauth.callback_server import (
+            raise_for_refresh_failure,
+        )
+
+        # The caller's own bound. Only the WAIT is bounded: the exchange is gated,
+        # so no bound can let it finish early — which is what makes "the caller gave
+        # up while the exchange was still on the wire" a structural fact.
+        caller_bound = 0.25
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def landed(creds: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "access": "access-2",
+                "refresh": "rotated",
+                "expires": store._now_ms() + 3600_000,
+            }
+
+        async def pre_send(creds: dict[str, Any]) -> dict[str, Any]:
+            raise httpx.ConnectError("connection refused")
+
+        async def answered_but_unhelpful(creds: dict[str, Any]) -> dict[str, Any]:
+            # The REAL shared classifier, entered the way a provider enters it.
+            raise_for_refresh_failure("Radient", 500, '{"error": "server_error"}')
+
+        async def lost_in_flight(creds: dict[str, Any]) -> dict[str, Any]:
+            raise RuntimeError("connection reset after the request was written")
+
+        def marker_shapes(credential_id: int) -> Any:
+            return self._current(store, credential_id).data.get(REFRESH_SEND_UNCONFIRMED_KEY)
+
+        async def drive(name: str, outcome: Any, after: Any) -> None:
+            entered.clear()
+            release.clear()
+            row = self._row(store, expires=0)
+            posts: list[str] = []
+
+            async def exchange(creds: dict[str, Any]) -> dict[str, Any]:
+                posts.append(creds["refresh"])
+                # ARMED BEFORE THE POST, which only the exchange can witness.
+                marker = marker_shapes(row.id)
+                assert isinstance(marker, dict) and marker["digest"], f"{name}: armed late"
+                entered.set()
+                await release.wait()
+                return await outcome(creds)
+
+            monkeypatch.setattr(AuthStore, "_refresh_fn", lambda self_, provider: exchange)
+            task = store.detached_refresh(row.id)
+            await entered.wait()
+            assert marker_shapes(row.id) is not None, f"{name}: no marker while on the wire"
+
+            # The caller's bound fires while the exchange is still gated... and the
+            # caller is the SHIPPED shape (`report.login_verdict`'s `asyncio.wait`),
+            # because that is the mechanism under test: `wait_for` around the
+            # exchange cancels it, and a shielded `wait_for` is that same cancel one
+            # layer up plus a loop-level "exception in shielded future" log on
+            # Python 3.14.
+            done, pending = await asyncio.wait({task}, timeout=caller_bound)
+            assert not done and pending, f"{name}: the caller's bound did not fire"
+            # ...and the exchange is untouched by it, marker and all.
+            assert not task.done(), f"{name}: the caller's bound cancelled the exchange"
+            assert marker_shapes(row.id) is not None, f"{name}: the abandoned caller resolved it"
+
+            release.set()
+            try:
+                await task
+            except AuthStoreError:
+                pass
+            assert posts == ["rotating-token"], f"{name}: the token was presented {posts}"
+            after(row.id, name)
+
+        def landed_after(credential_id: int, name: str) -> None:
+            row = self._current(store, credential_id)
+            assert row.data.get("access") == "access-2", name
+            assert row.data.get("refresh") == "rotated", name
+            assert REFRESH_SEND_UNCONFIRMED_KEY not in row.data, f"{name}: the ack left the marker"
+
+        def pre_send_after(credential_id: int, name: str) -> None:
+            assert (
+                REFRESH_SEND_UNCONFIRMED_KEY not in self._current(store, credential_id).data
+            ), name
+
+        def answered_after(credential_id: int, name: str) -> None:
+            marker = marker_shapes(credential_id)
+            assert isinstance(marker, dict), f"{name}: an answer that proved nothing must keep it"
+            assert marker["shape"] == SEND_SHAPE_ANSWERED, f"{name}: {marker}"
+
+        def lost_after(credential_id: int, name: str) -> None:
+            marker = marker_shapes(credential_id)
+            assert isinstance(marker, dict), f"{name}: an unanswered send is in doubt"
+            assert marker["shape"] == SEND_SHAPE_UNKNOWN, f"{name}: {marker}"
+
+        await drive("a landed rotation", landed, landed_after)
+        await drive("a provably pre-send failure", pre_send, pre_send_after)
+        await drive("an answer proving nothing", answered_but_unhelpful, answered_after)
+        await drive("an answer that never arrived", lost_in_flight, lost_after)
+
+    async def test_an_abandoned_caller_leaves_the_exchange_and_its_lease_alone(
+        self, store: AuthStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """While the POST is on the wire NOBODY but the exchange may take that lease.
+
+        This is the property, stated as the property rather than as "the deleted line
+        is what makes this pass": `report.py` no longer releases the lease when it
+        gives up waiting, and the measurement behind deleting it is that the call was
+        a NO-OP anyway — `_release_refresh_lease` is holder-scoped and this lease
+        belongs to the supervisor's own store, which is asserted here directly (the
+        caller releases; the peer still cannot take it). What the assertion protects
+        is the store's holder scoping: a release keyed on the credential alone — the
+        plausible "simplification" — would let a peer take the lease and re-present
+        the same refresh token while our POST is on the wire, which is the
+        reuse-detection POST that revoked the operator's grant twice in ~17 hours.
+        """
+        from local_operator.providers.auth_store import REFRESH_SEND_UNCONFIRMED_KEY
+
+        peer = AuthStore(store._db_path)
+        try:
+            row = self._row(store, expires=0)
+            entered = asyncio.Event()
+            release = asyncio.Event()
+
+            async def exchange(creds: dict[str, Any]) -> dict[str, Any]:
+                entered.set()
+                await release.wait()
+                return {
+                    "access": "access-2",
+                    "refresh": "rotated",
+                    "expires": store._now_ms() + 3600_000,
+                }
+
+            monkeypatch.setattr(AuthStore, "_refresh_fn", lambda self_, provider: exchange)
+            task = store.detached_refresh(row.id)
+            await entered.wait()
+
+            # While the exchange runs, a peer can neither take the lease nor be
+            # told to present the token.
+            assert peer._try_refresh_lease(row.id) is False
+            assert peer.send_unconfirmed(row.id, "rotating-token") is True
+            assert REFRESH_SEND_UNCONFIRMED_KEY in self._current(store, row.id).data
+
+            # The CALLER's own release — the call this PR deleted from report.py's
+            # timeout path — cannot free it, because the lease is not this store's.
+            store._release_refresh_lease(row.id)
+            assert peer._try_refresh_lease(row.id) is False
+
+            # Nor does the caller abandoning its wait change anything: it stops
+            # waiting and nothing else.
+            done, _pending = await asyncio.wait({task}, timeout=0.25)
+            assert not done
+            assert not task.done()
+            assert peer._try_refresh_lease(row.id) is False
+
+            release.set()
+            await task
+            # Only the exchange's own exit frees it — asserted from the outside, on
+            # a row nobody is holding any more.
+            assert peer._try_refresh_lease(row.id) is True
+        finally:
+            peer.close()
+
+    async def test_the_in_doubt_bound_is_one_exchange_window_not_an_hour(
+        self, store: AuthStore
+    ) -> None:
+        """The bound is DERIVED from the in-flight window, and shorter than the bearer.
+
+        Two rules, both about not repeating the defect where a marker outlived the
+        thing it was armed against:
+
+        * ``UNCONFIRMED_SEND_TTL_S`` must be GREATER than `AUTH_REFRESH_LEASE_MS`,
+          because a peer that takes the lease the instant it expires arms a marker
+          of its own for the same token — a bound that lapsed before that peer's
+          exchange could still be on the wire would re-present a token that may
+          already be spent.
+        * It must be SHORTER than the bearer the marker is armed against. Radient
+          mints 3600 s minus a 5-minute skew, and a refresh is triggered when that
+          bearer is due, so a marker that outlives it leaves no usable bearer and
+          no permitted refresh: the hour this replaced turned one cancelled
+          exchange into a guaranteed outage.
+
+        The behavioural half moves the clock rather than sleeping, like the
+        answered-shape case beside it.
+        """
+        from local_operator.providers.auth_store import (
+            AUTH_REFRESH_LEASE_MS,
+            PROVIDER_REFRESH_HTTP_TIMEOUT_S,
+            SEND_SHAPE_UNKNOWN,
+            UNCONFIRMED_SEND_TTL_S,
+            _refresh_token_digest,
+        )
+
+        assert UNCONFIRMED_SEND_TTL_S * 1000 > AUTH_REFRESH_LEASE_MS
+        assert UNCONFIRMED_SEND_TTL_S < 3600 - 300, "longer than the bearer it outlives"
+        # DERIVED, so the halves cannot drift: the window plus one per-op margin.
+        assert UNCONFIRMED_SEND_TTL_S == (
+            AUTH_REFRESH_LEASE_MS / 1000 + PROVIDER_REFRESH_HTTP_TIMEOUT_S
+        )
+
+        row = self._row(store, expires=0)
+        digest = _refresh_token_digest("rotating-token")
+        inside = store._now_ms() - int(UNCONFIRMED_SEND_TTL_S * 1000) + 1000
+        self._write_marker(
+            store, row.id, {"digest": digest, "at": inside, "shape": SEND_SHAPE_UNKNOWN}
+        )
+        assert store.send_unconfirmed(row.id, "rotating-token") is True
+
+        past = store._now_ms() - int(UNCONFIRMED_SEND_TTL_S * 1000) - 1000
+        self._write_marker(
+            store, row.id, {"digest": digest, "at": past, "shape": SEND_SHAPE_UNKNOWN}
+        )
+        assert store.send_unconfirmed(row.id, "rotating-token") is False
+        # The hour this replaced is gone, not merely shortened: a marker aged into
+        # it is not believed, which is what makes the deferral self-clearing.
+        assert store._now_ms() - past < 3600 * 1000
+
     async def test_the_refresh_lease_outlives_the_exchange_the_store_enforces(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2675,10 +2952,15 @@ class TestTheRotatingRefreshTokenIsNeverRePresented:
             AUTH_REFRESH_LEASE_MS,
             PROVIDER_REFRESH_HTTP_TIMEOUT_S,
             PROVIDER_REFRESH_TOTAL_BUDGET_S,
+            UNCONFIRMED_SEND_TTL_S,
         )
 
         assert PROVIDER_REFRESH_TOTAL_BUDGET_S >= PROVIDER_REFRESH_HTTP_TIMEOUT_S * 2
         assert AUTH_REFRESH_LEASE_MS > PROVIDER_REFRESH_TOTAL_BUDGET_S * 1000
+        # R4's derivation is what `UNCONFIRMED_SEND_TTL_S` is BUILT from, so the
+        # three cannot drift apart in a later edit: a raise of the budget drags the
+        # lease up, and the in-doubt bound with it, or this fails first.
+        assert UNCONFIRMED_SEND_TTL_S * 1000 > AUTH_REFRESH_LEASE_MS
 
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         db = tmp_path / "auth.db"
