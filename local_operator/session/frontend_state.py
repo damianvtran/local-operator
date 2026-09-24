@@ -3984,7 +3984,25 @@ class SnapshotJobs:
         # Route copies through the public detacher instead of asking Pydantic to
         # deep-copy tuple-backed Mapping/Sequence wrappers: the wrappers must
         # stay immutable while consumers retain their abstract container API.
-        self._values = [_public_job(value) for value in values]
+        #
+        # A row whose CANONICAL object is the one the last replace saw keeps the
+        # detached copy made then: a follower's jobs delta keeps every unchanged
+        # row by identity (``FrontendStateStore._reusable_job``), and re-detaching
+        # all 252 rows of a loaded roster for the handful that moved was ~2 ms per
+        # delta on the viewer's loop. Safe because ``_values`` is private --
+        # ``list``/``get`` still hand every caller a fresh detached copy.
+        previous = getattr(self, "_detached", {})
+        detached: dict[int, tuple[JobState, JobState]] = {}
+        rows: list[JobState] = []
+        for value in values:
+            kept = previous.get(id(value))
+            row = kept[1] if kept is not None and kept[0] is value else _public_job(value)
+            # The source is held beside its copy so ``id(value)`` cannot be
+            # recycled onto a different row while the entry lives.
+            detached[id(value)] = (value, row)
+            rows.append(row)
+        self._detached = detached
+        self._values = rows
         # Roster rendering asks get() once per row. A linear lookup made one
         # paint quadratic in the number of children; retain the first duplicate
         # ID to preserve the old next(...) behaviour for malformed extensions.
@@ -4032,7 +4050,28 @@ class SnapshotSubagentComms:
 
     def replace(self, jobs: Iterable[JobState]) -> None:
         rows = list(jobs)
-        self._nodes = {job.id: self._node_for(job) for job in rows}
+        # A row the last replace saw keeps its node, for the same reason and on
+        # the same identity proof as ``SnapshotJobs.replace``: the node is built
+        # from that (frozen) row, so an identical row builds an equal node.
+        #
+        # EXCEPT where the node also reads the DISK: a row with a ``session_id``
+        # but no wire ``session_dir`` has its directory derived and proven
+        # against an origin marker the child may not have written yet, and a
+        # later frame re-projecting the node is how a still-starting child
+        # becomes openable (``test_a_missing_marker_is_not_memoised_as_a_verdict``).
+        # Those rows are rebuilt every time, exactly as before.
+        previous = getattr(self, "_node_sources", {})
+        sources: dict[str, tuple[JobState, Any]] = {}
+        for job in rows:
+            kept = previous.get(job.id)
+            pure = bool(job.session_dir) or not job.session_id
+            sources[job.id] = (
+                kept
+                if pure and kept is not None and kept[0] is job
+                else (job, self._node_for(job))
+            )
+        self._node_sources = sources
+        self._nodes = {job.id: sources[job.id][1] for job in rows}
         self._aliases = {alias: job.id for job in rows for alias in job.attempt_aliases}
 
     @staticmethod

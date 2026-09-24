@@ -7643,6 +7643,17 @@ class AttachedSession:
         """
         return self._read_state_field("epoch")
 
+    def frontend_revision(self) -> tuple[int, ...]:
+        """A token that moves whenever the roster, todos or wakes move.
+
+        For per-frame readers that re-derive a view from those collections and
+        want to skip the work when nothing moved -- see
+        :meth:`FrontendStateStore.revision`, which defines what it covers.
+        """
+        if self._frontend_store is None:
+            raise RuntimeError("frontend state has not synchronized")
+        return self._frontend_store.revision()
+
     def subscribe_frontend(self, handler):  # type: ignore[no-untyped-def]
         if self._frontend_store is None:
             raise RuntimeError("frontend state has not synchronized")
@@ -7949,7 +7960,12 @@ class AttachedSession:
             logger.debug("event mute send failed", exc_info=True)
 
     async def refresh_attention(self) -> dict[str, Any]:
-        return dict(self.frontend_state.attention)
+        # Polled about once a second by the TUI's completion-receipt check. The
+        # whole-state clone it used to read through cost as much as the rest of
+        # that poll put together on a large roster; copy the one field instead.
+        if self._frontend_store is None:
+            raise RuntimeError("frontend state has not synchronized")
+        return self._frontend_store.attention_copy()
 
     async def acknowledge_attention(self, token: str) -> dict[str, Any]:
         # Capture this binding; a takeover cannot redirect an old render callback.
@@ -8752,11 +8768,12 @@ class AttachedSession:
         return ()
 
     def running_subagents(self) -> int:
-        return sum(
-            1
-            for row in self.frontend_state.jobs
-            if row.type == "task" and row.status == "running" and not row.queued
-        )
+        # Clone-free: `frontend_state` deep-copies every job for this one integer,
+        # and the TUI asks it per retention check and per stop ladder -- ~2.5 ms
+        # of the viewer's loop each time at a 252-row roster.
+        if self._frontend_store is None:
+            raise RuntimeError("frontend state has not synchronized")
+        return self._frontend_store.running_task_count()
 
     def runtime_model_catalogue(self) -> list[dict[str, Any]]:
         """The owner's offerable model rows, as published canonical state.
