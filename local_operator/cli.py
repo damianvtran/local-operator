@@ -1073,6 +1073,18 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    # Hidden for the same reason, and it exists because that flag has TWO callers.
+    # The upgrade's child is told this: the parent bounces the mobile daemon itself
+    # right after the child, so a child that bounced it too would restart the phone
+    # relay twice for one upgrade. A hand-run ``--refresh-daemons`` is given nothing,
+    # has no caller to do that bounce, and therefore does both halves — which is what
+    # an upgrade does. See ``update._run_daemon_repair``.
+    update_parser.add_argument(
+        "--services-only",
+        dest="services_only",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     # Install a build that is already on this machine into its own generation:
     # a source directory, or a git ref of the repository this command runs in.
     # Named separately from the PyPI path because it answers a different
@@ -8577,6 +8589,7 @@ def main() -> int:
             return update_command(
                 check=bool(getattr(args, "check", False)),
                 refresh_daemons=bool(getattr(args, "refresh_daemons", False)),
+                services_only=bool(getattr(args, "services_only", False)),
                 from_snapshot=getattr(args, "from_snapshot", None),
                 services=not bool(getattr(args, "no_services", False)),
             )

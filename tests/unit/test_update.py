@@ -729,7 +729,11 @@ def test_main_dispatches_update_check(monkeypatch: pytest.MonkeyPatch) -> None:
     with patch("local_operator.update.update_command", return_value=2) as cmd:
         assert main() == 2
         cmd.assert_called_once_with(
-            check=True, refresh_daemons=False, from_snapshot=None, services=True
+            check=True,
+            refresh_daemons=False,
+            services_only=False,
+            from_snapshot=None,
+            services=True,
         )
 
 
@@ -740,7 +744,33 @@ def test_main_dispatches_update(monkeypatch: pytest.MonkeyPatch) -> None:
     with patch("local_operator.update.update_command", return_value=0) as cmd:
         assert main() == 0
         cmd.assert_called_once_with(
-            check=False, refresh_daemons=False, from_snapshot=None, services=True
+            check=False,
+            refresh_daemons=False,
+            services_only=False,
+            from_snapshot=None,
+            services=True,
+        )
+
+
+def test_main_dispatches_the_service_only_repair(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--services-only`` reaches the repair, which is the upgrade child's argv.
+
+    The flag is hidden because nobody types it: it exists so the child an upgrade
+    spawns does not bounce the mobile daemon its caller is about to bounce. Wired
+    end to end here (parse → dispatch), because a flag the child is spawned with and
+    the parser does not accept is an unhandled-argument crash on every upgrade.
+    """
+    from local_operator.cli import main
+
+    monkeypatch.setattr("sys.argv", ["lop", "update", "--refresh-daemons", "--services-only"])
+    with patch("local_operator.update.update_command", return_value=0) as cmd:
+        assert main() == 0
+        cmd.assert_called_once_with(
+            check=False,
+            refresh_daemons=True,
+            services_only=True,
+            from_snapshot=None,
+            services=True,
         )
 
 
@@ -752,7 +782,11 @@ def test_main_dispatches_from_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
     with patch("local_operator.update.update_command", return_value=0) as cmd:
         assert main() == 0
         cmd.assert_called_once_with(
-            check=False, refresh_daemons=False, from_snapshot="main", services=True
+            check=False,
+            refresh_daemons=False,
+            services_only=False,
+            from_snapshot="main",
+            services=True,
         )
 
     monkeypatch.setattr("sys.argv", ["lop", "update", "--check", "--from-snapshot", "main"])
@@ -774,7 +808,11 @@ def test_main_dispatches_no_services(monkeypatch: pytest.MonkeyPatch) -> None:
     with patch("local_operator.update.update_command", return_value=0) as cmd:
         assert main() == 0
         cmd.assert_called_once_with(
-            check=False, refresh_daemons=False, from_snapshot=None, services=False
+            check=False,
+            refresh_daemons=False,
+            services_only=False,
+            from_snapshot=None,
+            services=False,
         )
 
 
@@ -1331,6 +1369,9 @@ class TestServiceDaemonRefresh:
             "local_operator.cli",
             "update",
             "--refresh-daemons",
+            # The caller owns the mobile half (review round 2, MINOR-2): the upgrade
+            # bounces that daemon itself right after this child.
+            "--services-only",
         ]
         # The image travels BESIDE the label and is always a real file — never
         # the label itself, which the kernel would try to execute. It is the
@@ -1549,14 +1590,64 @@ class TestServiceDaemonRefresh:
         ]
 
     def test_the_flag_bypasses_the_pypi_check(self, capsys) -> None:
-        """``--refresh-daemons`` is a repair, not an upgrade: no network, no version."""
+        """``--refresh-daemons`` is a repair, not an upgrade: no network, no version.
+
+        AND IT CARRIES BOTH HALVES (review round 2, MINOR-2): the services repair and
+        then the mobile bounce that daemon's own step owns. That is what an upgrade
+        does; without it a HAND run moved three daemons and left a stale mobile one
+        behind, silently, because the build question is deliberately not asked for
+        mobile. The upgrade's own child is told otherwise — see the test below.
+        """
         with (
             patch.object(update_mod, "check_latest") as check,
             patch.object(update_mod, "daemons_refresh_command", return_value=0) as command,
+            # This test tree is an editable checkout, so the real guard would refuse
+            # and (correctly) skip the bounce — see the refusal test below. The
+            # installed-distribution case is what this one is about.
+            patch.object(update_mod, "_repair_refusal", return_value=None),
+            patch.object(
+                update_mod,
+                "refresh_mobile_after_upgrade",
+                return_value=MobileRefresh(kind="restarted"),
+            ) as mobile,
         ):
             assert update_command(refresh_daemons=True) == 0
         check.assert_not_called()
         command.assert_called_once()
+        mobile.assert_called_once()
+        assert capsys.readouterr().out == ("mobile daemon restarted — refresh the phone UI\n")
+
+    def test_the_upgrades_child_leaves_the_mobile_half_to_its_caller(self, capsys) -> None:
+        """The child of an upgrade must not bounce mobile: its caller already does.
+
+        THE DOUBLE RESTART ROUND 1 (R4) REMOVED, pinned from this side. The parent
+        (:func:`update.refresh_daemons_after_upgrade`, and the TUI's own composition)
+        runs the mobile bounce immediately after this child, so the child is spawned
+        with ``--services-only`` and must touch nothing but the plists.
+        """
+        with (
+            patch.object(update_mod, "daemons_refresh_command", return_value=0),
+            patch.object(update_mod, "refresh_mobile_after_upgrade") as mobile,
+        ):
+            assert update_command(refresh_daemons=True, services_only=True) == 0
+        mobile.assert_not_called()
+        assert capsys.readouterr().out == ""
+
+    def test_a_refused_repair_does_not_bounce_mobile(self, capsys) -> None:
+        """A repair that is not allowed to write must not restart anything either.
+
+        The child reports a refusal as a printed warning and exit 0, which a caller
+        cannot tell from "nothing needed repairing", so the guard is evaluated again
+        here before the mobile half — a worktree run of the hidden flag must not
+        restart the operator's phone relay as a consolation.
+        """
+        with (
+            patch.object(update_mod, "daemons_refresh_command", return_value=0),
+            patch.object(update_mod, "_repair_refusal", return_value="a source checkout"),
+            patch.object(update_mod, "refresh_mobile_after_upgrade") as mobile,
+        ):
+            assert update_command(refresh_daemons=True) == 0
+        mobile.assert_not_called()
         assert capsys.readouterr().out == ""
 
     def test_the_child_refuses_to_rewrite_from_a_checkout(self, capsys) -> None:
