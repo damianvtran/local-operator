@@ -1,73 +1,51 @@
-"""The stall watchdog's OWN arming call is a wedge risk, and this is its repro.
+"""The stall bound must not be able to park a thread holding the GIL — and it no longer does.
 
-THE FIELD SIGNATURE, verbatim. Two live runtimes on this host (pids sampled with
-``sample <pid> 3``; 0.62.8 and 0.62.15, different builds, different work) show the
-SAME thing: the runtime's MAIN (event-loop) thread parks inside the watchdog's own
-re-arm -- ``faulthandler_dump_traceback_later`` -> ``cancel_dump_traceback_later``
--> ``PyThread_acquire_lock_timed`` -> ``__psynch_cvwait``, reached from
-``task_step`` (an ``asyncio`` task) -- WHILE HOLDING THE GIL, and the thread named
-``stall-watchdog-progress`` cannot take it (``lock_PyThread_acquire_lock`` ->
-``_PyParkingLot_Park`` -> ``_PyThreadState_Attach`` -> ``take_gil``). The session
-wedges, the watchdog's own sampler starves, and the timer can never finish what it
-was doing, so no dump is ever written.
+THE FIELD SIGNATURE, verbatim. Two live runtimes on this host (``sample <pid> 3``;
+builds 0.62.8 and 0.62.15, different work) show the same thing: the runtime's MAIN
+(event-loop) thread parked inside the watchdog's own re-arm —
 
-WHY THE CALL CANNOT RETURN, measured here rather than assumed. CPython's
-``faulthandler_dump_traceback_later`` cancels a previous timer before arming the
-next, and that cancel WAITS for an in-flight dump to finish -- with the GIL held,
-in whatever thread called it (``PyThread_acquire_lock_timed`` on the trace above).
-So an arm/re-arm is only safe while no dump is in flight; if one is, the caller
-parks holding the GIL and the whole process starves. Two things follow, and this
-file pins both:
+    task_wakeup_lock_held -> task_step -> ... -> cfunction_call
+      -> faulthandler_dump_traceback_later -> cancel_dump_traceback_later
+        -> PyThread_acquire_lock_timed -> _pthread_cond_wait -> __psynch_cvwait
 
-* (a) no C-timer call may be MADE on a thread whose parking wedges the session --
-  the event-loop thread, the plane thread that beat, or the sampler;
-* (b) while such a call is in flight, the watchdog's own gate must stay open, so
-  the sampler can still observe and the exit leg can still be re-read;
-* (c) and -- the finding that decides the fix, MEASURED HERE RATHER THAN ASSUMED --
-  moving the call off the loop is NOT sufficient on its own. The C call parks while
-  HOLDING THE GIL, so a dedicated worker thread parks holding it just the same and
-  the process wedges identically: a child that re-arms from a worker while its
-  dump channel cannot complete stops its ticker at the call and never reaches its
-  own ``MAIN-ALIVE`` print (recorded in the PR). (a) is therefore necessary and NOT
-  sufficient; (c) is the property a fix actually has to satisfy, and the last two
-  cells below assert it from both call sites.
+— WHILE HOLDING THE GIL, with the thread named ``stall-watchdog-progress`` unable
+to take it (``lock_PyThread_acquire_lock`` -> ``_PyParkingLot_Park`` ->
+``_PyThreadState_Attach`` -> ``take_gil``). The session wedges, the leg that exists
+to report the stall is stopped by the arming path, and the C timer can never finish
+what it was doing, so no dump reaches disk.
 
-WHAT IS PROVEN DETERMINISTICALLY HERE, and what is not, stated plainly:
+WHY THE CALL CANNOT RETURN (CPython 3.14.3, ``Modules/faulthandler.c``):
+``dump_traceback_later`` calls ``cancel_dump_traceback_later()`` first (``:806``),
+which releases ``cancel_event`` and blocks on
+``PyThread_acquire_lock(thread.running, 1)`` until the previous timer thread exits
+(``:686``, ``:689``) with ``intr_flag=0`` — no ``PyEval_SaveThread``, so the caller
+keeps the GIL. Between that cancel and the new timer being started (``:806`` to
+``:821``) the process holds no armed timer at all.
 
-* (a) is proven as a STRUCTURAL FACT -- thread identity, which cannot flake: every
-  call into the timer API is recorded with the thread that made it, and the loop's
-  own beat is driven through the real seams. This is the same shape
-  ``test_store_maintenance_callbacks_run_off_the_event_loop_thread`` uses, and for
-  the same reason (see AGENTS.md, "Prefer a structural invariant to a numeric one").
-  IT IS A NECESSARY CONDITION AND NOT A SUFFICIENT ONE: the child measurement in
-  the module docstring shows a dedicated worker thread wedging the process just as
-  the loop thread does, so a design that satisfies this cell alone still ships the
-  defect.
-* (b) is proven as a STATE fact in-process: ``_LOCK`` is the single gate every
-  sample and every beat passes through, the field trace shows the sampler parked
-  exactly there, and a parked timer call holds it -- so the cell asserts the gate
-  is free while the call is in flight. The end-to-end form of (b) -- the process's
-  Python threads actually stopping -- is proven in the child cells at the end of
-  this file, against the REAL C API, where it is observable at all only from
-  outside the process, once for a call made on the loop thread and once for a call
-  made on a dedicated one (the call site that a worker-shaped fix would move it to,
-  and which the same GIL defeats).
-* NOT proven here, and not claimed: WHY a field dump failed to finish. This file
-  forces the precondition (a dump that cannot complete) rather than explaining it.
-  The forcing is the rig's own substitution -- the dump is written to a channel
-  nobody drains -- and the child cell carries a draining control that shows the
-  channel is the only difference between "the loop survives" and "the loop wedges".
+THE FIX THESE CELLS PIN (design memo, option T1): no native timer call remains in
+this module's production path. The deadline is recorded by ``_arm_timer``, the fire
+is Python (``_fire``), and the dump is
+``faulthandler.dump_traceback(file=..., all_threads=True)`` — the same thread walk
+through the same writer, touching no timer state — taken outside ``_LOCK``. The
+out-of-process leg is a ``SIGUSR1`` registration on the same handle.
 
-WHAT IS NOT FIXED HERE. These cells are written to go RED on the pre-fix source
-and are left red on purpose: the fix is a design decision about who owns the C
-timer (a dedicated arming thread, or a policy that never replaces a pending timer
-from a loop thread), and it belongs to the architect's memo on the same defect.
-Whoever lands that fix flips these cells green; nothing here merges as a green
-suite until then.
+WHAT THE CELLS BELOW PROVE, and how each can fail:
+
+* P1 an ownership spy: across boot -> engage -> both planes' beats -> a held fire
+  -> disarm, the module makes NO call into the timer API at all.
+* P2 a child in which a dump is forcibly unable to finish: the module's arm, beat
+  and disarm paths still return, and the process is still running Python afterwards.
+  On the base ref the same child wedges (the memo's failing-first evidence).
+* P3 a source pin: a parse of the module that fails if a native timer call
+  reappears anywhere in its executable code.
+* P4 the fire's dump is taken OUTSIDE ``_LOCK``, which is what keeps a
+  hundreds-of-milliseconds stop-the-world from becoming the other plane's stall.
 """
 
 from __future__ import annotations
 
+import ast
+import faulthandler
 import os
 import socket
 import subprocess
@@ -82,30 +60,25 @@ import pytest
 
 from local_operator.session.runtime import stall_watchdog
 
-#: The name ``_start_sampler`` gives the sampler thread -- the thread the field
-#: trace shows unable to take the GIL, and therefore the second thread the timer
-#: API must never park.
-SAMPLER_NAME = "stall-watchdog-progress"
+#: The module under test, for the source pin.
+MODULE_PATH = Path(stall_watchdog.__file__)
 
-#: How long a cell waits for a publication from the code under test before it
-#: reports a wedge rather than a slow host. A backstop, never the assertion: the
-#: assertions below are about WHICH THREAD made a call and WHICH LOCK is free.
+#: The two C entry points the deadlock runs through. Named once, because the pin and
+#: the spy must agree on exactly which calls they are about.
+RETIRED_CALLS = ("dump_traceback_later", "cancel_dump_traceback_later")
+
+#: How long a cell waits for a publication from the code under test before it reports
+#: a wedge rather than a slow host. A backstop, never the assertion.
 PUBLISHED_S = 10.0
 
-#: How long the stand-in timer call in the gate cell parks. Only the teardown
-#: waits this long, and it is released earlier by the cell's own ``finally``.
-PARK_HOLD_S = 30.0
+#: How long the child in P2 gets to reach its sentinel. Generous on purpose: the
+#: child's own output is what says whether Python is still running.
+CHILD_BOUND_S = 25.0
 
-#: How long the loop thread gets to come back from ONE timer call in the child
-#: cell before the cell calls it wedged. Generous on purpose: the child's own
-#: ticks are what say whether Python is running at all, so this bound only has to
-#: separate "returned" from "never".
-CHILD_CALL_BOUND_S = 20.0
-
-#: The socket buffer the never-drained dump channel is given, in bytes. The dump
-#: of a single parked thread is already larger than this, so the C thread's write
-#: blocks on its own -- measured: with this buffer and no reader, ZERO bytes of
-#: the dump reach the other end, i.e. the write does not even partly complete.
+#: The socket buffer the never-drained dump channel is given. The dump of six
+#: parked, 250-frame-deep threads is far larger, so the C thread's write cannot be
+#: satisfied in one go — measured: with this buffer and no reader, ZERO bytes reach
+#: the other end, i.e. the write does not even partly complete.
 CHANNEL_SNDBUF = 1024
 
 
@@ -120,10 +93,10 @@ def _no_leaked_arm() -> Iterator[None]:
 def _child_env(config_dir: Path, **extra: str) -> dict[str, str]:
     """A child environment that can only touch ``config_dir``.
 
-    Every inherited ``CMUX_*``/``LOP_*``/``HERDR_*`` variable is stripped: this
-    suite is routinely run from inside an operator session whose own values would
-    otherwise be inherited, and ``LOCAL_OPERATOR_CONFIG_DIR`` alone is not enough
-    (AGENTS.md, "Isolating a run").
+    Every inherited ``CMUX_*``/``LOP_*``/``HERDR_*`` variable is stripped: this suite
+    is routinely run from inside an operator session whose own values would otherwise
+    be inherited, and ``LOCAL_OPERATOR_CONFIG_DIR`` alone is not enough (AGENTS.md,
+    "Isolating a run").
     """
     env = {k: v for k, v in os.environ.items() if not k.startswith(("CMUX_", "LOP_", "HERDR_"))}
     env["HOME"] = str(config_dir)
@@ -132,219 +105,228 @@ def _child_env(config_dir: Path, **extra: str) -> dict[str, str]:
     return env
 
 
-class _ThreadRecordingFaulthandler:
-    """Records WHICH THREAD each C-timer call is made on. Touches no real timer.
+def _wait_for(predicate: Any, timeout: float = PUBLISHED_S) -> bool:
+    """Wait (bounded) for a predicate on state the code under test writes."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return predicate()
 
-    The defect is a property of the CALLING THREAD, not of the arguments, so a spy
-    that lands on thread identity is the whole instrument. A real timer cannot be
-    driven into its blocked replace inside a pytest worker (that is the wedge), so
-    the structure is spied here and the real C behaviour is exercised in the child
-    cell below.
+
+class _OwnershipSpy:
+    """Records which THREAD calls each C entry point. Never installs a real timer.
+
+    Deliberately does NOT delegate: a real ``dump_traceback_later`` in a pytest
+    worker would arm a C timer that ends the worker with ``exit=True``, and this spy
+    exists to observe calls, not to survive them. What it proves is therefore
+    "the module asked for a timer" (or did not) — the end-to-end proof that a *real*
+    in-flight dump cannot wedge the arm path is the child in P2.
     """
 
     def __init__(self) -> None:
-        #: ``(kind, thread ident, thread name)`` in call order.
         self.calls: list[tuple[str, int, str]] = []
-        self.called = threading.Event()
+        self.registered: list[tuple[int, bool]] = []
+        self.unregistered: list[int] = []
 
-    def dump_traceback_later(self, seconds: float, **kwargs: Any) -> None:
-        self._record("arm")
+    def __getattr__(self, name: str) -> Any:
+        # Only the two retired calls are interesting; everything else (``register``,
+        # ``unregister``, ``dump_traceback``) is answered by a recorder so an unrelated
+        # new call cannot silently become an AttributeError in a cell.
+        def recorder(*args: Any, **kwargs: Any) -> None:
+            if name in RETIRED_CALLS:
+                self.calls.append((name, threading.get_ident(), threading.current_thread().name))
+            elif name == "register":
+                self.registered.append((int(args[0]), bool(kwargs.get("chain"))))
+            elif name == "unregister":
+                self.unregistered.append(int(args[0]))
 
-    def cancel_dump_traceback_later(self) -> None:
-        self._record("cancel")
-
-    def _record(self, kind: str) -> None:
-        self.calls.append((kind, threading.get_ident(), threading.current_thread().name))
-        self.called.set()
+        return recorder
 
 
-def _timer_calls_on(calls: list[tuple[str, int, str]], idents: set[int], names: set[str]):
-    """The recorded calls made by any of these threads -- the offenders, if any."""
-    return [c for c in calls if c[1] in idents or c[2] in names]
+class _DumpProbe:
+    """A probe that answers, so the sampler runs and the fire path is reachable."""
+
+    def __call__(self) -> tuple[object, bool]:
+        return (0.0, True)
 
 
-def test_the_c_timer_is_never_armed_from_a_thread_whose_park_wedges_the_session(
+def test_no_call_into_the_timer_api_is_made_in_an_armed_lifetime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """PROPERTY (a): the timer API is only ever called from a dedicated thread.
+    """P1: boot, both planes' beats, a held fire and disarm make NO timer-API call.
 
-    THE DEFECT THIS CELL IS RED FOR. ``beat`` and ``arm`` call ``_rearm`` ->
-    ``_arm_timer`` -> ``faulthandler.dump_traceback_later`` on the CALLER'S thread,
-    and the caller is the workload's own event loop (``process._beat_stall_watchdog``
-    is an ``asyncio`` task on it). While a dump is in flight that call parks holding
-    the GIL -- which is exactly the ``sample`` trace both preserved specimens carry:
-    ``task_step`` -> ``faulthandler_dump_traceback_later`` ->
-    ``cancel_dump_traceback_later`` -> ``PyThread_acquire_lock_timed``. So the cell
-    drives the real seams from this thread (which is what the runtime's loop is) and
-    asserts that none of the calls the module makes lands on it.
+    THE DECISION THIS PINS is "this module does not touch the C timer", and it is
+    asserted as an EMPTY CALLER SET rather than as "not on the loop thread", because
+    the field evidence is that the loop thread is where the park hurt while the
+    underlying defect is the call itself: the C call parks holding the GIL, so a
+    dedicated worker parks holding it too (measured: a child re-arming from a fresh
+    thread stops its ticker at the call and never reaches its own ``MAIN-ALIVE``
+    print). Empty is the only set that cannot wedge anything.
 
-    WHY THREAD IDENTITY AND NOT A STOPWATCH: a timing bound here would be a bet on
-    the fleet's load, and the property is a fact about where the code ran. This is
-    the pattern AGENTS.md names as the strongest form of "this work happened off
-    the event loop".
+    WHY A SPY AND NOT A STOPWATCH: a timing bound here would be a bet on the fleet's
+    load, and the property is a fact about which calls the module makes. AGENTS.md
+    names thread identity and structural spies as the strongest form of "this work
+    did not happen on that thread"; this is the degenerate case where the work must
+    not happen at all.
 
-    THE SAMPLER IS NAMED TOO, and it is a deliberate demand rather than a mirror of
-    today's code: a design that parks the timer call on ``stall-watchdog-progress``
-    would keep the GIL free (so it would pass a loop-only assertion) and still be a
-    defect -- that thread is the only Python leg left when everything else is
-    parked, and while it sits in the timer API it can neither sample, nor re-read
-    the exit leg, nor record a held fire, so the bound it is holding fires on a
-    runtime that is working. One dedicated thread for the timer, or none of this.
+    THE LIFETIME IS DRIVEN IN FULL, because a call can hide in any of its phases: the
+    boot arm, ``engage`` moving the bound down, a ``beat`` from each plane, the
+    executing-loop extension, a fire, the held-fire annotation and re-arm, and
+    ``disarm``. The fire is driven on the HELD leg (``busy`` reports work in flight),
+    which is the leg that annotates and keeps running — the fatal leg ends the process
+    and is exercised by the child in P2.
 
-    MUTATION THIS CELL CATCHES: route the arming back onto the caller's thread (the
-    shape on the base ref) -> red. Move it to a thread that is not the loop's ->
-    green.
+    MUTATION THIS CELL CATCHES: put a ``faulthandler.dump_traceback_later`` or
+    ``cancel_dump_traceback_later`` call back anywhere on this path -> red.
     """
-    recorder = _ThreadRecordingFaulthandler()
-    monkeypatch.setattr(stall_watchdog, "faulthandler", recorder)
+    spy = _OwnershipSpy()
+    monkeypatch.setattr(stall_watchdog, "faulthandler", spy)
 
-    # THIS thread plays the runtime's event loop: it arms the process (the entry
-    # point's own thread) and beats the workload plane, which is definitionally
-    # the loop's thread (see `beat`).
-    loop_thread = threading.current_thread()
-    tried: list[str] = []
-
-    def a_probe() -> tuple[object, bool]:
-        return (len(tried), True)  # motion that changes: a live, answering probe
-
-    armed = stall_watchdog.arm(seconds=30.0, directory=tmp_path, probe=a_probe)
-    tried.append("arm")
-    if armed:
-        stall_watchdog.beat(stall_watchdog.WORKLOAD)
-        tried.append("beat")
-
-    # The publication is the spy being called at all: a module that armed nothing
-    # is the OTHER defect (an unbounded runtime), and it must fail here rather than
-    # pass a "no call was made" assertion vacuously.
-    assert recorder.called.wait(PUBLISHED_S), (
-        f"no call reached the timer API within {PUBLISHED_S}s of {tried}; the runtime "
-        f"has no bound, which this cell treats as a failure rather than as a pass"
-    )
-
-    offenders = _timer_calls_on(recorder.calls, {loop_thread.ident or -1}, {SAMPLER_NAME})
-    assert not offenders, (
-        f"the C timer was called on the session's own thread: {offenders} "
-        f"(loop thread is {loop_thread.name!r}/{loop_thread.ident}, calls so far "
-        f"{recorder.calls}). A dump in flight makes that call park while holding the "
-        f"GIL, which is the wedge both preserved specimens are parked in -- the arming "
-        f"call has to be made by a thread whose parking costs the session nothing"
-    )
-    harness_calls = [c for c in recorder.calls if c[2] == "MainThread"]
-    assert harness_calls == [], (
-        f"the pytest main thread reached the timer API: {harness_calls}; in a runtime "
-        f"that thread is the event loop"
-    )
-
-
-class _ParkingFaulthandler:
-    """A stand-in for the one C behaviour that matters: the call does not return.
-
-    ``dump_traceback_later`` parses no timer here -- it parks until the cell
-    releases it, which is what a replace does while a dump is in flight. Parking on
-    an ``Event`` RELEASES the GIL, deliberately: it isolates the second half of the
-    defect (the module's own gate) from the GIL half, which the child cell below
-    exercises against the real API.
-    """
-
-    def __init__(self, gate: threading.Event, parked: threading.Event) -> None:
-        self.gate = gate
-        self.parked = parked
-        self.cancels = 0
-
-    def dump_traceback_later(self, seconds: float, **kwargs: Any) -> None:
-        self.parked.set()
-        self.gate.wait(PARK_HOLD_S)
-
-    def cancel_dump_traceback_later(self) -> None:
-        self.cancels += 1
-
-
-def test_the_watchdogs_gate_is_free_while_a_timer_call_is_in_flight(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """PROPERTY (b): a parked timer call must not hold the watchdog's own gate.
-
-    THE FIELD TRACE THIS PINS, frame for frame: the thread named
-    ``stall-watchdog-progress`` is parked in ``lock_PyThread_acquire_lock`` ->
-    ``_PyParkingLot_Park`` -> ``_PyThreadState_Attach`` -> ``take_gil``. It is
-    waiting on a PYTHON lock -- ``_LOCK``, which every sample takes (twice per
-    wake: around the probe read and around the whole of ``_sample``) -- held by the
-    loop thread across its timer call. So even on a hypothetical build where the
-    GIL were free, the watchdog could not observe: the leg that reports the stall
-    is itself stopped by the arming path.
-
-    WHAT IS ASSERTED, and why it is not a timing claim: the gate is free WHILE the
-    call is provably in flight (the stand-in publishes ``parked`` before it parks).
-    The only wait is for that publication; there is no elapsed-time comparison on
-    the success path.
-
-    MUTATION THIS CELL CATCHES: take ``_LOCK`` across the timer call (the shape on
-    the base ref: ``beat`` holds it from the stamp through ``_rearm``) -> red.
-    Perform the call outside the gate, or on a thread of its own -> green.
-    """
-    gate = threading.Event()
-    parked = threading.Event()
-    stand_in = _ParkingFaulthandler(gate, parked)
-    loop: list[threading.Thread] = []
-
-    # The state is armed through a pass-through first, so the cell exercises a
-    # RE-ARM (the production shape: `beat` on an armed runtime) rather than the
-    # boot arm, and so the sampler exists.
-    recorder = _ThreadRecordingFaulthandler()
-    monkeypatch.setattr(stall_watchdog, "faulthandler", recorder)
     assert (
-        stall_watchdog.arm(seconds=30.0, directory=tmp_path, probe=lambda: (0.0, True)) is True
-    ), "the cell could not arm, so it has nothing to re-arm"
-    monkeypatch.setattr(stall_watchdog, "faulthandler", stand_in)
-
-    def beat_from_the_loop() -> None:
-        stall_watchdog.beat(stall_watchdog.WORKLOAD)
-
-    loop_thread = threading.Thread(target=beat_from_the_loop, name="loop-proxy", daemon=True)
-    loop.append(loop_thread)
-    loop_thread.start()
-    try:
-        assert parked.wait(PUBLISHED_S), (
-            "the beat never reached the timer API, so this cell proved nothing about a "
-            "call in flight"
+        stall_watchdog.arm(
+            seconds=1.0,
+            directory=tmp_path,
+            probe=_DumpProbe(),
+            busy=lambda: True,  # work in flight: the fire annotates and stays
         )
-        # THE GATE ITSELF, read while the call is in flight: `_LOCK` is what every
-        # sample and every beat passes through, so a gate that cannot be taken IS
-        # the sampler being unable to observe (its own park, frame for frame).
-        acquired = stall_watchdog._LOCK.acquire(timeout=2.0)
-        try:
-            assert acquired, (
-                "the watchdog's gate is held while a timer call is in flight, so no "
-                "sample can complete: this is the 'stall-watchdog-progress' half of the "
-                "field trace, and it means the leg that exists to report a stall is "
-                "itself stopped by the arming path"
-            )
-        finally:
-            if acquired:
-                stall_watchdog._LOCK.release()
+        is True
+    ), "the cell could not arm, so it drove no phase of the lifetime"
+
+    stall_watchdog.engage()
+    stall_watchdog.beat(stall_watchdog.WORKLOAD)
+    stall_watchdog.beat(stall_watchdog.SERVING)
+    # THE FIRE, on the held leg: the sampler fires at the deadline, dumps every thread
+    # into this cell's own dump file, annotates and re-arms.
+    fired = _wait_for(
+        lambda: stall_watchdog._fired_count(stall_watchdog.dump_path(os.getpid(), tmp_path)) >= 1,
+        timeout=PUBLISHED_S,
+    )
+    stall_watchdog.disarm()
+
+    assert not spy.calls, (
+        f"the module called into the C timer API during an armed lifetime: {spy.calls}. "
+        f"Those calls park while holding the GIL when a dump is in flight, and the "
+        f"second one is the cancel that waits for it — the deadlock both preserved "
+        f"specimens are parked in"
+    )
+    assert fired, (
+        "the bound never fired in this cell, so the fire phase of the lifetime was "
+        "driven by nothing (the ownership assertion above is only as good as the "
+        "phases actually exercised)"
+    )
+    assert spy.registered, "the out-of-process leg (SIGUSR1) was never registered at arm"
+    assert spy.registered[0][1] is True, (
+        "the evidence signal was registered with chain=False, which would silently "
+        "displace whatever handler owned SIGUSR1 before this arm"
+    )
+    assert spy.unregistered == [spy.registered[0][0]], (
+        f"disarm left the signal leg registered (unregistered={spy.unregistered}, "
+        f"registered={spy.registered}); a disarmed runtime must not keep a handler "
+        f"that writes into the file disarm has just removed"
+    )
+
+
+def test_the_fire_takes_its_dump_outside_the_watchdogs_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P4: the all-thread dump is taken with ``_LOCK`` FREE.
+
+    WHY THIS IS ITS OWN PROPERTY: the gate is what every ``beat`` and every sample
+    takes, and an all-thread dump measures in the hundreds of milliseconds on this
+    fleet (200 threads x 300 frames, measured: see the PR). Taking it while holding
+    the gate would hand the other plane's tick the very stall the artifact exists to
+    report — the same class of defect as the deadlock, at a smaller scale.
+
+    THE ASSERTION IS STRUCTURAL: the spy asks the gate whether it is free AT THE
+    MOMENT the dump is taken, by trying a non-blocking acquire. A successful acquire
+    proves the caller does not hold it; the recorded answer must be exactly that.
+
+    MUTATION THIS CELL CATCHES: move ``_fire`` inside the ``with _LOCK:`` block in the
+    sampler, or hold the gate across the dump for any other reason -> red.
+    """
+    gate_was_free: list[bool] = []
+    real_dump = faulthandler.dump_traceback
+
+    def spy_dump_traceback(*args: Any, **kwargs: Any) -> None:
+        got = stall_watchdog._LOCK.acquire(blocking=False)
+        gate_was_free.append(got)
+        if got:
+            stall_watchdog._LOCK.release()
+        real_dump(*args, **kwargs)
+
+    monkeypatch.setattr(faulthandler, "dump_traceback", spy_dump_traceback)
+    assert (
+        stall_watchdog.arm(
+            seconds=1.0,
+            directory=tmp_path,
+            probe=_DumpProbe(),
+            busy=lambda: True,
+        )
+        is True
+    )
+    try:
+        assert _wait_for(lambda: bool(gate_was_free), timeout=PUBLISHED_S), (
+            "the bound never fired, so this cell proved nothing about the dump's "
+            "position relative to the gate"
+        )
+        assert all(gate_was_free), (
+            f"the all-thread dump was taken with the watchdog's gate held "
+            f"(free at dump time: {gate_was_free}); the gate is what every beat and "
+            f"every sample needs, so holding it across a hundreds-of-milliseconds dump "
+            f"is the same defect this module exists to report"
+        )
     finally:
-        # Un-park the stand-in BEFORE teardown: `disarm` takes the same gate, and a
-        # wedge left here would hang the suite rather than fail a cell.
-        gate.set()
-        for thread in loop:
-            thread.join(timeout=PARK_HOLD_S)
+        stall_watchdog.disarm()
 
 
-#: The fire the parent watches for on the dump channel: proof, from OUTSIDE the
-#: process, that the C timer really fired and is writing into the channel. Nothing
-#: inside the child can prove this once it wedges.
-FIRE_HEADER = b"Timeout ("
+def test_no_native_timer_call_survives_in_the_modules_executable_code() -> None:
+    """P3: a source pin — the retired calls cannot come back silently.
 
-#: The file the parent creates to say "the dump is in flight -- make the calls".
-#: A publication rather than a sleep: the child does not guess when the dump landed.
-GO_MARKER_S = 60.0
+    THE PARSE, not a grep: this module's docstrings quote both call names at length
+    (they are the evidence for the change), so a text scan would either fail on its
+    own documentation or have to be loosened until it caught nothing. An AST walk
+    sees only executable attribute access, which is exactly the set to keep empty.
 
-#: The child that drives the REAL C API into the wedge. Its dump goes to a channel
-#: the parent stops draining the moment it has seen the fire, which is the
-#: substituted precondition: a dump that cannot finish. ``repeat=True`` is what
-#: keeps it in that state -- the C thread re-arms itself internally, so the channel
-#: stays busy without any Python call.
-_TIMER_WEDGE_CHILD = """
+    It also pins the one *entry point* that must remain: ``faulthandler.dump_traceback``
+    is the whole of the new dump path, so a change that removed every reference would
+    satisfy this cell while destroying the artifact — hence the second assertion.
+
+    MUTATION THIS CELL CATCHES: any reintroduction of a timer-API call in production
+    code, including one added to a new helper -> red.
+    """
+    tree = ast.parse(MODULE_PATH.read_text(encoding="utf-8"))
+    offenders: list[tuple[str, int]] = []
+    dump_traceback_calls = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not isinstance(func, ast.Attribute):
+            continue
+        if func.attr in RETIRED_CALLS:
+            offenders.append((func.attr, node.lineno))
+        if func.attr == "dump_traceback":
+            dump_traceback_calls += 1
+
+    assert not offenders, (
+        f"{MODULE_PATH.name} calls the retired timer API at {offenders}. Every one of "
+        f"those calls replaces a pending timer, and the replace cancels a dump in "
+        f"flight while holding the GIL — see the module docstring for the stacks"
+    )
+    assert dump_traceback_calls >= 1, (
+        "the module no longer takes a dump at all: ``faulthandler.dump_traceback`` is "
+        "the whole of the fire's evidence path now"
+    )
+
+
+#: The child for P2. THE PRECONDITION IS FORCED, not waited for: a timer that fires
+#: repeatedly into a dump channel the parent stops draining the moment it has seen the
+#: fire, so the C thread's write cannot complete and that dump is in flight for good.
+#: Only then does the child touch the module's arm path — and the module's own dump
+#: goes to its own directory, so nothing here depends on the blocked channel.
+_ARM_PATH_CHILD = """
 import faulthandler
 import pathlib
 import socket
@@ -357,10 +339,11 @@ from local_operator.session.runtime import stall_watchdog
 sink = socket.socket(fileno=int(sys.argv[1]))
 mode = sys.argv[2]
 go = pathlib.Path(sys.argv[3])
-go_bound = float(sys.argv[4])
+dump_dir = pathlib.Path(sys.argv[4])
+go_bound = float(sys.argv[5])
 
-# Parked, DEEP frames: the all-thread dump is far larger than any socket buffer,
-# so the C thread's first write blocks the moment nobody is reading.
+# Parked, DEEP frames: the all-thread dump is far larger than any socket buffer, so
+# the C thread's first write blocks the moment nobody is reading.
 hold = threading.Event()
 
 
@@ -385,10 +368,6 @@ def ticker():
 
 threading.Thread(target=ticker, name="loop-proxy", daemon=True).start()
 
-# THE PRECONDITION, forced: a timer that fires repeatedly into the dump channel.
-# The parent stops draining as soon as it has seen the fire, so the C thread's
-# write cannot complete and the dump stays in flight -- nothing in Python has to
-# guess that it happened.
 faulthandler.dump_traceback_later(0.05, repeat=True, file=sink, exit=False)
 print(f"TIMER-ARMED {mode}", flush=True)
 
@@ -400,48 +379,43 @@ while not go.exists():
     time.sleep(0.01)
 print("GO", flush=True)
 
-# THE CALL UNDER TEST, made on this process's loop thread (its main thread, which
-# is where the runtime's event loop runs) through the module's single spelling for
-# the C call. Each of these replaces the pending timer -> it must cancel the dump
-# in flight first. In "worker" mode the same call is made on a FRESH THREAD, which
-# is the shape a fix that only moves the call off the loop would use.
-def callback(i):
-    stall_watchdog._arm_timer(sink, 30.0, exit_leg=False)
-    print(f"CALL {i} RETURNED", flush=True)
+# THE ARM PATH UNDER TEST: what every runtime's boot, every beat and every clean exit
+# does. On the base ref the first of these parks in the cancel of a dump that cannot
+# finish, holding the GIL, and the ticker above stops for good.
+def probe():
+    return (0.0, True)
 
 
-for i in range(20):
-    if mode == "worker":
-        threading.Thread(target=callback, args=(i,), name=f"timer-{i}", daemon=True).start()
-        print(f"SUBMITTED {i}", flush=True)
-    else:
-        callback(i)
-    time.sleep(0.05)
+assert stall_watchdog.arm(seconds=600.0, directory=dump_dir, probe=probe) is True
+print("ARMED", flush=True)
+stall_watchdog.engage()
+stall_watchdog.beat(stall_watchdog.WORKLOAD)
+stall_watchdog.beat(stall_watchdog.SERVING)
+stall_watchdog.disarm()
+print("ARM-PATH-RETURNED", flush=True)
 print("LOOP-SURVIVED", flush=True)
 """
 
 
-class _WedgeChildRun:
-    """One run of the child, with the dump channel driven from the parent side.
+class _ArmPathChild:
+    """One P2 run, with the dump channel driven from the parent side.
 
-    ``keep_draining`` decides the whole cell: ``True`` is the CONTROL, where the
-    parent keeps reading so the dump completes and nothing can wedge; ``False`` is
-    the rig, where the parent stops reading the moment it has SEEN the fire, so the
-    dump cannot finish. The only difference between the two runs is whether the
-    dump completes -- which is what makes the result a measurement of that rather
-    than of the rig.
+    ``keep_draining`` decides the cell: ``True`` is the CONTROL — the parent keeps
+    reading, so the dump completes and nothing can wedge — and ``False`` is the rig,
+    where the parent stops reading the moment it has SEEN the fire, so the dump cannot
+    finish. The only difference between the two runs is whether the dump completes,
+    which is what makes the result a measurement of that rather than of the rig.
     """
 
     def __init__(self, tmp_path: Path, mode: str, *, keep_draining: bool) -> None:
-        self.mode = mode
         self.keep_draining = keep_draining
         self.lines: list[str] = []
-        self.script = tmp_path / f"timer_wedge_child_{mode}.py"
-        self.script.write_text(_TIMER_WEDGE_CHILD, encoding="utf-8")
+        self.script = tmp_path / f"arm_path_child_{mode}.py"
+        self.script.write_text(_ARM_PATH_CHILD, encoding="utf-8")
         self.go = tmp_path / f"go-{mode}"
+        self.dump_dir = tmp_path / f"dumps-{mode}"
+        self.dump_dir.mkdir(parents=True, exist_ok=True)
         self.read_end, write_end = socket.socketpair()
-        # The dump of one parked, 250-frame-deep thread is already far larger than
-        # this buffer, so the C thread's write cannot be satisfied in one go.
         write_end.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, CHANNEL_SNDBUF)
         os.set_inheritable(write_end.fileno(), True)
         self.process = subprocess.Popen(  # noqa: S603 -- fixed argv, no shell
@@ -451,7 +425,8 @@ class _WedgeChildRun:
                 str(write_end.fileno()),
                 mode,
                 str(self.go),
-                str(GO_MARKER_S),
+                str(self.dump_dir),
+                "60",
             ],
             env=_child_env(tmp_path),
             cwd=str(tmp_path),
@@ -461,7 +436,7 @@ class _WedgeChildRun:
             pass_fds=(write_end.fileno(),),
         )
         write_end.close()
-        self.reader = threading.Thread(target=self._read_stdout, name="child-out", daemon=True)
+        self.reader = threading.Thread(target=self._read_stdout, name=f"out-{mode}", daemon=True)
         self.reader.start()
 
     def _read_stdout(self) -> None:
@@ -470,29 +445,25 @@ class _WedgeChildRun:
             self.lines.append(line.rstrip("\n"))
 
     def wait_for_fire_then_release(self) -> bool:
-        """Stop draining once the dump has really started; then say GO.
+        """Stop reading once the dump has really started; then say GO.
 
-        The fire is published on the channel itself, so this is an event rather
-        than a guess: the child must not make the calls under test until a dump is
-        demonstrably in flight, and only the parent can see that.
-
-        With ``keep_draining`` the reader keeps going instead -- the control -- and
-        the go marker is still only sent after the fire is seen, so both runs make
-        the calls at the same point in the child's life.
+        The fire is published on the channel itself, so this is an event rather than a
+        guess: the child must not touch the arm path until a dump is demonstrably in
+        flight, and only the parent can see that.
         """
         seen = b""
         deadline = time.monotonic() + PUBLISHED_S
         self.read_end.settimeout(0.5)
-        while FIRE_HEADER not in seen and time.monotonic() < deadline:
+        while b"Timeout (" not in seen and time.monotonic() < deadline:
             try:
                 seen += self.read_end.recv(65536)
             except TimeoutError:
                 continue
             except OSError:
                 break
-        fired = FIRE_HEADER in seen
+        fired = b"Timeout (" in seen
         if fired and self.keep_draining:
-            threading.Thread(target=self._drain_forever, name="dump-drain", daemon=True).start()
+            threading.Thread(target=self._drain_forever, name="drain", daemon=True).start()
         if fired:
             self.go.write_text("go", encoding="utf-8")
         return fired
@@ -505,7 +476,6 @@ class _WedgeChildRun:
             pass
 
     def wait_for(self, marker: str, timeout: float) -> str:
-        """Wait (bounded) for a marker the child prints; return the output either way."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if any(marker in line for line in self.lines):
@@ -523,112 +493,56 @@ class _WedgeChildRun:
         self.read_end.close()
 
 
-def test_a_timer_call_made_while_a_dump_is_in_flight_cannot_freeze_the_loop(
-    tmp_path: Path,
-) -> None:
-    """PROPERTY (b), end to end and against the REAL C API: the process must live.
+def test_the_arm_path_returns_while_a_dump_is_in_flight(tmp_path: Path) -> None:
+    """P2: with a dump that cannot finish, the arm path must still return.
 
-    The child arms a timer whose dump can never complete (the channel is never
-    drained) and then calls the module's single spelling for the C call twenty
-    times from its own loop thread. On the base ref the first call that lands
-    after the dump is in flight never returns -- and because it holds the GIL,
-    every Python thread in the child stops, which is what ``TICK`` going silent
-    shows. The child is the only place this is observable at all: with the GIL
-    held there is no Python left inside the process to observe with.
+    THIS IS THE FAILING-FIRST CELL for the whole change, and it is the one the field
+    demanded: the runtime's own boot, its two planes' beats and its clean exit all run
+    through the arm path, and on the base ref the first of them parks inside
+    ``cancel_dump_traceback_later`` while holding the GIL — every other Python thread
+    in the process stops, which is why the child's ``TICK`` line goes silent at
+    ``GO`` and neither sentinel appears.
 
-    ASSERTED: the child reached ``LOOP-SURVIVED``. What that means is the whole
-    property -- the loop thread came back from every call while a dump was in
-    flight, so the watchdog's arming path cannot wedge a runtime.
+    ASSERTED ON A SENTINEL, never on a stopwatch: ``ARM-PATH-RETURNED`` then
+    ``LOOP-SURVIVED``. The bound only decides how long "never" is waited out; it is
+    not the evidence.
 
-    THE CONTROL, same child, same bound, channel drained: it reaches
-    ``LOOP-SURVIVED`` on any build. Without it a green run would also be explained
-    by the rig never having produced an in-flight dump at all.
+    THE CONTROL RUNS THE SAME CHILD with the channel drained, and reaches both
+    sentinels on any build — so a green result cannot be explained by the rig never
+    having produced an in-flight dump at all.
 
-    MUTATION THIS CELL CATCHES: make the arming call again from the loop thread
-    while a dump is in flight (the shape on the base ref) -> red, with the child's
-    ``TICK`` line and its last ``CALL n RETURNED`` as the evidence of where it
-    stopped.
+    MUTATION THIS CELL CATCHES: any arm path that reaches a C timer call again -> red.
     """
-    control = _WedgeChildRun(tmp_path, "control", keep_draining=True)
+    control = _ArmPathChild(tmp_path, "control", keep_draining=True)
     try:
         assert control.wait_for_fire_then_release(), (
             "the control child never produced a fired dump on its channel, so this rig "
             f"is not measuring what it claims; output was {control.wait_for('TICK', 1.0)!r}"
         )
-        control_output = control.wait_for("LOOP-SURVIVED", CHILD_CALL_BOUND_S)
+        control_output = control.wait_for("LOOP-SURVIVED", CHILD_BOUND_S)
         assert "LOOP-SURVIVED" in control_output, (
             "the CONTROL run did not survive with its dump channel drained, so the "
-            "channel is not the difference this cell is about; its output was "
+            f"channel is not the difference this cell is about; output was "
             f"{control_output!r}"
         )
     finally:
         control.close()
 
-    rig = _WedgeChildRun(tmp_path, "wedge", keep_draining=False)
+    rig = _ArmPathChild(tmp_path, "wedge", keep_draining=False)
     try:
         assert rig.wait_for_fire_then_release(), (
-            "no dump was ever seen in flight, so this cell proved nothing about a call "
-            f"made while one is; output was {rig.wait_for('TICK', 1.0)!r}"
+            "no dump was ever seen in flight, so this cell proved nothing about an arm "
+            f"path taken while one is; output was {rig.wait_for('TICK', 1.0)!r}"
         )
-        output = rig.wait_for("LOOP-SURVIVED", CHILD_CALL_BOUND_S)
+        output = rig.wait_for("LOOP-SURVIVED", CHILD_BOUND_S)
     finally:
         pid = rig.process.pid
         rig.close()
-    assert "LOOP-SURVIVED" in output, (
-        f"the loop thread never came back from the arming call with a dump in flight "
-        f"(child pid {pid} was killed after {CHILD_CALL_BOUND_S}s). The child stopped "
-        f"after: {output.splitlines()[-4:]!r} -- TICK silent between two CALL lines is "
-        f"the field signature: the loop thread parked inside the C timer call holding "
-        f"the GIL, so no Python thread in the process can run"
+    assert "ARM-PATH-RETURNED" in output, (
+        f"the arm path never returned while a dump was in flight (child pid {pid} was "
+        f"killed after {CHILD_BOUND_S}s). The child stopped after: "
+        f"{output.splitlines()[-4:]!r} — a ticker that goes silent at GO is the field "
+        f"signature: the caller parked inside the C timer call holding the GIL, so no "
+        f"Python thread in the process could run"
     )
-
-
-def test_the_same_call_from_a_dedicated_thread_leaves_the_process_alive(
-    tmp_path: Path,
-) -> None:
-    """PROPERTY (c): the call site is not the whole story -- the GIL travels with it.
-
-    THE MEASUREMENT THIS CELL EXISTS FOR, and the one that changes the fix's design
-    space: the same rig as the cell above, with the SAME real C API and the same
-    never-completing dump, but the re-arm is made on a FRESH THREAD per call. A
-    fix shaped "move the arming call off the event loop" satisfies the structural
-    cell and this shape -- and it does NOT fix the defect. Measured on the base ref
-    with a standalone child: the worker parks inside ``dump_traceback_later``
-    holding the GIL, the ticker thread stops at ``TICK 4``, and the main thread
-    never reaches its own ``MAIN-ALIVE`` print. Nothing else in the process runs,
-    because the GIL is a process-wide lock and the parked call never releases it.
-
-    WHAT A FIX THEREFORE HAS TO DO, stated as the property rather than as a
-    prescription: a call into the timer API must be harmless to the REST of the
-    process whatever thread makes it and whatever is already in flight. That is
-    satisfiable by not entering the cancel path while a dump may be in flight, or by
-    making the call without the GIL -- the design decision is the architect's.
-
-    THE RIG'S LIMIT, stated because it bounds what this cell can catch: the in-flight
-    dump here is armed by the child through the same C API the module uses, but not
-    through the module's own bookkeeping. A fix that only avoids re-arming when the
-    MODULE believes its own timer has fired is not exercised by this rig and would
-    leave this cell red; that is a narrower property than the two preserved
-    specimens demand, and it is the reason this cell is written against a dump in
-    flight rather than against the module's fire history.
-
-    MUTATION THIS CELL CATCHES: any arrangement in which a Python thread can be
-    parked inside the timer API while another thread needs the GIL -> red.
-    """
-    rig = _WedgeChildRun(tmp_path, "worker", keep_draining=False)
-    try:
-        assert rig.wait_for_fire_then_release(), (
-            "no dump was ever seen in flight, so this cell proved nothing about a call "
-            f"made while one is; output was {rig.wait_for('TICK', 1.0)!r}"
-        )
-        output = rig.wait_for("LOOP-SURVIVED", CHILD_CALL_BOUND_S)
-    finally:
-        pid = rig.process.pid
-        rig.close()
-    assert "LOOP-SURVIVED" in output, (
-        f"a call made on a dedicated thread froze the process anyway (child pid {pid} "
-        f"killed after {CHILD_CALL_BOUND_S}s). The child stopped after: "
-        f"{output.splitlines()[-4:]!r} -- a TICK line that stops at a SUBMITTED/CALL "
-        f"line is the GIL being held by a thread that is not the loop, which is why "
-        f"moving the call off the loop is not a fix by itself"
-    )
+    assert "LOOP-SURVIVED" in output, output

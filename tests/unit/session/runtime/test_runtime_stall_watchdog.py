@@ -130,6 +130,10 @@ class _FakeFaulthandler:
     def __init__(self) -> None:
         self.armed: list[tuple[float, bool, Path]] = []
         self.cancels = 0
+        #: The out-of-process leg, recorded rather than installed: a cell must be able to
+        #: assert the leg exists WITHOUT a real SIGUSR1 handler in a pytest worker.
+        self.registered: list[tuple[int, bool, str]] = []
+        self.unregistered: list[int] = []
         #: The file's contents AT THE MOMENT the timer was armed.
         self.text_at_arm = ""
 
@@ -141,6 +145,14 @@ class _FakeFaulthandler:
 
     def cancel_dump_traceback_later(self) -> None:
         self.cancels += 1
+
+    def register(self, signum: int, **kwargs: Any) -> None:
+        #: ``all_threads`` and ``chain`` are recorded because both are load bearing:
+        #: ``chain=True`` is what stops this leg displacing somebody else's handler.
+        self.registered.append((signum, bool(kwargs.get("chain")), str(kwargs.get("file"))))
+
+    def unregister(self, signum: int) -> None:
+        self.unregistered.append(signum)
 
 
 def _child_env(config_dir: Path, **extra: str) -> dict[str, str]:
@@ -751,6 +763,12 @@ def test_a_beat_whose_rearm_failed_says_the_sibling_is_behind_the_last_beat(
 
         def cancel_dump_traceback_later(self) -> None:
             real_faulthandler.cancel_dump_traceback_later()
+
+        def register(self, *args: object, **kwargs: object) -> None:
+            raise OSError("no signal leg for you")
+
+        def unregister(self, *args: object, **kwargs: object) -> None:
+            return
 
     stall_watchdog.disarm()
     assert stall_watchdog.arm(seconds=30.0, directory=tmp_path) is True
@@ -6046,7 +6064,7 @@ def test_the_held_fire_backoff_can_never_shorten_the_bound(
     monkeypatch.setattr(
         stall_watchdog,
         "_arm_timer",
-        lambda handle, remaining, *, exit_leg: captured.append(remaining),
+        lambda armed, remaining: captured.append(remaining),
     )
     monkeypatch.setattr(stall_watchdog, "_record_held_fire", lambda armed: False)
     monkeypatch.setattr(stall_watchdog, "_dump_size", lambda path: 0)
@@ -6076,7 +6094,7 @@ def test_the_backoff_counter_is_per_EPISODE_not_per_process(
     same factor. ``_apply_exit_leg`` is the flip the sampler makes when the work clears
     with no fire pending, so that is where the episode ends.
     """
-    monkeypatch.setattr(stall_watchdog, "_arm_timer", lambda handle, remaining, *, exit_leg: None)
+    monkeypatch.setattr(stall_watchdog, "_arm_timer", lambda armed, remaining: None)
     monkeypatch.setattr(stall_watchdog, "_record_held_fire", lambda armed: False)
 
     dump, handle = _observed_dump(tmp_path, 4247)
