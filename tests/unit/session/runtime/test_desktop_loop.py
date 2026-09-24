@@ -310,6 +310,7 @@ async def test_the_loops_own_turn_is_stamped_as_harness_chrome(tmp_path):
     The negative control is in the same transcript: the person's own turn is not
     stamped, which is what stops the marker from hiding a human's words.
     """
+    from local_operator.harness.types import Message
     from local_operator.session.goal_loop import LOOP_GOAL_PROMPT
     from tests.e2e.harness import (
         ScriptedStream,
@@ -330,7 +331,11 @@ async def test_the_loops_own_turn_is_stamped_as_harness_chrome(tmp_path):
         async with asyncio.timeout(60):
             while driver.running:
                 await asyncio.sleep(0.01)
-        rows = [m for m in session.history() if getattr(m, "role", None) == "user"]
+        # ``isinstance(Message)`` is the repo's narrowing here rather than a
+        # ``getattr`` guard: ``history()`` is a union that also carries
+        # ``CustomMessage``, which has no ``text``/``provider_payload`` at all,
+        # and this cell reads the persisted ROW.
+        rows = [m for m in session.history() if isinstance(m, Message) and m.role == "user"]
     finally:
         await handle.dispose()
         await dispose_quietly(session)
