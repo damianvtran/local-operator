@@ -933,3 +933,95 @@ def test_every_child_row_the_marks_resolve_reads_them_off_the_pass(tmp_path) -> 
         f"{large_comms._records.touches / small_touches:.1f}x — that is the "
         "quadratic shape back on the per-row half"
     )
+
+
+def test_a_row_that_cannot_name_itself_costs_a_mark_and_not_the_band(tmp_path: Any) -> None:
+    """R1-2: the row-IDENTITY read is guarded, because ``getattr`` is not a guarantee.
+
+    ``getattr(job, "id", "")`` swallows only the ``AttributeError`` it would have
+    raised itself and propagates anything a property or an ``__getattr__`` raises.
+    Executed against a row whose ``id`` raises, the unguarded form escaped this
+    method's whole-body totality contract into a Textual message handler —
+    ``RuntimeError: id exploded`` out of ``_subagent_child_counts`` (review round
+    1 on this PR, R1-2) — and the docstring beside it claimed the opposite.
+
+    So the identity read has its own guard now, and what that buys is stated in
+    behaviour rather than in a comment: a row that cannot name itself earns the
+    same nothing a row outside the roster window does, and every row that CAN name
+    itself still carries its real mark. The nested fixture is the one that reaches
+    the per-row resolver at all (see ``_docked_registry``).
+    """
+
+    class _Unnameable:
+        """A roster row whose ``id`` raises on read, not merely missing."""
+
+        @property
+        def id(self) -> str:  # noqa: A003 - the row's own field name
+            raise RuntimeError("id exploded")
+
+    app, _comms = _docked_registry(4, tmp_path / "unnameable", nested=True)
+    jobs, _selected = app._subagent_roster()
+    assert jobs, "the fixture must reach a full roster"
+    expected = app._subagent_child_counts(jobs)
+    assert expected == {"job-0000": 3}, expected
+
+    counts = app._subagent_child_counts([_Unnameable(), *jobs])
+
+    assert counts == expected, (
+        "an unreadable row must cost its own mark and nothing else: the rest of "
+        f"the roster still resolves — {counts}"
+    )
+
+
+def test_a_session_whose_capability_reads_raise_costs_the_marks_not_the_band(
+    tmp_path: Any,
+) -> None:
+    """R2-1: the SESSION reads are guarded by the same rule as the row's identity.
+
+    ``getattr(session, "_subagent_comms", None)`` and ``getattr(session, "jobs",
+    None)`` swallow only the ``AttributeError`` they would have raised themselves
+    and propagate anything a property or an ``__getattr__`` raises — the gap
+    R1-2 closed on the row identity read, one read over. Measured on this head
+    before the fix, both escaped into the caller (``RuntimeError: comms
+    exploded``, ``RuntimeError: jobs exploded``) where the identity read now
+    answers.
+
+    A ``Session`` carries both as plain attributes, so the reachability is the
+    same synthetic class as R1-2 — what the guard buys is that the method's
+    totality contract holds for the shape rather than only for the shipped one.
+    """
+
+    class _CommsReadExplodes:
+        """A session whose comms capability raises on read, not merely missing."""
+
+        @property
+        def _subagent_comms(self) -> Any:
+            raise RuntimeError("comms exploded")
+
+        jobs: Any = None
+
+    class _JobsReadExplodes:
+        """A session whose ``jobs`` raises; the comms graph it carries is real."""
+
+        def __init__(self, comms: Any) -> None:
+            self._subagent_comms = comms
+
+        @property
+        def jobs(self) -> Any:
+            raise RuntimeError("jobs exploded")
+
+    app, comms = _docked_registry(4, tmp_path / "exploding", nested=True)
+    jobs, _selected = app._subagent_roster()
+    assert jobs, "the fixture must reach a full roster"
+    expected = app._subagent_child_counts(jobs)
+    assert expected == {"job-0000": 3}, expected
+
+    app._session = _CommsReadExplodes()
+    assert app._subagent_child_counts(jobs) == {}
+    assert app._subagent_roster() == ([], None)
+
+    # The same session shape with only ``jobs`` raising: the comms graph is real,
+    # so the guard has to answer the same nothing rather than escape.
+    app._session = _JobsReadExplodes(comms)
+    assert app._subagent_child_counts(jobs) == {}
+    assert app._subagent_roster() == ([], None)

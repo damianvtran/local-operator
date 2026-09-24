@@ -446,6 +446,413 @@ def test_subagent_compaction_reuses_only_identical_sources_and_prunes_removed_jo
     assert len(fold.projection.subagents) == 1  # the row's legacy removal is unchanged
 
 
+def _roster_with_todos(count: int) -> tuple[ProjectionFold, SubagentComms]:
+    """A fold over ``count`` children: long prompts, one settled child, todos.
+
+    The shape the frame cap actually meets on a deep roster — previews worth
+    re-capping, and roster todos, which are the tier's real per-repaint work.
+    """
+    jobs = SimpleNamespace(rows={})
+
+    class Jobs:
+        def get(self, job_id: str) -> Any:
+            return jobs.rows.get(job_id)
+
+    comms = SubagentComms(cast(Session, cast(Any, SimpleNamespace(jobs=Jobs()))))
+    for index in range(count):
+        job_id = f"child-{index}"
+        comms.record_launch(job_id, job_id, prompt=("preview line 工作项\n" * 20) + f"#{index}")
+        jobs.rows[job_id] = SimpleNamespace(status="running", agent_role="coder", latest_details={})
+    jobs.rows["child-1"].status = "completed"
+    jobs.rows["child-1"].result_text = "settled result\nsecond line"
+    comms.record_outcome("child-1", "completed", result_text=jobs.rows["child-1"].result_text)
+    fold = make_fold()
+    fold.set_subagent_details(comms)
+    for index in range(count):
+        fold.set_subagent_hydrated_details(
+            f"child-{index}",
+            [],
+            [
+                {
+                    "name": "Verification",
+                    "items": [
+                        {
+                            "text": f"todo {item} of child {index} " + "detail " * 90,
+                            "status": "pending",
+                            "reason": "reason " + "x" * 200,
+                        }
+                        for item in range(6)
+                    ],
+                }
+            ],
+        )
+    return fold, comms
+
+
+def _counted_compaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, int]:
+    """Count both normalizers BEFORE any memo is filled — see the test below."""
+    import local_operator.mobile.projection as projection_module
+
+    calls = {"flat": 0, "multiline": 0}
+    compact = projection_module._compact
+    compact_multiline = projection_module._compact_multiline
+
+    def count_flat(text: str, limit: int) -> str:
+        calls["flat"] += 1
+        return compact(text, limit)
+
+    def count_multiline(text: str, limit: int) -> str:
+        calls["multiline"] += 1
+        return compact_multiline(text, limit)
+
+    monkeypatch.setattr(projection_module, "_compact", count_flat)
+    monkeypatch.setattr(projection_module, "_compact_multiline", count_multiline)
+    return calls
+
+
+def _frame_row(data: dict[str, Any], job_id: str) -> dict[str, Any]:
+    return next(row for row in data["subagents"] if row["job_id"] == job_id)
+
+
+def _over_cap(projection: SessionProjection) -> int:
+    """A cap the frame exceeds by roughly half, so the text tiers are reached.
+
+    Self-scaling rather than a literal: where the tiers land is a property of
+    the fixture's own size, and a literal would quietly stop exercising them the
+    day that fixture changes.
+    """
+    from local_operator.mobile.projection import cap_projection_frame
+
+    uncapped, degraded = cap_projection_frame(projection, cap_bytes=1_000_000_000)
+    assert degraded is False
+    return max(1, len(json.dumps(uncapped, sort_keys=True, ensure_ascii=False)) // 2)
+
+
+def test_frame_cap_recaps_only_changed_sources_and_repeats_byte_for_byte(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An over-cap repaint re-caps what CHANGED, not what the roster holds.
+
+    Tiers 1 and 1c run on every repaint that is over the soft cap (~30x/s while
+    a turn streams), and ``_compact`` walks the whole source even when the cap
+    keeps a fraction of it, so an unchanged roster used to re-derive every
+    preview and every roster todo on every frame — measured at N=256 with a
+    hydrated roster as 13,824 normalizer calls scanning 3.56 MB per frame.
+
+    The memo may only skip work it would reproduce exactly, so the frames are
+    compared as WHOLE dicts, not field by field.
+    """
+    from local_operator.mobile.projection import (
+        FRAME_CAP_PROMPT_CHARS,
+        _compact,
+        cap_projection_frame,
+    )
+
+    # Counters go in FIRST: an entry keys on the normalizer OBJECT, so a swap
+    # after a fold or a cap has run invalidates every entry it wrote by design.
+    calls = _counted_compaction(monkeypatch)
+    fold, comms = _roster_with_todos(8)
+    projection = fold.projection
+
+    # Cold, every source once. The fold compacts one prompt and two outcome
+    # fields per child as the fixture builds; the cap then re-caps a prompt and
+    # two outcome fields per row, plus three todo items x (text, reason).
+    cap = _over_cap(projection)
+    fold_flat, fold_multiline = 8, 8 * 2
+    cap_flat, cap_multiline = 8 + 8 * 12, 8 * 2
+    cold = {"flat": fold_flat + cap_flat, "multiline": fold_multiline + cap_multiline}
+
+    first, degraded = cap_projection_frame(projection, cap_bytes=cap)
+    assert degraded is True
+    assert calls == cold
+
+    second, degraded_again = cap_projection_frame(projection, cap_bytes=cap)
+    assert calls == cold, "nothing changed, nothing re-capped"
+    assert second == first
+    assert degraded_again is degraded
+
+    # ONE record's prompt replaced by a NEW object of a different length: two
+    # sources to re-derive — one in the fold's own memo, one in the cap's — and
+    # the published preview follows it.
+    rewritten = ("rewritten prompt 工作项\n" * 12).strip()
+    comms._records["child-2"].prompt = rewritten
+    fold.set_subagent_details(comms)
+    third, _ = cap_projection_frame(projection, cap_bytes=cap)
+    assert calls == {"flat": cold["flat"] + 2, "multiline": cold["multiline"]}
+    assert _frame_row(third, "child-2")["prompt"] == _compact(rewritten, FRAME_CAP_PROMPT_CHARS)
+    assert _frame_row(third, "child-2")["prompt"] != _frame_row(second, "child-2")["prompt"]
+
+    # Re-hydrating ONE row's todos replaces its item objects, so that row's
+    # items are new work (6 items x text/reason) and the other seven rows are
+    # not: the cost tracks the change, not the roster. The texts stay long
+    # enough that the cap still needs tier 1c to fit, or the row's items would
+    # simply not be reached.
+    fold.set_subagent_hydrated_details(
+        "child-3",
+        [],
+        [
+            {
+                "name": "Verification",
+                "items": [
+                    {
+                        "text": f"rehydrated {item} " + "detail " * 90,
+                        "status": "pending",
+                        "reason": "r" * 200,
+                    }
+                    for item in range(6)
+                ],
+            }
+        ],
+    )
+    before = dict(calls)
+    fourth, _ = cap_projection_frame(projection, cap_bytes=cap)
+    assert calls == {"flat": before["flat"] + 12, "multiline": before["multiline"]}
+    assert _frame_row(fourth, "child-3")["todos"][0]["items"][0]["text"].startswith("rehydrated 0 ")
+
+    # A gate that skipped the normalizer whenever the value was already SHORT
+    # would republish this raw double space: the cap still normalises it, and
+    # the reuse path must not turn that into a second frame's work either.
+    projection.subagents[0].prompt = "double  space\ttext"
+    fifth, _ = cap_projection_frame(projection, cap_bytes=cap)
+    short_row = _frame_row(fifth, projection.subagents[0].job_id)
+    assert short_row["prompt"] == "double space text"
+    before = dict(calls)
+    cap_projection_frame(projection, cap_bytes=cap)
+    assert calls == before
+
+
+def test_frame_cap_memo_is_slotted_per_row_and_releases_departed_rows() -> None:
+    """Bounded by the roster the frame publishes: one slot per row, and freed."""
+    from local_operator.mobile.projection import cap_projection_frame
+
+    fold, _comms = _roster_with_todos(4)
+    projection = fold.projection
+    cap = _over_cap(projection)
+    cap_projection_frame(projection, cap_bytes=cap)
+    memo = projection._frame_cap_memo
+
+    assert set(memo) == {row.job_id for row in projection.subagents}
+    # Per row: three text fields plus text/reason for each of its six items.
+    assert {len(slot) for slot in memo.values()} == {3 + 2 * 6}
+
+    # A projection that publishes a SHORTER roster than the last capped frame
+    # releases the departed row's slot, which is what keeps the cache bounded
+    # by the roster rather than by every child it has ever carried.
+    departed = projection.subagents.pop()
+    cap_projection_frame(projection, cap_bytes=cap)
+    assert departed.job_id not in memo
+    assert set(memo) == {row.job_id for row in projection.subagents}
+
+
+def _memo_source_bytes(memo: dict[str, dict[Any, Any]], live: set[str]) -> int:
+    """Bytes of source text the memo pins for rows the roster no longer carries.
+
+    Superseded SOURCES are the whole of what the memo holds — the entry keeps the
+    row's own preview/result/reason objects alive, not copies of any frame — so
+    this is the quantity review round 1 and QA round 1 both measured on their own
+    fixtures, quoted here in the bytes they measured (1,694,671 B for a 32 -> 3
+    row shrink, 18,409,240 B at 256 x 25).
+
+    ENCODED rather than ``len(str)``, and that is not cosmetic on this fixture:
+    ``len`` is CHARACTERS, every prompt here ends in CJK (``工作项``), and
+    measured with the memo filled at 32 rows the same 480 pinned sources are
+    **175,284 characters against 179,124 bytes** — 32 of the 480 carrying the
+    non-ASCII preview. The name, this docstring and the figures cited above are
+    all bytes, so the sum has to be too (review round 2 on this PR, R2-3).
+
+    Both callers assert ``== 0``, so no caller depends on the unit — only on the
+    release being total.
+    """
+    return sum(
+        len(entry[0].encode("utf-8"))
+        for row_id, row_memo in memo.items()
+        if row_id not in live
+        for entry in row_memo.values()
+    )
+
+
+def test_frame_cap_memo_is_released_by_a_frame_that_comes_in_under_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1-1: the release keys on the PUBLISHED ROSTER, never on a tier having run.
+
+    The frame that most needs the release is the one that just shrank a roster —
+    and that frame is the SMALLER one, so it can land under the cap and return
+    before a tier runs. That is exactly where the release used to live, which is
+    why the slots of every departed row stayed pinned: 1,694,671 B measured on a
+    32 -> 3 row shrink with the frame under the cap, and 18,409,240 B at 256 rows
+    x 25 todos (review round 1 R1-1; QA round 1 section 5, byte figures).
+    """
+    from local_operator.mobile.projection import (
+        PROJECTION_FRAME_SOFT_CAP_BYTES,
+        cap_projection_frame,
+    )
+
+    fold, _comms = _roster_with_todos(32)
+    projection = fold.projection
+    memo = projection._frame_cap_memo
+    calls = _counted_compaction(monkeypatch)
+    cap_projection_frame(projection, cap_bytes=_over_cap(projection))
+    assert len(memo) == 32
+    live = {row.job_id for row in projection.subagents}
+    assert _memo_source_bytes(memo, live) == 0
+
+    while len(projection.subagents) > 3:
+        projection.subagents.pop()
+    shrunk_live = {row.job_id for row in projection.subagents}
+    before = dict(calls)
+
+    frame, degraded = cap_projection_frame(projection, cap_bytes=PROJECTION_FRAME_SOFT_CAP_BYTES)
+
+    # The cell has to be the UNDER-cap one or it would not reproduce R1-1 at all:
+    # no tier ran on this push, which is precisely why the old release site —
+    # inside tier 1 — was never reached for it.
+    assert degraded is False
+    assert calls == before, "no tier ran on the shrunken frame"
+    assert len(frame["subagents"]) == 3
+    assert set(memo) == shrunk_live
+    assert _memo_source_bytes(memo, shrunk_live) == 0
+    assert sum(len(row_memo) for row_memo in memo.values()) < 32 * (3 + 2 * 6)
+
+
+def test_the_memo_source_figure_counts_bytes_and_not_characters() -> None:
+    """R2-3: the name, the docstring and the figures cited from it are all bytes.
+
+    ``len(str)`` is CHARACTERS, and this fixture's prompts carry CJK, so the two
+    units genuinely diverge: measured with the memo filled at 32 rows, the same
+    480 pinned sources are 175,284 characters against 179,124 bytes, 32 of the
+    480 being the non-ASCII preview. A helper that summed characters while
+    reporting a byte figure would be quoting a quantity it never measured.
+    """
+    source = "工作项" * 1000
+    entry = (source, 10, lambda text, limit: text, source)
+    memo: dict[str, dict[Any, Any]] = {"departed": {"prompt": entry}}
+
+    assert len(source.encode("utf-8")) > len(source)
+    assert _memo_source_bytes(memo, set()) == len(source.encode("utf-8"))
+
+
+def test_frame_cap_memo_is_reduced_to_the_shape_a_row_still_publishes() -> None:
+    """A LIVE row's superseded slots are released too, not only a departed row's.
+
+    Review round 1 measured a row grown to 40 items and then shrunk to 1 keeping
+    all 89 of its slots (``3 + 2 x 40``), because entries are replaced in place
+    and nothing dropped the ones the row had shed. What the memo holds per row is
+    now the shape that row publishes — its three previews plus two slots per todo
+    item it still carries — and nothing else.
+    """
+    from local_operator.mobile.projection import cap_projection_frame
+
+    fold, _comms = _roster_with_todos(2)
+    projection = fold.projection
+    memo = projection._frame_cap_memo
+    cap = _over_cap(projection)
+    cap_projection_frame(projection, cap_bytes=cap)
+    assert len(memo["child-0"]) == 3 + 2 * 6
+
+    def hydrate(items: int) -> None:
+        fold.set_subagent_hydrated_details(
+            "child-0",
+            [],
+            [
+                {
+                    "name": "Verification",
+                    "items": [
+                        {
+                            "text": f"grown {item} " + "detail " * 90,
+                            "status": "pending",
+                            "reason": "reason " + "x" * 200,
+                        }
+                        for item in range(items)
+                    ],
+                }
+            ],
+        )
+
+    hydrate(40)
+    cap_projection_frame(projection, cap_bytes=cap)
+    assert len(memo["child-0"]) == 3 + 2 * 40
+
+    hydrate(1)
+    cap_projection_frame(projection, cap_bytes=cap)
+    assert len(memo["child-0"]) == 3 + 2 * 1
+    # The other row is untouched: the release is per row, not a reset.
+    assert len(memo["child-1"]) == 3 + 2 * 6
+
+
+def test_a_phase_reshape_costs_the_frame_a_sweep_and_not_a_grown_memo() -> None:
+    """R2-2: the per-row bound is ``previews + 4 x``, and the envelope is ATTAINED.
+
+    The reconcile's sweep test is a ``len()`` comparison taken BEFORE the tiers,
+    against the shape the row is publishing. A row whose item COUNT is unchanged
+    and whose ``(phase, item)`` POSITIONS moved passes it and then adds the new
+    positions' keys, so the honest bound after any frame is ``previews + 4 x``
+    rather than the ``+ 2 x`` the docstring used to claim (review round 2 on this
+    PR, R2-2). Pinned here on this file's fixture, one row of six items, where
+    ``previews + 2 x`` is 15 and ``previews + 4 x`` is 27:
+
+    * ``[6] -> [6]`` — nothing moved, so nothing new: ``15 -> 15``.
+    * ``[6] -> [3, 3]`` — three items moved: ``15 -> 21``.
+    * ``[6] -> [0, 6]`` — no old position survives, because a leading empty phase
+      is published rather than merged away, so the bound is reached: ``15 -> 27``.
+
+    Each peak is one frame wide — the NEXT frame sweeps back to ``15`` — which is
+    why the wider bound is documented rather than enforced in the code.
+    """
+    from local_operator.mobile.projection import cap_projection_frame
+
+    def phases(shape: list[int]) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": f"Phase {index}",
+                "items": [
+                    {
+                        "text": f"todo {index}.{item} " + "detail " * 90,
+                        "status": "pending",
+                        "reason": "reason " + "x" * 200,
+                    }
+                    for item in range(count)
+                ],
+            }
+            for index, count in enumerate(shape)
+        ]
+
+    def reshape_frame(before: list[int], after: list[int]) -> tuple[int, int, int]:
+        """``(slots before the reshaping frame, its peak, the next frame)``.
+
+        A FRESH fixture per pair, because the peak depends on the positions the
+        row was holding when the frame began — the sweep the previous frame left
+        behind is what decides how many of this frame's keys are new.
+        """
+        fold, _comms = _roster_with_todos(2)
+        projection = fold.projection
+        memo = projection._frame_cap_memo
+        cap = _over_cap(projection)
+        cap_projection_frame(projection, cap_bytes=cap)
+        fold.set_subagent_hydrated_details("child-0", [], phases(before))
+        cap_projection_frame(projection, cap_bytes=cap)
+        before_slots = len(memo["child-0"])
+        fold.set_subagent_hydrated_details("child-0", [], phases(after))
+        cap_projection_frame(projection, cap_bytes=cap)
+        peak = len(memo["child-0"])
+        cap_projection_frame(projection, cap_bytes=cap)
+        # The sibling is never reshaped, so it stays on the settled shape.
+        assert len(memo["child-1"]) == 3 + 2 * 6
+        return before_slots, peak, len(memo["child-0"])
+
+    two_x = 3 + 2 * 6
+    # Nothing moved, so no key is added: the frame is a pure hit.
+    assert reshape_frame([6], [6]) == (two_x, two_x, two_x)
+    # Three items move to positions the row had nothing at. The count is
+    # unchanged, so the frame's own sweep test passes and the keys land on top.
+    assert reshape_frame([6], [3, 3]) == (two_x, two_x + 2 * 3, two_x)
+    # No old position survives — a leading empty phase is published rather than
+    # merged away — so this is the bound itself, not a step toward it.
+    assert reshape_frame([6], [0, 6]) == (two_x, 3 + 4 * 6, two_x)
+
+
 def test_nested_subagent_completion_refreshes_selected_detail() -> None:
     """A nested row has no root lifecycle event to settle its phone detail."""
 
