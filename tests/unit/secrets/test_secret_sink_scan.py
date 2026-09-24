@@ -1008,3 +1008,374 @@ async def test_r2_2_the_carrier_print_is_refused_before_the_kernel_sees_it(
     assert result.is_error
     assert "python.print-of-source" in _result_text(result)
     assert not marker.exists(), "the cell ran anyway"
+
+
+# ---------------------------------------------------------------------------
+# Round-3 remediation: R3-1…R3-4, and the `KEY=value` argv fold-in
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # R3-1: each of these prints the value the verb put in the child's
+        # environment, and none of them was examined before this round — the
+        # consumer scan stopped at the `--secret` word `run` always carries.
+        "lop secret run --secret [redacted] -- printenv NAME",
+        "lop secret run --secret [redacted] -- printenv NAME | rev",
+        "lop secret run --secret NAME=TOKEN -- env",
+        "lop secret run --secret NAME=TOKEN -- set",
+        "lop secret run --secret NAME=TOKEN -- sh -c 'echo \"$TOKEN\" | rev'",
+        "lop secret run --secret NAME=TOKEN -- sh -c 'printenv TOKEN | base64'",
+        "lop secret run --secret NAME=TOKEN -- python3 -c 'import os;"
+        ' print(os.environ["TOKEN"])\'',
+        # The separator-less spelling is real: argparse consumes the `--` it
+        # uses, so the child command follows the options directly.
+        "lop secret run --secret [redacted] printenv NAME",
+        # `--env-var` moves the FILE secret's path, not the leak.
+        "lop secret file GCP_SA_JSON --env-var TOKFILE -- cat",
+    ],
+)
+def test_r3_1_the_runs_consumer_is_checked_for_the_side_the_value_is_on(command: str) -> None:
+    """The verb's consumer is refused when it prints the value it was handed.
+
+    ``file`` hands over a PATH, ``run`` hands over an ENVIRONMENT, so the same
+    consumer word can leak through one and not the other — which is why the two
+    arms are asserted separately below. This one pins the leaking half.
+    """
+    result = scan_command(command)
+    assert result.verdict == "printing", (command, result)
+    assert "shell.secret-verb-emitting-consumer" in result.labels
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The consumers the verb exists for: a client, a filter, a request, an
+        # attribute-setting builtin, and a length-only python check.
+        "lop secret run --secret NAME=TOKEN -- python3 client.py",
+        "lop secret run --secret [redacted] -- sed -n 1p /etc/hosts",
+        "lop secret run --secret [redacted] -- cat",
+        "lop secret run --secret [redacted] -- declare -x TOKEN",
+        "lop secret run --secret NAME=TOKEN -- env V=1 client",
+        "lop secret run --secret NAME=TOKEN -- sh -c 'curl -sS -H \"Authorization:"
+        " Bearer $TOKEN\" http://127.0.0.1:9/ >/dev/null; echo done'",
+        "lop secret run --secret NAME=TOKEN -- python3 -c 'import os,sys;"
+        ' sys.exit(0 if os.environ["TOKEN"] else 1)\'',
+        "lop secret file GCP_SA_JSON -- python3 -c 'import os;"
+        ' print(os.path.getsize(os.environ["GOOGLE_APPLICATION_CREDENTIALS"]))\'',
+        "lop secret file GCP_SA_JSON -- /bin/true",
+    ],
+)
+def test_r3_1_the_verbs_own_consumers_stay_allowed(command: str) -> None:
+    """No over-refusal: an argument-only printer reaches no environment value."""
+    result = scan_command(command)
+    assert not result.refused, (command, result)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # R3-2: the other console script for the same entry point,
+        "local-operator secret get [redacted]",
+        'v=$(local-operator secret get [redacted]); echo "$v" | rev',
+        # the precommand wrappers, each with its own option grammar
+        "command lop secret get [redacted]",
+        "command lop secret get [redacted] | base64",
+        "exec lop secret get [redacted]",
+        "env lop secret get [redacted]",
+        "nohup lop secret get [redacted] >/dev/stdout 2>/dev/null",
+        "timeout 30 lop secret get [redacted] | rev",
+        "timeout -s KILL 30 stdbuf -oL lop secret get [redacted]",
+        'v=$(timeout 30 lop secret get [redacted]); echo "$v" | rev',
+        'v=$(nice -n 5 lop secret get [redacted]); command echo "$v" | rev',
+        'env V="$(lop secret get [redacted])" printenv V | rev',
+        # a name bound to the program
+        "l=lop; $l secret get [redacted]",
+        'l=lop; v=$("$l" secret get [redacted]); echo "$v" | rev',
+        # and the value in command position, which bash prints back
+        "v=$(lop secret get [redacted]); $v",
+    ],
+)
+def test_r3_2_the_reach_covers_the_program_names_and_the_wrappers(command: str) -> None:
+    """R3-2: a source is a source however the program name is spelled."""
+    result = scan_command(command)
+    assert result.verdict == "printing", (command, result)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "command -v lop",
+        "timeout 5 sleep 0.1",
+        "env | grep -c lop",
+        "lop secret get [redacted] > /tmp/contained 2>/dev/null; echo contained",
+        'v=$(lop secret get [redacted]); curl -H "Authorization: Bearer $v" https://x',
+    ],
+)
+def test_r3_2_the_wrapper_reach_does_not_refuse_ordinary_commands(command: str) -> None:
+    result = scan_command(command)
+    assert not result.refused, (command, result)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # R3-3: the ways a value is re-bound that the `NAME=$(…)` rule never saw.
+        "for x in $(lop secret get [redacted]); do echo $x; done",
+        'v=$(lop secret get [redacted]); a=("$v"); echo "${a[@]}"',
+        'v=$(lop secret get [redacted]); a[0]="$v"; echo "${a[0]}"',
+        'v=$(lop secret get [redacted]); v+=$(lop secret get [redacted]); echo "$v"',
+        'lop secret get [redacted] > /tmp/f; read -r l < /tmp/f; echo "$l"',
+        'lop secret get [redacted] > /tmp/f; mapfile -t a < /tmp/f; echo "${a[0]}"',
+        'lop secret get [redacted] > /tmp/f; l=$(< /tmp/f); echo "$l"',
+        'lop secret get [redacted] > /tmp/f; l=$(cat /tmp/f); echo "$l"',
+        "lop secret get [redacted] > /tmp/f; cat /tmp/f",
+        # stderr is part of this result, and a `2>` beside it changes nothing
+        "lop secret get [redacted] 2>/dev/null",
+        "lop secret get [redacted] >&2",
+    ],
+)
+def test_r3_3_a_rebinding_carries_the_value(command: str) -> None:
+    """R3-3: bound by a loop, an array, a builtin, a file — still the value."""
+    result = scan_command(command)
+    assert result.verdict == "printing", (command, result)
+
+
+def test_r3_3_an_export_declared_before_the_assignment_still_exports() -> None:
+    """`export V; V=$(…)` exports the later binding (bash: measured, rc 0)."""
+    result = scan_command("export V; V=$(lop secret get [redacted]); printenv V")
+    assert result.verdict == "printing"
+    assert "shell.environment-dump-of-source" in result.labels
+    # …and an `export` whose name is never bound reaches nothing of ours.
+    assert not scan_command("export V; printenv V").refused
+
+
+def test_r3_3_a_loop_over_a_literal_list_binds_nothing() -> None:
+    """The loop binding is the iterable's taint, not the `for` keyword."""
+    result = scan_command('for k in A B; do echo "$k"; done; echo done')
+    assert not result.refused
+
+
+@pytest.mark.parametrize(
+    "cell",
+    [
+        # R3-4: bindings and sinks the eval walker missed.
+        'token = secrets["NAME"]\nfor c in token: print(c)',
+        'token = secrets["NAME"]\nfor i, c in enumerate(token): print(c)',
+        'token = secrets["NAME"]\nfor c in token[::-1]: print(c, end="")',
+        'alias = secrets\nprint(alias["NAME"][::-1])',
+        'token = secrets["NAME"]\nraise ValueError(token[::-1])',
+        'token = secrets["NAME"]\nassert False, token',
+        'import warnings\ntoken = secrets["NAME"]\nwarnings.warn(token[::-1])',
+        'import pprint\ntoken = secrets["NAME"]\npprint.pprint(token[::-1])',
+    ],
+)
+def test_r3_4_the_eval_walker_sees_the_loop_the_alias_and_the_exception(cell: str) -> None:
+    result = scan_python(cell)
+    assert result.verdict == "printing", (cell, result)
+
+
+@pytest.mark.parametrize(
+    "cell",
+    [
+        'token = secrets["NAME"]\nprint(len(token))',
+        'assert len(secrets["NAME"]) > 0',
+        'token = secrets["NAME"]\nassert token',
+        "raise ValueError('plain')",
+        "for i in range(3):\n    print(i)",
+        'import requests\ntoken = secrets["NAME"]\nresp = requests.get("https://x",'
+        ' headers={"Authorization": f"Bearer {token}"})\nprint(resp.status_code)',
+    ],
+)
+def test_r3_4_the_new_eval_rules_do_not_refuse_derived_observations(cell: str) -> None:
+    result = scan_python(cell)
+    assert not result.refused, (cell, result)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Fold-in (round 4): the `=` inside an ARGUMENT is not a shell
+        # assignment, and skipping assignment-shaped words stage-wide let the
+        # incident's own `KEY = value` print through as a consumer.
+        "v=$(lop secret get [redacted]); echo TOKEN=$v",
+        'v=$(lop secret get [redacted]); echo "TOKEN=$v" | rev',
+        'v=$(lop secret get [redacted]); printf "%s\\n" TOKEN=$v',
+    ],
+)
+def test_the_key_value_print_is_not_a_binding(command: str) -> None:
+    result = scan_command(command)
+    assert result.verdict == "printing", (command, result)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "V=1 echo TOKEN=literal",
+        "v=$(lop secret get [redacted]); printf '%s\\n' X=$v > /tmp/contained",
+        "export V=1; printenv V",
+    ],
+)
+def test_a_real_prefix_assignment_is_still_a_binding(command: str) -> None:
+    """The skip is positional: only words BEFORE the command word bind."""
+    result = scan_command(command)
+    assert not result.refused, (command, result)
+
+
+@pytest.mark.asyncio
+async def test_r3_1_the_run_leak_is_refused_before_the_child_runs(
+    tmp_path: Path, config_root: Path, stored_secret: str, shimmed_path: None
+) -> None:
+    """R3-1 through the REAL tool, CLI and store — the leak that started the round.
+
+    `lop secret run --secret N -- printenv N` returned the value raw on the
+    previous head, and `… | rev` returned it reversed past the mask. The marker
+    makes `ran=False` the pre-execution property rather than a reading of the
+    refusal text alone.
+    """
+    for command in (
+        f"lop secret run --secret {stored_secret} -- printenv {stored_secret}",
+        f"lop secret run --secret {stored_secret} -- printenv {stored_secret} | rev",
+    ):
+        marker = tmp_path / "ran"
+        if marker.exists():
+            marker.unlink()
+        result = await builtin.execute_bash(
+            "bash-r3-1",
+            {"command": f"touch {marker}; {command}"},
+            AbortSignal(),
+            None,
+            _context(tmp_path),
+        )
+        text = _result_text(result)
+        assert result.is_error, text
+        assert "shell.secret-verb-emitting-consumer" in text
+        assert not marker.exists(), "the child ran anyway"
+        assert _SYNTHETIC not in text
+        assert _SYNTHETIC[::-1] not in text
+
+
+@pytest.mark.asyncio
+async def test_r3_2_the_wrapped_and_renamed_program_is_refused_before_the_child_runs(
+    tmp_path: Path, config_root: Path, stored_secret: str, shimmed_path: None
+) -> None:
+    """The console script's other name and a wrapper prefix, through the tool."""
+    for command in (
+        f"local-operator secret get {stored_secret}",
+        f'v=$(timeout 30 lop secret get {stored_secret}); echo "$v" | rev',
+        f"l=lop; $l secret get {stored_secret}",
+    ):
+        marker = tmp_path / "ran"
+        if marker.exists():
+            marker.unlink()
+        result = await builtin.execute_bash(
+            "bash-r3-2",
+            {"command": f"touch {marker}; {command}"},
+            AbortSignal(),
+            None,
+            _context(tmp_path),
+        )
+        text = _result_text(result)
+        assert result.is_error, (command, text)
+        assert not marker.exists(), "the child ran anyway"
+        assert _SYNTHETIC not in text
+        assert _SYNTHETIC[::-1] not in text
+
+
+@pytest.mark.asyncio
+async def test_the_key_value_print_is_refused_before_the_child_runs(
+    tmp_path: Path, config_root: Path, stored_secret: str, shimmed_path: None
+) -> None:
+    """The fold-in row, through the real tool: `KEY=value` in an ARGUMENT."""
+    marker = tmp_path / "ran"
+    command = f'v=$(lop secret get {stored_secret}); echo "TOKEN=$v" | rev; touch {marker}'
+    result = await builtin.execute_bash(
+        "bash-key-value", {"command": command}, AbortSignal(), None, _context(tmp_path)
+    )
+    text = _result_text(result)
+    assert result.is_error, text
+    assert not marker.exists(), "the child ran anyway"
+    assert _SYNTHETIC not in text
+    assert _SYNTHETIC[::-1] not in text
+
+
+@pytest.mark.asyncio
+async def test_r3_3_the_file_read_back_rows_are_refused_before_the_child_runs(
+    tmp_path: Path, config_root: Path, stored_secret: str, shimmed_path: None
+) -> None:
+    """The `$(<f)` / `read` / `mapfile` spellings, through the real tool."""
+    for command in (
+        f'lop secret get {stored_secret} > {tmp_path}/f; l=$(< {tmp_path}/f); echo "$l" | rev',
+        f"lop secret get {stored_secret} > {tmp_path}/f; read -r l < {tmp_path}/f;"
+        ' echo "$l" | rev',
+        f"for x in $(lop secret get {stored_secret}); do echo $x; done | rev",
+    ):
+        marker = tmp_path / "ran"
+        if marker.exists():
+            marker.unlink()
+        result = await builtin.execute_bash(
+            "bash-r3-3",
+            {"command": f"touch {marker}; {command}"},
+            AbortSignal(),
+            None,
+            _context(tmp_path),
+        )
+        text = _result_text(result)
+        assert result.is_error, (command, text)
+        assert not marker.exists(), "the child ran anyway"
+        assert _SYNTHETIC not in text
+        assert _SYNTHETIC[::-1] not in text
+
+
+@pytest.mark.asyncio
+async def test_r3_4_the_loop_and_the_exception_are_refused_before_the_kernel_sees_it(
+    tmp_path: Path,
+) -> None:
+    """The eval half, through the real kernel, with a marker written first."""
+    for print_line in (
+        "for c in token: print(c)",
+        "raise ValueError(token[::-1])",
+        "import warnings\nwarnings.warn(token[::-1])",
+    ):
+        marker = tmp_path / "ran"
+        if marker.exists():
+            marker.unlink()
+        code = (
+            f'open("{marker}", "w").write("ran")\ntoken = secrets["{_SECRET_NAME}"]\n'
+            f"{print_line}"
+        )
+        result = await execute_eval(
+            "eval-r3-4", {"code": code}, AbortSignal(), None, _context(tmp_path)
+        )
+        assert result.is_error, (print_line, _result_text(result))
+        assert not marker.exists(), "the cell ran anyway"
+
+
+@pytest.mark.asyncio
+async def test_r3_1_the_run_consumer_still_delivers_the_value(
+    tmp_path: Path,
+    config_root: Path,
+    local_authorizer: str,
+    stored_secret: str,
+    shimmed_path: None,
+) -> None:
+    """The sanctioned `run` form still works end to end after the new arm.
+
+    A pass here cannot be the mask hiding a leak: the endpoint answers
+    `authorized` only for the exact bearer and answers with a word rather than
+    echoing the header.
+    """
+    marker = tmp_path / "ran"
+    command = (
+        f"lop secret run --secret {stored_secret}=TOK -- sh -c "
+        f"'curl -sS -H \"Authorization: Bearer $TOK\" {local_authorizer}'; touch {marker}"
+    )
+    result = await builtin.execute_bash(
+        "bash-r3-1-ok", {"command": command}, AbortSignal(), None, _context(tmp_path)
+    )
+    text = _result_text(result)
+    assert not result.is_error, text
+    assert marker.exists()
+    assert "authorized" in text, text
+    assert _SYNTHETIC not in text
