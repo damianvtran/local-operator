@@ -233,8 +233,12 @@ RULES: tuple[Rule, ...] = (
             'v=$(lop secret get NAME); echo "TOKEN=$v" | rev',
             "echo NAME | xargs lop secret get | rev",
             "xargs lop secret get <<< NAME | rev",
+            # R5-5: a `run` whose consumer is itself the fetch is the fetch.
+            "lop secret run --secret NAME=TOKEN -- lop secret get NAME | rev",
+            "lop secret run --secret NAME=TOKEN -- timeout 5 lop secret get NAME | rev",
         ),
         counterexamples=(
+            "lop secret run --secret NAME=TOKEN -- lop secret get NAME | wc -c",
             "lop secret get GITHUB_TOKEN | wc -c",
             "lop secret get GITHUB_TOKEN | shasum -a 256",
             "lop secret get GITHUB_TOKEN | docker login --username u --password-stdin",
@@ -371,6 +375,9 @@ RULES: tuple[Rule, ...] = (
             # R5-3: `-p` clustered with `-e` still prints the program's result.
             "lop secret run --secret NAME=TOKEN -- node -pe "
             "'[...process.env.TOKEN].reverse().join(\"\")'",
+            # R5-4: `file`'s `--env-var` before the NAME is still `file`.
+            "lop secret file --env-var KF GCP_SA_JSON -- sh -c 'rev \"$KF\"'",
+            "lop secret file --env-var=KF GCP_SA_JSON -- sh -c 'base64 < \"$KF\"'",
         ),
         counterexamples=(
             "lop secret file GCP_SA_JSON -- gcloud auth activate-service-account "
@@ -392,6 +399,7 @@ RULES: tuple[Rule, ...] = (
             "lop secret run --secret NAME=TOKEN -- env -i printenv",
             "lop secret run --secret NAME=TOKEN -- timeout 5 env -iv printenv",
             "lop secret run --secret NAME=TOKEN -- node -pe '1 + 1'",
+            "lop secret file --env-var KF GCP_SA_JSON -- sh -c 'wc -c < \"$KF\"'",
             "lop secret run --secret NAME=TOKEN -- node app.js",
             "lop secret run --secret NAME=TOKEN -- awk '{print $1}' /etc/hosts",
             "lop secret file GCP_SA_JSON -- sh -c 'wc -c < \"$GOOGLE_APPLICATION_CREDENTIALS\"'",
@@ -2551,13 +2559,70 @@ class _ShellAnalyzer:
                     if arg.startswith("--secret="):
                         return verb, arg.split("=", 1)[1].split("=", 1)[0]
         else:
-            name = args[2] if len(args) > 2 else ""
+            # `file`'s own `--env-var VAR` may come BEFORE the name (R5-4):
+            # argparse accepts `file --env-var KF NAME -- …`, and reading `KF` as
+            # the name — then `--env-var` as "not a name" — left the stage
+            # unseen as a source. `get` has no option that takes an operand.
+            position = 2
+            while verb == "file" and position < len(args):
+                if args[position] == "--env-var":
+                    position += 2
+                elif args[position].startswith("--env-var="):
+                    position += 1
+                else:
+                    break
+            name = args[position] if len(args) > position else ""
             if name and not name.startswith("-"):
                 # `lop secret get --help` is not a source: no value exists.
                 return verb, name
             if not name and via_xargs:
                 # The name is `xargs`'s stdin, which the text does not show.
                 return verb, "?"
+        return None
+
+    def _nested_source_stage(
+        self, stage: list[_Word | _Op | _Body]
+    ) -> list[_Word | _Op | _Body] | None:
+        """The consumer of `run … -- CMD` as a stage, when CMD is itself a source.
+
+        `file NAME -- lop secret get NAME | rev` was already refused (its PATH
+        flow reaches `rev`), but `run` returns no flow, so the same consumer
+        under `run` leaked reversed (R5-5). The consumer is everything after the
+        first `--` word, or — separator-less, which argparse also accepts —
+        after the last `--secret NAME` pair (each takes exactly one operand, so
+        the boundary is exact). Redirections are kept: they apply to the whole
+        command line either way.
+        """
+        redirects = self._redirect_words(stage)
+        positions = [
+            index
+            for index, item in enumerate(stage)
+            if isinstance(item, _Word) and index not in redirects
+        ]
+        texts = [self._word_text(stage[index]).strip() for index in positions]  # type: ignore[arg-type]
+        if "run" not in texts:
+            return None
+        cursor = texts.index("run") + 1
+        while cursor < len(texts):
+            if texts[cursor] == "--":
+                cursor += 1
+                break
+            if texts[cursor] == "--secret":
+                cursor += 2
+            elif texts[cursor].startswith("--secret="):
+                cursor += 1
+            else:
+                break
+        if cursor >= len(texts):
+            return None
+        inner = [
+            item
+            for index, item in enumerate(stage)
+            if index >= positions[cursor] or (index in redirects or isinstance(item, _Op))
+        ]
+        unwrapped = self._unwrap(inner)
+        if unwrapped and self._source_verb(unwrapped) is not None:
+            return inner
         return None
 
     def _emitting_consumer(
@@ -3185,6 +3250,20 @@ class _ShellAnalyzer:
                 # something reads it, which the read rules above then refuse.
                 return _Flow(path=True, name=secret, span=src_span)
             if verb == "run":
+                nested = self._nested_source_stage(stage)
+                if nested is not None:
+                    # `run … -- lop secret get N` hands the child's stdout — a
+                    # second fetch — straight to this stage's stdout (R5-5).
+                    # Walking the consumer AS this stage is what lets every
+                    # source rule judge it: `| rev` refuses, `| wc -c` and
+                    # `> /dev/null` stay allowed, exactly as the bare fetch.
+                    return self._stage(
+                        nested,
+                        stdin,
+                        writes_stdout=writes_stdout,
+                        contained=contained,
+                        depth=depth,
+                    )
                 self._emitting_consumer(stage, secret, verb=verb, depth=depth)
                 return _Flow()
             if stdout_path is not None:
