@@ -556,6 +556,40 @@ def test_the_owner_side_refresh_a_report_can_provoke_is_rate_limited(
     assert posts_after_first == 1
 
 
+@pytest.fixture()
+def young_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The owner module's ``monotonic`` as it reads 5 s after boot.
+
+    ``time.monotonic`` counts from boot, so a fresh CI runner or a laptop just after a
+    reboot reads a SMALL number — which is where a ``0.0`` "last refreshed" default
+    looked like a refresh a moment ago (review round 3, F1). Only ``owner``'s own view
+    of the clock is shifted: the broker's event loop keeps the real one, so nothing
+    else in the process sees time move.
+    """
+    import types
+
+    real = time.monotonic
+    start = real()
+    shim = types.SimpleNamespace(
+        **{name: getattr(time, name) for name in dir(time) if not name.startswith("_")}
+    )
+    shim.monotonic = lambda: 5.0 + (real() - start)
+    monkeypatch.setattr(owner_mod, "time", shim)
+
+
+def test_the_first_report_after_boot_still_refreshes(
+    owner: Any, idp: RotatingIdP, young_clock: None
+) -> None:
+    """F1: on a host up for under ``REPORT_REFRESH_MIN_INTERVAL_S``, the FIRST report
+    was answered ``coalesced`` and nothing was refreshed. It must refresh, once, and the
+    rate limit must still hold for the second."""
+    first = _report(owner, BORROWER_DEVICE, "invalid")
+    second = _report(owner, BORROWER_DEVICE, "invalid")
+    assert first["action"] == "refreshed", first
+    assert second["action"] == "coalesced", second
+    assert len(idp.posts) == 1
+
+
 def test_a_report_from_a_device_that_is_not_a_holder_is_refused(
     owner: Any, idp: RotatingIdP
 ) -> None:

@@ -289,7 +289,97 @@ def test_an_offline_owner_is_named_with_when_it_was_last_seen(mesh: Any) -> None
         _borrower_client(mesh).request_grant_sync(STUB_PROVIDER, session_id="sess-1"), Grant
     )
     mesh.a.stop()
+    # WAIT OUT THE SHUTDOWN GAP rather than race it (review round 3, F2): ``stop``
+    # shuts the owner's worker pool ~50 ms before it closes links, and this test is
+    # about an owner that is GONE. The gap itself is its own test below.
+    assert _wait_for(lambda: not any(link.alive for link in mesh.b.links.values()))
     offline = _borrower_client(mesh).request_grant_sync(STUB_PROVIDER, session_id="sess-2")
     assert isinstance(offline, BrokerError), offline
     assert offline.code == "owner_offline", offline
     assert "last seen just now" in offline.message, offline.message
+
+
+def test_an_owner_that_is_shutting_down_reads_as_offline(mesh: Any) -> None:
+    """F2 (review round 3): the owner mid-``stop`` answered ``internal`` in its own voice.
+
+    ``RelayServer.stop`` shuts the slow-op pool FIRST and closes links ~50 ms later. A
+    borrower whose link is still up in that gap gets "this device's relay is stopping",
+    which was classified ``internal``, cached, and shown to the borrower as if its own
+    relay were stopping. This holds the gap open deterministically by doing exactly
+    ``stop``'s first step and nothing else.
+    """
+    _share(mesh)
+    _pull(mesh)
+    client = _borrower_client(mesh)
+    assert isinstance(client.request_grant_sync(STUB_PROVIDER, session_id="sess-1"), Grant)
+    pool, _slots = mesh.a._slow_executor()  # noqa: SLF001 — ``stop``'s own first step
+    pool.shutdown(wait=False, cancel_futures=True)
+    assert any(link.alive for link in mesh.b.links.values()), "the gap was not held open"
+    stopping = _borrower_client(mesh).request_grant_sync(STUB_PROVIDER, session_id="sess-2")
+    assert isinstance(stopping, BrokerError), stopping
+    assert stopping.code == "owner_offline", stopping
+    assert "relay is stopping" not in stopping.message, stopping.message
+
+
+def test_a_static_key_revoke_says_the_copy_never_expires(
+    mesh: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F3 (review round 3): the receipt promised "until the token expires" for a key
+    that never expires. A static API key shared and then revoked must say the only true
+    thing: a copy lives until the key is rotated at the provider — in the lines AND in
+    the ``--json`` payload an incident script would read.
+    """
+    import json
+
+    from local_operator.providers.auth_store import AuthStore
+
+    auth = AuthStore(config_dir=mesh.a.root)
+    auth.upsert_credential(
+        "deepseek", {"type": "api_key", "key": "-".join(("static", "fixture", "value"))}
+    )
+    auth.close()
+    peer = mesh.b.identity.name
+    assert _lop_network("credential", "share", "deepseek", "--with", peer) == 0
+    capsys.readouterr()
+    assert _lop_network("credential", "revoke", "deepseek", "--from", peer) == 0
+    receipt = capsys.readouterr().out
+    assert "never expires" in receipt and "rotate the 'deepseek' key" in receipt, receipt
+    assert "until the token expires" not in receipt, receipt
+
+    assert _lop_network("credential", "share", "deepseek", "--with", peer) == 0
+    capsys.readouterr()
+    assert _lop_network("credential", "revoke", "deepseek", "--from", peer, "--json") == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert "never expires" in payload["revocation"]["copied_bearer"], payload
+
+
+_MISSING = object()
+
+
+def test_a_report_with_a_garbled_retry_value_is_answered_not_crashed(mesh: Any) -> None:
+    """QA round 2: a non-numeric ``retry_after_ms`` crashed the BORROWER's leg-1 handler.
+
+    ``_LocalOps.report`` read it with a bare ``int(...)``: ``"abc"`` raised ``ValueError``
+    and the control reply came back ``null`` — the same hole m1 closed on the owner's
+    side, in the other direction. Each shape a peer or a skewed build could send —
+    non-numeric, negative, absurdly large, ``NaN``, a container, missing — must reach the
+    owner and come back with a DEFINED answer, over the real socket and the real link.
+    """
+    _share(mesh)
+    _pull(mesh)
+    found = store.find_own_relay(mesh.b.root)
+    assert found is not None
+    for value in ("abc", -5, 10**18, "nan", [1], _MISSING):
+        extra = {} if value is _MISSING else {"retry_after_ms": value}
+        reply = relay.control_request(
+            found,
+            "credential_report",
+            timeout=30.0,
+            credential_key=STUB_PROVIDER,
+            kind="unavailable",
+            session_id="sess-garbled",
+            **extra,
+        )
+        assert isinstance(reply, dict), (value, reply)
+        detail = reply.get("detail")
+        assert isinstance(detail, dict) and detail.get("action") == "noted", (value, reply)

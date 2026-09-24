@@ -884,6 +884,14 @@ def _transport_refusal_code(sentence: str) -> str:
         return "not_a_holder"
     if "not implemented" in lowered or "not an operation this build dispatches" in lowered:
         return "unsupported"
+    if "relay is stopping" in lowered:
+        # THE OWNER IS GOING AWAY (review round 3, F2). ``RelayServer.stop`` shuts its
+        # slow-op pool ~50 ms before it closes links, so a borrower asking inside that
+        # gap reaches a live link and gets the relay's own first-person sentence
+        # ("this device's relay is stopping"). As ``internal`` it was cached and shown
+        # to the borrower in the OWNER's voice; to the borrower it means exactly what
+        # a closed link a moment later would: the owner is offline.
+        return "owner_offline"
     if "already running" in lowered:
         return "rate_limited"
     if "did not finish within" in lowered:

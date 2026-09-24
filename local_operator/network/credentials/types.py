@@ -32,6 +32,7 @@ THREE FACTS THIS MODULE EXISTS TO PIN, each a decision rather than a spelling:
 from __future__ import annotations
 
 import dataclasses
+import math
 import time
 import zlib
 from typing import Any, Literal
@@ -125,6 +126,56 @@ def device_bound_refusal(provider: str) -> str:
         f"cannot be lent to another device; run 'lop login {provider}' on the "
         "device that needs it"
     )
+
+
+# ---------------------------------------------------------------------------
+# Numbers that arrive from a peer
+# ---------------------------------------------------------------------------
+
+#: The longest a PEER's number may make this device wait before asking again (ms).
+#: It is the longest refusal TTL this module chooses for itself (``revoked``,
+#: ``not_a_holder`` …), so no peer can hold a borrower silent for longer than the
+#: borrower's own worst case — a 10**18 "retry after" was otherwise a refusal cached
+#: for the life of the process.
+MAX_PEER_RETRY_AFTER_MS = 300_000
+
+
+def peer_number(value: Any, *, default: float = 0, maximum: float | None = None) -> float:
+    """A number a PEER sent, or ``default`` — never an exception, never out of range.
+
+    WHY THIS EXISTS (QA round 2, and review round 2 m1 before it): every numeric field
+    on a broker frame, a grant, a refusal or a pulled placement document was read with
+    a bare ``int(...)``/``float(...)``, so one ``"abc"`` from a peer (or a build that
+    spells a field differently) raised ``ValueError`` in the handler — the reply came
+    back ``null`` and the borrower read a crash as "owner offline". The boundary is
+    where a value stops being the peer's claim and becomes this device's input, so it
+    is validated HERE, once, for every field.
+
+    Accepted: a finite ``int``/``float`` or a numeric string, ``>= 0``. A ``bool``, a
+    container, ``NaN``, an infinity, a negative number or anything unparseable yields
+    ``default``; a value above ``maximum`` is clamped to it.
+    """
+    if isinstance(value, bool) or value is None:
+        return default
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str):
+        try:
+            number = float(value.strip())
+        except ValueError:
+            return default
+    else:
+        return default
+    if not math.isfinite(number) or number < 0:
+        return default
+    if maximum is not None and number > maximum:
+        return maximum
+    return number
+
+
+def peer_int(value: Any, *, default: int = 0, maximum: int | None = None) -> int:
+    """:func:`peer_number` for a field the protocol defines as an integer."""
+    return int(peer_number(value, default=default, maximum=maximum))
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +280,7 @@ class BrokerError:
             key=str(detail.get("key") or ""),
             owner_device=str(detail.get("owner_device") or ""),
             owner_device_name=str(detail.get("owner_device_name") or ""),
-            retry_after_ms=int(detail.get("retry_after_ms") or 0),
+            retry_after_ms=peer_int(detail.get("retry_after_ms"), maximum=MAX_PEER_RETRY_AFTER_MS),
         )
 
 
@@ -325,14 +376,16 @@ class Grant:
         return cls(
             access_token=str(detail.get("access_token") or ""),
             kind=str(detail.get("token_kind") or "bearer"),
-            token_expires_at_ms=int(detail.get("token_expires_at_ms") or 0),
-            grant_expires_at_ms=int(detail.get("grant_expires_at_ms") or 0),
+            # A garbled expiry reads as 0 — already expired — so ``GrantCache`` never
+            # holds the grant: the failure is a re-ask, not a bearer kept forever.
+            token_expires_at_ms=peer_int(detail.get("token_expires_at_ms")),
+            grant_expires_at_ms=peer_int(detail.get("grant_expires_at_ms")),
             credential_ref=CredentialRef(
                 owner_device=str(ref_row.get("owner_device") or ""),
                 owner_device_name=str(ref_row.get("owner_device_name") or ""),
                 provider=str(ref_row.get("provider") or ""),
                 kind=str(ref_row.get("kind") or "oauth"),
-                credential_id=int(ref_row.get("credential_id") or 0),
+                credential_id=peer_int(ref_row.get("credential_id")),
             ),
             served_by=str(detail.get("served_by") or ""),
             refreshed=bool(detail.get("refreshed")),
@@ -340,8 +393,10 @@ class Grant:
                 kind=str(scope_row.get("kind") or "session"),
                 session_id=str(scope_row.get("session_id") or ""),
             ),
-            identity={str(k): str(v) for k, v in (identity or {}).items()},
-            latency_ms=int(detail.get("latency_ms") or 0),
+            identity=(
+                {str(k): str(v) for k, v in identity.items()} if isinstance(identity, dict) else {}
+            ),
+            latency_ms=peer_int(detail.get("latency_ms")),
             grant_id=str(detail.get("grant_id") or ""),
         )
 
@@ -413,7 +468,7 @@ class CredentialPlacementEntry:
                 Holder(
                     device=str(item["device"]),
                     scope=str(item.get("scope") or "session"),
-                    granted_at=float(item.get("granted_at") or 0.0),
+                    granted_at=peer_number(item.get("granted_at")),
                     granted_by=str(item.get("granted_by") or ""),
                 )
             )
@@ -425,8 +480,10 @@ class CredentialPlacementEntry:
             owner_device_name=str(row.get("owner_device_name") or ""),
             identity_label=str(row.get("identity_label") or ""),
             holders=holders,
-            declared_at=float(row.get("declared_at") or 0.0),
-            doc_rev=int(row.get("doc_rev") or 1),
+            declared_at=peer_number(row.get("declared_at")),
+            # A garbled revision reads as the FLOOR, so it can never outrank (and
+            # overwrite) a revision this device already holds.
+            doc_rev=peer_int(row.get("doc_rev"), default=1),
         )
 
 

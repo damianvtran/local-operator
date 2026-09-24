@@ -109,6 +109,11 @@ class _LocalOps:
         )
 
     def report(self, frame: dict[str, Any]) -> dict[str, Any]:
+        from local_operator.network.credentials.types import (
+            MAX_PEER_RETRY_AFTER_MS,
+            peer_int,
+        )
+
         key = str(frame.get("credential_key") or "")
         client = self._source()
         if client is None:
@@ -120,7 +125,11 @@ class _LocalOps:
             model_id=str(frame.get("model_id") or ""),
             block_scope=str(frame.get("block_scope") or ""),
             for_session=str(frame.get("session_id") or ""),
-            retry_after_ms=int(frame.get("retry_after_ms") or 0),
+            # VALIDATED AT THE BOUNDARY (QA round 2): a bare ``int(...)`` raised
+            # ``ValueError`` on a non-numeric value and the control reply came back
+            # ``null``. The owner no longer reads this number (review round 2, m1), so
+            # a garbled one simply travels as 0.
+            retry_after_ms=peer_int(frame.get("retry_after_ms"), maximum=MAX_PEER_RETRY_AFTER_MS),
         )
 
     def placement(self, frame: dict[str, Any]) -> dict[str, Any]:
