@@ -150,13 +150,16 @@ all.
 
 **The announcement is not unconditional, so do not read its absence as
 impossibility.** Where no broker or session is reachable, and in the default
-keyfile tier wherever a live broker refuses the caller — which includes this
-user's own plain terminal, since it has no `lop` session among its ancestors —
-the seam degrades to the **unannounced local read**, exactly as
-`$(lop secret get NAME)` does: same bytes, no notice to any session. The broker
-is the audit trail and the redaction notice in that tier, not a boundary,
-because the master key sits on disk beside the store and a refused caller can
-read it directly anyway. In the hardened passphrase tier the refusal stands and
+keyfile tier where a live broker refuses the caller's ancestry (`unauthorized` /
+`unauthenticated`, which includes this user's own plain terminal, since it has no
+`lop` session among its ancestors) the seam degrades to the **unannounced local
+read**, exactly as `$(lop secret get NAME)` does: same bytes, no notice to any
+session. The fallback is narrower than "any refusal": codes this code path does
+not catch — `unredactable`, `locked`, `version` — propagate instead, so a broker
+that answered and said one of those serves nothing at all. The broker is the
+audit trail and the redaction notice in that tier, not a boundary, because the
+master key sits on disk beside the store and a refused caller can read it
+directly anyway. In the hardened passphrase tier the refusal stands and
 there is no local read to fall back to. "What is recorded" below is how you tell
 the two apart afterwards.
 
