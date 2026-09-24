@@ -509,7 +509,7 @@ sessionless surface answers the same questions from the files on disk, gated on
 | --- | --- | --- |
 | `GET /v1/desktop/mcp` | `cwd?` (absolute existing dir, default the user's home), `session_id?` | `CRUDResponse{result:{data:<catalog>, replayed:false}}` |
 | `POST /v1/desktop/mcp` | `MCPControl` plus `cwd?` | the FULL catalog again, plus `operation: <McpOperation>\|null` — the op this request started or named. A REFUSAL is `409 {code, message}` and carries NO document, so a client that needs rows after one re-reads the GET |
-| `POST /v1/desktop/mcp/credentials` | `MCPCredentials` plus `cwd?` | `{name, saved_ids, failed_ids, code, catalog:<catalog>}` |
+| `POST /v1/desktop/mcp/credentials` | `MCPCredentials` plus `cwd?` and `header?` (the `add_key` form, below) | `{name, saved_ids, failed_ids, code, catalog:<catalog>}` |
 
 `add`, `remove`, `test`, `login`, `reauth`, `logout`, `status` and `cancel` are the
 sessionless actions. `connect`, `disconnect` and `reload` stay on the session route:
@@ -546,7 +546,9 @@ its `scope` (`global`/`project`, where it APPLIES) with `project_cwd` set iff
 `project`, a `transport`/`endpoint` pair with a redacted URL when the URL carried
 user-info, a query or a fragment, `status`/`status_reason`/`status_observed_at`/
 `status_basis`, an `auth` block (`kind`, `signed_in`, and the state of each
-`secret_refs` id), a `tool_count` with its basis, and the closed `actions` list. It
+`secret_refs` id), a `tool_count` with its basis, and the closed `actions` list —
+`test`, `sign_in`, `set_key`, `add_key`, `reauth`, `sign_out`, `remove`, `connect`,
+`disconnect`. It
 is generated in `mcp/catalog.py` — the ONE row builder behind this route — so no
 client derives any of it; `docs/fixtures/mcp-catalog.json` is a pinned sample of the
 shape (with one row per status, one project row, one foreign-import row and a
@@ -562,6 +564,33 @@ Test or sign-in ANSWERED it), `operation` (one is running right now, so nothing 
 measured this server yet — `status_observed_at` is null), or `stored` (config, the
 grant store, the encrypted store). The bases are kept apart so a client never draws
 a settled result for an operation still in flight.
+
+**Keys: `set_key` vs `add_key`.** `set_key` appears when the config declares `${ID}`
+references (`auth.secret_refs` non-empty): the client asks for each listed id and
+posts `{name, values:{<id>: <value>}, confirmed_replace?}`. `add_key` appears INSTEAD
+of `sign_in` for a REMOTE server we own (`source.editable`) that declares no
+reference and is known to need a key: its config says `auth.type: apikey`, or a Test
+in this daemon watched it answer 401/403 while discovery found no OAuth
+authorization server. Such a row reads `auth.kind: api_key`, `signed_in: false`,
+`needs_sign_in`, and never offers `sign_in` (which could only fail with "No OAuth
+authorization server was discovered"). The client asks for the header name (e.g.
+`Authorization` or `X-Api-Key`), a key id (a `[A-Za-z_][A-Za-z0-9_]*` name) and the
+value, and posts `{name, header, values:{<id>: <value>}}` — exactly one id. The
+server binds `headers[<header>] = "${<id>}"` into the file that defines the server
+(only a reference ever enters config), then stores the value; a refused store rolls
+the binding back. It refuses a header the server already sets, a transport-owned
+header, and a foreign row, with `code: invalid_target` and nothing written. After it
+the row carries the new reference and offers `set_key`. The challenge observation
+lives in this daemon's memory, so after a restart such a row reads `unknown` +
+`sign_in` again until the next Test.
+
+**A key write or a grant action forgets EVERY cached probe**, not only its own row's:
+a grant is keyed by the server URL (every folder) and a key by its id (every server
+that names it), so a per-row drop left the same stale answer one folder or one
+sibling server away. An operation already running when that happens settles
+normally but records no probe, since it measured the facts that were just replaced.
+A refused key write changes nothing and forgets nothing.
+
 **A stored fact never claims `connected`** — a grant revoked upstream still reads as
 signed in, so stored state is shown as "Ready". Precedence, first match wins: a
 config that fails validation is `error`; a running operation on that server is
@@ -572,8 +601,9 @@ synchronous answer: it spawns one short-lived manager, connects NON-interactivel
 `needs_sign_in` or `error`. One operation runs at a time (a second loopback OAuth
 listener would fight for the callback port), each is bounded and cancellable, and
 every spawned child is torn down inside the operation's own task — including on
-server shutdown, which cancels and JOINS the operation, so a `SIGTERM` reaps the
-child through the app's own teardown. Two limits, measured rather than assumed: a
+server shutdown, which cancels and JOINS the operation, so the child is reaped
+through the app's own teardown wherever the lifespan's shutdown runs (`SIGTERM`,
+`SIGINT`, a programmatic uvicorn shutdown), and not under `SIGKILL`. Two limits, measured rather than assumed: a
 `SIGKILL` runs no teardown at all, so a child that ignores its stdin stays until it
 reads EOF and exits on its own (an ordinary stdio server does exactly that within
 seconds), and a second cancel landing during teardown interrupts `disconnect_all`

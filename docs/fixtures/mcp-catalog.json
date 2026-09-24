@@ -119,6 +119,40 @@
       ]
     },
     {
+      "id": "acme-api",
+      "name": "acme-api",
+      "scope": "global",
+      "project_cwd": null,
+      "source": {
+        "kind": "local-operator",
+        "path": "/Users/you/.local-operator/mcp.json",
+        "editable": true,
+        "owned_scope": "global"
+      },
+      "transport": "remote_url",
+      "endpoint": {
+        "command": null,
+        "url": "https://mcp.acme.example/mcp",
+        "endpoint_redacted": false
+      },
+      "status": "needs_sign_in",
+      "status_reason": null,
+      "status_observed_at": null,
+      "status_basis": "stored",
+      "auth": {
+        "kind": "api_key",
+        "signed_in": false,
+        "secret_refs": []
+      },
+      "tool_count": null,
+      "tool_count_basis": null,
+      "actions": [
+        "test",
+        "add_key",
+        "remove"
+      ]
+    },
+    {
       "id": "filesystem",
       "name": "filesystem",
       "scope": "global",

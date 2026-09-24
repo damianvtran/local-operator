@@ -316,6 +316,30 @@ def test_an_overlay_that_reached_no_row_is_not_a_live_document(distinct: Path) -
         assert (row["status"], row["status_basis"]) == ("not_started", "stored"), overlay
 
 
+def test_an_overlay_hidden_by_a_running_operation_is_not_a_live_document(
+    distinct: Path,
+) -> None:
+    """R2-m2: the overlay names a configured server, and still reaches no row.
+
+    A running operation outranks the overlay, so the only server the overlay
+    speaks for reads ``connecting``/``operation``. Deriving ``applied`` from the
+    overlay's KEYS called that document ``live``.
+    """
+    add_server("echoer", command=COMMAND, scope="global", cwd=distinct)
+
+    document = describe_servers(
+        str(distinct),
+        live={"echoer": LiveFacts(status="connected", tool_count=2)},
+        session_id="8fd6c6a40934",
+        running=frozenset({"echoer"}),
+    )
+    (row,) = document["servers"]
+
+    assert (row["status"], row["status_basis"]) == ("connecting", "operation")
+    assert document["status_source"] == "config"
+    assert document["session_id"] is None
+
+
 def test_a_live_auth_block_is_needs_sign_in_with_its_reason(distinct: Path) -> None:
     add_server("echoer", command=COMMAND, scope="global", cwd=distinct)
 
@@ -535,6 +559,104 @@ def test_a_local_command_with_a_reference_offers_set_key_and_not_sign_in(
     assert row["actions"] == ["test", "set_key", "remove"]
 
 
+@pytest.fixture
+def challenges(monkeypatch: pytest.MonkeyPatch) -> dict[str, bool]:
+    """The per-process 401 ledger, emptied and restored around one test."""
+    from local_operator.mcp import auth
+
+    ledger: dict[str, bool] = {}
+    monkeypatch.setattr(auth, "OAUTH_CHALLENGES", ledger)
+    return ledger
+
+
+def test_a_401_without_oauth_offers_add_key_and_never_sign_in(
+    distinct: Path, challenges: dict[str, bool]
+) -> None:
+    """U3: Sign in on a server with no OAuth server can only fail.
+
+    The ledger entry is what a Test's own connect records on a 401/403 whose
+    discovery found nothing (``manager._auth_challenge``), so this is the row a
+    user sees straight after pressing Test on such a server.
+    """
+    url = "https://mcp.example.invalid/rpc"
+    add_server("acme-api", url=url, scope="global", cwd=distinct)
+    challenges[url] = False
+
+    (row,) = describe_servers(str(distinct))["servers"]
+
+    assert row["auth"] == {"kind": "api_key", "signed_in": False, "secret_refs": []}
+    assert (row["status"], row["status_basis"]) == ("needs_sign_in", "stored")
+    assert row["actions"] == ["test", "add_key", "remove"]
+
+
+def test_a_401_with_oauth_discovered_still_offers_sign_in(
+    distinct: Path, challenges: dict[str, bool]
+) -> None:
+    url = "https://mcp.example.invalid/rpc"
+    add_server("remote", url=url, scope="global", cwd=distinct)
+    challenges[url] = True
+
+    (row,) = describe_servers(str(distinct))["servers"]
+
+    assert "sign_in" in row["actions"]
+    assert "add_key" not in row["actions"]
+
+
+def test_a_declared_apikey_server_offers_add_key_without_a_probe(
+    distinct: Path, challenges: dict[str, bool]
+) -> None:
+    """``auth.type: apikey`` is the user's own statement; no 401 is needed."""
+    global_file = _global_mcp_json()
+    global_file.parent.mkdir(parents=True, exist_ok=True)
+    global_file.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "acme-api": {
+                        "type": "http",
+                        "url": "https://mcp.example.invalid/rpc",
+                        "auth": {"type": "apikey"},
+                    }
+                }
+            }
+        )
+    )
+
+    (row,) = describe_servers(str(distinct))["servers"]
+
+    assert row["actions"] == ["test", "add_key", "remove"]
+
+
+def test_a_server_that_already_references_a_key_keeps_set_key(
+    distinct: Path, challenges: dict[str, bool]
+) -> None:
+    """A reference to fill means ``set_key``; ``add_key`` is only for none."""
+    url = "https://mcp.example.invalid/rpc"
+    add_server(
+        "acme-api", url=url, headers={"X-Api-Key": "${ACME_KEY}"}, scope="global", cwd=distinct
+    )
+    challenges[url] = False
+
+    (row,) = describe_servers(str(distinct))["servers"]
+
+    assert row["actions"] == ["test", "set_key", "remove"]
+
+
+def test_a_foreign_401_row_is_not_offered_add_key(
+    distinct: Path, challenges: dict[str, bool]
+) -> None:
+    """``add_key`` writes the server's config, so it needs the row to be ours."""
+    url = "https://mcp.example.invalid/rpc"
+    (distinct / ".mcp.json").write_text(json.dumps({"mcpServers": {"acme-api": {"url": url}}}))
+    challenges[url] = False
+
+    (row,) = describe_servers(str(distinct))["servers"]
+
+    assert row["source"]["editable"] is False
+    assert "add_key" not in row["actions"]
+    assert "sign_in" not in row["actions"]
+
+
 def test_a_local_command_without_references_is_never_offered_a_sign_in(
     distinct: Path,
 ) -> None:
@@ -716,6 +838,7 @@ def test_the_pinned_fixture_still_matches_the_builder(distinct: Path) -> None:
                 "test",
                 "sign_in",
                 "set_key",
+                "add_key",
                 "reauth",
                 "sign_out",
                 "remove",
@@ -757,6 +880,15 @@ def test_the_pinned_fixture_still_matches_the_builder(distinct: Path) -> None:
     assert any(row["source"]["editable"] is False for row in fixture["servers"])
     assert any(row["endpoint"]["endpoint_redacted"] for row in fixture["servers"])
     assert any(row["tool_count_basis"] == "last_seen" for row in fixture["servers"])
+    # The key-entry pair the UI routes on, and the rule between them: ``add_key``
+    # only on a row with no reference to fill, and never beside ``sign_in``.
+    for row in fixture["servers"]:
+        assert not {"add_key", "sign_in"} <= set(row["actions"]), row["name"]
+        assert not {"add_key", "set_key"} <= set(row["actions"]), row["name"]
+        if "add_key" in row["actions"]:
+            assert row["auth"]["secret_refs"] == [] and row["auth"]["kind"] == "api_key"
+    assert any("set_key" in row["actions"] for row in fixture["servers"])
+    assert any("add_key" in row["actions"] for row in fixture["servers"])
     # The one row a merely-running operation owns: its basis is not a probe's,
     # and it carries no observation, or a renderer cannot tell the two apart.
     connecting = [row for row in fixture["servers"] if row["status"] == "connecting"]

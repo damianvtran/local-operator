@@ -803,6 +803,119 @@ def set_http_oauth_server(
     return 0
 
 
+#: A header name a key may be bound into: an RFC 9110 token. Bounded so the
+#: name cannot smuggle a second header or a value into the config.
+HEADER_NAME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,128}$")
+
+#: The ``${ID}`` form the resolver publishes (``secret_refs._NAME_RE``). An id
+#: outside it would be stored but never published as a reference, leaving the
+#: row asking for a key it already holds.
+SECRET_ID_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+
+#: Headers the transport owns. A key bound here would either be overwritten by
+#: the transport or break the protocol, so the write is refused instead.
+TRANSPORT_OWNED_HEADERS = frozenset(
+    {
+        "accept",
+        "connection",
+        "content-length",
+        "content-type",
+        "host",
+        "mcp-protocol-version",
+        "mcp-session-id",
+        "transfer-encoding",
+    }
+)
+
+
+def bind_header_secret(
+    name: str,
+    header: str,
+    secret_id: str,
+    *,
+    cwd: str | os.PathLike[str] | None = None,
+) -> str:
+    """Bind ``headers[header] = "${secret_id}"`` on a remote server we own.
+
+    The config half of the desktop's ``add_key`` action: a remote server that
+    answered 401 with no OAuth discovery, and declares no ``${ID}``, has no
+    reference for a key to fill, so one is added here and the value goes to the
+    encrypted store separately (only a reference ever enters config). Writes
+    ONLY the scope file that already defines the effective server, and never
+    replaces an existing header: a header the user wrote is theirs, and the way
+    to change a referenced value is ``set_key``. Returns the scope written.
+    Raises :class:`MCPConfigWriteError` (``unknown_server``, ``not_owned``,
+    ``invalid_config`` or ``write_failed``).
+    """
+    root = cwd if cwd is not None else "."
+    if not HEADER_NAME_RE.match(header) or header.lower() in TRANSPORT_OWNED_HEADERS:
+        raise MCPConfigWriteError([f"header {header!r} cannot carry a key"], "invalid_config")
+    if not SECRET_ID_RE.match(secret_id):
+        raise MCPConfigWriteError(
+            [f"key id {secret_id!r} is not a reference name"], "invalid_config"
+        )
+    configs, sources = load_all_mcp_configs(root)
+    cfg = configs.get(name)
+    if cfg is None:
+        raise MCPConfigWriteError([f"server {name!r} not found"], "unknown_server")
+    if not getattr(cfg, "url", None):
+        raise MCPConfigWriteError([f"server {name!r} has no headers"], "invalid_config")
+    scope = owned_scope_for_source(sources.get(name), root)
+    if scope is None:
+        raise MCPConfigWriteError([f"server {name!r} is not ours to edit"], "not_owned")
+    path = _scope_path(root, scope)
+    doc = _read_json(path)
+    servers = doc.get("mcpServers") if doc is not None else None
+    raw = servers.get(name) if isinstance(servers, dict) else None
+    if doc is None or not isinstance(raw, dict):
+        raise MCPConfigWriteError([f"server {name!r} not found in {path}"], "unknown_server")
+    headers = raw.get("headers")
+    if headers is None:
+        headers = {}
+    if not isinstance(headers, dict) or any(str(key).lower() == header.lower() for key in headers):
+        raise MCPConfigWriteError([f"server {name!r} already sets {header!r}"], "invalid_config")
+    headers[header] = f"${{{secret_id}}}"
+    raw["headers"] = headers
+    try:
+        _write_json_atomic(path, doc)
+    except OSError as exc:
+        raise MCPConfigWriteError([f"could not write {path}: {exc}"]) from exc
+    return scope
+
+
+def unbind_header_secret(
+    name: str,
+    header: str,
+    *,
+    scope: str,
+    cwd: str | os.PathLike[str] | None = None,
+) -> None:
+    """Undo :func:`bind_header_secret` when the value could not be stored.
+
+    Removes the header only while it still holds a bare ``${ID}`` reference,
+    so a concurrent hand edit of that header is never thrown away.
+    """
+    path = _scope_path(cwd if cwd is not None else ".", scope)
+    doc = _read_json(path)
+    servers = doc.get("mcpServers") if doc is not None else None
+    raw = servers.get(name) if isinstance(servers, dict) else None
+    if doc is None or not isinstance(raw, dict):
+        return
+    headers = raw.get("headers")
+    value = headers.get(header) if isinstance(headers, dict) else None
+    if not isinstance(headers, dict) or not isinstance(value, str):
+        return
+    if not re.fullmatch(r"\$\{[^}]+\}", value):
+        return
+    del headers[header]
+    if not headers:
+        del raw["headers"]
+    try:
+        _write_json_atomic(path, doc)
+    except OSError as exc:
+        raise MCPConfigWriteError([f"could not write {path}: {exc}"]) from exc
+
+
 def remove_server(
     name: str,
     *,

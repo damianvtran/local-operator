@@ -59,9 +59,17 @@ class CatalogControl(MCPControl):
 
 
 class CatalogCredentials(MCPCredentials):
-    """``MCPCredentials`` plus the folder whose config names the server."""
+    """``MCPCredentials`` plus the folder whose config names the server.
+
+    ``header`` is the ``add_key`` action's one extra field: the HTTP header the
+    key travels in, for a remote server that declares no ``${ID}`` yet. With it,
+    ``values`` must hold exactly one id; that id is bound into the server's
+    config as ``headers[header] = "${ID}"`` and the value stored. Without it the
+    request is the ``set_key`` write it always was.
+    """
 
     cwd: str | None = Field(default=None, max_length=4096)
+    header: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 def _cwd_or_422(raw: str | None) -> str:
@@ -169,5 +177,5 @@ async def mcp_catalog_credentials(body: CatalogCredentials, request: Request):
             "confirmed_replace": body.confirmed_replace,
         }
     )
-    result = await host_.store_credentials(credentials, folder)
+    result = await host_.store_credentials(credentials, folder, header=body.header)
     return reply({"data": {**result, "catalog": await host_.catalog(folder)}})

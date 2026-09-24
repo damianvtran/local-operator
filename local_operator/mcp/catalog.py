@@ -257,21 +257,53 @@ def _secret_ref_states(cfg: Any, base: Path) -> list[dict[str, str]]:
     ]
 
 
+def _needs_unbound_key(cfg: Any, refs: list[dict[str, str]], granted: bool) -> bool:
+    """A remote server that needs a key and declares no ``${ID}`` to hold one.
+
+    Two ways to know, both without guessing: the config says ``auth.type:
+    apikey``, or this process watched the server answer a 401/403 challenge and
+    discovery found NO authorization server (``OAUTH_CHALLENGES[url] is
+    False``, recorded by a Test's own connect). Before this such a row offered
+    only Sign in, which fails with "No OAuth authorization server was
+    discovered" — a user with a key had no way to enter it (UX round 1 of the
+    Integrations redesign, U3).
+
+    The ledger is per-process, so after a daemon restart the answer falls back
+    to ``unknown`` + Sign in until the next Test re-observes the challenge.
+    That is the ledger's documented scope, and it errs toward the old answer
+    rather than toward claiming a fact nobody measured.
+    """
+    from local_operator.mcp.auth import OAUTH_CHALLENGES
+
+    url = getattr(cfg, "url", None)
+    if not url or refs or granted:
+        return False
+    auth_type = getattr(getattr(cfg, "auth", None), "type", None)
+    if auth_type == "apikey":
+        return True
+    return auth_type is None and OAUTH_CHALLENGES.get(url) is False
+
+
 def _auth_facts(cfg: Any, refs: list[dict[str, str]]) -> dict[str, Any]:
     """``auth`` for one row: kind, signed-in state and reference states.
 
     ``unknown`` is the honest answer for a bare URL (typically a Codex or
     Claude import): whether it takes OAuth is only knowable from the network,
     so it is offered a sign-in and never claimed as "no auth needed".
+
+    A server that needs a key it has nowhere to put (:func:`_needs_unbound_key`)
+    is ``api_key`` with ``signed_in: false`` — ``all()`` over no references is
+    ``True``, which would call a server we just watched refuse us signed in.
     """
     from local_operator.mcp.auth import server_has_stored_grant
 
     url = getattr(cfg, "url", None)
     auth_type = getattr(getattr(cfg, "auth", None), "type", None)
     granted = bool(url) and server_has_stored_grant(url)
+    unbound = _needs_unbound_key(cfg, refs, granted)
     if url and (auth_type == "oauth" or granted):
         kind = "oauth"
-    elif auth_type == "apikey" or refs:
+    elif auth_type == "apikey" or refs or unbound:
         kind = "api_key"
     elif url:
         kind = "unknown"
@@ -280,11 +312,13 @@ def _auth_facts(cfg: Any, refs: list[dict[str, str]]) -> dict[str, Any]:
     signed_in: bool | None
     if kind == "oauth":
         signed_in = granted
+    elif unbound:
+        signed_in = False
     elif kind == "api_key":
         signed_in = all(ref["state"] == "encrypted" for ref in refs)
     else:
         signed_in = None
-    return {"kind": kind, "signed_in": signed_in, "secret_refs": refs}
+    return {"kind": kind, "signed_in": signed_in, "secret_refs": refs, "_unbound": unbound}
 
 
 def _last_seen_tools(name: str, cfg: Any, digest: str, tool_cache: Any) -> int | None:
@@ -322,6 +356,9 @@ def _row(
     foreign = source_kind(source) if owned is None else None
     refs = _secret_ref_states(cfg, base)
     auth = _auth_facts(cfg, refs)
+    # Internal only: it decides a status and an action below, and never crosses
+    # HTTP (the published ``auth`` keys are pinned by the fixture drift test).
+    unbound_key = bool(auth.pop("_unbound"))
     url, redacted = _public_url(cfg)
     remote = bool(getattr(cfg, "url", None))
 
@@ -370,7 +407,7 @@ def _row(
             tool_count, tool_basis = probe.tool_count, "probe"
     else:
         basis = "stored"
-        if auth["kind"] == "oauth" and not auth["signed_in"]:
+        if (auth["kind"] == "oauth" and not auth["signed_in"]) or unbound_key:
             status = "needs_sign_in"
         elif any(ref["state"] == "unavailable" for ref in refs):
             # The encrypted store could not be read, so the connect would fail
@@ -394,6 +431,14 @@ def _row(
         actions.append("sign_in")
     if refs:
         actions.append("set_key")
+    elif unbound_key and owned is not None:
+        # ``add_key``, not ``set_key``: there is no ``${ID}`` to fill, so the
+        # client must also NAME the header the key travels in, and the write
+        # binds it into this server's config — which is why it needs the row to
+        # be ours (a foreign import is fixed in the tool that owns it). Never
+        # beside ``sign_in``: ``auth.kind`` is ``api_key`` here, which the
+        # sign-in rule above already excludes.
+        actions.append("add_key")
     if auth["kind"] == "oauth" and auth["signed_in"]:
         actions.extend(["reauth", "sign_out"])
     if owned is not None:
@@ -490,11 +535,13 @@ def describe_servers(
         )
         for name, cfg in configs.items()
     ]
-    # Whether the overlay reached a row, which is a lower bar than "an overlay
-    # was passed" and the honest one for the two fields below it: a warm session
-    # that loaded none of these servers, or facts keyed by names this folder
-    # does not configure, contribute nothing that a row could report.
-    applied = live is not None and any(name in live for name in configs)
+    # Whether the overlay reached a row — read from the ROWS, not from the
+    # overlay's keys: a running operation and a config error both take
+    # precedence over the overlay, so an overlay keyed by a server being tested
+    # right now names a configured server and still reaches no row (review
+    # round 2, R2-m2). An empty overlay, or one keyed by names this folder does
+    # not configure, is the same case.
+    applied = any(row["status_basis"] == "live" for row in servers)
     return {
         "cwd": cwd,
         "project_scope_available": available,

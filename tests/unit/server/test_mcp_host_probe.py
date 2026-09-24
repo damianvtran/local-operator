@@ -170,11 +170,24 @@ def test_the_default_folder_shorthand_is_expanded(
     assert resolve_cwd("~/nested") == str(nested)
 
 
-@pytest.mark.parametrize("bad", ["~nosuchuser", "~nosuchuser/project"])
-def test_a_tilde_that_names_no_home_is_still_refused(bad: str) -> None:
-    """Expanding changes nothing here (no such home), so the guard still holds."""
+@pytest.mark.parametrize(
+    "bad", ["~nosuchuser", "~nosuchuser/project", "~root", "~root/", "~daemon/x"]
+)
+def test_only_the_callers_own_home_shorthand_is_expanded(bad: str) -> None:
+    """``~user`` is refused whether or not the account exists (R2-m3).
+
+    ``os.path.expanduser`` resolves ``~root`` to a real directory on macOS and
+    Linux, so "no such home to expand" was never the guard it was described as.
+    The desktop sends ``~`` or an absolute path; another account's home in
+    shorthand is not a case it has, so the shorthand is refused outright.
+    """
     with pytest.raises(ValueError):
         resolve_cwd(bad)
+
+
+def test_another_accounts_home_is_still_reachable_as_an_absolute_path() -> None:
+    """The refusal is of the SHORTHAND, not the folder: ``/`` always exists."""
+    assert resolve_cwd(os.path.abspath(os.sep)) == os.path.abspath(os.sep)
 
 
 # ---------------------------------------------------------------------------
@@ -440,6 +453,261 @@ async def test_a_grant_action_drops_the_probe_before_it_starts(
     finally:
         await host.close()
     assert (await _first_row(host, cwd))["status"] != "connected"
+
+
+# -- R2-M1: the facts a probe measured are keyed by URL and by secret id --------
+#
+# Each test below reproduces one contradiction the round-2 review measured on the
+# previous head, where invalidation dropped only ``probes[(cwd, name)]``. They use
+# TWO folders (the default one, which is the config dir's parent, and a project
+# folder) and TWO servers sharing one ``${ID}``, because the stale answer lived
+# exactly one folder switch or one sibling server away from the row acted on.
+
+
+@pytest.fixture
+def folders(tmp_path: Path, host: McpHost) -> tuple[str, str]:
+    """``(home, project)``: the desktop default folder and a second folder."""
+    project = tmp_path / "project"
+    project.mkdir()
+    return str(tmp_path / "home"), str(project)
+
+
+@pytest.fixture
+def real_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real encrypted store, with no persistent broker process."""
+    monkeypatch.setattr("local_operator.secrets.client.ensure_broker", lambda *a, **kw: False)
+
+
+async def test_a_sign_out_in_one_folder_forgets_the_probe_recorded_in_another(
+    host: McpHost, folders: tuple[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Contradiction 1: "Connected, 3 tools" beside Sign in, after a sign-out.
+
+    The server is global, so it is the same server — and the same URL-keyed
+    grant — in both folders. The grant is REAL (``auth.db`` under the isolated
+    config dir) and so is the logout: the assertion is on what the user reads
+    in the folder they did NOT act in.
+    """
+    from local_operator.mcp.auth import McpTokenStorage, server_has_stored_grant
+    from local_operator.mcp.desktop import MCPControl
+
+    # The logout records the URL in the per-process challenge ledger; keep that
+    # write inside this test.
+    monkeypatch.setattr("local_operator.mcp.auth.OAUTH_CHALLENGES", {})
+    home, project = folders
+    url = "https://mcp.example.com/sse"
+    await host.execute(
+        MCPControl.model_validate({"action": "add", "name": "remote", "url": url, "oauth": True}),
+        home,
+    )
+    McpTokenStorage(url)._write({"tokens": {"access_token": "placeholder"}})
+    assert server_has_stored_grant(url)
+    _seed_probe(host, home, "remote")
+    assert (await _first_row(host, home))["status"] == "connected", "the seeded probe is live"
+
+    operation = await host.execute(_logout_control("remote"), project)
+    assert operation is not None
+    settled = await _settle(host, str(operation["id"]))
+
+    assert settled["status"] == "complete", settled
+    assert not server_has_stored_grant(url)
+    row = await _first_row(host, home)
+    assert (row["status"], row["status_basis"]) == ("needs_sign_in", "stored"), row
+    assert row["auth"]["signed_in"] is False
+    assert "sign_in" in row["actions"]
+
+
+async def test_a_key_written_through_one_server_forgets_its_siblings_probe(
+    host: McpHost, folders: tuple[str, str], real_store: None
+) -> None:
+    """Contradiction 2: ``needs_sign_in`` from a probe beside ``signed_in: true``.
+
+    ``a`` and ``b`` both read ``${SHARED}``; the key is written through ``a``,
+    and ``b`` is the row that kept the stale answer.
+    """
+    home, _ = folders
+    for name in ("a", "b"):
+        await _add_remote(
+            host,
+            name,
+            cwd=home,
+            url=f"https://{name}.example.com/mcp",
+            headers={"Authorization": "${SHARED}"},
+        )
+    _seed_probe(host, home, "b", status="needs_sign_in", tools=None)
+    rows = {row["name"]: row for row in (await host.catalog(home))["servers"]}
+    assert (rows["b"]["status"], rows["b"]["status_basis"]) == ("needs_sign_in", "probe")
+
+    result = await host.store_credentials(
+        MCPCredentials(name="a", values={"SHARED": SecretStr("padlock")}), home
+    )
+
+    assert result["code"] == "saved", result
+    rows = {row["name"]: row for row in (await host.catalog(home))["servers"]}
+    for name in ("a", "b"):
+        assert rows[name]["auth"]["signed_in"] is True, rows[name]
+        assert (rows[name]["status"], rows[name]["status_basis"]) == ("not_started", "stored")
+
+
+async def test_a_key_written_from_another_folder_forgets_this_folders_probe(
+    host: McpHost, folders: tuple[str, str], real_store: None
+) -> None:
+    """Contradiction 3: the same global server's key, written from elsewhere."""
+    home, project = folders
+    await _add_remote(host, "remote", cwd=home, headers={"Authorization": "${PROBEKEY}"})
+    _seed_probe(host, home, "remote", status="needs_sign_in", tools=None)
+    assert (await _first_row(host, home))["status_basis"] == "probe"
+
+    result = await host.store_credentials(
+        MCPCredentials(name="remote", values={"PROBEKEY": SecretStr("padlock")}), project
+    )
+
+    assert result["code"] == "saved", result
+    row = await _first_row(host, home)
+    assert row["auth"]["signed_in"] is True, row
+    assert (row["status"], row["status_basis"]) == ("not_started", "stored"), row
+
+
+async def test_a_refused_key_write_forgets_nothing(
+    host: McpHost, folders: tuple[str, str], real_store: None
+) -> None:
+    """A write the store refused changed no fact, so every probe still holds."""
+    home, _ = folders
+    await _add_remote(host, "remote", cwd=home, headers={"Authorization": "${PROBEKEY}"})
+    first = MCPCredentials(name="remote", values={"PROBEKEY": SecretStr("padlock")})
+    assert (await host.store_credentials(first, home))["code"] == "saved"
+    _seed_probe(host, home, "remote")
+
+    again = MCPCredentials(name="remote", values={"PROBEKEY": SecretStr("deadbolt")})
+    result = await host.store_credentials(again, home)
+
+    assert result["code"] == "replace_confirmation_required", result
+    assert (home, "remote") in host.probes
+    assert (await _first_row(host, home))["status_basis"] == "probe"
+
+
+#: Waits for ``argv[2]`` to exist, THEN serves the real fixture server. The pid
+#: file says the child is up — so the manager has already resolved its env from
+#: the store — and the gate file lets the test write a new key before the Test
+#: can finish, which is the in-flight window R2-m1 is about.
+GATED_SERVER = (
+    "import os,sys,time,runpy;"
+    "open(sys.argv[1],'w').write(str(os.getpid()));"
+    "[time.sleep(0.05) for _ in iter(lambda: os.path.exists(sys.argv[2]), True)];"
+    "sys.argv=[sys.argv[3]];runpy.run_path(sys.argv[0],run_name='__main__')"
+)
+
+
+async def test_a_test_in_flight_across_a_key_replace_records_no_probe(
+    host: McpHost, tmp_path: Path, folders: tuple[str, str], real_store: None
+) -> None:
+    """R2-m1: the Test resolved the OLD value, so its answer is not the row's.
+
+    The operation itself still settles and reports what it saw (``complete``);
+    only the cached probe is withheld, so the row recomputes from the stores.
+    """
+    home, _ = folders
+    pid_file, gate = tmp_path / "gated.pid", tmp_path / "gate"
+    await _add(
+        host,
+        "gated",
+        cwd=home,
+        command=sys.executable,
+        args=["-c", GATED_SERVER, str(pid_file), str(gate), str(FIXTURE_SERVER)],
+        env={"FIXTURE_KEY": "${FIXTURE_KEY}"},
+    )
+    first = MCPCredentials(name="gated", values={"FIXTURE_KEY": SecretStr("padlock")})
+    assert (await host.store_credentials(first, home))["code"] == "saved"
+
+    operation = await host.execute(_test_control("gated"), home)
+    assert operation is not None
+    await _wait_for_pid_file(pid_file)
+    replace = MCPCredentials(
+        name="gated",
+        values={"FIXTURE_KEY": SecretStr("deadbolt")},
+        confirmed_replace=["FIXTURE_KEY"],
+    )
+    assert (await host.store_credentials(replace, home))["code"] == "saved"
+    gate.touch()
+    settled = await _settle(host, str(operation["id"]))
+
+    assert settled["status"] == "complete", settled
+    assert (home, "gated") not in host.probes, "a probe measured with the old key was kept"
+    row = await _first_row(host, home)
+    assert (row["status"], row["status_basis"]) == ("not_started", "stored"), row
+
+
+# -- add_key: binding a header for a server that declares no reference -------------
+
+
+async def test_add_key_binds_a_header_reference_and_stores_the_value(
+    host: McpHost, folders: tuple[str, str], real_store: None
+) -> None:
+    """The row goes from ``add_key`` to ``set_key`` with its key held."""
+    home, _ = folders
+    await _add_remote(host, "acme", cwd=home)
+
+    result = await host.store_credentials(
+        MCPCredentials(name="acme", values={"ACME_KEY": SecretStr("padlock")}),
+        home,
+        header="X-Api-Key",
+    )
+
+    assert result["code"] == "saved", result
+    doc = json.loads((Path(home) / ".local-operator" / "mcp.json").read_text())
+    assert doc["mcpServers"]["acme"]["headers"] == {"X-Api-Key": "${ACME_KEY}"}
+    row = await _first_row(host, home)
+    assert row["auth"]["secret_refs"] == [{"id": "ACME_KEY", "state": "encrypted"}]
+    assert "set_key" in row["actions"] and "add_key" not in row["actions"]
+
+
+@pytest.mark.parametrize(
+    ("header", "secret_id"),
+    [
+        ("Authorization", "ACME_KEY"),  # the server already sets it
+        ("Content-Type", "ACME_KEY"),  # the transport owns it
+        ("X-Api-Key\r\nX-Evil", "ACME_KEY"),  # not a header token
+        ("X-Api-Key", "not-a-reference"),  # the resolver would never publish it
+    ],
+)
+async def test_add_key_refuses_and_writes_nothing(
+    host: McpHost, folders: tuple[str, str], real_store: None, header: str, secret_id: str
+) -> None:
+    home, _ = folders
+    await _add_remote(host, "acme", cwd=home, headers={"Authorization": "${OTHER}"})
+    path = Path(home) / ".local-operator" / "mcp.json"
+    before = path.read_text()
+
+    result = await host.store_credentials(
+        MCPCredentials(name="acme", values={secret_id: SecretStr("padlock")}),
+        home,
+        header=header,
+    )
+
+    assert (result["code"], result["saved_ids"]) == ("invalid_target", []), result
+    assert path.read_text() == before
+
+
+async def test_add_key_rolls_the_binding_back_when_the_store_refuses(
+    host: McpHost, folders: tuple[str, str], real_store: None
+) -> None:
+    """The id is already held and the replace was not confirmed: config unchanged."""
+    home, _ = folders
+    await _add_remote(host, "keeper", cwd=home, headers={"Authorization": "${ACME_KEY}"})
+    held = MCPCredentials(name="keeper", values={"ACME_KEY": SecretStr("padlock")})
+    assert (await host.store_credentials(held, home))["code"] == "saved"
+    await _add_remote(host, "acme", cwd=home, url="https://acme.example.com/mcp")
+    path = Path(home) / ".local-operator" / "mcp.json"
+    before = path.read_text()
+
+    result = await host.store_credentials(
+        MCPCredentials(name="acme", values={"ACME_KEY": SecretStr("deadbolt")}),
+        home,
+        header="X-Api-Key",
+    )
+
+    assert result["code"] == "replace_confirmation_required", result
+    assert json.loads(path.read_text()) == json.loads(before)
 
 
 async def test_a_new_probe_prunes_the_expired_ones(host: McpHost, tmp_path: Path) -> None:
