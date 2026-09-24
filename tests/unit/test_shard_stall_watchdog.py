@@ -59,17 +59,165 @@ class _FakeConfig:
             self.workerinput = {"workerid": "gw0"}
 
 
-def test_inert_without_the_env_var(monkeypatch) -> None:
-    """Unset means inert, so a developer run and the ``-n0`` e2e stage are untouched.
+def test_inert_on_ci_without_the_env_var(monkeypatch) -> None:
+    """A CI job that did not ask for the shard bound stays exactly as inert as before.
 
-    Inert has to mean *no thread and no directory*, not merely a disabled
-    report: this hook runs in every pytest process in the repo, including the
-    e2e stage that carries its own tighter bound.
+    That is what keeps the ``-n0`` e2e stage (one process, its own tighter bound)
+    out of this module's worker branch: only CI's explicit value can enable it
+    there. Inert means *no thread and no directory*, not merely a disabled report
+    -- this hook runs in every pytest process in the repo.
     """
     monkeypatch.delenv(watchdog.ENV_SECONDS, raising=False)
+    monkeypatch.delenv(watchdog.LOCAL_ENV_SECONDS, raising=False)
     assert watchdog.enabled_seconds() is None
-    watchdog.install(_FakeConfig(worker=False))
-    assert watchdog._CONTROLLER is None
+    assert watchdog.local_seconds(on_ci=True) is None
+
+
+def test_an_explicit_local_bound_is_honoured_on_ci_too(monkeypatch) -> None:
+    """The off-switch arm must not swallow a value the operator typed in.
+
+    ``local_seconds`` refuses to INVENT a bound on CI; it does not refuse one it was
+    handed. Worth a guard because the two arms live next to each other and a
+    later edit that returns early on ``on_ci`` -- a plausible reading of "CI keeps
+    the shard bound only" -- would silently drop the bound on the one machine where
+    a stall costs a cancelled job.
+    """
+    monkeypatch.delenv(watchdog.ENV_SECONDS, raising=False)
+    monkeypatch.setenv(watchdog.LOCAL_ENV_SECONDS, "120")
+    assert watchdog.local_seconds(on_ci=True) == 120.0
+    assert watchdog.local_seconds(on_ci=False) == 120.0
+
+
+def test_the_local_default_reports_without_any_env_var(monkeypatch, capsys) -> None:
+    """The point of the local default: silence is what cost a local run its evening.
+
+        Measured 2026-09-24: a whole-tree local run under load average 80-200 reached
+        69% and then its log stopped -- because a wall-clock ``timeout`` killed the
+    group, not because a test hung, and the log tail (a ``PluggyTeardownRaisedWarning``
+        and ``OSError: cannot send (already closed?)`` from orphaned workers) could not
+        say which. Nothing in the run could have told the reader, so the reader watched
+        it by hand for four hours. This guard is the fix: absent an explicit value, a
+        local run instruments itself.
+    """
+    monkeypatch.delenv(watchdog.ENV_SECONDS, raising=False)
+    monkeypatch.delenv(watchdog.LOCAL_ENV_SECONDS, raising=False)
+
+    assert watchdog.local_seconds(on_ci=False) == watchdog.LOCAL_DEFAULT_SECONDS
+    watchdog.install(_FakeConfig(worker=False), on_ci=False)
+    assert watchdog._CONTROLLER is not None
+    assert watchdog._CONTROLLER.seconds == watchdog.LOCAL_DEFAULT_SECONDS
+    # One line, naming the switch that turns it off: an instrument that reports on
+    # a healthy run has to be silenceable by the person reading it.
+    notice = capsys.readouterr().err
+    assert watchdog.LOCAL_ENV_SECONDS in notice and "=0" in notice
+
+
+def test_the_local_default_is_silenceable_and_overridable(monkeypatch) -> None:
+    """A debugger session needs it OFF, and a bound someone typed in must win.
+
+    ``0``/``false``/``no``/``off`` is the off switch (any case, the repo's usual
+    flag reading, and the same set the root conftest's worker-cap flag uses).
+    An explicit value wins over the default in both directions, because the only
+    reason to set it is that the default is wrong for this host or this session.
+    """
+    monkeypatch.delenv(watchdog.ENV_SECONDS, raising=False)
+    for off in ("0", "false", "NO", "off"):
+        monkeypatch.setenv(watchdog.LOCAL_ENV_SECONDS, off)
+        assert watchdog.local_seconds(on_ci=False) is None, off
+    monkeypatch.setenv(watchdog.LOCAL_ENV_SECONDS, "45")
+    assert watchdog.local_seconds(on_ci=False) == 45.0
+
+
+def test_a_malformed_local_bound_falls_back_to_the_default(monkeypatch) -> None:
+    """A typo must not be read as "no reporting" -- that is the failure mode here.
+
+    Falling back to the default is safe in a way a shorter bound would not be:
+    the default only prints, and it is already sized above any legitimate item, so
+    the worst a typo can do is report at the bound nobody chose. Disabling instead
+    would turn a five-character mistake into the silence this module exists to
+    remove -- and that silence is indistinguishable from a healthy run.
+    """
+    monkeypatch.delenv(watchdog.ENV_SECONDS, raising=False)
+    for typo in ("4m", "-5", "inf", "nan"):
+        monkeypatch.setenv(watchdog.LOCAL_ENV_SECONDS, typo)
+        assert watchdog.local_seconds(on_ci=False) == watchdog.LOCAL_DEFAULT_SECONDS, typo
+
+
+def test_the_off_switch_spellings_match_the_worker_cap_flag() -> None:
+    """One reading of ``0``/``false``/``no``/``off`` per module, and they must agree.
+
+    Two modules now decide whether an env flag is off (this one and the root
+    conftest's worker cap), and they are read by the same person in the same
+    session: `PYTEST_QUIET_WORKER_CAP=0` silences one and
+    `LOCAL_OPERATOR_LOCAL_STALL_SECONDS=0` silences the other. A second reading
+    that treated `off` as ON would be a defect nobody notices until the value they
+    typed failed to take effect -- so the sets are pinned equal here rather than
+    kept equal by a comment.
+    """
+    import importlib.util
+
+    # The root conftest under a private name: pytest has already imported the real
+    # one as a plugin, and it must not be monkeypatched (see
+    # `tests/unit/test_xdist_worker_budget.py::_load_hook_module`).
+    spec = importlib.util.spec_from_file_location(
+        "_conftest_flags_under_test", Path(__file__).resolve().parents[2] / "conftest.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert module._FALSY_ENV_VALUES == watchdog.FALSY_ENV_VALUES
+
+
+def test_the_hard_bound_is_off_unless_asked_for(monkeypatch) -> None:
+    """Report-only is the default everywhere, including CI.
+
+    A fired hard bound kills the process that hits it -- a worker carrying
+    unrelated tests -- so it cannot be the default; ``exit=True`` only ever comes
+    from an explicit request (see the module docstring).
+    """
+    monkeypatch.delenv(watchdog.TEST_TIMEOUT_ENV, raising=False)
+    assert watchdog.per_test_bound() is None
+    for off in ("0", "false", "no", "off"):
+        monkeypatch.setenv(watchdog.TEST_TIMEOUT_ENV, off)
+        assert watchdog.per_test_bound() is None, off
+    monkeypatch.setenv(watchdog.TEST_TIMEOUT_ENV, "4m")
+    assert watchdog.per_test_bound() is None, "a typo must not start killing workers"
+
+
+def test_the_hard_bound_is_sized_from_the_manifest_and_floored(monkeypatch) -> None:
+    """The bound comes from ``tests/durations.json``, never from taste or a clock.
+
+    Two directions, because both are the sizing claim: a heavy file gets slack over
+    its own measured total (so a legitimately slow test under fleet load cannot
+    trip it), and a file the manifest does not mention gets the floor rather than
+    an exemption -- an unbounded new file is exactly where a hang would hide.
+    """
+    monkeypatch.setenv(watchdog.TEST_TIMEOUT_ENV, "1")
+    assert watchdog.per_test_bound() == (None, True)
+
+    heavy = "tests/unit/tui/test_settings_view.py::test_one"
+    measured = watchdog._manifest_seconds(heavy)
+    assert measured is not None and measured > watchdog.BOUND_FLOOR_S
+    assert watchdog.sized_bound_seconds(heavy) == pytest.approx(measured * watchdog.BOUND_SLACK)
+    assert watchdog.sized_bound_seconds(heavy) > SLOWEST_LEGITIMATE_ITEM_S
+
+    unknown = "tests/unit/tui/test_a_file_the_manifest_does_not_mention.py::test_one"
+    assert watchdog._manifest_seconds(unknown) is None
+    assert watchdog.sized_bound_seconds(unknown) == watchdog.BOUND_FLOOR_S
+
+
+#: The worst legitimate single item AGENTS.md records for a local run, in seconds
+#: (top of the Environment section: "the worst legitimate test measured in a full
+#: local run is 81s"). It is here as a number because the sizing claim above needs
+#: one: a bound under this would fail healthy runs.
+SLOWEST_LEGITIMATE_ITEM_S = 81.0
+
+
+def test_a_typed_bound_wins_over_the_sized_one(monkeypatch) -> None:
+    """The escape hatch, for someone who has already seen the sized bound misfire."""
+    monkeypatch.setenv(watchdog.TEST_TIMEOUT_ENV, "12.5")
+    assert watchdog.per_test_bound() == (12.5, True)
 
 
 def test_a_malformed_bound_disables_rather_than_shrinks(monkeypatch) -> None:
@@ -331,6 +479,57 @@ def test_the_worker_keeps_the_bound_it_was_installed_with(monkeypatch) -> None:
     watchdog.note_start("tests/unit/a.py::test_one")
 
     assert fake.armed and fake.armed[0][0] == 4.0
+
+
+def test_the_worker_re_arms_per_item_and_sizes_the_sized_bound(monkeypatch) -> None:
+    """One item is the instrument's unit, so a new test gets a new countdown.
+
+    Arming ONCE per process (what this did before the hard bound existed) means the
+    countdown an item inherits started while some earlier test was running: the
+    first fast test to follow a slow one would be reported as a stall, and a test
+    that parks early in its file would be waited out only after the previous test's
+    bound had already elapsed. Two items, two arms, and the stale timer cancelled
+    -- the assertion that both happen is what stops a later edit from making
+    ``arm`` a first-call-only no-op again.
+
+    The sized bound comes from ``tests/durations.json`` (see
+    :func:`sized_bound_seconds`), so the two arms are asserted at each file's own
+    value rather than at one number the test would have to hardcode twice.
+    """
+    monkeypatch.setenv(watchdog.TEST_TIMEOUT_ENV, "1")
+    fake = _install_worker(monkeypatch, bound="4")
+    heavy = "tests/unit/tui/test_settings_view.py::test_one"
+    light = "tests/unit/analytics/test_model.py::test_one"
+
+    watchdog.note_start(heavy)
+    watchdog.note_start(light)
+
+    worker = watchdog._WORKER
+    assert worker is not None
+    assert [armed for armed, _ in fake.armed] == [
+        watchdog.sized_bound_seconds(heavy),
+        watchdog.sized_bound_seconds(light),
+    ]
+    assert fake.cancels == 1, "the previous item's timer must not be left running"
+
+
+def test_the_hard_bound_kills_the_process_instead_of_repeating(monkeypatch) -> None:
+    """``exit=True, repeat=False`` is the opt-in; the default repeats and never exits.
+
+    A repeating timer that exits would kill the worker at the first snapshot with
+    its stacks half-written, and an exiting timer that repeated would be reported
+    twice for one park. The two modes are therefore mutually exclusive by
+    construction, and this guard is what says so -- the whole difference between
+    "a report" and "a failure" lives in these two keywords.
+    """
+    monkeypatch.setenv(watchdog.TEST_TIMEOUT_ENV, "600")
+    fake = _install_worker(monkeypatch, bound="4")
+
+    watchdog.note_start("tests/unit/a.py::test_one")
+
+    worker = watchdog._WORKER
+    assert worker is not None
+    assert fake.armed == [(600.0, {"file": worker._handle, "repeat": False, "exit": True})]
 
 
 def test_an_unusable_dump_directory_disables_the_worker(monkeypatch, tmp_path) -> None:

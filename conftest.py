@@ -392,7 +392,21 @@ _install_real_store_guard()
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    shard_stall_watchdog.install(config)
+    shard_stall_watchdog.install(config, on_ci=_on_ci_host())
+
+
+def _on_ci_host() -> bool:
+    """Is this a dedicated CI runner, as opposed to an agent shell on a laptop?
+
+    ONE predicate, used by the worker-cap hook and by the stall reporter, because
+    the two must agree about the kind of machine they are on: the cap takes every
+    core on CI and a share locally, and the reporter keeps the shard bound only on
+    CI. They disagreed by construction before -- the cap denied our own bash
+    tool's ``CI=1`` while the reporter would have believed it -- which is how a
+    subagent running the suite on the operator's laptop would have been told
+    "dedicated runner" twice over.
+    """
+    return bool(os.environ.get("CI")) and not _in_agent_shell()
 
 
 def pytest_runtest_logstart(nodeid: str, location: tuple[str, int | None, str]) -> None:
@@ -1151,7 +1165,7 @@ def pytest_xdist_auto_num_workers(config: pytest.Config) -> int:
         # cores" on the shared laptop the share exists to protect, and only
         # there. Denying that marker keeps every real provider at full
         # parallelism; see `_AGENT_SHELL_ENV` for why this is not an allowlist.
-        on_ci = bool(os.environ.get("CI")) and not _in_agent_shell()
+        on_ci = _on_ci_host()
 
         cpu_arm = cpus if on_ci else max(1, int(cpus * _CPU_SHARE))
         cap = cpu_arm
