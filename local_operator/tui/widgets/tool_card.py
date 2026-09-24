@@ -155,6 +155,13 @@ ICON_PARTIAL = "◐"
 #: leads with something else, therefore keeps the ordinary crop instead of
 #: promoting a line that is not the claim.
 _PARTIAL_LEADS = ("Partial results:", "Partial search:")
+#: The word the collapsed row falls back to when the payload says the result is
+#: partial but its text carries no disclosure to promote. It is the word both
+#: shipped leads open with, so the row reads the same either way, and it exists
+#: because a bare `◐` and nothing else is a state mark the operator cannot
+#: interpret: a foreign or older payload still has to say WHICH state it is in
+#: (design review round 2, D2-3).
+_PARTIAL_LABEL = "Partial"
 #: Expansion affordance trailing the summary. Both spellings are the same
 #: click target; only the label flips so the row always says what a click does.
 EXPAND_HINT = "⟨expand⟩"
@@ -1420,7 +1427,7 @@ class ToolCard(ExpandableActionBlock):
         #: the sentence at all. Set in :meth:`_absorb_result`.
         self._fetch_reported_retry_after = False
         #: True when the result was cut short by a search budget
-        #: (``details["partial"]``, set by the search tools). The COLLAPSED row
+        #: (``details["partial_result"]``, set by the search tools). The COLLAPSED row
         #: reads this: that row takes its structure from ``details`` and never
         #: from the result text, so a disclosure the text leads with is still
         #: unreachable from the state an operator scans unless the flag rides here
@@ -2310,7 +2317,14 @@ class ToolCard(ExpandableActionBlock):
         # Reset per result, with the fetch flags below and for the same reason: a
         # card is written once, but a rebuilt card must never inherit the previous
         # body's partial state.
-        self._partial = bool(details.get("partial")) if isinstance(details, Mapping) else False
+        # A key named for the payload, never a bare ``partial``: the mobile
+        # projection writes a STRING under that name (``mobile/projection.py``),
+        # and a truthy string here would paint the partial marker on an unrelated
+        # tool the day some path forwards those details into a card (review round
+        # 2, R2-5).
+        self._partial = (
+            bool(details.get("partial_result")) if isinstance(details, Mapping) else False
+        )
         name = self.tool_name.lower()
         search_output = _search_result_output(details) if name == "web_search" else []
         # A web_fetch (and a `read <url>`, which records tool_name "read" but
@@ -2913,6 +2927,12 @@ class ToolCard(ExpandableActionBlock):
         same `warning` ink the collapsed row's partial marker does, which is also
         what puts the state on the pixel plane at all (D1).
         """
+        if self._failure_reason():
+            # The error's own pair wins: an error card paints `✗` in `danger` in
+            # the collapsed row, and a body lead in the partial pair would
+            # disagree with it (review round 2, R2-6). Ordered the same way
+            # `_promoted_lead` is, so the two cannot diverge.
+            return ICON_ERROR, fallback
         if self._partial_reason():
             return ICON_PARTIAL, bindings.style("tool.status.partial_glyph")
         return ICON_ERROR, fallback
@@ -3821,7 +3841,12 @@ class ToolCard(ExpandableActionBlock):
             # arguments. A bound nobody can see does not fix the reported
             # problem. The disclosure itself is promoted exactly as an error's
             # cause is, so the row that cannot show the note still says it.
-            glyph, reason = ICON_PARTIAL, self._partial_reason()
+            glyph = ICON_PARTIAL
+            # The lead when the text carries one, and a fixed label when it does
+            # not: the flag is what says the RESULT is partial, so the row must be
+            # able to state that even where there is no disclosure sentence to
+            # promote (design review round 2, D2-3).
+            reason = self._partial_reason() or _PARTIAL_LABEL
             tint = bindings.style("tool.status.partial_glyph")
             abbreviates = True
         elif self._state == "interrupted":
