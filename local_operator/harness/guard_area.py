@@ -179,14 +179,25 @@ def exempt_from_escalation(
     tool_name: str,
     arguments: Mapping[str, Any] | None = None,
     session_cwd: str | None = None,
+    verdict: bool | None = None,
 ) -> Iterator[bool]:
     """Publish whether this call reads the guard's area, for its duration.
 
     ``session_cwd`` is forwarded verbatim: the verdict is decided when the CALL
     is published, and the caller publishing it is the only one that knows the
     root the reader is about to use.
+
+    ``verdict`` is an ALREADY-DECIDED answer, handed in by a caller that decided
+    it where the READER decided it (the loop records it at dispatch) so that a
+    re-resolution here cannot land on a filesystem a same-batch mutation has
+    already changed -- the divergence R3-2 fixes on PR #1502. ``None``, the
+    default, keeps today's behaviour exactly: the verdict is resolved here, and
+    that fallback is deliberate -- a call that never dispatched (a planning
+    failure, a synthetic result) has nothing recorded and must still resolve.
     """
-    token = _EXEMPT_SOURCE.set(reads_exempt_source(tool_name, arguments, session_cwd))
+    if verdict is None:
+        verdict = reads_exempt_source(tool_name, arguments, session_cwd)
+    token = _EXEMPT_SOURCE.set(verdict)
     try:
         yield _EXEMPT_SOURCE.get()
     finally:

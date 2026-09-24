@@ -36,7 +36,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from local_operator.ansi import sanitize_prompt_line
 from local_operator.harness.approval import ask_approval
-from local_operator.harness.guard_area import exempt_from_escalation
+from local_operator.harness.guard_area import exempt_from_escalation, reads_exempt_source
 from local_operator.harness.intent import (
     INTENT_FIELD,
     INTENT_SCAN_LIMIT,
@@ -681,6 +681,19 @@ class LoopContext:
     # call's arguments -- a ``write`` carries whole file contents -- alive for
     # the length of that session.
     original_call_args: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # R3-2: the guard-area exemption verdict of every call the loop actually
+    # dispatched, keyed by ``tool_call_id`` -- the SAME key and the same
+    # dispatch/consume shape as ``original_call_args`` above. Re-deriving the
+    # verdict at redaction time is a defect, not merely redundant work: a tool
+    # BATCH gathers its results before any are appended, so a same-batch
+    # mutation (``read <path>`` plus ``bash ln -sfn`` in one batch) always lands
+    # FIRST and the guard re-resolving at redaction sees a filesystem the reader
+    # never saw -- the agent's bytes get read and masked. Recording the verdict
+    # at dispatch, where ``item.args`` is in hand and the reader inside
+    # ``tool.execute`` resolves the same value, makes the two agree by
+    # construction. Consumed (popped) at redaction, so it does not outlive the
+    # result it belongs to.
+    exempt_source_verdicts: dict[str, bool] = field(default_factory=dict)
 
 
 @dataclass
@@ -1026,6 +1039,23 @@ def _call_arguments(context: "LoopContext", tool_call_id: str) -> dict[str, Any]
             if call.id == tool_call_id:
                 return call.arguments
     return {}
+
+
+def _exempt_source_verdict(context: "LoopContext", tool_call_id: str) -> bool | None:
+    """The guard-area verdict recorded at DISPATCH for the result being redacted.
+
+    Recorded by ``_runner_result`` and CONSUMED here (popped), the same
+    dispatch/consume shape as :func:`_call_arguments` beside it. ``None`` means
+    this call never dispatched -- a planning failure, a synthetic result the loop
+    invented -- so ``exempt_from_escalation`` must fall back to resolving the
+    verdict itself. Returning the recorded value rather than re-deriving it is
+    the whole point (R3-2 against PR #1502): a tool batch gathers its results
+    before any are appended, so a same-batch mutation (``read <path>`` plus
+    ``bash ln -sfn`` in one batch) lands first, and a verdict re-derived at
+    redaction would resolve a filesystem the reader never saw and clear an
+    escalated read of the guard's own area.
+    """
+    return context.exempt_source_verdicts.pop(tool_call_id, None)
 
 
 def _scrub_argument_value(value: Any, redact: Callable[[str], str]) -> tuple[Any, bool]:
@@ -3227,13 +3257,16 @@ class AgentLoop:
                         raise
                     finally:
                         # ``_runner_result`` records the ORIGINAL arguments for
-                        # the redaction hook (R3-1). This bridge redacts with
+                        # the redaction hook (R3-1) and, beside them, the
+                        # guard-area verdict (R3-2). This bridge redacts with
                         # ``planned.args`` directly below and never reaches
-                        # ``_call_arguments`` to consume it, so drop the record
-                        # here or an eval-heavy session accumulates one entry per
-                        # nested call. ``finally`` because the cancellation path
-                        # raises out before the redaction runs.
+                        # ``_call_arguments``/``_exempt_source_verdict`` to
+                        # consume either, so drop both records here or an
+                        # eval-heavy session accumulates one entry per nested
+                        # call. ``finally`` because the cancellation path raises
+                        # out before the redaction runs.
                         context.original_call_args.pop(nested.id, None)
+                        context.exempt_source_verdicts.pop(nested.id, None)
                     # Redact before the result crosses back into arbitrary
                     # Python, the same text policy used for native history.
                     if config.redact_tool_result is not None:
@@ -3268,16 +3301,21 @@ class AgentLoop:
                 execution_context = execution_context.model_copy(
                     update={"dispatch_tool": dispatch_tool}
                 )
-            # R3-1: the guard's view of this call is recorded HERE, where
+            # R3-1/R3-2: the guard's view of this call is recorded HERE, where
             # ``item.args`` -- the ORIGINAL the tool is about to run with -- is
             # in hand, and the reader inside ``tool.execute`` resolves the same
-            # value. ``_call_arguments`` would otherwise find only the stored,
-            # scrubbed copy in ``context.messages`` and hand the guard a
-            # different string (see its docstring). Guarded by the same config
-            # as the redaction that consumes it, so an unconfigured hook pays
-            # no copy at all.
+            # value. Two records share this point because they share the reason:
+            # ``_call_arguments`` would otherwise find only the stored, scrubbed
+            # copy in ``context.messages`` (R3-1), and a redaction-time
+            # re-resolution of the exemption would see a filesystem a same-batch
+            # mutation has already changed (R3-2). Guarded by the same config as
+            # the redaction that consumes them, so an unconfigured hook pays no
+            # copy and no resolution at all.
             if config.redact_tool_result is not None:
                 context.original_call_args[call.id] = item.args
+                context.exempt_source_verdicts[call.id] = reads_exempt_source(
+                    tool.name, item.args, _session_cwd(context)
+                )
             return await tool.execute(call.id, item.args, signal, on_update, execution_context)
         except asyncio.CancelledError:
             raise
@@ -4079,6 +4117,7 @@ class AgentLoop:
                     result.tool_name,
                     _call_arguments(context, result.tool_call_id),
                     _session_cwd(context),
+                    _exempt_source_verdict(context, result.tool_call_id),
                 )
             # coerceToolResult: an empty tool result serializes as "" on
             # most wires and Anthropic REJECTS an empty ``is_error`` content
@@ -4108,6 +4147,7 @@ class AgentLoop:
         tool_name: str,
         arguments: Mapping[str, Any] | None,
         session_cwd: str | None = None,
+        exempt_verdict: bool | None = None,
     ) -> list[Content]:
         """Mask one result's text blocks OFF the event loop.
 
@@ -4152,6 +4192,12 @@ class AgentLoop:
         agree on the process CWD, and a relative spelling resolves somewhere
         other than the session root whenever the two differ. That route is only
         ever exercised by a caller that forgot the argument; this one does not.
+
+        ``exempt_verdict`` is the ALREADY-DECIDED exemption recorded at dispatch
+        (R3-2): resolving it HERE re-reads a filesystem a same-batch mutation has
+        already changed, so the reader and the guard would disagree on which
+        bytes were being masked. ``None`` — a call that never dispatched — tells
+        the guard to resolve it, the same fallback ``_call_arguments`` keeps.
         """
         texts = [item.text for item in content if isinstance(item, TextContent)]
         if not texts:
@@ -4160,7 +4206,7 @@ class AgentLoop:
         def _run() -> list[str]:
             with (
                 tool_source(tool_name, arguments),
-                exempt_from_escalation(tool_name, arguments, session_cwd),
+                exempt_from_escalation(tool_name, arguments, session_cwd, exempt_verdict),
             ):
                 return [redact(text) for text in texts]
 
