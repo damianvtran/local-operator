@@ -3624,13 +3624,60 @@ def _rearmed_since(dump: Path, fired_mono: float) -> bool:
 
     Unreadable, absent, malformed or OLD-FORMAT (two-field) siblings answer ``False`` —
     the evidence of a recovery is missing, so the held reading the dump states stands.
+    So does a sibling OLDER THAN THE DUMP, which is :func:`_sibling_path`'s fence.
     """
+    sibling = _sibling_path(dump)
+    if sibling is None:
+        return False
     try:
-        raw = dump.with_suffix(DEADLINE_SUFFIX).read_text(encoding="utf-8").split()
+        raw = sibling.read_text(encoding="utf-8").split()
         deadline_mono = float(raw[2])
     except (OSError, ValueError, IndexError):
         return False
     return deadline_mono - fired_mono >= min_bound_seconds() / 2
+
+
+def _sibling_path(dump: Path) -> Path | None:
+    """This dump's deadline sibling, or ``None`` when it cannot belong to the dump's life.
+
+    THE PID FENCE, APPLIED TO THE SIBLING (agent review round 2, m-A). :func:`arm`
+    truncates the dump and unlinks the sibling for each new life, but the unlink is
+    best-effort, and a sibling that survives it belongs to the PREVIOUS holder of the
+    pid. After a reboot that holder's monotonic values are on the old boot's base, far
+    ABOVE this life's, so its deadline would read as "re-armed long after the fire" — a
+    stuck runtime reported recovered, the unsafe direction.
+
+    The fence is ORDER, measured on the file system that holds both: the dump is
+    truncated when a life ARMS and the sibling is written only by that life's later
+    re-arms, so a sibling whose mtime is OLDER than its dump's arm header cannot have
+    been written by this life. The header's epoch (:func:`armed_at`) is the arm moment,
+    and every dump :func:`arm` writes carries it — builds before this fence included — so
+    a dump without a readable header, or an unstat-able sibling, answers "cannot tell"
+    (``None``), the held direction. The one-second slack is ``armed_at``'s resolution
+    (``{time.time():.0f}``). Both sides are WALL time, and that is safe here in a way it
+    was not for supersession: a step or sleep can only make the sibling look OLDER than
+    the arm (held), never make a foreign sibling look younger than a fresh life's arm.
+    """
+    sibling = dump.with_suffix(DEADLINE_SUFFIX)
+    arm = armed_at(_dump_text(dump))
+    if arm is None:
+        return None
+    try:
+        written = sibling.stat().st_mtime
+    except OSError:
+        return None
+    return sibling if written >= arm - 1.0 else None
+
+
+#: What :func:`held_reading` answers. ``HELD_PROVEN`` — a new-format held fire whose
+#: sibling is present, belongs to this life and shows NO re-arm since: the runtime is
+#: stalled, and the artifacts say so on one clock. ``HELD_UNPROVEN`` — held by the
+#: marker, but the evidence that would settle recovery is missing (an old-format marker
+#: or sibling, a sibling from another life, or none at all). ``NOT_HELD`` — no held
+#: fire, or one that is superseded.
+HELD_PROVEN = "proven"
+HELD_UNPROVEN = "unproven"
+NOT_HELD = "not held"
 
 
 def _holds(dump: Path, text: str) -> bool:
@@ -3667,26 +3714,63 @@ def _holds(dump: Path, text: str) -> bool:
     # header states the rule this restores: readers test these markers as substrings,
     # which is exactly why no header quotes one. ``rfind`` keeps that rule for the
     # ordering test too: an interleaved marker is still found, wherever it landed.
+    return held_reading(dump, text) != NOT_HELD
+
+
+def held_reading(dump: Path, text: str) -> str:
+    """:func:`_holds`, with "held because proven" told apart from "held because unknown".
+
+    TWO READERS, TWO DEFAULTS, ONE PREDICATE (agent review round 2, M-A). The LABEL
+    (``bound held; lop stop``, ``/info``, ``stall_held``) is advice to a person, and when
+    the artifacts cannot show a recovery the conservative label is "held" — a false
+    "held" costs a look, a false "not held" hides a stall. The KILL LADDER acts on the
+    reading, and there the conservative direction is the OPPOSITE: a false "held" cuts
+    the turn a draining runtime is finishing. Runtimes started by a build that predates
+    the monotonic stamp are exactly the ones still carrying a drain latch today, and
+    every one of their held markers is old-format. So the ladder takes only
+    :data:`HELD_PROVEN` (see ``control._drain_stalled``) and the label takes both
+    held answers; neither re-derives the rule.
+    """
     if not _fires(text) or HELD_MARKER not in text:
-        return False
+        return NOT_HELD
     if text.rfind(OBSERVED_MARKER) > text.rfind(HELD_MARKER):
-        return False
+        return NOT_HELD
     fired_mono = _held_fired_mono(text)
-    return fired_mono is None or not _rearmed_since(dump, fired_mono)
+    if fired_mono is None:
+        return HELD_UNPROVEN
+    if _rearmed_since(dump, fired_mono):
+        return NOT_HELD
+    # Proven only when the sibling that failed to show a re-arm is this life's and
+    # carries the monotonic field: an absent, foreign or old-format sibling answered
+    # "no re-arm" for want of evidence, not because of it.
+    sibling = _sibling_path(dump)
+    if sibling is None:
+        return HELD_UNPROVEN
+    try:
+        float(sibling.read_text(encoding="utf-8").split()[2])
+    except (OSError, ValueError, IndexError):
+        return HELD_UNPROVEN
+    return HELD_PROVEN
 
 
-def held_now(pid: int, started_at: float, directory: Path | None = None) -> bool:
+def held_now(
+    pid: int, started_at: float, directory: Path | None = None, *, proven: bool = False
+) -> bool:
     """Is THIS life of ``pid`` held right now? :func:`held_fire` behind the pid-reuse fence.
 
     The per-pid spelling of what ``info.collect`` does for a whole listing (the held
     scan plus :func:`dump_is_current`), for a caller holding one record — the kill
     ladder, deciding whether a draining runtime can still reach the turn boundary it
     is waiting for. One spelling, so the ladder and the listing cannot disagree.
+
+    ``proven=True`` is the ladder's reading: held only on :data:`HELD_PROVEN` evidence
+    (see :func:`held_reading` for why the two readers default differently).
     """
     evidence = dump_evidence(pid, directory)
     if evidence is None or not dump_is_current(evidence[0], started_at):
         return False
-    return _holds(*evidence)
+    reading = held_reading(*evidence)
+    return reading == HELD_PROVEN if proven else reading != NOT_HELD
 
 
 def fire_outcome(pid: int | None = None, directory: Path | None = None) -> str:

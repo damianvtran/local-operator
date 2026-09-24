@@ -32182,16 +32182,22 @@ class OperatorApp(App[None]):
             # press ASKS again and then leaves alone — the plain count would read
             # as "these will all be stopped".
             qualifiers.append(f"{len(drained)} already leaving — asked again, then left alone")
-        if stalled_pids:
-            # The other half, in the ladder's own words: these are leaving too, but their
-            # drain has stopped reporting, so the press does NOT leave them alone.
-            qualifiers.append(
-                f"{len(stalled_pids)} leaving but stalled — not left to drain, stopped"
-            )
         if qualifiers:
             lines[0] = (
                 f"will stop {total} session{'s' if total != 1 else ''} "
                 f"({'; '.join(qualifiers)}):"
+            )
+        if stalled_pids:
+            # The other half, in the ladder's own words: these are leaving too, but their
+            # drain has stopped reporting, so the press does NOT leave them alone.
+            # FUTURE TENSE, because this is the plan the press will try and the identity
+            # gate can still refuse it (QA round 2, Q-5). ITS OWN LINE, because appended
+            # to the header the pair wrapped at 110 columns (99 of body): the header is
+            # the count, and each qualifier is a line a reader can scan.
+            n = len(stalled_pids)
+            lines.append(
+                f"({n} leaving but stalled — not left to drain; "
+                f"{'it' if n == 1 else 'they'} will be stopped)"
             )
         for pid, name, tag in rows:
             lead = f"  pid {pid:>{pid_w}}  "
