@@ -4991,6 +4991,43 @@ def test_the_escalated_notice_still_demands_a_rotation() -> None:
     assert "rm -f" not in text
 
 
+def test_an_escalation_the_table_could_not_name_says_so() -> None:
+    """An escalated hit with NO label must name the MISSING provenance.
+
+    The escalation and the labels are graded separately, so ``labels=()`` with
+    ``reached_model=True`` is a state the shipped path reaches: a hit whose mask
+    cannot be CLAIMED (``complete=False``) is dropped from ``ShapeReport.labels``
+    while it still escalates if readable material survived (``exposed=True``). The
+    corpus's own escalating case — the ``amqp`` DSN whose username is its password —
+    grades exactly that way, so the state is reached from real input and is asserted
+    here off the corpus rather than from a synthetic empty list.
+
+    What the escalated text may NOT do in that state is assert a generic shape
+    ("credential-shaped content"), which reads as a shape the table DID identify and
+    leaves the reader unable to tell an un-named hit from a named one. It must say
+    the shape table could not name it. Measured live this session: sessions stopped
+    work over notices in exactly this state.
+    """
+    import local_operator.redaction_shapes as rs
+
+    case = next(c for c in POSITIVE_CASES if c.reason == "amqp DSN")
+    _masked, hits = rs.scrub_shapes_with_hits(case.text)
+    report = rs.shape_report(hits)
+    # The state itself, proven rather than assumed: escalation with nothing named.
+    assert report.reached_model is True, "the corpus case stopped escalating"
+    assert report.labels == (), f"the escalation now names a shape: {report.labels}"
+
+    from local_operator.incidents import format_shape_incident_message
+
+    text = format_shape_incident_message("bash", list(report.labels), "cmd")
+    assert "could not name" in text, text
+    assert "credential-shaped content" not in text, text
+    # The load-bearing halves are untouched: the head the row rules key on, and the
+    # rotation instruction the escalation exists to deliver.
+    assert text.startswith("[credential redaction] ")
+    assert "rotate it" in text and "compromised" in text
+
+
 @pytest.mark.asyncio
 async def test_a_contained_result_files_nothing_anywhere(tmp_path: Path) -> None:
     """End to end: masked whole means NO incident on any surface the operator sees.
