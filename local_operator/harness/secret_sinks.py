@@ -1574,6 +1574,41 @@ _STDERR_DEVICES = frozenset({"/dev/stderr", "/dev/fd/2", "/proc/self/fd/2"})
 #: Redirect targets that drop the value entirely.
 _DISCARD_DEVICES = frozenset({"/dev/null"})
 
+#: A redirect target carrying expansion or glob syntax — `$LOG`, a backtick,
+#: `*.f`. The shell chooses its text at run time, so the guard cannot read it and
+#: must not write it down as an ordinary file: `>& $LOG` with `LOG=/dev/stderr`
+#: was read as a contained path and put the raw value in this result's
+#: `--- stderr ---` section (R7-2).
+_UNRESOLVED_WORD_RE = re.compile(r"[$`*?\[\]]")
+
+#: Spelling families that name a descriptor rather than a file whose contents the
+#: guard could account for. Only the targets the fd table models
+#: (`_DISCARD_DEVICES`, `_STDOUT_DEVICES`, `_STDERR_DEVICES`) are readable; any
+#: other word in these families (`/dev/tty`, `/dev/fd/3`) is a device this guard
+#: has no rule for, so it is refused rather than absorbed as a file.
+_DESCRIPTOR_WORD_PREFIXES = ("/dev/", "/proc/self/fd/")
+
+
+def _device_spelling(text: str) -> str:
+    """``text`` with `.` segments and repeated `/` collapsed, for device lookup.
+
+    Device recognition is an exact-string lookup, so `/dev//stderr`,
+    `/dev/./stderr` and `/dev//stdout` — the same files as `/dev/stderr` and
+    `/dev/stdout` — were read as ordinary contained paths and the raw value
+    landed in the stderr or stdout section unnoticed (R7-3, pre-existing at both
+    heads). Only the lexical half of normalisation is done here: `.` and empty
+    segments are dropped, while `..` is left alone because resolving it lexically
+    would be a guess about symlinks. A word carrying expansion or glob syntax is
+    returned untouched — its spelling is not this guard's to resolve.
+    """
+    if _UNRESOLVED_WORD_RE.search(text):
+        return text
+    segments = [part for part in text.split("/") if part not in ("", ".")]
+    if not segments:
+        return "/" if text.startswith("/") else text
+    return ("/" if text.startswith("/") else "") + "/".join(segments)
+
+
 #: `NAME=`, `NAME+=` and `NAME[i]=` all bind a value to NAME (R3-3). The append
 #: and element spellings used to fail this match, so `v+=$(lop secret get X)` and
 #: `a[0]="$v"` were read as COMMANDS and their names never carried the taint.
@@ -2193,13 +2228,16 @@ class _ShellAnalyzer:
         descriptors they name AT THAT MOMENT, so they resolve through ``fds``
         rather than being written down as paths. It is shared with the `tee`
         operand walk because a device operand is the same question there
-        (round 6).
+        (round 6). The target is read through `_device_spelling` first, because
+        the lookup is an exact-string one and `>/dev//stderr` names the same
+        file as `>/dev/stderr` (R7-3).
         """
-        if text in _DISCARD_DEVICES:
+        device = _device_spelling(text)
+        if device in _DISCARD_DEVICES:
             return ("null", "")
-        if text in _STDOUT_DEVICES:
+        if device in _STDOUT_DEVICES:
             return fds["1"]
-        if text in _STDERR_DEVICES:
+        if device in _STDERR_DEVICES:
             return fds["2"]
         return ("path", text)
 
@@ -2222,31 +2260,120 @@ class _ShellAnalyzer:
 
         Only descriptors 1 and 2 are modelled, since the value is written to
         stdout and only 1 and 2 are captured; a `{fd}>` opens a fresh descriptor
-        and touches neither. `&>` / `>&WORD` rebind both. A target that is not
-        a number after `>&` or `<&` is a path, and `>&-` closes the descriptor.
+        and touches neither. `&>` / `>&WORD` rebind both: `&>` for a word this
+        guard can read, `>&WORD` only for the two shapes
+        `_legacy_word_destination` names, since that spelling is where round 7's
+        leaks came from. A CLOSED descriptor is not a discarded one (R7-1), and a
+        word the guard cannot read is refused rather than written down as a file
+        (R7-2).
         """
         fds: dict[str, tuple[str, str]] = {"1": ("result", ""), "2": ("stderr", "")}
 
         for fd, op, target in cls._fd_redirections(stage):
             text = cls._word_text(target).strip().strip("'\"")
             if op in ("&>", "&>>"):
-                fds["1"] = fds["2"] = cls._resolve_destination(text, fds)
+                # `&>WORD` sends BOTH streams to the word. A word the guard
+                # cannot read on its own keeps the pre-round-6 verdict: fd 1 is
+                # left on this result, so the stage is refused. That is where
+                # `&> $LOG` (`LOG=/dev/stderr`) put the raw value in the
+                # `--- stderr ---` section once it was absorbed as a path (R7-2).
+                if not cls._word_is_unreadable(text):
+                    fds["1"] = fds["2"] = cls._resolve_destination(text, fds)
             elif op in (">", ">>", ">|"):
                 if fd in fds:
                     fds[fd] = cls._resolve_destination(text, fds)
             elif op in (">&", "<&"):
                 if text == "-":
                     if fd in fds:
-                        fds[fd] = ("null", "")
+                        # A CLOSED descriptor is NOT a discarded one. That was
+                        # round 6's premise here and it is false on the shell this
+                        # tool resolves for itself (`resolve_bash_shell(None)` →
+                        # `/bin/bash` 3.2.57): a BUILTIN keeps writing to the
+                        # shell's stream while it reports the close, measured —
+                        #   bash -c 'echo AAA >&-' | wc -c        -> 4
+                        #   bash -c 'printf BBB >&-'              -> 3
+                        #   bash -c '/bin/echo CCC >&-'           -> 0 (external honours it)
+                        #   bash -c 'echo DDD 2>&- 1>&-' | wc -c  -> 4 (fd 1 closed)
+                        # — so `v=$(lop secret get N); echo "$v" >&-` printed the
+                        # raw value in `--- stdout ---` while the scan read the fd
+                        # as discarded (R7-1). Each descriptor is therefore read
+                        # as still reaching the visible stream it names, the way
+                        # an unmodelled source descriptor already is: fd 1 this
+                        # result, fd 2 its stderr section. Symmetric, one rule,
+                        # and it puts the `2>&-` dups back on the refusal side
+                        # rather than resting on the premise this round retired —
+                        # they cost nothing real, since bash aborts them anyway
+                        # (`echo AAA 2>&- 1>&2` → `bash: 2: Bad file descriptor`,
+                        # rc=1, 0 bytes on both streams, like `2>&- >&2`).
+                        fds[fd] = ("result", "") if fd == "1" else ("stderr", "")
                 elif text.isdigit():
                     if fd in fds:
                         # An unmodelled source descriptor (3, 9…) is unknown
                         # territory; reading it as this result is the safe side.
                         fds[fd] = fds.get(text, ("result", ""))
                 elif op == ">&" and fd == "1":
-                    # `>&FILE` is bash's older spelling of `&>FILE`.
-                    fds["1"] = fds["2"] = cls._resolve_destination(text, fds)
+                    both = cls._legacy_word_destination(text, fds)
+                    fds["1"] = fds["2"] = both
         return fds["1"]
+
+    @classmethod
+    def _word_is_unreadable(cls, text: str) -> bool:
+        """Is this redirect target a word the guard cannot read as itself?
+
+        Three shapes: nothing at all, expansion or glob syntax, and a word in a
+        descriptor family the fd table does not model (``/dev/tty``,
+        ``/dev/fd/3``). A device the guard has no rule for is not a file whose
+        contents it could account for, so it earns a refusal rather than the
+        benefit of the doubt.
+        """
+        if not text or _UNRESOLVED_WORD_RE.search(text):
+            return True
+        spelling = _device_spelling(text)
+        if spelling in _DISCARD_DEVICES or spelling in _STDOUT_DEVICES:
+            return False
+        if spelling in _STDERR_DEVICES:
+            return False
+        return spelling == "/dev" or spelling.startswith(_DESCRIPTOR_WORD_PREFIXES)
+
+    @classmethod
+    def _legacy_word_destination(
+        cls, text: str, fds: dict[str, tuple[str, str]]
+    ) -> tuple[str, str]:
+        """The single destination bash's older `>&WORD` opens for BOTH streams.
+
+        Absorbed for two word shapes only, each with driven evidence: the fd-2
+        device (`>& /dev/stderr` is this result's stderr section, and the round-6
+        device rule already refuses it as `shell.source-to-stderr`), and a plain
+        literal file path (`>& /tmp/f`), whose file the rig has verified holds
+        the value. Every other word keeps the verdict every revision before
+        round 6 gave — base refused this spelling outright, and round 6's
+        loosening is what R7-1 and R7-2 are about — so fd 1 stays on this result
+        and the stage is refused. Two of those are worth naming:
+
+        * a word carrying expansion or glob syntax (`>& $LOG`) is not resolved;
+        * a device word gets no device resolution under the legacy spelling
+          (`>& /dev/null`, `>& /dev/tty`): the modern `&>` gets it, and this
+          spelling only earned the two rows above.
+
+        The trade is deliberate. For this guard an unrecognised spelling is
+        REFUSED, not allowed: a false refusal costs a user one workaround
+        (`&> /dev/null` or `>/dev/null 2>&1`), while a false allow publishes a
+        secret into the tool result, which is the whole harm this module exists
+        to prevent.
+        """
+        spelling = _device_spelling(text)
+        if spelling in _STDERR_DEVICES:
+            return fds["2"]
+        if (
+            cls._word_is_unreadable(text)
+            or spelling in _DISCARD_DEVICES
+            or spelling in _STDOUT_DEVICES
+        ):
+            # Not the current ``fds["1"]``: `>&WORD` OPENS the word, it does not
+            # duplicate fd 1, so an earlier `>/dev/null` does not survive it and
+            # the refusal has to hold whatever fd 1 was bound to at that point.
+            return ("result", "")
+        return ("path", text)
 
     def _tee_operands_to_stderr(self, words: list[_Word], stdout: tuple[str, str]) -> bool:
         """Register every file `tee` writes, and report a device STDERR operand.
