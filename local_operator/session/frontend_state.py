@@ -4805,10 +4805,42 @@ class FrontendStateStore:
         #: because it answers the other half of one question: what a roster tick
         #: must rebuild.
         self._released_rows = _ReleasedRows(self._state.epoch)
+        #: The FOLLOWER's last wire body per job, as received (before the reducer
+        #: rewrites ``trajectory``/``todos`` on it), so a ``jobs`` delta can keep
+        #: the canonical row of every child whose body did not move -- see
+        #: :meth:`_reusable_job`. Owned beside ``_follower_windows`` and reset on
+        #: exactly the same paths, because it describes the same installed rows.
+        self._follower_job_bodies: dict[str, tuple[dict[str, Any], JobState]] = {}
 
     @property
     def state(self) -> FrontendSessionState:
         return self._public_state(self._state)
+
+    def running_task_count(self) -> int:
+        """Running, un-queued ``task`` children, without cloning the state.
+
+        The sibling of :meth:`has_running_job`, for the same measured reason: a
+        viewer's ``running_subagents`` asked this through ``state`` -- a deep copy
+        of every job for one integer -- once per retention check and per stop
+        ladder, and at a 252-row roster that clone is ~2.5 ms of the viewer's
+        loop each time. A read-only scan of the already-frozen rows is safe to
+        share and returns only an ``int``.
+        """
+        return sum(
+            1
+            for job in self._state.jobs
+            if job.type == "task" and job.status == "running" and not job.queued
+        )
+
+    def attention_copy(self) -> dict[str, Any]:
+        """A caller-owned copy of ``attention`` alone, without the whole-state clone.
+
+        ``attention`` is a mutable ``dict`` and so is refused by
+        :meth:`read_field`'s allow-list; this pays the deep copy that protects it
+        for THAT field only, instead of for every job on the roster as ``state``
+        does. Polled about once a second by the TUI's completion-receipt check.
+        """
+        return copy.deepcopy(dict(self._state.attention))
 
     def _public_state(self, state: FrontendSessionState) -> FrontendSessionState:
         """A caller-owned clone of ONE canonical state object.
@@ -5012,9 +5044,59 @@ class FrontendStateStore:
         it from the same section that installed the state and fans out OUTSIDE
         it. No subscriber callback ever runs holding this lock.
         """
+        # Outside the section: one writer per store (see ``_publish_lock``), so
+        # reading the outgoing state here cannot race, and the row walk is
+        # proportional to the roster, which the section must never be.
+        self._bump_revisions(self._state, state)
         with self._publish_lock:
             self._state = state
             return list(self._subscribers)
+
+    #: The collections :meth:`revision` counts, i.e. what the TUI's dock band is
+    #: painted from (the subagent, todo and wake panels).
+    _REVISED_COLLECTIONS: Final = ("jobs", "todos", "wakes")
+
+    def _bump_revisions(self, before: FrontendSessionState, after: FrontendSessionState) -> None:
+        """Advance :meth:`revision` for each collection whose content moved.
+
+        By IDENTITY, which is exact here rather than approximate: canonical
+        collections are replaced, never edited in place, and a ``jobs`` delta
+        keeps the row object of every child whose body did not change (see
+        :meth:`_reusable_job`). So "every row is the same object" means "nothing a
+        reader can see moved", and anything else is a new revision. A scalar
+        delta re-wraps the SAME rows in a fresh sequence, hence the row walk
+        rather than a comparison of the sequence objects.
+        """
+        revisions = self.__dict__.setdefault(
+            "_revisions", dict.fromkeys(self._REVISED_COLLECTIONS, 0)
+        )
+        for name in self._REVISED_COLLECTIONS:
+            old, new = getattr(before, name), getattr(after, name)
+            if old is new:
+                continue
+            if (
+                name == "jobs"
+                and len(old) == len(new)
+                and all(a is b for a, b in zip(old, new, strict=True))
+            ):
+                continue
+            revisions[name] += 1
+
+    def revision(self) -> tuple[int, ...]:
+        """A token that moves whenever ``jobs``, ``todos`` or ``wakes`` move.
+
+        Lets a reader skip re-deriving a view it already painted from those
+        collections -- the TUI's dock band was re-projecting a 252-row roster on
+        every canonical delta, including the token-cadence scalar ones that
+        cannot change a row. Compare tokens for equality only; the values carry
+        no other meaning. Includes the epoch, because a re-seated store starts
+        its counters from what it held, not from a fresh lineage.
+        """
+        revisions = self.__dict__.get("_revisions") or {}
+        return (
+            hash(self._state.epoch),
+            *(revisions.get(name, 0) for name in self._REVISED_COLLECTIONS),
+        )
 
     def _rebuild_derived(self, state: FrontendSessionState) -> None:
         """Drop every cache a re-seated state invalidates.
@@ -5039,6 +5121,10 @@ class FrontendStateStore:
         self._trajectory_windows.clear()
         self._released_rows.clear()
         self._follower_windows.reset(state.epoch)
+        # Same lineage argument as the window memo: a re-seated state's rows are
+        # freshly parsed objects, so no body recorded against the old ones may
+        # vouch for them.
+        self._follower_job_bodies = {}
 
     def replace(self, state: FrontendSessionState) -> None:
         self._install(self._freeze_for_install(state))
@@ -5103,6 +5189,9 @@ class FrontendStateStore:
             # round trip buys the certainty that no window survives a lineage the
             # follower has just declared untrustworthy.
             self._follower_windows.reset(self._state.epoch)
+            # A shed body means the next full delta may describe rows this store
+            # never saw, so nothing recorded before it may vouch for a row.
+            self._follower_job_bodies = {}
             # Sequence-only install, and SHALLOW on purpose: the body was shed,
             # so what this publish carries is unknown rather than unchanged, and
             # the object it installs is the previous one with a new sequence
@@ -5113,20 +5202,42 @@ class FrontendStateStore:
             for subscriber in subscribers:
                 subscriber(update.model_copy(deep=True))
             return self.state
-        changes = copy.deepcopy(update.changes)
+        # The roster is copied PER ROW below, and only for rows that changed: a
+        # whole-``changes`` deep copy was ~2.5 ms of a 252-row delta on its own,
+        # almost all of it rows the delta merely repeated.
+        changes = copy.deepcopy(
+            {key: value for key, value in update.changes.items() if key != "jobs"}
+        )
         # A malformed field later in a jobs delta must not advance a plan's
         # watermark: validation either installs the entire update or nothing.
         todo_sequences = dict(self._todo_sequences)
-        # The frozen window each rebuilt job will carry, positionally aligned
-        # with ``changes["jobs"]``. Built here, installed AFTER validation.
+        # The frozen window each job will carry, positionally aligned with the
+        # ROSTER (``plan``), reused and rebuilt rows alike. Built here, installed
+        # AFTER validation.
         windows: list[_FrozenSequence] = []
-        if "jobs" in changes:
+        #: Per roster position, either the canonical row kept by identity or the
+        #: index of its body in ``rebuilt`` (the part pydantic validates).
+        plan: list[JobState | int] = []
+        bodies: dict[str, dict[str, Any]] = {}
+        if "jobs" in update.changes:
             previous = {job.id: job for job in self._state.jobs}
             replacements = set(update.job_trajectory_replacements)
             rebuilt = []
-            for raw in changes["jobs"]:
-                job_id = str(raw.get("id", ""))
+            rebuilt_windows: list[_FrozenSequence] = []
+            for received in update.changes["jobs"]:
+                job_id = str(received.get("id", "")) if isinstance(received, Mapping) else ""
                 prior = previous.get(job_id)
+                kept = self._reusable_job(job_id, prior, received, update)
+                if kept is not None:
+                    plan.append(kept)
+                    windows.append(cast(_FrozenSequence, kept.trajectory))
+                    bodies[job_id] = self._follower_job_bodies[job_id][0]
+                    continue
+                raw = copy.deepcopy(received)
+                if isinstance(raw, dict) and job_id:
+                    # Recorded BEFORE the reducer rewrites the body below, so the
+                    # next delta compares like with like: what the runtime sent.
+                    bodies[job_id] = copy.deepcopy(raw)
                 # A runtime that says "this is a replacement" has told us the
                 # window is not a suffix, so the memo is not consulted at all.
                 window = None
@@ -5172,9 +5283,13 @@ class FrontendStateStore:
                     raw["todos"] = update.job_todo_updates[job_id]
                     todo_sequences[job_id] = update.sequence
                 windows.append(window)
+                rebuilt_windows.append(window)
+                plan.append(len(rebuilt))
                 rebuilt.append(raw)
             changes["jobs"] = rebuilt
-            retained = {str(row["id"]) for row in rebuilt}
+            retained = {
+                job.id if isinstance(job, JobState) else str(rebuilt[job]["id"]) for job in plan
+            }
             todo_sequences = {key: seq for key, seq in todo_sequences.items() if key in retained}
             # A job that left the roster takes its window's entry with it, or the
             # memo would pin that job's rows for the life of the store.
@@ -5215,10 +5330,16 @@ class FrontendStateStore:
             # misalignment would install one child's rows on another. Naming that
             # here is cheaper than trusting an ordering invariant to survive the
             # next edit to this method.
-            normalized["jobs"] = _FrozenSequence(
+            validated = [
                 _freeze_job(job.model_copy(update={"trajectory": window}))
-                for job, window in zip(patch.jobs, windows, strict=True)
+                for job, window in zip(patch.jobs, rebuilt_windows, strict=True)
+            ]
+            normalized["jobs"] = _FrozenSequence(
+                step if isinstance(step, JobState) else validated[step] for step in plan
             )
+        elif "jobs" in update.changes:
+            # An explicit empty roster (``[]`` is the wire's clear).
+            normalized["jobs"] = _FrozenSequence(())
         candidate = self._state.model_copy(update=normalized)
         # ``jobs_are_canonical`` is now true on the jobs path too: the windows
         # above are frozen and the shells around them are frozen here, so the
@@ -5236,10 +5357,58 @@ class FrontendStateStore:
         if windows:
             for job, window in zip(self._state.jobs, windows, strict=True):
                 self._follower_windows.remember(job.id, window)
+        if "jobs" in update.changes:
+            # Same place and same reason as the window memo: only a body whose
+            # row canonical state now HOLDS is recorded, paired with that row.
+            self._follower_job_bodies = {
+                job.id: (bodies[job.id], job) for job in self._state.jobs if job.id in bodies
+            }
         self._todo_sequences = todo_sequences
         for subscriber in subscribers:
             subscriber(update.model_copy(deep=True))
         return self.state
+
+    def _reusable_job(
+        self, job_id: str, prior: JobState | None, received: Any, update: FrontendUpdate
+    ) -> JobState | None:
+        """The canonical row to KEEP for ``received``, or ``None`` to rebuild it.
+
+        WHY. A ``jobs`` delta carries the WHOLE roster, and a loaded parent sends
+        one per roster tick: measured at 12 stepping lanes plus 240 settled
+        children, every delta repeated 252 rows (~410 KB) while 1-12 of them had
+        moved, and rebuilding all 252 -- deep copy, pydantic validation, freeze --
+        cost the viewer ~11 ms p50 per delta on its UI loop. It also handed every
+        downstream reader 252 new objects, so nothing further along could tell
+        what had actually changed.
+
+        THE PROOF. A row is kept only when all of these hold, and together they
+        say the rebuild would produce a row equal to the one already installed:
+
+        * the recorded body is paired with ``prior`` BY IDENTITY, so the row is
+          the very one that body built -- not one a ``seed_job_*`` call, a
+          snapshot install or a degraded-delta reset has since replaced (each of
+          those drops or bypasses the record);
+        * the body the runtime sent now EQUALS the body it sent then, so every
+          field pydantic would validate is unchanged;
+        * the delta names no trajectory append or replacement and no todo update
+          for this job -- the three things the reducer merges in from OUTSIDE the
+          body -- so the window and the plan the row carries are still current.
+
+        Anything else rebuilds exactly as before, which is always correct and
+        only slower.
+        """
+        if prior is None or not job_id or not isinstance(received, dict):
+            return None
+        if (
+            job_id in update.job_trajectory_appends
+            or job_id in update.job_trajectory_replacements
+            or job_id in update.job_todo_updates
+        ):
+            return None
+        recorded = self._follower_job_bodies.get(job_id)
+        if recorded is None or recorded[1] is not prior:
+            return None
+        return prior if recorded[0] == received else None
 
     def seed_job_trajectory(self, job_id: str, rows: Sequence[dict[str, Any]]) -> bool:
         """Install rows a FOLLOWER fetched on demand for one child's page.
