@@ -147,6 +147,59 @@ def test_the_recorded_fatal_batch_is_funded_past_its_own_declaration() -> None:
     assert funded_timeout(180.0, params) > declared_work_seconds(params)
 
 
+@pytest.mark.parametrize("rate", [float("nan"), float("inf"), -0.01])
+def test_execution_overhead_rate_must_be_finite_and_nonnegative(rate: float) -> None:
+    with pytest.raises(ValueError, match="finite and nonnegative"):
+        declared_work_seconds(
+            execute({"kind": "click", "frame_id": "screen", "x": 1, "y": 2}),
+            execution_overhead_seconds_per_action=rate,
+        )
+
+
+def test_terminal_actions_do_not_receive_execution_overhead() -> None:
+    params = execute(
+        {
+            "kind": "finish",
+            "status": "done",
+            "reason": "complete",
+        }
+    )
+    assert declared_work_seconds(params, execution_overhead_seconds_per_action=3.0) == 0.0
+    assert funded_timeout(5.0, params, execution_overhead_seconds_per_action=3.0) == 5.0
+
+
+def test_execution_overhead_funds_waits_actions_and_one_headroom() -> None:
+    params = execute(
+        [
+            {"kind": "click", "frame_id": "screen", "x": 1, "y": 2},
+            {"kind": "wait", "duration_ms": 2_000},
+            {"kind": "key", "keys": ["enter"]},
+        ]
+    )
+
+    # Two primitive actions receive the apparatus delay; the wait receives its
+    # explicit two seconds plus one delay, and the call gets one headroom.
+    assert declared_work_seconds(params, execution_overhead_seconds_per_action=3.0) == 11.0
+    assert (
+        funded_timeout(5.0, params, execution_overhead_seconds_per_action=3.0)
+        == 11.0 + DECLARED_WORK_HEADROOM_S
+    )
+    # The public default stays byte-for-byte equivalent for non-paper callers:
+    # the existing requested wait and single 30s headroom remain funded.
+    assert declared_work_seconds(params) == 2.0
+    assert funded_timeout(5.0, params) == 2.0 + DECLARED_WORK_HEADROOM_S
+
+
+def test_paper_overhead_funds_maximum_legal_action_batch_without_a_new_cap() -> None:
+    params = execute([{"kind": "wait", "duration_ms": MAX_WAIT_MS} for _ in range(MAX_BATCH_SIZE)])
+    declared = MAX_BATCH_SIZE * (MAX_WAIT_MS / 1000.0 + 3.0)
+    assert declared_work_seconds(params, execution_overhead_seconds_per_action=3.0) == declared
+    assert (
+        funded_timeout(120.0, params, execution_overhead_seconds_per_action=3.0)
+        == declared + DECLARED_WORK_HEADROOM_S
+    )
+
+
 def test_the_bound_is_the_protocols_own_maximum_not_a_new_constant() -> None:
     """The largest legal batch is the largest funded call; both come from the schema.
 

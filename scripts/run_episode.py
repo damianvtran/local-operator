@@ -58,7 +58,7 @@ import time
 import uuid
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Sequence, get_args
+from typing import Any, Sequence, cast, get_args
 
 from local_operator.evaluation.adapters.api import (
     AdapterSelector,
@@ -115,6 +115,18 @@ UNKNOWN_HARNESS_VERSION = "0.0.0"
 # scoring and cleanup, so an episode that runs its full budget still gets torn
 # down deliberately rather than reclaimed underneath itself.
 _LEASE_SLACK_SECONDS = 900
+_ACTION_SETTLE_POLICY_NAME = "OSWORLD_ACTION_SETTLE_POLICY"
+_DEFAULT_ACTION_SETTLE_POLICY = "throughput"
+# The paper settle, in seconds: exactly the apparatus pause the AWS provider
+# applies after each guest execute (``providers.base.DEFAULT_ACTION_DELAY_S`` in
+# the adapter distribution). This script is the harness side and runs with the
+# adapter NOT installed -- ``scripts/osworld_tag_audit.py`` documents that the
+# harness does not install it -- so the value is mirrored here rather than
+# imported, and BOTH the funded execute deadline and the sealed manifest derive
+# from this one name. The mirror is bound by the provider's own default in
+# ``tests/unit/evaluation/runner/test_run_episode_infra.py``, so the manifest
+# cannot go on claiming a settle the provider stopped sleeping.
+_ACTION_SETTLE_SECONDS = 3.0
 # Diagnostic prefixes (``_diagnostic`` renders ``<TypeName>: ...``) that mean
 # a secret stopped the run before allocation; both are name-only by contract.
 _SECRET_DIAGNOSTICS = ("MissingSecret:", "UnusableSecret:")
@@ -389,7 +401,12 @@ def build_spec(
 
 
 def build_config(
-    run_root: Path, *, episode_id: str, max_steps: int, max_cycle_usd_micros: int | None
+    run_root: Path,
+    *,
+    episode_id: str,
+    max_steps: int,
+    max_cycle_usd_micros: int | None,
+    execution_overhead_seconds_per_action: float = 0.0,
 ) -> Any:
     """Roots under ONE durable directory; timeouts sized for a real worker.
 
@@ -412,6 +429,7 @@ def build_config(
         artifact_root=artifacts,
         rescue_root=rescue,
         max_steps=max_steps,
+        execution_overhead_seconds_per_action=execution_overhead_seconds_per_action,
         # A real AWS allocation waits on instance readiness (up to 10 min in
         # the provider); the reset timeout must cover that or the runner
         # abandons an episode whose instance is still coming up.
@@ -533,8 +551,35 @@ def _parse_infra(values: Sequence[str], purpose: str) -> tuple[ScopedInfraValue,
     return tuple(out.values())
 
 
+def _effective_action_settle_policy(infra_values: Sequence[ScopedInfraValue]) -> str:
+    policy = next(
+        (item.value for item in infra_values if item.name == _ACTION_SETTLE_POLICY_NAME),
+        _DEFAULT_ACTION_SETTLE_POLICY,
+    )
+    if policy not in {"paper", "throughput"}:
+        raise ValueError(
+            f"unsupported {_ACTION_SETTLE_POLICY_NAME}; expected 'paper' or 'throughput'"
+        )
+    return policy
+
+
+def _ensure_action_settle_policy(
+    infra_values: tuple[ScopedInfraValue, ...], purpose: str
+) -> tuple[ScopedInfraValue, ...]:
+    if any(item.name == _ACTION_SETTLE_POLICY_NAME for item in infra_values):
+        return infra_values
+    return infra_values + (
+        ScopedInfraValue(
+            name=_ACTION_SETTLE_POLICY_NAME,
+            value=_DEFAULT_ACTION_SETTLE_POLICY,
+            purpose=purpose,
+        ),
+    )
+
+
 def _infra_disclosure_metadata(
-    infra: Sequence[str], purpose: str = "benchmark_compute"
+    infra: Sequence[ScopedInfraValue] | Sequence[str],
+    purpose: str = "benchmark_compute",
 ) -> dict[str, Any]:
     """Manifest metadata disclosing infra overrides that change the apparatus.
 
@@ -561,16 +606,32 @@ def _infra_disclosure_metadata(
     values is supplied to an adapter build that does not declare it. Requested
     and applied can therefore differ only on a run that produced no bundle.
 
-    Use the same parser as the episode spec: a per-value purpose prefix must
-    not hide a requested override from disclosure. Identical duplicates are
-    coalesced; conflicting names and malformed entries fail before the run.
+    The caller passes the normalized infra tuple also used by the episode
+    spec, including its explicit settle policy. Derive the delay from that same
+    selected value: a second override would permit the manifest to disagree
+    with how the adapter actually paced actions.
     """
 
-    return {
+    if not infra or isinstance(infra[0], str):
+        # Keep the helper convenient for legacy test/call sites. Parse their
+        # original input first so malformed values still fail before defaults
+        # can obscure the source of the error.
+        infra_values = _ensure_action_settle_policy(
+            _parse_infra(cast(Sequence[str], infra), purpose), purpose
+        )
+    else:
+        infra_values = _ensure_action_settle_policy(
+            cast(tuple[ScopedInfraValue, ...], infra), purpose
+        )
+    metadata = {
         DISCLOSED_INFRA_METADATA_KEYS[item.name]: item.value
-        for item in _parse_infra(infra, purpose)
+        for item in infra_values
         if item.name in DISCLOSED_INFRA_METADATA_KEYS
     }
+    # Manifest metadata allows only canonical JSON scalars with safe integers;
+    # the pacing code retains the numeric 3.0 value separately.
+    metadata["osworld_action_settle_seconds"] = int(_ACTION_SETTLE_SECONDS)
+    return metadata
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -718,6 +779,14 @@ def _ensure_lease_outlasts_wall(
 async def run(args: argparse.Namespace) -> int:
     try:
         infra_values = _parse_infra(args.infra, args.infra_purpose)
+        infra_values = _ensure_action_settle_policy(infra_values, args.infra_purpose)
+        # Resolved HERE, in the same handler as the parse that fed it: an
+        # unsupported policy is operator input error, and every other ``--infra``
+        # error exits as EXIT_PREFLIGHT from this block. Resolved later -- in the
+        # ``build_config`` argument list below, whose ``try`` catches only
+        # ``VolatileRootError`` -- a bad value escaped as an uncaught ValueError
+        # traceback from a plain command-line flag.
+        settle_policy = _effective_action_settle_policy(infra_values)
     except ValueError as error:
         print(str(error), file=sys.stderr)
         return EXIT_PREFLIGHT
@@ -736,6 +805,9 @@ async def run(args: argparse.Namespace) -> int:
             episode_id=episode_id,
             max_steps=args.max_steps,
             max_cycle_usd_micros=max_cycle,
+            execution_overhead_seconds_per_action=(
+                _ACTION_SETTLE_SECONDS if settle_policy == "paper" else 0.0
+            ),
         )
     except VolatileRootError as error:
         print(str(error), file=sys.stderr)
@@ -805,7 +877,7 @@ async def run(args: argparse.Namespace) -> int:
             # through the manifest. Requested can only differ from applied on
             # an episode that produced no bundle: the runner refuses an
             # override an adapter build does not declare.
-            **_infra_disclosure_metadata(args.infra, args.infra_purpose),
+            **_infra_disclosure_metadata(infra_values),
         },
     )
 

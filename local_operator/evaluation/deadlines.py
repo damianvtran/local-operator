@@ -55,8 +55,16 @@ The one interaction with a benchmark's wall clock is stated in
 
 from __future__ import annotations
 
+import math
+
 from local_operator.evaluation.lifecycle import CleanupPlan
-from local_operator.evaluation.protocol import ActionBatch, ProtocolModel, WaitAction
+from local_operator.evaluation.protocol import (
+    ActionBatch,
+    AskUserAction,
+    FinishAction,
+    ProtocolModel,
+    WaitAction,
+)
 
 #: Fixed allowance added to a request's own declared duration.
 #:
@@ -112,7 +120,9 @@ from local_operator.evaluation.protocol import ActionBatch, ProtocolModel, WaitA
 DECLARED_WORK_HEADROOM_S: float = 30.0
 
 
-def declared_work_seconds(params: ProtocolModel) -> float:
+def declared_work_seconds(
+    params: ProtocolModel, *, execution_overhead_seconds_per_action: float = 0.0
+) -> float:
     """Wall time the request itself declares, in seconds.
 
     ``0.0`` means "this request declares no duration", which is the answer for
@@ -148,12 +158,28 @@ def declared_work_seconds(params: ProtocolModel) -> float:
     attribute from being funded.
     """
 
+    if (
+        isinstance(execution_overhead_seconds_per_action, bool)
+        or not isinstance(execution_overhead_seconds_per_action, (int, float))
+        or not math.isfinite(execution_overhead_seconds_per_action)
+        or execution_overhead_seconds_per_action < 0.0
+    ):
+        raise ValueError("execution_overhead_seconds_per_action must be finite and nonnegative")
+
     batch = getattr(params, "action_batch", None)
     if isinstance(batch, ActionBatch):
-        return (
+        wait_seconds = (
             sum(action.duration_ms for action in batch.actions if isinstance(action, WaitAction))
             / 1000.0
         )
+        # Finish/ask-user end a decision without executing desktop work. The
+        # per-action apparatus allowance funds only semantic actions that can
+        # mutate or wait in the environment; waits also retain their declared
+        # duration above.
+        executed_action_count = sum(
+            not isinstance(action, (FinishAction, AskUserAction)) for action in batch.actions
+        )
+        return wait_seconds + executed_action_count * execution_overhead_seconds_per_action
     plan = getattr(params, "cleanup_plan", None)
     selected = getattr(params, "action_ids", None)
     if isinstance(plan, CleanupPlan) and selected is not None:
@@ -166,7 +192,12 @@ def declared_work_seconds(params: ProtocolModel) -> float:
     return 0.0
 
 
-def funded_timeout(configured: float, params: ProtocolModel) -> float:
+def funded_timeout(
+    configured: float,
+    params: ProtocolModel,
+    *,
+    execution_overhead_seconds_per_action: float = 0.0,
+) -> float:
     """The deadline that governs this call: never less than its own declaration.
 
     A request that declares nothing returns ``configured`` UNCHANGED -- not
@@ -184,10 +215,10 @@ def funded_timeout(configured: float, params: ProtocolModel) -> float:
     allowance from the operator's configured budget instead. The trigger is
     therefore "declared anything", not "declared a lot".
 
-    Over-funding is the deliberate direction on the retry path too: the
-    observation-phase resume (``episode._execute_with_observation_recovery``)
-    sends the SAME batch, so it is funded for the same declaration even though a
-    resume only re-reads the state that batch already applied.
+    Execution overhead is an evaluation-only opt-in. The episode runner passes
+    it only for a mutating ``execute`` while the paper-settle policy is active;
+    ordinary calls retain the zero default. A resume carries the same batch for
+    identity, but only re-reads state, so its caller does not pass this rate.
 
     The RESCUE path gains the headroom as well, and that is intended rather than
     an oversight: ``supervisor.run_rescue`` passes one action's
@@ -199,7 +230,9 @@ def funded_timeout(configured: float, params: ProtocolModel) -> float:
     allowance belongs there for the same reason it belongs anywhere else.
     """
 
-    declared = declared_work_seconds(params)
+    declared = declared_work_seconds(
+        params, execution_overhead_seconds_per_action=execution_overhead_seconds_per_action
+    )
     if declared <= 0.0:
         return configured
     return max(configured, declared + DECLARED_WORK_HEADROOM_S)

@@ -29,6 +29,8 @@ from local_operator.evaluation.adapters.api import (
     CleanupParams,
     CleanupResult,
     ExecuteParams,
+    ExecuteResult,
+    ExecutionReceipt,
     Handshake,
     ObservationResult,
     ObserveParams,
@@ -1141,3 +1143,78 @@ def test_host_refuses_a_frame_whose_pixels_disagree_with_model_visible(tmp_path:
     lying = _frame_observation(tmp_path, payload, declared=FrameSize(width=1920, height=1080))
     with pytest.raises(SupervisionError, match="model-visible geometry"):
         HostVerifier("task", "episode", tmp_path).accept_initial(lying)
+
+
+class _RecordingRpc:
+    """A stand-in for ``RpcClient`` that records HOW each call was made.
+
+    ``None`` for the rate means the keyword was not passed at all, which is the
+    distinction ``_call_raw``'s two branches exist to preserve: the zero default
+    has to leave an ordinary call byte-identical rather than sending a rate of
+    0.0 down the wire. It answers with a real ``ExecuteResult`` payload so the
+    call under test completes as a normal one would.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, float, float | None]] = []
+
+    async def call(
+        self,
+        method: Any,
+        params: Any,
+        *,
+        timeout: float,
+        execution_overhead_seconds_per_action: float | None = None,
+    ) -> dict[str, Any]:
+        self.calls.append((method, timeout, execution_overhead_seconds_per_action))
+        output = observation("task", "episode", 1)
+        return ExecuteResult(
+            observation=output,
+            receipt=ExecutionReceipt(
+                operation_id=params.operation_id,
+                action_batch_id=params.action_batch_id,
+                input_observation_id=params.action_batch.observation_id,
+                output_observation_id=output.observation_id,
+                sequence=output.sequence,
+            ),
+        ).model_dump(mode="json")
+
+
+@pytest.mark.asyncio
+async def test_call_raw_forwards_the_overhead_rate_and_sends_the_zero_default_bare(
+    tmp_path: Path,
+) -> None:
+    """The middle hop, where the rate can be lost without any test noticing.
+
+    The per-action overhead exists to fund a paper-settle ``execute``; an
+    argument dropped between ``VerifiedAdapterSession`` and ``RpcClient`` would
+    leave that deadline on the caller's constant while the adapter really slept
+    once per action -- and the episode-level test cannot see it, because
+    ``FakeAdapter._call_raw`` calls ``funded_timeout`` in its own body and so
+    funds itself whatever the supervisor did with the argument. This drives the
+    real ``AdapterSupervisor`` against a recording client, so the assertion is
+    about what actually crossed that boundary: the rate when there is one, and
+    no keyword at all when there is not.
+    """
+
+    from types import SimpleNamespace
+
+    from local_operator.evaluation.adapters.supervisor import AdapterSupervisor
+
+    supervisor = AdapterSupervisor(
+        selector(tmp_path), SimpleNamespace(pid=os.getpid())  # type: ignore[arg-type]
+    )
+    rpc = _RecordingRpc()
+    supervisor.rpc = rpc  # type: ignore[assignment]
+    params = _execute_params(observation("task", "episode", 0))
+
+    await supervisor._call_raw(
+        "execute",
+        params,
+        ExecuteResult,
+        timeout=1.0,
+        execution_overhead_seconds_per_action=2.5,
+    )
+    await supervisor._call_raw("execute", params, ExecuteResult, timeout=1.0)
+
+    assert rpc.calls == [("execute", 1.0, 2.5), ("execute", 1.0, None)]
