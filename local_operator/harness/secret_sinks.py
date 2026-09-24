@@ -359,6 +359,11 @@ RULES: tuple[Rule, ...] = (
             # variable bound, so an emitter the old word list lacked is seen.
             "lop secret file GCP_SA_JSON -- sh -c 'rev \"$GOOGLE_APPLICATION_CREDENTIALS\"'",
             "lop secret file GCP_SA_JSON --env-var KF -- sh -c 'rev \"$KF\"'",
+            # R5-1: a redirection's words are not the consumer's argv, so the
+            # habitual `2>/dev/null` no longer hides the `env` in front of it.
+            "lop secret run --secret NAME=TOKEN -- env 2>/dev/null",
+            "lop secret run --secret NAME=TOKEN -- env 2>&1 | grep TOKEN",
+            "lop secret run --secret NAME=TOKEN -- env < /dev/null | rev",
         ),
         counterexamples=(
             "lop secret file GCP_SA_JSON -- gcloud auth activate-service-account "
@@ -381,6 +386,8 @@ RULES: tuple[Rule, ...] = (
             "lop secret run --secret NAME=TOKEN -- node app.js",
             "lop secret run --secret NAME=TOKEN -- awk '{print $1}' /etc/hosts",
             "lop secret file GCP_SA_JSON -- sh -c 'wc -c < \"$GOOGLE_APPLICATION_CREDENTIALS\"'",
+            "lop secret run --secret NAME=TOKEN -- sh -c "
+            "'curl -sS -H \"Authorization: Bearer $TOKEN\" https://x' 2>/dev/null",
             "lop secret run --secret NAME -- echo",
         ),
     ),
@@ -1920,6 +1927,32 @@ class _ShellAnalyzer:
         return targets
 
     @classmethod
+    def _redirect_words(cls, stage: Sequence[_Word | _Op | _Body]) -> set[int]:
+        """Indices of every word that belongs to a redirection, not to argv.
+
+        That is the target (`/dev/null` in `2>/dev/null`) AND the descriptor
+        prefix the lexer hands over as its own word: `2` in `2>&1`, `{fd}` in
+        `{fd}>x`. Bash reads a digit (or `{name}`) as a descriptor only when it
+        touches the operator — `echo 2 >x` prints `2` — so adjacency is the
+        test, as in :meth:`_fd_redirections`.
+
+        Every walk that decides "which word is the command" must skip these
+        (R5-1): `run … -- env 2>/dev/null` read `2` as the consumer (the wrapper
+        grammar stepped over `env`), so the dump check never saw `env` and the
+        raw value came back.
+        """
+        words = cls._redirect_targets(stage)
+        for index, item in enumerate(stage):
+            if not isinstance(item, _Op) or item.text not in _REDIRECTS or not index:
+                continue
+            previous = stage[index - 1]
+            if isinstance(previous, _Word) and previous.span[1] == item.span[0]:
+                text = cls._word_text(previous).strip()
+                if text.isdigit() or re.fullmatch(r"\{[A-Za-z_][A-Za-z0-9_]*\}", text):
+                    words.add(index - 1)
+        return words
+
+    @classmethod
     def _unwrap(cls, stage: list[_Word | _Op | _Body]) -> list[_Word | _Op | _Body]:
         """The stage with its precommand wrappers dropped (R3-2).
 
@@ -2492,7 +2525,15 @@ class _ShellAnalyzer:
         ``run`` branch could never fire at all (R3-1), because ``run`` always
         carries one.
         """
-        words = [self._word_text(item).strip() for item in stage if isinstance(item, _Word)]
+        # Redirection words are not argv: neither `lop`'s nor the consumer's
+        # (R5-1 — `-- env 2>/dev/null` and `-- env < /dev/null` each put a
+        # redirect word where the consumer is looked for).
+        redirects = self._redirect_words(stage)
+        words = [
+            self._word_text(item).strip()
+            for index, item in enumerate(stage)
+            if isinstance(item, _Word) and index not in redirects
+        ]
         rest: list[str] = []
         names: list[str] = []
         after_options: int | None = None
