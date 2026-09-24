@@ -261,6 +261,15 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
         turns = frame.get("turns")
         if not isinstance(turns, list) or not all(isinstance(item, dict) for item in turns):
             raise ValueError("turns must be a list of message objects")
+        # ``aside_instruction`` is the CALLER's declaration that its turns still
+        # need the off-record wrapper (absent means they do). Typed here for the
+        # reason ``remember`` is on ``approval_answer``: the dispatch compares it
+        # against the boolean ``False``, so a coerced value ("false", 0, "no")
+        # would read as "the caller wrapped its own turns" and silently drop the
+        # instruction from a real question — the exact regression the field was
+        # added to stop, arriving as a wrong answer rather than as a refusal.
+        if "aside_instruction" in frame and not isinstance(frame.get("aside_instruction"), bool):
+            raise ValueError("aside_instruction must be a boolean")
     elif op == "approval_answer":
         if not isinstance(frame.get("request_id"), str) or not frame["request_id"]:
             raise ValueError("request_id must be a non-empty string")
@@ -368,7 +377,7 @@ ControlOp = Literal[
     "set_model",  # {provider, model_id} — the model sheet's choice
     "set_effort",  # {effort} — one rung from the model's ladder
     "slash",  # {command, args} — execute a TUI slash command
-    "complete_aside",  # {turns} — authoritative off-record provider request
+    "complete_aside",  # {turns, aside_instruction?: false} — off-record request
     "new_conversation",  # {} — the TUI's /new
     "resume_session",  # {session_id} — rebind the runtime to another transcript
     "approval_answer",  # {request_id, approved, remember}
@@ -814,6 +823,18 @@ class SessionProjection:
         this is a property of THIS COPY, not of the projection.
         """
         self.activity_age_reference: tuple[float, float] | None = None
+        # The frame cap's re-cap memo — also deliberately NOT a field, for the
+        # same ``asdict`` reason: it is a cache over this object's rows, not a
+        # property of the projection, and a field would ship it down the wire.
+        # It lives HERE because the rows being re-capped are this object's, and
+        # the object is retained across repaints by both wire paths, which is
+        # the whole precondition for the memo (see
+        # ``projection._frame_capped``). ``projection._reconcile_frame_cap_memo``
+        # is what bounds it: to the roster, and to the shape each live row
+        # carries, of the last frame PUBLISHED — capped or under the cap, since
+        # the reconcile runs before the size check and the frame that shrinks a
+        # roster is the one that comes in under the cap.
+        self._frame_cap_memo: dict[str, dict[Any, tuple[str, int, Any, str]]] = {}
 
 
 def stamp_activity_age(projection: SessionProjection) -> None:

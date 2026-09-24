@@ -52,7 +52,12 @@ from local_operator.server.retire import RETIRING_MESSAGE, DaemonRetiring
 # ``set_pin`` is aliased only because this adapter's own method of that name is
 # the caller's entry point; the store function stays the single writer.
 from local_operator.session.archived import set_archived as set_session_archived
-from local_operator.session.attached import READ_ATTACH_BUDGET_S, AttachedSession
+from local_operator.session.attached import (
+    DESKTOP_CONTROL_ATTACH_S,
+    READ_ATTACH_BUDGET_S,
+    READ_FIRST_FRAME_GRACE_S,
+    AttachedSession,
+)
 from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
 from local_operator.session.attention import AttentionStore
 from local_operator.session.catalog import DECORATION_ATTENTION, load_catalog
@@ -193,6 +198,12 @@ WATCH_TTL = 45.0
 _LEASE_WARM_BACKOFF_S = 30.0
 _LEASE_WARM_BACKOFF_CAP_S = 120.0
 _LEASE_WARM_POLL_S = 1.0
+
+#: How long a snapshot waits for the attention store before it answers with the
+#: last known receipt state (B-F6). An uncontended read of ``attention.db``
+#: is ~1 ms, so this is only ever spent against a writer holding the lock; the
+#: refresh keeps going and publishes an ``attention`` frame when it lands.
+ATTENTION_SNAPSHOT_WAIT_S = 0.05
 
 #: The completion kinds the DESKTOP BRIDGE may put on the wire as a
 #: ``notification`` frame. Narrower than ``NotificationKind`` on purpose.
@@ -1003,6 +1014,42 @@ class DesktopSessionBridge:
         #: the LEASE's intent across attempts, while ``warm_task`` is the single
         #: engage it (or the ``/warm`` route) has in flight at any moment.
         self.lease_warm_task: asyncio.Task[None] | None = None
+        #: The READ envelope's attach attempt, single-flight per bridge and run
+        #: OUTSIDE ``self.lock`` (see :meth:`acquire`). Held for the same reason
+        #: ``warm_task`` is: asyncio keeps only a weak reference to a bare task.
+        self.read_attach_task: asyncio.Task[bool] | None = None
+        #: The attempts some read ANSWERED ahead of, i.e. painted the cold facade
+        #: an attempt may be about to replace. Only those attempts owe a
+        #: ``frontend.replace`` when they settle (see :meth:`_read_attach_settled`):
+        #: an attach that landed inside the grace was already in the frame that
+        #: read served.
+        #:
+        #: KEYED BY ATTEMPT, NOT A BRIDGE FLAG (review round 1, F3). One flag reset
+        #: by every new attempt lost a correction: reader A outruns T1, T1 settles
+        #: with its done-callback still queued, reader B finds T1 done and starts
+        #: T2 (clearing the flag), and T1's callback then saw nothing to publish,
+        #: leaving A's pane on the cold view with no transition. An attempt's own
+        #: membership here cannot be cleared by a later one.
+        self.read_attach_outran: set[asyncio.Task[bool]] = set()
+        #: The runtime pid the lease-driven warm last left the viewer BOUND to, so
+        #: the next cold period can ask how that runtime ended before it decides
+        #: whether to pace (see :meth:`_lease_warm_loop`). ``None`` is "unknown",
+        #: which is charged, never excused.
+        self.warm_served_pid: int | None = None
+        #: Whether a warm has been SERVED on this intent. Distinct from the pid,
+        #: which may legitimately be unknown for a served attempt.
+        self.warm_served = False
+        #: The served pid whose exit was already probed, so the probe runs once
+        #: per served runtime rather than once per pacing pass (see
+        #: :meth:`_probe_served_runtime`).
+        self.warm_probed_pid: int | None = None
+        #: The in-flight attention read shared by the snapshot and the poll loop,
+        #: so a contended store is asked once rather than once per caller.
+        self.attention_refresh: asyncio.Task[dict[str, Any]] | None = None
+        #: Whether a snapshot went out with attention state it could not confirm
+        #: in time, so the refresh that lands afterwards must publish the
+        #: ``attention`` frame even when this bridge had no baseline before.
+        self.attention_served_stale = False
         #: Pace for the next lease-driven attempt, valid only between an attempt
         #: that failed and the retry it earned; ``warm_not_before`` is the
         #: monotonic deadline, ``warm_backoff_s`` the value it was set from so
@@ -1096,10 +1143,16 @@ class DesktopSessionBridge:
         remote = self.remote
         if remote is None:
             return {"cold": True, "cold_reason": "no-runtime", "attaching": False}
+        # An attach that is IN FLIGHT behind a served read is ``attaching`` too:
+        # the frame that answered first is cold only because the paint did not
+        # wait for it, and the frame the attempt publishes when it settles
+        # (``_read_attach_settled``) carries the verdict. Reporting ``False``
+        # there would say "nothing is coming" over an attach that is.
+        in_flight = self.read_attach_task is not None and not self.read_attach_task.done()
         return {
             "cold": remote.is_cold,
             "cold_reason": remote.cold_reason,
-            "attaching": remote.attaching,
+            "attaching": remote.attaching or (in_flight and remote.is_cold),
         }
 
     async def acquire(self, *, read: bool = False) -> AttachedSession:
@@ -1111,96 +1164,206 @@ class DesktopSessionBridge:
         disk in the same process (``snapshot``/``history``). Read mode therefore
         bounds its one attempt at ``READ_ATTACH_BUDGET_S`` and answers cold when
         it does not land, keeping the authenticated dial for the rollover. The
-        CONTROL envelope (the default) is unchanged: one attempt on the foreground
-        envelope, and a raise the route ladder turns into a named refusal — a
-        write that was not admitted must say so rather than be reported as a
-        served read.
+        CONTROL envelope (the default) is one attempt bounded at
+        ``DESKTOP_CONTROL_ATTACH_S``, and a raise the route ladder turns into a
+        named refusal — a write that was not admitted must say so rather than be
+        reported as a served read.
+
+        THE ATTACH RUNS OUTSIDE ``self.lock``, in both envelopes, and that is
+        the fix for the reported 17-20 s reads. The lock orders what it has to —
+        the reference count, facade construction, the epoch/replay reset and
+        ``_detach`` — and used to be held across ``attach_existing`` as well, so
+        every read of a conversation queued behind a control call's 15 s attach
+        and then paid its own 2 s (measured with a SIGSTOPped owner: 16.9-20.0 s,
+        which the renderer's 20 s deadline cut into "the backend could not
+        complete this request"). Holding a reference is what makes leaving the
+        lock safe: ``_detach`` runs only at ``users == 0``, so the facade cannot
+        be disposed under a caller that is still attaching it, and
+        ``attach_existing`` serialises dials on the facade's own ``_bind_lock``.
+
+        A READ DOES NOT WAIT FOR ITS ATTACH beyond ``READ_FIRST_FRAME_GRACE_S``.
+        The attempt is a single-flight task (``read_attach_task``): a healthy
+        owner lands inside the grace, so its first frame is live exactly as
+        before, and a busy one answers cold at once while the attach carries on
+        behind the paint and announces its outcome as a ``frontend.replace``
+        (see :meth:`_read_attach_settled`).
         """
+        task: asyncio.Task[bool] | None = None
         async with self.lock:
             self.users += 1
             self.touched = time.monotonic()
             try:
-                if self.remote is None:
-                    # The birth selection this draft was created with, and the
-                    # deliberate override that makes the child PIN it (a config
-                    # edit must not re-select a conversation the user chose a
-                    # model for). Both are ``None``/``False`` for every session
-                    # that carries no stored choice, which is every session an
-                    # older build created — and for one whose own journal already
-                    # owns a selection, so a switched conversation is never
-                    # dragged back to the model it was born on (see
-                    # :func:`draft_birth_selection`).
-                    birth = await asyncio.to_thread(
-                        draft_birth_selection, self.root, self.session_id
-                    )
-                    remote = await AttachedSession.cold(
-                        self.session_id,
-                        config_dir=self.root,
-                        cwd=self.cwd,
-                        takeover_factory=_no_takeover,
-                        surface="desktop",
-                        initial_model=birth,
-                        model_selection_override=birth is not None,
-                    )
-                    self.remote = remote
-                    # A detached interval has no receipt feed. A new epoch makes
-                    # that gap explicit even when the runtime itself never died.
-                    self.epoch = uuid.uuid4().hex
-                    self.sequence = 0
-                    self.replay.clear()
-                    self.replay_bytes = 0
-                    # The same argument as the replay's: a reconnecting client's
-                    # cursor cannot address the old epoch's announcements, so
-                    # holding the ids would only suppress a notice the new
-                    # connection has never seen.
-                    self.announced.clear()
-                    # The engage's refresh hook, installed HERE because this is the only
-                    # seam that owns this facade for its whole life.
-                    #
-                    # WHY IT IS NEEDED AT ALL: `retiring` means "a successor is owed,
-                    # engage one" — the frame a move ends with, and a client-side build
-                    # refresh too — and the facade answers it with `_go_cold(refresh=True)`,
-                    # which fires this callback. The TUI installs one
-                    # (`_on_runtime_refreshed`); without one the desktop viewer simply sat
-                    # cold until the user's next send engaged, so a moved session's chip
-                    # stayed on the OLD directory with nothing to settle it. (A
-                    # WHOLE-DAEMON retirement is a different case with its own mechanism,
-                    # `server/retire.py`: the callback still fires there and declines in
-                    # `_schedule_warm`, because the daemon leaving needs no successor
-                    # spawned inside it.) Nothing else can take this job:
-                    # `attach_existing()` only adopts an EXISTING owner record (there is
-                    # none after a retire), and warm()/prompt()/command only re-engage when
-                    # the user next acts.
-                    #
-                    # WHY THE CALLBACK AND NOT "warm() after the move route returns": at
-                    # the moment `set_working_directory` returns, the outgoing client is
-                    # usually STILL connected (`retire_now` is acked before the EOF), so an
-                    # engage issued there samples `is_cold` as False and returns without
-                    # doing anything — silently. This callback runs on the exact frame
-                    # that flips the viewer cold, which is the only moment that is not a
-                    # race. It fires from `_on_disconnected` inside the client's pump, i.e.
-                    # on the event loop, so `_schedule_warm` may create its task directly.
-                    remote.set_refresh_callback(self._on_runtime_retired)
-                    # THE LOCAL REPLACEMENT SEAM (contract §C). A move installs an
-                    # accepted directory on the facade WITHOUT the owner's
-                    # epoch/sequence moving, so telling desktop subscribers as an
-                    # ordinary ``frontend.update`` would present a same-sequence
-                    # delta the renderer discards — the frame is published here
-                    # instead, through the bridge's own outer cursor.
-                    remote.set_local_cwd_callback(lambda _cwd: self.publish_frontend_replace())
-                    self.unsubscribers = [
-                        remote.subscribe(self._event),
-                        remote.subscribe_frontend(self._frontend).unsubscribe,
-                    ]
-                await self.remote.attach_existing(budget=READ_ATTACH_BUDGET_S if read else None)
-                if self.attention_task is None:
-                    self.attention_task = asyncio.create_task(self._poll_attention())
-                return self.remote
+                remote = await self._ensure_facade()
             except BaseException:
                 self.users -= 1
                 if self.users == 0:
                     await self._detach()
                 raise
+            if read:
+                task = self._start_read_attach(remote)
+        try:
+            if read:
+                if task is not None:
+                    # ``asyncio.wait`` rather than ``wait_for``: this caller stops
+                    # WAITING at the grace, while the attempt belongs to the bridge
+                    # and must not be cancelled with the request that started it
+                    # (``wait`` never cancels what it waits on; a cancelled request
+                    # leaves the task running for the other readers and the
+                    # stream).
+                    done, _ = await asyncio.wait({task}, timeout=READ_FIRST_FRAME_GRACE_S)
+                    if not done:
+                        self.read_attach_outran.add(task)
+            else:
+                await remote.attach_existing(control_budget=DESKTOP_CONTROL_ATTACH_S)
+        except BaseException:
+            # SHIELDED, the shape the routes' ``_give_the_bridge_back`` settled in
+            # review rounds 2 and 3 (review round 1 of this change, F4).
+            # ``release`` awaits the bridge lock, which every other route on this
+            # session contends, and ``_detach`` awaits the owner connection's
+            # tear-down; a cancellation delivered at either await propagates into
+            # an unshielded release and leaves ``users`` incremented for good —
+            # ``release`` is the only thing that drops it, and eviction only ever
+            # considers ``users == 0``. Shielded, the request unwinds promptly
+            # while the release runs to completion exactly once; shield's own
+            # callback retrieves the release's failure when nobody is left to
+            # raise it to.
+            await asyncio.shield(self.release())
+            raise
+        if self.attention_task is None:
+            self.attention_task = asyncio.create_task(self._poll_attention())
+        return remote
+
+    def _start_read_attach(self, remote: AttachedSession) -> asyncio.Task[bool] | None:
+        """The bridge's one read-envelope attach attempt, started if none is live.
+
+        ``None`` when there is nothing to wait for: a facade that is already
+        attached (every read of a live conversation), or one whose attempt is
+        already running — the second reader joins it rather than dialling again,
+        which is what used to serialise two reads into 4 s. Called under
+        ``self.lock`` so two readers cannot both find no task.
+        """
+        running = self.read_attach_task
+        if running is not None and not running.done():
+            return running
+        if not remote.is_cold:
+            return None
+        task = asyncio.create_task(remote.attach_existing(budget=READ_ATTACH_BUDGET_S))
+        self.read_attach_task = task
+        task.add_done_callback(lambda settled: self._read_attach_settled(remote, settled))
+        return task
+
+    def _read_attach_settled(self, remote: AttachedSession, task: asyncio.Task[bool]) -> None:
+        """Tell the stream how an attach that outlived its read ended.
+
+        ``frontend.replace`` IN ADDITION to the owner's rollover
+        ``frontend.update`` (which ``AttachedSession._bind_to`` now publishes
+        after the sync finishes, so it too says ``cold: false``): the shipped
+        renderer takes ``cold`` from the snapshot and from this frame only, and
+        applies a rollover update's fields without it. The replace is ordered by
+        the bridge's own cursor, carries the whole bounded projection plus the
+        cold triple, and is the frame the
+        renderer already applies as authoritative (contract §C) — so an attach
+        that lands after the first paint moves the panel to live, and one that
+        fails moves it from ``attaching`` to its classified ``cold_reason``.
+
+        Published only when a read actually answered during the flight: an
+        attach inside the grace was already in the frame that read served.
+        """
+        if task.cancelled():
+            return
+        if task.exception() is not None:
+            # ``attach_existing`` absorbs every failure in read mode; anything
+            # that still escapes is a bug to log, never a crash of the loop.
+            logger.debug("read attach for %s failed", self.session_id, exc_info=task.exception())
+        # Membership is THIS attempt's own fact: a later attempt cannot clear it
+        # (see ``read_attach_outran``), and discarding it here is what makes the
+        # correction exactly once per attempt.
+        outran = task in self.read_attach_outran
+        self.read_attach_outran.discard(task)
+        if self.remote is not remote or not outran:
+            return
+        # PUBLISHED FOR A RETAINED DIAL TOO. The served frame may predate the
+        # attempt's CLASSIFICATION, not only its outcome: under load the
+        # registry read that decides ``owner-silent``/``owner-leaving`` runs in a
+        # worker thread that can outlast the grace, so the first frame carries
+        # the documented unclassified default (``no-runtime`` with
+        # ``attaching: true``). This frame is the correction; a retained dial's
+        # own late rollover still follows if the owner answers.
+        self.publish_frontend_replace()
+
+    async def _ensure_facade(self) -> AttachedSession:
+        """This bridge's facade, constructed cold on first use. Caller holds the lock."""
+        if self.remote is None:
+            # The birth selection this draft was created with, and the
+            # deliberate override that makes the child PIN it (a config
+            # edit must not re-select a conversation the user chose a
+            # model for). Both are ``None``/``False`` for every session
+            # that carries no stored choice, which is every session an
+            # older build created — and for one whose own journal already
+            # owns a selection, so a switched conversation is never
+            # dragged back to the model it was born on (see
+            # :func:`draft_birth_selection`).
+            birth = await asyncio.to_thread(draft_birth_selection, self.root, self.session_id)
+            remote = await AttachedSession.cold(
+                self.session_id,
+                config_dir=self.root,
+                cwd=self.cwd,
+                takeover_factory=_no_takeover,
+                surface="desktop",
+                initial_model=birth,
+                model_selection_override=birth is not None,
+            )
+            self.remote = remote
+            # A detached interval has no receipt feed. A new epoch makes
+            # that gap explicit even when the runtime itself never died.
+            self.epoch = uuid.uuid4().hex
+            self.sequence = 0
+            self.replay.clear()
+            self.replay_bytes = 0
+            # The same argument as the replay's: a reconnecting client's
+            # cursor cannot address the old epoch's announcements, so
+            # holding the ids would only suppress a notice the new
+            # connection has never seen.
+            self.announced.clear()
+            # The engage's refresh hook, installed HERE because this is the only
+            # seam that owns this facade for its whole life.
+            #
+            # WHY IT IS NEEDED AT ALL: `retiring` means "a successor is owed,
+            # engage one" — the frame a move ends with, and a client-side build
+            # refresh too — and the facade answers it with `_go_cold(refresh=True)`,
+            # which fires this callback. The TUI installs one
+            # (`_on_runtime_refreshed`); without one the desktop viewer simply sat
+            # cold until the user's next send engaged, so a moved session's chip
+            # stayed on the OLD directory with nothing to settle it. (A
+            # WHOLE-DAEMON retirement is a different case with its own mechanism,
+            # `server/retire.py`: the callback still fires there and declines in
+            # `_schedule_warm`, because the daemon leaving needs no successor
+            # spawned inside it.) Nothing else can take this job:
+            # `attach_existing()` only adopts an EXISTING owner record (there is
+            # none after a retire), and warm()/prompt()/command only re-engage when
+            # the user next acts.
+            #
+            # WHY THE CALLBACK AND NOT "warm() after the move route returns": at
+            # the moment `set_working_directory` returns, the outgoing client is
+            # usually STILL connected (`retire_now` is acked before the EOF), so an
+            # engage issued there samples `is_cold` as False and returns without
+            # doing anything — silently. This callback runs on the exact frame
+            # that flips the viewer cold, which is the only moment that is not a
+            # race. It fires from `_on_disconnected` inside the client's pump, i.e.
+            # on the event loop, so `_schedule_warm` may create its task directly.
+            remote.set_refresh_callback(self._on_runtime_retired)
+            # THE LOCAL REPLACEMENT SEAM (contract §C). A move installs an
+            # accepted directory on the facade WITHOUT the owner's
+            # epoch/sequence moving, so telling desktop subscribers as an
+            # ordinary ``frontend.update`` would present a same-sequence
+            # delta the renderer discards — the frame is published here
+            # instead, through the bridge's own outer cursor.
+            remote.set_local_cwd_callback(lambda _cwd: self.publish_frontend_replace())
+            self.unsubscribers = [
+                remote.subscribe(self._event),
+                remote.subscribe_frontend(self._frontend).unsubscribe,
+            ]
+        return self.remote
 
     async def release(self) -> None:
         async with self.lock:
@@ -1230,8 +1393,16 @@ class DesktopSessionBridge:
             with contextlib.suppress(BaseException):
                 await self.lease_warm_task
             self.lease_warm_task = None
-        self.warm_backoff_s = 0.0
-        self.warm_not_before = 0.0
+        self._clear_warm_backoff()
+        # The read attach goes with the facade it was dialling for: a dial that
+        # lands after ``dispose()`` is refused by the facade anyway, but a task
+        # left running would still hold a socket until it noticed.
+        if self.read_attach_task is not None:
+            self.read_attach_task.cancel()
+            with contextlib.suppress(BaseException):
+                await self.read_attach_task
+            self.read_attach_task = None
+        self.read_attach_outran.clear()
         # BEFORE `dispose()`, and suppressing the task's own failure as well as
         # the cancellation: an engage that lands after the facade is gone would
         # otherwise hold a freshly spawned runtime resident with no viewer to
@@ -1278,6 +1449,15 @@ class DesktopSessionBridge:
             with contextlib.suppress(BaseException):
                 await self.attention_task
             self.attention_task = None
+        # The shared refresh a snapshot stopped waiting on is this bridge's too:
+        # it runs in a worker thread that cannot be interrupted, so cancelling
+        # only drops the result, and a publish from a detached bridge is moot.
+        if self.attention_refresh is not None:
+            self.attention_refresh.cancel()
+            with contextlib.suppress(BaseException):
+                await self.attention_refresh
+            self.attention_refresh = None
+        self.attention_served_stale = False
 
     async def close(self) -> None:
         for sub in self.subscribers.values():
@@ -1339,6 +1519,60 @@ class DesktopSessionBridge:
             else:
                 sub.queue.put_nowait((frame, size))
                 sub.queued_bytes += size
+
+    def publish_to_subscription(
+        self, kind: str, payload: dict[str, Any], *, subscription_id: str
+    ) -> bool:
+        """Put one LIVE-ONLY frame on ONE subscriber's FIFO, and on no other.
+
+        WHY THIS EXISTS BESIDE :meth:`publish`. The aside's ``aside_delta``
+        frames are the one family on this bridge that is PRIVATE TO THE VIEWER
+        THAT ASKED: the exchange they describe is off the record, and the
+        runtime seam already refuses to fan an aside out (``_aside_delta_sink``
+        — "the frame goes to the CONNECTION THAT ASKED"). Routing them through
+        :meth:`publish` undid that one hop later: every other window's stream on
+        the same session received another viewer's aside text, and paid for it
+        in its own queue and byte budget. A viewer is not a subscriber of an
+        aside it did not ask for, so the fan-out is not a wider delivery — it is
+        a leak. The frame is addressed by ``aside_id`` on top of that, so this
+        is a second lock rather than the only one.
+
+        NEVER REPLAYED, for the reason :meth:`publish` gives for its own
+        ``replay=False`` path (and the reason the aside is live-only end to
+        end): a delta replayed on reconnect repaints progress for a request the
+        client already has the settled answer to. The SEQUENCE still advances —
+        the cursor argument in :meth:`publish` applies unchanged, and ``events``
+        computes ``gap`` from retained frames only, so the skipped seq is simply
+        never ``first``. Immaterial for this family, since a caller that missed
+        a delta already has the whole answer in the POST's ``text``.
+
+        Returns whether the named subscription was live and took the frame. A
+        false answer is NOT an error to the caller — the aside is already being
+        answered for it by the POST — which is why this returns rather than
+        raising (see the asides route).
+        """
+        sub = self.subscribers.get(subscription_id)
+        if sub is None or sub.overflow:
+            return False
+        self.sequence += 1
+        frame = {
+            "session_id": self.session_id,
+            "epoch": self.epoch,
+            "seq": self.sequence,
+            "type": kind,
+            "payload": payload,
+        }
+        size = len(json.dumps(frame, separators=(",", ":")).encode())
+        if sub.queue.full() or sub.queued_bytes + size > REPLAY_BYTES:
+            # The SAME relief valve every other publication in this file uses,
+            # on the same accounting: a subscriber that cannot take the frame is
+            # disconnected so its reconnect reconciles, rather than being fed a
+            # queue whose bytes this method stopped counting.
+            self._disconnect(sub)
+            return False
+        sub.queue.put_nowait((frame, size))
+        sub.queued_bytes += size
+        return True
 
     def publish_once(self, kind: str, payload: dict[str, Any], *, dedupe_key: str) -> bool:
         """Publish ``kind`` unless this bridge already announced ``dedupe_key``.
@@ -1412,8 +1646,12 @@ class DesktopSessionBridge:
             previous = self.attention
             self.attention = state
             # The initial snapshot owns the baseline; later changes have their
-            # own receipt clock rather than borrowing a runtime sequence.
-            if previous:
+            # own receipt clock rather than borrowing a runtime sequence. A
+            # snapshot that went out WITHOUT confirmed attention (the store was
+            # contended past ``ATTENTION_SNAPSHOT_WAIT_S``) did not own one, so
+            # the read that lands afterwards is published as the correction.
+            stale, self.attention_served_stale = self.attention_served_stale, False
+            if previous or stale:
                 self.publish("attention", state)
                 # THE NOTIFICATION EDGE, published AFTER the attention frame so
                 # a reader that toasts already holds the receipt state that
@@ -1559,7 +1797,7 @@ class DesktopSessionBridge:
                     and (remote.is_cold or getattr(remote, "supports_completion_ack", False)),
                 )
                 if key != self.attention_poll_key:
-                    await self.refresh_attention()
+                    await self._shared_attention_refresh()
                     self.attention_poll_key = key
                 if failing:
                     logger.info(
@@ -1598,6 +1836,24 @@ class DesktopSessionBridge:
             )
         )
 
+    def _shared_attention_refresh(self) -> asyncio.Task[dict[str, Any]]:
+        """The one in-flight attention read, started if none is running.
+
+        Shared by the snapshot and the poll loop so a contended store is asked
+        once per bridge rather than once per caller — each read can spend the
+        store's whole retry window (``_BUSY_TIMEOUT_MS`` x 2 attempts, 10.8 s
+        measured worst case) and N readers stacking N of them is what turns a
+        busy sidecar into a slow machine. The task's own failure is retrieved
+        here so a snapshot that stopped waiting does not leave it unobserved.
+        """
+        running = self.attention_refresh
+        if running is not None and not running.done():
+            return running
+        task = asyncio.create_task(self.refresh_attention())
+        task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        self.attention_refresh = task
+        return task
+
     async def snapshot(self) -> dict[str, Any]:
         # Decorative, so a busy or damaged receipt sidecar cannot stop a
         # conversation from OPENING. Before this field existed the snapshot
@@ -1605,8 +1861,23 @@ class DesktopSessionBridge:
         # write contention into a failure of the primary read path. The last
         # known state is kept rather than blanked -- it is what the previous
         # successful poll actually saw.
-        with contextlib.suppress(sqlite3.Error, OSError):
-            await self.refresh_attention()
+        #
+        # AND IT IS NO LONGER WAITED ON PAST A GLANCE (B-F6). The store is the
+        # most contended file on the machine (~25 sessions publish into it with
+        # ``BEGIN IMMEDIATE`` in a rollback journal, so a writer blocks readers)
+        # and the read rides out up to 10.8 s of that. An uncontended read
+        # answers in ~1 ms, well inside the wait below, so the ordinary open
+        # still carries fresh receipts; a contended one serves the last known
+        # state now and the refresh publishes the ``attention`` frame the
+        # renderer already consumes when it lands. Shielded so the refresh
+        # survives the snapshot giving up on it.
+        refresh = self._shared_attention_refresh()
+        try:
+            await asyncio.wait_for(asyncio.shield(refresh), timeout=ATTENTION_SNAPSHOT_WAIT_S)
+        except TimeoutError:
+            self.attention_served_stale = True
+        except (sqlite3.Error, OSError):
+            pass
         state = self.state()
         seq, epoch = self.sequence, self.epoch
         cursor = state["snapshot"].get("history_cursor")
@@ -1618,7 +1889,18 @@ class DesktopSessionBridge:
         # which is why it is stated here and in ``docs/DESKTOP_API.md`` rather than
         # left to be inferred -- and why this branch is the one place where the
         # snapshot still serves something not derived from the journal.
-        if cursor:
+        #
+        # A COLD FACADE GETS THE PAGE TOO. Its state has no cursor by
+        # construction (nothing refreshed it from a live session), so the gate
+        # above skipped the page on every cold open and first paint became this
+        # frame PLUS a serial ``/history`` round trip for the very same tail.
+        # The page served here IS that tail (``history()``, the method the route
+        # calls), so the reader loses nothing by painting from it; a renderer
+        # that sees a non-empty page beside ``cold_reason`` knows this backend
+        # fills it and skips the duplicate fetch, and an older one reconciles
+        # on an empty page only, which a cold open with rows no longer is.
+        remote = self.remote
+        if cursor or (remote is not None and remote.is_cold):
             # THE PAGE IS THE JOURNAL'S TAIL. Its upper bound is NOT the frontend
             # cursor above, and that is the fix rather than a detail: this is a
             # read of the TRANSCRIPT, while ``history_cursor`` is a FRONTEND
@@ -1935,6 +2217,57 @@ class DesktopSessionBridge:
         """
         self.warm_backoff_s = 0.0
         self.warm_not_before = 0.0
+        self.warm_served = False
+        self.warm_served_pid = None
+        self.warm_probed_pid = None
+
+    async def _probe_served_runtime(self) -> bool:
+        """Whether the served runtime exited cleanly, memoising a FINAL verdict (N1).
+
+        This sits inside the pacing loop, so an unmemoised probe runs on every
+        ``_LEASE_WARM_POLL_S`` pass (a worker thread plus a ``ps`` fork). Only a
+        verdict that cannot change is memoised: once the pid is gone the boot
+        record decides for good, clean or not. A pid that is still ALIVE is not a
+        verdict — that runtime may yet exit cleanly and must then drop the pace
+        — so it is re-asked, which costs at most one probe a second and only
+        while a viewer is cold over a runtime that is still running (a resync, a
+        wedged socket), a state the loop leaves as soon as it binds or the lease
+        lapses. The next SERVED warm records a new pid and earns a fresh probe.
+        """
+        verdict = await asyncio.to_thread(self._served_runtime_exited_cleanly)
+        if verdict is None:
+            return False
+        self.warm_probed_pid = self.warm_served_pid
+        return verdict
+
+    def _served_runtime_exited_cleanly(self) -> bool | None:
+        """Whether the runtime the last SERVED warm bound to left through its exit path.
+
+        A pid that is still alive has not exited at all (a viewer can go cold
+        over a live runtime — a resync, a wedged socket), and an unknown pid is
+        not evidence of anything. An unknown pid answers False (final) and a
+        live one ``None`` (undecided, see :meth:`_probe_served_runtime`); both
+        keep the pace, which is the conservative side of this question. Runs off
+        the loop: it stats a file under the run directory.
+        """
+        pid = self.warm_served_pid
+        # ``check_zombie`` IS REQUIRED HERE, not a nicety: THIS process spawned
+        # the runtime (the lease warm's engage), and nothing in ``serve`` reaps
+        # a detached child, so a runtime that exited cleanly sits as a zombie
+        # that signal-0 reports alive. Measured over real ``serve``: after a
+        # SIGTERM the served runtime's pid is ``ps`` state ``Z`` with its boot
+        # record withdrawn, ``pid_alive`` answers True and only the zombie probe
+        # answers False — without it every served warm still paced the next
+        # cold period its full ~26 s. The probe's ``ps`` fork (~4 ms) runs off
+        # the loop, only after a served warm, and once per served runtime once
+        # it has exited (see :meth:`_probe_served_runtime` for the live case).
+        if pid is None:
+            return False
+        if registry.pid_alive(pid, check_zombie=True):
+            return None
+        from local_operator.session.runtime import journal
+
+        return journal.read_boot_record(pid, self.root) is None
 
     async def _lease_warm_loop(self, remote: AttachedSession) -> None:
         """Keep a live VISIBLE lease's warm until it is served or withdrawn.
@@ -2006,6 +2339,22 @@ class DesktopSessionBridge:
                 # must not be the thing that resurrects the stopped session.
                 self._clear_warm_backoff()
                 return
+            if (
+                self.warm_served
+                and self.warm_probed_pid != self.warm_served_pid
+                and await self._probe_served_runtime()
+            ):
+                # A SERVED WARM IS NOT A FAILURE (B-F1). The charge below stands
+                # after a served attempt so a runtime that boots and then DIES is
+                # paced; it used to stand for the runtime that simply finished —
+                # the idle drain reaps a warmed runtime seconds after the user
+                # looks away — so switching back inside 30 s waited out the rest
+                # of the pace cold (reproduced: 26.2-26.8 s p95 watch->live).
+                # The two are told apart by the boot record, which the runtime
+                # withdraws on EVERY clean exit and which an unclean death leaves
+                # behind (``process._clear_boot_record``), so the crash-loop case
+                # keeps its pace exactly.
+                self._clear_warm_backoff()
             remaining = self.warm_not_before - time.monotonic()
             if remaining > 0:
                 await asyncio.sleep(min(remaining, _LEASE_WARM_POLL_S))
@@ -2054,7 +2403,11 @@ class DesktopSessionBridge:
             if not remote.is_cold:
                 # SERVED: the runtime is up. The charge stands (above) so a
                 # runtime that dies in the next few seconds is paced rather than
-                # re-spawned at the next beat.
+                # re-spawned at the next beat — and it is dropped at the next
+                # cold period if that runtime turns out to have exited cleanly
+                # (the check at the top of this loop).
+                self.warm_served = True
+                self.warm_served_pid = remote.runtime_pid
                 return
             logger.debug(
                 "lease-driven warm for %s left the viewer cold; next attempt in %.0fs",

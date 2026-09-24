@@ -126,9 +126,11 @@ _CONNECT_TIMEOUT_S = 5.0
 #: Two attempts is therefore the largest budget whose worst case still answers a
 #: turn's ``finally`` promptly -- ~12 s, against ~16-17 s for a third attempt --
 #: and the second window is what absorbs a burst that outlasts the first. A lock
-#: that outlasts both is what the journal beside the store is for (the outcome is
-#: durable in the transcript before it is published, so the next boot re-imports
-#: it).
+#: that outlasts both is what the journal beside the store is for: the outcome is
+#: durable in the transcript before it is published, and the owning session
+#: republishes it in-process on a bounded ladder (see
+#: ``Session._schedule_attention_republish``), with the next boot's import as the
+#: fallback rather than the only remedy.
 _CONTENTION_ATTEMPTS = 2
 _CONTENTION_BACKOFF_S = 0.2
 
@@ -233,10 +235,16 @@ class AttentionWriteDeferred(_AttentionContentionDeferred):
     times ``_CONTENTION_ATTEMPTS`` -- never SQLite's first refusal.
 
     The name says DEFERRED rather than LOST because for the publish path it is:
-    the outcome is journalled to the transcript *before* it is published, so the
-    next boot's ``bootstrap_transcript`` re-imports it (see
-    ``Session._publish_attention_outcome``). Callers that swallow this must say
-    so out loud, because a completion missing from the store until the next boot
+    the outcome is journalled to the transcript *before* it is published, and the
+    owning session retries the publication IN THIS PROCESS on a bounded republish
+    ladder (``Session._schedule_attention_republish``: four rungs, ~86 s), which is
+    the remedy that matters, because a finished session is idle and an idle session
+    never boots. The next boot's ``bootstrap_transcript`` re-imports the journal as
+    well, but as the FALLBACK for a ladder that ran out -- it is not on its own a
+    remedy, which is what the previous wording here claimed and what the operator
+    hit (2026-09-23: completions landed in the journal and never in the store, so
+    no notification and no sidebar mark). Callers that swallow this must say so out
+    loud, because a completion missing from the store until the ladder's next rung
     is a real, user-visible delay.
     """
 
@@ -251,7 +259,8 @@ class AttentionReadDeferred(_AttentionContentionDeferred):
     read has changed nothing -- the receipt, the revision and the watermark are
     all exactly as they were -- so a surface may serve its last good frame, or
     its empty value, and re-read on the next tick. A deferred write may have been
-    a completion that will not be published until the next boot's journal import.
+    a completion the store does not have yet, which the owning session republishes
+    in-process and which the next boot's journal import would otherwise carry.
     Both carry SQLITE_BUSY through the same base, so `store_failures` answers 503
     "busy, retry" for either and no ladder needs a new branch.
 

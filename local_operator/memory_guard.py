@@ -27,10 +27,13 @@ What this deliberately is NOT:
 
 **It reduces the blast radius; it does not make allocation safe.** A fast
 allocator can outrun a 250 ms poll — one tick can be one allocation burst. The
-ceiling is ``0.5 x available minus a reserve``, so a command that blows past it
-inside one tick still has roughly the reserve of real RAM before the kernel's own
-OOM killer looks at the box. The number is a stopgap between "a slow command" and
+auto ceiling responds to the available-memory and swap-pressure sample for each
+command, retains an absolute reserve, and is capped at a fraction of physical RAM
+for unusually idle hosts. Each guard applies to one command process group only;
+there is no machine-wide aggregate budget, so several concurrent commands can
+consume several such ceilings. This is a stopgap between "a slow command" and
 "a dead session", not a guarantee.
+
 """
 
 from __future__ import annotations
@@ -59,59 +62,34 @@ def _platform() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Constants, next to the code that reads them (the `_consumer_defaults()` rule).
-#
-# The reserve arithmetic is copied from conftest.py (`_MEMORY_SHARE`,
-# `_MEMORY_RESERVE_CAP_MB`, `_MEMORY_RESERVE_FRACTION`) with the same values and
-# the same shape, so this machine keeps ONE budget vocabulary rather than two that
-# can drift. A reader who understands the pytest worker cap understands this.
+# Auto-budget constants, next to the code that reads them. These intentionally
+# differ from pytest's worker-pool values: a memory test should not silently tune
+# the resource limit of one live command group.
 # ---------------------------------------------------------------------------
 
-#: Fraction of *available* memory one command may claim. The rest is left for the
-#: OS, the editor and the other sessions that make this machine contended.
-_MEMORY_SHARE = 0.5
+#: Share of measured available memory a single command may claim before other
+#: limits apply. Recomputing from current availability keeps it pressure-sensitive.
+_MEMORY_SHARE = 0.75
 
-#: Floor held out of the budget entirely, so the fraction is not the only thing
-#: between a mis-sized command and zero free memory. `min` rather than
-#: subtract-then-halve so a solo command is not charged twice.
-_MEMORY_RESERVE_CAP_MB = 2048
+#: Absolute headroom held back, scaled down on small hosts by the second arm.
+_MEMORY_RESERVE_CAP_MB = 1024
+_MEMORY_RESERVE_FRACTION = 16
 
-#: 1/8 of total scales the reserve down on a small device; the cap above bounds it
-#: from above on a large one.
-_MEMORY_RESERVE_FRACTION = 8
+#: Per-command cap as a fraction of physical RAM, limiting unusually idle hosts.
+#: It is not an aggregate ceiling across concurrently running command groups.
+_MEMORY_PHYSICAL_CAP_FRACTION = 0.25
 
 #: Advisory line fires at this fraction of the ceiling (the `memory.high` analog).
 _SOFT_FRACTION = 0.8
 
-#: If free swap is below this, the host has *already* paged itself into a corner,
-#: so the effective available memory is the min of the measured arm and the
-#: free-swap headroom. Swap is NEVER summed into spendable budget: counting swap
-#: as headroom would RAISE the ceiling on exactly the thrashing host we are trying
-#: to protect. This is a pressure floor on the reserve, nothing more.
+#: If free swap is below this, lower effective available memory; never count swap
+#: as spendable headroom because that would raise limits on a thrashing host.
 _SWAP_FLOOR_MB = 256
 
-#: Small-device floor, and the DEFAULT floor: the bash tool's. The reserve arithmetic
-#: above can drive the ceiling to zero
-#: on a tight host (~1 GB available on an 8 GB device: `min(512, 1024 - 1024)` =
-#: 0 MB), which would kill every command the instant it started — a guard that is
-#: worse than no guard. Measured on this host: the smallest command that actually
-#: runs (`bash -c 'sleep & sleep'`) peaks at ~4 MB, a plain `git status` ~3 MB, and
-#: a trivial `python3 -c` at ~15 MB of interpreter; the realistic smallest
-#: "ordinary" command this fleet runs is a Python interpreter, so the floor is set
-#: above that. It is a JUDGEMENT, not a calibrated number (no 8 GB device was
-#: available to measure against), and it is deliberately low: its job is to keep
-#: ordinary commands (a `git status`, a shell pipeline, a `python -c`) alive on a
-#: pressured small host, not to hand a big job a licence to run. A command that
-#: genuinely needs more than this asks for it — `memory_mb=`, or `mode=manual`.
-#: (At 1.5 GB available the arithmetic gives 512 MB, above this floor — the floor
-#: binds at ~1 GB, the case named here and in the contract's §11.)
-#:
-#: It is only the DEFAULT. A caller whose command is not an ordinary one names its
-#: own through ``compute_budget(floor_mb=...)`` — see ``mobile.install``'s
-#: ``_STEP_MEMORY_FLOOR_MB``, which is ~2x the measured cost of a package-manager
-#: child. The floor is a parameter rather than a second calculation downstream
-#: precisely so the reserve arithmetic has ONE owner.
+#: Low default floor prevents the reserve arithmetic from killing ordinary commands
+#: on small, pressured hosts; it is not a licence for a large command to run.
 _MIN_CEILING_MB = 64
+
 
 #: Where the config keys live under `values`, spelled ONCE and shared with the
 #: `settings_io` rows so the reader and the writer cannot disagree.
@@ -420,26 +398,41 @@ def compute_budget(
         effective_available = min(available_mb, free_swap_mb + _SWAP_FLOOR_MB)
         floor_reason = f"; swap-pressure floor (free swap {free_swap_mb} MB)"
 
-    budget_mb = effective_available * _MEMORY_SHARE
     reserve_mb = min(_MEMORY_RESERVE_CAP_MB, total_mb // _MEMORY_RESERVE_FRACTION)
-    budget_mb = max(0, min(budget_mb, effective_available - reserve_mb))
+    # Bound one group by all three independent constraints: a responsive share of
+    # memory available at launch, headroom left for the OS/other work, and a
+    # physical-RAM fraction for very idle hosts. This is not an aggregate governor;
+    # concurrent command groups each calculate their own ceiling.
+    physical_cap_mb = total_mb * _MEMORY_PHYSICAL_CAP_FRACTION
+    budget_mb = max(
+        0,
+        min(
+            effective_available * _MEMORY_SHARE,
+            effective_available - reserve_mb,
+            physical_cap_mb,
+        ),
+    )
     ceiling_mb = int(budget_mb)
 
     floor_mb = max(0, int(floor_mb))
+    # Floors keep tiny ordinary commands alive, but must not punch through the
+    # physical-RAM bound (including callers with a larger command-specific floor).
+    bounded_floor_mb = min(floor_mb, int(physical_cap_mb))
     floored = False
-    if ceiling_mb < floor_mb:
-        # §10's small-device hazard made concrete: the reserve arithmetic can land
-        # on 0, which would kill every command on the first tick. The floor keeps
-        # ordinary commands alive; it is not a licence for a big job.
-        ceiling_mb = floor_mb
+    if ceiling_mb < bounded_floor_mb:
+        ceiling_mb = bounded_floor_mb
         floored = True
 
     reason = (
-        f"auto ceiling: {_MEMORY_SHARE:g} x {effective_available} MB available "
-        f"minus {reserve_mb} MB reserve{floor_reason}"
+        f"auto ceiling: min({_MEMORY_SHARE:g} x {effective_available} MB available, "
+        f"{effective_available} MB available minus {reserve_mb} MB reserve, "
+        f"{_MEMORY_PHYSICAL_CAP_FRACTION:g} x {total_mb} MB physical cap)"
+        f"{floor_reason}"
     )
     if floored:
-        reason += f" (raised to the {floor_mb} MB floor for this command)"
+        reason += f" (raised to the {bounded_floor_mb} MB floor for this command)"
+        if bounded_floor_mb < floor_mb:
+            reason += f"; requested floor {floor_mb} MB limited by physical cap"
     return with_ceilings(ceiling_mb, "auto", reason, reserve_mb)
 
 

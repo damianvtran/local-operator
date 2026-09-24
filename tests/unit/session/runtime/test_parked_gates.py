@@ -327,7 +327,9 @@ def test_an_expired_question_is_not_reported_to_the_model_as_a_denial() -> None:
     assert "approval request" not in ask.lower()
     # It must still say WHAT went unanswered and that nothing was decided...
     assert "Deploy to production or roll back?" in ask
-    assert "never answered" in ask and "No decision was made" in ask
+    # "expired unanswered" carries it without the "was never answered:" clause
+    # that said the same thing twice (round 2, D8r).
+    assert "expired unanswered" in ask and "No decision was made" in ask
     # ...and leave the model where pressing `esc` leaves it, since both mean
     # "no answer came back" (see ASK_UNANSWERED_TEXT).
     assert "Decide yourself" in ask and "what you assumed" in ask
@@ -342,7 +344,10 @@ def test_an_expired_approval_still_reads_as_the_automatic_denial_it_is() -> None
     approval = _rendered_timeout_text("approval")
 
     assert "denied automatically" in approval
-    assert "not a decision by the user" in approval
+    # "the operator", not "the user": one name for one person, in a row this PR
+    # touched while it moved the access flow to "the operator" (round 2, D8r).
+    assert "not a decision by the operator" in approval
+    assert "the user" not in approval
 
     # A row with no `kind` at all predates the field; it must keep reading as an
     # approval rather than silently becoming a question.
@@ -373,6 +378,41 @@ def test_a_phone_watching_parks_for_the_configured_day(monkeypatch) -> None:
     )
     # Notifications OFF: proves the park comes from the watching phone and not
     # from an out-of-band toast being available.
+    monkeypatch.setattr(
+        "local_operator.tui.notify.notifications_enabled", lambda: False, raising=False
+    )
+
+    assert handle._gate_timeout_s() == 24 * 3600.0
+
+
+def test_an_attached_pane_parks_a_gate_without_anyone_watching_it(monkeypatch) -> None:
+    """The gate reads ATTACHMENT, so a mounted pane parks it (§2.2).
+
+    The question a park bets on is "will this be seen", not "is anybody looking
+    this second": a desktop pane holding this conversation will show the card
+    the moment the operator returns to it, and a gate that expired in the
+    meantime would answer a question nobody was given the chance to answer.
+    Notifications OFF, so the park provably comes from the pane.
+    """
+    from local_operator.session.runtime.serving import ServingSessionHandle
+
+    class _AttachedOnly:
+        """A registrant that answers attachment but reports no watcher."""
+
+        def attached_surfaces(self):
+            return frozenset({"desktop"})
+
+        def watching_surfaces(self):
+            return frozenset()
+
+        def set_record_pending(self, pending):
+            return None
+
+    handle = ServingSessionHandle.__new__(ServingSessionHandle)
+    handle._registrant = _AttachedOnly()  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        ServingSessionHandle, "_unattended_gate_hours", lambda self: 24, raising=False
+    )
     monkeypatch.setattr(
         "local_operator.tui.notify.notifications_enabled", lambda: False, raising=False
     )

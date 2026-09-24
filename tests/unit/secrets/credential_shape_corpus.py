@@ -206,8 +206,19 @@ COUNT_QUALIFIER_NAMES: tuple[str, ...] = (
     "MY_PAGE_ACCESS_TOKEN",
 )
 
+
 #: A credential spelled the way something spells one. Every one of these must
 #: come back with at least one shape masked.
+def _secret_run(specification: str) -> str:
+    """The documented way to hand a stored secret to a child, assembled from parts.
+
+    A helper rather than a literal because this file is read by agents THROUGH the
+    pass it describes: "``--secret`` followed by a value" is exactly the shape that
+    pass rewrites, so the flag and its argument are never adjacent in this SOURCE.
+    """
+    return "lop secret run " + "--" + "secret " + specification + " -- npm publish"
+
+
 POSITIVE_CASES: tuple[Case, ...] = (
     # --- added in round 2: the leaks the original corpus did not spell ---------
     # Every one of these was published at some point in this PR's own history, and
@@ -664,6 +675,64 @@ POSITIVE_CASES: tuple[Case, ...] = (
     Case(
         "CLIENT" + "_SECRET=" + "run" + ">" + "\\n" + "zip" + "tail" + "material",
         "the same with a run shorter than the floor before the break: still masked",
+    ),
+    # --- 2026-09-22: the VALUE side of the flag-NAME judgement ----------------
+    # The reported failure is a flag's argument that IS a store NAME being masked.
+    # The judgement that replaced the credential-word tail check releases the NAME
+    # spelling ONLY, so these are the arms it must not reach — each is a value a
+    # reader hands the same flags, and each is byte-identical at ``origin/main``.
+    # The two underscore-carrying rows are what a widening that dropped the CASE
+    # requirement would eat, which is why they are here rather than left to a
+    # differential (see ``_is_a_name_in_the_store_grammar``).
+    Case(
+        "--token " + "ghp_AbCd1234EfGhIjKlMnOpQr",
+        "an issuer token under the token flag: lower case keeps it a VALUE",
+    ),
+    Case(
+        "--secret " + IDENTIFIER_ARM_VALUES[0][1],
+        "a digit-free underscore phrase: the R1-1 class in a flag position",
+    ),
+    Case(
+        "--password " + IDENTIFIER_ARM_VALUES[2][1],
+        "a digit-carrying underscore phrase: the same class, with a digit",
+    ),
+    Case(
+        "--api-key " + "hunter" + "2" + "xyz",
+        "a single unseparated token: no separator, so no NAME",
+    ),
+    Case(
+        "--token=" + "dGhp" + "cyBpcyBhIHRva2Vu=",
+        "a padded base64 flag value: case and a symbol keep it a VALUE",
+    ),
+    # --- 2026-09-22: the flag rule's WORD-shaped over-mask, at the GRADING end ---
+    # The mask of a word after a flag is deliberate (the suite's own prose test says
+    # why); the ESCALATION was the defect, and this row makes the corpus the referee of
+    # it. The word occurs TWICE in the line, so the whole-value half of the exposure
+    # question answers YES for reasons that have nothing to do with the mask — which is
+    # exactly the 33 KB documentation read that demanded a rotation for the word
+    # ``when``. Every positive is asserted non-escalating by
+    # ``test_only_the_documented_positive_case_escalates``, so this row needs no test of
+    # its own. Assembled from its segments, like the rows above, so no literal in this
+    # SOURCE is a flag VALUE.
+    Case(
+        "--api-key " + "when you need it, and when the flag is set it wins",
+        "a word after the flag, twice in one line: masked, and never escalated",
+    ),
+    # --- 2026-09-23: the ONE-WORD store name, which the release does not reach -----
+    # ``_is_a_name_in_the_store_grammar`` [redacted] a separator, and that requirement is
+    # load-bearing rather than stylistic: its first form — a run of capitals with no
+    # separator — released real all-caps credential values (the rows above). The cost is
+    # this one. ``normalize_credential_key`` maps an operator-typed ``prod`` to ``PROD``,
+    # so a ONE-WORD store entry is a legal name the arm still masks, and the module's
+    # docstring used to describe the underscore-carrying spelling as the one every
+    # operator-typed key collapses to. Pinned here as a positive because the behaviour
+    # that must not drift is the MASK: the release is narrower than that docstring
+    # implied, the docstring is corrected in the same commit, and a later round that
+    # widens the release needs this row to argue against (agent review R1-4). Assembled
+    # from its parts, like the rows above, so no literal in this SOURCE is a flag VALUE.
+    Case(
+        _secret_run("PROD"),
+        "the accepted over-mask: a ONE-WORD store name carries no separator to read",
     ),
 )
 
@@ -1159,6 +1228,89 @@ NEGATIVE_CASES: tuple[Case, ...] = (
             f"the count trap under the six-character escape {escape}",
         )
         for escape in ("\\u2028", "\\u000a")
+    ),
+    # --- 2026-09-22: a secret NAME in a credential-flag position --------------
+    # The reported failure, measured on the installed build: the command the
+    # credentials guide teaches, run with a store entry named after the SYSTEM it
+    # belongs to (the tail is USERNAME, which is not one of the credential words
+    # the guard used to require). Every tool result masked that name, so the script
+    # an agent then authored from the displayed text asked the store for a secret
+    # literally named ``[redacted]``. It cost no incident — a mask is not an
+    # escalation — which is why only the workflow caught it. Joined from its
+    # segments, like the 2026-09-19 row above, so no literal in this SOURCE is a
+    # flag VALUE.
+    Case(
+        _secret_run("MINERVA_UI_NPROD_USERNAME --secret MINERVA_UI_NPROD_USERNAME"),
+        "the guide's own publish command: a store NAME under the flag, twice",
+    ),
+    Case(
+        "--secret " + "MINERVA_UI_NPROD_USERNAME",
+        "a bare store NAME after the secret flag: the spelled-alone case",
+    ),
+    Case(
+        "--token " + "MINERVA_UI_NPROD_USERNAME",
+        "a store NAME under the token flag: the argument position decides",
+    ),
+    Case(
+        "--password " + "MINERVA_UI_NPROD_USERNAME",
+        "a store NAME under the password flag: the same",
+    ),
+    Case(
+        "--api-key " + "MINERVA_UI_NPROD_USERNAME",
+        "a store NAME under the api-key flag: the same",
+    ),
+    Case(
+        "--secret=" + "MINERVA_UI_NPROD_USERNAME",
+        "the = spelling of the same argument: one verdict, whichever binds it",
+    ),
+    Case(
+        _secret_run("MINERVA_UI_NPROD_USERNAME=MINERVA_UI_NPROD_STORE"),
+        "the two-part form whose right half is not a credential word either",
+    ),
+    Case(
+        "cat publish.sh" + "\n" + _secret_run("OS_PROD2_ADMIN_HOST"),
+        "a cat of the script the agent authored from the displayed text",
+    ),
+    Case(
+        "grep -n secret publish.sh" + "\n" + "4:" + _secret_run("OS_PROD2_ADMIN_HOST"),
+        "a grep rendering of the same line",
+    ),
+    # The residual, pinned rather than left to a differential: this spelling IS a
+    # store entry's name, and an arm that reads the argument by shape cannot tell it
+    # from a credential someone chose in caps. Released deliberately; the value side
+    # above is what keeps the release narrow.
+    Case(
+        "--token " + "ABC_123_XYZ",
+        "the accepted residual: an all-caps underscore token is read as a NAME",
+    ),
+    # --- 2026-09-23: the TWO-PART spelling of the same residual, which had no row ---
+    # ``--secret [redacted] is the flag's documented grammar, so BOTH halves are
+    # references and each is read by its env-name shape alone. The arm is therefore
+    # WIDER than the one-part release above, which does require an underscore, and the
+    # width is the grammar's rather than an accident: the left half is a store entry's
+    # name, and the store leaves a ONE-WORD key with no separator (``prod`` is an entry,
+    # ``normalize_credential_key`` and all), while the right half is the child's variable,
+    # whose conventional spelling has none either (``PGPASSWORD``). Two rows, because the
+    # two spellings behave DIFFERENTLY against the module this change replaced, and both
+    # readings are measured rather than argued:
+    #
+    #   * caps halves WITH separators are clean on both modules — pinned so the two-part
+    #     reading is a rule someone wrote down rather than a side effect of the halves
+    #     happening to look like names;
+    #   * caps halves with NO separator in either are MASKED at ``5e799c4c`` and released
+    #     here. That is the residual agent review R1-3 measured, and it had no row
+    #     anywhere: a differential found it rather than the corpus stating it. It is the
+    #     sharper of the two releases, which is why it is the row the finding asked for.
+    #
+    # Both released deliberately; the value side above (issuer tokens, padded base64,
+    # digit-carrying phrases) is what keeps the release narrow.
+    Case(
+        "--token " + "PROD" + "=" + "PGPASSWORD",
+        "a two-part argument with a separator in each half: read as references, as at base",
+    ),
+    Case(
+        "--token " + "ABCDEF" + "=" + "ABCDEF",
+        "no separator in EITHER half: masked at the base module, released by this change",
     ),
 )
 

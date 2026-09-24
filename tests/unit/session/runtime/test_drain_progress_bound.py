@@ -23,18 +23,44 @@ injected clock.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from local_operator import update as update_mod
 from local_operator.session.runtime import process as child_mod
 from local_operator.session.runtime.process import _reaper
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.runtime.types import LEAVING_FOR_BUILD
 from local_operator.update import BuildStamp
 
 OLD = BuildStamp(version="0.59.7", source_ref="7fe8b1005")
 NEW = BuildStamp(version="0.59.8", source_ref="dec7933a6")
+
+
+class _MovingLane:
+    """A session double whose LANE keeps stepping: never silent, never idle.
+
+    One of ``_work_motion``'s five signals and the one the incident's runtime kept
+    moving — the roster generation is bumped by every completed assistant message, model
+    change and lifecycle event a child reports (``Session._schedule_subagent_persist``),
+    so a stepping child keeps the parent's movement clock reset while the parent's own
+    transcript stays frozen.
+
+    ``step_forever`` is driven as a real task rather than by poking the movement clock,
+    because the property under test is precisely that the staleness clock cannot be left
+    alone by work of this shape.
+    """
+
+    def __init__(self) -> None:
+        self._subagent_roster_generation = 0
+        self.steps = 0
+
+    async def step_forever(self) -> None:
+        while True:
+            self._subagent_roster_generation += 1
+            self.steps += 1
+            await asyncio.sleep(0.002)
 
 
 class _Handle:
@@ -48,7 +74,14 @@ class _Handle:
         self.disposed = False
         self.denials = 0
         self.retired = False
-        self.draining = False
+        # THE LATCH IS THE PRODUCTION HANDLE'S FIELD, because
+        # ``begin_drain``/``end_drain`` below call that handle's own methods:
+        # ``_draining`` and the retiring cause it latches are what it writes and
+        # what the arms read back.
+        self._draining = False
+        self._retiring_cause = ""
+        self._retiring_detail = ""
+        self._disposing = False
         self.update_failed: str | None = None
         #: Permanently busy until a test says otherwise — the incident's own shape
         #: (a lane parked behind a child process), and the one state the abandon arm
@@ -69,22 +102,38 @@ class _Handle:
         return 0
 
     def begin_drain(self, cause: str, detail: str = "") -> bool:
-        self.drains += 1
-        self.draining = True
-        return True
+        """The PRODUCTION latch, called through, with this file's counter beside it.
+
+        ``ServingSessionHandle.begin_drain`` decides whether the latch closes and is
+        the only thing that writes the state the arms read back, so it is CALLED
+        rather than modelled — a double that re-implemented it would keep these cells
+        green while the production handle stopped latching at all. ``drains`` is this
+        rig's bookkeeping for the cell that asserts the latch is not taken twice.
+        """
+        latched = ServingSessionHandle.begin_drain(
+            cast("ServingSessionHandle", self), cause, detail
+        )
+        if latched:
+            self.drains += 1
+        return latched
 
     def end_drain(self) -> bool:
-        """The release a real handle grew for this arm (``serving.end_drain``).
+        """The PRODUCTION release, called not modelled, for ``begin_drain``'s reason.
 
-        Modelled here rather than stubbed away because the ASSERTION this file is
-        about is that the latch comes off: a fake without it would let the arm
-        pass while the production handle kept refusing admissions forever.
+        The assertion these cells are about is that the latch comes OFF, so the release
+        they measure has to be the one the production handle performs; ``releases``
+        counts those, and a double that could fabricate one would let the arm pass while
+        the handle kept refusing admissions forever.
         """
-        if not self.draining:
-            return False
-        self.draining = False
-        self.releases += 1
-        return True
+        released = ServingSessionHandle.end_drain(cast("ServingSessionHandle", self))
+        if released:
+            self.releases += 1
+        return released
+
+    @property
+    def draining(self) -> bool:
+        """The production latch's own field, under the name these cells read."""
+        return self._draining
 
     def note_update_failed(self, pair: str, bound: float = 0.0) -> None:
         self.update_failed = pair
@@ -132,6 +181,67 @@ async def _wait_for(predicate: Any, timeout: float = 5.0) -> bool:
 
 
 @pytest.mark.asyncio
+async def test_a_drain_with_MOVING_work_is_abandoned_at_the_dwell(monkeypatch) -> None:
+    """THE OPERATOR'S EIGHT HOURS: work that keeps reporting is now bounded too.
+
+    The cell above is the SILENT hold. This is the one the fleet actually produced,
+    and it is the reason a second bound exists at all: a lane that keeps STEPPING
+    resets the movement clock on every read (:func:`process._work_motion` reads the
+    subagent roster generation among its five signals), so ``stalled_s`` never
+    reaches ``BUILD_DRAIN_PROGRESS_S`` and, before this arm, nothing else in the
+    process ended the hold — measured on the reporting host as eight hours latched,
+    with the session refusing admissions for the whole of it.
+
+    Red on a tree without the dwell, green with it, and the discrimination is by the
+    PUBLISHED BOUND: the staleness arm cannot have fired here, because its own bound
+    is fifteen minutes and this cell's run is a fraction of a second — so a tree that
+    reached the abandon through silence would have to publish 900 s, while the dwell
+    arm publishes the dwell it ran out of (patched here to 50 ms).
+
+    The lane is driven for real — a task stepping the roster every few milliseconds,
+    the shape its own comment describes — rather than by moving the clock, because the
+    WHOLE POINT is that no injected clock can stand in for this: the clock the
+    staleness bound reads is pushed forward by the work itself.
+    """
+    monkeypatch.setattr(child_mod, "REAP_CHECK_S", 0.02)
+    monkeypatch.setattr(child_mod, "BUILD_CHECK_S", 0.02)
+    monkeypatch.setattr(child_mod, "BUILD_DRAIN_DWELL_S", 0.05, raising=False)
+    monkeypatch.setattr(child_mod.random, "uniform", lambda _a, _b: 0.0)
+    monkeypatch.setenv("LOP_SESSION_GRACE_S", "60")
+    monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: NEW)
+    monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: NEW)
+    monkeypatch.setattr(update_mod, "build_marker_age_s", lambda *_a, **_k: 999.0)
+
+    lane = _MovingLane()
+    handle, runtime, stop = _Handle(), _Runtime(), asyncio.Event()
+    handle._session = lane
+    stepping = asyncio.ensure_future(lane.step_forever())
+    task = asyncio.ensure_future(_reaper(handle, runtime, stop))
+    try:
+        assert await _wait_for(lambda: handle.drains == 1), "the drain latch never engaged"
+        assert await _wait_for(lambda: handle.releases == 1, timeout=2.0), (
+            "a lane that keeps stepping held the drain past the dwell: this is the "
+            "state that stayed latched for eight hours, and nothing else ends it"
+        )
+        assert lane.steps > 2, "the lane has to have stepped for this cell to mean anything"
+        assert handle.draining is False, "the latch was counted but never taken off"
+        assert handle.retired is False, "the moving hold is abandoned, not retired"
+        assert (
+            not stop.is_set() and not handle.disposed
+        ), "an abandoned handover keeps serving; it never ends the process or its turn"
+        assert runtime.failures, "the abandoned handover was never published"
+        assert runtime.failures[0][1] == pytest.approx(0.05), (
+            "the failure was published with the STALENESS bound, so this cell was "
+            "passed by the wrong arm rather than by the dwell"
+        )
+        assert handle.drains == 1, "the drain was latched a second time"
+    finally:
+        stepping.cancel()
+        stop.set()
+        task.cancel()
+
+
+@pytest.mark.asyncio
 async def test_a_drain_with_silent_work_is_ABANDONED_and_the_runtime_keeps_serving(
     monkeypatch,
 ) -> None:
@@ -141,8 +251,8 @@ async def test_a_drain_with_silent_work_is_ABANDONED_and_the_runtime_keeps_servi
     build move may not end a runtime with a turn in flight, because the answer to
     "this work has not reported anything for fifteen minutes" is a person looking
     at it, not a silent cut. The shape it asserts now is the whole arm — the latch
-    is RELEASED (the fake exposes the production ``end_drain``, so a tree that
-    keeps refusing admissions fails here), nothing is disposed and ``stop`` stays
+    is RELEASED (the double CALLS the production ``end_drain`` — see ``_Handle`` — so a
+    tree that keeps refusing admissions fails here), nothing is disposed and ``stop`` stays
     clear (the process keeps serving), the failure is PUBLISHED, and the ordinary
     build phrase is still the one on the record rather than a forced-handover
     phrase that no longer describes what happens.

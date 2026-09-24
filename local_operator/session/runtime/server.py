@@ -204,6 +204,16 @@ async def image_blocks_in_thread(images: list[dict[str, str]] | None) -> list["I
 #: control socket reader enforces.
 _MAX_LINE_BYTES = 1 << 20
 
+#: How long the per-connection sync task waits for the ON-LOOP frontend bind
+#: before falling back to the off-loop one (``_serve_frontend_sync``).
+#:
+#: 100 ms, from the healthy owner's own distribution rather than a guess: a
+#: healthy owner binds in 4.7-5.0 ms p50 and at most ~15 ms p95, so a healthy attach
+#: never reaches this grace and its bytes on the wire are unchanged. An owner
+#: busy inside a synchronous step of a turn is the case it exists for, and there
+#: the wait has no ceiling of its own — the parked hop is what measured 15.0 s.
+_ONLOOP_BIND_GRACE_S = 0.1
+
 
 def _frame_line_bytes(frame: dict[str, Any], *, payload: bytes | None = None) -> int:
     """Encoded bytes this frame occupies on the wire, with the delimiter counted.
@@ -290,7 +300,10 @@ def _mergeable_delta_key(payload: Mapping[str, Any]) -> str | None:
     two arrive interleaved.
 
     Everything else returns ``None`` and is left alone: a frame that must not
-    merge is never compared to its neighbour at all.
+    merge is never compared to its neighbour at all. That includes the ``op``
+    around the payload — the aside's ``aside_delta`` frame is mergeable too, but
+    its stream identity lives on the FRAME (its ``req``), so it is
+    :func:`_mergeable_frame_key` that answers for it.
     """
     kind = payload.get("type")
     if kind == "message_update":
@@ -298,6 +311,51 @@ def _mergeable_delta_key(payload: Mapping[str, Any]) -> str | None:
     if kind == "reasoning_delta":
         return f"reasoning_delta:{payload.get('message_id') or ''}"
     return None
+
+
+def _mergeable_frame_key(frame: Mapping[str, Any]) -> str | None:
+    """The in-flight stream a queued FRAME carries a fragment of, or ``None``.
+
+    :func:`_mergeable_delta_key` reads an event's payload; this reads the frame
+    around it, because the aside's stream identity is not in its payload. An
+    ``aside_delta`` frame is ``{op, req, data: {delta}}`` — the request that
+    asked for the aside IS the stream, and the id of the aside panel (which the
+    desktop renderer knows as ``aside_id``) never crosses this wire. Two
+    fragments fold only when the same ``req`` produced them, so two concurrent
+    asides on one connection cannot merge into one answer.
+
+    Keyed in the same namespace as :func:`_mergeable_delta_key` (the family is
+    part of the key), so an aside fragment can never fold into a
+    ``message_update`` or ``reasoning_delta`` beside it: those are the
+    conversation the viewer is reading, and this is a private question about it.
+    """
+    op = frame.get("op")
+    if op == "aside_delta":
+        req = frame.get("req")
+        # A frame with no ``req`` is not a stream this method can identify, so it
+        # is left alone rather than keyed as one nameless stream all such frames
+        # would share.
+        return None if req is None else f"aside_delta:{req}"
+    if op == "event":
+        return _mergeable_delta_key(frame.get("data") or {})
+    return None
+
+
+def _merged_frame_head(frame: Mapping[str, Any], data: dict[str, Any]) -> dict[str, Any]:
+    """The compacted head one merge leaves: ``frame``'s routing, ``data``'s text.
+
+    Built from the INCOMING frame rather than from the head it replaces, and
+    that is the whole reason this is a function rather than a literal: a frame
+    carries routing the merged text says nothing about. ``aside_delta`` is
+    addressed by its ``req`` — drop it and the viewer's pump has no stream to
+    deliver the fragment to, so a merged chunk would be discarded on arrival
+    while the frame counted as delivered. The event families describe no
+    routing beyond their payload, so their head stays the ``op``+``data`` pair
+    it always was.
+    """
+    if frame.get("op") == "aside_delta":
+        return {"op": "aside_delta", "req": frame.get("req"), "data": data}
+    return {"op": "event", "data": data}
 
 
 #: Line bytes the shedding stage deliberately leaves UNSPENT.
@@ -1206,6 +1264,19 @@ class _ClientConn:
     # task per event. Held for shutdown and slow-client eviction.
     event_writer_task: asyncio.Task[None] | None = None
     frontend_unsubscribe: Callable[[], None] | None = None
+    #: This connection's CURRENT bind generation, and the mechanism that keeps a
+    #: late on-loop bind from relaying into a connection the off-loop fallback
+    #: already bound (``_serve_frontend_sync``).
+    #:
+    #: An attach that outlasts ``_ONLOOP_BIND_GRACE_S`` is served off-loop, but
+    #: the on-loop bind it abandoned is SHIELDED and cannot be cancelled — it
+    #: still lands in the store and still calls the relay. Without a stamp the
+    #: same connection would see every delta twice, which is not a slow frame but
+    #: a wrong one: the client's exact-``+1`` check reads the duplicate as a gap
+    #: and redials. The generated callback compares the token it was stamped with
+    #: against this field, so bumping it retires every callback created before the
+    #: bump — the fallback's own included, if a THIRD attempt ever supersedes it.
+    bind_token: int = 0
     #: The chain of ops this connection has ADMITTED: each waits for the one
     #: before it, so ordering is preserved, and none of them parks the reader —
     #: which is what lets a ``ping`` be answered while a mutation is still in
@@ -1502,6 +1573,13 @@ class RuntimeServer:
         #: for tests and for the "did a headless runtime pay for a fold?"
         #: question; 0 after a lifetime with no daemon client is the claim.
         self.projection_sinks_built: int = 0
+        #: How many viewers this runtime attached by binding OFF the session's
+        #: loop because the on-loop bind missed ``_ONLOOP_BIND_GRACE_S``.
+        #: Observable for the same reason ``projection_sinks_built`` is: it is
+        #: the term that says whether the grace is mistuned for a given host. A
+        #: healthy owner answers in one digit of milliseconds, so a nonzero count
+        #: on an idle session is the signal that the grace (or the host) moved.
+        self.frontend_off_loop_binds: int = 0
         # What build this runtime is running, stamped once at construction:
         # the answer cannot change while the process lives, and the record is
         # the channel an attach client reads it from before it dials.
@@ -2924,6 +3002,54 @@ class RuntimeServer:
 
     # -- connections -----------------------------------------------------------
 
+    def _frontend_relay(self, conn: _ClientConn, token: int) -> Callable[[Any], None]:
+        """A canonical-delta relay STAMPED with the bind generation it belongs to.
+
+        One factory for both bind attempts (on-loop and off-loop) so the two
+        cannot drift in what they put on the wire — the frame is built here, in
+        the only place that builds it.
+
+        The stamp is the whole mechanism behind ``_ClientConn.bind_token``: an
+        attach that outlives the grace is served off-loop, but the shielded
+        on-loop bind it abandoned still lands in the store and still calls this
+        callback. Its token is stale by then, so it returns early — without the
+        check the SAME connection would receive every delta twice, and a client
+        reading an exact-``+1`` stream treats a duplicate as a gap and redials.
+        """
+
+        def on_update(update: Any) -> None:
+            if conn.bind_token != token:
+                return
+            payload = update.model_dump(mode="json") if hasattr(update, "model_dump") else update
+            self._relay_frontend_to(conn, payload)
+
+        return on_update
+
+    async def _bind_with_grace(self, bind_task: asyncio.Task[Any]) -> Any | None:
+        """The on-loop bind's subscription if it answers inside the grace, else ``None``.
+
+        ``None`` means HAND OFF, never "failed": the caller binds off-loop
+        instead (``_serve_frontend_sync``), which is the whole point of the grace.
+        A genuine bind failure is NOT swallowed here — it is re-raised out of
+        ``bind_task.result()`` so the caller drops the connection exactly as it
+        always did.
+
+        A METHOD RATHER THAN AN INLINE ``wait_for`` because of the second exit.
+        ``wait_for`` expiring cancels the SHIELD it created, not the task it
+        shielded, so when the timeout's own callback runs before the shield's
+        completion callback the awaiting task is told the grace expired while
+        ``bind_task`` is ALREADY DONE and holding a live subscription. Handing off
+        there would bind this connection twice and then release the landed one,
+        and it would mark a HEALTHY owner window-less — the display window being
+        the one thing the on-loop path carries that the off-loop one cannot.
+        """
+        try:
+            return await asyncio.wait_for(asyncio.shield(bind_task), _ONLOOP_BIND_GRACE_S)
+        except TimeoutError:
+            if bind_task.done() and not bind_task.cancelled():
+                return bind_task.result()
+            return None
+
     async def _serve_frontend_sync(
         self,
         conn: _ClientConn,
@@ -2933,7 +3059,7 @@ class RuntimeServer:
         """Bind one viewer and queue its canonical ``frontend_sync`` frame.
 
         A per-connection task rather than inline work in ``_on_connection``; the
-        reason it is deferred at all is at its creation site. It owns two
+        reason it is deferred at all is at its creation site. It owns three
         invariants:
 
         * **The frame order is the frame order it always was.** Registration and
@@ -2949,23 +3075,25 @@ class RuntimeServer:
           exception in the callback while the connection stayed registered, never
           read and never dropped. As a task it has an owner: the failure drops the
           connection and releases its subscription.
+        * **A busy owner does not hold the bind.** The on-loop bind is given
+          ``_ONLOOP_BIND_GRACE_S``; past it this task binds OFF-LOOP through
+          ``subscribe_frontend_nowait`` and queues the sync without a display
+          window. What that buys is the whole point of the path — measured 15.0 s
+          of control attach against a blocked owner, for a bind whose register
+          half never needed that loop at all.
 
         ``subscribe_frontend`` arrives as a PARAMETER, resolved and
         capability-checked at the creation site: dropping a connection whose
         handle cannot bind belongs on the connection path, where the socket still
-        exists to be closed, not inside a task.
+        exists to be closed, not inside a task. The off-loop capability is read
+        here instead, and its ABSENCE is not a refusal: a single-plane handle (the
+        TUI kind) simply keeps today's behaviour and waits the hop out.
         """
         # Declared before the ``try`` so the failure path can hand the bind task
         # to ``_release_when_landed`` even when the raise happened before it was
         # created (a capability check, a sync-payload build).
         bind_task: asyncio.Task[Any] | None = None
         try:
-
-            def on_update(update: Any) -> None:
-                payload = (
-                    update.model_dump(mode="json") if hasattr(update, "model_dump") else update
-                )
-                self._relay_frontend_to(conn, payload)
 
             from local_operator.session.frontend_state import (
                 FrontendSubscription,
@@ -3006,16 +3134,19 @@ class RuntimeServer:
             # other connection keep flowing for the same reason, because the
             # wait is on this task rather than on the runtime's loop.
             #
-            # AND THE HOP IS DELIBERATELY LEFT UNBOUNDED, which reads at first
-            # like the opposite of a fix. A budget belongs to a CALLER that is
-            # waiting for an answer; the only caller here is a task nothing
-            # awaits, so a budget buys it nothing and costs a live viewer its
-            # connection (``mobile/tui_handle._on_app``'s unbounded branch
-            # carries that measurement: a viewer dialled into a busy terminal
-            # was welcomed and then killed at 10.01 s with ``owner exited``
-            # while the app was merely busy). The bind therefore lands late
-            # instead, and the interactive budget stays where a caller is
-            # actually waiting.
+            # THE HOP IS BOUNDED NOW, BUT BY A FALLBACK TRIGGER RATHER THAN BY A
+            # FAILURE BUDGET, and the difference is what keeps the old reasoning
+            # intact. A budget belongs to a CALLER waiting for an answer; the only
+            # caller here is a task nothing awaits, so letting the bind FAIL at a
+            # deadline buys nothing and costs a live viewer its connection
+            # (``mobile/tui_handle._on_app``'s unbounded branch carries that
+            # measurement: a viewer dialled into a busy terminal was welcomed and
+            # then killed at 10.01 s with ``owner exited`` while the app was
+            # merely busy). Exceeding ``_ONLOOP_BIND_GRACE_S`` therefore changes
+            # WHO binds, never whether: past the grace this task binds off-loop
+            # and the abandoned hop is released as it lands (``bind_token``, then
+            # ``_release_when_landed``). A healthy owner answers in 4.7-5.0 ms
+            # p50, far inside the grace, so the path taken there is unchanged.
             #
             # The seam is SINGLE for both handle shapes, and that is why no hop
             # is added here: ``ServingSessionHandle.subscribe_frontend`` carries
@@ -3024,7 +3155,7 @@ class RuntimeServer:
             # ``session_loop`` is served inline by
             # ``_handle_call_on_session_loop``, so the TUI kind keeps the hop it
             # already had rather than gaining a second.
-            async def bind() -> Any:
+            async def bind(on_update: Callable[[Any], None]) -> Any:
                 outcome = (
                     subscribe_frontend(on_update, display_window=True)
                     if window_requested
@@ -3043,12 +3174,72 @@ class RuntimeServer:
             # subscriber the session keeps for the life of the process. That is
             # also what makes ``_drop_client``'s ordering — cancel this task, then
             # release the recorded subscription — safe rather than lucky.
-            bind_task = asyncio.ensure_future(bind())
+            bind_task = asyncio.ensure_future(bind(self._frontend_relay(conn, conn.bind_token)))
+            subscription: FrontendSubscription | None
+            bind_started = time.perf_counter()
             try:
-                subscription = cast(FrontendSubscription, await asyncio.shield(bind_task))
+                subscription = await self._bind_with_grace(bind_task)
             except asyncio.CancelledError:
                 self._release_when_landed(bind_task)
                 raise
+            # The grace's own measurement, logged on both hand-off branches
+            # below. It is what answers the design's rollout question — "is the
+            # fallback firing on healthy owners?" — from a production log, since
+            # a healthy owner answers in one digit of milliseconds (p50 4.7-5.0 ms
+            # measured) and would never appear here at all.
+            waited_ms = (time.perf_counter() - bind_started) * 1000.0
+            if subscription is None:
+                bind_off_loop = getattr(self._handle, "subscribe_frontend_nowait", None)
+                if not callable(bind_off_loop):
+                    # A single-plane handle keeps today's behaviour: wait the hop
+                    # out. The grace is then a delay and nothing else, which is
+                    # the honest cost of the only handle that cannot be served
+                    # this way (the TUI kind, whose subscribe goes through the
+                    # app's own loop).
+                    logger.info(
+                        "session runtime: frontend bind for session %s missed the "
+                        "%.0f ms on-loop grace (%.1f ms) and this handle has no "
+                        "off-loop bind — waiting it out",
+                        self._record.session_id,
+                        _ONLOOP_BIND_GRACE_S * 1000.0,
+                        waited_ms,
+                    )
+                    subscription = await asyncio.shield(bind_task)
+                else:
+                    #: Counted as well as logged: the counter is the cheap signal
+                    #: a status host can read, the line is the one a human greps.
+                    self.frontend_off_loop_binds += 1
+                    logger.info(
+                        "session runtime: frontend bind for session %s missed the "
+                        "%.0f ms on-loop grace (%.1f ms) — binding off the session "
+                        "loop",
+                        self._record.session_id,
+                        _ONLOOP_BIND_GRACE_S * 1000.0,
+                        waited_ms,
+                    )
+                    # RETIRE THE ABANDONED ATTEMPT BEFORE IT REGISTERS. The bump
+                    # makes every callback stamped before it (the parked on-loop
+                    # bind's, when it lands) return early instead of relaying a
+                    # second copy of every delta into this connection.
+                    conn.bind_token += 1
+                    # ...and its subscription is released as it lands. Registered
+                    # BEFORE the off-loop call, not after: the released callback is
+                    # attached to ``bind_task`` either way, and doing it first means
+                    # a raise or a cancellation anywhere below cannot leave a
+                    # subscription nobody will receive.
+                    self._release_when_landed(bind_task)
+                    # A SECOND ``frontend_sync`` MAY ARRIVE ON THIS CONNECTION
+                    # LATER, and it is not this hand-off binding twice: a viewer
+                    # rehydrates itself at turn end through its own
+                    # ``frontend_sync`` RPC. What the token guard above rules out is
+                    # a DUPLICATE DELTA STREAM, which is what the client's
+                    # exact-``+1`` check reads as a gap (measured on the desk rig:
+                    # ``sync_seqs`` 5 then 46 on one attach, contiguous throughout).
+                    outcome = bind_off_loop(self._frontend_relay(conn, conn.bind_token))
+                    if inspect.isawaitable(outcome):
+                        outcome = await outcome
+                    subscription = cast(FrontendSubscription, outcome)
+            assert subscription is not None, "neither bind path produced a subscription"
             sync = subscription.sync
             # Trajectories are stripped here and re-fetched per job through
             # ``job_trajectory``; see ``sync_wire_payload`` for why the frame
@@ -3187,15 +3378,17 @@ class RuntimeServer:
             logger.debug("bind-failure announcement write failed", exc_info=True)
 
     def _release_when_landed(self, bind_task: asyncio.Task[Any]) -> None:
-        """Release a viewer subscription whose connection died MID-BIND.
+        """Release a bind's eventual subscription once nothing will receive it.
 
-        ``_drop_client`` cancels this connection's bind task, and the reason a
-        cancelled bind cannot leave a live subscriber is STRUCTURAL rather than
-        argued: the bind is shielded, so the cancel cannot abort it
-        half-registered (``_serve_frontend_sync``), and this runs on the
-        cancellation path to release whatever did register. ``_drop_client``'s
-        ordering follows from it — cancel first, then release the recorded
-        subscription, so nothing is released twice.
+        Two callers, one contract. ``_drop_client`` cancels this connection's
+        bind task, and the reason a cancelled bind cannot leave a live subscriber
+        is STRUCTURAL rather than argued: the bind is shielded, so the cancel
+        cannot abort it half-registered (``_serve_frontend_sync``), and this runs
+        on the cancellation path to release whatever did register. The off-loop
+        fallback reaches here having SUPERSEDED the same bind (``conn.bind_token``)
+        — the shielded attempt still lands, and its subscription is just as
+        unreachable. ``_drop_client``'s ordering follows from it — cancel first,
+        then release the recorded subscription, so nothing is released twice.
 
         A DONE-CALLBACK rather than an await, and the difference matters twice
         over. ``_drop_client`` runs from the reader loop and from shutdown, so
@@ -3787,6 +3980,14 @@ class RuntimeServer:
             return
         self._detached = detached
         self._desktop_delivery = delivery
+        # WHEN the last viewer left, which is a different fact from THAT it did:
+        # the residency policy bounds how long (and how many) detached runtimes
+        # stay warm by evicting the least recently detached, and this is the one
+        # stamp that carries an order (``process._detached_at``,
+        # ``SessionRecord.detached_at``). Cleared on the 0->1 transition so a
+        # runtime being watched is not a keep-alive candidate — the reaper's own
+        # record read is the inverse of this field.
+        self._record.detached_at = time.time() if detached else None
         self._republish()
         if detached and self._pending:
             # A GATE WAS OPENED WHILE SOMEBODY WAS WATCHING, and they have now
@@ -3826,8 +4027,41 @@ class RuntimeServer:
         Deduped like :meth:`set_busy`, and it matters more here: the drain calls
         this once, but a repeat signal or a second drain arm on the same runtime
         must not put a staged write and rename on the far side of a signal.
+
+        A NEW DEPARTURE SUPERSEDES THE LAST FAILURE, which is :meth:`note_updating`'s
+        rule one rung over (its NIT 4) and is required here for the same reason plus
+        one of its own. The reason is the window's: without it the record keeps
+        describing an abandoned move after the runtime has started a NEW one, so a
+        fleet row reads "update failed" about a session that is moving right now.
+
+        The reason it has one of its own is that the record's OTHER half,
+        ``update_failed``, describes THE HANDOVER THIS PHRASE ANNOUNCES — an abandon
+        keeps the ordinary build phrase by design (``process._abandon_move``), so
+        that field is the only thing separating a handover still waiting from one
+        that was given up, and its readers are the fleet surfaces that print the two
+        columns side by side (``info.collect``, ``cli``'s UPDATING cell, the incident
+        row). A stale failure left beside a freshly latched drain makes that pair
+        report the new attempt as the abandoned one. Cleared here rather than only on
+        a change of phrase, because the second attempt at the same build announces
+        the same words — the case that matters would otherwise be the one it got
+        wrong.
+
+        WHAT SURVIVES THE CLEAR, stated exactly: the failure is a DURABLE INCIDENT
+        ROW (``note_update_failed`` writes ``UPDATE_FAILED_CAUSE`` with the pair and
+        the bound it spent on the detail), which is the account an issue report
+        cites, and the field is re-published if THIS attempt fails too. The handle's
+        own memo is NOT part of that account — it is the WINDOW rung's
+        (``serving.ServingSessionHandle.note_update_failed``, written by
+        ``_abandon_update_window`` only, and it is what lets ``begin_update`` make the
+        rung's ONE permitted retry: the pair is refused only once ``_update_retried``
+        already holds it, so the memo stops a THIRD attempt rather than "re-opening a
+        window that burned its bound") and the drain rung deliberately does
+        not write it (agent review round 1, NIT-2; round 2, R2-NIT-1).
         """
-        if self._leaving == phrase:
+        superseded = bool(phrase) and bool(self._record.update_failed)
+        if superseded:
+            self._record.update_failed = ""
+        if self._leaving == phrase and not superseded:
             return
         self._leaving = phrase
         self._record.leaving = phrase
@@ -3995,6 +4229,11 @@ class RuntimeServer:
                 leaving=self._leaving,
                 started=self._started,
                 detached=not bool(self._visible_attach_surfaces()),
+                # ATTACHMENT, not visibility: the reaper's own term 3, and the
+                # fact the keep-alive cap charges a slot on. Published from the
+                # same read as ``detached`` because the two answers come from one
+                # snapshot of ``_clients`` (see ``_visible_attach_surfaces``).
+                watching=bool(self.attach_clients()),
                 subagents_running=self._subagents_running,
                 subagents_queued=self._subagents_queued,
             )
@@ -4088,6 +4327,21 @@ class RuntimeServer:
         See :meth:`_visible_attach_surfaces` for why the machine-wide answer
         wins where it exists and the renderer's flag is the fallback where it
         does not.
+
+        AN EMPTY ``session_id`` IS NOT EVIDENCE AGAINST THIS SESSION. The
+        publisher blanks the field whenever it cannot vouch for which
+        conversation the window shows (``server/utils/desktop_presence.py``), and
+        a renderer-report lapse blanks it too, so denial on an empty name reads
+        absence of evidence as evidence against — which is precisely what told
+        the operator's own focused, visible app that nobody was at a screen.
+        The per-connection flag is the per-session answer, and it is set by a
+        heartbeat that names THIS session's subscription, so falling through to
+        it is also the pre-presence behaviour the docstring above promises an
+        older app: byte-identical for an old UI.
+
+        The denied direction is preserved where the record IS evidence: an app
+        naming a DIFFERENT conversation still denies, which is what stops it
+        suppressing a background session's banner while showing someone else.
         """
         try:
             from local_operator.session.runtime.presence import desktop_presence
@@ -4097,6 +4351,8 @@ class RuntimeServer:
             logger.debug("could not read the desktop presence", exc_info=True)
             return conn.desktop_visible
         if not presence.present:
+            return conn.desktop_visible
+        if not presence.session_id:
             return conn.desktop_visible
         record = getattr(self, "_record", None)
         session_id = str(getattr(record, "session_id", "") or "")
@@ -4119,6 +4375,69 @@ class RuntimeServer:
             )
             else frozenset()
         )
+
+    def attached_surfaces(self) -> frozenset[str]:
+        """Which KINDS of interface can PRESENT a card the operator will see.
+
+        Sibling of :meth:`watching_surfaces`, NOT a replacement. That one answers
+        "is a person looking at this session right now" and is the whole of rung 1
+        of the notification ladder (``docs/DESKTOP_API.md``, "The notification
+        eligibility ladder"). This one answers "is there an interface that could
+        show this session a question, and that the operator returns to" — the
+        question the MODEL needs, because a question asked now is answered when
+        they look, not when they are looking.
+
+        FOCUS IS DELIBERATELY ABSENT, and it must not be "tidied" into agreement
+        with :meth:`_visible_attach_surfaces`. Focus flaps with window z-order,
+        and this answer is rendered into the persisted system-prompt tail
+        (``prompts_api.build_system_blocks``), so every flap would move a block
+        the model carries on every request. A window that is merely not frontmost
+        still holds a mounted pane this conversation can be painted into.
+
+        THE DESKTOP CLAUSE IS THE LEASE AND NOTHING ELSE (round 1, MINOR 5). It
+        used to read ``lease and (desktop_visible or desktop_can_notify)`` — the
+        ``attach_clients()`` clause, on the theory that both asked "could this
+        front end present something". That theory costs the model-facing answer
+        its stability: ``desktop_visible`` is the app's ``visible &&
+        focused``, so on a host with no OS-notification channel
+        (``can_notify`` false — the JSON transport, browser dev) the clause
+        collapses to ``visible``, and raising and lowering the window flips the
+        persisted block and writes a ``[session-state]`` row. The lease is what
+        the question actually asked for: it is renewed by a heartbeat that names
+        THIS session's subscription and is withdrawn when the pane leaves
+        (``desktop_watch``), so "lease live" IS "a pane holds this
+        conversation", with no window state and no notification capability in
+        it. ``can_notify`` belongs to reachability (:meth:`notification_surfaces`)
+        and ``visible`` to attention; neither is attachment.
+
+        The reaper's own count (:meth:`attach_clients`) keeps the extra clause:
+        it answers a RESIDENCY question, where an app that can neither show nor
+        notify is not a reason to stay up, and the two are now deliberately not
+        the same expression.
+
+        A terminal attach is counted even while it is displaying ANOTHER session
+        (``terminal_displaying`` False): the connection is the process that can
+        paint the card the moment the operator switches back to it. This asks
+        about presentation, not about attention.
+        """
+        attached: set[str] = set()
+        # SNAPSHOT BEFORE ITERATING (C8): read from the session's loop while the
+        # runtime's own loop registers and drops clients in this dict — the same
+        # hazard ``attach_clients`` documents.
+        for conn in list(self._clients.values()):
+            if conn.kind != "attach":
+                continue
+            if conn.surface == "desktop":
+                if self._desktop_lease_live(conn):
+                    attached.add("desktop")
+            else:
+                attached.add("attach")
+        if self.watch_supported and self.phone_watchers > 0:
+            # Reported as ``viewer`` rather than ``daemon``, for the reason given
+            # on :meth:`watching_surfaces`: a relay being dialled is true of every
+            # session on a machine running ``lop mobile``.
+            attached.add("viewer")
+        return frozenset(attached)
 
     def watching_surfaces(self) -> frozenset[str]:
         """Which KINDS of surface have a HUMAN watching this session right now.
@@ -4964,7 +5283,16 @@ class RuntimeServer:
                     detail = "already admitted"
                     extra: dict[str, Any] = {}
                 else:
-                    outcome = await self._dispatch(op, frame)
+                    # The stream sink is built for the one op that uses it, so no
+                    # other dispatch pays for a closure capture. See ``_dispatch``
+                    # for why the dispatcher is handed a sink rather than ``conn``.
+                    outcome = await self._dispatch(
+                        op,
+                        frame,
+                        deliver=(
+                            self._aside_delta_sink(conn, req) if op == "complete_aside" else None
+                        ),
+                    )
                     # An op may answer with state as well as with a sentence
                     # (``AckDetail``): the extra fields ride THIS frame rather
                     # than a follow-up push, because the caller of the receipt op
@@ -5025,6 +5353,7 @@ class RuntimeServer:
                 await self._push()
         except Exception as exc:  # noqa: BLE001 — the error IS the reply
             from local_operator.session.errors import (
+                AsideUnanswered,
                 AttachmentUnavailable,
                 OperatorAuthorityRequired,
                 ProfileRegistryUnavailable,
@@ -5035,6 +5364,7 @@ class RuntimeServer:
             if isinstance(
                 exc,
                 (
+                    AsideUnanswered,
                     AttachmentUnavailable,
                     OperatorAuthorityRequired,
                     ProfileRegistryUnavailable,
@@ -5363,7 +5693,23 @@ class RuntimeServer:
             logger.debug("admitted-command probe failed", exc_info=True)
             return False
 
-    async def _dispatch(self, op: str, frame: dict[str, Any]) -> str | AckDetail:
+    async def _dispatch(
+        self,
+        op: str,
+        frame: dict[str, Any],
+        *,
+        deliver: Callable[[str], None] | None = None,
+    ) -> str | AckDetail:
+        """Run one control op and return its receipt.
+
+        ``deliver`` is the frame sink for the ONE op that answers with a STREAM
+        rather than a single receipt (``complete_aside``). It exists so the
+        dispatcher keeps holding no ``conn`` — see ``_on_request``'s note on the
+        relay toggles, which are handled there for the same reason — while the
+        chunks still reach the connection that ASKED. The CALLER builds it, so
+        the target connection and the request id stay the caller's facts, and the
+        dispatcher is handed one opaque callable.
+        """
         from local_operator.mobile.types import validate_control_frame
 
         validate_control_frame(frame)
@@ -5447,7 +5793,30 @@ class RuntimeServer:
             complete_aside = getattr(h, "complete_aside", None)
             if not callable(complete_aside):
                 raise ValueError("this owner cannot run off-record requests")
-            result = complete_aside(list(frame.get("turns") or []))
+            # OPTIONAL CAPABILITY, probed rather than assumed (``_accepts_kw``,
+            # the cached signature probe the routed-slash ops use): an older or
+            # reduced owner takes ``turns`` alone, and a second ARGUMENT would
+            # break every one of those handles. Such an owner simply never
+            # streams, and the caller's settled answer is the whole reply — the
+            # pre-stream behaviour.
+            fields: dict[str, Any] = {}
+            if deliver is not None and _accepts_kw(complete_aside, "on_delta"):
+                fields["on_delta"] = deliver
+            # ``aside_instruction`` is forwarded ONLY as the boolean False, and
+            # only to a handle that advertises it. Two compatibility facts, one
+            # direction each, and both are the reason the field is optional:
+            # an owner built before this PR knows neither the body key nor the
+            # keyword, so it wraps the turns it is sent (which is what a caller
+            # that did not ask otherwise wants) — and a client built before this
+            # PR sends no key at all, which reads here as "wrap", exactly as it
+            # behaved then. A caller that supplied its own instruction says so,
+            # and an owner that cannot hear it is still protected by
+            # ``wrap_aside_turns`` being idempotent.
+            if frame.get("aside_instruction") is False and _accepts_kw(
+                complete_aside, "aside_instruction"
+            ):
+                fields["aside_instruction"] = False
+            result = complete_aside(list(frame.get("turns") or []), **fields)
             if not inspect.isawaitable(result):
                 raise ValueError("owner complete_aside operation must be awaitable")
             return await result
@@ -6020,6 +6389,52 @@ class RuntimeServer:
         except RuntimeError:  # loop closing
             pass
 
+    def _aside_delta_sink(self, conn: _ClientConn, req: Any) -> Callable[[str], None]:
+        """The per-request sink ``complete_aside`` streams its chunks through.
+
+        TWO FACTS ARE LOAD-BEARING, and they are the ones ``_relay_event``
+        documents one method up:
+
+        * the frame goes to the CONNECTION THAT ASKED, NEVER to the fan-out.
+          An aside is a private question ("explain this model"); its text is not
+          the session's event stream, so ``_clients`` is not consulted and a
+          second viewer of the same conversation sees nothing of it HERE. That
+          claim is scoped to this hop on purpose: the next one — a host
+          forwarding to its renderers — is a fan-out of its own, and it is
+          addressed for the same reason
+          (``DesktopSessionBridge.publish_to_subscription``); a reader who takes
+          this paragraph as a statement about the whole path would be reading it
+          one hop too far.
+        * the callback fires on the SESSION's loop, not this one:
+          ``ServingSessionHandle.complete_aside`` is marshalled there whole, so
+          the ``on_delta`` calls inside ``Session.complete_aside`` run on that
+          thread. The one write below hops back with ``call_soon_threadsafe``,
+          which from a single producer thread preserves emission order — a
+          direct ``conn.event_queue.put_nowait`` from here would be a
+          cross-thread mutation of an ``asyncio.Queue``.
+
+        The frame is built fresh per chunk rather than mutated in place because
+        ``_enqueue_client_frame`` runs the wire size fit over it, and a shared
+        nested ``data`` dict is exactly the aliasing a future fit pass could
+        rewrite under a frame already queued.
+        """
+
+        def send(delta: str) -> None:
+            loop = self._loop
+            if loop is None or self._closed.is_set():
+                return
+            frame: dict[str, Any] = {
+                "op": "aside_delta",
+                "req": req,
+                "data": {"delta": delta},
+            }
+            try:
+                loop.call_soon_threadsafe(self._enqueue_client_frame, conn, frame)
+            except RuntimeError:  # loop closing
+                pass
+
+        return send
+
     def _relay_on_loop(self, data: dict[str, Any]) -> None:
         """Fan one serialized AgentEvent out to event-subscribed attach clients.
 
@@ -6064,23 +6479,37 @@ class RuntimeServer:
     def _compact_event_queue(self, conn: _ClientConn) -> bool:
         """Fold the delta-grade and compose frame families in place.
 
-        Merges runs of same-stream ``message_update`` and ``reasoning_delta``
-        frames, and keeps only the NEWEST ``tool_call_compose`` per
-        ``tool_call_id``. Which frames belong to one stream is
-        :func:`_mergeable_delta_key`'s rule, and it is the only family-specific
-        thing here: the size accounting below is delta-sized and therefore
-        family-agnostic.
+        Merges runs of same-stream ``message_update``, ``reasoning_delta`` and
+        ``aside_delta`` frames, and keeps only the NEWEST ``tool_call_compose``
+        per ``tool_call_id``. Which frames belong to one stream is
+        :func:`_mergeable_frame_key`'s rule (it delegates to
+        :func:`_mergeable_delta_key` for the event families), and it is the only
+        family-specific thing here apart from the head it rebuilds: the size
+        accounting below is delta-sized and therefore family-agnostic.
 
-        Both are lossless by construction. For ``message_update`` the later
+        ``aside_delta`` IS A THIRD DELTA FAMILY AND THE SAME ARITHMETIC COVERS
+        IT. One ``complete_aside`` streams a fragment per token, all but the last
+        of which are pure progress — the aside's authoritative text is the POST
+        receipt — so an unmergeable aside run is the reasoning family's failure
+        mode again, on the surface whose slow reader is the phone: with
+        ``_EVENT_QUEUE_MAX`` at 64 a stalled quick-ask takes
+        ``event queue overflow`` instead of being compacted. The fold itself
+        needs no special case for it: the same ``delta`` is concatenated, in
+        arrival order, and only frames from the SAME request fold together (the
+        request id is the stream — see :func:`_mergeable_frame_key`).
+
+        All three are lossless by construction. For ``message_update`` the later
         event's ``message`` already contains the earlier one's text, and
         concatenating ``delta`` preserves the append contract UIs rely on. For
         ``reasoning_delta`` there is no accumulated payload at all — the frame
         carries one fragment, a ``message_id`` both frames agree on, and the
-        same concatenation reproduces the two fragments in arrival order. This
-        matters as much as it does for text: reasoning arrives once per token,
-        and a long-thinking turn is thousands of frames, so without the fold a
-        stalled viewer's FIFO fills with incompressible reasoning frames and is
-        dropped — the same failure the compose fold below was written for. For
+        same concatenation reproduces the two fragments in arrival order; this
+        matters as much as it does for text, because reasoning arrives once per
+        token, and a long-thinking turn is thousands of frames, so without the
+        fold a stalled viewer's FIFO fills with incompressible reasoning frames
+        and is dropped — the same failure the compose fold below was written
+        for. ``aside_delta`` is that case again, one fragment per token of an
+        answer the viewer is watching arrive. For
         ``tool_call_compose`` the argument is the one ``_fold_live_event``
         (``frontend_state.py``) already relies on for the reconnect seed: a
         compose frame is a SNAPSHOT of a call being dictated (``tool_name``,
@@ -6215,61 +6644,65 @@ class RuntimeServer:
                     # ``compose:0`` while start/end carry the provider's real
                     # id, so the pop misses and the slot stays live.
                     compose_slot.clear()
+            # A frame that must not merge is never compared to its neighbour:
+            # :func:`_mergeable_frame_key` answers only for the families whose
+            # fragments are losslessly concatenable, and the FAMILY is part of
+            # the key, so an aside fragment can never fold into a
+            # ``message_update`` or ``reasoning_delta`` beside it.
             previous = compacted[-1] if compacted else None
+            merge_key = _mergeable_frame_key(frame)
             if (
                 previous is not None
-                and frame.get("op") == "event"
-                and previous.get("op") == "event"
+                and merge_key is not None
+                and merge_key == _mergeable_frame_key(previous)
             ):
                 data = frame.get("data") or {}
                 prior = previous.get("data") or {}
-                merge_key = _mergeable_delta_key(data)
-                if merge_key is not None and merge_key == _mergeable_delta_key(prior):
-                    # SIZE THE DELTA, NOT THE WHOLE FRAME. Re-dumping the
-                    # merged frame re-serializes the unchanged accumulated
-                    # ``message`` — hundreds of KB — on every merge, which is
-                    # quadratic in queue depth: one 64-frame compaction
-                    # serialized 67.4 MB and took 152 ms on the runtime loop.
-                    # A ``reasoning_delta`` frame has no ``message`` to re-dump,
-                    # so the same arithmetic is simply cheap there; it is the
-                    # SAME arithmetic, which is what keeps the reasoning family
-                    # from needing an accounting of its own.
-                    # That loop also owns the ``_SEND_TIMEOUT_S`` sends, so the
-                    # stall pushed a healthy peer's 0.90 s drain past 1.0 s and
-                    # dropped it — manufacturing the very false disconnect this
-                    # guard exists to prevent.
-                    #
-                    # Exact, not an estimate: JSON escaping is per-character,
-                    # so the escaped length of ``a + b`` is exactly the escaped
-                    # length of ``a`` plus that of ``b``. The merged frame is
-                    # THIS frame carrying its own delta with everything already
-                    # folded into ``compacted[-1]`` prepended, so its encoded
-                    # size is this frame's size plus those accumulated escaped
-                    # bytes. Measuring ``frame`` rather than the merge result
-                    # is what makes this O(one frame) per merge — and because
-                    # it is THIS frame's own ``message``, a message that grew
-                    # between frames is sized correctly rather than estimated
-                    # from a stale one. Verified equal to a full re-dump on
-                    # adversarial payloads (quotes, backslashes, control
-                    # characters, emoji, U+2028) and thousands of random ones.
-                    prior_delta_bytes = merged_delta_bytes[-1]
-                    frame_bytes = _frame_size_without_delta(frame) + len(
-                        json.dumps(str(data.get("delta", ""))).encode()
+                # SIZE THE DELTA, NOT THE WHOLE FRAME. Re-dumping the
+                # merged frame re-serializes the unchanged accumulated
+                # ``message`` — hundreds of KB — on every merge, which is
+                # quadratic in queue depth: one 64-frame compaction
+                # serialized 67.4 MB and took 152 ms on the runtime loop.
+                # A ``reasoning_delta`` frame has no ``message`` to re-dump,
+                # so the same arithmetic is simply cheap there; it is the
+                # SAME arithmetic, which is what keeps the reasoning family
+                # from needing an accounting of its own.
+                # That loop also owns the ``_SEND_TIMEOUT_S`` sends, so the
+                # stall pushed a healthy peer's 0.90 s drain past 1.0 s and
+                # dropped it — manufacturing the very false disconnect this
+                # guard exists to prevent.
+                #
+                # Exact, not an estimate: JSON escaping is per-character,
+                # so the escaped length of ``a + b`` is exactly the escaped
+                # length of ``a`` plus that of ``b``. The merged frame is
+                # THIS frame carrying its own delta with everything already
+                # folded into ``compacted[-1]`` prepended, so its encoded
+                # size is this frame's size plus those accumulated escaped
+                # bytes. Measuring ``frame`` rather than the merge result
+                # is what makes this O(one frame) per merge — and because
+                # it is THIS frame's own ``message``, a message that grew
+                # between frames is sized correctly rather than estimated
+                # from a stale one. Verified equal to a full re-dump on
+                # adversarial payloads (quotes, backslashes, control
+                # characters, emoji, U+2028) and thousands of random ones.
+                prior_delta_bytes = merged_delta_bytes[-1]
+                frame_bytes = _frame_size_without_delta(frame) + len(
+                    json.dumps(str(data.get("delta", ""))).encode()
+                )
+                if frame_bytes + prior_delta_bytes <= _MAX_LINE_BYTES:
+                    merged = dict(data)
+                    merged["delta"] = str(prior.get("delta", "")) + str(data.get("delta", ""))
+                    compacted[-1] = _merged_frame_head(frame, merged)
+                    # ACCUMULATES: the new head carries the prior head's
+                    # whole delta plus its own, so the next merge must be
+                    # measured against both. Overwriting this with only the
+                    # newly-folded delta under-counts every merge after the
+                    # second and emitted a 1,048,795-byte frame — over the
+                    # cap this method exists to respect.
+                    merged_delta_bytes[-1] = prior_delta_bytes + (
+                        len(json.dumps(str(data.get("delta", ""))).encode()) - 2
                     )
-                    if frame_bytes + prior_delta_bytes <= _MAX_LINE_BYTES:
-                        merged = dict(data)
-                        merged["delta"] = str(prior.get("delta", "")) + str(data.get("delta", ""))
-                        compacted[-1] = {"op": "event", "data": merged}
-                        # ACCUMULATES: the new head carries the prior head's
-                        # whole delta plus its own, so the next merge must be
-                        # measured against both. Overwriting this with only the
-                        # newly-folded delta under-counts every merge after the
-                        # second and emitted a 1,048,795-byte frame — over the
-                        # cap this method exists to respect.
-                        merged_delta_bytes[-1] = prior_delta_bytes + (
-                            len(json.dumps(str(data.get("delta", ""))).encode()) - 2
-                        )
-                        continue
+                    continue
             compacted.append(frame)
             # Seeded with THIS frame's own delta, not zero: the running total
             # is "escaped bytes of the delta ``compacted[-1]`` currently
@@ -6439,7 +6872,7 @@ class RuntimeServer:
         return ordinary
 
     async def _push_to(self, conn: _ClientConn) -> None:
-        """The welcome form of a push: one full projection to one connection.
+        """The welcome form of a push: one frame to one connection.
 
         The ONE frame that may also carry the operator capability's handshake
         proof (issue #1310) — deliberately here and not in ``_projection_frame``,
@@ -6448,10 +6881,15 @@ class RuntimeServer:
         all. A client that sees no proof (this runtime holds no capability, or
         the client offered no nonce) presents nothing, which is the fail-closed
         reading of a runtime nobody handed one to.
+
+        WHICH frame is the welcome is ``_welcome_frame``'s decision, not this
+        method's: a full-TUI/desktop attach reads the projection for its
+        identity and discards the payload, and that payload is built and capped
+        inline on the serving loop.
         """
         conn.sending_welcome = True
         try:
-            frame = self._projection_frame(conn, self._projection_payload())
+            frame = self._welcome_frame(conn)
             proof = self._welcome_operator_proof(conn)
             if proof is not None:
                 # Salt alongside the proof, because the client needs both
@@ -6463,6 +6901,54 @@ class RuntimeServer:
             await self._send_to(conn, frame)
         finally:
             conn.sending_welcome = False
+
+    def _welcome_frame(self, conn: _ClientConn) -> dict[str, Any]:
+        """The welcome for THIS connection: identity-only, or the full projection.
+
+        The split is by who READS the payload, which is a property of the client
+        rather than of the daemon. A connection that asked for the canonical
+        frontend AND the raw event stream is a full terminal or the desktop, and
+        the only client of that shape builds ``AttachClient`` with
+        ``on_projection = lambda _projection: None`` — it consumes the welcome
+        for identity and nothing else. Phone and daemon connections asked for
+        no canonical frontend, are the clients that render the projection, and
+        keep their welcome byte-identical.
+
+        ``None`` from ``_slim_welcome_frame`` (a reduced handle with no seed)
+        falls back to the full projection rather than guessing at identity.
+        """
+        if conn.wants_events and conn.wants_frontend:
+            slim = self._slim_welcome_frame()
+            if slim is not None:
+                return slim
+        return self._projection_frame(conn, self._projection_payload())
+
+    def _slim_welcome_frame(self) -> dict[str, Any] | None:
+        """The identity-only welcome, or ``None`` when the handle has no seed.
+
+        WHY IT EXISTS. ``_projection_payload`` builds and CAPS a whole projection
+        for the welcome, and the attach clients above read none of it — every byte
+        past the identity is serialized, walked by the cap tiers and discarded.
+        On the fixtures that is 0.7 ms of CPU, which is NOT why this exists: it
+        exists because ``_push_to`` calls it INLINE on the serving loop, once per
+        connection, and a field dump has caught ``cap_projection_frame`` on that
+        thread's stack (``lop-mobile-registrant`` ← ``_push_to`` ←
+        ``_on_connection``, runtime-stall-42983.log). A frame nobody reads is not
+        worth any chance of that.
+
+        THE PAYLOAD IS ``_identity_projection()``, the SAME object the send
+        ceiling substitutes when a projection cannot be written at all — one
+        notion of "identity only" rather than two that drift, and it keeps the
+        empty collections that make the frame a valid projection of its own op
+        for a client rebuilding it field by field.
+
+        The client accepts this op (``attach_client`` treats ``welcome`` exactly
+        as it treats ``projection``); an older client that only knew the
+        projection op never reaches here.
+        """
+        if getattr(self._handle, "session_projection_seed", None) is None:
+            return None
+        return {"op": "welcome", "data": self._identity_projection()}
 
     def _welcome_operator_proof(self, conn: _ClientConn) -> str | None:
         """This connection's handshake proof, or ``None`` when there is none to give.
