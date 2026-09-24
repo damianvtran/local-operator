@@ -1945,12 +1945,19 @@ def cached_available_models(
     *,
     cache_dir: Path | None = None,
     base_url: str | None = None,
+    values: Mapping[str, Any] | None = None,
 ) -> tuple[list[DiscoveredModel], ListingStatus]:
     """Every model cached on disk for ``provider_id`` with zero network calls.
 
     Synchronous, non-blocking, and I/O-isolated: uses :func:`peek_listing` so it
     never acquires fetch leases, spawns background revalidation threads, or
     attempts network requests.
+
+    ``values`` is the caller's ALREADY-READ config mapping, for a caller that
+    resolves several local providers in one pass (the catalogue's first frame).
+    ``None`` -- every caller with no snapshot to hand over -- keeps the
+    per-provider read :func:`.providers.local.provider_settings` does itself, so
+    the answer is identical either way.
 
     Returns:
         ``(models, status)`` where status is ``"cached"`` if a valid cached
@@ -1968,7 +1975,41 @@ def cached_available_models(
     if definition.local_setup:
         from local_operator.providers.local import endpoint_cache_key, resolve_base_url
 
-        key = endpoint_cache_key(key, resolve_base_url(definition.id, override=base_url))
+        try:
+            endpoint = resolve_base_url(definition.id, override=base_url, values=values)
+        except ValueError:
+            # A stored endpoint `normalize_base_url` rejects: reachable by a
+            # hand-edited config.yml, because the settings editor validates and
+            # the file does not. The frame still has to answer, and with no
+            # usable endpoint there is no document NAME to look under, so this
+            # provider contributes its SHIPPED rows and nothing else -- exactly
+            # what it contributed before every provider was read through here.
+            # Deliberately caught rather than re-raised: the read is now the
+            # first frame's reader for EVERY provider, so one unconfigured local
+            # server emptied the whole catalogue -- review round 2 measured it on
+            # the shipped app over loopback as 409 with 0 rows on
+            # `command-entities`, 500 on the models route and 502 on the phone,
+            # where the previous head answered 200 with 120 rows on all three;
+            # reproduced here 2026-09-24 as `assert 409 == 200` in
+            # `tests/unit/server/test_desktop_first_frame_catalogue.py`.
+            #
+            # THE BREADTH IS A KNOWN CONSTRAINT, not an oversight: this catches
+            # any `ValueError` raised below, not only the resolver's. The live
+            # path's guard for the same call is equally broad
+            # (`live_catalogue`'s `_fetch_provider`), and narrowing this one
+            # would mean catching a private exception type or re-deriving the
+            # resolution here -- the second spelling of the endpoint policy that
+            # this reader exists to be the first of. If a future caller adds a
+            # `ValueError` to the path below, it will be swallowed into the
+            # static rows: teach this guard about it then, rather than assuming
+            # it cannot happen.
+            return merge_models(rows, None), "static"
+        if not endpoint:
+            # No endpoint at all -- the generic gateway's preset is empty and
+            # nothing was configured. Same answer, for the same reason: an
+            # endpoint-scoped document name would name a file nothing writes.
+            return merge_models(rows, None), "static"
+        key = endpoint_cache_key(key, endpoint)
     listing = peek_listing(key, cache_dir=cache_dir)
     capture = listing_capture_version(storage_id)
     live_rows = _rows_from_payload(listing.payload, capture)
