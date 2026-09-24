@@ -137,6 +137,66 @@ class SessionRow(BaseModel):
     opened_by: OpenedBy | None = None
 
 
+class ScopedAsk(BaseModel):
+    """The scope a page was ASKED for, echoed back on the answer.
+
+    Echoed rather than inferred because a page can land after the operator
+    collapsed the group that asked for it: the client must be able to attribute
+    an answer to the request that produced it from the answer itself, not from
+    the ordering of its own promises (two scope fetches can be in flight, and the
+    one that returns first is not necessarily the one that asked first).
+
+    ``name`` is the display name the request carried -- NOT a live team or
+    profile: the operator renames and deletes teams, and a session's stored
+    ``attachment.json`` keeps the name it was attached under.
+    (``resume.read_session_attachment``'s docstring is explicit that the stored
+    name is a historical fact.)
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["team", "agent"]
+    name: str
+
+
+class ScopeTotal(BaseModel):
+    """One group's conversation count, for a collapsed row's badge.
+
+    ``active`` counts the group's rows that the listing files under Active
+    (``CatalogEntry.active``: pending, unseen, or live), so a group's badge can
+    carry both numbers without the client recomputing either.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["team", "agent"]
+    name: str
+    total: int
+    active: int
+
+
+class ScopeCounts(BaseModel):
+    """How many conversations the listing holds, in total and per group.
+
+    Present only when the request asked for it (``with_counts=true``), because
+    the census costs one ``attachment.json`` read per visible session -- memoized
+    in ``session.catalog._BINDING_MEMO``, so a second call on an unchanged store
+    pays only stats, but a cold one is a real cost on a large store and a client
+    that does not draw counts must not pay it.
+
+    ``unbound`` is its own number rather than a ``scopes`` entry: a session with
+    no ``attachment.json`` binding belongs to no group, and folding it into one
+    would invent a group the renderer never draws.
+
+    ``scopes`` is sorted by ``(-total, kind, name)`` so two reads of one store
+    cannot order the same counts differently.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    total: int
+    active: int
+    unbound: int
+    scopes: list[ScopeTotal]
+
+
 class SessionList(BaseModel):
     """One page of conversations, plus what could NOT be read while building it.
 
@@ -183,6 +243,49 @@ class SessionList(BaseModel):
     truncated: bool = False
     limit: int = 100
     degraded: list[str] = Field(default_factory=list)
+    #: The position to resume this scope from, or ``None`` when this page is the
+    #: last one. OPAQUE to the client: it is the ranking tuple of the page's last
+    #: row plus the scope it was minted for, and the client only ever hands it
+    #: back.
+    #:
+    #: INVARIANT, asserted by tests: ``(next_cursor is not None) == truncated``.
+    #: ``next_cursor`` is not a restatement of ``truncated`` — ``truncated`` is a
+    #: boolean and this is the value needed to fetch the next page — which is why
+    #: no separate ``has_more`` was added beside it.
+    #:
+    #: Minted from the last row of the PAGE and never from an appended off-page
+    #: pin, because a pin below the page is not a position in the scope's
+    #: continuation: resuming from it would skip every row between the page's end
+    #: and that pin.
+    next_cursor: str | None = None
+    #: Your cursor could not be used, so THIS ANSWER IS THE SCOPE'S FIRST PAGE.
+    #:
+    #: Not an error: a malformed token, one from an unknown version, and one
+    #: minted for a different scope are all answered the same way, and the remedy
+    #: is the same for all three — re-read from the top. This mirrors
+    #: ``HistoryPage.cursor_missing`` exactly (``server.utils.desktop_sessions``),
+    #: including its reasoning that a client which lost its place must be able to
+    #: tell "the store moved" from "your token is unusable".
+    cursor_missing: bool = False
+    #: The scope this page was asked for, or ``None`` for the head listing.
+    scope: ScopedAsk | None = None
+    #: The per-group census, present only when ``with_counts=true`` asked for it.
+    counts: ScopeCounts | None = None
+
+    # THE FOUR FIELDS ABOVE ARE ADDITIVE AND ALWAYS PRESENT, which is the whole
+    # compatibility promise stated precisely: a request that sends none of
+    # ``scope_kind``/``scope_name``/``cursor``/``with_counts`` gets exactly the
+    # ``sessions``/``truncated``/``limit``/``degraded`` it has always got, and the
+    # four new fields sit at their defaults (``null``, ``false``, ``null``,
+    # ``null``). PRESENT rather than omitted, on the precedent the ``degraded``
+    # comment above states: a client must be able to tell "this answer is not
+    # paged" from "this server is too old to page it", and the capability map's
+    # ``session_catalogue_page`` key is what makes that question askable BEFORE
+    # the request rather than only after it.
+    #
+    # A DAEMON THAT PREDATES THESE FIELDS IS INDISTINGUISHABLE FROM AN ABSENT
+    # KEY: every one is defaulted, so a client that never learned the key sees the
+    # same listing it always saw.
 
 
 class SessionSearchRow(BaseModel):
