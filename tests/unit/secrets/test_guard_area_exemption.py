@@ -34,6 +34,7 @@ from local_operator.harness.types import (
     StreamToolCallDelta,
     TextContent,
     ToolCall,
+    ToolContext,
     ToolResult,
 )
 from local_operator.redaction_shapes import REDACTION_MARKER
@@ -78,6 +79,62 @@ def test_a_relative_spelling_resolves_the_same_way(monkeypatch: pytest.MonkeyPat
     monkeypatch.chdir(SHAPE_TABLE.parent.parent)
     assert reads_exempt_source("read", {"path": "local_operator/redaction_shapes.py"}) is True
     assert reads_exempt_source("read", {"path": "./local_operator/redaction_shapes.py"}) is True
+
+
+def test_a_relative_spelling_follows_the_session_root_not_the_process_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE ROUND-1 BLOCKER, at the matcher.
+
+    The process CWD stands at the repo root, so the exempt spelling *would*
+    resolve to a real exempt file if the process CWD were consulted. The
+    SESSION root is somewhere else entirely, and that is the root the reader
+    uses -- so the only correct answer is False, the escalating one. A matcher
+    that answers True here exempts a read of a file the reader never opens; an
+    agent-authored decoy at that spelling has its escalation suppressed.
+    """
+    monkeypatch.chdir(SHAPE_TABLE.parent.parent)
+    session_root = tmp_path / "elsewhere"
+    (session_root / "local_operator").mkdir(parents=True)
+    # Sanity: the spelling resolves to a genuinely exempt file from THIS cwd,
+    # so the arm cannot pass merely because the spelling is wrong.
+    assert reads_exempt_source("read", {"path": "local_operator/redaction_shapes.py"}) is True
+    assert (
+        reads_exempt_source(
+            "read", {"path": "local_operator/redaction_shapes.py"}, str(session_root)
+        )
+        is False
+    ), "a relative spelling was resolved against the process CWD, not the reader's root"
+    # The same spelling is still exempt -- and only -- when the session root IS
+    # the tree the exempt files live in.
+    assert (
+        reads_exempt_source(
+            "read", {"path": "local_operator/redaction_shapes.py"}, str(SHAPE_TABLE.parent.parent)
+        )
+        is True
+    )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        "~nosuchuser000/redaction_shapes.py",
+        "notes\x00.txt",
+        "notes\ud800.txt",
+    ),
+    ids=("unresolvable-tilde-user", "embedded-nul", "lone-surrogate"),
+)
+def test_a_malformed_path_fails_safe_instead_of_raising(raw: str, tmp_path: Path) -> None:
+    """FAIL SAFE, never raise. This runs for EVERY read/grep result.
+
+    The reader tolerates all three of these on purpose (``_resolve_workspace_path``
+    catches ``RuntimeError`` from ``expanduser`` and ``(OSError, ValueError)``
+    from ``resolve``), and the pre-PR path returned an ordinary result for them.
+    A matcher that raises takes the whole turn down before ``AgentEndEvent``;
+    the honest answer for a path that cannot be resolved is the ESCALATING one.
+    """
+    assert reads_exempt_source("read", {"path": raw}, str(tmp_path)) is False
+    assert reads_exempt_source("grep", {"path": raw}, str(tmp_path)) is False
 
 
 def test_a_bash_command_that_merely_names_the_path_is_not_exempt() -> None:
@@ -227,18 +284,26 @@ def _echo_tool(name: str, text: str) -> AgentTool:
     )
 
 
-async def _drive(session: Session, tool: AgentTool, stream: Any) -> list[str]:
-    """Run one scripted turn and return the redacted tool rows' text."""
+async def _drive(session: Session, tool: AgentTool, stream: Any, session_cwd: str | None = None) -> list[str]:
+    """Run one scripted turn and return the redacted tool rows' text.
+
+    ``session_cwd`` is the SESSION root the reader resolves a relative ``path``
+    against (``ToolContext.cwd``). It is a parameter rather than always
+    ``session._cwd`` because the dimension the round-1 blocker lived in is
+    exactly when this root differs from the process CWD: an arm that never
+    varies the two agrees with itself and proves nothing about that class.
+    """
     config = LoopConfig(
         model=ModelSpec(provider="test", model_id="unit-model", context_window=1000),
         convert_to_llm=lambda messages: [m for m in messages if isinstance(m, Message)],
         stream_fn=stream,
         redact_tool_result=session._redact_tool_result_text,
     )
+    tool_context = ToolContext(cwd=session_cwd) if session_cwd is not None else None
     events = [
         event
         async for event in AgentLoop().run(
-            [Message.user("go")], LoopContext(tools=[tool]), config, None
+            [Message.user("go")], LoopContext(tools=[tool], tool_context=tool_context), config, None
         )
     ]
     end = events[-1]
@@ -441,3 +506,123 @@ def test_the_publication_is_per_call_and_resets() -> None:
             assert source_is_exempt() is False
         assert source_is_exempt() is True
     assert source_is_exempt() is False
+
+
+# --- the DECISIVE arm: process CWD and session root DISAGREE -------------------
+#
+# Every arm above leaves the two roots equal, which is exactly why the two-root
+# union shipped: nothing here ever asked what happens when the root the reader
+# uses is not the root the process stands in. These three arms are that question.
+# The process CWD is chdir'd to the repo root (where the exempt spellings DO
+# resolve to real exempt files); the session root is a plain temp dir, which is
+# the default shape of an installed `lop` run launched outside the repo.
+
+
+@pytest.mark.asyncio
+async def test_a_decoy_at_the_exempt_spelling_still_escalates_from_another_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BLOCKER REGRESSION ARM. An agent-authored decoy must NOT be exempt.
+
+    The session root holds ``local_operator/redaction_shapes.py`` -- a file the
+    agent wrote, carrying the corpus's escalating case -- while the process CWD
+    stands at the repo root, so the same relative spelling ALSO resolves to the
+    real exempt file there. Before the fix the matcher took the process-CWD arm
+    and returned True, so the read was masked with no rotate-it demand; the file
+    read is the decoy, and the operator was never told. The absolute spelling of
+    the SAME decoy escalated, which is what isolates the exemption (not the
+    bytes) as the difference.
+    """
+    session_root = tmp_path / "session"
+    (session_root / "local_operator").mkdir(parents=True)
+    decoy = session_root / "local_operator" / "redaction_shapes.py"
+    decoy.write_text(f"{ESCALATING_TEXT}\n", encoding="utf-8")
+    monkeypatch.chdir(SHAPE_TABLE.parent.parent)  # the process CWD that used to win
+
+    relative = _OneCallStream(
+        "read", json.dumps({"path": "local_operator/redaction_shapes.py", "raw": True})
+    )
+    rows = await _drive(_session(tmp_path), _read_tool(), relative, str(session_root))
+
+    # The decoy really was read, and really carried escalating material: without
+    # this the arm could pass by reading something that never had a shape in it.
+    assert ESCALATING_TEXT in decoy.read_text(encoding="utf-8")
+    assert len(rows[0]) > 40, "the read returned almost nothing; the arm proved nothing"
+    assert REDACTION_MARKER in rows[0], "masking is not exempt and still must apply"
+    assert ESCALATING_TEXT not in rows[0], "the decoy's escalating case reached the model"
+
+    session = _session(tmp_path)
+    rows = await _drive(
+        session,
+        _read_tool(),
+        _OneCallStream(
+            "read", json.dumps({"path": "local_operator/redaction_shapes.py", "raw": True})
+        ),
+        str(session_root),
+    )
+    assert _escalation_flags(session) == [
+        True
+    ], "a relative spelling resolved against the process CWD exempted a decoy"
+    assert len(rows[0]) > 40
+
+
+@pytest.mark.asyncio
+async def test_a_laundered_value_in_that_decoy_reaches_the_operator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE LAUNDERING CASE. ``write`` a real value into the decoy, ``read`` it relatively.
+
+    The reviewer's sharpest vector: an agent writes an escalating value into a
+    file it names with the exempt relative spelling and reads it back. Masking
+    still applies (the value never reaches the model), but the rotation demand
+    is the thing that tells the operator a real secret was handled -- and the
+    union of roots is what silenced it. Asserted on all three surfaces the
+    requirement names: the model's text, the pending queue, and the JOURNAL.
+    """
+    session_dir = tmp_path / "session"
+    (session_dir / "local_operator").mkdir(parents=True)
+    decoy = session_dir / "local_operator" / "redaction_shapes.py"
+    decoy.write_text(f"PAYLOAD = {ESCALATING_TEXT!r}\n", encoding="utf-8")
+    monkeypatch.chdir(SHAPE_TABLE.parent.parent)
+
+    session = _session(tmp_path)
+    stream = _OneCallStream(
+        "read", json.dumps({"path": "local_operator/redaction_shapes.py", "raw": True})
+    )
+    rows = await _drive(session, _read_tool(), stream, str(session_dir))
+    # Read the queue BEFORE flushing: ``_flush_shape_incidents`` drains it into
+    # the journal, so an assertion on the flags afterwards would read an empty
+    # list and pass for the wrong reason.
+    flags = _escalation_flags(session)
+    await session._flush_shape_incidents()
+
+    body = (tmp_path / "session" / "transcript.jsonl").read_text(encoding="utf-8")
+    assert ESCALATING_TEXT not in rows[0], "the laundered value reached the model"
+    assert flags == [True], "the laundering vector was not escalated"
+    assert "rotate" in body, "the demand never reached the journal"
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_path_returns_an_ordinary_result_and_the_turn_survives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE SCRIPTED TURN THAT CRASHED, re-run. Not the unit call -- the turn.
+
+    ``reads_exempt_source`` runs for EVERY read/grep result, so a raise there
+    aborted the turn before ``AgentEndEvent``. Each of the three inputs the two
+    streams named is driven through the real ``read`` tool here, and the turn is
+    required to END with an ordinary error row. The lone surrogate additionally
+    exercises ``_error_batch_fingerprint``, which digests model-visible error
+    text and raised on the same input once the guard no longer did.
+    """
+    session_dir = tmp_path / "session"
+    session_dir.mkdir(parents=True)
+    monkeypatch.chdir(session_dir)
+    for raw in ("~nosuchuser000/redaction_shapes.py", "notes\x00.txt", "notes\ud800.txt"):
+        session = _session(tmp_path)
+        stream = _OneCallStream("read", json.dumps({"path": raw}))
+        rows = await _drive(session, _read_tool(), stream, str(session_dir))
+        assert rows, f"no tool row for {raw!r}: the turn did not complete"
+        assert "Does not exist" in rows[0] or "does not exist" in rows[0], (
+            f"expected the ordinary missing-path result for {raw!r}, got {rows[0][:120]!r}"
+        )
