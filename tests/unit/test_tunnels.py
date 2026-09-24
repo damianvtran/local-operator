@@ -39,6 +39,7 @@ from local_operator.tunnels.cli import (
     dispatch,
 )
 from local_operator.tunnels.gateway import (
+    AUTHORIZATION_DEFERRED,
     CONSOLE_URL,
     LEASE_PENDING,
     LOGIN_REQUIRED,
@@ -1791,6 +1792,91 @@ def test_a_deferral_keeps_the_retry_and_its_log_line_blames_no_login(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reason", "detail", "expected"),
+    [
+        # The deferral's own reason: the row above already states the window and the
+        # escalation, so the Login line carries the state alone.
+        (AUTHORIZATION_DEFERRED, TERMINAL_DETAIL[AUTHORIZATION_DEFERRED], "retried automatically"),
+        # THE DISCRIMINATING CASE (agent review round 2, R4): the same reason with a
+        # detail that does NOT contain the window still takes the short line — the old
+        # `window in connector["detail"]` form fails here, which is how the prose
+        # coupling is kept from coming back.
+        (
+            AUTHORIZATION_DEFERRED,
+            "a connector detail with no window in it",
+            "retried automatically",
+        ),
+        # Every other shape this surface can print from: no other reason means the
+        # window is already on screen, so the Login line has to carry it.
+        (UNREACHABLE, TERMINAL_DETAIL[UNREACHABLE], "clears by itself"),
+        (REFUSED, TERMINAL_DETAIL[REFUSED], "clears by itself"),
+        # No terminal entry for this one, so the probe falls back to the relay sentence —
+        # which is what the CLI really prints for it (and it carries no window either).
+        (NOT_AUTHORIZED, RELAY_DETAIL[NOT_AUTHORIZED], "clears by itself"),
+        (LEASE_PENDING, TERMINAL_DETAIL[LEASE_PENDING], "clears by itself"),
+        (LOGIN_REQUIRED, TERMINAL_DETAIL[LOGIN_REQUIRED], "clears by itself"),
+        # A STOPPED tunnel, and a gateway that never answered: no reason and no detail,
+        # so there is no row above and this line is the only carrier left.
+        ("", "", "clears by itself"),
+    ],
+)
+async def test_the_deferred_login_line_is_selected_by_the_reason_code(
+    tmp_path, monkeypatch, connection, reason: str, detail: str, expected: str
+) -> None:
+    """Which deferral line prints is a REASON-CODE decision, not a prose match (R4).
+
+    `_status_text` deduplicates the self-clearing window: the connector's own sentence
+    carries it, so the `Login:` line repeats it only when nothing above did. That
+    "nothing above" was decided by searching the rendered sentence for the window's
+    text, which made a copy edit capable of silently flipping which line a user sees.
+    This pins the pairing reason -> line for every shape the surface can produce, and
+    the second case pins it against the substring form directly.
+
+    The payloads are synthesized rather than fetched, deliberately: the question here
+    is which line a given (reason, detail, verdict) produces, and a real gateway can
+    only produce the deferral reason WITH the deferral sentence — it cannot build the
+    case that discriminates. The real gateway path is covered by
+    `test_the_deferral_window_is_printed_once_when_the_gateway_answered`.
+    """
+    from local_operator.tunnels import cli, report
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    config.save(_stored(connection, credential_id=1))
+    api = AsyncMock()
+    api.request.side_effect = httpx.ConnectError("network is unreachable")
+    monkeypatch.setattr(cli, "RadientTunnels", lambda *_: api)
+
+    async def connector_state(value):  # noqa: ANN001 — the probe's own signature
+        return {
+            "state": "not serving" if reason else "stopped",
+            "reason": reason,
+            "detail": detail,
+            "since": None,
+            "remedy": None,
+        }
+
+    async def login_verdict(value):  # noqa: ANN001
+        # The state the whole branch is about, held constant while the connector varies.
+        return {"credential_id": 1, "state": "deferred"}
+
+    monkeypatch.setattr(report, "connector_state", connector_state)
+    monkeypatch.setattr(report, "login_verdict", login_verdict)
+
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+    receipt = await dispatch(parser.parse_args(["tunnel", "status"]))
+    login_lines = [line for line in receipt.splitlines() if line.startswith("Login:")]
+    assert len(login_lines) == 1, receipt
+    assert expected in login_lines[0], receipt
+    assert "sign-in expired" not in login_lines[0]
+    assert "could not be checked" not in login_lines[0]
+    if reason != AUTHORIZATION_DEFERRED:
+        assert f"about {self_clearing_window()}" in login_lines[0], "the only carrier"
+        assert "sign in again only if it persists" in login_lines[0], "the escalation"
+
+
+@pytest.mark.asyncio
 async def test_tunnel_status_reports_a_deferral_in_the_machine_shape_too(
     tmp_path, monkeypatch, connection
 ) -> None:
@@ -2164,8 +2250,12 @@ def test_a_short_lived_cli_loop_cancels_the_exchange_and_the_marker_is_bounded(
         assert store._now_ms() - marker["at"] <= auth_store.UNCONFIRMED_SEND_TTL_S * 1000
         assert store.refresh_deferred(row.id) is True
         assert store._conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
-    # The lease is free: a cancelled exchange still runs its own `finally`.
-    assert AuthStore()._try_refresh_lease(row.id) is True
+    # The lease is free: a cancelled exchange still runs its own `finally` — and the probe
+    # is closed on its way out, because a bare `AuthStore()` inside an assertion held a
+    # sqlite connection open for the rest of the session and took a real lease as a side
+    # effect of an `assert` (agent review round 2, R5).
+    with closing(AuthStore()) as probe:
+        assert probe._try_refresh_lease(row.id) is True
 
     second = asyncio.run(dispatch(parser.parse_args(["tunnel", "status"])))
     assert "Login: refresh deferred" in second

@@ -307,7 +307,10 @@ async def login_verdict(value: dict[str, Any]) -> dict[str, Any]:
             # it without a command and without "sign-in expired", which is what
             # this case used to be reported as (`unknown`, rendered as "could not
             # be checked", wrong twice — the check did run, and no network had
-            # anything to do with it).
+            # anything to do with it). "Clears by itself" is about ONE WINDOW and
+            # not about the state (agent review round 2, R6): a stalling endpoint
+            # re-arms the marker, so the copy carries the sign-in escalation for
+            # the case it persists rather than an absolute.
             return {"credential_id": selected, "state": "deferred"}
         key = _verdict_key(store, selected, row.updated_at)
         remembered = _remembered_verdict(key)
