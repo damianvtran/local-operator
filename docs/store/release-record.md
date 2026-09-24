@@ -111,6 +111,82 @@ stays not-applicable until a promote succeeds.
 dispatches and the eight trees that version came to name; 0.1.20 is the repair
 for that ambiguity, and it is the number the store now holds.
 
+**Post-submission addendum (appended 2026-09-24): approved and published,
+without a promote run behind it.** The rows above are left as written, because
+this file corrects a shipped entry by appending; the approval is recorded here.
+**v0.1.20 is live and the queue is empty**, and both halves of that statement are
+the store's own fields rather than a workflow's exit code:
+
+- **The queue is empty.** Promote run
+  [36008806075](https://github.com/damianvtran/local-operator/actions/runs/36008806075),
+  dispatched by `damianvtran` on `main` at 2026-09-24T13:53:24Z
+  (`headSha=bc1e247f…`, `EXPECTED_VERSION=0.1.20`), was refused at its own gate at
+  2026-09-24T13:56:45Z and printed its store read on the way out: `Chrome Web Store publish failed: only an approved STAGED revision can be promoted (store said: submitted <absent>; published state=PUBLISHED distributionChannels=[crxVersion=0.1.20 deployPercentage=100])`. `submitted
+  <absent>` is **not** "still in review" — a revision in review reads
+  `PENDING_REVIEW`, which is what this run's own predecessor printed a day
+  earlier — it is the store saying there is nothing pending, so there was nothing
+  left to promote. As with that predecessor, the refusal is the probe and the
+  fields it carried on the way out are the answer.
+- **The public listing agrees, and it is the independent half** (checked
+  2026-09-24): **"Version 0.1.20"**, **"Updated September 24, 2026"**,
+  **132KiB**, and the manifest the page serves reads `"version": "0.1.20"`. The
+  0.1.18 entry's own check on 2026-09-23 read 0.1.18, so what moved on the public
+  page is this publication. Both version sites on `main`
+  (`extension/manifest.json`, `extension/package.json`) read `0.1.20` as well,
+  which is what an empty queue means for the next bump rather than a claim about
+  the store.
+
+**The approval instant is bounded, not known, and none is invented.** The last
+evidence that this revision was still unpublished is the 2026-09-23 probe's own
+read — `submitted state=PENDING_REVIEW distributionChannels=[crxVersion=0.1.20 deployPercentage=100]`, printed by run
+[35874866430](https://github.com/damianvtran/local-operator/actions/runs/35874866430)
+at 2026-09-23T14:33:16Z — and the first evidence that it was live is the
+2026-09-24 run above at 13:56:45Z, with the listing read of the same day. The
+approval instant therefore lies **between 2026-09-23T14:33:16Z and
+2026-09-24T13:56:45Z**, and no run we hold narrows it further — which is why the
+`Approval timestamp` row above is left as written rather than rewritten. The
+heading is left standing for the same reason: its "in review as of 2026-09-23" is
+superseded by this addendum, not edited out of it. The listing carries the only
+fine-grained reading inside that window — a timestamp field beside the version and
+size in the page's own payload, `1790254705` seconds and `513623000` nanos, i.e.
+2026-09-24T12:58:25.513623Z, the value behind the rendered "Updated September 24,
+2026" — and it is recorded as what it is, a listing field consistent with a
+publication that morning, **not** as the approval instant, which no store read
+exposes.
+
+**The route, precisely, because it is the unusual half.** The submission did not
+travel this repository's API path: `chrome-web-store.yml` run
+[35870383291](https://github.com/damianvtran/local-operator/actions/runs/35870383291)
+uploaded and validated `v0.1.20` and was then refused `INVALID_ARGUMENT` /
+`INVALID_ITEM_METADATA`, so the `publish` call that carries `STAGED_PUBLISH`
+never created a submission for this revision (see `Submission route` above). The
+operator completed the outstanding `downloads` justification in the Developer
+Dashboard and submitted from there, so this revision's publish semantics are the
+Dashboard's, not our script's — and not this record's to assert. What is measured
+is the consequence: **no `chrome-web-store-promote.yml` run published this
+version.** The last successful promote anywhere is still 0.1.18's (run
+[35736288300](https://github.com/damianvtran/local-operator/actions/runs/35736288300),
+2026-09-22T13:51:32Z), and both dispatches since — this entry's, on 2026-09-23 and
+2026-09-24 — failed. That must not be folded into an
+approval-publishes-by-itself reading: Google's publish reference defines
+`STAGED_PUBLISH` as "After approval the submission will be staged and can then be
+published by the developer", against `DEFAULT_PUBLISH`, "The submission will be
+published immediately after being approved", and this revision never went in
+through either call. So the publication was a developer-initiated action — the
+Dashboard's publish path, or an out-of-band API call — that this checkout holds
+no record of: **the fourth occurrence of the gap this file records under v0.1.12,
+v0.1.15 and v0.1.17.** Unlike those three, the reason our promote is not behind
+it is visible rather than inferred: the API half of the route was refused for
+this revision, so there was no `STAGED` submission for the documented "wait for
+`STAGED`, then promote" sequence to act on. The runbook question the earlier three
+left open is not closed by this entry.
+
+**The queue is clear.** `submitted <absent>` means no revision is queued ahead of
+the next one, so this entry closes the 0.1.20 queue item: the next extension
+change carries the next bump, and a fresh `chrome-web-store.yml` dispatch meets an
+empty queue rather than the `NOT_UPDATEABLE` refusal a revision already in review
+draws.
+
 ---
 
 ## v0.1.20 — on `main`, NOT submitted (as of 2026-09-22)
