@@ -48,18 +48,27 @@ serving it, in ONE loopback round trip, and returns a structured
 `_answers_as_record`, now a renderer over it, so the serve-reload path kept its
 contract and behaviour unchanged.
 
-The verdicts, composed in `ServeDaemonReport` with the shared classification:
+The verdicts, composed in `ServeDaemonReport` with the shared classification.
+**The probe outranks the beat wherever a probe ran**: a `wedged` record whose
+address answers as its own instance IS `serving` (a stale beat is not a verdict on
+the process — `server/registry.py` is explicit about that), and `wedged`/`stale`
+keep their own word only where the address agrees nobody is serving.
 
 | verdict | evidence | what a reader does with it |
 |---|---|---|
 | `serving` | the probe answered with the record's own `instance_id` | nothing; this is the only state that may be signalled a reload |
-| `deaf` | pid alive, heartbeat fresh, the probe did not answer | the owner's loop is alive and it is not serving — the state the incident was in |
-| `squatted` | something answered and it was not this record's instance (or a non-200, or no instance at all) | somebody else holds this address |
-| `wedged` / `stale` | the shared classification, unchanged | as before |
+| `deaf` | the address did not answer at all (refused, timed out, reset before a response) | the owner's loop is alive and it is not serving — the state the incident was in |
+| `squatted` | something answered and it was not this record's daemon: a different `instance_id`, a non-200, an unintelligible response, or no instance at all | somebody else holds this address |
+| `wedged` / `stale` | the shared classification, when the address agrees nobody is serving | as before |
 
-`deaf` and `squatted` are deliberately distinct: the first says *nobody is
-there*, the second says *somebody else is*, and only the second names another
-daemon for the operator to look at.
+`deaf` and `squatted` are deliberately distinct, and the line between them is
+**an answer versus a silence** rather than "is anything listening": the first says
+*nobody answered*, the second says *something answered and it is not this record's
+daemon*, and only the second describes a process the operator could go and look at.
+A port that accepts a connection and then speaks something that is not this
+product's health endpoint is therefore `squatted`, not `deaf` — the sentence for
+the first version of this split ("nothing is answering there") was about a port
+that had just answered.
 
 ### 2.2 Report it, in the two surfaces that used to be silent
 
@@ -85,9 +94,21 @@ product that can end a stray serve daemon. It refuses, in this order:
    and matched as a WORD SEQUENCE — the spawn contract, never a substring, the
    same rule `session/runtime/reclaim.parse_process_row` states for runtimes, so
    a person running `grep 'local_operator.cli serve'` is not mistaken for a
-   daemon. Two spellings are accepted, in one predicate: the branded interpreter
-   (`-m local_operator.cli serve`) and the launcher by basename (`…/lop serve`,
-   which is how the machine's own `lop` is reached).
+   daemon. THREE spellings are accepted, in one predicate:
+   - the branded interpreter, `-m local_operator.cli serve` (any position);
+   - the launcher by basename (`…/lop serve`, `…/local-operator serve`) **at
+     `argv[0]` or immediately after the `procname` label**, because `procname`
+     REPLACES `argv[0]` — a live labelled daemon reads
+     `Local Operator [serve] port=18490 /Users/…/local-operator serve --host …`,
+     and the label pattern is derived from `procname.LABEL_SERVE` rather than
+     typed again;
+   - the **desktop app's managed backend**, `<interpreter> -c "from
+     local_operator.cli import main; main()" serve …`, which is deliberately never
+     branded (`procname` refuses a `-c` launch on purpose: the app verifies its
+     backend by asking the same string to report `sys.executable`, and a re-exec
+     through the branded link would fail that check on every machine). Without
+     this third spelling the predicate refuses the app's own backend — the daemon
+     that held 1111 in the incident.
 2. **The same uid.** A process belonging to another account is refused with the
    `sudo` remedy named.
 3. **The verdict must be one that is not serving.** `serving` refuses outright —
@@ -96,9 +117,12 @@ product that can end a stray serve daemon. It refuses, in this order:
    connection is not evidence: the loop may be mid-restart or the host may be
    starved (this host ran at a load average of 130 for hours). An unreadable or
    raising probe sends nothing.
-4. **Re-identification at signal time.** The command line is re-read immediately
-   before the signal; a pid that is no longer the daemon the verdict was measured
-   on is refused.
+4. **Re-identification at signal time, and one last address reading.** The command
+   line is re-read immediately before the signal, and so is the ADDRESS: a daemon
+   that begins serving between the confirmation and the signal — the recovery this
+   command must not punish — is refused, as is an address whose occupant changed
+   under the verdict (`problem="changed"`). Both refusals send nothing and say to
+   run it again.
 
 Then `SIGTERM` → bounded wait (`RECLAIM_TERM_GRACE_S`) → `SIGKILL` → bounded wait,
 with a receipt that names the pid, the address, the verdict and which signal
@@ -142,7 +166,9 @@ read is the evidence.
 
 - **`lop services status` / `restart`**: lines and receipts for live daemons are
   unchanged; `restart` still signals only `live`, `reloadable`,
-  identity-proven daemons.
+  identity-proven daemons. The report reads the fleet from ONE source now, so a
+  record gets exactly one row — the property `_fleet_action_lines` documents for
+  `grep`/`awk` counting.
 - **`lop update`**: a failed nudge is still a warning on a successful update.
   The new stuck-daemon warnings are additive `ServiceRefresh` warnings, printed
   by the same printer.

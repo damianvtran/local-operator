@@ -29,6 +29,11 @@ import pytest
 from local_operator import services
 from local_operator.server import registry as serve_registry
 
+
+def _no_sleep(_seconds: float) -> None:
+    """A sleep the ladder does not have to pay for."""
+
+
 SERVE_ARGV = (
     "/opt/lop/bin/Local Operator [serve] port=1111 -P -m local_operator.cli "
     "serve --host 127.0.0.1 --port 1111"
@@ -834,7 +839,7 @@ def test_the_update_warning_reuses_the_axis_sentence_and_real_remedies() -> None
         probe=services.AddressProbe(services.SQUATTED, "answered as somebody else", "other"),
     )
     text = "\n".join(services.stuck_report_lines(squatted))
-    assert "something else is answering there" in text
+    assert "what answers there is not this record's daemon" in text
     assert "nothing is answering" not in text
     assert "lop services reclaim 11" in text
 
@@ -884,3 +889,75 @@ def test_a_pid_that_leaves_before_the_escalation_is_still_ended() -> None:
     assert kills == [(4242, 15)], "SIGTERM only: the escalation found no process"
     assert outcome.acted
     assert "ended on SIGKILL" in "\n".join(outcome.lines)
+
+
+def test_the_launcher_proof_survives_the_procname_label_and_the_app_entrypoint() -> None:
+    """R3-2/R3-1: the launcher arm, pinned by inputs that do NOT carry the marker.
+
+    Every other fixture in this file uses ``SERVE_ARGV``, which contains
+    ``-m local_operator.cli serve`` — so the MARKER arm answers them and the
+    launcher arm could be reverted to ``argv[0]``-only with the suite still green
+    (review round 3, R3-2, measured: 39/39 green after reverting it). These three
+    inputs can only be accepted by the launcher and entry-point arms:
+
+    * the real labelled daemon shape, measured on this host with ``ps -o command=``
+      — ``procname`` REPLACES argv[0], so the launcher is four words in;
+    * the desktop app's managed backend — ``<interpreter> -c "<entrypoint>" serve``
+      — which is deliberately never branded and which ``reclaim`` refused until
+      this round (R3-1: it is the daemon that held 1111 in the incident).
+    """
+    labelled = (
+        "Local Operator [serve] port=18490 /Users/damian/.local/bin/local-operator serve "
+        "--host 127.0.0.1 --port 18490"
+    )
+    app_backend = (
+        "/Users/me/.local/share/lop/generations/2026/tools/local-operator/bin/python "
+        "-c from local_operator.cli import main; main() serve --port 1111"
+    )
+    assert services.is_serve_command(labelled)
+    assert services.is_serve_command(app_backend)
+    assert services.is_serve_command("/Users/me/.local/bin/lop serve")
+    # And the false positives R1-8 closed stay closed.
+    assert not services.is_serve_command('/bin/zsh -c "lop serve --port 1111"')
+    assert not services.is_serve_command("grep -rn lop serve src/")
+    # A `-c` that merely PRINTS the entry point is not a daemon, and neither is the
+    # app's own identity probe (which imports the same module for a different job).
+    assert not services.is_serve_command('/usr/bin/python3 -c "print(1)" serve')
+    assert not services.is_serve_command(
+        "/usr/bin/python3 -c import json, sys; from local_operator.cli import main;"
+        " print(json.dumps([sys.executable]))"
+    )
+    assert not services.is_serve_command(
+        "/Users/me/.local/share/lop/generations/2026/tools/local-operator/bin/python "
+        "-c from local_operator.cli import main; main() --version"
+    )
+
+
+def test_the_wait_answers_from_its_last_read() -> None:
+    """R3-2/N-4: the three-valued wait describes its FINAL read, not a blip.
+
+    Readings ``unreadable, unreadable, still there`` — the process table blipped for
+    both polls and then answered that the process is running. The wait must answer
+    "still there". The round-1 version kept a sticky "something was unreadable" flag,
+    so this exact input returned DOUBT and the report printed "the process table
+    could not be read" over a reading that had already answered.
+    """
+    def _scripted(values: list[bool | None]):
+        queue = list(values)
+
+        def _read(_pid: int) -> bool | None:
+            value = queue.pop(0)
+            if not queue:
+                queue.append(value)
+            return value
+
+        return _read
+
+    blipped = services._await_exit(
+        4242, _scripted([None, None, True]), _no_sleep, 0.001, 0.0005
+    )
+    assert blipped is False, "the last read said still-there, so the answer is still-there"
+    # And the other two answers still come through, so this is three-valued rather
+    # than merely "never None".
+    assert services._await_exit(4242, _scripted([None, False]), _no_sleep, 0.001, 0.0005) is True
+    assert services._await_exit(4242, _scripted([None]), _no_sleep, 0.001, 0.0005) is None
