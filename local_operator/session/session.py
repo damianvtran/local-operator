@@ -107,6 +107,7 @@ from local_operator.harness.redaction import current_tool_source, set_shape_hit_
 # the renderer calls it and nothing outside needs it — so it is deliberately NOT
 # reachable from ``local_operator.session.session``.
 from local_operator.harness.render import _default_convert_to_llm, _is_todo_reminder
+from local_operator.harness.replay_bound import bound_replay_payloads
 from local_operator.harness.subagent import (
     SubagentModelUnavailable,
     read_effort_tier_selectors,
@@ -145,6 +146,7 @@ from local_operator.harness.types import (
     StreamToolCallDelta,
     StreamUsageEvent,
     TextContent,
+    ToolCall,
     ToolCallComposeEvent,
     ToolContext,
     ToolExecutionEndEvent,
@@ -855,6 +857,66 @@ _PERSISTABLE_CUSTOM_TYPES: frozenset[str] = frozenset(
         # resume time; the harness must not replay a claim it cannot re-verify.
     }
 )
+
+
+#: What the model is told when it answers an aside with a tool call.
+#:
+#: Off the record there is nothing to run: the aside request carries the live tool
+#: catalogue only to stay on the working turn's cached prefix (see
+#: ``Session.complete_aside``), so a ``tool_use`` in the answer is inert. Sending
+#: the model its own call back, followed by this refusal, is what makes the one
+#: bounded retry a CORRECTION — the retry runs with ``tools=[]`` *and* with the
+#: rejected call and its error result in the request, so the model can see why it
+#: is being asked again instead of repeating the same answer into silence.
+ASIDE_TOOL_CALL_REFUSAL = (
+    "This was an off-the-record aside: tool calls are not available here, so this "
+    "call was rejected and nothing ran. Answer the user's question in plain text "
+    "or markdown."
+)
+
+
+def _collect_tool_call_delta(state: dict[int, dict[str, Any]], event: Any) -> None:
+    """Fold one ``StreamToolCallDelta`` into the per-``index`` accumulator.
+
+    The same grammar ``AgentLoop._assemble_tool_call`` uses, deliberately: a
+    provider streams one call as a sequence of fragments (the id first or last,
+    the name in pieces, the arguments a few bytes at a time), and a second
+    reading of that shape is a second place for it to drift.
+    """
+    entry = state.setdefault(event.index, {"id": "", "name": "", "arg_parts": []})
+    if event.id:
+        entry["id"] = event.id
+    if event.name:
+        entry["name"] += event.name
+    if event.argument_delta:
+        entry["arg_parts"].append(event.argument_delta)
+
+
+def _assemble_aside_tool_calls(state: dict[int, dict[str, Any]]) -> list[ToolCall]:
+    """The calls the wire carried, in ``index`` order, as the provider sent them.
+
+    ``raw_arguments`` keeps the exact JSON string that streamed, so a provider
+    that requires the verbatim form gets back what it sent; ``arguments`` is the
+    parsed mapping when the string parses to one and empty when it does not —
+    ``AgentLoop._assemble_tool_call`` leaves ``{}`` there too, because this turn
+    exists to correct the model, not to validate its arguments.
+    """
+    calls: list[ToolCall] = []
+    for _, entry in sorted(state.items()):
+        raw = "".join(entry["arg_parts"]).strip()
+        arguments: dict[str, Any] = {}
+        if raw:
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                arguments = parsed
+        call = ToolCall(name=entry["name"], arguments=arguments, raw_arguments=raw or None)
+        if entry["id"]:
+            call.id = entry["id"]
+        calls.append(call)
+    return calls
 
 
 def _pair_spliced_tool_results(messages: list[Message]) -> list[Message]:
@@ -4166,7 +4228,18 @@ class Session:
         changes, _ = self._system_state_delta(desired)
         if changes:
             history.append(self._system_state_message(changes))
-        return blocks, self._render_history([*history, *turns])
+        # The ASIDE must be bounded by the same rule as the turn it runs beside,
+        # for two reasons that are really one. A helper or the compaction
+        # advisor is a second conversation request over the same transcript, so
+        # leaving it unbounded re-sends exactly the payload the turn just
+        # elided (measured: the same tool row was 8,190 chars on the turn and
+        # 123,780 here). And ``complete_aside`` is deliberately byte-identical
+        # to the turn so it READS THE TURN'S PROVIDER CACHE -- a bound applied
+        # at one site and not the other diverges them at the turn's LAST
+        # message, which is precisely where the cached prefix ends. Applying
+        # the same deterministic function to the same messages is what keeps
+        # the two identical; the turn's own seam is ``harness/loop.py``.
+        return blocks, bound_replay_payloads(self._render_history([*history, *turns]))
 
     @property
     def model(self) -> ModelSpec:
@@ -13118,10 +13191,28 @@ class Session:
         self,
         turns: Sequence[AgentMessage],
         *,
+        aside_instruction: bool = True,
         on_delta: Callable[[str], None] | None = None,
         on_usage: Callable[[Usage], None] | None = None,
     ) -> str:
         """Answer a side question against the live context WITHOUT joining it.
+
+        ``aside_instruction`` is ACCEPTED AND NOT ACTED ON, and both halves of
+        that are deliberate. This primitive never wraps: it is the shared bottom
+        of callers that own their own instruction — the TUI's ``/btw`` overlay
+        formats ``ASIDE_PROMPT`` itself, and the goal-loop judge sends
+        ``LOOP_JUDGE_PROMPT``, which must never be framed as an aside — so there
+        is nothing here for the flag to switch. It is in the signature so a
+        caller can state the same intent against whichever hop it happens to
+        hold: ``tui/app.py`` reaches this method directly when it owns the
+        session, and an ``AttachedSession`` (whose flag crosses the wire to the
+        seam that does apply the wrap) when it is only viewing one. One call site
+        that had to branch would be one call site that can get the branch wrong.
+        THE LANDMINE, documented rather than hidden: making this primitive honour
+        a True here would apply ``ASIDE_PROMPT`` to the judge's question — the
+        one request ``session/aside.py`` and both seams state must never receive
+        it — so the wrap belongs at the seams, and the flag rides the call to
+        reach them.
 
         This is ``complete_once``'s opposite number. ``complete_once`` is for
         errands that need the provider but not the conversation (auto-naming);
@@ -13180,12 +13271,35 @@ class Session:
         call and NOTHING else — the model "answered" the question by reaching
         for ``read``. That would surface as an empty answer on the card, which
         reads as a provider fault. So when the stream carried a tool call and
-        no text, the request is retried once with ``tools=[]``: the tools block
-        is the front of the prefix, so this retry is a full re-process at
-        write price, but it is bounded to that rare case rather than paid on
-        every aside, and it gives the user an answer instead of a blank. An
-        answer that mixes text and a tool call is returned as its text
-        without a retry; the text is what was asked for.
+        no text, the request is retried ONCE, with the model's own rejected
+        call appended to the message list for THIS request only — the assistant
+        turn exactly as the wire carried it (id, name, arguments), followed by
+        one error tool result per call id saying the call was not run because
+        tool calls are unavailable off the record — and with ``tools=[]`` so the
+        wire offers nothing to call. The pairing is not cosmetic: an assistant
+        turn carrying ``tool_calls`` with no matching result for every id is a
+        400 on every provider wire (the same rule :meth:`_wire_legal_snapshot`
+        exists to hold), so the retry would be REJECTED rather than answered.
+        None of that append reaches the live context, the transcript or the
+        session's event fan-out: it is built into a copy of the request.
+
+        The tools block is the front of the prefix, so this retry is a full
+        re-process at write price, but it is bounded to that rare case rather
+        than paid on every aside. An answer that mixes text and a tool call is
+        returned as its text without a retry; the text is what was asked for.
+        An empty answer that carried NO call (a refusal, a length stop) is the
+        provider's answer and is returned as ``""`` — retrying it would only pay
+        the full prefix twice.
+
+        The retry is BOUNDED TO ONE, and a second bare call (or an empty answer
+        after it) raises :class:`AsideUnanswered` rather than returning ``""``.
+        The empty string is what made this the silent case: the UI renders it as
+        an unexplained blank, when what actually happened is that the model
+        would not answer in text. The raise is the honest outcome, and it is the
+        correct one for the goal-loop judge, which reaches this method with
+        ``LOOP_JUDGE_PROMPT`` and counts a raise as a judge failure
+        (``MAX_LOOP_JUDGE_FAILURES``) — a judge that cannot answer in text has
+        failed to judge.
 
         ``on_usage`` fires once per provider call, so a single aside may
         deliver TWO usage figures when that retry runs — the first call's
@@ -13217,6 +13331,11 @@ class Session:
         )
         parts: list[str] = []
         called_tool = False
+        # Per-index accumulation of the call the wire carried, keyed by the
+        # delta's own ``index``: an answer that is nothing BUT a call is handed
+        # back to the model on the retry below, so its fragments have to be
+        # reassembled into the turn the provider actually sent.
+        calls: dict[int, dict[str, Any]] = {}
         async for event in self._stream_fn(request, None):
             if isinstance(event, StreamTextDelta):
                 parts.append(event.delta)
@@ -13224,18 +13343,40 @@ class Session:
                     on_delta(event.delta)
             elif isinstance(event, StreamToolCallDelta):
                 # Inert by design (see the docstring): recorded only so an
-                # answer that was NOTHING BUT a call can be retried below.
+                # answer that was NOTHING BUT a call can be corrected below.
                 called_tool = True
+                _collect_tool_call_delta(calls, event)
             elif isinstance(event, StreamUsageEvent) and on_usage is not None:
                 on_usage(event.usage)
         if parts or not called_tool:
             return "".join(parts)
         # Tool call and no text: the model tried to act instead of answering.
-        # Retry once with no tools at all — off the cache prefix, but bounded
-        # to this case. ``tools=[]`` never reaches the Anthropic mapping, so
-        # the wire genuinely offers nothing to call.
+        # Hand the rejected call back — the assistant turn verbatim, paired with
+        # one error result per call id — and retry once with no tools at all.
+        # ``tools=[]`` never reaches the Anthropic mapping, so the wire genuinely
+        # offers nothing to call; the appended turn tells the model WHY it is
+        # being asked again rather than leaving it to repeat itself in silence.
+        #
+        # Built into a COPY of the request: the live context, the transcript and
+        # the event fan-out are untouched by this, which is the no-trace contract
+        # the docstring states — the correction exists only inside this request.
         logger.debug("aside answered with a bare tool call; retrying without tools")
-        retry = request.model_copy(update={"tools": []})
+        rejected = _assemble_aside_tool_calls(calls)
+        correction: list[AgentMessage] = [
+            Message(role="assistant", content=[], tool_calls=rejected)
+        ]
+        correction.extend(
+            Message(
+                role="tool",
+                content=[TextContent(text=ASIDE_TOOL_CALL_REFUSAL)],
+                tool_call_id=call.id,
+                tool_name=call.name,
+            )
+            for call in rejected
+        )
+        retry = request.model_copy(
+            update={"tools": [], "messages": [*request.messages, *correction]}
+        )
         async for event in self._stream_fn(retry, None):
             if isinstance(event, StreamTextDelta):
                 parts.append(event.delta)
@@ -13243,7 +13384,17 @@ class Session:
                     on_delta(event.delta)
             elif isinstance(event, StreamUsageEvent) and on_usage is not None:
                 on_usage(event.usage)
-        return "".join(parts)
+        if parts:
+            return "".join(parts)
+        # A second bare call, or an empty answer AFTER being corrected: the model
+        # will not answer this in text, so say so rather than return the empty
+        # string the card renders as an unexplained blank. Imported here rather
+        # than at module scope for the reason the other ``session.errors``
+        # imports in this file are lazy: the module is a leaf this file may not
+        # import at the top without a cycle.
+        from local_operator.session.errors import AsideUnanswered
+
+        raise AsideUnanswered()
 
     async def advise_compaction(self, turns: Sequence[AgentMessage]) -> str:
         """One off-loop request asking the model WHEN to compact (BETA).
