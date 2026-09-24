@@ -94,6 +94,26 @@ MISS_REFETCH_MIN_AGE_S = 10 * 60
 #: sync miss path is unaffected: it has its own stale-beats-absent rule.
 REVALIDATE_BACKOFF_S = 5 * 60
 
+#: Per-process floor between SYNCHRONOUS attempts on one document after a fetch
+#: FAILED, i.e. the sibling of :data:`REVALIDATE_BACKOFF_S` for the path a caller
+#: actually waits on. Without it a failing provider is re-asked on every read
+#: that needs a live listing: a failed fetch leaves no fresh document, so its age
+#: keeps growing past every TTL and each read re-issues the request. The picker's
+#: 15-minute TTL bounds that for a HEALTHY provider; a provider answering 429/5xx
+#: is asked again on EVERY live read, and a surface that refetches on window focus
+#: lets a user amplify their own rate limit by alt-tabbing.
+#:
+#: Five minutes, not the 24 h the hard TTL would allow, and that is the point: it
+#: BOUNDS the retry rate rather than hiding a credential the user just repaired,
+#: so the worst case is one wasted round trip per document per five minutes
+#: against a provider that is answering again. IN-PROCESS only, like its sibling:
+#: a restart retries at once, and a second process is a second opinion rather than
+#: a client of this one's memory. It also applies only while the document it was
+#: recorded against is still the document being read (see :func:`_document_stamp`),
+#: so a removed or replaced document is fetched at once rather than reported stale
+#: from a memory about something else.
+LISTING_FAILURE_BACKOFF_S = 5 * 60
+
 
 def default_cache_dir() -> Path:
     """Same cache root the skills index uses, so there is one place to clear."""
@@ -413,6 +433,10 @@ class Listing:
     fetched: bool = False
     #: A live fetch was attempted on this call and raised; ``payload`` is the
     #: stale document (or ``None`` when there was none to fall back on).
+    #: Also set when a fetch was NOT attempted because this document's previous
+    #: attempt failed inside :data:`LISTING_FAILURE_BACKOFF_S` — the flag means
+    #: "this read could not produce a live listing", which is what both cases
+    #: are, and discovery's ``"stale"`` is the right status for both.
     failed: bool = False
     #: A background revalidation thread was started by this call.
     refreshing: bool = False
@@ -430,6 +454,20 @@ _last_attempt: dict[str, float] = {}
 #: Live revalidation threads, so tests can join them instead of sleeping.
 _threads: dict[str, threading.Thread] = {}
 _revalidate_lock = threading.Lock()
+
+#: The last SYNCHRONOUS fetch failure per document, as ``(monotonic_time,
+#: document_stamp)``. In-process only, so a restart retries at once (a persisted
+#: failure memory would turn a five-minute rate bound into an outage the user
+#: cannot clear by hand), and the STAMP is why the value is a pair: the memory is
+#: a statement about a DOCUMENT, not about a path. Without it a document that
+#: vanished or was replaced while the memory stood was reported ``stale``
+#: without any attempt — which is what pytest's reused ``tmp_path`` exposed
+#: (all four parametrizations of a long-named test share one truncated directory
+#: prefix, so a dir is created again empty under a path this process still
+#: remembered failing on) and what a cache sweep, a peer process's
+#: ``invalidate`` or a hand-cleared cache dir does for real.
+_last_failure: dict[str, tuple[float, tuple[int, int] | None]] = {}
+_failure_lock = threading.Lock()
 
 
 def _revalidation_threads() -> list[threading.Thread]:
@@ -510,6 +548,63 @@ def _schedule_revalidate(
     return True
 
 
+def _document_stamp(path: Path) -> tuple[int, int] | None:
+    """An identity for whatever document is at ``path`` — ``None`` when none is.
+
+    Size and nanosecond mtime of the file the reader is about to serve. Two calls
+    return the same pair only for the SAME document version, which is exactly the
+    question the failure backoff asks: a document that appeared, was replaced or
+    was removed is not the one this process watched fail.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
+
+
+def _failure_backoff_active(path: Path) -> bool:
+    """Whether a synchronous fetch for ``path`` is inside its failure window.
+
+    The read half of :data:`LISTING_FAILURE_BACKOFF_S`, kept beside the write half
+    in :func:`read_listing` so the two cannot drift apart. The remembered failure
+    has to be about THIS document: a stamp mismatch means the document the attempt
+    failed on is gone or different, so the request is made rather than answered
+    from a memory that no longer describes anything.
+    """
+    with _failure_lock:
+        recorded = _last_failure.get(str(path))
+    if recorded is None:
+        return False
+    recorded_at, stamp = recorded
+    return (
+        stamp == _document_stamp(path)
+        and time.monotonic() - recorded_at < LISTING_FAILURE_BACKOFF_S
+    )
+
+
+def _record_failure(path: Path) -> None:
+    """Remember that a synchronous fetch for ``path`` just failed.
+
+    Called after the attempt raised, so the stamp names the document that attempt
+    was made against — a failed fetch writes nothing.
+    """
+    with _failure_lock:
+        _last_failure[str(path)] = (time.monotonic(), _document_stamp(path))
+
+
+def _clear_failure(path: Path) -> None:
+    """Forget a document's failure history: it answered, so it is healthy again.
+
+    Cleared on SUCCESS rather than merely left to expire, so the memory is a
+    statement about the LAST attempt and not a lingering accusation: a document
+    whose backoff lapsed, was fetched successfully and then held in cache would
+    otherwise still carry a timestamp that a later reader could act on.
+    """
+    with _failure_lock:
+        _last_failure.pop(str(path), None)
+
+
 def peek_listing(key: str, *, cache_dir: Path | None = None) -> Listing:
     """The document on disk, read-only: no fetch, no revalidation, no sweep.
 
@@ -583,6 +678,18 @@ def read_listing(
     poll a foreign lease holder gets. Rare (two ids, one missing, resolved
     within seconds of each other) and bounded, so the paint path stays bounded.
 
+    A synchronous fetch that FAILED is remembered for
+    :data:`LISTING_FAILURE_BACKOFF_S` (see that constant for why the sync side
+    needs a bound of its own, and note that the background path above keeps its
+    separate ``REVALIDATE_BACKOFF_S``). ``refetch_if`` cannot opt out of it — the
+    whole point is that the reader's "this document is too old for my id" verdict
+    is exactly what a failing provider answers on every call, so honouring it
+    unconditionally is the loop the backoff exists to break; the wait is bounded
+    and an explicit :func:`invalidate` — what a credential change or a newly
+    configured endpoint goes through — retries at once. The memory is bound to the
+    document it was recorded against, not merely to the path, so a document that
+    was removed or replaced in the meantime is fetched rather than skipped.
+
     A cross-process fetch lease guards the miss path: several lop sessions
     cold-starting together all miss in the same instant, and without the
     lease each fires its own live listing request at the same public
@@ -604,6 +711,23 @@ def read_listing(
                 refreshing = _schedule_revalidate(key, revalidate or fetch, cache_dir)
             return Listing(payload=payload, age_s=age, refreshing=refreshing)
         logger.debug("%s catalogue (%.0fs old) declared expired by its reader", key, age)
+
+    # THE SYNC SIDE OF THE FAILURE BACKOFF (see ``LISTING_FAILURE_BACKOFF_S``):
+    # this document's last synchronous attempt failed moments ago, and asking
+    # again right now is how one 429 becomes a retry loop — a failed fetch leaves
+    # no fresh document, so its age only ever grows and every later read reaches
+    # this line. Checked BEFORE the lease, so a backed-off read neither waits on
+    # a fetch it will not make nor blocks a caller that would make one. The
+    # verdict is the one a failed fetch returns (stale beats absent), so the
+    # caller sees the state it would have seen a moment later, minus the round
+    # trip.
+    if _failure_backoff_active(path):
+        logger.debug(
+            "%s catalogue fetch skipped: last attempt failed inside %.0fs",
+            key,
+            LISTING_FAILURE_BACKOFF_S,
+        )
+        return Listing(payload=payload, age_s=age, failed=True)
 
     # CROSS-PROCESS FETCH LEASE (see the class docstring): the winner fetches
     # and writes; losers give the winner a brief window, re-read, and serve
@@ -637,6 +761,7 @@ def read_listing(
         fresh = fetch()
     except Exception as exc:  # noqa: BLE001 - any client/transport error degrades
         lease.release()
+        _record_failure(path)
         if payload is not None:
             # Stale beats absent: the numbers are days old at worst, whereas
             # the static fallback is wrong by nearly a factor of six.
@@ -647,6 +772,7 @@ def read_listing(
 
     _write_cache(path, fresh)
     lease.release()
+    _clear_failure(path)
     return Listing(payload=fresh, age_s=0.0, fetched=True)
 
 
@@ -678,9 +804,19 @@ def invalidate(key: str, *, cache_dir: Path | None = None) -> None:
 
     Called by ``discovery._available_models`` -- the one place that maps a cached
     payload -- when a document it just read yielded no usable rows.
+
+    Also forgets the document's failure backoff
+    (:data:`LISTING_FAILURE_BACKOFF_S`): this function IS the app's "forget what
+    you know about this document" call, and ``ProviderController._configure_local``
+    reaches it after the user points a local provider at a NEW endpoint. Leaving
+    the window standing there would answer a just-repaired connection with the
+    previous endpoint's failure for up to five minutes -- the one case the bound
+    promises not to hide.
     """
+    path = _cache_path(key, cache_dir)
+    _clear_failure(path)
     try:
-        _cache_path(key, cache_dir).unlink(missing_ok=True)
+        path.unlink(missing_ok=True)
     except OSError as exc:  # pragma: no cover - read-only cache dir
         logger.debug("could not invalidate %s catalogue: %s", key, exc)
 
@@ -697,7 +833,10 @@ def invalidate_documents(storage_id: str, *, cache_dir: Path | None = None) -> i
     resolve to -- that is decided later, by ``_serves_account_scoped_catalogue``
     against the stored row -- so targeting a single key would leave the document
     the next listing actually reads untouched, which is the whole failure this
-    exists to prevent.
+    exists to prevent. Same for the failure backoff
+    (:data:`LISTING_FAILURE_BACKOFF_S`): a credential that was just repaired or
+    replaced must be tried AT ONCE, because a fresh login is the strongest
+    evidence the next attempt will answer where the last one did not.
 
     The dot separator is load-bearing rather than incidental: ``openai.*`` cannot
     match ``openai-device.listing.json``, so a provider whose id is a prefix of
@@ -709,6 +848,7 @@ def invalidate_documents(storage_id: str, *, cache_dir: Path | None = None) -> i
     dropped = 0
     try:
         for document in directory.glob(f"{storage_id}.*listing.json"):
+            _clear_failure(document)
             try:
                 document.unlink(missing_ok=True)
                 dropped += 1
