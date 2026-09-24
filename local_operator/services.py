@@ -514,8 +514,7 @@ def is_serve_command(command: str) -> bool:
     # most needed to be able to end (review round 3, R3-1: this predicate refused the
     # app's live backend on 1111 while `services status` told the operator to reclaim
     # that exact pid).
-    entrypoint = _serve_entrypoint_length(words)
-    if entrypoint:
+    if _is_serve_entrypoint(words):
         return True
     return False
 
@@ -536,8 +535,8 @@ def _procname_label_length(words: list[str]) -> int:
     return 0
 
 
-def _serve_entrypoint_length(words: list[str]) -> int:
-    """Where the desktop app's ``-c`` entry point ends and its verb sits; ``0`` if none.
+def _is_serve_entrypoint(words: list[str]) -> bool:
+    """Is this argv the desktop app's ``-c`` entry point AND its ``serve`` verb?
 
     ``<interpreter> -c "from local_operator.cli import main; main()" serve …`` — the
     app's managed backend, which is never branded (see :data:`SERVE_ENTRYPOINT_WORDS`).
@@ -548,11 +547,16 @@ def _serve_entrypoint_length(words: list[str]) -> int:
     the ``-c`` the third — and the round-3 version refused the app's own backend for
     exactly those users. Measured (review round 4, R4-1).
 
-    The accepted trade-off, recorded because it widens a proof: this also admits the
-    app's own pre-exec wrapper (``bash -c 'exec "$@"' owned-serve <interpreter> -c …
-    serve``). That costs nothing here — the plan execs, so no nameable pid is ever
-    that ``bash``, and if one were, it would be a shell whose argv carries this
-    product's serve entry point, which is what a STRAY proof has to recognise.
+    A BOOLEAN, not the index it used to return (review round 5, R5-2): the only
+    consumer tested truthiness, and a returned index reads like a length.
+
+    The accepted trade-off, recorded because it widens a proof: because the ``-c`` is
+    SEARCHED FOR, this also admits an argv carrying an EARLIER, unrelated ``-c`` and
+    the app's own pre-exec wrapper (``bash -c 'exec "$@"' owned-serve <interpreter>
+    -c … serve``) — both still carry this product's serve entry point followed by the
+    verb (review round 5, R5-1). That costs nothing here: the app's plan execs, so no
+    nameable pid is ever that ``bash``, and an interpreter handed these exact words as
+    ``-c`` *is* our serve entry point, which is what a STRAY proof has to recognise.
     """
     window = len(SERVE_ENTRYPOINT_WORDS)
     for index in range(len(words) - window - 1):
@@ -561,8 +565,8 @@ def _serve_entrypoint_length(words: list[str]) -> int:
         if tuple(words[index + 1 : index + 1 + window]) != SERVE_ENTRYPOINT_WORDS:
             continue
         if words[index + 1 + window] == SERVE_LAUNCHER_VERB:
-            return index + window + 2
-    return 0
+            return True
+    return False
 
 
 def serve_process(pid: int, *, timeout_s: float = HEALTH_TIMEOUT_S) -> str | None:
