@@ -4267,6 +4267,93 @@ def _is_truncated_pem(hit: ShapeHit) -> bool:
     return re.search(r"END [A-Z0-9 ]*PRIVATE KEY", upper) is None
 
 
+#: The shortest matched value whose own characters may be CLAIMED as readable
+#: credential material — the floor under the exposure judgement.
+#:
+#: **Why a floor at all.** ``exposed`` is the whole severity classification: it is
+#: what raises the rotation notice, and it was computed for a match of ANY length.
+#: Below this width the claim is not supportable, because a fragment that short is
+#: not credential material and its characters are all but certain to reappear in
+#: the same text for innocent reasons. Measured on the module's own source: two
+#: two-character and one four-character ``dsn-password-plain`` match read their own
+#: characters back out of ordinary prose — the Python keyword ``pass`` among them —
+#: and the session escalated with ``labels=()``, announcing "a credential the shape
+#: table could not name". A match that short WAS masked in the text (the rule
+#: matched it and replaced it), so whatever is left is text the mask did not write,
+#: not a readable credential.
+#:
+#: **The number, and what it costs in each direction.** Both bounds land on five,
+#: which is why it is five rather than a tuning knob:
+#:
+#: * DOWNWARD it is bounded by the module's own shortest real credential. The
+#:   corpus's one escalating case (``amqp DSN``) carries a FIVE-character password
+#:   that survives deliberately in the userinfo, and :func:`_run_shapes` records a
+#:   seven-character ``-pass`` value as real in the same breath; both must keep
+#:   escalating, so the floor cannot sit above five. The flag refusal's own boundary
+#:   (:data:`_FLAG_PROSE_MAX_CHARS`, with its test pinning five, six and seven
+#:   characters as escalating again) is the same edge approached from the other side.
+#: * UPWARD it is the width below which a match cannot be told from ordinary text
+#:   ANYWHERE in the text — the judgement :data:`_FLAG_PROSE_MAX_CHARS` already makes
+#:   for this class — so one past that width is the first at which the survival
+#:   question has any discriminating power.
+#:
+#: The cost, stated the way the module states its other floors: a credential-shaped
+#: value of ONE to FOUR characters really printed twice in the clear is graded
+#: CONTAINED and files no rotation demand. At that width it cannot be distinguished
+#: from the prose around it, which is the whole of the reason — and the MASK is
+#: untouched by this floor, so the text is rewritten exactly as it was; only the
+#: severity claim is withheld, and ``complete`` still says what that mask may claim.
+_EXPOSURE_MIN_VALUE_LEN = _FLAG_PROSE_MAX_CHARS + 1
+
+
+def _value_may_be_claimed_exposed(value: str) -> bool:
+    """Whether a matched value's own characters may be CLAIMED as readable material.
+
+    Two refusals, and they answer different questions, so both are needed:
+
+    * WIDTH (:data:`_EXPOSURE_MIN_VALUE_LEN`) — below it a match cannot be told
+      from ordinary text anywhere in the text, so the survival question has no
+      discriminating power and the claim is refused rather than answered.
+    * SUBSTANCE (:func:`_value_is_not_a_credential`) — the judgement the MASKING
+      floor (:func:`_assignment_value_guard`) already makes, reused rather than
+      restated so a second reading of ``is this a credential`` cannot drift from
+      it. The REGISTRATION floor (:func:`is_registerable_component`) is NOT a
+      second caller of the whole predicate: it consults only its placeholder half
+      (:func:`is_placeholder_component`) plus its own length floor, exactly as it
+      did before this change, and it is byte-identical across it. It subsumes the
+      placeholder consult this site used to make on its own, and it reaches the
+      cases no word list can: a value that is an expression, a reference, a type
+      name or a path is not credential material in either direction.
+
+    ``name=""`` because the exposure judgement is anchored on the VALUE's own
+    characters, not on a name: the name-driven clauses of that predicate excuse a
+    value that is a REFERENCE to a name (:func:`_repeats_its_own_name`,
+    ``name.startswith("_")``), and a value that reached a mask was already judged
+    under its real name at the masking floor. An empty name makes exactly those
+    clauses inert and leaves the value's own shape doing the work.
+
+    ``strong=True`` is the CONSERVATIVE arm for a hit whose name is unknown here:
+    it refuses the claim only for values that are code, references, placeholders or
+    paths whatever a name says, and leaves ambiguous values their exposure. The
+    other arm relaxes in the wrong direction — under it the corpus's own
+    five-character ``amqp`` password stops escalating, which is a silent missed
+    leak, and a missed leak is not recoverable where a spurious rotation is.
+    """
+    if len(value) < _EXPOSURE_MIN_VALUE_LEN:
+        return False
+    if REDACTION_MARKER in value:
+        # A value carrying the harness's OWN marker is not ordinary text and cannot be
+        # read as code: the marker is text a mask wrote, so the expression/reference
+        # clauses of the predicate (which is where ``[`` and ``]`` land) would refuse a
+        # claim for a reason that has nothing to do with the value's own spelling. The
+        # survival question decides it instead, which is the documented limit
+        # :func:`_credential_fragments_survive` records: a value containing the marker
+        # that survives WHOLLY still escalates, and a partial survivor is ungradeable
+        # and stays refused — its surviving fragment is spelled exactly like a mask.
+        return True
+    return not _value_is_not_a_credential(value, name="", strong=True)
+
+
 def _only_fully_masked(hits: list[ShapeHit], text: str) -> list[ShapeHit]:
     """Grade every hit: contained, contained-but-unclaimable, or EXPOSED.
 
@@ -4313,25 +4400,45 @@ def _only_fully_masked(hits: list[ShapeHit], text: str) -> list[ShapeHit]:
         # cannot swallow an exposure: a block that was masked is contained, and
         # one that left a fragment readable is not.
         #
-        # A PLACEHOLDER/REFERENCE value is never graded EXPOSED, and this consult is
-        # the whole of the false-positive fix rather than a wording change. The DSN
-        # rule masks the copy INSIDE the URL and deliberately leaves a bare second
-        # mention READABLE — the value is a ``$VAR`` reference, and
-        # ``is_placeholder_component`` is exactly what keeps it unmasked (it is the
-        # predicate ``_value_is_not_a_credential`` consults at the masking floor).
-        # The fragment test then found that deliberately-readable survivor under the
-        # hit's own value and read it as a partial mask, so a duplicated reference
-        # filed a rotation demand for a value that was never credential material:
-        # ``postgres://u:$VAR@host`` plus a later ``$VAR`` escalated, and the same
-        # line without the second mention did not. The exposed path was the ONE site
-        # that did not consult the predicate — the masking floor and the registration
-        # floor (:func:`is_registerable_component`) both do — and no word-list change
-        # can reach it, because the value is correctly on the list already.
+        # The survival question is asked LAST, because it is the expensive half and
+        # it is the half with no discriminating power for a value that is not
+        # credential material to begin with. Two refusals run in front of it, and
+        # they are the whole of the false-positive fix rather than a wording change:
         #
-        # The conservative direction is unchanged for every real value: only a
-        # placeholder is excused, and a genuinely half-masked SECRET (or a duplicate
-        # of one) still escalates, because its own characters are genuinely readable.
-        exposed = not is_placeholder_component(hit.value) and _credential_fragments_survive(
+        # * WIDTH — :data:`_EXPOSURE_MIN_VALUE_LEN`. This is the floor the exposed
+        #   path was missing, and it is what stops a two-to-four character ordinary
+        #   word being claimed as readable credential material: at that width the
+        #   characters reappear in the same text for innocent reasons, so the
+        #   fragment test returns True for prose (the Python keyword ``pass``, read
+        #   out of this module's own source, was one such escalation).
+        # * SUBSTANCE — :func:`_value_is_not_a_credential`, the predicate the
+        #   MASKING floor (:func:`_assignment_value_guard`) already consults and
+        #   this site did not. (The REGISTRATION floor
+        #   (:func:`is_registerable_component`) does not consult the whole
+        #   predicate — only its placeholder half, plus its own length floor — so
+        #   this site is that predicate's SECOND caller, not its third.) It
+        #   subsumes the placeholder consult that used to sit here: the DSN rule
+        #   masks the copy INSIDE a URL and deliberately leaves a bare second mention
+        #   READABLE, because the value
+        #   is a ``$VAR`` reference — and the fragment test then found that
+        #   deliberately-readable survivor under the hit's own value and read it as a
+        #   partial mask, so ``postgres://u:$VAR@host`` plus a later ``$VAR`` filed a
+        #   rotation demand for a value that was never credential material, while the
+        #   same line without the second mention did not. No word-list change could
+        #   reach that, because the value is correctly on the list already.
+        #
+        # The conservative direction is unchanged for every real value: a genuinely
+        # half-masked SECRET (or a duplicate of one) still escalates, because its own
+        # characters are genuinely readable. The floor sits below the module's own
+        # shortest real credential for that reason, and what
+        # ``test_a_short_but_real_credential_keeps_its_escalation`` pins is the two
+        # routes by which a short value still survives it: the ``amqp`` DSN — whose
+        # userinfo username, equal to the password, stays readable by the DSN rule's
+        # own design rather than by this floor — and a seven-character ``-pass`` value
+        # printed twice in the clear. A FULLY-MASKED five-character value is not one
+        # of them: it files nothing at either revision, so no masked case can pin this
+        # floor's lower edge.
+        exposed = _value_may_be_claimed_exposed(hit.value) and _credential_fragments_survive(
             hit, index
         )
         if _is_truncated_pem(hit) or exposed:
