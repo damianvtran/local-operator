@@ -484,6 +484,35 @@ TYPE_ANNOTATION_POSITIVES: tuple[Case, ...] = (
         "API" + "_KEY=" + "&" + _generic("Pass", "Word"),
         "a REFERENCE-marked stem base: the marker is spelling, not the name",
     ),
+    # --- the R4-1 class: a credential stem in a MIDDLE ``::`` segment ---
+    # The R3-1 fix read the base's FIRST segment (a whole-base ``startswith``) and its LAST
+    # (the leaf helper), so every segment BETWEEN them was invisible to both and the class
+    # was released with no hit — 504 of 504 on the round-4 grid, against 0 of 504 at
+    # ``origin/main``. Both interior positions are pinned here, with a reference marker and
+    # an argument list on one side each, because the miss was a POSITION inside a call site
+    # the last enumeration marked fixed (agent reviews R4-1 and R4-3). Every row is at
+    # least 8 characters, the assignment rule's own value floor, so it pins a reading this
+    # clause can reach.
+    Case(
+        "API" + "_KEY=" + "foo" + "::" + "Pass" + "::" + "Word",
+        "a credential stem in an INTERIOR segment, no argument list",
+    ),
+    Case(
+        "API" + "_KEY=" + _generic("foo" + "::" + "Pass" + "::" + "Word", "X"),
+        "the same interior stem over an argument list",
+    ),
+    Case(
+        "API" + "_KEY=" + "std" + "::" + "Secret" + "::" + "String",
+        "an interior credential WORD with a type name after it",
+    ),
+    Case(
+        "API" + "_KEY=" + "a" + "::" + "B" + "::" + "Pass" + "::" + "C",
+        "two interior positions in a four-segment path",
+    ),
+    Case(
+        "API" + "_KEY=" + "&" + "Pass" + "::" + "Word",
+        "an interior stem BEHIND a reference marker: both markers at once",
+    ),
 )
 
 

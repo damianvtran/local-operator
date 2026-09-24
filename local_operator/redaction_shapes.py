@@ -1222,7 +1222,20 @@ def _parse_type_expression(text: str, index: int, end: int, depth: int) -> tuple
                 # A lowercase word that is NOT a type name: ``Foo<word>``. A
                 # PRIMITIVE is a type name here, which is how ``Vec<u8>`` passes —
                 # and the allowance is spent only where an argument list was
-                # actually parsed, which is what keeps ``Pass<int>`` out.
+                # actually parsed.
+                #
+                # The WHOLE slice is read here, and that is deliberate (the family
+                # hunt's site 6). This line is reached only when the argument parsed as
+                # a NON-type, so it can only ever MASK — a whole-string read in the
+                # safe direction. A previous round claimed that token-splitting it
+                # would RELEASE qualified arguments; that claim has NO witness and is
+                # withdrawn. Patching this line to split the slice on ``::`` and accept
+                # any token moved the final verdict for 0 of 400 candidate values (and
+                # 0 in the reviewer's own 4752- and 1080-candidate sweeps): a
+                # ``::``-qualified slice that IS a type name is consumed as a type
+                # upstream and never arrives here. Leaving the whole-slice read is
+                # still the right call; the reason is that it is harmless, not that
+                # splitting it would leak (agent review R4-2).
                 argument_names_are_types = False
             if index < end and text[index] == ",":
                 index += 1
@@ -1283,7 +1296,9 @@ def _type_token_segments(token: str) -> tuple[str, ...]:
     released.
     """
     stripped = token.lstrip("&")
-    return (stripped, *stripped.split("::"))
+    # ``dict.fromkeys`` de-duplicates while keeping the order, so a single-segment token
+    # (``Pass``, ``&str``) yields one entry rather than the same name twice.
+    return tuple(dict.fromkeys((stripped, *stripped.split("::"))))
 
 
 def _base_is_a_credential_stem(base: str) -> bool:
