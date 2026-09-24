@@ -3339,10 +3339,18 @@ def build_app(daemon: MobileDaemon):
         # press works a moment later. The stream is woken so the client's
         # optimistic star is replaced by the listing's truth at once. Unpinning
         # stays allowed -- it cannot plant anything, and it answers ``false``.
+        #
+        # THE BODY CARRIES ONLY THE HALF THE WRAPPER CANNOT: both screens render
+        # this as "Could not save the pin: <this>", so a body that also said the
+        # pin was not saved read as two clauses doing one job -- and its second
+        # clause landed on `message` for a screen that had just said there are
+        # none (design round 5, D13). What is left names the reason and the
+        # remedy in one sentence, from either surface: the list's long-press has
+        # no composer in reach, so the advice is what to send, not where.
         if pinned and not await asyncio.to_thread(_session_folder_exists, session_id):
             daemon.table.notify_list_changed()
             return JSONResponse(
-                {"error": "this conversation is not saved yet; pin it after its first message"},
+                {"error": "no saved messages yet — pin it after you send one"},
                 status_code=409,
             )
         state = await asyncio.to_thread(daemon.table.set_pins, session_id, pinned)
