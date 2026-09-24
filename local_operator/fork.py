@@ -51,10 +51,13 @@ from pathlib import Path
 
 from local_operator.resume import (
     ATTACHMENT_SIDECAR_NAME,
+    GOAL_SIDECAR_NAME,
     ORIGIN_FORK,
     TITLE_SIDECAR_NAME,
     TRANSCRIPT_NAME,
     mark_session_origin,
+    read_goal_record,
+    write_goal_record,
 )
 
 #: The ownership stamp's name, imported rather than spelled again: the file this
@@ -119,10 +122,15 @@ FORK_BOUNDARY_INSTRUCTION = (
 #:   borne, so the fork's picker row is labelled instantly rather than by a
 #:   transcript window scan, and the fork starts under the parent's name until
 #:   the ordinary retitle path moves it.
+#: - ``goal.json`` carries the judged-goal record. The child IS a continuation of
+#:   the same work, so it inherits the objective, its status and its settled
+#:   history — but NOT the live judge, which is rewritten to a fresh state at the
+#:   fork boundary (see :func:`_rewrite_fork_goal_judge`).
 COPIED_SIDECARS: tuple[str, ...] = (
     TRANSCRIPT_NAME,
     ATTACHMENT_SIDECAR_NAME,
     TITLE_SIDECAR_NAME,
+    GOAL_SIDECAR_NAME,
 )
 
 #: Files that exist in a parent directory and must NOT reach the fork. Not read
@@ -263,6 +271,11 @@ def fork_session(
     except OSError as exc:
         raise ForkError(f"cannot copy the conversation into the fork: {exc}") from exc
 
+    # A fork's goal is the same work, so the record above is inherited — but its
+    # LIVE judge is not, and this is the one place that can be said once for
+    # every fork (bare, boot-prompted or spawned).
+    _rewrite_fork_goal_judge(fork_dir)
+
     # Written for EVERY fork, including a bare one. The marker is consumed into
     # memory by the fork's first ``Session`` construction and never enters the
     # transcript, preserving both the parent's bytes and its prompt-cache prefix.
@@ -307,6 +320,44 @@ def fork_session(
     # would silently wear its parent's name.
     mark_session_origin(fork_dir, ORIGIN_FORK, parent=parent_id, forked_at=time.time())
     return new_id
+
+
+def _rewrite_fork_goal_judge(fork_dir: Path) -> None:
+    """Reset an inherited goal record's LIVE judge, keeping the goal itself.
+
+    ``goal.json`` is copied byte-for-byte with the rest of the sidecars, which is
+    right for the objective, its status and its settled history — a fork of a
+    judged goal IS a continuation of that work, and a child that opened with no
+    goal would be a different conversation wearing the parent's transcript.
+
+    What must NOT survive the copy is the judge's live state. Copied verbatim,
+    an in-flight ``judging``/``continuing`` record is exactly the shape the
+    re-arm rule fires on (a restart that finds one re-arms rather than leaving
+    the goal inert), so the child would judge the parent's objective at its first
+    turn end — spending tokens on work the parent is still doing, in a fork the
+    user may never open.
+
+    The token is RE-MINTED rather than merely reset, and that is the half a
+    state reset alone would miss: the staleness guard drops a verdict whose token
+    has moved, so a child that kept the parent's token would accept the PARENT's
+    in-flight answer as its own.
+
+    No history entry is written: a fork is not a settle, and recording one would
+    put a row in every fork's history for work the user never completed.
+    """
+    payload = read_goal_record(fork_dir)
+    if payload is None:
+        return
+    judge = payload.get("judge")
+    payload["judge"] = {
+        **(judge if isinstance(judge, dict) else {}),
+        "state": "waiting",
+        "run": 0,
+        "failures": 0,
+    }
+    if payload.get("goal"):
+        payload["token"] = uuid.uuid4().hex
+    write_goal_record(fork_dir, payload)
 
 
 def _write_json_sidecar(path: Path, payload: dict[str, object]) -> None:

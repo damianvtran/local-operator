@@ -104,6 +104,7 @@ from local_operator.session.frontend_state import (
     SnapshotSubagentComms,
     SnapshotWakeScheduler,
     WakeState,
+    _fold_goal_status,
 )
 from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.session.model_selection import StoredModelSelection
@@ -1710,8 +1711,9 @@ class AttachedSession:
         ask — but "no owner" is not "nothing is known". The session's last
         runtime wrote a full ``FrontendSessionState`` to the transcript at every
         turn end (``FrontendStateStore.checkpoint``), and that row already holds
-        the subagent roster, the todo list, the conversation title, the goal and
-        the accumulated spend.
+        the subagent roster, the todo list, the conversation title, the goal WITH
+        its judged record (status, live judge, settled history) and the
+        accumulated spend.
 
         Before this, none of it was read: a resumed session opened with an empty
         subagent panel and no todos, and stayed that way until the user sent a
@@ -1724,10 +1726,10 @@ class AttachedSession:
         state is authoritative for the rest, so the two are merged rather than
         one replacing the other: ``cwd`` and the model come from THIS process
         (using the shared conversation-selection reader, not mutable defaults),
-        while the roster, todos, title and costs come from disk. ``jobs`` are
-        stamped ``restored`` for the same reason the session's own restore does
-        — a restored row has no in-process trajectory, and the panel says so
-        rather than rendering a busy child as empty.
+        while the roster, todos, title, goal record and costs come from disk.
+        ``jobs`` are stamped ``restored`` for the same reason the session's own
+        restore does — a restored row has no in-process trajectory, and the panel
+        says so rather than rendering a busy child as empty.
 
         Best-effort by construction: an unreadable, absent or malformed
         checkpoint leaves the synthesised state untouched. Opening a
@@ -1777,6 +1779,34 @@ class AttachedSession:
                 "conversation_title_user_set": durable.conversation_title_user_set,
                 "conversation_title_forked": durable.conversation_title_forked,
                 "goal": durable.goal,
+                # The judged-goal record rides the SAME checkpoint as the text
+                # above, and it has to be folded by name for the same reason
+                # everything else here is: this dict is an explicit whitelist
+                # over ``durable``, so a field left out is a field the cold
+                # frame silently drops. Carrying ``goal`` without the record
+                # left a cold pane showing an objective it could not strike
+                # (no status) and a history reading as "no completed goals".
+                #
+                # ``goal_status`` goes through ``_fold_goal_status`` rather
+                # than being copied raw, because that helper is THE one place
+                # the pre-lifecycle migration default lives, and a cold open is
+                # exactly where a session from such a build is first looked at:
+                # read raw, a restored "pursue this" goal would show as no goal
+                # status at all until a runtime engaged and refreshed it.
+                #
+                # NOT gated on ``inherited`` (unlike ``jobs`` above): the
+                # runtime keeps the goal record across a fork —
+                # ``_inherited_identity_fixups`` re-stamps only ``session_id``,
+                # ``checkpoint_id`` and ``jobs`` — so zeroing it here would be
+                # the cold frame and the attached frame disagreeing about what
+                # the fork has.
+                "goal_status": _fold_goal_status(durable),
+                "goal_judge": durable.goal_judge,
+                "goal_history": list(durable.goal_history),
+                # The flag that says the list above was dropped by the WIRE
+                # bound rather than empty: restoring the list without it would
+                # re-create the lie it exists to prevent.
+                "goal_history_truncated": durable.goal_history_truncated,
                 "active_agent": durable.active_agent,
                 "active_team": durable.active_team,
                 # Spend and occupancy are the conversation's history, not this

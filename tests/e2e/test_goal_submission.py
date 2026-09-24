@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from local_operator.harness.rows import is_harness_chrome
 from local_operator.harness.types import Message, TextContent
 from local_operator.tools.builtin import build_write_tool
 from local_operator.tui.app import OperatorApp
@@ -39,6 +40,15 @@ async def test_one_goal_command_executes_and_persists_a_real_tool(headless_tui_e
                 arguments={"path": str(target), "content": "goal command started this turn"},
             ),
             text_turn("The goal artifact is ready."),
+            # THE JUDGE. Setting a goal with `/goal <text>` arms it, so this turn's
+            # END is the edge that starts a `complete_aside` — the app's own judge
+            # call, off the record. `CONTINUE` here is deliberate: it is what makes
+            # the continuation row exist at all, which is the row the assertions
+            # below prove is recorded and never painted.
+            text_turn("VERDICT: CONTINUE\nThe artifact exists but has not been verified."),
+            text_turn("Verified: the artifact is there and the goal is met."),
+            # The second judge call, on the continuation turn it just admitted.
+            text_turn("VERDICT: ACHIEVED\nThe artifact exists and the goal is met."),
         ]
     )
     directory = headless_tui_env / "sessions" / "goal-submit"
@@ -61,15 +71,32 @@ async def test_one_goal_command_executes_and_persists_a_real_tool(headless_tui_e
                 await drain(pilot, cycles=20)
                 assert session.goal == request
                 assert target.read_text() == "goal command started this turn"
-                assert len(stream.requests) == 2
+                # FIVE provider calls, and each one is named: the goal turn's tool
+                # call, its summary, the judge's verdict, the continuation the
+                # verdict admitted, and the judge's second verdict (the one that
+                # settles). A number without that list reads as flake the next time
+                # somebody adds a turn.
+                assert len(stream.requests) == 5
+                # THE CHROME ROW IS NEVER PAINTED. The continuation is a real
+                # persisted user-role row (asserted below), and this is the
+                # assertion that no surface paints the harness's words as the
+                # human's: exactly one UserBlock, carrying what was typed.
                 assert [row.text() for row in app.query(UserBlock)] == [request]
                 assert "The goal artifact is ready." in transcript_text(app)
                 history = [item for item in session.history() if isinstance(item, Message)]
                 users = [message for message in history if message.role == "user"]
-                assert len(users) == 1
+                # TWO durable user rows: what the human typed, then the chrome
+                # prompt the judge admitted. The transcript records why the
+                # conversation continued; the column above shows only the human.
+                assert len(users) == 2
                 content = users[0].content[0]
                 assert isinstance(content, TextContent)
                 assert content.text == request
+                chrome = users[1].content[0]
+                assert isinstance(chrome, TextContent)
+                assert is_harness_chrome(chrome.text)
+                assert users[1].provider_payload == {"harness_injected": True}
+                assert session.goal_status == "done", "the judge's second verdict settles"
                 assert any(message.role == "tool" for message in history)
                 records = _transcript_records(directory)
                 assert _has_tool_call(records, "write")

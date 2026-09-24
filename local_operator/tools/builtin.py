@@ -138,12 +138,15 @@ from local_operator.redaction_shapes import (
     ShapeHit,
     ShapeReport,
     credential_dump_notice,
+    credential_forms,
     has_shape_anchor,
     pem_body_line,
     pem_end_line,
     pem_header_line_end,
     scrub_secrets_with_hits,
     shape_report,
+    straddling_form_start,
+    stream_hold_window,
 )
 from local_operator.scratchpad import (
     SCRATCHPAD_NAMESPACE,
@@ -2488,14 +2491,45 @@ class _PipeRedactor:
     inside the window is not split.
 
     **The hold is the max of two rules, and this is the honest one.** ``pending``
-    is bounded by ``max(_PIPE_HOLD_LIMIT, longest registered value + one window)``:
-    the KNOWN-value rule below is older, is not a window rule at all, and holds
-    whatever a registered value needs — measured, a 24,576-byte registered value
-    peaks at 31,072 bytes held at 64 KiB reads, where the same input under this
-    limit alone peaks at 8,192. That is bounded by what the SESSION knows rather
-    than by what the child prints, which is the property the cap exists for, and
-    it is the same in kind as the shape rule: a value too long to be complete in
-    the buffer is split here too, registered or not.
+    is bounded by ``max(_PIPE_HOLD_LIMIT, self.hold + longest spelling)``: the
+    KNOWN-value rule below is older, is not a window rule at all, and holds
+    whatever a registered value needs. ``self.hold`` is a WINDOW and not a
+    whole-buffer bound — the tail this filter keeps is that window plus the
+    spelling it is holding off, so a value of N characters whose widest spelling
+    is the escaped one (4N) can hold up to ``min(4N, 64 KiB) + 4N`` characters.
+    That is bounded by what the SESSION knows rather than by what the child
+    prints, which is the property the cap exists for, and it is the same in kind
+    as the shape rule: a value too long to be complete in the buffer is split
+    here too, registered or not (round-1 review, F4/Q2 — the residual is stated
+    there rather than implied here).
+
+    **Both of those rules run over the SPELLINGS of a value, not its bytes.**
+    A value the mask catches reversed, in hex or base64 is also a value the cut
+    must not halve, and its spellings are longer than it is: the escaped form is
+    four characters per byte, so a 32-character secret is a 128-character needle
+    and can straddle a cut its verbatim form would never reach. So the release
+    point's KNOWN-value rule and the hold both take ``self.forms``
+    (:func:`~local_operator.redaction_shapes.credential_forms`), which is the
+    same spelling list the mask below uses — one policy, so "the mask would have
+    caught it" and "the cut was moved off it" cannot disagree about what a value
+    looks like. The cost is one ``str.find`` per spelling per feed, confined to a
+    window around the cut rather than scanning the buffer to its end.
+
+    **A WINDOW FLOOR is what makes the line rule safe, and it is not optional.**
+    The line rule releases every complete line, which is decidable only for a
+    spelling that cannot CONTAIN a line terminator. A registered multi-line value
+    (a pretty-printed service-account JSON, a multi-line ``.env`` blob) and the
+    ``\n``-joined spelling both carry one, so a line-aligned writer made each of
+    its lines look like a decidable prefix and the value was published line by
+    line — into the live card and the peekable job tail, the one surface nothing
+    re-reads. Nothing downstream could repair it: a line is not one of the
+    enumerated spellings, so the settle-time pass had nothing to match either.
+    So the cut is floored by ``self.hold`` as well as ruled by the line rule: the
+    last ``hold`` characters are never published, which means a spelling that
+    spans lines is not released until it is whole. ``self.hold`` is
+    :func:`~local_operator.redaction_shapes.stream_hold_window` — the same window
+    ``StreamMasker`` uses, from the one function that computes it, so the two
+    chunked surfaces cannot disagree about what is held.
 
     Trailing partial lines are therefore withheld until they complete. That is
     a real trade for a line-oriented surface, taken deliberately: a credential
@@ -2544,7 +2578,28 @@ class _PipeRedactor:
 
     def _set(self, values: Iterable[str]) -> None:
         self.secrets = sorted({value for value in values if value}, key=len, reverse=True)
-        self.lookbehind = max((len(value) for value in self.secrets), default=1) - 1
+        # EVERY SPELLING, not just the verbatim one, and that is why the list is
+        # kept separate from ``self.secrets``: the MASK derives the same spellings
+        # for itself (``scrub_secrets_with_hits`` takes the raw values), and the CUT
+        # RULE below needs them as needles — because a value printed reversed or in
+        # hex is a value the mask must catch AND a value the release point must not
+        # cut in half. ``self.secrets`` stays raw because that is what the mask takes.
+        self.forms = sorted(
+            {form for value in self.secrets for form in credential_forms(value)},
+            key=len,
+            reverse=True,
+        )
+        #: How many characters this filter never publishes from the end of its
+        #: buffer — the SAME window ``StreamMasker`` uses (one function, so the
+        #: two chunked surfaces cannot disagree about what is held).
+        #:
+        #: This replaces ``self.lookbehind``, which was computed as exactly this
+        #: number and then read nowhere (round-1 review, F7): the release point
+        #: did not hold a window at all, so a registered value containing a line
+        #: terminator — a pretty-printed service-account JSON, a multi-line
+        #: ``.env`` — was published one LINE at a time, and a line is not one of
+        #: the enumerated spellings, so no later pass could repair it (F1/Q1).
+        self.hold = stream_hold_window(self.secrets)
 
     def refresh(self, values: Sequence[str]) -> None:
         """Adopt a newly-widened value set mid-stream.
@@ -2554,10 +2609,20 @@ class _PipeRedactor:
         Re-read per chunk, which is what makes a value that arrives at the same
         moment as the bytes it must scrub still get scrubbed.
 
-        The lookbehind can only GROW here, never shrink below what is already
-        held back: ``pending`` is untouched, so a longer new secret straddling
-        this chunk boundary is still resolved on the next feed.
+        The hold can only GROW here, never shrink below what is already held
+        back: ``pending`` is untouched, so a longer new secret straddling this
+        chunk boundary is still resolved on the next feed.
+
+        **Unchanged sets return immediately.** This is called once per read (a
+        64 KiB chunk), and rebuilding every value's spelling list is real work —
+        measured at 68 µs for five ordinary secrets and 61 ms for one oversized
+        value, per read, for as long as the value stays registered (round-1
+        review, F5). The list is a pure function of the value set, so the same
+        set cannot produce a different answer.
         """
+        current = sorted({value for value in values if value}, key=len, reverse=True)
+        if current == self.secrets:
+            return
         self._set(values)
 
     def feed(self, chunk: bytes, *, final: bool = False) -> bytes:
@@ -2790,16 +2855,72 @@ class _PipeRedactor:
         cap_forced = len(text) - cut > _PIPE_DEFERRAL_LIMIT
         if cap_forced:
             cut = self._cut_past_a_split_header(text, len(text) - _PIPE_DEFERRAL_LIMIT)
-        # Never cut through a KNOWN value. The newline rule above already
-        # prevents that for any value without a newline in it, which is every
-        # credential in practice; this keeps the guarantee for the ones with
-        # one, and for the cap-forced cut above.
+        # Never cut through a KNOWN value, in ANY of its spellings. The newline
+        # rule above already prevents that for a spelling without a newline in
+        # it, which is every verbatim credential in practice; this keeps the
+        # guarantee for the ones with one (and for the newline-joined spelling),
+        # for the cap-forced cut above, and — the case this was widened for — for
+        # a TRANSFORMED spelling, which is longer than the value and therefore
+        # straddles a cut the value itself would not.
         #
         # A SHAPE gets the same rule, for the same reason and by a stricter
         # mechanism — see _shape_safe_spans / _cut_outside: the cap is the one
         # release the line rule does not cover, and it is the one that used to
         # publish a credential in two unmasked halves.
         spans = self._shape_safe_spans(text) if cap_forced else []
+        # THE WINDOW FLOOR, and it is what closes the line-terminator leak: the
+        # newline rule above releases every complete line, which is decidable for
+        # a spelling that cannot contain a newline and is exactly wrong for one
+        # that does — the value's own line terminator made each line look like a
+        # decidable prefix, so a multi-line registered value was published line by
+        # line into the live card and the peekable job tail, the one surface
+        # nothing re-reads (round-1 review F1 / QA Q1). Holding the last `hold`
+        # characters back means a spelling that spans lines is never released
+        # until it is whole, which is when the mask below can match it.
+        #
+        # `min` against the cap-forced cut above, so the two rules compose the way
+        # they are documented: the cap bounds the buffer in the ordinary case
+        # (hold is small), and a registered value larger than the cap wins, which
+        # is the pre-existing posture for a known value (see the class docstring).
+        # It sits BEFORE the fixed point below, and that placement is what lets it
+        # compose with the three rules there: every one of them only ever moves the
+        # cut LEFT, so none can undo the floor, and the floor can land inside a value
+        # or a short line fragment that those rules then get the last word on.
+        #
+        # THE FLOOR RETREATS TO A LINE BOUNDARY, and that is what keeps it from
+        # undoing the PEM line loop. `len(text) - hold` is an arbitrary offset, so
+        # taken as-is it lands mid-line in the ordinary (non-cap) case — the one case
+        # where, before the floor, every release ended on a line. The fragment rule in
+        # the loop below only guards a short fragment at the END of a release; a
+        # floor cut a few bytes before a terminator leaves the short fragment at the
+        # START of the next one instead (`+Q\n`), which `_mask_open_key_block` reads as
+        # PROSE and CLOSES the block on — measured on the fold of this change onto
+        # #1427/#1445, with one 26-char value registered: 8 of 34 PEM streams
+        # published body lines raw, up to 1,873 of 2,000, against 0 on main and 0
+        # with the floor removed. Moving back to the line start keeps the floor's own
+        # guarantee (it only moves the cut further LEFT, so the last `hold`
+        # characters are still never published) and restores the line-aligned
+        # release the PEM classifiers were written against, including a header line
+        # the floor would otherwise have split.
+        #
+        # BOUNDED by `_PIPE_DEFERRAL_LIMIT`, and the bound is about MEMORY, not about
+        # what a PEM body looks like: an unwrapped body line longer than the cap IS a
+        # body line to `pem_body_line` (round-2 review, R2-2). The bound is what stops
+        # this hold becoming the unbounded one. Once `hold` exceeds the cap (a value of
+        # ~2 KiB, whose escaped spelling is 4x) the floor lands before the cap-forced
+        # cut, and in a line with no terminator yet the unbounded retreat would answer
+        # every release with the line's start — cut 0, forever, while `pending` grows
+        # with the child's output. So a line longer than the cap keeps its mid-line cut
+        # here, and the START-side fragment rule in the fixed point below is what
+        # stops that cut from closing an open block (round-2 review, R2-1).
+        #
+        # AND IT NEVER CUTS INTO A WHOLE BLOCK THAT FITS THE CAP (round-3 review R3-1 /
+        # QA Q2-1) — see `_cut_before_a_whole_block`.
+        floor = max(len(text) - self.hold, 0)
+        if floor < cut:
+            line_start = max(text.rfind("\n", 0, floor), text.rfind("\r", 0, floor)) + 1
+            cut = line_start if floor - line_start <= _PIPE_DEFERRAL_LIMIT else floor
+            cut = self._cut_before_a_whole_block(text, cut)
         # ONE fixed point over ALL THREE rules, not a sequence of them: moving the cut
         # for a shape can put it inside a value, a value move can put it inside a line,
         # and the line hold can expose a value — so each is re-checked against the
@@ -2830,21 +2951,120 @@ class _PipeRedactor:
         # and holding bytes back at that point would DROP them, because ``pending`` is
         # never flushed again. The invariant this hold exists for is not "no fragment is
         # ever released"; it is "no fragment a LATER release will classify".
+        #
+        # AND THE SAME HOLD FOR THE FRAGMENT A CUT LEAVES AT THE START OF THE NEXT
+        # RELEASE (`_short_line_start`), because a mid-line cut has two ends and the
+        # rule above guards one. Every rule that can cut inside a line — the cap, the
+        # window floor past its line bound, `_cut_outside`, the known-value rule — hands
+        # the rest of that line to the next release, whose line loop reads it as a
+        # LINE: `5\n` is prose to it, so the block closed and the rest of the body went
+        # out raw. Measured (round-2 review, R2-1) with one registered value on an
+        # unwrapped body line longer than the cap: 200 of 200 body lines published,
+        # against 0 with no value; the same class published a CRLF body when a cut
+        # fell between `\r` and `\n` (a lone `\n` is prose too). A release is not made
+        # to start ON a line — a line longer than the cap cannot be, while memory stays
+        # bounded — it is made to start with at least `PEM_BODY_FLOOR` characters of
+        # its line, which the body grammar classifies exactly as it classifies the
+        # whole line. Moves the cut LEFT by at most `PEM_BODY_FLOOR` characters, so it
+        # composes with the other rules like the end-side hold does.
         while True:
             previous_cut = cut
             if spans:
                 cut = self._cut_outside(cut, spans)
-            for secret in self.secrets:
-                start = text.find(secret, max(cut - len(secret) + 1, 0))
-                if 0 <= start < cut < start + len(secret):
-                    cut = start
+            start = straddling_form_start(text, cut, self.forms)
+            if start >= 0:
+                cut = start
             if cut and (self._in_key_block or block_open):
                 break_at = max(text.rfind("\n", 0, cut), text.rfind("\r", 0, cut)) + 1
                 if 0 < cut - break_at < PEM_BODY_FLOOR:
                     cut = break_at
+                else:
+                    cut = self._short_line_start(text, cut, break_at)
             if cut == previous_cut:
                 break
         return cut
+
+    @staticmethod
+    def _cut_before_a_whole_block(text: str, cut: int) -> int:
+        """Move a floor cut that lands inside a complete, cap-sized key block to its BEGIN.
+
+        WHY: the hold above treats a block as one unit — it is deferred until its
+        END arrives and then released whole, which is the unit the shape table's
+        ``pem-private-key`` masks (it spans BEGIN to END). The window floor is an
+        offset counted back from the buffer's end, so once END is in hand it lands
+        INSIDE that unit and splits it into two releases. The first carries the
+        header, which opens `_mask_open_key_block`'s line state; any non-body line in
+        the block then CLOSES that state by the prose rule — a legacy-encrypted PEM's
+        ``Proc-Type:``/``DEK-Info:`` lines and blank separator (``ssh-keygen -m PEM
+        -N …``, ``openssl … -traditional``), or a body line carrying a ``-`` value —
+        and the second release (the held tail: body lines + END, no header in front of
+        it for the table to match) goes out raw on the live card and the peek tail,
+        which nothing re-reads. Measured on the head before this rule: a 26-line
+        legacy-encrypted block published 1/2/5 body lines for a 14/26/88-char
+        unrelated registered value at every read size, at 1,839 of 1,839 two-chunk
+        split offsets, and 17 of 26 through a real background ``cat``; main published
+        0, because without the floor it never cut there.
+
+        WHY THE CUT AND NOT THE BLOCK RULE: main's "prose closes the block" rule is
+        the over-mask guard for a stray header, and changing it needs its own round of
+        over-mask evidence. Restoring main's unit is the smaller fix, and it only moves
+        the cut further LEFT, so the floor's guarantee (the last ``hold`` characters
+        are never published) still holds.
+
+        BOUNDED BY THE CAP: only a block whose BEGIN-to-END-line span fits
+        :data:`_PIPE_DEFERRAL_LIMIT` is treated as a unit — that is the size main can
+        hold whole, and a larger one is split by the cap on main too, where the open
+        block's line state is what masks it. The extra hold is therefore at most one
+        cap. The same raw ``-----BEGIN``/``-----END`` literals as the hold above, so
+        the two rules cannot disagree about where a block starts.
+        """
+        begin = text.rfind("-----BEGIN", 0, cut)
+        if begin < 0:
+            return cut
+        end = text.find("-----END", begin)
+        if end < 0:
+            # No END yet: the hold above (or the cap) already decided this cut.
+            return cut
+        break_match = _PEM_LINE_BREAK.search(text, end)
+        block_end = break_match.end() if break_match else len(text)
+        if block_end <= cut or block_end - begin > _PIPE_DEFERRAL_LIMIT:
+            # The block, END line included, is released whole before the cut; or it
+            # is larger than main could ever hold whole.
+            return cut
+        return begin
+
+    @staticmethod
+    def _short_line_start(text: str, cut: int, line_start: int) -> int:
+        """Move ``cut`` left so the next release does not START with a sub-floor fragment.
+
+        Only called while a key block is open (see the fixed point in
+        :meth:`_release_point`). ``line_start`` is where the line holding ``cut``
+        begins. Returns ``cut`` unchanged when it is already a line boundary, or when
+        the rest of its line — up to that line's terminator, or to the end of the
+        buffer when the terminator has not arrived (the line can only grow, so the
+        fragment can only get LONGER) — is at least ``PEM_BODY_FLOOR`` characters.
+
+        A cut between ``\\r`` and ``\\n`` counts as mid-line: the next release would
+        start with a lone ``\\n``, an empty line the loop reads as prose. So does a cut
+        right after a ``\\r`` that ends the buffer, because the ``\\n`` may be the next
+        read's first byte; that holds a CR-terminated line one read longer, and only
+        while a block is open.
+        """
+        if cut >= len(text) and not text.endswith("\r"):
+            return cut  # nothing is left for a next release to start with
+        if text[cut - 1] == "\r" and text[cut : cut + 1] in ("\n", ""):
+            # Inside a CRLF pair: the line ends at that `\r`, so its start is the one
+            # before it — `line_start` was computed from the `\r` itself.
+            line_end = cut - 1
+            line_start = max(text.rfind("\n", 0, line_end), text.rfind("\r", 0, line_end)) + 1
+        elif line_start == cut:
+            return cut  # already a line boundary
+        else:
+            ends = [i for i in (text.find("\n", cut), text.find("\r", cut)) if i >= 0]
+            line_end = min(ends) if ends else len(text)
+        if line_end - cut >= PEM_BODY_FLOOR:
+            return cut
+        return max(line_start, line_end - PEM_BODY_FLOOR)
 
     def _cut_past_a_split_header(self, text: str, cut: int) -> int:
         """Extend a cap-forced cut to the end of a header LINE it would otherwise split.

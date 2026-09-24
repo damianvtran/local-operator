@@ -77,7 +77,7 @@ def test_a_cancelled_login_exits_130_and_says_how_to_retry(
     async def cancelling_login(callbacks: Any, **kwargs: Any) -> dict[str, Any]:
         raise LoginCancelledError("Login cancelled")
 
-    monkeypatch.setattr(auth_cli, "_apply_login_defaults", lambda provider_id: None)
+    monkeypatch.setattr(auth_cli, "_apply_login_defaults", lambda provider_id, **_kwargs: None)
     _swap_login(monkeypatch, "anthropic", cancelling_login)
 
     code = auth_cli.run_login("anthropic", None, _Store())  # type: ignore[arg-type]
@@ -103,7 +103,7 @@ def test_a_paste_only_provider_does_not_claim_a_listener_was_stopped(
     async def cancelling_login(callbacks: Any, **kwargs: Any) -> str:
         raise LoginCancelledError("Login cancelled")
 
-    monkeypatch.setattr(auth_cli, "_apply_login_defaults", lambda provider_id: None)
+    monkeypatch.setattr(auth_cli, "_apply_login_defaults", lambda provider_id, **_kwargs: None)
     _swap_login(monkeypatch, "alibaba", cancelling_login)
 
     code = auth_cli.run_login("alibaba", None, _Store())  # type: ignore[arg-type]
@@ -179,7 +179,7 @@ def test_the_signal_reaches_the_provider_login(monkeypatch: pytest.MonkeyPatch) 
         seen.update(kwargs)
         return "sk-key"
 
-    monkeypatch.setattr(auth_cli, "_apply_login_defaults", lambda provider_id: None)
+    monkeypatch.setattr(auth_cli, "_apply_login_defaults", lambda provider_id, **_kwargs: None)
     monkeypatch.setattr(auth_cli, "_invalidate_cached_listing", lambda pid: None)
     monkeypatch.setattr(auth_cli, "_invalidate_cached_usage", lambda pid, store: None)
     _swap_login(monkeypatch, "alibaba", recording_login)
@@ -197,7 +197,7 @@ def test_a_successful_login_is_unaffected_by_the_cancel_plumbing(
     async def good_login(callbacks: Any, **kwargs: Any) -> str:
         return "sk-real"
 
-    monkeypatch.setattr(auth_cli, "_apply_login_defaults", lambda provider_id: None)
+    monkeypatch.setattr(auth_cli, "_apply_login_defaults", lambda provider_id, **_kwargs: None)
     monkeypatch.setattr(auth_cli, "_invalidate_cached_listing", lambda pid: None)
     monkeypatch.setattr(auth_cli, "_invalidate_cached_usage", lambda pid, s: None)
     _swap_login(monkeypatch, "alibaba", good_login)

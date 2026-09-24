@@ -115,6 +115,14 @@ async def capabilities():
                 "notification_contract": 1,
                 "mcp": 1,
                 "mcp_auth": 1,
+                # Sessionless MCP management: `GET/POST /v1/desktop/mcp` and
+                # `POST /v1/desktop/mcp/credentials`, answering with no session
+                # and no model configured, in the catalog vocabulary
+                # (connected / needs_sign_in / not_started / connecting / error,
+                # plus per-row `actions`). Its own key because a renderer that
+                # does not see it must keep using the session route, which still
+                # works — "update the backend" would be false there.
+                "mcp_catalog": 1,
                 "radient": 1,
                 # Session code memory: GET/POST/PATCH/DELETE on
                 # `/v1/desktop/sessions/{id}/variables`, reading and writing a
