@@ -236,6 +236,10 @@ RULES: tuple[Rule, ...] = (
             # R5-5: a `run` whose consumer is itself the fetch is the fetch.
             "lop secret run --secret NAME=TOKEN -- lop secret get NAME | rev",
             "lop secret run --secret NAME=TOKEN -- timeout 5 lop secret get NAME | rev",
+            # R5-1's class: bash takes a redirection anywhere in a simple
+            # command, so one in FRONT of the fetch is still the fetch.
+            "2>/dev/null lop secret get NAME | rev",
+            "{fd}>/dev/null lop secret get NAME | rev",
         ),
         counterexamples=(
             "lop secret run --secret NAME=TOKEN -- lop secret get NAME | wc -c",
@@ -368,6 +372,8 @@ RULES: tuple[Rule, ...] = (
             "lop secret run --secret NAME=TOKEN -- env 2>/dev/null",
             "lop secret run --secret NAME=TOKEN -- env 2>&1 | grep TOKEN",
             "lop secret run --secret NAME=TOKEN -- env < /dev/null | rev",
+            "lop secret run --secret NAME=TOKEN -- time printenv TOKEN | rev",
+            "lop secret run --secret NAME=TOKEN -- nice --adjustment 5 printenv TOKEN | rev",
             # R5-2: the `env -i` exemption belongs to `env`'s own options, not to
             # another wrapper's `-i` or an `-u` operand spelled `-i`.
             "lop secret run --secret NAME=TOKEN -- stdbuf -i 0 env printenv TOKEN | rev",
@@ -611,6 +617,10 @@ RULES: tuple[Rule, ...] = (
             "set -a; V=$(lop secret get GITHUB_TOKEN); printenv V",
             "readonly V=$(lop secret get GITHUB_TOKEN); readonly",
             "export V; V=$(lop secret get NAME); printenv V",
+            # R5-1's class: a redirection is not the dumper's argument, so
+            # `env 2>/dev/null` is still a bare `env`.
+            "export V=$(lop secret get NAME); env 2>/dev/null | rev",
+            "export V=$(lop secret get NAME); export 2>/dev/null",
         ),
         counterexamples=(
             'v=$(lop secret get GITHUB_TOKEN); env V="$v" some-client --flag',
@@ -1061,6 +1071,9 @@ _STAGE_ENDS = frozenset({"\n", ";", "&", "&&", "||", ";;", "(", ")"})
 
 #: Redirection operators whose next word is a path (or a delimiter, for here-docs).
 _REDIRECTS = frozenset({">", ">>", ">|", "<", "<>", "<<", "<<-", "<<<", ">&", "<&"})
+#: `{name}` touching a redirection: bash allocates a fresh descriptor into
+#: `name`, so the word is the redirection's, not the command's.
+_FD_VARIABLE_RE = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")
 
 
 def _read_parens(text: str, open_index: int) -> tuple[str, int]:
@@ -1578,10 +1591,12 @@ _PRECOMMANDS: dict[str, tuple[frozenset[str], int]] = {
     "builtin": (frozenset(), 0),
     "exec": (frozenset({"-a"}), 0),
     "nohup": (frozenset(), 0),
-    "nice": (frozenset({"-n"}), 0),
+    # GNU's long spellings take a SEPARATE operand word too (`nice --adjustment
+    # 5`): without them the operand was read as the command (R5-2's note).
+    "nice": (frozenset({"-n", "--adjustment"}), 0),
     "timeout": (frozenset({"-s", "-k", "--signal", "--kill-after"}), 1),
     "gtimeout": (frozenset({"-s", "-k", "--signal", "--kill-after"}), 1),
-    "stdbuf": (frozenset({"-i", "-o", "-e"}), 0),
+    "stdbuf": (frozenset({"-i", "-o", "-e", "--input", "--output", "--error"}), 0),
     "env": (frozenset({"-u", "--unset", "-C", "--chdir", "-P"}), 0),
 }
 
@@ -1599,9 +1614,18 @@ _ENV_SPLIT = frozenset({"-S", "--split-string"})
 _CONSUMER_WRAPPERS: dict[str, tuple[frozenset[str], int]] = {
     **_PRECOMMANDS,
     "xargs": (
-        frozenset({"-I", "-L", "-n", "-P", "-s", "-d", "-E", "-a", "-J", "-R", "-S"}),
+        frozenset(
+            {
+                *("-I", "-L", "-n", "-P", "-s", "-d", "-E", "-a", "-J", "-R", "-S"),
+                *("--max-args", "--max-procs", "--max-chars", "--delimiter", "--arg-file"),
+            }
+        ),
         0,
     ),
+    # `time` in an OUTER stage is bash's reserved word (skipped as a keyword),
+    # but after `run … --` it is `/usr/bin/time`, a program that runs its
+    # operand with the same environment: `-- time printenv TOK | rev` leaked.
+    "time": (frozenset({"-f", "-o", "--format", "--output"}), 0),
 }
 
 
@@ -2022,7 +2046,7 @@ class _ShellAnalyzer:
             previous = stage[index - 1]
             if isinstance(previous, _Word) and previous.span[1] == item.span[0]:
                 text = cls._word_text(previous).strip()
-                if text.isdigit() or re.fullmatch(r"\{[A-Za-z_][A-Za-z0-9_]*\}", text):
+                if text.isdigit() or _FD_VARIABLE_RE.fullmatch(text):
                     words.add(index - 1)
         return words
 
@@ -2043,7 +2067,9 @@ class _ShellAnalyzer:
         dumps, `nice` alone prints a number), and `command -v`/`-V` looks a name
         up rather than running it, so none of those is unwrapped.
         """
-        targets = cls._redirect_targets(stage)
+        # Every redirection word, the `2` of `2>/dev/null` included, is not a
+        # command word (R5-1's class): reading it as one stopped the unwrap.
+        targets = cls._redirect_words(stage)
         sequence = [
             index
             for index, item in enumerate(stage)
@@ -2092,9 +2118,15 @@ class _ShellAnalyzer:
 
     @classmethod
     def _command_word(cls, stage: list[_Word | _Op | _Body]) -> str:
-        """The command this stage runs, assignment prefixes skipped."""
-        for item in stage:
-            if not isinstance(item, _Word):
+        """The command this stage runs, assignment prefixes skipped.
+
+        Redirection words are skipped as well (R5-1's class): bash accepts a
+        redirection anywhere in a simple command, so `2>/dev/null lop secret get
+        X | rev` runs `lop` and the `2` in front of it is no command.
+        """
+        redirects = cls._redirect_words(stage)
+        for index, item in enumerate(stage):
+            if not isinstance(item, _Word) or index in redirects:
                 continue
             text = cls._word_text(item).strip()
             if not text or text in _SHELL_KEYWORDS:
@@ -2130,8 +2162,14 @@ class _ShellAnalyzer:
             if (
                 isinstance(previous, _Word)
                 and previous.span[1] == stage[op_index].span[0]
-                and cls._word_text(previous).strip().isdigit()
+                and (
+                    cls._word_text(previous).strip().isdigit()
+                    or _FD_VARIABLE_RE.fullmatch(cls._word_text(previous).strip())
+                )
             ):
+                # `{fd}>/dev/null` opens a NEW descriptor; stdout is untouched,
+                # so reading it as fd 1 marked `{fd}>/dev/null lop secret get X
+                # | rev` discarded (R5-1's class sweep).
                 fd = cls._word_text(previous).strip()
             found.append((fd, operator, item))
         return found
@@ -2275,8 +2313,9 @@ class _ShellAnalyzer:
     @classmethod
     def _command_span(cls, stage: list[_Word | _Op | _Body]) -> tuple[int, int]:
         """The span of the stage's command word, or ``(0, 0)`` when it has none."""
-        for item in stage:
-            if not isinstance(item, _Word) or cls._is_assignment(item):
+        redirects = cls._redirect_words(stage)
+        for index, item in enumerate(stage):
+            if not isinstance(item, _Word) or cls._is_assignment(item) or index in redirects:
                 continue
             text = cls._word_text(item).strip()
             if text and text not in _SHELL_KEYWORDS:
@@ -2521,7 +2560,15 @@ class _ShellAnalyzer:
         be a false refusal — the class of bug the four required non-findings
         exist to prevent.
         """
-        words = [item for item in stage if isinstance(item, _Word)]
+        # A redirection is not the command or its argv (R5-1's class): with
+        # its words left in, `2>/dev/null lop secret get X` had `2` as the
+        # command and was no source at all.
+        redirects = self._redirect_words(stage)
+        words = [
+            item
+            for position, item in enumerate(stage)
+            if isinstance(item, _Word) and position not in redirects
+        ]
         index = self._command_index(words)
         if index is None:
             return None
@@ -2965,10 +3012,23 @@ class _ShellAnalyzer:
         # Reserved words are structure, not operands: dropping them here is what
         # lets `for …; do v=$(…); done` and `if …; then lop secret get X; fi`
         # read as the stages a person sees rather than as keyword soup.
-        words = [
+        # Redirection words are not operands either (R5-1's class): `export
+        # 2>/dev/null` bound a `2` instead of listing, and `cp f g 2>/dev/null`
+        # took `/dev/null` as the copy's destination. The whole-command scans
+        # (`/proc/…/environ` behind a `<`, a `>&2` in an expansion) still read
+        # every word, so they get ``all_words``.
+        redirects = self._redirect_words(stage)
+        all_words = [
             item
             for item in stage
             if isinstance(item, _Word) and self._word_text(item).strip() not in _SHELL_KEYWORDS
+        ]
+        words = [
+            item
+            for index, item in enumerate(stage)
+            if isinstance(item, _Word)
+            and index not in redirects
+            and self._word_text(item).strip() not in _SHELL_KEYWORDS
         ]
         bodies = [item.piece for item in stage if isinstance(item, _Body)]
         command = self._command_word(stage)
@@ -3001,7 +3061,7 @@ class _ShellAnalyzer:
                     stdout_path = text
             elif op in (">&", "1>&", "&>") and text.lstrip("&") == "2":
                 to_stderr = True
-        for word in words:
+        for word in all_words:
             for piece in word.pieces:
                 if piece.kind == "expand" and re.search(r"1?>&\s*2\b", piece.text):
                     to_stderr = True
@@ -3012,7 +3072,7 @@ class _ShellAnalyzer:
         # -- whole-command conditions, recorded and judged after the walk ---
         # Before the assignment branch, because `PS4='+ '` IS an assignment and
         # would otherwise return early without ever being examined.
-        self._note_conditions(command, stage, words)
+        self._note_conditions(command, stage, all_words)
 
         # -- a substitution standing alone in command position ---------------
         # `$(lop secret get NAME)` with nothing consuming it: its output becomes
@@ -3208,7 +3268,7 @@ class _ShellAnalyzer:
             # command word so `V=$(…) printenv V` reads `V` as the operand.
             prefix = self._prefix_exports(stage, depth=depth)
             dumper = [word for word in words if not self._is_assignment(word)] or words
-            dumper = words[words.index(dumper[0]) :]
+            dumper = words[words.index(dumper[0]) :] if dumper else []
             dumper_flags = [
                 text
                 for text in (self._word_text(word).strip() for word in dumper[1:])
