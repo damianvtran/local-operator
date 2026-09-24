@@ -1429,3 +1429,58 @@ async def test_an_unchanged_pin_file_does_not_repaint_the_list(tmp_path, monkeyp
     await daemon._scan_once()
     assert not queue.empty()
     assert daemon.table.pins == ()
+
+
+def test_pin_route_refuses_a_live_session_with_no_folder_yet(tmp_path, monkeypatch) -> None:
+    """A pin the list cannot show is refused, not answered 200 (QA Q2).
+
+    A live session in the window before its conversation materialises has a
+    runtime entry but no ``sessions/<id>`` folder, and ``read_pins`` prunes any
+    id without one. The route used to answer ``200 pinned: true`` while the row
+    stayed unpinned, and leave the id in the file to pin itself later once the
+    folder appeared. It must now refuse with 409, write nothing, and still wake
+    the list so the client's optimistic star is corrected; and once the folder
+    exists the same request pins for real.
+    """
+    from local_operator.tui.sidebar_pins import PINS_FILE, read_pins
+
+    cfg = tmp_path / "config"
+    (cfg / "sessions").mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    daemon.table.entries[4242] = _live_entry(4242, "ghost-1")
+    queue: asyncio.Queue[None] = asyncio.Queue()
+    daemon.table.list_subscribers.add(queue)
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+
+    refused = client.post("/api/sessions/ghost-1/pin", json={"pinned": True})
+    assert refused.status_code == 409, refused.text
+    assert "not saved yet" in refused.json()["error"]
+    assert not (cfg / PINS_FILE).exists(), "a refused pin must not reach the store"
+    assert not queue.empty(), "the refusal must repaint the list over the optimistic star"
+    # Unpinning is harmless and stays answerable.
+    unpin = client.post("/api/sessions/ghost-1/pin", json={"pinned": False})
+    assert (unpin.status_code, unpin.json()["pinned"]) == (200, False)
+
+    (cfg / "sessions" / "ghost-1").mkdir()
+    pinned = client.post("/api/sessions/ghost-1/pin", json={"pinned": True})
+    assert (pinned.status_code, pinned.json()["pinned"]) == (200, True)
+    assert read_pins(cfg) == ["ghost-1"]
+
+
+def test_set_pins_answers_what_the_reader_reports(tmp_path, monkeypatch) -> None:
+    """``set_pins`` reports the READ-BACK state, so the route cannot claim a pin
+    the list will not show even if the folder vanishes under the write."""
+    from local_operator.tui.sidebar_pins import PINS_FILE
+
+    cfg = tmp_path / "config"
+    (cfg / "sessions").mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    table = SessionTable()
+    # No folder: the store takes the id, the reader prunes it.
+    assert table.set_pins("gone-1", True) is False
+    assert json.loads((cfg / PINS_FILE).read_text()) == ["gone-1"]
+    assert table.pins == ()

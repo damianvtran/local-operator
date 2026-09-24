@@ -187,7 +187,10 @@ Screens, following branding.md §7's agent-output hierarchy:
   toggle, so a retried request cannot flip the pin back). A pin made on another
   surface reaches an open phone list without a reload within one discovery
   pass (`SCAN_INTERVAL_S`, 2 s): that pass stats `sidebar-pins.json` once per
-  tick and repaints the list only when the pinned set changed.
+  tick and repaints the list only when the pinned set changed. A pin needs the
+  conversation's durable folder, so pinning a session in the moment before its
+  first message lands on disk is refused with a 409 rather than stored as a pin
+  the list cannot show.
 - **Session view** — transcript with TUI-parity rendering: user rows,
   assistant markdown, one-line tool calls with state glyphs and green/red
   diff counts, tap to expand/collapse args+output+diff; todos panel;
