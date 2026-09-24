@@ -66,7 +66,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Union
+from typing import Any, Union, cast
 
 from local_operator.harness.approval import (
     mint_operator_cap,
@@ -439,6 +439,37 @@ def _spawn_runtime(
     from local_operator import procname
 
     interpreter = _spawn_interpreter()
+    # A WARMED STANDBY FIRST (``session/runtime/standby.py``): the same spawn —
+    # this exact environment, this capture file, the child end of this handoff
+    # — handed to an interpreter that has already paid the runtime's ~1.1 s of
+    # import CPU, which at this host's load is most of a cold engage's 3-4 s.
+    # ``None`` means no standby, or one that refused (a moved build, generation,
+    # config or environment); the cold spawn below then runs exactly as before.
+    # The capability is still minted and registered HERE, so the console that
+    # engaged holds it for the adopted pid just as it would for a forked one.
+    from local_operator.paths import config_dir as _config_dir
+    from local_operator.session.runtime import standby
+
+    # ``try_adopt`` never raises, so the handoff and capture stay ours to close
+    # on exactly the paths below: here on adoption, in the cold path's own
+    # ``finally`` otherwise.
+    adopted = standby.try_adopt(
+        Path(env.get("LOCAL_OPERATOR_CONFIG_DIR") or _config_dir()),
+        interpreter,
+        env,
+        capture,
+        handoff.pass_fds[0] if handoff.pass_fds else None,
+    )
+    if adopted is not None:
+        try:
+            # SCM_RIGHTS gave the standby its OWN duplicate of the child end, so
+            # delivering and closing here is the same sequence as after a fork.
+            handoff.deliver(operator_cap)
+            remember_operator_cap(adopted.pid, operator_cap)
+        finally:
+            handoff.close()
+            handle.close()
+        return cast("subprocess.Popen[bytes]", adopted)
     if interpreter != sys.executable:
         argv0, executable = procname.spawn_identity_for_interpreter(
             procname.LABEL_SESSION_ANON, interpreter, id=str(session_id)[:8]
@@ -901,6 +932,15 @@ async def engage_runtime(
                 capture = getattr(candidate, "lop_capture_path", None)
                 spawned = True
                 spawns += 1
+                # The standby this spawn may just have consumed is replaced
+                # BEHIND it: on a daemon thread, after the candidate exists, so
+                # the warm's fork never sits ahead of the user's own engage. A
+                # no-op outside a host that enabled warming (see
+                # ``standby.enable_warming``), and one ``flock`` probe when a
+                # standby is already waiting.
+                from local_operator.session.runtime import standby
+
+                standby.warm_in_background(Path(config_dir), _spawn_interpreter())
             elif candidate is not None and candidate.poll() is not None:
                 # THE CANDIDATE WE SPAWNED IS GONE. It exited while no record
                 # exists and nobody holds the lease — a winner dying DURING
