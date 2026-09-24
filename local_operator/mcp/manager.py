@@ -2913,8 +2913,8 @@ class McpManager:
         real gate: an HTTP server with no grant in its row writes nothing.
 
         The write is synchronous and small (one row read, one conditional row
-        write — measured at ~85.9 us for the manager's own read path, whose cost
-        is dominated by building a ``McpTokenStorage`` per call). It runs on the
+        write — measured for this write itself at 196-230 us median, p90
+        1.2-1.3 ms, on a loaded host; QA round 2, Q6). It runs on the
         event loop at the END of a connect that has already done PRM/ASM
         discovery, a token exchange and a ``tools/list``, so its share of the
         connect is not measurable against those.
