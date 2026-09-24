@@ -64,6 +64,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -120,6 +121,17 @@ class KeyBackendError(RuntimeError):
     level and carry on) and "the presence store refused" (tell the operator,
     who has a gesture to make).
     """
+
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        """``status`` is the ``OSStatus`` the OS returned, when there was one.
+
+        An attribute rather than only prose because a caller sometimes has to BRANCH on
+        it rather than read it: the opt-in hardware test must SKIP (not fail) when the OS
+        itself refuses this caller's entitlement, and matching that on the message text
+        would be the string-sniffing this removes (agent review round 1, R1-6).
+        """
+        super().__init__(message)
+        self.status = status
 
 
 # ---------------------------------------------------------------------------
@@ -413,53 +425,117 @@ class _CF:
             self.release(err)
 
 
-#: ``OSStatus`` values from the presence store that carry a REMEDY, with the
-#: sentence the operator needs. The framework's own text is precise but does not
-#: say what to do; these two do, and they are the two this repository has measured
-#: on a real host (see the module docstring).
+#: ``OSStatus`` values from the presence store, named so the code below reads as prose
+#: rather than as bare integers.
 #:
-#: ``-50`` is ``errSecParam``: the access-control flags were refused. It means a
-#: build is carrying a flag pair Apple does not accept — ``userPresence`` combines
-#: only with ``applicationPassword`` and ``privateKeyUsage`` — and NO host will
-#: accept it, so the sentence says that rather than implying a host problem.
+#: ``-50`` is ``errSecParam``, the framework's GENERIC parameter refusal, and it does not
+#: mean one thing: at the access-control call it is a flag pair Apple will not accept,
+#: while at key generation it is "inconsistent private key parameters". A diagnosis is
+#: therefore keyed by the call site as well — see :func:`secure_enclave_diagnosis`
+#: (design round 1, D2/R1-1). ``-34018`` is ``errSecMissingEntitlement``.
 _ERR_SEC_PARAM = -50
-
-#: ``-34018`` is ``errSecMissingEntitlement``. It is NOT a host defect and not a
-#: flag defect: the Secure Enclave keeps its keys in the data-protection keychain,
-#: and that keychain refuses a caller carrying no keychain entitlement — i.e. a
-#: process that is not code-signed (measured: an ad-hoc/linker-signed interpreter
-#: gets this, Apple's signed ``python3`` does not). The remedy names the level such
-#: a runtime can honestly create instead, so the failure routes the operator to a
-#: working path rather than leaving them with a negative number.
 _ERR_SEC_MISSING_ENTITLEMENT = -34018
 
-_SECURE_ENCLAVE_REMEDIES: dict[int, str] = {
-    _ERR_SEC_PARAM: (
-        "the access-control flags were refused (errSecParam): kSecAccessControlUserPresence "
-        "may be combined only with kSecAccessControlApplicationPassword and "
-        "kSecAccessControlPrivateKeyUsage, so a build carrying a wrong flag pair cannot "
-        "create a key on any host"
+#: The two call sites a refusal can come from, as the vocabulary the diagnosis is keyed
+#: on. Named constants rather than a boolean because ``errSecParam`` is read differently
+#: at each (see above).
+ACCESS_CONTROL_REFUSED = "access control"
+KEY_GENERATION_REFUSED = "key generation"
+
+#: ``(site, OSStatus) -> the lines that explain it``. The FIRST line is the diagnosis and
+#: LEADS the message; the rest say what it costs and what to do with it, one per line, in
+#: the shape :class:`CngBackend` established for the same situation: name the fallback,
+#: name what giving up the gesture costs, and name the level ``lop operator status`` will
+#: report. Naming the fallback is NOT naming it as the sanctioned path — a file-backed
+#: key is a downgrade, and the copy has to say which protection is being given up
+#: (design round 1, D1).
+_SECURE_ENCLAVE_DIAGNOSES: dict[tuple[str, int], tuple[str, ...]] = {
+    (ACCESS_CONTROL_REFUSED, _ERR_SEC_PARAM): (
+        "the access-control flags were refused (errSecParam), which no host accepts: "
+        "kSecAccessControlUserPresence may be combined only with "
+        "kSecAccessControlApplicationPassword and kSecAccessControlPrivateKeyUsage",
+        "that is a defect in the build carrying the flag pair, not something this host "
+        "can work around",
     ),
-    _ERR_SEC_MISSING_ENTITLEMENT: (
-        "this process carries no keychain entitlement (errSecMissingEntitlement): the "
-        "Secure Enclave keeps its keys in the data-protection keychain, which refuses a "
-        "caller that is not code-signed, so this runtime cannot use the presence tier here "
-        "— `lop operator init --backend file-only` creates the level this runtime can "
-        "enforce, and `lop operator status` reports it as that"
+    (KEY_GENERATION_REFUSED, _ERR_SEC_MISSING_ENTITLEMENT): (
+        "this runtime cannot create a presence-gated operator key: the Secure Enclave "
+        "keeps its keys in the data-protection keychain, which needs a keychain "
+        "entitlement this process does not have (errSecMissingEntitlement)",
+        "run `lop operator init --backend file-only` for a file-backed operator key — "
+        "and note that a file-backed key raises no presence prompt, and any process "
+        "running as you can read it, which `lop operator status` reports as the level "
+        "`operator-file-only`",
+    ),
+    (KEY_GENERATION_REFUSED, _ERR_SEC_PARAM): (
+        "key generation was refused (errSecParam): the parameters are inconsistent for a "
+        "Secure Enclave key, and a protection class this host will not accept is the "
+        "usual cause — the classes tried are listed below",
+        "`lop operator status` reports the level this host actually got",
     ),
 }
 
+#: A CoreFoundation object address as the framework prints it (``<SecKeyRef:…> 0x7f86…``).
+_RUN_ADDRESS = re.compile(r"\s*0x[0-9a-fA-F]+")
 
-def secure_enclave_remedy(status: int) -> str:
-    """The actionable sentence for an ``OSStatus`` from the presence store.
 
-    An empty string for a status with no known remedy, deliberately: the caller
-    appends what it has and contributes nothing on a code we cannot explain,
-    rather than guessing a cause. Classification is a seam of its own so it can be
-    tested without a Secure Enclave, which matters because the two codes above
-    cannot both be produced on one host.
+def without_run_addresses(text: str) -> str:
+    """The framework's words with per-run object ADDRESSES removed, nothing else.
+
+    ``0x7f86b0d240`` differs on every run, and this text is printed to be pasted into a
+    bug report: the address is noise there, and it makes two identical failures look
+    different (design round 1, D4). The framework's own wording, including the object's
+    description, is kept.
     """
-    return _SECURE_ENCLAVE_REMEDIES.get(int(status), "")
+    return _RUN_ADDRESS.sub("", text)
+
+
+def secure_enclave_diagnosis(site: str, status: int) -> tuple[str, ...]:
+    """The lines that explain ONE refusal, or ``()`` for a status we cannot explain.
+
+    Keyed by the call SITE as well as the code, because ``errSecParam`` is the
+    framework's generic parameter refusal and does not mean the same thing at both sites
+    (design round 1, D2/R1-1). An unknown pair contributes NOTHING rather than a guessed
+    cause; the framework's own words are appended either way. Classification lives in its
+    own seam so it is testable without a Secure Enclave — the codes above cannot all be
+    produced on one host.
+    """
+    return _SECURE_ENCLAVE_DIAGNOSES.get((site, int(status)), ())
+
+
+def secure_enclave_refusal_message(refusals: dict[tuple[str, int, str], list[str]]) -> str:
+    """The message for a refused key creation: DIAGNOSIS first, framework detail last.
+
+    ``refusals`` maps ``(site, status, framework detail) -> the protection classes that
+    produced it``, so a refusal that is identical for every class is said ONCE with the
+    classes listed beside it instead of repeating one sentence per class, and the operator
+    reaches the next command in the first two lines rather than at the end of a long
+    single line (design round 1, D3).
+
+    The framework's own text is never replaced by ours — it is the last line, kept
+    verbatim (minus per-run addresses), because it is what a report should quote.
+    """
+    lines: list[str] = []
+    written: set[tuple[str, int]] = set()
+    for site, status, _detail in refusals:
+        if (site, status) in written:
+            continue
+        written.add((site, status))
+        lines.extend(secure_enclave_diagnosis(site, status))
+    if not lines:
+        # No explanation we can stand behind: say the plain fact and let the framework's
+        # detail line below carry everything we actually know.
+        lines.append("the Secure Enclave refused to create an operator key")
+    for (site, status, detail), classes in refusals.items():
+        # The code is prefixed only when the framework's own text does not already state
+        # it: ``CFErrorCopyDescription`` normally renders "… (OSStatus error -34018 - …)",
+        # and saying the same number twice on one line is the restatement this message
+        # exists to avoid (design round 1, D3). The framework's words are never edited.
+        stated = re.search(rf"error\s+{re.escape(str(status))}\b", detail) is not None
+        lines.append(
+            f"framework detail: {site} — {', '.join(classes)}: "
+            f"{'' if stated else f'OSStatus {status} - '}{detail}"
+        )
+    return lines[0] + "".join(f"\n  {line}" for line in lines[1:])
 
 
 class SecureEnclaveBackend:
@@ -539,8 +615,19 @@ class SecureEnclaveBackend:
         """
         cf = self.cf
         tag = cf.data(APPLICATION_TAG.encode())
-        failures: list[str] = []
-        statuses: list[int] = []
+        # ``(site, status, framework detail) -> the classes that produced it``. Grouped
+        # this way so a refusal that is identical for every protection class is recorded
+        # ONCE with the classes listed beside it, rather than repeating one sentence per
+        # class, and so the DIAGNOSIS is chosen from the call site that actually refused
+        # rather than from the status alone (design round 1, D2/D3).
+        refusals: dict[tuple[str, int, str], list[str]] = {}
+
+        def record(site: str, protection: str, err: Any) -> None:
+            """Record one refusal; read the code BEFORE ``cf.error`` releases the error."""
+            status = cf.status(err)
+            detail = without_run_addresses(cf.error(err))
+            refusals.setdefault((site, status, detail), []).append(protection)
+
         try:
             for protection in self.PROTECTION_LADDER:
                 err = ctypes.c_void_p()
@@ -551,8 +638,7 @@ class SecureEnclaveBackend:
                     ctypes.byref(err),
                 )
                 if not access:
-                    statuses.append(cf.status(err))
-                    failures.append(f"{protection}: {cf.error(err)}")
+                    record(ACCESS_CONTROL_REFUSED, protection, err)
                     continue
                 private_attrs = cf.dict(
                     [
@@ -586,8 +672,7 @@ class SecureEnclaveBackend:
                 key = cf.S.SecKeyCreateRandomKey(attrs, ctypes.byref(err))
                 cf.release(attrs)
                 if not key:
-                    statuses.append(cf.status(err))
-                    failures.append(f"{protection}: {cf.error(err)}")
+                    record(KEY_GENERATION_REFUSED, protection, err)
                     continue
                 try:
                     spki = self._public_point(int(key))
@@ -596,19 +681,14 @@ class SecureEnclaveBackend:
                 return KeyHandle(
                     backend=SECURE_ENCLAVE, key_id=key_id_for(spki), spki=spki, presence=True
                 )
-            # The framework's own text stays first and stays precise; the remedy is
-            # appended once per distinct status so the operator is told what to do
-            # WITHOUT the failure being softened into a generic sentence.
-            detail = "; ".join(failures)
-            message = f"the Secure Enclave refused to create an operator key ({detail})"
-            remedies = [
-                remedy
-                for remedy in dict.fromkeys(secure_enclave_remedy(s) for s in statuses)
-                if remedy
-            ]
-            if remedies:
-                message += " — " + " ; ".join(remedies)
-            raise KeyBackendError(message)
+            # Every class refused. The message leads with the diagnosis and the next
+            # command, and keeps the framework's own words (minus per-run addresses) as
+            # the detail line; the status rides along for callers that must branch on it
+            # rather than read it.
+            raise KeyBackendError(
+                secure_enclave_refusal_message(refusals),
+                status=next(iter(refusals))[1],
+            )
         finally:
             cf.release(tag)
 
@@ -704,14 +784,30 @@ class _SecureEnclaveSigner(Signer):
         """
         cf = self._cf
         err = ctypes.c_void_p()
-        signature = cf.S.SecKeyCreateSignature(
-            self._key,
-            cf.const("kSecKeyAlgorithmECDSASignatureMessageX962SHA256"),
-            cf.data(message),
-            ctypes.byref(err),
-        )
+        # The message is an OWNED ``CFDataRef``: ``CFDataCreate`` hands back a +1
+        # reference, and ``SecKeyCreateSignature`` does not take it — so it is released
+        # here, once the call has returned either way. It used to be created inline and
+        # dropped, leaking one CFData per signature (agent review round 1, R1-3).
+        payload = cf.data(message)
+        try:
+            signature = cf.S.SecKeyCreateSignature(
+                self._key,
+                cf.const("kSecKeyAlgorithmECDSASignatureMessageX962SHA256"),
+                payload,
+                ctypes.byref(err),
+            )
+        finally:
+            cf.release(payload)
         if not signature:
-            raise KeyBackendError(f"the Secure Enclave refused to sign: {cf.error(err)}")
+            # The code is read BEFORE ``cf.error``, which RELEASES the error object —
+            # reading it afterwards would be a use-after-free on the very ref being
+            # reported on. Same treatment as ``create``'s copy, too: this line is meant
+            # to be pasted into a report, so the per-run address is stripped (D4).
+            status = cf.status(err) if err else None
+            raise KeyBackendError(
+                "the Secure Enclave refused to sign: " + without_run_addresses(cf.error(err)),
+                status=status,
+            )
         try:
             return cf.data_bytes(int(signature))
         finally:
