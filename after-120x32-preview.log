@@ -1,0 +1,10 @@
+picked row id: ?
+RES | ❯ Fan-out audit of the ingest pipeline                                 1m ago  bbbb00000001
+RES |   Harden lop secret get output                                         2m ago  cdcd00000001
+RES |   Migration checklist for the invoices table                          10m ago  dddd00000001
+PRE | Fan-out audit of the ingest pipeline
+PRE | started 1m · last worked 1m · agent-opened
+PRE | ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+PRE | (no prose in this transcript)
+screen virtual: Size(width=118, height=30) size: Size(width=118, height=30) scrollbar: False
+wrote /Users/damian/.local-operator/sessions/f3bbc04ef9e7/scratchpad/frames-r2/after-120x32-preview.svg

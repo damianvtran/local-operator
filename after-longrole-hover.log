@@ -1,0 +1,8 @@
+rows on screen: ['bbbb00000001', 'cdcd00000001', 'dddd00000001']
+hovered row y: 2 id: bbbb00000001
+tooltip display: True
+tooltip render: 'Fan-out audit of the ingest pipeline\nRecent\nopened by implementation-reviewer-keep-this-name-long\nbbbb00000001'
+tooltip region: Region(x=0, y=4, width=40, height=8) screen: Region(x=0, y=0, width=80, height=24)
+row lines the hover changed: [] of 15
+screen virtual: Size(width=78, height=22) size: Size(width=78, height=22) scrollbar: False
+wrote /Users/damian/.local-operator/sessions/f3bbc04ef9e7/scratchpad/frames-r2/after-longrole-hover.svg

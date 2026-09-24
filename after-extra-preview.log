@@ -1,0 +1,12 @@
+picked row id: ?
+RES |   Fan-out audit of the ingest pipeline                                 1m ago  bbbb00000001
+RES |   Harden lop secret get output                                         2m ago  cdcd00000001
+RES | ❯ Retention sweep for the analytics ledger                             3m ago  eeee00000001
+RES |   Migration checklist for the invoices table                          10m ago  dddd00000001
+PRE | Retention sweep for the analytics ledger
+PRE | started just now · last worked 3m
+PRE | ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+PRE | ▸ you
+PRE |   Sweep the retention ledger. Let's pick this up.
+screen virtual: Size(width=118, height=30) size: Size(width=118, height=30) scrollbar: False
+wrote /Users/damian/.local-operator/sessions/f3bbc04ef9e7/scratchpad/frames-r2/after-extra-preview.svg

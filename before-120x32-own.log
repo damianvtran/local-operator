@@ -1,0 +1,14 @@
+picked row id: ?
+RES |   Fan-out audit of the ingest pipeline                                 1m ago  bbbb00000001
+RES |   Harden lop secret get output                                         2m ago  cdcd00000001
+RES | ❯ Migration checklist for the invoices table                          10m ago  dddd00000001
+PRE | Migration checklist for the invoices table
+PRE | started 10m · last worked 10m
+PRE | ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+PRE | ▸ you
+PRE |   Migration checklist for the invoices table. Let's pick this up.
+PRE | 
+PRE | ▪ lop
+PRE |   On it. Reading the pipeline config first.
+screen virtual: Size(width=118, height=30) size: Size(width=118, height=30) scrollbar: False
+wrote /Users/damian/.local-operator/sessions/f3bbc04ef9e7/scratchpad/frames-r2/before-120x32-own.svg

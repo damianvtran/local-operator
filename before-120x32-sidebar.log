@@ -1,0 +1,8 @@
+rows on screen: ['bbbb00000001', 'cdcd00000001', 'dddd00000001']
+hovered row y: 2 id: bbbb00000001
+tooltip display: True
+tooltip render: 'Fan-out audit of the ingest pipeline\nRecent\nbbbb00000001'
+tooltip region: Region(x=0, y=4, width=40, height=5) screen: Region(x=0, y=0, width=120, height=32)
+row lines the hover changed: [] of 30
+screen virtual: Size(width=118, height=30) size: Size(width=118, height=30) scrollbar: False
+wrote /Users/damian/.local-operator/sessions/f3bbc04ef9e7/scratchpad/frames-r2/before-120x32-sidebar.svg
