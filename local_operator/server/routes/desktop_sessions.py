@@ -1755,12 +1755,17 @@ async def create_session(body: CreateSession, request: Request):
             # exists in two places at once is the permanent routing ambiguity the
             # mesh exists to prevent, so this device does not choose one.
             #
-            # ``cwd`` IS DELIBERATELY NOT FORWARDED. The field names a path on THIS
-            # machine — the renderer sends the directory it is showing — and a peer
-            # asked to create a session there would either fail or, worse, land in a
-            # directory that merely happens to share the path on its disk. An empty
-            # cwd makes the peer default to its own home, which is the same rule
-            # ``session/remote_open`` states for a remote attach.
+            # ``cwd`` IS FORWARDED, AND THE PEER CHECKS IT (QA round 1, Q9). The field
+            # names a path on the PEER's disk when a peer is chosen — that is what the
+            # pane's own hint says ("Must exist on <peer>") — and the peer is the only
+            # device that can stat it. This route therefore does NOT admit it here (the
+            # path need not exist on this machine) and does NOT drop it either: dropping
+            # it was measured as a 200 for ``/nonexistent/on/this/mac`` with the
+            # conversation quietly started in the peer's home directory. The peer's
+            # refusal names the peer and comes back as this route's 409, the same status
+            # the local admission gives an unusable directory. An EMPTY ``cwd`` still
+            # means "the peer decides" and becomes the peer's home
+            # (``session/remote_open`` states the same rule for a remote attach).
             assert spec is not None or body.model is None
             # Imported here rather than at module scope: the mesh package is a boot
             # cost this file must not add for every backend, and a create that names
@@ -1774,6 +1779,7 @@ async def create_session(body: CreateSession, request: Request):
                     create_on_peer,
                     host(request).root,
                     body.peer,
+                    cwd=body.cwd,
                     model=(
                         {
                             "provider": spec.provider,

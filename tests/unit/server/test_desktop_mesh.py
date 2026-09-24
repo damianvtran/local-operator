@@ -293,6 +293,53 @@ async def test_peers_collapse_two_memberships_into_one_row(
 
 
 @pytest.mark.asyncio
+async def test_a_peer_in_two_networks_counts_its_sessions_once(
+    mesh_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 1, Q1: ``session_count`` counts SESSIONS, not memberships.
+
+    Measured on three real paired devices: the peer that shares two networks with this
+    machine holds two conversations and reported ``session_count: 4`` — every reader of
+    this field was told twice what the sidebar (which counts its own grouped rows) drew,
+    and the field is the only count any surface that does not group rows can use. The
+    producer now de-duplicates by id, and this counts a SET of ids as well, so the
+    number means what it says whichever half hands the rows over.
+    """
+    client, root = mesh_api
+    (root / "network" / "networks").mkdir(parents=True, exist_ok=True)
+    _join(
+        monkeypatch,
+        FakeRelay(
+            {
+                "net_peer_ls": [
+                    {
+                        "device_id": PEER,
+                        "name": "build-box",
+                        "network_id": NET_ONE,
+                        "reachable": True,
+                        "reason": "",
+                        "last_seen_at": None,
+                    }
+                ]
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        "local_operator.session.peer_rows.peer_session_rows",
+        # The shape the relay's fan-out produced for a device in two networks: one row
+        # per shared network, so two conversations arrive as four rows.
+        lambda root=None, **kwargs: (
+            _peer_row(id="c" * 12),
+            _peer_row(id="d" * 12),
+            _peer_row(id="c" * 12),
+            _peer_row(id="d" * 12),
+        ),
+    )
+    row = (await client.get("/v1/desktop/peers")).json()["result"]["peers"][0]
+    assert row["session_count"] == 2, row
+
+
+@pytest.mark.asyncio
 async def test_an_unreachable_peer_carries_glossed_words(
     mesh_api, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -607,6 +654,19 @@ async def test_remove_member_requires_the_network_name_typed_exactly(
     assert wrong.json()["detail"]["code"] == "confirmation_mismatch"
     assert relay.ops() == [], "a wrong confirmation must not reach the relay at all"
 
+    # A PADDED NAME IS NOT THE NAME (QA round 1, Q7). This route used to strip before
+    # comparing, which made the backend the LOOSER of the two gates: the tab keeps
+    # Remove disabled for ``" home "`` while a request carrying it removed the device,
+    # so one act answered two ways depending on the door it came through.
+    padded = await client.request(
+        "DELETE",
+        f"/v1/desktop/networks/{NET_ONE}/members/{PEER_TWO}",
+        json={"confirm": " home "},
+    )
+    assert padded.status_code == 409, padded.text
+    assert padded.json()["detail"]["code"] == "confirmation_mismatch"
+    assert relay.ops() == [], "a padded name is a wrong name, not a trimmed one"
+
     right = await client.request(
         "DELETE",
         f"/v1/desktop/networks/{NET_ONE}/members/{PEER_TWO}",
@@ -667,7 +727,14 @@ async def test_create_on_a_peer_mints_there_and_keeps_the_id(
     op, fields = relay.calls[0]
     assert op == "peer_session_create"
     assert fields["peer"] == PEER
-    assert not fields.get("cwd"), "a path on THIS machine means nothing on the peer"
+    # THE WORKING DIRECTORY TRAVELS, AND THE PEER IS WHAT CHECKS IT (QA round 1, Q9).
+    # This asserted the opposite ("a path on THIS machine means nothing on the peer")
+    # and that was the bug: the field is what the pane's own hint promises to check
+    # ("Must exist on <peer>"), dropping it made the promise unkeepable, and a
+    # non-existent directory created a conversation in the peer's home folder with a
+    # 200. The path is meaningless HERE — the peer refuses it if it does not exist
+    # there — which is why the route forwards it rather than resolving it locally.
+    assert fields["cwd"] == str(root)
 
 
 @pytest.mark.asyncio

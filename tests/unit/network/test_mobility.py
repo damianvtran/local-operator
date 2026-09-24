@@ -621,3 +621,71 @@ def test_delete_of_a_live_remote_session_is_refused_by_the_owners_guard(
     assert result["code"] == "session_delete_refused"
     assert str(result["message"]) in set(_GUARD_REFUSALS.values()) or result["message"]
     assert source.exists()
+
+
+def test_an_offload_returns_the_destinations_refusal_instead_of_waiting_it_out(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 1, Q4a: the refusal the peer makes in milliseconds must not cost the budget.
+
+    An offload's inviter watches its OWN durable progress — the journal it wrote and the
+    tombstone it will write — and never asks the destination, which is right for every
+    phase the destination reports and wrong for exactly one: a REFUSAL writes nothing
+    here. So the inviter held the request for its whole budget (``wait_s +
+    OFFLOAD_CONFIRM_WAIT_S``: 30 s at ``wait_s=0``, 60 s at the CLI's default) and then
+    answered "the outcome is unconfirmed" about a move that never started. Measured with
+    the desktop's own pane holding the session: the peer refused 9 times out of 9 in
+    ~3 ms with "This session is open in another terminal or attached client." and the
+    user read a timeout 60 s later. The refusing device now reports it over the link it
+    was invited on, and the wait ends where the refusal happened.
+    """
+    import time
+
+    server_a, server_b, _host, _port = pair
+    # B'S OWN SETTINGS, so the join records the endpoint B is actually listening on: the
+    # default settings would advertise the CLI's configured port, which nothing is bound
+    # to here — and this is the one rig in this file where A DIALS B (recalls have B dial
+    # A), so an undialable advertisement reads as an unreachable peer rather than as a
+    # fixture detail.
+    _pair(pair, monkeypatch, role="admin", settings=server_b.settings)
+    _owned_session(server_a)
+    sentence = (
+        "This session is open in another terminal or attached client. "
+        "Disconnect that client, then move again."
+    )
+    # The owner's own runtime refuses to retire — the "another terminal or attached
+    # client" case, which is ``_retire_local_runtime``'s ``viewed`` outcome.
+    monkeypatch.setattr(
+        mobility,
+        "_retire_local_runtime",
+        lambda root, session_id, deadline_s=0: {"result": "viewed", "sentence": sentence},
+    )
+
+    budget = mobility.move_bound_s(0.0)
+    started = time.monotonic()
+    result = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+    elapsed = time.monotonic() - started
+
+    assert result["ok"] is False, result
+    assert result["code"] == "busy", result
+    assert result["message"] == sentence, "the refusing device's own words, verbatim"
+    assert result["changed"] is False, "nothing moved, so a retry is safe"
+    assert elapsed < budget / 2, (
+        f"the refusal took {elapsed:.1f}s of a {budget:.0f}s budget, so it waited for the "
+        "deadline rather than being told: that is the finding this test exists for"
+    )
+
+
+def test_the_move_bound_is_the_formula_a_client_can_derive() -> None:
+    """Q4a's contract: the bound is ``wait_s + the settle window``, published as a function.
+
+    The desktop's own deadline was ``wait_s + 15`` while this side answered at
+    ``wait_s + 30``, so the client's timeout ALWAYS won and its vaguer sentence ("the
+    move may have happened") replaced the backend's real answer. A client's bound has to
+    be this plus a margin, and the relay's own budget is the same expression rather than
+    a second number that can drift from it.
+    """
+    assert mobility.move_bound_s(0.0) == mobility.OFFLOAD_CONFIRM_WAIT_S
+    assert mobility.move_bound_s(30.0) == 30.0 + mobility.OFFLOAD_CONFIRM_WAIT_S
+    assert mobility.move_bound_s(30.0, keep=True) == 30.0 + mobility.KEEP_COPY_WAIT_S
+    assert mobility.move_bound_s(-5.0) == mobility.OFFLOAD_CONFIRM_WAIT_S

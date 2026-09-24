@@ -109,6 +109,16 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "an audit-record field",
     ),
+    # THIS device's OWN runtime's sentence, when a create's model choice was not taken
+    # (``_set_model_on``), recorded as the ``detail`` of the local audit event
+    # ``session.create.warm_failed``. It is not a peer's reason token — the mesh's
+    # glosses have nothing to say about it — and it goes into an audit record rather
+    # than onto a screen, so a fixed sentence here would lose the runtime's own words
+    # from the one line an operator reads.
+    ("local_operator/network/relay.py", "RelayServer._warm_after_create", "detail"): (
+        1,
+        "this device's own runtime sentence, recorded in the local audit log",
+    ),
     # Carried into ``SessionRow.unreachable_reason`` / ``UnansweredPeer.reason``. Both
     # readers are glossed or silent by design: the sidebar tooltip goes through
     # ``peer_reason_words``, and the silent-peer HEADING deliberately paints no reason

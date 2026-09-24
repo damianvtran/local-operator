@@ -192,9 +192,15 @@ class Authorizer:
 
         capability = self._required_capability(effective, outer_op)
         if capability is not None and capability not in link.capabilities:
+            # THE REFUSAL NAMES THE DEVICE THE USER CAN SEE (QA round 1, Q8). This
+            # printed ``link.device_id`` — a raw ``d_3c90…`` — which is the one thing
+            # on screen the user cannot match to anything: every other sentence about a
+            # peer says its name, and this is the message that has to tell them WHICH
+            # device cannot do the thing (it was, in the case measured, the device they
+            # were sitting at).
             refusal = Refusal(
                 "not_authorised",
-                f"{link.device_id} may not do that on this device "
+                f"{self._device_label(link)} may not do that on this device "
                 f"(it does not hold the {capability!r} capability)",
             )
             self._refused(link, effective, refusal, frame, capability=capability)
@@ -204,6 +210,20 @@ class Authorizer:
         return Granted(action=effective, session_id=session_id, capability=capability)
 
     # -- steps --------------------------------------------------------------
+
+    def _device_label(self, link: LinkContext) -> str:
+        """The name to use for ``link``'s device in a sentence, or its id.
+
+        The member table is the authority, because that is where every other surface
+        gets the name it shows (``relay._member_name`` and ``_peer_label`` read the same
+        row). Its ABSENCE is the one case that falls back to the id: a link the table no
+        longer holds a row for — a rotation that carried the membership away under a live
+        link — is still a device a refusal has to name, and an unnamed device beats no
+        sentence at all.
+        """
+        record = self._networks.network(link.network_id)
+        row = record.member(link.device_id) if record is not None else None
+        return str(getattr(row, "name", "") or "") or link.device_id
 
     def _check_epoch(self, link: LinkContext, op: str, frame: dict[str, Any]) -> None:
         record = self._networks.network(link.network_id)

@@ -182,7 +182,14 @@ async def remove_network_member(
 
     def work() -> dict[str, Any]:
         record = resolve_network(root, network)
-        if body.confirm.strip() != str(record.name):
+        # EXACTLY THE NAME AS TYPED, which is what this docstring has always claimed and
+        # what the UI enforces (QA round 1, Q7). ``strip()`` made the backend the LOOSER
+        # of the two gates: ``{"confirm": " qa498net "}`` was accepted and removed the
+        # device, while the same string left the tab's Remove button disabled. One act
+        # with two answers depending on which door the request came through is the
+        # disagreement this route exists to prevent — and removal is the one act that
+        # changes every other device's state.
+        if body.confirm != str(record.name):
             raise MeshRefusal(
                 "confirmation_mismatch",
                 f"removing a member of {record.name!r} needs that network's name typed "
