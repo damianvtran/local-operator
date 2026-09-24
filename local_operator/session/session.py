@@ -133,18 +133,22 @@ from local_operator.harness.types import (
     LoopConfig,
     Message,
     MessageStartEvent,
+    MessageUpdateEvent,
     ModelChangeEvent,
     ModelSpec,
     NoticeEvent,
     PeerMessageDeliveredEvent,
+    ReasoningDeltaEvent,
     SteeringDeliveredEvent,
     StreamEvent,
     StreamTextDelta,
     StreamToolCallDelta,
     StreamUsageEvent,
     TextContent,
+    ToolCallComposeEvent,
     ToolContext,
     ToolExecutionEndEvent,
+    ToolExecutionUpdateEvent,
     ToolResult,
     Usage,
     WakeDeliveredEvent,
@@ -459,6 +463,19 @@ _PRE_ABORT_DROP_NOTICE_AT = 3
 #: that needs everything to stop regardless has the stronger rung: the ``abort``
 #: control op cancels the children, and ``lop stop`` ends the process.
 _STOPPED_WORK_RESIDUE_TYPES = frozenset({HUB_MESSAGE_TYPE, JOB_RESULT_MESSAGE_TYPE})
+
+#: Event families a provider stream produces at TOKEN rate. An unobserved
+#: subagent does not fold these into its own frontend store (see ``_emit``):
+#: nothing can read that store's live seed, and at N children the per-token
+#: fold was the largest single cost on the shared loop. Everything that
+#: changes durable or billed state (message/tool boundaries, usage, turn
+#: edges) is deliberately NOT in this set.
+_PER_TOKEN_EVENT_TYPES = (
+    MessageUpdateEvent,
+    ReasoningDeltaEvent,
+    ToolCallComposeEvent,
+    ToolExecutionUpdateEvent,
+)
 
 #: The builtin tools whose createIf gate reads a field only a SESSION can fill
 #: (``subagent_launcher``, ``jobs``, ``wake_scheduler``, ``subagent_comms``, the
@@ -2065,6 +2082,11 @@ class Session:
         self._goal_state = goal_state if goal_state is not None else GoalState()
         self._variables = variables
         self._job_id = job_id
+        #: Settled model-owned jobs whose auto-delivery was declined because a
+        #: turn was streaming (see ``_on_job_completed``), in settle order. The
+        #: turn's ``finally`` hands them over once it is idle again; see
+        #: ``_deliver_deferred_job_results``.
+        self._deferred_job_results: dict[str, None] = {}
         self._job_label = job_label
         self._parent_display_name = parent_display_name
         self._subagent_comms = subagent_comms
@@ -8781,11 +8803,35 @@ class Session:
         # while still streaming, and every event INSIDE the turn was admitted
         # already — so only the normal end is new work.
         store = getattr(self, "_frontend_state_store", None)
-        if store is not None and (
-            self._has_ui
-            or store.has_subscribers
-            or self._is_streaming
-            or isinstance(event, (AgentStartEvent, AgentEndEvent))
+        # A SUBAGENT with nothing subscribed to its own store skips the fold for
+        # the per-token families. The reasoning above (keep the seed warm for a
+        # viewer that has not arrived yet) is sound for a session a frontend can
+        # join; a child's store is not one -- every surface that shows a child
+        # reads its PARENT's roster, its trajectory and its transcript, never
+        # ``child.subscribe_frontend``. Folding each token there was pure cost:
+        # a ``model_dump`` plus a live-seed rebuild per delta, for every child,
+        # on the one loop the parent shares (measured: 128k folds for 16
+        # children in ``scripts/bench_subagent_fanout.py``). The boundaries still
+        # fold -- message/tool starts and ends, turn edges, usage -- so the
+        # child's spend, outcome and checkpoint are exactly what they were, and
+        # a subscriber arriving later flips ``has_subscribers`` and gets every
+        # delta from then on. ``_has_ui`` does not exempt a child: it is
+        # inherited from the parent and says the PARENT has a terminal.
+        per_token_skip = (
+            self._job_id is not None
+            and store is not None
+            and not store.has_subscribers
+            and isinstance(event, _PER_TOKEN_EVENT_TYPES)
+        )
+        if (
+            store is not None
+            and not per_token_skip
+            and (
+                self._has_ui
+                or store.has_subscribers
+                or self._is_streaming
+                or isinstance(event, (AgentStartEvent, AgentEndEvent))
+            )
         ):
             # Replay-changing commits precede their public events. Publish the
             # scalar first so retained viewers cannot select a stale tail after
@@ -9488,6 +9534,7 @@ class Session:
             self._discard_queued_notices()
             self._signal = None
             self._is_streaming = False
+            self._deliver_deferred_job_results()
 
     async def _drop_pre_aborted_turn(
         self,
@@ -10656,7 +10703,25 @@ class Session:
         if getattr(job, "consumed", False) or job.type not in ("task", "bash"):
             return
         if self._is_streaming:
+            # DEFERRED, never dropped. Returning here used to be the whole
+            # story, on the theory that a streaming turn "either waited or can
+            # 'jobs'". It frequently does neither: a model launches a batch,
+            # does other work, and ends its turn with "I'll wait for the
+            # children to report back" -- and every child that settled while
+            # that turn was still streaming was then never delivered by
+            # anything. The parent sat idle forever with finished children
+            # (reproduced: two children settling during the parent's own tool
+            # call produced ZERO deliveries after the turn ended). That is the
+            # "session wedged waiting on its subagents" report. The turn's
+            # ``finally`` now re-offers these once it is idle, and the
+            # ``consumed`` re-check there keeps a result the turn DID collect
+            # through ``wait`` from arriving twice.
+            self._deferred_job_results[job_id] = None
             return
+        self._deliver_job_result(job_id, text, job)
+
+    def _deliver_job_result(self, job_id: str, text: str, job: Any) -> None:
+        """Queue one settled job's result as a fresh idle-time turn."""
         label = getattr(job, "label", job_id)
         status = getattr(job, "status", "completed")
         summary = (text or "").strip()
@@ -10673,6 +10738,41 @@ class Session:
             details={"job_id": job_id, "text": delivery},
         )
         self._spawn_background(self._prompt_messages([message]))
+
+    def _deliver_deferred_job_results(self) -> None:
+        """Hand over job results that settled while a turn was streaming.
+
+        Called from the turn pipeline's ``finally`` AFTER ``_is_streaming`` is
+        cleared, so it runs exactly when ``_on_job_completed`` would have
+        accepted the delivery in the first place. Each result becomes its own
+        ``_prompt_messages`` turn -- the same shape a live delivery takes -- and
+        those serialize on the turn lock, so a burst of N deferred children
+        costs N short turns in settle order rather than a race.
+
+        Re-checked here rather than trusted from the deferral: a job the turn
+        collected with ``wait`` is ``consumed`` by now and is skipped, a job
+        swept from the ledger is skipped, and a disposed session delivers
+        nothing. Never raises into the turn's ``finally``.
+        """
+        if not self._deferred_job_results:
+            return
+        pending = list(self._deferred_job_results)
+        self._deferred_job_results.clear()
+        if self._disposed:
+            return
+        for job_id in pending:
+            try:
+                job = self.jobs.get(job_id)
+                if job is None or getattr(job, "consumed", False):
+                    continue
+                if getattr(job, "status", "running") == "running":
+                    continue
+                text = (
+                    (job.result_text or "") if job.status == "completed" else (job.error_text or "")
+                )
+                self._deliver_job_result(job_id, text, job)
+            except Exception:  # noqa: BLE001 - a delivery must not fail the turn's teardown
+                logger.warning("deferred job delivery failed for %s", job_id, exc_info=True)
 
     async def _reject_steering(self, command_id: str, reason: str) -> None:
         """Terminally reject one accepted-but-undurable producer steer."""
