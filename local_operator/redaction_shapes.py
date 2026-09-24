@@ -1247,20 +1247,33 @@ def _parse_type_expression(text: str, index: int, end: int, depth: int) -> tuple
     return True, index, is_a_type_name
 
 
-def _type_token_leaf(token: str) -> str:
-    """The NAME a type token denotes, with its spelling markers stripped.
+def _type_token_segments(token: str) -> tuple[str, ...]:
+    """EVERY name a type token is spelled with, markers and qualification stripped.
 
     A token in this grammar carries things beside its own name: a ``::``
     qualification (``foo::bar::Baz``) and a reference marker (``&``, ``&&``). Both are
     SPELLING, and every guard here that decides a release on what a token is CALLED has
-    to read the same part of it. That is the lesson of the fourth round on this clause:
-    R1-1 was a digit position, R1-2 and R2-1 read the ARGUMENT where the fact was the
-    base, and R3-1 read the WHOLE BASE where the fact is the leaf.
+    to read the same part of it.
 
-    One helper rather than a ``rsplit`` per call site, because the two release-side
-    tests in :func:`_is_type_expression` are the SAME extraction
-    (:func:`_base_is_a_credential_stem` and :func:`is_credential_name`), and a leaf
-    fix applied to one of them and not the other is exactly the miss R3-1 was.
+    **A POSITION, not a SITE, is what this returns — and that is the lesson of the
+    fifth round on this clause.** R1-1 was a digit position; R1-2 and R2-1 read the
+    ARGUMENT where the fact was the base; R3-1 read the WHOLE BASE where the fact is the
+    leaf; R4-1 read the FIRST and LAST segments where the fact is ANY segment. The three
+    earlier fixes each widened a read at a call SITE and then enumerated SITES — and
+    R4-1 hid INSIDE site 1, one the enumeration marked FIXED, because a site can be
+    named correctly while the window it reads is still narrower than the vocabulary it
+    refuses. So this returns the whole segment set rather than one leaf: a consumer that
+    tests every entry cannot read a narrower window than the vocabulary it refuses, and
+    a positional omission is then structurally impossible rather than enumerated away.
+
+    One helper rather than a ``split`` per call site, because the two release-side tests
+    in :func:`_is_type_expression` are the SAME extraction
+    (:func:`_base_is_a_credential_stem` and :func:`is_credential_name`), and a fix
+    applied to one of them and not the other is exactly the miss R3-1 was.
+
+    The token's OWN spelling leads the tuple, so a consumer keeps the whole-string read
+    the first-segment test used to provide (``startswith`` on the whole token can only
+    see segment 0) while gaining the interior ones.
 
     Only ``::`` and ``&`` are stripped, and that is the whole REACHABLE set: the
     assigned value's own grammar excludes whitespace, so a lifetime reference can only
@@ -1269,10 +1282,8 @@ def _type_token_leaf(token: str) -> str:
     primitive therefore still reads as that primitive, which is what keeps ``&str``
     released.
     """
-    leaf = token.rsplit("::", 1)[-1]
-    while leaf.startswith("&"):
-        leaf = leaf[1:]
-    return leaf
+    stripped = token.lstrip("&")
+    return (stripped, *stripped.split("::"))
 
 
 def _base_is_a_credential_stem(base: str) -> bool:
@@ -1293,24 +1304,37 @@ def _base_is_a_credential_stem(base: str) -> bool:
     hit. Any later widening of the ARGUMENT grammar must not be able to re-open this
     class, which is what putting the refusal on the base buys.
 
-    **The base is read as a WHOLE and as its LEAF** (agent review R3-1), because the
-    discriminating fact is the NAME the token denotes and a qualification hides that
-    name behind a path: a qualified spelling whose LEAF is in :data:`_CREDENTIAL_STEMS`
-    is that credential word with a namespace attached, and with only the whole base
-    tested the entire qualified class — 360 of 360 combinations of 5 module prefixes,
-    12 stem leaves and 6 argument shapes — was released whole with NO hit, so the value
-    was not even registered for the exact-value pass, and the no-argument spelling
-    (a bare qualified path) released through the path-convention branch too. The
-    whole-base test is kept beside the leaf test because a stem in a NON-leaf segment
-    is the same chosen value spelled the other way round, and because either test can
-    only ever refuse a release.
+    **The base is read as EVERY one of its ``::`` segments** (agent reviews R3-1 and
+    R4-1), because the discriminating fact is the NAME the token denotes and a
+    qualification hides that name behind a path: a qualified spelling whose ANY segment
+    is in :data:`_CREDENTIAL_STEMS` is that credential word with a namespace attached,
+    and each narrower window released a whole class with NO hit — so the value was not
+    even registered for the exact-value pass.
+
+    The windows, and what each one cost, because the series is the point:
+
+    * the WHOLE BASE alone released the qualified class — 360 of 360 combinations of 5
+      module prefixes, 12 stem leaves and 6 argument shapes (R3-1), and the
+      no-argument spelling (a bare qualified path) released through the
+      path-convention branch too;
+    * the whole base PLUS its LEAF fixed that and still released a stem in an INTERIOR
+      segment — ``foo::Pass::Word``, ``std::Secret::String<Vec<u8>>``, ``&Pass::Word``,
+      504 of 504 in the round-4 grid (R4-1) — because ``startswith`` on the whole base
+      can only ever match segment 0 and the leaf read takes ``rsplit("::", 1)[-1]``, so
+      every segment between the two was invisible to BOTH. That is the whole reason this
+      reads an extraction of the full segment set instead: the miss was a POSITION
+      inside a call site the R3-1 enumeration had marked fixed, not another site.
+
+    Either test can only ever refuse a release, so widening the window cannot trade
+    containment back — which is why every segment is read rather than the two the last
+    finding happened to name.
 
     A stem match is deliberately blunt: it only ever REFUSES a release, so the cost
     of a false hit is a masked type, which is the direction this clause trades in.
     """
     return any(
         part.lower().startswith(stem)
-        for part in (base, _type_token_leaf(base))
+        for part in _type_token_segments(base)
         for stem in _CREDENTIAL_STEMS
     )
 
@@ -1408,7 +1432,7 @@ def _is_type_expression(value: str) -> bool:
         # sits on the BASE and is silent about the argument,
         # which is the direction that cannot trade containment back.
         return False
-    if is_credential_name(base) or is_credential_name(_type_token_leaf(base)):
+    if any(is_credential_name(part) for part in _type_token_segments(base)):
         # The BASE is a credential WORD, whatever the arguments are (agent review
         # R1-2): ``Pass<int>``, ``Pass<any>``, ``Token<void>``, ``Secret<str>``. A
         # type's base is not spelled as a credential word in the paired tables —
@@ -1418,11 +1442,13 @@ def _is_type_expression(value: str) -> bool:
         # the class the argument grammar alone cannot, and it does it on the base
         # rather than on the argument, which is what keeps a real annotation over a
         # primitive (``Vec<u8>``, ``Option<Vec<u8>>``) released.
-        # The LEAF is read through the same helper as the stem test above (agent review
-        # R3-1): these are the two release-side extractions of the SAME slice, and
-        # passing the whole base to both of them is what left the qualified class
-        # released. ``base`` is deliberately reused rather than re-split so the two
-        # cannot drift apart again.
+        # EVERY segment is read through the same helper as the stem test above (agent
+        # reviews R3-1 and R4-1): these are the two release-side extractions of the SAME
+        # slice, and passing a NARROWER window to one of them is what left the qualified
+        # class, and then the interior-segment one, released. ``base`` is deliberately
+        # reused rather than re-split so the two cannot drift apart again, and the helper
+        # returns the full segment set so a positional gap cannot be introduced at
+        # either site.
         return False
     path = _TYPE_PATH_RE.fullmatch(value)
     if path:
