@@ -2351,11 +2351,18 @@ class MobileDaemon:
         terminal pin reaches the phone within one interval at the price of a
         single syscall. The file is re-read only when its fingerprint moves.
         The fingerprint is ``(st_ino, st_size, st_mtime_ns)`` -- the desktop
-        feed's ``_fingerprint`` for this same file -- and the inode is the field
-        that cannot miss: every write is a same-directory ``os.replace``, which
-        lands a new inode even when two writes share an mtime tick and a size.
-        ``None`` (no file) is a fingerprint too, so the file appearing or being
-        removed is a change like any other.
+        feed's ``_fingerprint`` for this same file -- and the inode is what
+        separates two writes that share an mtime tick and a size: every write is
+        a same-directory ``os.replace`` onto a fresh ``mkstemp`` file, so the
+        name lands on a different inode AS LONG AS the filesystem has not handed
+        the replaced file's freed inode number straight back to that temp file.
+        It is not airtight: ext4 does reuse a freed number at once (review round
+        8, R8-1), so two same-size replaces inside one mtime tick CAN fingerprint
+        equal there, and the pin is then picked up by the next write that moves
+        size, mtime or inode. That residue is bounded to a burst of writes on one
+        clock tick, which ``st_mtime_ns`` already makes rare. ``None`` (no file)
+        is a fingerprint too, so the file appearing or being removed is a change
+        like any other.
 
         Re-reads through ``read_pins`` (the one reader, with its store prune)
         and drops only the MERGED summaries cache, not the durable rows: a pin
