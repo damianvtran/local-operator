@@ -3007,3 +3007,40 @@ def cli_attached_connect():
     from local_operator.session.attached import AttachedSession
 
     return AttachedSession.connect
+
+
+def test_the_workstream_flag_is_carried_and_leaves_the_approval_posture_alone(
+    tmp_home: Path, quiet_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`lop exec --workstream` chooses the row's visibility and nothing else.
+
+    It used to imply ``--control`` on the belief that only a controlled run is
+    steerable. Every exec run already publishes its record and serves the socket,
+    so that bought nothing, while ``--control`` changes the APPROVAL posture:
+    gates park for a day instead of being denied, and ``--tools`` stops standing
+    as the approval. The fan-out shape (`--workstream --background --tools
+    bash,write`) then parked on its first write where the same command without
+    the flag ran (PR #1436 agent review round 1, F1). The two flags stay
+    composable: a caller who wants both says both.
+    """
+    captured: dict[str, Any] = {}
+
+    def fake_run_exec(command: str, exec_args) -> int:
+        captured["args"] = exec_args
+        return 0
+
+    monkeypatch.setattr("local_operator.exec_mode.run_exec", fake_run_exec)
+    monkeypatch.setattr(
+        "local_operator.exec_mode.resolve_hosting_model_dry", lambda args: ("test", "m")
+    )
+    base = ["program", "--hosting", "test", "--model", "m", "exec", "do it"]
+    monkeypatch.setattr("sys.argv", [*base, "--workstream"])
+    assert main() == 0
+    exec_args = captured.pop("args")
+    assert exec_args.workstream is True
+    assert exec_args.control is False, "--workstream changed the approval posture"
+
+    monkeypatch.setattr("sys.argv", [*base, "--workstream", "--control"])
+    assert main() == 0
+    exec_args = captured.pop("args")
+    assert (exec_args.workstream, exec_args.control) == (True, True)

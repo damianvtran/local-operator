@@ -12,6 +12,28 @@ from local_operator.session.frontend_state import FrontendSync, SlashResult
 from local_operator.session.runtime.types import reported_subagent_count
 
 
+class OpenedBy(BaseModel):
+    """WHO opened an agent workstream: the frozen ``{agent, label, session}`` object.
+
+    A MODEL rather than ``dict[str, str | None]`` so the three names the desktop
+    sidebar (local-operator-ui #448) is written against live in the published
+    schema and are ENFORCED at validation: with a free-form dict a producer-side
+    rename or an extra key passed silently and surfaced as an empty label in
+    another repository (PR #1436 agent review round 1, F4).
+
+    ``extra="forbid"`` is the enforcement half. Every member is REQUIRED-BUT-
+    NULLABLE rather than defaulted: the producer (``resume.workstream_opened_by``)
+    always writes all three, ``None`` where a member could not be read, so a
+    missing key is a producer bug to fail on, not a value to fill. The JSON is
+    byte-identical to the dict it replaces — same three keys, same order.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    agent: str | None
+    label: str | None
+    session: str | None
+
+
 class SessionRow(BaseModel):
     model_config = ConfigDict(extra="allow")
     id: str
@@ -88,6 +110,31 @@ class SessionRow(BaseModel):
     def _a_reported_count(cls, value: Any) -> int | None:
         """Refuse an unusable count the way every other reader does."""
         return reported_subagent_count(value)
+
+    #: WHO opened this conversation when an AGENT opened it on the operator's
+    #: behalf — ``{"agent": str | None, "label": str | None,
+    #: "session": str | None}`` — and ``None`` for every ordinary row.
+    #:
+    #: ADDITIVE AND FROZEN, for the same reason `degraded` is: the sidebar that
+    #: renders the attribution is written against exactly these three names in
+    #: another repository, so a rename here would surface as an empty label
+    #: rather than as an error anyone sees (``resume.OPENED_BY_KEYS`` owns the
+    #: list and the reasoning).
+    #:
+    #: A NULLABLE OBJECT rather than an omission, which is the opposite of
+    #: `pinned`'s rule and deliberately so: ``pinned`` is a state the user
+    #: TOGGLES, so an absent key would leave a stale optimistic value standing,
+    #: while this is an immutable fact about how the session began and a client
+    #: that never renders it is unaffected. ``None`` therefore means "nobody
+    #: machine-opened this" and is the answer on every row that is not an agent
+    #: workstream.
+    #:
+    #: Populated ONLY for a workstream row (``resume.ORIGIN_AGENT_WORKSTREAM``).
+    #: The 2026-09-18 incident was a machine-started session being
+    #: indistinguishable from one the operator opened; a visible workstream
+    #: without this would repeat it with the row merely visible instead of
+    #: hidden.
+    opened_by: OpenedBy | None = None
 
 
 class SessionList(BaseModel):
