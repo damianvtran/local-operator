@@ -1011,9 +1011,8 @@ value. `header` is request-only: no response, no catalog row and no fixture carr
 it, because what crosses back is the row's own `auth.secret_refs`. A `header` on a
 row the catalog does not offer `add_key` for (an OAuth server, a server that
 already sends a credential header, a stdio server), or with more than one id, is
-`200` with
-`code: "invalid_target"`, and the whole code vocabulary of that route is in
-[DESKTOP_CONTROLS.md](DESKTOP_CONTROLS.md).
+`200` with `code: "invalid_target"`, and the whole code vocabulary of that route is
+in [DESKTOP_CONTROLS.md](DESKTOP_CONTROLS.md).
 
 `POST .../{id}/watch` is the one route whose envelope is WIDER than that budget,
 and it says so rather than leaving it to be discovered: after the attach it
