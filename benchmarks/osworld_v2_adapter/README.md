@@ -311,6 +311,37 @@ does NOT create IAM roles or security groups; those are one-time human steps.
    worker writes into its own environment (OSWorld reads it from nowhere
    else); it is scrubbed on `close`.
 
+7. **Anything else the task's own source declares** → the value that requirement
+   names, as a `--secret` ref or an `--infra` value (the refusal names which, and
+   which substitute will also do). A task whose controller reads a value when the
+   guest's task object is instantiated is **refused at `reset_start`** without it:
+   after the task is parsed, before the provider is constructed, so no guest is
+   ever allocated. Measured before the check existed: 44 of the release's 108
+   tasks declared a value nothing supplied and no existing check covered (40 of
+   them `WEBSITE_HOST_SUFFIX`), and each allocated a desktop and then died inside
+   vendor code — `task_016` raised `ValueError: WEBSITE_HOST_SUFFIX must be set in
+   environment variables` from `aws.py:863 _start_desktop_env`, a traceback naming
+   no adapter, with an instance left to tear down. Two rules keep the refusal
+   honest rather than merely fast:
+   * **A value with no channel is refused whether or not it is supplied.**
+     `GITLAB_PRIVATE_TOKEN` is the case: `desktop_env/controllers/gitlab.py:19-23`
+     reads it through `os.getenv` at import, and this build hands the vendor only
+     the env-delivery allowlist plus the provider's own credentials, so supplying
+     it changes nothing. The two GitLab tasks (`task_026`, `task_041`) therefore
+     cannot run on this build at all, and are refused at the seam instead of
+     allocating a guest and failing mid-setup; a build that puts the name on
+     `vendor_bridge.SECRET_ENV_NAMES` can run them.
+   * **A documented substitute satisfies what it stands in for.** The pinned
+     simulator resolves its key through `model_client`'s fallback chain
+     (`user_simulator.respond` passes no key when it has none, and the client then
+     falls back to the judge key), so a supplied judge key satisfies
+     `OSWORLD_USER_SIM_API_KEY`; only the absence of both is refused.
+   `GOOGLE_ACCOUNT_CREDENTIALS` is declared OPTIONAL: a search of the pinned tree
+   finds the name at no call site, and a required name the apparatus cannot
+   consume is the anti-pattern this table already refuses for the legacy proxy
+   pair. **Needs a wheel built from this source** — it is adapter code, so a wheel
+   pinned before this change keeps the old behaviour.
+
 ## How secrets reach the worker
 
 The worker is spawned with an environment built from a closed allowlist, so
