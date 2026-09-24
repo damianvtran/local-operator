@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -9,6 +10,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, SecretStr
 
 from local_operator.config import ConfigManager
+from local_operator.model.defaults import SuggestedModel, suggested_model_for
+from local_operator.providers import key_check
 from local_operator.providers.auth_store import AuthStore
 from local_operator.providers.registry import (
     PROVIDER_REGISTRY,
@@ -20,7 +23,13 @@ from local_operator.providers.registry import (
 from local_operator.server.dependencies import get_config_manager
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
-from local_operator.server.utils.desktop_auth import DesktopAuth, LoginOperation
+from local_operator.server.utils.desktop_auth import (
+    LOGIN_READY_TIMEOUT_S,
+    DesktopAuth,
+    LoginOperation,
+    SignInUnavailableError,
+    apply_desktop_login_defaults,
+)
 
 router = APIRouter(tags=["Authentication"], dependencies=[Depends(require_desktop)])
 
@@ -64,9 +73,23 @@ async def get_desktop_auth(
     host = getattr(request.app.state, "desktop_auth", None)
     if host is None:
         root = resolve_config_dir()
-        host = DesktopAuth(AuthStore(root / "auth.db", config_dir=root), root)
+        # The server's own manager, so a sign-in's defaults are written through
+        # the same instance every other config route reads.
+        host = DesktopAuth(AuthStore(root / "auth.db", config_dir=root), root, manager)
         request.app.state.desktop_auth = host
     return host
+
+
+def _suggestion(hosting: str, *, oauth: bool = False) -> dict[str, str] | None:
+    """The wire shape of ``model.defaults.suggested_model_for``.
+
+    ``{"id", "name"}`` or ``None``. The renderer shows this ("Suggested: Claude
+    Opus 5.5") before any sign-in, and it is the model a first sign-in will set,
+    so the two must come from the same table -- which is why the table lives in
+    the backend and the renderer carries no copy.
+    """
+    suggested: SuggestedModel | None = suggested_model_for(hosting, oauth=oauth)
+    return None if suggested is None else {"id": suggested.id, "name": suggested.name}
 
 
 def _reply(result: Any, message: str = "Provider controls retrieved.") -> CRUDResponse[Any]:
@@ -110,6 +133,12 @@ async def providers(host: DesktopAuth = Depends(get_desktop_auth)):
                     "method_id": method.id,
                     "requires_secret_input": method.paste_prompt_required,
                     "paste_fallback": method.paste_code_flow,
+                    # Per METHOD, because the route decides the spelling: a Kimi
+                    # OAuth grant reaches a host that names K3 `k3`, a Kimi key
+                    # one that names it `kimi-k3`.
+                    "suggested_model": _suggestion(
+                        storage_id, oauth=method.login_kind != "api_key"
+                    ),
                 }
                 for method in PROVIDER_REGISTRY
                 if credential_provider_id(method.id) == storage_id and method.login is not None
@@ -137,6 +166,7 @@ async def providers(host: DesktopAuth = Depends(get_desktop_auth)):
                         "kind": "api_key",
                         "requires_secret_input": True,
                         "paste_fallback": False,
+                        "suggested_model": _suggestion(storage_id),
                     }
                 )
             rows.append(
@@ -170,6 +200,10 @@ async def providers(host: DesktopAuth = Depends(get_desktop_auth)):
                     or bool(resolve_env_key(storage_id)),
                     "stored_credentials": len(host.store.list_credentials(storage_id)),
                     "base_url": provider.base_url,
+                    # The model a first sign-in here will set as the default (API
+                    # key spelling; each method carries its own), or null for a
+                    # provider with no suggestion (local runtimes, TypeSafe).
+                    "suggested_model": _suggestion(storage_id),
                 }
             )
         return _reply({"providers": rows})
@@ -246,12 +280,30 @@ async def remove_account(account_id: int, host: DesktopAuth = Depends(get_deskto
 
 @router.post("/v1/auth/login", response_model=CRUDResponse)
 async def login(body: LoginRequest, host: DesktopAuth = Depends(get_desktop_auth)):
+    """Start a sign-in and reply once it has something the renderer can act on.
+
+    Starting a sign-in SUPERSEDES any active one (see ``DesktopAuth.start``), so
+    this no longer answers 409. The reply waits up to
+    ``LOGIN_READY_TIMEOUT_S`` for the flow's URL or prompt, because the renderer
+    opens the browser from THIS reply: replying before the flow ran a step --
+    as this did -- always sent ``auth_url: null`` and the browser never opened
+    until the user pressed "reopen". A flow slower than the bound still works;
+    the renderer's poll picks the URL up.
+    """
     try:
-        op = host.start(body.provider)
+        op = await host.start(body.provider)
+    except SignInUnavailableError as error:
+        # 503, not 422: the request was valid and the server is shutting down.
+        # The renderer classifies 503 as "backend not answering"
+        # (``isServerUnreachable``), which is exactly this state; nothing in the
+        # desktop client branches on a 422 from this route.
+        raise HTTPException(503, str(error)) from None
     except ValueError as error:
         raise HTTPException(422, str(error)) from None
-    except RuntimeError as error:
-        raise HTTPException(409, str(error)) from None
+    try:
+        await asyncio.wait_for(op.ready.wait(), timeout=LOGIN_READY_TIMEOUT_S)
+    except TimeoutError:
+        pass
     return _reply(op.snapshot(), "Sign-in started.")
 
 
@@ -264,11 +316,40 @@ async def operation(operation_id: str, host: DesktopAuth = Depends(get_desktop_a
 async def operation_input(
     operation_id: str, body: LoginInput, host: DesktopAuth = Depends(get_desktop_auth)
 ):
+    """Answer an operation's open prompt.
+
+    For a login whose prompt reads an API key (``paste_is_api_key``) the answer
+    IS the key, and this is the second route that stores one -- so it runs the same
+    ``key_check`` as ``PUT /v1/auth/providers/{id}/key`` before the flow sees it
+    (QA round 1, Q2). Validating here was chosen over refusing
+    ``POST /v1/auth/login`` for these providers: that start-then-paste shape is
+    an existing contract (the ``/login`` desktop command advertises it, and older
+    renderers may drive it), so closing it would break a client to fix a check.
+    A definite rejection answers 422 with the reason and leaves the prompt OPEN,
+    so the user re-pastes into the same flow; "could not check" lets the key
+    through, exactly as the PUT does.
+
+    Gated on what the PROMPT reads, not on the login flavour: the flavour gate
+    (``login_kind == "api_key"``) skipped ``alibaba-token-plan-oauth``, a device
+    login whose first prompt reads the ``sk-sp-`` inference key it then stores
+    (review round 2, MAJOR 1). An authorization code pasted into Anthropic's
+    fallback box is not a key and is never sent to a provider as one.
+    """
     op = _operation(host, operation_id)
     pending = op.pending_input
     if pending is None or pending.done() or body.prompt_id != op.prompt_id:
         raise HTTPException(409, "This sign-in is not waiting for input.")
-    pending.set_result(_secret(body))
+    value = _secret(body)
+    definition = get_provider_definition(op.provider)
+    if definition is not None and definition.paste_is_api_key:
+        verdict = await key_check.check_api_key(op.provider, value)
+        if verdict.valid is False:
+            raise HTTPException(422, verdict.reason or "The provider rejected this API key.")
+        # The check awaited: the flow may have been cancelled or superseded
+        # meanwhile, and a resolved future cannot take a second result.
+        if pending.done() or op.pending_input is not pending:
+            raise HTTPException(409, "This sign-in is not waiting for input.")
+    pending.set_result(value)
     return _reply(op.snapshot(), "Response submitted.")
 
 
@@ -283,19 +364,47 @@ async def cancel_operation(operation_id: str, host: DesktopAuth = Depends(get_de
 async def save_key(
     provider_id: str, body: SecretInput, host: DesktopAuth = Depends(get_desktop_auth)
 ):
+    """Check the key with its provider, store it, and apply first-run defaults.
+
+    Validation lives HERE rather than on ``/probe`` so a key is checked on the one
+    path that stores it: a separate endpoint the renderer had to remember to call
+    afterwards would be a second path, and the reported bug (a fake DeepSeek key
+    showing "Signed in") was exactly a save with no check behind it. ``/probe``
+    stays the LOCAL-server reachability check it was built as.
+
+    * The provider definitively rejects the key -> 422 with the reason as
+      ``detail``; nothing is stored and no defaults are applied.
+    * It accepts it -> stored, ``valid: true``.
+    * It cannot be checked (timeout, offline, outage) -> stored anyway,
+      ``valid: null`` with a reason; an unreachable provider is not evidence
+      the key is wrong.
+
+    ``result`` is ``{"valid", "reason", "defaults_applied"}``. The key itself
+    never appears in a reply or a log line.
+    """
     storage_id = credential_provider_id(provider_id)
     definition = get_provider_definition(storage_id)
     if definition is None or definition.env_keys is None:
         raise HTTPException(422, "This provider does not accept an API key.")
+    secret = _secret(body)
+    verdict = await key_check.check_api_key(storage_id, secret)
+    if verdict.valid is False:
+        raise HTTPException(422, verdict.reason or "The provider rejected this API key.")
     # AuthStore owns alias translation and source precedence. Use the same
     # login tier as the terminal; do not create a renderer-owned secret store.
-    host.store.upsert_credential(
-        storage_id, {"type": "api_key", "source": "login", "key": _secret(body)}
-    )
+    host.store.upsert_credential(storage_id, {"type": "api_key", "source": "login", "key": secret})
     from local_operator.providers.auth_cli import _invalidate_cached_listing
 
     _invalidate_cached_listing(storage_id)
-    return _reply({}, "API key saved.")
+    # `oauth=False`: this stored a KEY, even under a provider whose own login is
+    # OAuth, and the key's host decides the suggested model's spelling.
+    applied = await asyncio.to_thread(
+        apply_desktop_login_defaults, host.config_manager, storage_id, oauth=False
+    )
+    return _reply(
+        {"valid": verdict.valid, "reason": verdict.reason, "defaults_applied": applied},
+        "API key saved.",
+    )
 
 
 @router.post("/v1/auth/providers/{provider_id}/probe", response_model=CRUDResponse)

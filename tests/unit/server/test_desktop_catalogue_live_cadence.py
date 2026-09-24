@@ -42,7 +42,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.config import ConfigManager
-from local_operator.model import discovery
+from local_operator.model import discovery, registry
 from local_operator.model.discovery import DiscoveredModel
 from local_operator.server.routes import auth, desktop_catalogues
 
@@ -116,7 +116,18 @@ def _plant_anthropic_document(tmp_path: Path, *, age_s: float, ids: list[str]) -
 
 #: A model that exists only in the FETCH's answer: it is what the user is looking
 #: for, and it cannot appear by accident, because the planted document omits it.
-RELEASED_SINCE_THE_DOCUMENT = "claude-opus-5-5"
+#:
+#: It must ALSO be an id the shipped registry does not carry, and that is not
+#: decoration: ``live_catalogue`` layers a provider's listing OVER the shipped
+#: rows, so a curated id reaches the served set whether or not a fetch happened
+#: -- the inside-the-cadence case would then pass for the wrong reason, and the
+#: past-the-cadence case could not fail. This id was ``claude-opus-5-5`` while
+#: that was unshipped; adding it as a curated row for the suggested-defaults
+#: work silently converted the assertion into a claim about the registry. The
+#: guard test at the end of this file holds the constraint open, and
+#: ``test_desktop_first_frame_catalogue.UNSHIPPED_ID`` is the same shape for the
+#: same reason.
+RELEASED_SINCE_THE_DOCUMENT = "claude-fable-6"
 
 
 class _Fetches:
@@ -142,7 +153,7 @@ class _Fetches:
             DiscoveredModel(id="claude-opus-5", name="Claude Opus 5", context_window=1_000_000),
             DiscoveredModel(
                 id=RELEASED_SINCE_THE_DOCUMENT,
-                name="Claude Opus 5.5",
+                name="Claude Fable 6",
                 context_window=1_000_000,
             ),
         ]
@@ -206,6 +217,9 @@ async def test_a_live_read_inside_the_cadence_is_served_without_a_fetch(
         "turn every refresh into nine provider requests"
     )
     assert "claude-opus-5" in ids
+    # Absent because no fetch happened AND because the registry can never supply
+    # it; the sentinel's comment and the guard test below are what keep the
+    # second half of that true.
     assert RELEASED_SINCE_THE_DOCUMENT not in ids
 
 
@@ -225,3 +239,15 @@ async def test_the_initial_read_never_fetches_even_a_document_past_the_cadence(
 
     assert fetched.calls == []
     assert body["source"] == "initial"
+
+
+async def test_the_fetch_only_sentinel_is_not_a_shipped_registry_row() -> None:
+    """The sentinel must stay unshipped, or two assertions above go vacuous.
+
+    A test rather than a comment because the failure is silent: a curated row
+    puts the sentinel in the served set with no fetch at all, so the
+    inside-the-cadence case keeps passing (for the registry's reason, not the
+    cadence's) while the past-the-cadence case can no longer fail. That is
+    exactly what shipping ``claude-opus-5-5`` did.
+    """
+    assert RELEASED_SINCE_THE_DOCUMENT not in registry.static_models("anthropic")

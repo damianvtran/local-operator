@@ -789,6 +789,20 @@ class ProviderController:
         # lazy OAuth thunks name it explicitly, and `create_api_key_login`'s
         # paste-only login swallows it through `**_kwargs`.
         result = await definition.login(callbacks, signal=signal, **options)
+        if signal is not None and signal.aborted:
+            # The login returned AFTER its host abandoned it: a flow that ignores
+            # the signal (the paste-only logins do, by design) or absorbs its
+            # task's cancellation can still come back with a credential. The
+            # user has walked away from this sign-in -- the desktop may already
+            # have started a newer one for another provider -- so storing it now
+            # would silently add an account they cancelled (review round 3,
+            # MINOR 2). Raised as the ordinary cancel outcome every host already
+            # handles.
+            from local_operator.providers.oauth.callback_server import (
+                LoginCancelledError,
+            )
+
+            raise LoginCancelledError(signal.reason or "Login cancelled")
 
         storage = definition.store_credentials_as or provider_id
         if isinstance(result, str):

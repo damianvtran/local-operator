@@ -22,6 +22,7 @@ from local_operator.providers.oauth.callback_server import (
     LoginError,
     maybe_await,
     raise_for_refresh_failure,
+    report_flow_details,
 )
 from local_operator.providers.oauth.device_code import (
     DevicePollResult,
@@ -122,6 +123,11 @@ async def login_xai(
         if not device_code or not verification_url:
             raise LoginError(f"xAI device authorization response malformed: {authz}")
 
+        await report_flow_details(
+            callbacks,
+            user_code=str(authz.get("user_code") or ""),
+            expires_in=float(authz.get("expires_in", 900)),
+        )
         if callbacks.on_auth_url is not None:
             user_code = authz.get("user_code", "")
             await maybe_await(
