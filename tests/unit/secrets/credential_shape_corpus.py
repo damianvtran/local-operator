@@ -371,16 +371,16 @@ TYPE_ANNOTATION_POSITIVES: tuple[Case, ...] = (
     # caught the dangerous half (agent review R1-1). These five rows are that half,
     # and each is a value the arm released before the confinement was enforced.
     Case(
-        "API" + "_KEY=" + _generic("Pass", "Word") + "7",
-        "the digit-carrying sibling of the residual: a digit in the ARGUMENT masks",
+        "API" + "_KEY=" + _generic("Pass", "Word7"),
+        "the digit-carrying sibling of the residual: a digit INSIDE the argument",
     ),
     Case(
         "API" + "_KEY=" + _generic("Pass7", "Word"),
         "the same with the digit in the BASE: also masks",
     ),
     Case(
-        "API" + "_KEY=" + _generic("Abc", "Xyz") + "1",
-        "both capitals, digit in the ARGUMENT: the grid row that was released whole",
+        "API" + "_KEY=" + _generic("Abc", "Xyz1"),
+        "both capitals, digit INSIDE the argument: the grid row that was released whole",
     ),
     Case(
         "DB" + "_PASSWORD=" + _generic("Correcthorse", "Battery") + "7",
@@ -414,6 +414,41 @@ TYPE_ANNOTATION_POSITIVES: tuple[Case, ...] = (
     Case(
         "API" + "_KEY=" + _generic("Token", "void"),
         "the same with ``void``",
+    ),
+    # --- the R2-1 class: a credential-STEM base over a TYPE-SHAPED argument ---
+    # R1-2 put the refusal on the ARGUMENT (a bare primitive), which released
+    # ``Pass<Word>``; R2-1 was the same mistake one spelling over, releasing a
+    # credential-stem base over a CamelCase argument or a nested application. Both
+    # are the same inversion — the discriminating fact is the BASE — so these rows
+    # pin the spelling the argument rule could not reach. Every one of them masks at
+    # ``origin/main`` and was released whole, with no hit, at the old head.
+    Case(
+        "API" + "_KEY=" + _generic("Pass", "Phrase"),
+        "a credential-stem base over a CamelCase argument: reads as a passphrase",
+    ),
+    Case(
+        "API" + "_KEY=" + _generic("Passphrase", "Word"),
+        "the same stem spelled out, which the whole-word test does not reach either",
+    ),
+    Case(
+        "API" + "_KEY=" + _generic("Passkey", "Word"),
+        "the same class: ``Passkey`` is a stem, not a whole credential word",
+    ),
+    Case(
+        "API" + "_KEY=" + _generic("Auth", "Token"),
+        "a credential-stem base over another credential stem",
+    ),
+    Case(
+        "API" + "_KEY=" + _generic("Login", "Secret"),
+        "the same inversions on ``Login``",
+    ),
+    Case(
+        "API" + "_KEY=" + _generic("Pass", _generic("Vec", "u8")),
+        "a credential-stem base over a NESTED application: not a bare primitive",
+    ),
+    Case(
+        "API" + "_KEY=" + _generic("Pass", "Word"),
+        "the whole-condition residual: a credential-stem base, so it MASKS (R2-1)",
     ),
     # --- the R1-1 half the corpus had no row for: a bare ``::`` path ---
     Case(
@@ -1538,32 +1573,30 @@ NEGATIVE_CASES: tuple[Case, ...] = (
     ),
     # The spellings this change releases, as rows rather than as a paragraph.
     *TYPE_ANNOTATION_NEGATIVES,
-    # ...and the one it releases that is NOT a type annotation, pinned here so the
-    # boundary the type clause draws is a row a later change has to argue with.
+    # ...and the residual that REMAINS released, pinned here so the boundary the type
+    # clause draws is a row a later change has to argue with.
     #
-    # ``Pass<Word>`` is a credential spelled EXACTLY as ``Ident<Ident>`` — capitals
-    # on both sides, no digit, no symbol, no word break — and no spelling test can
-    # tell that from a type application: a type name and a chosen password use the
-    # same alphabet. It sits in the NEGATIVE half deliberately, which is this file's
-    # convention for an accepted residual (see the lowercase vendor tail above), and
-    # the residual is bounded by construction rather than by hope: no issuer's
-    # alphabet contains ``<`` or ``>`` — base64url, hex, JWT and UUID all exclude
-    # them — every vendor prefix is lowercase, and the escape routes a credential
-    # actually has (a rendered blob, a DSN, a header) all carry the symbols the
-    # whole-value confinement check rejects.
+    # ``Correcthorse<Battery>`` is a credential spelled EXACTLY as ``Ident<Ident>`` —
+    # capitals on both sides, no digit, no symbol, no word break, and a base that is
+    # NOT a credential stem — and no spelling test can tell that from a type
+    # application: a type name and a chosen password use the same alphabet. It sits in
+    # the NEGATIVE half deliberately, which is this file's convention for an accepted
+    # residual (see the lowercase vendor tail above), and the residual is bounded by
+    # construction rather than by hope: no issuer's alphabet contains ``<`` or ``>`` —
+    # base64url, hex, JWT and UUID all exclude them — every vendor prefix is
+    # lowercase, and the escape routes a credential actually has (a rendered blob, a
+    # DSN, a header) all carry the symbols the whole-value confinement check rejects.
     #
-    # The residual is now the WHOLE-CONDITION spelling, and the boundary is on both
-    # sides: a digit in either the base or the argument masks, and so does a word
-    # break in either. ``Correcthorse<Battery>`` is the same value with its
-    # underscore dropped — digit-free, no word break — and it is pinned here for the
-    # same reason: the arm releases it, so it is a boundary rather than an accident.
-    Case(
-        "API" + "_KEY=" + _generic("Pass", "Word"),
-        "the accepted residual: Ident<Ident> is a type by spelling, and is recorded",
-    ),
+    # The residual NARROWED in agent review R2-1: ``Pass<Word>`` used to sit beside it,
+    # released as this residual was, and it is now a POSITIVE row because its base is a
+    # credential stem (``Pass``) and a passphrase over such a base is a chosen value
+    # rather than an annotation. The base is the discriminating fact, so
+    # ``Correcthorse<Battery>`` is what stays released — a base no one chooses a
+    # password with — and the row above is what says the release is on the base and not
+    # on the argument.
     Case(
         "DB" + "_PASSWORD=" + _generic("Correcthorse", "Battery"),
-        "the residual's no-word-break spelling: underscore removed, still digit-free",
+        "the accepted residual: Ident<Ident>, underscore removed, still digit-free",
     ),
 )
 

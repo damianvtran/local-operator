@@ -340,11 +340,13 @@ _TYPE_CLAUSE_ROWS_THE_ARM_HOLDS = 15
 #: drift away from the table it measures.
 _TYPE_CLAUSE_ROWS_THAT_CATCH_A_WIDE_ARM = len(TYPE_ANNOTATION_POSITIVES)
 
-#: The spellings the confinement must MASK, and the arm each one is confined by.
-#: They are the digit-carrying half of the residual class that had no row before
-#: agent review R1-1, and they are asserted as VALUES rather than left to the corpus
-#: because the corpus only proves the whole-line reading: this blocks SAYS which
-#: condition of the documented release each spelling violates.
+#: The spellings the CONFINEMENT must mask — the digit, word-break and bare-path
+#: conditions — and the condition each one violates. They are the digit-carrying half
+#: of the residual class that had no row before agent review R1-1. They are asserted as
+#: VALUES rather than left to the corpus because the corpus only proves the whole-line
+#: reading: this table SAYS which condition of the documented release each spelling
+#: violates. The credential-stem half is in :data:`_STEM_BASE_MUST_MASK`, which is a
+#: different arm and has its own test.
 _CONFINEMENT_MUST_MASK: tuple[tuple[str, str], ...] = (
     ("Pass" + _LT + "Word" + "7", "a digit in the ARGUMENT"),
     ("Pass7" + _LT + "Word", "a digit in the BASE"),
@@ -353,12 +355,50 @@ _CONFINEMENT_MUST_MASK: tuple[tuple[str, str], ...] = (
     ("foo" + _LT + "Bar" + _GT, "a LOWERCASE base under a generic"),
     ("abc" + "::" + "def" + _LT + "Bar" + _GT, "a lowercase-qualified leaf under a generic"),
     ("Option" + _LT + "Sha256" + _GT, "a digit inside a NON-primitive type name"),
-    ("Pass" + _LT + "int" + _GT, "a credential-stem BASE over a bare primitive"),
+    ("Sv" + "::" + "Secret", "a CamelCase MODULE segment in a bare path"),
+    ("Camel" + "::" + "Word9", "the same convention violation with a digit"),
+)
+
+#: The spellings a credential-STEM or credential-WORD base must mask, whatever the
+#: ARGUMENT is. The base is the discriminating fact: a type's own base is never a
+#: credential word, which is what keeps a real annotation released
+#: (:data:`_STEM_BASE_STAYS_RELEASED`).
+#:
+#: **This table is the R2-1 regression.** Each stem row below was released WHOLE, with
+#: no hit, at the head that round reviewed, and masks at ``origin/main``. The gate that
+#: let them through was the same inversion R1-2 made one spelling over — a refusal
+#: keyed on the ARGUMENT where the fact is the BASE — so a CamelCase argument or a
+#: nested application, neither of them a bare primitive, fell past it. A later widening
+#: of the ARGUMENT grammar must not be able to re-open that class, which is what
+#: asserting every argument shape over a fixed stem is for.
+_STEM_BASE_MUST_MASK: tuple[tuple[str, str], ...] = (
+    ("Pass" + _LT + "int" + _GT, "a credential-stem base over a bare primitive"),
     ("Pass" + _LT + "any" + _GT, "the same: ``any`` is English, not a type"),
     ("Secret" + _LT + "str" + _GT, "a credential WORD base over a primitive"),
     ("Token" + _LT + "void" + _GT, "the same with ``void``"),
-    ("Sv" + "::" + "Secret", "a CamelCase MODULE segment in a bare path"),
-    ("Camel" + "::" + "Word9", "the same convention violation with a digit"),
+    ("Pass" + _LT + "Phrase" + _GT, "a credential-stem base over a CamelCase argument"),
+    ("Passphrase" + _LT + "Word" + _GT, "a stem the whole-word test does not reach either"),
+    ("Passkey" + _LT + "Word" + _GT, "the same class one spelling over"),
+    ("Auth" + _LT + "Token" + _GT, "a credential-stem base over another credential stem"),
+    ("Auth" + _LT + "String" + _GT, "the same over a type name"),
+    ("Login" + _LT + "Secret" + _GT, "the same inversion on ``Login``"),
+    ("Login" + _LT + "String" + _GT, "the same over a type name"),
+    ("Pass" + _LT + "String" + _GT, "a stem base over a type name, digit-free"),
+    ("Pass" + _LT + "Vec" + _LT + "u8" + _GT + _GT, "a stem base over a NESTED application"),
+    ("Pass" + _LT + "Vec" + _LT + "Phrase" + _GT + _GT, "a nested application of names"),
+    ("Pass" + _LT + "Word" + _GT, "the residual BEFORE this round: a stem base masks"),
+)
+
+#: The other side of :data:`_STEM_BASE_MUST_MASK`, in the same shape: a type's OWN base
+#: over the SAME argument shapes, which must stay released. Read as a pair, the two
+#: tables say the release is decided by the base and not by the argument.
+_STEM_BASE_STAYS_RELEASED: tuple[tuple[str, str], ...] = (
+    ("Vec" + _LT + "int" + _GT, "a type base over a bare primitive"),
+    ("Vec" + _LT + "Phrase" + _GT, "a type base over a CamelCase argument"),
+    ("Vec" + _LT + "String" + _GT, "a type base over a type name"),
+    ("Vec" + _LT + "Vec" + _LT + "u8" + _GT + _GT, "a type base over a nested application"),
+    ("Option" + _LT + "Vec" + _LT + "u8" + _GT + _GT, "the same one type down"),
+    ("Arc" + _LT + "Mutex" + _LT + "String" + _GT + _GT, "a two-level type application"),
 )
 
 
@@ -429,7 +469,12 @@ def test_the_type_clause_masks_a_digit_carrying_spelling() -> None:
 
     for value, condition in _CONFINEMENT_MUST_MASK:
         assert rs._is_type_expression(value) is False, condition
-        text = "DB" + "_PASSWORD=" + value
+        # ``API_KEY`` rather than ``DB_PASSWORD``: the name must not COLLIDE with the
+        # value, because ``_repeats_its_own_name`` releases a value that repeats its
+        # own variable name (``DB_PASSWORD=…password…``) — a pre-existing arm, not this
+        # clause, and one this block is not testing. ``API_KEY`` shares no substring
+        # with any row here, so the reading below is the type clause's alone.
+        text = "API" + "_KEY=" + value
         assert rs.scrub_shapes(text) != text, f"released with no hit: {condition}"
 
     # The primitives are UNCHANGED by the digit rule: they are type names by fiat.
@@ -450,10 +495,46 @@ def test_the_type_clause_masks_a_digit_carrying_spelling() -> None:
     assert rs._is_type_expression("Pass" + _LT + "int" + _GT) is False
     assert rs._base_is_a_credential_stem("Pass") is True
     assert rs._base_is_a_credential_stem("Vec") is False
-    assert rs._has_a_bare_primitive_argument("Vec" + _LT + "u8" + _GT) is True
-    assert (
-        rs._has_a_bare_primitive_argument("Option" + _LT + "Vec" + _LT + "u8" + _GT + _GT) is False
-    )
+
+
+def test_the_type_clause_refuses_a_credential_stem_base_whatever_the_argument() -> None:
+    """The stem refusal is on the BASE, and this is the R2-1 regression (MAJOR).
+
+    ``_base_is_a_credential_stem`` used to be qualified by
+    ``_has_a_bare_primitive_argument``, so a credential-stem base whose argument was a
+    CamelCase NAME (``Pass<Phrase>``, ``Auth<Token>``, ``Login<Secret>``) or a nested
+    application (``Pass<Vec<u8>>``) fell past both gates and was released WHOLE, with
+    no hit at all, while masking at ``origin/main``. ``is_credential_name`` is a
+    whole-word test and is ``False`` for every stem but ``passwd``/``pwd``, so it never
+    covered them either.
+
+    The two tables are the assertion, and they must be read as a PAIR: every one of
+    :data:`_STEM_BASE_MUST_MASK` masks, and every one of
+    :data:`_STEM_BASE_STAYS_RELEASED` — the same argument shapes over a type's own base
+    — is released. Taken together that is the evidence the release is decided by the
+    BASE and not by the argument, which is the inversion both R1-2 and R2-1 shipped.
+
+    Each mask must carry a real hit rather than being silent: a hit is what registers
+    the value for the exact-value pass, so a silent mask contains it only on this line.
+    """
+    import local_operator.redaction_shapes as rs
+
+    for value, condition in _STEM_BASE_MUST_MASK:
+        assert rs._is_type_expression(value) is False, condition
+        # ``API_KEY`` and not ``DB_PASSWORD``: the name must not COLLIDE with the
+        # value, because ``_repeats_its_own_name`` releases a value that contains its
+        # own variable name (``DB_PASSWORD=…password…``). That arm is pre-existing and
+        # unchanged by this clause, and reading through it would measure the wrong one.
+        text = "API" + "_KEY=" + value
+        masked = rs.scrub_shapes(text)
+        assert masked != text, f"released with no hit: {condition}"
+        _, hits = rs.scrub_shapes_with_hits(text)
+        assert hits, f"a SILENT mask does not register the value: {condition}"
+
+    for value, condition in _STEM_BASE_STAYS_RELEASED:
+        assert rs._is_type_expression(value) is True, condition
+        text = "API" + "_KEY=" + value
+        assert rs.scrub_shapes(text) == text, f"containment traded back: {condition}"
 
 
 def test_the_digit_rule_ignores_a_bare_integer_argument() -> None:
@@ -538,18 +619,24 @@ def test_the_type_clauses_arguments_must_be_types(
 def test_the_type_clauses_accepted_residual_is_a_row(monkeypatch: pytest.MonkeyPatch) -> None:
     """The one release this clause makes that is not a type annotation.
 
-    ``API_KEY=Pass<Word>`` is a credential spelled exactly as ``Ident<Ident>``, and no
-    spelling test separates that from a type application — a type name and a chosen
-    password use the same alphabet. It is pinned as a corpus row rather than
-    described in prose so a later change has to meet it, and the two assertions here
-    are what make it a boundary of THIS clause: the row survives today, and it is
-    released by this arm (removed, the same value masks).
+    ``DB_PASSWORD=Correcthorse<Battery>`` is a credential spelled exactly as
+    ``Ident<Ident>``, and no spelling test separates that from a type application — a
+    type name and a chosen password use the same alphabet. It is pinned as a corpus row
+    rather than described in prose so a later change has to meet it, and the two
+    assertions here are what make it a boundary of THIS clause: the row survives today,
+    and it is released by this arm (removed, the same value masks).
 
-    The boundary is now on BOTH sides, and this test asserts the widening that used
-    to sit beside it: the residual is the digit-free, symbol-free, single-token
-    spelling, so the digit-carrying sibling of the same row MASKS. Before the
-    confinement was enforced that sibling was released whole, which is why a test
-    that only asserted the residual would have passed while releasing credentials.
+    **The residual NARROWED in agent review R2-1, and that is the assertion below.**
+    ``Pass<Word>`` used to sit here beside it, released as this residual was; its base
+    is a credential STEM (``Pass``), so the stem gate now refuses it whatever the
+    argument is, and it is a POSITIVE row. What stays released is a base no one chooses
+    a password with — which is the point: the refusal is on the BASE, not the argument.
+
+    The boundary is on BOTH sides, and this test asserts the widening that used to sit
+    beside it: the residual is the digit-free, symbol-free, single-token spelling, so
+    the digit-carrying sibling of the same row MASKS. Before the confinement was
+    enforced that sibling was released whole, which is why a test that only asserted the
+    residual would have passed while releasing credentials.
     """
     import local_operator.redaction_shapes as rs
 
@@ -561,8 +648,14 @@ def test_the_type_clauses_accepted_residual_is_a_row(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(rs, "_is_type_expression", lambda value: False)
     assert rs.scrub_shapes(case.text) != case.text, "the residual must be this arm's"
 
-    # ...and the sibling that a wide arm used to take with it.
+    # ...and the credential-STEM spelling that used to be released beside it (agent
+    # review R2-1): the same ``Ident<Ident>`` shape, but over a base a person reaches
+    # for when they choose a password, so it MASKS rather than sitting in the residual.
     monkeypatch.undo()
+    stem_spelling = "API" + "_KEY=" + "Pass" + _LT + "Word"
+    assert rs.scrub_shapes(stem_spelling) != stem_spelling, "a stem base must MASK"
+
+    # ...and the sibling that a wide arm used to take with it.
     sibling = "DB" + "_PASSWORD=" + "Pass" + _LT + "Word" + "7"
     assert rs.scrub_shapes(sibling) != sibling, "the digit-carrying sibling must MASK"
 
@@ -3638,17 +3731,48 @@ _CORPUS_GRADING_DIGEST = "a755ab0e8960419f719323ae343ef725e9f8662f278b1bfc66ba0e
 #:    That is the whole safety claim of this round: the enforcement narrowed the
 #:    release class the branch introduced and touched nothing the branch had not.
 #:
-#: 2. **The corpus grew by seven rows, which is what moves the constant.** Five are the
-#:    DIGIT-CARRYING and LOWERCASE-BASE half of the residual class — spellings the arm
-#:    released WHOLE with no hit at all before this round, and which the corpus had no
-#:    row for because it pinned only the digit-free spelling (agent review R1-1). They
-#:    sit in ``TYPE_ANNOTATION_POSITIVES`` because they MUST mask. The other two are
-#:    negatives: the same digit-free passphrase with its underscore removed, and the
-#:    ``Pass<int>`` primitive-argument spelling — both released, so both are boundaries
-#:    of the confined arm. The table's own counts moved with them, and the wide-arm
-#:    assertion is now pinned to the table's length rather than to a stale ``8``, so a
-#:    positive row with no discriminating reading fails instead of sitting inert.
-_CORPUS_GRADING_DIGEST = "bee10950878787b704adc228b84b2de62ba10098bed85e332554aff3cf6ffb99"
+#: 2. **The corpus grew by ELEVEN positives and ONE negative, which is what moves the
+#:    constant.** The eleven are the DIGIT-CARRYING and LOWERCASE-BASE half of the
+#:    residual class plus the primitive-argument spellings — all of them released WHOLE
+#:    with no hit at all before this round, and all of them things the corpus had no row
+#:    for because it pinned only the digit-free spelling (agent review R1-1). They sit
+#:    in ``TYPE_ANNOTATION_POSITIVES`` because they MUST mask, and the table's count
+#:    moved 8 -> 19 with them (``NEGATIVE_CASES`` moved 194 -> 195 for the one negative:
+#:    the same digit-free passphrase with its underscore removed, which the arm still
+#:    releases and is therefore a boundary of the confined arm rather than a miss). Both
+#:    figures are read off the assembled tuples rather than counted by hand, and the
+#:    whole-line totals agree: 471 graded rows became 483, which is 11 positives and 1
+#:    negative. The
+#:    wide-arm assertion is pinned to the table's length rather than to a stale ``8``, so
+#:    a positive row with no discriminating reading fails instead of sitting inert.
+#:
+#: MOVED ONCE MORE on 2026-09-23, in the R2-1 remediation, and the argument is again a
+#: measurement rather than a claim:
+#:
+#: 3. **The MODULE change moved exactly ONE pre-existing row, and it moved in the safe
+#:    direction.** The credential-stem base gate is applied to the BASE unconditionally
+#:    (``if _base_is_a_credential_stem(base): return False``, agent review R2-1), so
+#:    ``Pass<Word>`` — a credential stem over a CamelCase argument, previously the
+#:    ACCEPTED RESIDUAL and released whole with no hit — is now masked. Measured by
+#:    grading all 483 pre-existing rows under both modules: one row moves, and it is
+#:    that one. The other direction is measured too, because a base gate is only safe if
+#:    it is silent about a type's own base: ``Vec<String>``, ``Option<Vec<u8>>``,
+#:    ``Arc<Mutex<String>>``, ``Map<string, string>``, ``HashMap<String,String>``,
+#:    ``Result<String,Error>``, ``&str`` and ``std::collections::HashMap`` are released
+#:    identically before and after. The residual the arm still accepts is
+#:    ``Correcthorse<Battery>`` — ``Ident<Ident>`` with a base no one chooses a password
+#:    with — and it is a corpus row rather than a paragraph.
+#:
+#: 4. **The round's corpus change is ONE promotion and SIX additions.** ``Pass<Word>``
+#:    is promoted out of the released half, so ``NEGATIVE_CASES`` moved 195 -> 194: the
+#:    residual lost a member to the refusal rather than gaining one. Six credential-stem
+#:    positives are added beside it — ``Pass<Phrase>``, ``Passphrase<Word>``,
+#:    ``Passkey<Word>``, ``Auth<Token>``, ``Login<Secret>`` and ``Pass<Vec<u8>>`` — which
+#:    is what takes ``TYPE_ANNOTATION_POSITIVES`` 19 -> 26. Both counts are measured from
+#:    the assembled tuples, not counted by hand. The two digit rows whose reason line
+#:    named a condition the row does not exercise are corrected in the same change
+#:    (agent review R2-3).
+_CORPUS_GRADING_DIGEST = "c9f9fc543a0f62cc5783c5695ef02bb95bed53f3d11682934f6705f508ffb07f"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:
