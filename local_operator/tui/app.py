@@ -960,6 +960,7 @@ def _frontend_revision(session: Any) -> Any:
     except Exception:  # noqa: BLE001 -- not synchronized yet reads as "unknown"
         return None
 
+
 #: Background-completion banners one observer tick may SPAWN. Everything past
 #: the cap is still claimed — the arbitration is unchanged — and collapsed into
 #: a single "N sessions finished" digest carrying the tick's ABSOLUTE total.
@@ -10898,7 +10899,12 @@ class OperatorApp(App[None]):
         session = self._session
         revision = _frontend_revision(session)
         painted = getattr(self, "_band_painted_revision", None)
-        if revision is None or painted is None or painted[0] is not session or painted[1] != revision:
+        if (
+            revision is None
+            or painted is None
+            or painted[0] is not session
+            or painted[1] != revision
+        ):
             self._band_painted_revision = (session, revision)
             self._refresh_band()
 

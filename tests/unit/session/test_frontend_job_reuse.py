@@ -245,7 +245,9 @@ def test_clone_free_readers_match_the_cloned_state() -> None:
     )
     cloned = store.state
     assert store.running_task_count() == sum(
-        1 for job in cloned.jobs if job.type == "task" and job.status == "running" and not job.queued
+        1
+        for job in cloned.jobs
+        if job.type == "task" and job.status == "running" and not job.queued
     )
     assert store.running_task_count() == 1
     copy = store.attention_copy()

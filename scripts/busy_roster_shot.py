@@ -54,6 +54,7 @@ time.time = lambda: NOW  # type: ignore[assignment]
 import local_operator  # noqa: E402
 import local_operator.update as _update  # noqa: E402
 
+
 class _NotBehind:
     """The update probe pinned to "not behind" (see ``dock_band_shot.py``)."""
 
@@ -104,8 +105,12 @@ def _settled(i: int) -> dict[str, Any]:
 def _roster(step: int) -> list[dict[str, Any]]:
     lanes = [_lane(i, f"reading files step {step + i}") for i in range(12)]
     if step >= 3:
-        lanes[4] = {**lanes[4], "status": "failed", "error_text": "provider error: overloaded",
-                    "settled_at": NOW - 5}
+        lanes[4] = {
+            **lanes[4],
+            "status": "failed",
+            "error_text": "provider error: overloaded",
+            "settled_at": NOW - 5,
+        }
     return lanes + [_settled(i) for i in range(240)]
 
 
