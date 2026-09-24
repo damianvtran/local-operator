@@ -1284,12 +1284,28 @@ def test_the_refusal_is_classified_by_call_site_and_not_by_the_code_alone() -> N
     # The site must name a next command, and NOT the one that cannot help there: a
     # file-backed key is a different key, and `file-only` never calls
     # SecAccessControlCreateWithFlags, so pointing at it would send the operator to a
-    # command that does not address what failed (design round 2, D2-1).
-    assert "lop-update" in " ".join(access), "the access-control site names no action"
+    # command that does not address what failed (design round 2, D2-1). The command it
+    # names must be one the READER has, and must say which build carries the fix: this
+    # copy ships in a wheel, where only `local-operator` and `lop` exist — `lop-update`
+    # is the operator's own host script and is not installed by anything here (design
+    # round 1, D1-2).
+    assert "lop update" in " ".join(access), "the access-control site names no action"
+    assert "from `main`" in " ".join(access), "the copy must say which build has the fix"
     assert "file-only" not in " ".join(access), "file-only does not help at this site"
     keygen = keychain.secure_enclave_diagnosis(keychain.KEY_GENERATION_REFUSED, -50)
     assert keygen and keygen[0] != access[0], "one code read the same way at two sites"
     assert "inconsistent" in keygen[0]
+    # Its next action used to be `lop operator status` alone, and on the state a keygen
+    # refusal leaves that report's own way out is `lop operator init` — the command that
+    # just refused. It is now the downgrade, byte-identical to the sibling entry's, so the
+    # two sites cannot drift into describing one fallback two ways (design round 1, D1-1).
+    assert keygen[1] == keychain._FILE_ONLY_FALLBACK, keygen
+    assert (
+        keygen[1]
+        == keychain.secure_enclave_diagnosis(
+            keychain.KEY_GENERATION_REFUSED, keychain._ERR_SEC_MISSING_ENTITLEMENT
+        )[1]
+    )
     # A status nobody has classified contributes nothing, rather than a guessed cause.
     assert keychain.secure_enclave_diagnosis(keychain.KEY_GENERATION_REFUSED, -9999) == ()
     assert keychain.secure_enclave_diagnosis("a site that does not exist", -50) == ()
@@ -1420,9 +1436,16 @@ def test_a_printed_failure_carries_no_per_run_object_address() -> None:
     cleaned = keychain.without_run_addresses(raw)
     assert "0x" not in cleaned and "7F86B0D240" not in cleaned
     assert cleaned == "failed to add key to keychain: <SecKeyRef:('com.apple.setoken')>"
+    # Nine digits is the SHORTEST address the framework has printed on this host
+    # (`0x10137ede0`), and it must still go: a threshold of eight would have spared the
+    # parameters below instead (agent review round 1, R1-1).
+    nine = "keychain: <SecKeyRef:('com.apple.setoken')> 0x10137ede0"
+    assert keychain.without_run_addresses(nine) == "keychain: <SecKeyRef:('com.apple.setoken')>"
     # NOT run addresses — every one of these was altered by the first rule.
     for kept in (
         "id=0x7f8 ref=0x1",  # short hex literals: `id= ref=` before
+        "invalid parameter 0x00000008 for kSecAttrKeyType",  # a length-8 PARAMETER (R1-1)
+        "token 0xdeadbeef is a parameter, not an address",  # ...and another: both were deleted
         "could not read /tmp/0x9f/probe.pem",  # a hex path segment: `/tmp//probe.pem` before
         "OSStatus error -50",  # no hex at all
         "0x75929d8380 begins the description",  # no separator, so nothing to anchor on
