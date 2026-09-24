@@ -665,7 +665,9 @@ def test_one_contended_merge_does_not_stop_the_other_members_being_merged(
     asked: list[str] = []
     merged: list[str] = []
 
-    def _merge(network_id: str, document: dict[str, Any], *, from_device: str, **_: Any) -> list:
+    def _merge(
+        network_id: str, document: dict[str, Any], *, from_device: str, **_: Any
+    ) -> list[str]:
         if from_device == OWNER:
             raise MeshRefusal("busy", "another writer is changing who may borrow")
         merged.append(from_device)
