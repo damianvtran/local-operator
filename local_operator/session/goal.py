@@ -651,15 +651,16 @@ class GoalState:
     def ensure_token(self) -> bool:
         """Give a goal that has NO token one, so the judge can run. ``True`` if minted.
 
-        The other half of RULINGS R9. The fold reads a goal with no status as
-        ``active`` — a record restored from a build that predates this one, or a
-        text written through the plain ``set_goal`` the mobile relay and
-        ``lop --goal`` use — because it is standing work the user expects
-        pursued. But ``GoalJudge._enabled`` also requires a TOKEN (it is the
-        judge's staleness guard), and ``arm`` was the only minter, so those two
-        paths produced a goal every surface called ``active`` and nothing ever
-        ran on: the silent half of "the goal sitting inert", with no error to
-        see (agent review round 1, MAJOR-3).
+        The other half of RULINGS R9, and since the plain ``set_goal`` arms the
+        goal it writes (agent review round 2, MAJOR-5), the ONE caller left is
+        the pre-lifecycle restore fold: it reads a ``goal.json`` written before
+        this record existed, and the fold reads a goal with no status as
+        ``active`` because it is standing work the user expects pursued. But
+        ``GoalJudge._enabled`` also requires a TOKEN (it is the judge's staleness
+        guard), and ``arm`` was the only minter, so that path produced a goal
+        every surface called ``active`` and nothing ever ran on: the silent half
+        of "the goal sitting inert", with no error to see (agent review round 1,
+        MAJOR-3).
 
         Minting here is exactly as safe as minting in :meth:`arm`. The token
         exists so a verdict captured before a goal was REPLACED is dropped; a
