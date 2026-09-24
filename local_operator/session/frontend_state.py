@@ -4762,6 +4762,26 @@ def _fold_goal_status(session: Any) -> str:
     return "active" if str(getattr(session, "goal", "") or "") else ""
 
 
+class FrontendRevision(NamedTuple):
+    """What :meth:`FrontendStateStore.revision` returns; compare for equality.
+
+    ``lifecycle`` moves only when a child appears, leaves, or changes status or
+    queued-ness -- the subset of a roster change a coalescing reader must apply
+    at once rather than on its next spaced pass.
+    """
+
+    epoch: str
+    jobs: int
+    todos: int
+    wakes: int
+    lifecycle: int
+
+
+def _job_lifecycle(jobs: Sequence[JobState]) -> tuple[tuple[str, str, bool], ...]:
+    """The roster reduced to what makes a child start, settle or leave."""
+    return tuple((job.id, job.status, job.queued) for job in jobs)
+
+
 class FrontendStateStore:
     """Atomic snapshot/update store shared by local and remote sessions.
 
@@ -5105,36 +5125,42 @@ class FrontendStateStore:
         reader can see moved", and anything else is a new revision. A scalar
         delta re-wraps the SAME rows in a fresh sequence, hence the row walk
         rather than a comparison of the sequence objects.
+
+        ``lifecycle`` is the narrower question a coalescing reader must never
+        wait on: did a child appear, leave, start, settle or get admitted from
+        the queue. Only asked when the roster moved at all.
         """
         revisions = self.__dict__.setdefault(
-            "_revisions", dict.fromkeys(self._REVISED_COLLECTIONS, 0)
+            "_revisions", dict.fromkeys((*self._REVISED_COLLECTIONS, "lifecycle"), 0)
         )
         for name in self._REVISED_COLLECTIONS:
             old, new = getattr(before, name), getattr(after, name)
             if old is new:
                 continue
-            if (
-                name == "jobs"
-                and len(old) == len(new)
-                and all(a is b for a, b in zip(old, new, strict=True))
-            ):
-                continue
+            if name == "jobs":
+                if len(old) == len(new) and all(a is b for a, b in zip(old, new, strict=True)):
+                    continue
+                if _job_lifecycle(old) != _job_lifecycle(new):
+                    revisions["lifecycle"] += 1
             revisions[name] += 1
 
-    def revision(self) -> tuple[int, ...]:
+    def revision(self) -> "FrontendRevision":
         """A token that moves whenever ``jobs``, ``todos`` or ``wakes`` move.
 
         Lets a reader skip re-deriving a view it already painted from those
         collections -- the TUI's dock band was re-projecting a 252-row roster on
         every canonical delta, including the token-cadence scalar ones that
-        cannot change a row. Compare tokens for equality only; the values carry
-        no other meaning. Includes the epoch, because a re-seated store starts
-        its counters from what it held, not from a fresh lineage.
+        cannot change a row. Compare for equality only; the counters carry no
+        other meaning. Carries the epoch, because a re-seated store continues
+        its counters across a lineage change.
         """
         revisions = self.__dict__.get("_revisions") or {}
-        return (
-            hash(self._state.epoch),
-            *(revisions.get(name, 0) for name in self._REVISED_COLLECTIONS),
+        return FrontendRevision(
+            epoch=self._state.epoch,
+            jobs=revisions.get("jobs", 0),
+            todos=revisions.get("todos", 0),
+            wakes=revisions.get("wakes", 0),
+            lifecycle=revisions.get("lifecycle", 0),
         )
 
     def _rebuild_derived(self, state: FrontendSessionState) -> None:
