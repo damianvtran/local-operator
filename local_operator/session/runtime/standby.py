@@ -1,4 +1,4 @@
-"""One pre-imported runtime interpreter per config root, adopted by the next cold engage.
+"""A pre-imported runtime interpreter this CONSOLE forked, adopted by its next cold engage.
 
 WHY THIS EXISTS — THE MEASUREMENT
 =================================
@@ -15,69 +15,123 @@ Attributed with a CPU-clock cProfile of a fresh child:
 
 and on that host 100 ms of CPU costs 1.0-1.7 s of WALL (a pure CPU spin,
 measured the same afternoon), because the scheduler is shared with ~1,000
-processes. Wall time is therefore ~10x CPU on every path, and the only way to
-move a number the user feels is to remove CPU from the critical path, not to
-reorder it. Import pruning cannot do that: session construction needs all but
-a handful of the ~450 modules it loads (the greedy cover in the PR evidence).
+processes. So the only lever is removing CPU from the critical path, and import
+pruning cannot do it: session construction needs all but a handful of the ~450
+modules it loads. A standby pays that import, and the next cold engage hands its
+spawn to the already-warm process instead of forking a fresh interpreter.
 
-So the imports are paid BEFORE anyone asks: one standby interpreter per config
-root imports the whole runtime graph and waits. The next cold engage for that
-root hands it the session's spawn contract over a unix socket instead of
-forking a new interpreter; the standby becomes an ordinary runtime (same module,
-same ``amain``, same lease arbitration) and a fresh standby is warmed behind it.
+WHY THE CHANNEL IS PRIVATE — THE ONE PROPERTY EVERYTHING ELSE FOLLOWS FROM
+==========================================================================
+**This console forks the standby, and the only channel to it is the socketpair
+end that fork inherited.** There is no path, port, lock file or directory any
+other process can find, bind or connect to, because there is none at all.
 
-WHAT A STANDBY IS NOT — THE OPERATOR'S CONSTRAINTS, AND HOW EACH IS HELD
-=======================================================================
-(a) ONE PER CONFIG ROOT, MACHINE-WIDE, not one per host: ~20 TUIs run at once
-    here, and a spare per TUI would be ~20 idle interpreters. A ``flock`` on
-    ``run/standby/lock`` inside the root is held for the standby's whole life by
-    the standby ITSELF — so the lock is released by the kernel when it exits or
-    is killed, and a second warmer finds it held and does nothing. A host that
-    finds no ready standby spawns cold exactly as before: the standby is an
-    optimisation, never a dependency.
+That is not a simplification of the earlier design; it is the correction of a
+security defect in it (agent review round 1, R1-1). That revision kept one
+standby per MACHINE and reached it over ``<root>/run/standby/standby.sock``.
+Same-uid processes cannot be isolated from each other — a model-authored
+``bash`` call runs as exactly this uid — so anything writable by this uid can be
+bound FIRST by any of them, and the console would then have handed that process
+the operator capability (issue #1310's escalation: the capability is what lets
+a runtime's own gate be moved from ``ask`` to ``auto``). A peer-pid or
+``LOCAL_PEERPID`` check does not close it either: the impostor's pid is just as
+real, and ``secrets/peer.py`` records that same-uid peers can only be identified
+by LINEAGE. Lineage is what an inherited descriptor IS: the value can reach a
+process only if this process's own ``fork``/``exec`` put the descriptor in it,
+so the capability cannot reach anything this console did not start. There is no
+ownership, mode, path or handshake that could have the same strength.
 
-(b) NEVER A STALE BUILD, NEVER A STALE CONFIG. Adoption is refused — the
-    standby exits and the caller spawns cold — when any of these moved since the
-    standby finished warming:
+THE CONSEQUENCE, STATED PLAINLY: one standby per WARMING CONSOLE, not one per
+machine. On this host the desktop app's ``lop serve`` daemon is the singleton
+that warms (so the desktop surface keeps one spare per machine, exactly as
+intended), while each interactive TUI that opens new conversations warms its
+own. The earlier machine-wide sharing is not recoverable by any means that keeps
+the capability out of a stranger's hands — see the trade-off section of the PR
+body — and the mitigations here are: warming is opt-in per process and only
+enabled at the TUI and ``serve`` launch points; it is triggered lazily AFTER an
+engage (never at boot, never on the critical path); every standby exits on idle
+(:data:`IDLE_REAP_S`), when its console goes away (EOF on the inherited
+descriptor, detected immediately), and when its root disappears.
+
+WHAT IT IS NOT — THE OPERATOR'S CONSTRAINTS, AND HOW EACH IS HELD
+================================================================
+(a) ONE PER CONSOLE, and never more: the process holds at most one standby, and
+    a spawn is refused while one is alive. A console with no standby spawns cold
+    exactly as before — the standby is an optimisation, never a dependency.
+
+(b) NEVER A STALE BUILD, NEVER A STALE CONFIG. Adoption is refused — the standby
+    exits — when any of these moved since it finished warming:
 
     * the interpreter the caller would spawn (``launch._spawn_interpreter``,
-      i.e. the CURRENT generation after a ``lop-update``) is not the one the
-      standby runs;
+      i.e. the CURRENT generation after a ``lop-update``) is not in the same venv
+      the standby runs;
     * ``update.installed_build`` (version + ``.lop-source`` ref) differs;
     * any loaded ``local_operator`` module file's mtime moved (a same-path
-      rebuild, an editable checkout edited under it — measured at 0.2 ms for
-      the ~140 files, so it is checked on every adoption rather than sampled);
-    * ``config.yml``'s stat key (``config.config_file_key``) differs from the
-      one recorded at warm, for the operator's explicit concern that a spare
-      warmed under one configuration must not construct a session under another.
+      rebuild, an editable checkout edited under it — measured at 0.2 ms for the
+      ~140 files, so it is checked on every request rather than sampled);
+    * ``config.yml``'s stat key (``config.config_file_key``) differs from the one
+      recorded at warm, for the operator's explicit concern that a spare warmed
+      under one configuration must not construct a session under another.
 
-    The standby also exits on its own after :data:`IDLE_REAP_S` so a machine
-    that stops opening conversations does not keep an interpreter forever.
+    A requester whose root or warm-sensitive environment differs is DECLINED (it
+    keeps waiting for a matching one) rather than retired, because a standby that
+    exited on every mismatch would be killed by whichever host engaged next.
 
-(c) INVISIBLE AS A SESSION. The standby publishes nothing a session reader
-    lists until it is adopted: no record in ``run/mobile`` (so not in ``lop
-    sessions``, the desktop feed or the mobile list), no boot record in
-    ``run/host``, no lease, no transcript, no analytics row, and it never runs
-    ``create_session`` — so it never takes the store-maintenance or analytics
-    passes, which are started from session construction. It does not arm the
-    stall watchdog (``stall_watchdog.arm`` has exactly one call site, the
-    runtime ``__main__`` guard, and a standby does not reach it until adopted).
-    Its argv is ``-m local_operator.session.runtime.standby``, which the
-    residency census (``reclaim.parse_process_row``) matches as a whole word
-    against ``RUNTIME_MODULE`` and therefore does NOT count as a runtime.
+(c) INVISIBLE AS A SESSION until it is adopted. The standby publishes nothing a
+    session reader lists: no record in ``run/mobile`` (so not in ``lop
+    sessions``, the desktop feed or the mobile list), no boot record, no lease,
+    no transcript, no analytics row — and it never runs ``create_session``, so it
+    never takes the store-maintenance or analytics passes, which start from
+    session construction. It does not arm the stall watchdog
+    (``stall_watchdog.arm`` has exactly one call site, the runtime ``__main__``
+    guard, and a standby reaches it only through :func:`_become_runtime`). Its
+    argv is ``-m local_operator.session.runtime.standby``, which the residency
+    census (``reclaim.parse_process_row``) matches as a whole word against
+    ``RUNTIME_MODULE`` and therefore does NOT count as a runtime.
 
-    ON ADOPTION it must become countable, because it is then a runtime like any
-    other and the sweep's orphan protection has to see it. The module word is
-    rewritten IN PLACE in the process's own argv memory (``_rename_argv``):
-    ``...runtime.standby`` and ``...runtime.process`` are the same length, and
-    macOS/Linux ``ps`` read argv straight from that memory — verified on this
-    host, ``ps -ww`` shows the rewritten word. The label's ``[standby]`` becomes
-    ``[session]`` the same way. Where the rewrite is not possible the adoption is
-    refused rather than leaving an uncountable runtime behind.
+    AT adoption it must become countable and attributable, because it is now a
+    runtime the sweep's orphan protection has to see:
 
-COST, STATED: one interpreter per config root that has an interactive host, at
-~135-150 MB max RSS measured (the same as a runtime child right after
-construction, less the session), idle at 0% CPU in a blocking ``accept``.
+    * the module word and the ``[standby]``/``id=--------`` label are rewritten
+      IN PLACE in the process's own argv memory (``_rename_argv``) — same
+      lengths, and macOS/Linux ``ps`` read argv straight from that memory
+      (verified with ``ps -ww``). Where the rewrite is impossible, the adoption
+      is refused rather than leaving an uncountable runtime behind;
+    * a BOOT RECORD is written BEFORE construction starts. That is what fixes
+      R1-3: the adopted process is older than its session (its ``etime`` counts
+      from the warm) and its ``ps -E`` environment block is this console's, so
+      ``reclaim``'s young rung and ``session_id_of`` had nothing to read. The
+      boot record is the artifact those readers already prefer, and writing it
+      one step earlier makes both true for the whole construction window.
+
+(d) COST, measured: max RSS 47-158 MB (median ~130 MB) per standby, sitting at 0%
+    CPU in a blocking read. It is warmed on a daemon thread after an engage, so it
+    costs an engage nothing; it exits on adoption, on idle
+    (:data:`IDLE_REAP_S`), and when its console goes away.
+
+    HOW LONG THE WARM TAKES, CORRECTED (QA round 1, QW1). The first revision kept
+    the warm in Darwin's background band for its whole life and claimed "about a
+    minute". That claim was false on the host this exists for: measured at load
+    180-227, standbys spent 16 minutes of wall on 0.25-0.29 s of CPU each and had
+    not finished, so the feature failed open to a cold spawn exactly when it
+    mattered. :func:`_warm` now measures its own progress and abandons the band if
+    it is starved (:data:`WARM_BAND_MAX_S` caps the polite phase at 45 s), which
+    bounds the warm at ~15-45 s from there at that load — see the PR body for the
+    measurement at load 150+. Two cold engages inside that window still both take
+    the cold path.
+
+    A CONSEQUENCE FOR THE CONSTRAINTS ABOVE: this buys the win per CONSOLE, not
+    per machine. The desktop app's ``lop serve`` daemon is a singleton and keeps
+    one spare per machine as intended, but each interactive TUI that opens new
+    conversations warms its own — the price of the capability never reaching a
+    process this console did not start.
+
+RIG NOTE (agent review round 1, R1-6, and it is now structural rather than a
+policy): a rig never leaves a standby behind, because a standby's life is tied
+to the process that warmed it — when the rig ends, its descriptor closes and the
+standby sees EOF and exits. A rig that keeps its ROOT while its warming process
+stays alive can still hold one for up to :data:`IDLE_REAP_S`; the root-gone check
+covers the case where the root is deleted first.
 
 WHAT IT DOES NOT FIX: session construction itself (~440 ms CPU before this PR's
 config memo, ~180 ms after) still runs after adoption, because it depends on the
@@ -94,7 +148,7 @@ import os
 import socket
 import subprocess
 import sys
-import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -106,21 +160,24 @@ logger = logging.getLogger(__name__)
 #: in-place rewrite cannot grow the string. ``test_standby`` pins the lengths.
 STANDBY_MODULE = "local_operator.session.runtime.standby"
 
-#: The directory, inside a config root's ``run`` tree, that holds the lock and
-#: the socket's rendezvous file. Not ``run/mobile`` or ``run/host``: every
-#: session reader scans those, and a standby must be in none of them.
-STANDBY_DIRNAME = "run/standby"
+#: The argv flag carrying the INHERITED descriptor number the standby listens on.
+#: A descriptor number is not a secret: the descriptor itself is what nobody else
+#: has, which is the whole property this design rests on. Spelled once, like
+#: ``approval.OPERATOR_FD_FLAG``, because the spawner and the child are different
+#: processes and a drift between them is a silent "no standby".
+STANDBY_FD_FLAG = "--standby-fd"
 
 #: How long a standby waits for an adoption before exiting on its own. Long
-#: enough that an operator who opens conversations every few minutes always
-#: finds one warm; short enough that a machine that stops opening them gives
-#: the memory back within the quarter hour.
+#: enough that an operator who opens new conversations every few minutes always
+#: finds one warm; short enough that a console gives the memory back within the
+#: quarter hour. A standby is no longer shared between consoles, so this is now
+#: purely the memory bound rather than an availability policy.
 IDLE_REAP_S = 900.0
 
 #: How long the engage side waits for a standby's answer before giving up and
-#: spawning cold. A healthy standby answers in single-digit ms (it is parked in
-#: ``accept``); the bound exists for one that is wedged, so a wedged standby can
-#: cost at most this on top of today's cold spawn.
+#: spawning cold. A healthy standby answers in single-digit ms (it is parked in a
+#: read); the bound exists for one that is wedged, so a wedged standby costs at
+#: most this on top of today's cold spawn.
 ADOPT_TIMEOUT_S = 2.0
 
 #: Environment switch that turns the whole mechanism off — no warm and no
@@ -128,14 +185,14 @@ ADOPT_TIMEOUT_S = 2.0
 #: suite, which sets it process-wide in ``tests/conftest.py``: warming is opt-in
 #: per process (:func:`enable_warming`, called only at the TUI and ``serve`` CLI
 #: launch points), but the suite drives exactly those launch points through
-#: ``cli.main()``, and a standby is detached by design, so without the switch a
-#: run leaves live interpreters behind (measured, and why the switch is there).
+#: ``cli.main()``, and a standby is a detached process by design, so without the
+#: switch a run leaves live interpreters behind (measured, and why it is there).
 DISABLE_ENV = "LOP_RUNTIME_STANDBY_DISABLED"
 
 #: The keys of the spawn contract a standby is allowed to receive. The same
 #: names ``launch._spawn_runtime`` writes into a cold child's environment, and
 #: nothing else: a standby must end up in exactly the state a cold child starts
-#: in, so the adoption request is applied as those keys and only those.
+#: in.
 CONTRACT_KEYS = (
     "LOP_MOBILE_CHILD_CWD",
     "LOP_MOBILE_CHILD_RESUME",
@@ -149,10 +206,9 @@ CONTRACT_KEYS = (
 #: The modules warmed beyond the runtime's own top-level imports and
 #: ``session_factory._WARM_IMPORTS``: the smallest set whose transitive closure
 #: covers every module a first session construction imports lazily (a greedy
-#: cover over the 199 modules measured, 76 of them ours). Warming them is what
-#: makes the post-adoption construction pay ~180 ms of CPU instead of ~400.
-#: A module missing here is not a correctness problem — it is imported on
-#: first use exactly as before — only a slower adoption.
+#: cover over the 199 modules measured, 76 of them ours). A module missing here
+#: is not a correctness problem — it is imported on first use exactly as before —
+#: only a slower adoption.
 _WARM_EXTRA: tuple[str, ...] = (
     "local_operator.classification",
     "local_operator.tools.registry",
@@ -176,25 +232,18 @@ _WARM_EXTRA: tuple[str, ...] = (
     "local_operator.variables",
 )
 
-#: sockaddr_un.sun_path is 104 bytes on macOS and bind() fails past 103 — the
-#: same bound ``secrets.protocol.MAX_SOCKET_PATH`` measured.
-_MAX_SOCKET_PATH = 103
-
-
 #: Environment names a WARMED interpreter may already have acted on, so a
 #: requester whose values differ must get a cold child instead. Measured, not
 #: guessed: an ``os.environ`` read hook over the whole warm recorded exactly
 #: ``HOME``, ``LANG``/``LANGUAGE``/``LC_*``, ``ARCHFLAGS``, ``OTEL_*``,
-#: ``PYDANTIC_DISABLE_PLUGINS``, ``PYTHON*``/``_PYTHON*`` — and nothing else;
-#: every product variable (``LOCAL_OPERATOR_*``, ``LOP_*``) is read at CALL time,
-#: after adoption has installed the requester's environment. ``TMPDIR``/``TZ``
-#: are added because ``tempfile`` and ``time`` cache them on first use, and
-#: ``LOP_BUILD_PREFIX`` because the warm's build stamp is read through it.
-#: Every other name (``PATH``, API keys, a terminal's variables, the desktop
-#: token) is simply replaced by the requester's value before the runtime starts,
-#: which is exactly what a cold child would have inherited. Keeping product
-#: prefixes OUT of this set is what lets one standby serve both a TUI and the
-#: desktop daemon, whose environments differ in exactly those names.
+#: ``PYDANTIC_*``, ``PYTHON*``/``_PYTHON*`` — and nothing else; every product
+#: variable (``LOCAL_OPERATOR_*``, ``LOP_*``) is read at CALL time, after
+#: adoption has installed the requester's environment. ``TMPDIR``/``TZ`` are
+#: added because ``tempfile`` and ``time`` cache them on first use, and
+#: ``LOP_BUILD_PREFIX`` because the warm's build stamp is read through it. Every
+#: other name (``PATH``, API keys, a terminal's variables, the desktop token) is
+#: simply replaced by the requester's value before the runtime starts, which is
+#: exactly what a cold child would have inherited.
 _WARM_SENSITIVE_NAMES = frozenset(
     {"HOME", "LANG", "LANGUAGE", "ARCHFLAGS", "TMPDIR", "TZ", "LOP_BUILD_PREFIX"}
 )
@@ -206,22 +255,22 @@ def _venv_of(interpreter: str) -> str:
 
     NOT ``realpath(interpreter)``: a standby is exec'd through the branded
     hardlink beside the interpreter (``procname.spawn_identity``), so its
-    ``sys.executable`` is ``<venv>/bin/Local Operator`` while the requester
-    names ``<venv>/bin/python3`` — and a venv's ``python`` is itself a symlink
-    to the base interpreter, which every venv on the machine shares. The venv
-    directory is the identity that decides which build is imported.
+    ``sys.executable`` is ``<venv>/bin/Local Operator`` while the requester names
+    ``<venv>/bin/python3`` — and a venv's ``python`` is itself a symlink to the
+    base interpreter, which every venv on the machine shares. The venv directory
+    is the identity that decides which build is imported.
     """
     return os.path.realpath(Path(interpreter).parent.parent)
 
 
 def disabled() -> bool:
-    """Off by switch, and off where the adoption channel does not exist.
+    """Off by switch, and off where an inherited descriptor cannot be trusted.
 
-    The operator capability rides to the standby as a passed descriptor
-    (``socket.send_fds``, POSIX ``SCM_RIGHTS``), so a platform without it — and
-    Windows, whose handoff is an inheritable handle — keeps the cold spawn.
+    The private channel is a POSIX socketpair; Windows has no ``pass_fds``, and
+    its inheritance rules would hand the console's descriptor to any child it
+    starts. Windows therefore keeps the cold spawn.
     """
-    if os.name != "posix" or not hasattr(socket, "send_fds"):
+    if os.name != "posix":
         return True
     return os.environ.get(DISABLE_ENV, "") not in ("", "0", "false", "no", "off")
 
@@ -236,176 +285,9 @@ def _warm_sensitive(env: "dict[str, str] | os._Environ[str]") -> dict[str, str]:
     }
 
 
-def standby_dir(root: Path, *, create: bool = True) -> Path:
-    path = root / STANDBY_DIRNAME
-    if create:
-        path.mkdir(parents=True, exist_ok=True)
-        os.chmod(path, 0o700)
-    return path
-
-
-def socket_path(root: Path, *, create: bool = True) -> Path:
-    """The rendezvous socket for ``root``'s standby, short enough to bind.
-
-    Inside the root's 0700 ``run/standby`` when it fits; otherwise under a
-    private per-uid directory in ``TMPDIR`` named by a digest of the root, the
-    same fallback shape the secret broker uses, so a deep test root still works
-    and two roots never share a socket. ``create=False`` is the READER's form:
-    the engage path only asks whether a socket is there, and must not leave a
-    directory in a store (or in ``TMPDIR``) on every spawn by asking.
-    """
-    natural = standby_dir(root, create=create) / "standby.sock"
-    if len(str(natural)) <= _MAX_SOCKET_PATH:
-        return natural
-    import hashlib
-
-    digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:12]
-    uid = os.getuid() if hasattr(os, "getuid") else 0
-    directory = Path(tempfile.gettempdir()) / f"lop-standby-{uid}-{digest}"
-    if create:
-        from local_operator.secrets.protocol import ensure_runtime_dir
-
-        directory = ensure_runtime_dir(directory)
-    return directory / "standby.sock"
-
-
 # ---------------------------------------------------------------------------
-# The engage side: adopt one if it is there, warm one behind it either way
+# The console side: one standby, one private descriptor, no path anywhere
 # ---------------------------------------------------------------------------
-
-
-class AdoptedRuntime:
-    """What ``launch._spawn_runtime`` returns when a standby took the session.
-
-    Duck-types the two things ``engage_runtime`` reads off a candidate — ``pid``
-    and ``poll()``/``returncode``, which it uses to tell a candidate still
-    CONSTRUCTING from one that died — plus ``lop_capture_path``. The standby is
-    not our child (it was started detached by whichever host warmed it), so
-    liveness is signal-0 plus the zombie probe rather than ``waitpid``.
-    """
-
-    #: The engage loop polls a constructing candidate every 10 ms, and the zombie
-    #: probe is a ``ps`` fork (3.9 ms idle, far more at load 100). Signal-0 on
-    #: every poll, the fork at most this often: a standby's parent is the host
-    #: that warmed it, which may not reap it promptly, so a died-unreaped standby
-    #: is still noticed within a quarter second rather than at the 30 s deadline.
-    ZOMBIE_PROBE_S = 0.25
-
-    def __init__(self, pid: int, capture: Path | None) -> None:
-        self.pid = pid
-        self.returncode: int | None = None
-        self.lop_capture_path = capture
-        self.lop_adopted_standby = True
-        self._probed_at = 0.0
-
-    def poll(self) -> int | None:
-        if self.returncode is not None:
-            return self.returncode
-        from local_operator.session.runtime.registry import pid_alive
-
-        now = time.monotonic()
-        probe = now - self._probed_at >= self.ZOMBIE_PROBE_S
-        if probe:
-            self._probed_at = now
-        if not pid_alive(self.pid, check_zombie=probe):
-            # Not our child: its real status is unknowable here. 1 is the
-            # honest "it ended without publishing", which is all the engage
-            # loop asks of a returncode.
-            self.returncode = 1
-        return self.returncode
-
-
-def try_adopt(
-    root: Path,
-    interpreter: str,
-    env: dict[str, str],
-    capture: Path,
-    operator_fd: int | None,
-) -> AdoptedRuntime | None:
-    """Hand a cold child's whole spawn to ``root``'s standby, or ``None`` to spawn cold.
-
-    ``env`` is EXACTLY the environment ``launch._spawn_runtime`` would have given
-    the cold child, and ``operator_fd`` the child's end of the operator-capability
-    handoff, passed by ``SCM_RIGHTS`` so the value travels on a descriptor exactly
-    as it does into a cold child (``harness/approval.py``): the adopted runtime
-    reads it with the same ``--operator-fd`` reader, and the capability never
-    touches argv, the environment or a file.
-
-    WHO MAY ADOPT. The socket is 0600 in a 0700 directory, so only this uid can
-    connect, and anything running as this uid can already start a runtime of its
-    own for any session with a capability it minted itself (``python -m
-    local_operator.session.runtime.process``). Adoption therefore grants nothing
-    a cold spawn does not; it only skips the imports.
-
-    Never raises: every failure — no standby, a refusal, a timeout, a torn
-    reply — is ``None``, and the caller does exactly what it did before this
-    module existed.
-    """
-    if disabled():
-        return None
-    try:
-        path = socket_path(root, create=False)
-        if not path.exists():
-            return None
-    except Exception:  # noqa: BLE001 — no rendezvous, no standby
-        return None
-    try:
-        cwd = os.getcwd()
-    except OSError:
-        cwd = ""
-    request = {
-        "op": "adopt",
-        "interpreter": str(interpreter),
-        "env": dict(env),
-        "cwd": cwd,
-        "capture": str(capture),
-        "has_operator_fd": operator_fd is not None,
-    }
-    try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-            sock.settimeout(ADOPT_TIMEOUT_S)
-            sock.connect(str(path))
-            # The descriptor rides on its own one-byte message, ahead of the
-            # frame, so the frame itself can be written with a plain sendall.
-            socket.send_fds(sock, [b"F"], [operator_fd] if operator_fd is not None else [])
-            _send(sock, request)
-            reply = _recv(sock)
-    except (OSError, ValueError):
-        logger.debug("standby adoption unavailable for %s", root, exc_info=True)
-        return None
-    if not isinstance(reply, dict) or reply.get("ok") is not True:
-        logger.info(
-            "standby declined adoption (%s); spawning cold",
-            (reply or {}).get("reason", "no reply") if isinstance(reply, dict) else "bad reply",
-        )
-        return None
-    pid = reply.get("pid")
-    if not isinstance(pid, int) or pid <= 0:
-        return None
-    return AdoptedRuntime(pid, capture)
-
-
-def ensure_warm(root: Path, interpreter: str) -> None:
-    """Start a standby for ``root`` unless one is warming or waiting already.
-
-    Called from ``launch.engage_runtime`` on user-driven engages, so the NEXT
-    cold engage finds one. Cheap when one exists: a single non-blocking
-    ``flock`` probe on the lock the live standby holds. Never raises.
-
-    NEVER FROM A RUNTIME: a runtime child carries the spawn contract in its
-    environment, and a runtime that warmed spares would make every session a
-    warmer. Only interface hosts (the TUI, the desktop daemon) warm.
-    """
-    if not _WARMING[0] or disabled() or os.environ.get("LOP_MOBILE_CHILD_RESUME"):
-        return
-    try:
-        lock = standby_dir(root) / "lock"
-        if _lock_held(lock):
-            return
-        _spawn_standby(root, interpreter)
-    except Exception:  # noqa: BLE001 — a missing warm is a slower next engage, never a failure
-        logger.debug("could not warm a standby for %s", root, exc_info=True)
-
 
 #: Whether THIS process warms standbys. Off by default: only a long-lived
 #: interface host turns it on (:func:`enable_warming`), so a unit test, a script,
@@ -414,14 +296,53 @@ def ensure_warm(root: Path, interpreter: str) -> None:
 #: rather than rebound.
 _WARMING: list[bool] = [False]
 
+#: The live standby, or ``None``. At most one per process, and never replaced
+#: while it is alive.
+_WARM: list["_Standby | None"] = [None]
+
+#: Serialises the spawn/consume transition between the warming thread and the
+#: engage path.
+_LOCK = threading.Lock()
+
+
+class _Standby:
+    """A forked, warming interpreter and the private descriptor to it.
+
+    ``sock`` is this process's end of the socketpair whose other end the child
+    inherited at ``exec``. Nothing else on the machine holds it, which is why
+    possession of it is the whole authentication story (see the module
+    docstring): the capability is handed over this descriptor and nowhere else.
+    """
+
+    def __init__(self, proc: "subprocess.Popen[bytes]", sock: socket.socket, root: Path) -> None:
+        self.proc = proc
+        self.sock = sock
+        self.root = root
+        #: Set once the child says it is warm. Kept as a cached answer so the
+        #: engage path never blocks on a read that has not arrived yet.
+        self.ready = False
+        #: Set when an adoption SUCCEEDS, i.e. this standby became a runtime. The
+        #: monitor thread reads it to tell "consumed" from "died and must be
+        #: replaced".
+        self.consumed = False
+
+    def alive(self) -> bool:
+        return self.proc.poll() is None
+
+    def close(self) -> None:
+        """Drop the descriptor. Never raises; called on every exit path."""
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
 
 def enable_warming(root: "Path | None" = None) -> None:
     """Make this process a warmer, and warm one standby now, off the caller's thread.
 
-    Called by the TUI and the desktop daemon at boot, so the FIRST new
-    conversation or cold switch after a launch already finds a standby. The
-    probe is one ``flock``; the spawn, when needed, is a fork — both on a daemon
-    thread so neither host's event loop waits on them. Never raises.
+    Called by the TUI and the ``serve`` daemon at their launch points, so the
+    FIRST new conversation or cold switch already finds a standby. Never raises:
+    a console that cannot warm simply spawns cold.
     """
     if disabled() or os.environ.get("LOP_MOBILE_CHILD_RESUME"):
         return
@@ -435,61 +356,160 @@ def enable_warming(root: "Path | None" = None) -> None:
         # later cwd) would leave a process bound to a directory nobody owns.
         if not isinstance(target, Path) or not target.is_absolute():
             return
-        _WARMING[0] = True
+        # The standby resolves its own root from the environment it inherits, and
+        # a console has exactly one. An engage for a different root is declined
+        # by ``try_adopt`` rather than served from a spare warmed for another
+        # store.
+        if Path(target) != config_dir():
+            return
         interpreter = _spawn_interpreter()
     except Exception:  # noqa: BLE001 — a missing warm is a slower first engage
         logger.debug("could not resolve a standby target", exc_info=True)
         return
-    warm_in_background(target, interpreter)
+    _WARMING[0] = True
+    warm_in_background(Path(target), interpreter)
 
 
 def warm_in_background(root: Path, interpreter: str) -> None:
     """:func:`ensure_warm` on a daemon thread: never on an engage's critical path."""
     if not _WARMING[0]:
         return
-    import threading
-
     threading.Thread(
         target=ensure_warm, args=(root, interpreter), name="lop-standby-warm", daemon=True
     ).start()
 
 
-def _lock_held(lock: Path) -> bool:
-    import fcntl
+#: How long a standby which exits without being adopted must have lived before a
+#: replacement is warmed for it. The loop breaker: a root that has been deleted
+#: (``root-gone``) makes a fresh standby exit immediately, and re-warming it
+#: forever would be a fork storm.
+REWARM_MIN_LIFE_S = 5.0
 
-    fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o600)
+#: Delay before a replacement spawn, so an exit that repeats cannot spin.
+REWARM_DELAY_S = 1.0
+
+#: The least time between two monitor-driven re-warms. What it bounds: a host whose
+#: tree is being edited (an editable checkout retires a standby as ``tree-moved``)
+#: would otherwise re-warm after every retirement, each one a fork plus a warm.
+#: An engage's own ``warm_in_background`` is not subject to it, because that one
+#: follows a spawn the operator asked for.
+REWARM_MIN_INTERVAL_S = 60.0
+
+#: When the last monitor-driven re-warm happened. A list so it is mutated, not
+#: rebound, matching ``_WARMING``'s shape.
+_LAST_REWARM: list[float] = [0.0]
+
+
+def _monitor(warm: _Standby) -> None:
+    """Wait on a standby and, if it left WITHOUT being adopted, warm another.
+
+    WHY THIS EXISTS (QA round 1, QW2). A standby retires itself whenever an input
+    it must be current on moved — measured: a TUI rewrote ``config.yml`` 5.9 s
+    after boot, which retired the standby as ``config-moved``. Without a monitor
+    the replacement waits for the next engage, so the FIRST new conversation
+    after a boot is exactly the one that goes cold: the warm would be spent on
+    the wrong session. Here the console notices the exit when it happens and
+    starts the replacement immediately, so the window is a warm rather than a
+    whole cycle.
+
+    A CONSUMED standby exits the same way and is not replaced here — the engage
+    path's own ``warm_in_background`` after the spawn does that, with the
+    interpreter the new session actually used.
+    """
+    started = time.monotonic()
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        return True
-    else:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        return False
-    finally:
-        os.close(fd)
+        warm.proc.wait()
+    except Exception:  # noqa: BLE001 - a monitor must never take a thread down
+        return
+    if warm.consumed:
+        return
+    with _LOCK:
+        if _WARM[0] is not warm:
+            return
+        _WARM[0] = None
+    if not _WARMING[0] or disabled():
+        return
+    if not warm.root.is_dir():
+        # ``root-gone``: a replacement would exit for the same reason, so the
+        # loop breaker here is the cause rather than a timer.
+        return
+    if time.monotonic() - started < REWARM_MIN_LIFE_S:
+        logger.debug("standby for %s exited at once; not re-warming", warm.root)
+        return
+    now = time.monotonic()
+    if now - _LAST_REWARM[0] < REWARM_MIN_INTERVAL_S:
+        return
+    _LAST_REWARM[0] = now
+    time.sleep(REWARM_DELAY_S)
+    try:
+        from local_operator.session.runtime.launch import _spawn_interpreter
+
+        ensure_warm(warm.root, _spawn_interpreter())
+    except Exception:  # noqa: BLE001 - a missing replacement is a slower engage
+        logger.debug("could not replace the standby for %s", warm.root, exc_info=True)
 
 
-def _spawn_standby(root: Path, interpreter: str) -> None:
-    """Start one detached standby. It takes the lock itself; a racer loses there.
+def _start_monitor(warm: _Standby) -> None:
+    threading.Thread(target=_monitor, args=(warm,), name="lop-standby-monitor", daemon=True).start()
 
-    The environment is this host's, stripped of the spawn contract so a standby
-    never inherits a session identity from whoever warmed it, and pinned to the
-    root it serves. The label is the ANON session label with ``[standby]`` in
-    place of ``[session]`` (same length, so the adoption rename is in place).
+
+def ensure_warm(root: Path, interpreter: str) -> None:
+    """Start a standby for ``root`` unless one is already alive. Never raises.
+
+    Called from ``launch.engage_runtime`` after each spawn decision, so the NEXT
+    cold engage finds one — never before the user's own engage, and never from a
+    runtime child (a runtime carries the spawn contract in its environment, and a
+    runtime that warmed spares would make every session a warmer).
+    """
+    if not _WARMING[0] or disabled() or os.environ.get("LOP_MOBILE_CHILD_RESUME"):
+        return
+    try:
+        from local_operator.paths import config_dir
+
+        if Path(root) != config_dir():
+            return
+        with _LOCK:
+            current = _WARM[0]
+            if current is not None and current.alive():
+                return
+            if current is not None:
+                current.close()
+            _WARM[0] = _spawn_standby(Path(root), interpreter)
+            fresh = _WARM[0]
+        # OUTSIDE the lock: the monitor immediately blocks in ``proc.wait()`` and
+        # only takes the lock if the child leaves without being adopted.
+        _start_monitor(fresh)
+    except Exception:  # noqa: BLE001 — a missing warm is a slower next engage, never a failure
+        logger.debug("could not warm a standby for %s", root, exc_info=True)
+
+
+def _spawn_standby(root: Path, interpreter: str) -> "_Standby":
+    """Fork the warming interpreter, handing it ONE end of a private socketpair.
+
+    ``pass_fds`` is what makes the other end unreachable by anything else: it is
+    the only descriptor that survives the child's ``exec`` (``close_fds`` closes
+    every other one), and the console keeps its own end with ``O_CLOEXEC`` set so
+    no later child of this process — a tool subprocess, an ``exec --background``
+    worker — inherits it either.
     """
     from local_operator import procname
     from local_operator.interpreter import SAFE_PATH_FLAG
     from local_operator.paths import CONFIG_DIR_ENV
     from local_operator.procstate import detached_popen_kwargs
 
+    console_end, child_end = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    child_fd = child_end.fileno()
     env = dict(os.environ)
     for key in CONTRACT_KEYS + ("LOP_RUNTIME_ADOPT_SESSION",):
         env.pop(key, None)
-    # Pinned, because the engage names its root explicitly and a warmer's own
-    # environment may resolve a different one. Safe to pin: the config dir is
-    # read at call time, not by the warm, and adoption replaces this whole
-    # environment with the requester's anyway (``_apply_environment``).
+    # Pinned, because the child resolves its root from the environment and a
+    # warmer's own environment is the only one it should serve. Safe to pin: the
+    # config dir is read at call time, not by the warm, and adoption replaces
+    # this whole environment with the requester's anyway (``_apply_environment``).
     env[CONFIG_DIR_ENV] = str(root)
+    # The label is the ANON session label with ``[standby]`` in place of
+    # ``[session]`` and a placeholder id: same lengths as the real label, so the
+    # adoption rename is in place.
     label = procname.LABEL_SESSION_ANON.replace("[session]", "[standby]")
     if interpreter != sys.executable:
         argv0, executable = procname.spawn_identity_for_interpreter(
@@ -497,20 +517,245 @@ def _spawn_standby(root: Path, interpreter: str) -> None:
         )
     else:
         argv0, executable = procname.spawn_identity(label, id="--------")
-    subprocess.Popen(  # noqa: S603 — fixed argv, no shell
-        [argv0, SAFE_PATH_FLAG, "-m", STANDBY_MODULE],
-        executable=executable,
-        env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        close_fds=True,
-        **detached_popen_kwargs(),
-    )
+    try:
+        proc = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+            [argv0, SAFE_PATH_FLAG, "-m", STANDBY_MODULE, STANDBY_FD_FLAG, str(child_fd)],
+            executable=executable,
+            env=env,
+            # Detached stdio: the standby has no session to speak for yet, and its
+            # own console is a full-screen app whose terminal a stray write would
+            # paint over. On adoption ``_redirect_output`` points both at the
+            # session's capture, which is where a runtime's own traceback must
+            # land (see R1-2 in the module docstring of ``_become_runtime``).
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            pass_fds=(child_fd,),
+            **detached_popen_kwargs(),
+        )
+    except BaseException:
+        # A failed spawn must not leak either end of the socketpair.
+        child_end.close()
+        console_end.close()
+        raise
+    child_end.close()
+    return _Standby(proc, console_end, root)
+
+
+#: What a standby may say before it is asked anything, as ONE byte (the console
+#: reads it with a zero timeout, so the frame must arrive whole and mean something
+#: on its own). ``READY`` is the normal case; ``FAILED`` says the warm raised, and
+#: the console logs it and spawns cold.
+_READY = b"R"
+_FAILED = b"E"
+
+
+class AdoptedRuntime:
+    """The ``Popen``-shaped handle the engage loop expects, backed by a real child.
+
+    It is a REAL ``Popen`` this process forked (through the standby), so ``pid``
+    is the console's own child, and the console's own record of "I started the
+    runtime behind this record" is telling the truth about it — and ``poll()``
+    reports the child's actual status and reaps it, instead of the previous
+    design's zombie probe guessing at a pid that was never ours.
+    """
+
+    #: ``launch`` and the engage loop read these to treat an adopted candidate
+    #: exactly like a forked one.
+    lop_adopted_standby = True
+
+    def __init__(self, proc: "subprocess.Popen[bytes]", capture: Path | None) -> None:
+        self._proc = proc
+        self.lop_capture_path = capture
+
+    @property
+    def pid(self) -> int:
+        return self._proc.pid
+
+    def poll(self) -> "int | None":
+        return self._proc.poll()
+
+    @property
+    def returncode(self) -> "int | None":
+        return self._proc.returncode
+
+
+def adoption_possible() -> bool:
+    """Whether a warmed standby for this process is ready to take a spawn.
+
+    A PURE probe for the caller that must decide BEFORE it builds anything: the
+    engage path mints a capability handoff for whichever route it takes, and a
+    console with no standby (the common case — ``lop exec``, a test, the phone
+    daemon) should not mint one it will not use. Never blocks: :func:`_ready`
+    reads a byte that was already written when the warm finished.
+
+    It can retire a standby whose warm failed, which is the only side effect and
+    is the same one :func:`try_adopt` would have caused a moment later.
+    """
+    if disabled():
+        return False
+    with _LOCK:
+        warm = _WARM[0]
+    if warm is None:
+        return False
+    return _ready(warm)
+
+
+def try_adopt(
+    root: Path,
+    interpreter: str,
+    env: dict[str, str],
+    capture: Path,
+    cap_fd: "int | None",
+) -> "AdoptedRuntime | None":
+    """Hand a cold child's whole spawn to this console's standby, or ``None``.
+
+    ``env`` is EXACTLY the environment ``launch._spawn_runtime`` would have given
+    the cold child, and ``cap_fd`` is the child end of the operator-capability
+    handoff, passed by ``SCM_RIGHTS`` so the value travels on a descriptor exactly
+    as it does into a cold child (``harness/approval.py``): the adopted runtime
+    reads it with the same ``--operator-fd`` reader, and the capability never
+    touches argv, the environment or a file.
+
+    WHO MAY ADOPT, and why there is no check here to look for: only this process
+    holds the descriptor this request is written to (see the module docstring).
+    The value reaches a process only through this process's own fork, so there is
+    no peer to authenticate — and nothing to steal the capability with.
+
+    Never raises: a standby that is not ready, one that declined, a torn reply,
+    or a wedged one that misses :data:`ADOPT_TIMEOUT_S` all answer ``None``, and
+    the caller does exactly what it did before this module existed.
+    """
+    if disabled():
+        return None
+    with _LOCK:
+        warm = _WARM[0]
+        if warm is None:
+            return None
+        if not warm.alive():
+            warm.close()
+            _WARM[0] = None
+            return None
+    if Path(root) != warm.root:
+        return None
+    if not _ready(warm):
+        return None
+    try:
+        cwd = os.getcwd()
+    except OSError:
+        cwd = ""
+    request = {
+        "op": "adopt",
+        "root": str(root),
+        "interpreter": str(interpreter),
+        "env": dict(env),
+        "cwd": cwd,
+        "capture": str(capture),
+        "has_cap_fd": cap_fd is not None,
+    }
+    adopted: "AdoptedRuntime | None" = None
+    try:
+        warm.sock.settimeout(ADOPT_TIMEOUT_S)
+        # ONE MESSAGE: the frame and the capability descriptor together, so the
+        # child's first read gets the length prefix and the fd in the same
+        # ``recvmsg`` (see :func:`_recv_request`). A separate marker byte would be
+        # indistinguishable from the start of that prefix.
+        body = json.dumps(request).encode("utf-8")
+        payload = len(body).to_bytes(4, "big") + body
+        if cap_fd is not None:
+            socket.send_fds(warm.sock, [payload], [cap_fd])
+        else:
+            socket.send_fds(warm.sock, [payload], [])
+        reply = _recv(warm.sock)
+        if isinstance(reply, dict) and reply.get("ok"):
+            adopted = AdoptedRuntime(warm.proc, capture)
+    except (OSError, ValueError):
+        logger.debug("standby adoption failed; spawning cold", exc_info=True)
+    finally:
+        # The standby served its one session (or is no longer usable): drop the
+        # descriptor and stop tracking it, so the next engage warms a replacement
+        # with a FRESH handoff rather than reusing this one.
+        with _LOCK:
+            if _WARM[0] is warm:
+                warm.consumed = True
+                _WARM[0] = None
+        warm.close()
+        if adopted is None:
+            _retire(warm)
+    return adopted
+
+
+def _ready(warm: _Standby) -> bool:
+    """Whether the child has said it is warm. Cached, and never blocks past now.
+
+    A zero timeout, because this runs on the engage path: a standby whose warm is
+    still in flight must cost the engage nothing at all. The byte was written
+    when the warm finished, so a warm standby's answer is already in the socket
+    buffer and this read returns immediately.
+    """
+    if warm.ready:
+        return True
+    try:
+        warm.sock.settimeout(0)
+        answer = warm.sock.recv(1)
+    except (BlockingIOError, TimeoutError, OSError):
+        return False
+    if answer == _READY:
+        warm.ready = True
+        return True
+    if answer == _FAILED:
+        logger.warning("the runtime standby could not warm; new sessions spawn cold")
+    elif answer:
+        logger.debug("unexpected standby handshake %r", answer)
+    with _LOCK:
+        if _WARM[0] is warm:
+            _WARM[0] = None
+    warm.close()
+    _retire(warm)
+    return False
+
+
+def _retire(warm: _Standby) -> None:
+    """End a standby that cannot serve, by EXACT pid of a child this process owns.
+
+    Never by name: this fleet runs ~25 agents whose own children carry similar
+    argv, and an unscoped kill has already taken out another session's process
+    tree once. SIGTERM first because that is what a standby expects; SIGKILL only
+    if it ignores one, and only for the pid this process forked.
+    """
+    try:
+        if warm.proc.poll() is None:
+            warm.proc.terminate()
+            try:
+                warm.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                warm.proc.kill()
+    except Exception:  # noqa: BLE001 - a retire is best-effort BY CONTRACT
+        # Not just OSError, and not fatal: this runs on the engage path (a
+        # refused or timed-out adoption) and on the console's way out. A standby
+        # that cannot be signalled is still harmless - it holds one end of a
+        # socketpair nothing else has, and it exits on its own when this console
+        # closes the other end, when its root goes away, or on idle.
+        logger.debug("could not end standby %s", getattr(warm, "pid", "?"), exc_info=True)
+
+
+def reset_for_tests() -> None:
+    """End the tracked standby and clear the flags. Tests only — production never calls it."""
+    with _LOCK:
+        warm = _WARM[0]
+        _WARM[0] = None
+        _WARMING[0] = False
+        _LAST_REWARM[0] = 0.0
+    if warm is not None:
+        # ``consumed`` so the monitor does not start a replacement for a standby
+        # this call ended on purpose.
+        warm.consumed = True
+        warm.close()
+        _retire(warm)
 
 
 # ---------------------------------------------------------------------------
-# Wire: one length-prefixed JSON object each way
+# Wire: one length-prefixed JSON object each way, over the private descriptor
 # ---------------------------------------------------------------------------
 
 
@@ -562,10 +807,9 @@ def _tree_moved(recorded: dict[str, int]) -> bool:
     """Whether any file the warm IMPORTED has changed since it was imported.
 
     The recorded files only, re-stat'ed: a module first imported AFTER the warm
-    (the guard's own lazy imports, a timer's) is not a change to what was
-    warmed, and comparing whole stamps read that as a moved tree — measured: the
-    first idle check retired every standby with ``tree-moved`` on an untouched
-    checkout.
+    (the guard's own lazy imports, a timer's) is not a change to what was warmed,
+    and comparing whole stamps read that as a moved tree — measured: the first
+    idle check retired every standby with ``tree-moved`` on an untouched checkout.
     """
     for path, mtime in recorded.items():
         try:
@@ -585,13 +829,11 @@ class _Warmth:
 
     * :meth:`stale` — has anything this interpreter's imports depend on moved
       since the warm? If so the standby is worthless to EVERY requester, so it
-      EXITS (the next engage warms a replacement against what is current).
-    * the per-request checks in :func:`_serve` — is this requester one a cold
-      child of THIS interpreter would serve identically? If not, the standby
-      DECLINES and keeps waiting, because it is still right for the hosts it
-      was warmed for (a TUI and the desktop daemon can differ in environment,
-      and a spare that exited on every mismatch would be killed by whichever of
-      the two engaged next).
+      EXITS (the console warms a replacement against what is current).
+    * the per-request checks in :func:`_await_request` — is this requester one a
+      cold child of THIS interpreter would serve identically? If not, the standby
+      DECLINES and keeps waiting, because exiting on a mismatch would end a spare
+      whose console merely engaged from another directory.
     """
 
     def __init__(self, root: Path) -> None:
@@ -635,13 +877,13 @@ def _rename_argv(old: bytes, new: bytes) -> bool:
 
     WHY. The residency census identifies a runtime by the ``-m RUNTIME_MODULE``
     word in its argv (``reclaim.parse_process_row``). An adopted standby IS a
-    runtime and must be counted — the sweep's protection of attached runtimes
-    and its orphan reclaim both depend on the census — but it was exec'd as
+    runtime and must be counted — the sweep's protection of attached runtimes and
+    its orphan reclaim both depend on the census — but it was exec'd as
     ``-m ...standby``. macOS's ``ps`` reads the argument area of the process
     (``KERN_PROCARGS2``) and Linux reads ``/proc/<pid>/cmdline``, both backed by
     the same memory ``_NSGetArgv``/``argv`` point at, so an equal-length
-    overwrite is visible to every reader (verified with ``ps -ww`` on this
-    host). ``sys.orig_argv`` keeps the original, so nothing in-process changes.
+    overwrite is visible to every reader (verified with ``ps -ww`` on this host).
+    ``sys.orig_argv`` keeps the original, so nothing in-process changes.
 
     Returns False when the platform offers no way to find argv; the caller then
     refuses adoption rather than leaving an uncountable runtime.
@@ -691,111 +933,252 @@ def _rename_argv_linux(old: bytes, new: bytes) -> bool:
     return True
 
 
-def _serve(root: Path) -> int:
-    """Warm, then wait for one adoption or the idle bound. Returns an exit status."""
-    import fcntl
+def _standby_fd_from_argv(argv: "list[str]") -> "int | None":
+    """The inherited descriptor number, or ``None`` when this is not a standby.
 
-    lock_fd = os.open(str(standby_dir(root) / "lock"), os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        return 0  # another standby holds this root: the racer that lost exits 0
-    # Held for the life of the process, released by the kernel on any exit.
-    # Lowest scheduling class while warming: the warm is speculative work and
-    # must never take CPU from a session that is doing real work on this host.
-    _background_priority(True)
-    _warm()
-    _background_priority(False)
-    # The guard snapshot is taken at NORMAL priority: it is a handful of stats
-    # and two small file reads, and in the background band a host at load 100+
-    # starved it for over a minute after the imports had already finished.
-    warmth = _Warmth(root)
-    path = socket_path(root)
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        pass
-    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    listener.bind(str(path))
-    os.chmod(path, 0o600)
-    listener.listen(4)
-    warm_env = _warm_sensitive(os.environ)
-    deadline = time.monotonic() + IDLE_REAP_S
-    request: Any = None
-    operator_fd: int | None = None
-    try:
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return 0
-            listener.settimeout(min(remaining, 30.0))
-            try:
-                conn, _ = listener.accept()
-            except socket.timeout:
-                # A stale warm is worth nothing: check the guards between waits
-                # too, so a standby does not sit on a superseded build for the
-                # whole idle window after a ``lop-update``.
-                if warmth.stale():
-                    return 0
-                continue
-            with conn:
-                conn.settimeout(ADOPT_TIMEOUT_S)
-                try:
-                    _marker, fds, _flags, _addr = socket.recv_fds(conn, 1, 1)
-                    request = _recv(conn)
-                except (OSError, ValueError):
-                    continue
-                if not isinstance(request, dict) or request.get("op") != "adopt":
-                    for fd in fds:
-                        os.close(fd)
-                    continue
-                env = request.get("env")
-                env = env if isinstance(env, dict) else {}
-                stale = warmth.stale()
-                reason = stale
-                if not reason and _venv_of(str(request.get("interpreter") or "")) != warmth.venv:
-                    reason = "interpreter-differs"
-                if not reason and _warm_sensitive(env) != warm_env:
-                    # The requester's interpreter settings, locale, home or
-                    # product switches differ from the ones this process
-                    # imported under: only a fresh interpreter is equivalent.
-                    reason = "environment-differs"
-                if not reason and bool(request.get("has_operator_fd")) != bool(fds):
-                    reason = "operator-fd-missing"
-                if not reason and not _rename_argv(
-                    STANDBY_MODULE.encode(), _runtime_module().encode()
-                ):
-                    # Nothing renamed yet (the module word is the first rename
-                    # and it failed), so the standby is still a clean standby.
-                    stale = reason = "argv-rename-unavailable"
-                if reason:
-                    for fd in fds:
-                        os.close(fd)
-                    try:
-                        _send(conn, {"ok": False, "reason": reason})
-                    except OSError:
-                        pass
-                    if stale:
-                        return 0
-                    continue
-                _rename_argv(b"[standby]", b"[session]")
-                _rename_argv(b"id=--------", _label_id(env).encode())
-                operator_fd = fds[0] if fds else None
-                _apply_environment(env)
-                _change_directory(str(request.get("cwd") or ""))
-                _redirect_output(str(request.get("capture") or ""))
-                _send(conn, {"ok": True, "pid": os.getpid()})
+    A NUMBER, not a value: the descriptor is the secret, and a number that names
+    nothing in another process's table is useless there.
+    """
+    for index, item in enumerate(argv):
+        if item == STANDBY_FD_FLAG and index + 1 < len(argv):
+            candidate = argv[index + 1]
             break
-    finally:
-        listener.close()
+        if item.startswith(f"{STANDBY_FD_FLAG}="):
+            candidate = item.partition("=")[2]
+            break
+    else:
+        return None
+    return int(candidate) if candidate.lstrip("-").isdigit() else None
+
+
+def _recv_request(sock: socket.socket) -> "tuple[dict[str, Any], list[int]]":
+    """One request frame AND the descriptors that came with it.
+
+    THE DESCRIPTOR RIDES THE SAME MESSAGE AS THE FRAME'S FIRST BYTES, not a second
+    message with a marker byte: a byte sent alongside the ancillary data is
+    indistinguishable from the start of the frame's length prefix, so the reader
+    saw a torn frame (found by this change's own round-1 tests, which is what the
+    tests are for). The kernel attaches an ``SCM_RIGHTS`` set to the first byte of
+    the message it was sent with, so reading the 4-byte header with ``recv_fds``
+    gets both, and the body follows with a plain read.
+
+    Raises ``ValueError`` on EOF — the console having gone away, which the caller
+    reads as this process's exit signal.
+    """
+    header = b""
+    fds: list[int] = []
+    while len(header) < 4:
+        chunk, received, _flags, _addr = socket.recv_fds(
+            sock, 4 - len(header), max(1, 4 - len(fds))
+        )
+        if not chunk:
+            for fd in fds:
+                os.close(fd)
+            raise ValueError("standby channel closed")
+        header += chunk
+        fds.extend(received)
+    size = int.from_bytes(header, "big")
+    if size > 1 << 20:
+        raise ValueError("standby frame too large")
+    body = b""
+    while len(body) < size:
+        chunk = sock.recv(size - len(body))
+        if not chunk:
+            raise ValueError("standby channel closed")
+        body += chunk
+    return json.loads(body.decode("utf-8")), fds
+
+
+def _close_all(fds: "list[int]") -> None:
+    for fd in fds:
         try:
-            path.unlink()
+            os.close(fd)
         except OSError:
             pass
-        # The lock goes with the listener: the next warmer may start its
-        # replacement the moment this one stops being a standby.
-        os.close(lock_fd)
-    return _become_runtime(operator_fd)
+
+
+def _await_request(sock: socket.socket) -> "dict[str, Any] | None":
+    """Warm, then wait for an adoption this standby may take.
+
+    Returns the request to serve, or ``None`` when the standby should leave
+    quietly (idle, its console gone, or its build/root/config moved). Raises only
+    for a genuine programming error: every condition a normal machine produces is
+    handled here, because a standby that dies noisily would be a worse citizen
+    than one that simply is not there.
+    """
+    from local_operator.paths import config_dir
+
+    root = config_dir()
+    # Lowest scheduling class while warming: the warm is speculative work and must
+    # never take CPU from a session that is doing real work on this host.
+    _background_priority(True)
+    try:
+        _warm()
+    except BaseException:  # noqa: BLE001 — a failed warm means "no standby"
+        logger.debug("standby warm failed", exc_info=True)
+        _background_priority(False)
+        _send_byte(sock, _FAILED)
+        return None
+    _background_priority(False)
+    # The guard snapshot is taken at NORMAL priority: it is a handful of stats and
+    # two small file reads, and in the background band a host at load 100+ starved
+    # it for over a minute after the imports had already finished.
+    warmth = _Warmth(root)
+    warm_env = _warm_sensitive(os.environ)
+    _send_byte(sock, _READY)
+    deadline = time.monotonic() + IDLE_REAP_S
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        sock.settimeout(min(remaining, 30.0))
+        try:
+            request, fds = _recv_request(sock)
+        except (TimeoutError, socket.timeout):
+            # A stale warm is worth nothing: checked between waits too, so a
+            # standby does not sit on a superseded build for the whole idle
+            # window after a ``lop-update``.
+            if warmth.stale():
+                return None
+            continue
+        except (OSError, ValueError):
+            # EOF here is the console having gone away — the descriptor it held
+            # was the only one, so its close is this process's exit signal.
+            return None
+        if not isinstance(request, dict) or request.get("op") != "adopt":
+            _close_all(fds)
+            continue
+        reason, retire = _refusal(warmth, warm_env, request)
+        if reason:
+            _close_all(fds)
+            # Sent even on the way out: the console logs the reason, and an
+            # unexplained EOF is what a retirement used to look like.
+            _refuse(sock, reason)
+            if retire:
+                return None
+            continue
+        if request.get("has_cap_fd") and not fds:
+            _refuse(sock, "capability-descriptor-missing")
+            continue
+        cap_fd = fds[0] if fds else -1
+        _close_all(fds[1:])
+        # LAST, and after every check that can decline: this is the one step that
+        # cannot be undone, and it is taken only for a request this standby is
+        # actually going to serve.
+        if not _rename_argv(STANDBY_MODULE.encode(), _runtime_module().encode()):
+            # No way to make this process countable by the census: leaving it as a
+            # runtime would hide it from the sweep, which is worse than no spare.
+            _refuse(sock, "argv-rename-unavailable")
+            return None
+        return {**request, "cap_fd": cap_fd}
+
+
+def _refusal(
+    warmth: _Warmth, warm_env: dict[str, str], request: dict[str, Any]
+) -> "tuple[str, bool]":
+    """Why this standby must not take this request, or ``("", False)``.
+
+    Returns ``(reason, retire)``. ``retire`` means the standby is worthless to
+    EVERYONE (an input it warmed against moved) so it should exit; a reason with
+    ``retire`` False is a decline that leaves it waiting, because it is still the
+    right spare for the host that warmed it — a TUI and the desktop daemon
+    legitimately differ in environment, and a spare that exited on every mismatch
+    would be killed by whichever of the two engaged next.
+
+    The reason is SENT to the console either way, so a retirement appears in that
+    host's log as ``config-moved`` rather than as an unexplained EOF.
+    """
+    stale = warmth.stale()
+    if stale:
+        return stale, True
+    if str(request.get("root") or "") != str(warmth.root):
+        return "other-root", False
+    if _venv_of(str(request.get("interpreter") or "")) != warmth.venv:
+        return "other-venv", False
+    env = request.get("env")
+    env = env if isinstance(env, dict) else {}
+    if _warm_sensitive(env) != warm_env:
+        # The requester's interpreter settings, locale, home or build prefix
+        # differ from the ones this process imported under: only a fresh
+        # interpreter is equivalent.
+        return "other-environment", False
+    # The one step that cannot be undone is taken by the CALLER, as the last
+    # precondition before it commits: this function only answers questions.
+    return "", False
+
+
+def _refuse(sock: socket.socket, reason: str) -> None:
+    try:
+        _send(sock, {"ok": False, "reason": reason})
+    except OSError:
+        pass
+
+
+def _send_byte(sock: socket.socket, byte: bytes) -> None:
+    """One byte, in one write: the handshake the console reads with a zero timeout."""
+    try:
+        sock.sendall(byte)
+    except OSError:
+        pass
+
+
+def _commit_adoption(sock: socket.socket, request: dict[str, Any]) -> int:
+    """Become the runtime's process: argv, name, environment, boot record, reply.
+
+    Called OUTSIDE the caller's error handling, deliberately (agent review round
+    1, R1-2). Everything up to the previous line is a standby that may fail
+    quietly; from here this process is the session's runtime, and a failure must
+    be as loud as it is in a cold child — non-zero exit and a traceback on stderr,
+    which by then is the session's capture file that ``engage_runtime`` reads for
+    its actionable startup reason.
+
+    Returns the descriptor number carrying the capability (``-1`` for none).
+    """
+    env = request.get("env")
+    env = env if isinstance(env, dict) else {}
+    # The module word was renamed by ``_await_request`` as the last precondition;
+    # these two complete the row a reader of ``ps`` sees.
+    _rename_argv(b"[standby]", b"[session]")
+    _rename_argv(b"id=--------", _label_id(env).encode())
+    cap_fd = int(request.get("cap_fd", -1))
+    _apply_environment(env)
+    _change_directory(str(request.get("cwd") or ""))
+    _redirect_output(str(request.get("capture") or ""))
+    # BEFORE the session is constructed, so the sweep can see this runtime's
+    # session and its true age for the whole construction window (R1-3). The
+    # runtime rewrites this same record at its own boot boundary.
+    _write_adoption_boot_record(env)
+    _send(sock, {"ok": True, "pid": os.getpid()})
+    # The private descriptor has served its purpose, and the runtime must not hold
+    # one nothing will ever write to again: close it before any tool subprocess
+    # could be started.
+    try:
+        sock.close()
+    except OSError:
+        pass
+    return cap_fd
+
+
+def _write_adoption_boot_record(env: dict[str, Any]) -> None:
+    """Publish this process's boot record now, before it constructs anything.
+
+    ``run/host``'s record is the artifact ``reclaim`` and the roster already
+    prefer for attribution, so writing it one step earlier is what makes an
+    adopted runtime visible to them exactly as a forked one is. Best-effort, for
+    the reason ``journal.write_boot_record``'s own contract gives: a runtime whose
+    boot record cannot be written must still run its turns.
+    """
+    session_id = str(env.get("LOP_MOBILE_CHILD_RESUME") or "")
+    if not session_id:
+        return
+    try:
+        from local_operator import update
+        from local_operator.session.runtime.journal import write_boot_record
+
+        build = update.installed_build(os.environ.get("LOP_BUILD_PREFIX") or None)
+        write_boot_record(session_id, build, cwd=str(env.get("LOP_MOBILE_CHILD_CWD") or ""))
+    except Exception:  # noqa: BLE001 — instrumentation, never a boot gate
+        logger.debug("adopted runtime could not write its boot record", exc_info=True)
 
 
 def _runtime_module() -> str:
@@ -804,13 +1187,18 @@ def _runtime_module() -> str:
     return RUNTIME_MODULE
 
 
+WARM_BAND_MIN_WALL_S = 20.0
+WARM_BAND_MAX_S = 45.0
+WARM_BAND_MIN_CPU_RATIO = 0.02
+
+
 def _background_priority(on: bool) -> None:
     """Darwin's background band while warming; normal again before serving.
 
-    PRIO_DARWIN_BG throttles CPU and I/O. Reset before the socket opens, so an
-    adopted standby constructs the session at the same priority a cold child
-    would. A platform without it keeps its normal priority, which only means
-    the warm competes as a cold spawn would have.
+    PRIO_DARWIN_BG throttles CPU and I/O. Reset before the channel is answered, so
+    an adopted standby constructs the session at the same priority a cold child
+    would. A platform without it keeps its normal priority, which only means the
+    warm competes as a cold spawn would have.
     """
     which = getattr(os, "PRIO_DARWIN_PROCESS", None)
     band = getattr(os, "PRIO_DARWIN_BG", None)
@@ -825,19 +1213,46 @@ def _background_priority(on: bool) -> None:
 def _warm() -> None:
     """Import what a runtime child and a first session construction import.
 
-    Exactly the work a cold child pays before it can publish, minus anything
-    that depends on the session: nothing here opens the store, reads a
-    transcript, takes a lease or starts a background pass (verified with an
-    audit hook over the whole warm: zero opens or listings under the config
-    root). The tokenizer rides along for the reason ``warm_session_imports``
-    gives.
+    Exactly the work a cold child pays before it can publish, minus anything that
+    depends on the session: nothing here opens the store, reads a transcript,
+    takes a lease or starts a background pass (verified with an audit hook over
+    the whole warm: zero opens or listings under the config root). The tokenizer
+    rides along for the reason ``warm_session_imports`` gives.
+
+    THE BAND IS ABANDONED IF IT STARVES THE WARM (QA round 1, QW1). The caller
+    starts this process in Darwin's background band, which is the polite choice (a
+    speculative spare must not compete with the sessions already serving). But
+    the band is not a bound: measured at load 180-227, eight standbys spent 16
+    MINUTES of wall on 0.25-0.29 s of CPU each, all of them runnable — so
+    "available about a minute after boot" was false on exactly the host this
+    exists for, and the feature quietly failed open to a cold spawn. The same
+    warm at normal priority takes 15-42 s there.
+
+    So progress is measured, not assumed: before each import, if the warm has
+    been running for at least :data:`WARM_BAND_MIN_WALL_S` and has either spent
+    under :data:`WARM_BAND_MIN_CPU_RATIO` of that wall on CPU or run past
+    :data:`WARM_BAND_MAX_S`, the band is dropped FOR GOOD and the rest of the warm
+    runs at normal priority. That gives a ceiling instead of an unbounded wait
+    while keeping the polite behaviour on a host with room to spare.
     """
     import importlib
+
+    started_wall = time.monotonic()
+    started_cpu = time.process_time()
+
+    def _leave_the_band_if_starved() -> None:
+        elapsed = time.monotonic() - started_wall
+        if elapsed < WARM_BAND_MIN_WALL_S:
+            return
+        spent = time.process_time() - started_cpu
+        if elapsed >= WARM_BAND_MAX_S or spent / elapsed < WARM_BAND_MIN_CPU_RATIO:
+            _background_priority(False)
 
     # NOT ``local_operator.session.runtime.process`` itself: adoption runs that
     # module as ``__main__`` (see :func:`_become_runtime`), exactly as ``python
     # -m`` does in a cold child, and ``runpy`` warns when the module it is about
     # to run is already imported. Its own top-level imports are warmed by name.
+    _leave_the_band_if_starved()
     import local_operator.session.runtime.server  # noqa: F401
     import local_operator.session.runtime.serving  # noqa: F401
     import local_operator.session.runtime.stall_watchdog  # noqa: F401
@@ -848,6 +1263,7 @@ def _warm() -> None:
     # long-lived host (``bytecode.warm_bytecode_cache_in_background``'s own
     # docstring says a runtime child must not start it).
     for name in _WARM_IMPORTS + _WARM_EXTRA:
+        _leave_the_band_if_starved()
         try:
             importlib.import_module(name)
         except Exception:  # noqa: BLE001 — a warm-up must never be the failure
@@ -855,6 +1271,7 @@ def _warm() -> None:
     try:
         from local_operator.compaction.tokens import warm_tokenizer
 
+        _leave_the_band_if_starved()
         warm_tokenizer()
     except Exception:  # noqa: BLE001
         logger.debug("standby tokenizer warm skipped", exc_info=True)
@@ -863,10 +1280,10 @@ def _warm() -> None:
 def _label_id(env: dict[str, Any]) -> str:
     """``id=<first 8 of the session>``, padded to the placeholder's width.
 
-    The same 8 characters ``launch._spawn_runtime`` puts in a cold child's
-    label, so ``ps`` and Activity Monitor show an adopted runtime exactly as
-    they show a cold one. Padded rather than truncated because the rename is in
-    place and must keep the length.
+    The same 8 characters ``launch._spawn_runtime`` puts in a cold child's label,
+    so ``ps`` and Activity Monitor show an adopted runtime exactly as they show a
+    cold one. Padded rather than truncated because the rename is in place and must
+    keep the length.
     """
     ident = str(env.get("LOP_MOBILE_CHILD_RESUME") or "")[:8]
     return ("id=" + ident).ljust(len("id=--------"), "-")
@@ -875,12 +1292,17 @@ def _label_id(env: dict[str, Any]) -> str:
 def _apply_environment(env: dict[str, Any]) -> None:
     """Replace this process's environment with the one a cold child would get.
 
-    WHOLE, not merged: a cold child inherits exactly ``env`` and nothing else,
-    and an adopted standby must be indistinguishable from it — a key the warmer
-    had and the requester does not would otherwise survive into the session
-    (the ``LOP_*`` leakage AGENTS.md "Isolating a run" documents).
-    Warm-sensitive names already matched (see ``_WARM_SENSITIVE_NAMES``), so
-    nothing replaced here was read by an import that already ran.
+    WHOLE, not merged: a cold child inherits exactly ``env`` and nothing else, and
+    an adopted standby must be indistinguishable from it — a key the warmer had
+    and the requester does not would otherwise survive into the session (the
+    ``LOP_*`` leakage AGENTS.md "Isolating a run" documents). Warm-sensitive names
+    already matched (see ``_WARM_SENSITIVE_NAMES``), so nothing replaced here was
+    read by an import that already ran.
+
+    THE ``ps -E`` VIEW IS NOT REPAIRED HERE, and cannot be: ``os.environ`` and
+    ``putenv`` do not rewrite the argument area ``ps -Eww`` reads. That is why the
+    boot record is written at adoption (R1-3): reclaim and the roster read the
+    record for attribution instead of the process's environment.
     """
     wanted = {str(k): str(v) for k, v in env.items() if isinstance(v, str)}
     for key in list(os.environ):
@@ -897,8 +1319,8 @@ def _change_directory(cwd: str) -> None:
     ``launch._spawn_runtime`` passes no ``cwd=``, so the cold child starts where
     the engaging host stands; the session's OWN directory rides the contract
     (``LOP_MOBILE_CHILD_CWD``) and is what the session uses. Best-effort: a
-    vanished directory leaves the standby where it was, which only matters to
-    code that reads ``os.getcwd()`` before the session applies its own.
+    vanished directory leaves the standby where it was, which only matters to code
+    that reads ``os.getcwd()`` before the session applies its own.
     """
     if not cwd:
         return
@@ -912,13 +1334,18 @@ def _redirect_output(capture: str) -> None:
     """Point stdout/stderr at the caller's capture file, as a cold spawn does.
 
     ``engage_runtime`` reads that file to report WHY a candidate died (the
-    actionable startup reasons), so an adopted standby must write its
-    construction failures to the same place a cold child would.
+    actionable startup reasons), so an adopted standby must write its construction
+    failures to the same place a cold child would — and so must a runtime that
+    crashes hours later.
     """
     if not capture:
         return
     try:
-        fd = os.open(capture, os.O_WRONLY | os.O_APPEND)
+        # ``O_CREAT`` as well as append, at the mode the spawn path's ``mkstemp``
+        # makes: the capture is this process's log, and a runtime whose traceback
+        # went nowhere because the file was missing would be the R1-2 defect in a
+        # second shape.
+        fd = os.open(capture, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     except OSError:
         return
     try:
@@ -930,21 +1357,28 @@ def _redirect_output(capture: str) -> None:
         os.close(fd)
 
 
-def _become_runtime(operator_fd: int | None) -> int:
+def _become_runtime(operator_fd: int) -> int:
     """Run the runtime module as ``__main__``: from here on, a cold child.
 
+    Called OUTSIDE the standby's error handling, on purpose: this is the point
+    after which a failure belongs to the session rather than to a speculative
+    spare, so the exception propagates and the process exits NON-ZERO with its
+    traceback in the capture file — which is what lets the console report
+    "connect a provider" instead of a generic error after three retries (agent
+    review round 1, R1-2). The earlier revision caught it here and returned 0 with
+    an empty capture, so every adopted failure read as a success.
+
     ``runpy.run_module(..., run_name="__main__")`` is the machinery ``python -m``
-    itself uses, so the runtime's ``__main__`` guard runs unchanged — brand,
-    ARM THE STALL BOUND, ``main()`` — and ``stall_watchdog.arm`` keeps its one
-    call site (pinned by ``test_the_only_arm_site_is_the_runtime_entry_point``).
-    A standby never arms it: the warm is not a session, and the bound is
-    armed only by this line, after adoption.
+    itself uses, so the runtime's ``__main__`` guard runs unchanged — brand, ARM
+    THE STALL BOUND, ``main()`` — and ``stall_watchdog.arm`` keeps its one call
+    site (pinned by ``test_the_only_arm_site_is_the_runtime_entry_point``). A
+    standby never arms it: the warm is not a session.
 
     The operator capability arrives exactly as it does for a cold child — as the
     NUMBER of a descriptor in ``sys.argv`` (``--operator-fd <n>``), read and
-    closed by the capability reader in ``harness/approval.py``, from ``process.main``.
-    The descriptor is the one ``SCM_RIGHTS`` delivered, i.e. the child end of the
-    requester's own handoff; its number is not a secret.
+    closed by the capability reader in ``harness/approval.py``, from
+    ``process.main``. The descriptor is the one ``SCM_RIGHTS`` delivered over this
+    console's private channel, i.e. the child end of the console's own handoff.
 
     ``SystemExit`` from the guard's ``sys.exit(main())`` propagates to this
     process's own exit, as it would in a cold child.
@@ -954,23 +1388,33 @@ def _become_runtime(operator_fd: int | None) -> int:
     from local_operator.harness.approval import OPERATOR_FD_FLAG
 
     sys.argv = [sys.argv[0]] + (
-        [OPERATOR_FD_FLAG, str(operator_fd)] if operator_fd is not None else []
+        [OPERATOR_FD_FLAG, str(operator_fd)] if operator_fd is not None and operator_fd >= 0 else []
     )
     runpy.run_module(_runtime_module(), run_name="__main__", alter_sys=True)
     return 0
 
 
 def main() -> int:
+    """The standby entry point: wait, then become a runtime or leave quietly."""
     from local_operator import procname
-    from local_operator.paths import config_dir
 
     procname.brand_this_process()
-    root = config_dir()
-    try:
-        return _serve(root)
-    except Exception:  # noqa: BLE001 — a standby that fails simply is not there
-        logger.debug("standby exited on an error", exc_info=True)
+    fd = _standby_fd_from_argv(sys.argv[1:])
+    if fd is None:
+        logger.debug("standby started without an inherited descriptor; nothing to do")
         return 0
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM, fileno=fd)
+    try:
+        request = _await_request(sock)
+    except Exception:  # noqa: BLE001 — before adoption a failure is just "no standby"
+        logger.debug("standby exited on an error while waiting", exc_info=True)
+        return 0
+    if request is None:
+        return 0
+    # PAST THIS LINE A FAILURE IS THE SESSION'S, not the spare's: no handler here,
+    # so the exception reaches stderr (the capture) and the exit status is non-zero.
+    operator_fd = _commit_adoption(sock, request)
+    return _become_runtime(operator_fd)
 
 
 if __name__ == "__main__":
