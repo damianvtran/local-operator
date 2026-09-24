@@ -852,6 +852,12 @@ class TuiSessionHandle(SessionHandle):
         differently, or the same command would read differently depending on which
         machine happened to own the session.
 
+        ``stop`` IS THE ONE VERB WHOSE ARGUMENTS CHANGE ITS TARGET, and the lane is
+        chosen by the LINE: relayed, only the bare ``/stop`` — the session this
+        carrier is attached to — is typed, while ``/stop all`` and ``/stop <pid>``
+        take the dispatcher's refusal. Round 4 (V4-1) measured the alternative:
+        handing the whole line over let a phone-shaped caller arm the owner's fan-out.
+
         THE DEFAULT IS THE OTHER HALF OF THE FIX: ``locality`` is ``None`` when a
         caller did not forward it, and ``None`` is read as RELAYED, so a carrier that
         forgets the forward routes to the dispatcher instead of into the owner's
@@ -869,7 +875,13 @@ class TuiSessionHandle(SessionHandle):
         from local_operator.slash_commands import primary_slash_name
 
         primary = primary_slash_name(command)
-        if not may_run_slash_in_the_owners_terminal(primary, locality, capabilities):
+        # ``args`` TRAVELS WITH THE VERB, because this lane types the whole LINE into
+        # the owner's local dispatch and its handlers are argument-sensitive: `/stop
+        # all` arms the machine-wide fan-out and `/stop <pid>` reaches another
+        # session, so the BARE form is all a relayed caller may run there (round 4,
+        # V4-1). Everything else falls through to the dispatcher below, which has no
+        # ``stop`` branch and answers with its own sentence.
+        if not may_run_slash_in_the_owners_terminal(primary, locality, capabilities, args):
             # The dispatcher's own gate answers the delete-scoped verbs, but it
             # answers them with a typed receipt this caller would have to render;
             # the capability sentence is the same one both hosts give, so ask for it
