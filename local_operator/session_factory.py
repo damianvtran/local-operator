@@ -4699,6 +4699,22 @@ async def create_session(
         from local_operator.session.attached import AttachedSession
 
         root = Path(agent_registry.config_dir)
+        # A SESSION ANOTHER DEVICE OWNS IS OPENED AS ITS VIEWER, never looked up
+        # here (mesh build plan §0 finding 2). Without this, a `--resume` of a
+        # peer's id fell through to the local takeover below and minted a second
+        # conversation under the same id on this device — INV-1's two-writer case.
+        # ``open_remote_viewer`` answers ``None`` with no dial when this device
+        # holds the directory or runs no relay, so the local path is unchanged.
+        from local_operator.session.remote_open import open_remote_viewer
+
+        async def refuse_takeover() -> "SessionProtocol":
+            raise RuntimeError("a remote viewer never takes over a session")
+
+        remote_viewer = await open_remote_viewer(
+            str(resume_id), config_dir=root, takeover=refuse_takeover
+        )
+        if remote_viewer is not None:
+            return remote_viewer
         record, owner = await asyncio.to_thread(find_runtime_record, root, str(resume_id))
         if owner is not None and owner != os.getpid():
             if record is None or record.protocol < 4:
