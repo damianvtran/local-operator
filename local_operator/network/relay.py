@@ -2377,6 +2377,20 @@ class StoreView(NetworkState):
 
         return read_tombstones(self._root)
 
+    def replica_owner(self, session_id: str) -> str:
+        """The device this install's REPLICA of ``session_id`` was synced from.
+
+        Read per question from the replica cursor, which ``sync_from`` writes only
+        after every byte verified. ``""`` means this device holds no verified replica
+        of that id, which is the answer that refuses — see
+        ``Authorizer._replica_scope`` for the one frame this question admits.
+        """
+        from local_operator.network.sync import read_replica_cursor
+
+        if self._root is None:
+            return ""
+        return str(read_replica_cursor(self._root, session_id).get("owner_device") or "")
+
 
 #: How long a mesh-requested engage may take before the op answers with a
 #: sentence. Longer than a local caller's own budget because this one spans a
@@ -3126,6 +3140,11 @@ class RelayServer:
         self._local_slice_handlers: dict[str, Callable[[dict[str, Any]], Any]] = {}
         #: Every op name a slice has claimed, so a second claim is refused.
         self._slice_owned: set[str] = set()
+        #: ``(name, hook)`` a slice registered to run ONCE when the relay starts
+        #: (see ``register_ops``). Stored, not called, at registration: a slice is
+        #: installed at CONSTRUCTION and a test builds hundreds of relays it never
+        #: starts, so working here would spend their time on work no test asked for.
+        self._slice_start_hooks: list[tuple[str, Callable[[], Any]]] = []
         self._slow_lock = threading.Lock()
         self._slow_pool: ThreadPoolExecutor | None = None
         self._slow_slots: threading.BoundedSemaphore | None = None
@@ -3190,6 +3209,29 @@ class RelayServer:
             self._threads.append(thread)
         self.publish()
         self._flush_outboxes()
+        self._run_start_hooks()
+
+    def _run_start_hooks(self) -> None:
+        """Run each slice's one-shot start hook, on its own daemon thread.
+
+        A THREAD, not an inline call: a hook is housekeeping that may do network
+        I/O, and ``start()`` is on the path of every ``lop`` command that has to
+        bring a relay up — a hook that waited on a peer would make the CLI's
+        start-up cost depend on another machine. The hook is therefore
+        fire-and-forget by contract, and the relay is fully usable whether it has
+        finished or not. A hook that raises is REPORTED and does not take the
+        relay down: the same rule ``_install_slices`` follows.
+        """
+        for label, hook in self._slice_start_hooks:
+
+            def _run(hook: Callable[[], Any] = hook, label: str = label) -> None:
+                try:
+                    hook()
+                except Exception as exc:  # noqa: BLE001 — see the docstring
+                    print(f"mesh relay: start hook {label} failed ({exc})", file=sys.stderr)
+
+            thread = threading.Thread(target=_run, name=f"mesh-start-{label}", daemon=True)
+            thread.start()
 
     def serve_forever(self) -> None:
         """The foreground runner (``lop network serve``): block until signalled."""
@@ -4299,6 +4341,7 @@ class RelayServer:
         *,
         slow: Mapping[str, float] | None = None,
         replace: bool = False,
+        on_start: Mapping[str, Callable[[], Any]] | None = None,
     ) -> None:
         """Let a slice module serve its ops without editing this file.
 
@@ -4306,7 +4349,18 @@ class RelayServer:
         after the chokepoint exactly like the core table; ``local_handlers`` are
         control-socket ops (:data:`SLICE_LOCAL_OPS`). ``slow`` maps a peer op to
         its owner-side deadline in seconds and moves its handler off the link's
-        reader (see :data:`SLOW_OP_WORKERS`).
+        reader (see :data:`SLOW_OP_WORKERS`). ``on_start`` maps a LABEL to a
+        callable run once when the relay starts, on its own daemon thread.
+
+        WHY ``on_start`` EXISTS. Some slice state can only be settled by a relay
+        that is up: the move's crash recovery has to run when a relay starts on a
+        root a previous relay died in, and nothing else in the tree is guaranteed
+        to run at that moment. Without the hook the recovery existed and was
+        correct but nobody called it, so a stale handoff blocked the owner's own
+        conversation until a human happened to run another move (review round 1,
+        M-3). Each hook runs on a DAEMON THREAD and its failure is logged and
+        swallowed: a relay that refused to start because one slice's housekeeping
+        raised would take every link on this device down with it.
 
         THE RULES, each a refusal rather than a warning:
 
@@ -4348,6 +4402,12 @@ class RelayServer:
             taken = sorted((set(handlers) | set(local_handlers)) & self._slice_owned)
             if taken:
                 raise ValueError(f"already registered by another slice: {', '.join(taken)}")
+        for label, hook in (on_start or {}).items():
+            if not callable(hook):
+                raise TypeError(f"start hook {label!r} is not callable")
+            if any(label == existing for existing, _hook in self._slice_start_hooks):
+                raise ValueError(f"a start hook named {label!r} is already registered")
+        self._slice_start_hooks.extend((label, hook) for label, hook in (on_start or {}).items())
         self._handlers.update(handlers)
         self._local_slice_handlers.update(local_handlers)
         for name in handlers:
