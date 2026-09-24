@@ -1539,3 +1539,173 @@ async def test_r4_1_a_wrapped_run_consumer_still_delivers_the_value(
     assert marker.exists()
     assert "authorized" in text and "unauthorized" not in text, text
     assert _SYNTHETIC not in text
+
+
+# -- round 5 ---------------------------------------------------------------
+# Each row below leaked (or, for the controls, would regress) on `589318e78`.
+# R5-1's class is "a non-command word read as the command": the redirect
+# words, anywhere a word-walk decides which word runs.
+
+
+@pytest.mark.parametrize(
+    ("command", "label"),
+    [
+        # R5-1: a redirect on the `run` stage hid the `env` in front of it.
+        (
+            "lop secret run --secret NAME=TOK -- env 2>/dev/null",
+            "shell.secret-verb-emitting-consumer",
+        ),
+        (
+            "lop secret run --secret NAME=TOK -- env 2>&1 | grep TOK",
+            "shell.secret-verb-emitting-consumer",
+        ),
+        (
+            "lop secret run --secret NAME=TOK -- env < /dev/null | rev",
+            "shell.secret-verb-emitting-consumer",
+        ),
+        (
+            "lop secret run --secret NAME=TOK -- env >/dev/stdout | rev",
+            "shell.secret-verb-emitting-consumer",
+        ),
+        (
+            "lop secret run --secret NAME=TOK -- timeout 5 env 2>/dev/null | rev",
+            "shell.secret-verb-emitting-consumer",
+        ),
+        (
+            "lop secret run --secret NAME=TOK -- env {fd}>/dev/null | rev",
+            "shell.secret-verb-emitting-consumer",
+        ),
+        (
+            "lop secret run --secret NAME=TOK -- env <<< x | rev",
+            "shell.secret-verb-emitting-consumer",
+        ),
+        (
+            "lop secret file NAME -- 2>/dev/null cat",
+            "shell.secret-verb-emitting-consumer",
+        ),
+        # R5-1's class sweep: the same words in the OUTER walk.
+        ("2>/dev/null lop secret get NAME | rev", "shell.pipe-of-source"),
+        ("</dev/null lop secret get NAME | rev", "shell.pipe-of-source"),
+        ("{fd}>/dev/null lop secret get NAME | rev", "shell.pipe-of-source"),
+        (
+            "export V=$(lop secret get NAME); env 2>/dev/null | rev",
+            "shell.environment-dump-of-source",
+        ),
+        (
+            "export V=$(lop secret get NAME); export 2>/dev/null",
+            "shell.environment-dump-of-source",
+        ),
+        (
+            "export V=$(lop secret get NAME); set 2>/dev/null",
+            "shell.environment-dump-of-source",
+        ),
+        # External `time` and GNU long operands in the consumer's wrappers.
+        (
+            "lop secret run --secret NAME=TOK -- time printenv TOK | rev",
+            "shell.secret-verb-emitting-consumer",
+        ),
+        (
+            "lop secret run --secret NAME=TOK -- nice --adjustment 5 printenv TOK | rev",
+            "shell.secret-verb-emitting-consumer",
+        ),
+        (
+            "lop secret run --secret NAME=TOK -- stdbuf --output L printenv TOK | rev",
+            "shell.secret-verb-emitting-consumer",
+        ),
+        # R5-2: an `-i` that `env` does not own is no `env -i`.
+        (
+            "lop secret run --secret NAME=TOK -- stdbuf -i 0 env printenv TOK | rev",
+            "shell.secret-verb-emitting-consumer",
+        ),
+        (
+            "lop secret run --secret NAME=TOK -- env -u -i printenv TOK | rev",
+            "shell.secret-verb-emitting-consumer",
+        ),
+        # R5-3: node's `-p` clustered with `-e`.
+        (
+            "lop secret run --secret NAME=TOK -- node -pe "
+            "'[...process.env.TOK].reverse().join(\"\")'",
+            "shell.secret-verb-emitting-consumer",
+        ),
+        # R5-4: `--env-var` before the NAME.
+        (
+            "lop secret file --env-var KF NAME -- sh -c 'rev \"$KF\"'",
+            "shell.secret-verb-emitting-consumer",
+        ),
+        (
+            "lop secret file --env-var=KF NAME -- sh -c 'base64 < \"$KF\"'",
+            "shell.secret-verb-emitting-consumer",
+        ),
+        # R5-5: a `run` whose consumer is the fetch.
+        ("lop secret run --secret NAME=TOK -- lop secret get NAME | rev", "shell.pipe-of-source"),
+        (
+            "lop secret run --secret NAME=TOK -- timeout 5 lop secret get NAME | rev",
+            "shell.pipe-of-source",
+        ),
+        ("lop secret run --secret NAME=TOK lop secret get NAME | rev", "shell.pipe-of-source"),
+    ],
+)
+def test_r5_a_non_command_word_is_not_read_as_the_command(command: str, label: str) -> None:
+    result = scan_command(command)
+    assert result.verdict == "printing", (command, result)
+    assert label in result.labels, (command, result.labels)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The sanctioned consumer with the habitual stderr suffix.
+        "lop secret run --secret NAME=TOK -- sh -c "
+        "'curl -sS -H \"Authorization: Bearer $TOK\" http://127.0.0.1:9/' 2>/dev/null",
+        "lop secret run --secret NAME=TOK -- python3 client.py 2>&1 | tail -1",
+        "lop secret run --secret NAME=TOK -- echo 2 >/dev/null",
+        # `env -i` that env owns, however it is spelled or wrapped.
+        "lop secret run --secret NAME=TOK -- env -i printenv",
+        "lop secret run --secret NAME=TOK -- timeout 5 env -iv printenv",
+        "lop secret run --secret NAME=TOK -- stdbuf -i 0 env -i printenv",
+        "lop secret run --secret NAME=TOK -- env -u X -i printenv",
+        "lop secret run --secret NAME=TOK -- nice --adjustment 5 python3 client.py",
+        "lop secret run --secret NAME=TOK -- time -p curl -sS http://127.0.0.1:9/",
+        "lop secret run --secret NAME=TOK -- node -pe '1 + 1'",
+        "lop secret file --env-var KF NAME -- sh -c 'wc -c < \"$KF\"'",
+        "lop secret file --env-var KF NAME -- gcloud auth activate-service-account --key-file \"$KF\"",
+        "lop secret run --secret NAME=TOK -- lop secret get NAME | wc -c",
+        "lop secret run --secret NAME=TOK -- lop secret get NAME >/dev/null",
+        "lop secret run --secret NAME=TOK -- lop secret list",
+        "2>/dev/null lop secret get NAME | wc -c",
+        "lop secret get NAME > /tmp/o 2>/dev/null",
+        "export V=1; env 2>/dev/null | wc -l",
+    ],
+)
+def test_r5_the_redirect_and_ownership_fixes_keep_the_sanctioned_forms(command: str) -> None:
+    result = scan_command(command)
+    assert not result.refused, (command, result)
+
+
+@pytest.mark.asyncio
+async def test_r5_1_a_redirected_run_dump_is_refused_before_the_child_runs(
+    tmp_path: Path, config_root: Path, stored_secret: str, shimmed_path: None
+) -> None:
+    """R5-1 through the REAL tool: on `589318e78` these returned the value raw or reversed."""
+    commands = [
+        f"lop secret run --secret {stored_secret}=TOK -- env 2>/dev/null",
+        f"lop secret run --secret {stored_secret}=TOK -- env 2>&1 | grep TOK",
+        f"lop secret run --secret {stored_secret}=TOK -- env < /dev/null | rev",
+        f"lop secret run --secret {stored_secret}=TOK -- lop secret get {stored_secret} | rev",
+    ]
+    for command in commands:
+        marker = tmp_path / "ran"
+        if marker.exists():
+            marker.unlink()
+        result = await builtin.execute_bash(
+            "bash-r5",
+            {"command": f"touch {marker}; {command}"},
+            AbortSignal(),
+            None,
+            _context(tmp_path),
+        )
+        text = _result_text(result)
+        assert result.is_error, (command, text)
+        assert not marker.exists(), f"the child ran anyway: {command}"
+        assert _SYNTHETIC not in text
+        assert _SYNTHETIC[::-1] not in text
