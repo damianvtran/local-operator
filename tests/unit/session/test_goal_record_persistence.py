@@ -410,9 +410,9 @@ def test_set_goal_over_a_settled_goal_starts_a_new_life_and_is_judged(
     # A NEW LIFE, taken together: text, lifecycle, judge, token and history.
     assert session.goal == "Land the new billing migration"
     assert session.goal_status == "active", "no branch may leave the new goal settled"
-    assert session.goal_token and session.goal_token != settled_token, (
-        "the token is the staleness guard, so a replaced goal mints a fresh one"
-    )
+    assert (
+        session.goal_token and session.goal_token != settled_token
+    ), "the token is the staleness guard, so a replaced goal mints a fresh one"
     assert session.goal_judge_state.state == "waiting", "a goal IS active work"
     # The settled goal the user asked to keep is KEPT, and it is not lost by the
     # replacement: `GoalState.arm` settles a done goal where it already stands.

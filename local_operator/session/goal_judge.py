@@ -432,11 +432,13 @@ class GoalJudge:
 
         ``""`` counts as active, deliberately: the frontend fold reads a goal with
         no status as ``active`` (RULINGS R9), because a goal restored from a build
-        that predates the record, or set through the mobile relay's plain
-        ``set_goal``, is standing work the user expects pursued. The TOKEN is what
-        is not negotiable — it is this judge's whole staleness guard — so a goal
-        without one is not judged rather than judged with a guard that cannot
-        fire.
+        that predates the record is standing work the user expects pursued. The
+        TOKEN is what is not negotiable — it is this judge's whole staleness guard
+        — so a goal without one is not judged rather than judged with a guard that
+        cannot fire. Nothing mints such a goal any more: the plain ``set_goal``
+        arms what it writes, and the one remaining producer is the pre-lifecycle
+        restore fold, which mints the token as it reads the status (agent review
+        round 2, MAJOR-5).
         """
         return bool(self.goal()) and self.status() in {"", "active"} and bool(self.token())
 

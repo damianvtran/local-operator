@@ -325,9 +325,7 @@ async def test_a_new_goal_over_a_settled_one_is_armed_on_either_host() -> None:
         assert session._goal_state.judge.state == "waiting"
         # The settled goal the user asked to keep is the HISTORY row, tagged as
         # finished — which is where a strike belongs.
-        assert [(row["text"], row["status"]) for row in session.history_view()] == [
-            (GOAL, "done")
-        ]
+        assert [(row["text"], row["status"]) for row in session.history_view()] == [(GOAL, "done")]
     assert new in local_body.plain and "\u2014 active" in local_body.plain
     assert new not in _struck_spans(local_body), "an armed goal must not read as achieved"
     assert GOAL in _struck_spans(local_body), "the settled goal it replaced is the struck one"
