@@ -44,6 +44,7 @@ from unittest.mock import patch
 import pytest
 
 from local_operator.tui.app import OperatorApp
+from local_operator.tui.widgets.session_sidebar import SessionSidebar
 from tests.unit.tui.test_gate_resurface_on_switch import (
     _attached,
     _install_probe,
@@ -315,7 +316,7 @@ async def test_the_navigation_settled_rearm_heals_a_display_only_source(
     The fix unfuses ``resume_viewer_gates`` from ``not display_only`` at TWO
     sites. Mutation-testing them one at a time showed the commit site
     (``_commit_sidebar_session``) is defended by
-    ``test_a_display_only_source_never_rearms_its_gate_bridge``, but re-fusing
+    ``test_a_display_only_commit_rearms_its_gate_bridge``, but re-fusing
     the OTHER one — the ``session_id == ""`` arm of
     ``_sidebar_navigation_pending`` — left the entire suite GREEN (18 passed).
     The level-triggered reconcile added by the same fix heals the gate before
@@ -512,6 +513,250 @@ async def test_a_display_only_frame_is_ready_only_with_a_CORRECTLY_BOUND_card(
                         "ready. The relaxation is too wide: a card belonging to a "
                         "superseded gate view (or another session) would be treated as "
                         "this gate's surface." + diagnosis
+                    )
+                finally:
+                    gate_task.cancel()
+                    await asyncio.gather(gate_task, return_exceptions=True)
+    finally:
+        await rig.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("history", ["current", "stale"])
+async def test_a_display_only_frame_whose_gate_cannot_be_presented_still_paints(
+    tmp_path, monkeypatch, history: str
+) -> None:
+    """A card-less preview is ready at once, and the card follows when it can.
+
+    THE STATE. The user returns to a session that holds an unanswered gate
+    while its viewer is not ready for events (``_ready_for_events`` False: a
+    display resync in flight, with the socket up). That is ``is_cold`` through
+    its third disjunct, so preparation latches ``display_only``. It is also G1
+    of ``_maybe_start_gate``, so no card can mount in this state. The frame
+    must not wait for one: the connect that ends the state only starts once the
+    frame resolves (``connect_after_paint``). A frame that waited would wait on
+    itself, sit out ``_await_sidebar_frame``'s 15 s timer and end in the terminal
+    ``SurfaceNotReady`` ("Could not open conversation") over a correctly painted
+    preview.
+
+    BOTH SUB-SHAPES, because they fail differently when the escape is missing.
+    With the display history still current the paint-recovery branch fires on
+    every refused frame (a relayout spin). With it stale that branch is skipped
+    and the frame waits out the timer. ``stale`` is driven for real, through a
+    held ``frontend_sync`` and ``_invalidate_display_history``. ``current``
+    clears ``_ready_for_events`` directly, since a real refresh always
+    invalidates the history first and cannot produce this sub-shape on its own.
+
+    THE SECOND HALF IS THE POINT OF THE PR. Resolving the frame must not cost
+    the card: once the viewer is ready again the card has to come back without
+    the user switching. That is why the escape lives in the frame verdict and
+    not in the card predicate the reconcile also asks.
+
+    Settlement is measured in turns (``_RESURFACE_TURNS``), not seconds. The
+    ``committed_id`` it waits on is only set after the frame future resolves
+    successfully, so a pass cannot come from the timer firing.
+    """
+    rig = await _rig(tmp_path / "config", monkeypatch, "alpha", "beta")
+    app = _app(rig, "alpha")
+    release_sync = asyncio.Event()
+    try:
+        with patch("local_operator.mobile.attach_client.find_runtime_record", rig.find_owner):
+            async with app.run_test(size=(100, 30)) as pilot:
+                assert await _pump_until(pilot, lambda: app._session is not None, tries=300)
+                alpha, source = _attached(app._session), app._interaction
+                app._set_approve_all(False)
+                probe = _install_probe(monkeypatch, alpha)
+
+                gate_task = await _raise_ask(rig, "alpha", _one_question())
+                try:
+                    assert await _pump_until(
+                        pilot, lambda: app._ask_screen is not None, tries=300
+                    ), "the ask card never mounted; the premise is unmet"
+
+                    await _click(app, pilot, "beta")
+                    assert app._sidebar_navigation.committed_id == "beta"
+                    assert app._ask_screen is None, "the outgoing card is still on screen"
+
+                    if history == "stale":
+                        client = alpha._client
+                        assert client is not None
+                        real_sync = client.frontend_sync
+
+                        async def held_sync(*args, **kwargs):
+                            await release_sync.wait()
+                            return await real_sync(*args, **kwargs)
+
+                        monkeypatch.setattr(client, "frontend_sync", held_sync)
+                        alpha._invalidate_display_history()
+                        assert await _pump_until(
+                            pilot, lambda: not alpha._ready_for_events, tries=100
+                        ), "the held resync never cleared _ready_for_events"
+                        assert not alpha.display_history_current
+                    else:
+                        alpha._ready_for_events = False
+                        assert alpha.display_history_current
+                    assert alpha.is_cold, "the premise needs is_cold via _ready_for_events"
+
+                    reached_at = app._sidebar_gate_reached
+                    recoveries_at = app._sidebar_gate_recoveries
+                    app.post_message(SessionSidebar.Selected("alpha"))
+                    painted = await _pump_until(
+                        pilot,
+                        lambda: app._sidebar_navigation.committed_id == "alpha",
+                        tries=_RESURFACE_TURNS,
+                    )
+                    diagnosis = (
+                        f"\n  history = {history!r}"
+                        f"\n  painted = {painted!r}"
+                        f"\n  gate_reached delta = {app._sidebar_gate_reached - reached_at}"
+                        f"\n  gate_recoveries delta = "
+                        f"{app._sidebar_gate_recoveries - recoveries_at}"
+                        + _state(app, alpha, source, probe)
+                    )
+                    _dump(diagnosis)
+
+                    assert painted, (
+                        "the display_only frame for a session whose gate cannot be "
+                        "presented never resolved. It waits for a card that G1 refuses "
+                        "to mount, and the only exit left is the 15 s timer's terminal "
+                        "SurfaceNotReady." + diagnosis
+                    )
+                    assert app._sidebar_gate_reached > reached_at, (
+                        "the frame resolved without reaching the paint gate, so this "
+                        "did not test the gate's verdict" + diagnosis
+                    )
+                    assert app._sidebar_gate_recoveries == recoveries_at, (
+                        "the paint gate bought recovery relayouts for a refusal a "
+                        "repaint cannot fix" + diagnosis
+                    )
+                    assert source.display_only and not alpha._ready_for_events, (
+                        "the state moved on before the verdict could be read; the "
+                        "premise does not hold" + diagnosis
+                    )
+                    assert app._ask_screen is None and alpha.pending_gate is not None
+
+                    # And the card comes back once the viewer is ready, with no
+                    # switch. `stale` heals for real. `current` restores the flag
+                    # and delivers the frontend notification a delta would.
+                    if history == "stale":
+                        release_sync.set()
+                    else:
+                        alpha._ready_for_events = True
+                        app._source_frontend_changed(source)
+                    resurfaced = await _pump_until(
+                        pilot, lambda: app._ask_screen is not None, tries=_RESURFACE_TURNS
+                    )
+                    assert resurfaced, (
+                        "the preview painted, but the card never came back once the "
+                        "viewer was ready for events" + _state(app, alpha, source, probe)
+                    )
+                    assert not gate_task.done(), "the gate resolved without an answer"
+
+                    # THE PLACEMENT OF THE ESCAPE. Above, the card can also come
+                    # back through the connect path, so that half cannot tell
+                    # an escape in the frame verdict from one in
+                    # `_sidebar_gate_card_ready`. This leg can. A card-less,
+                    # detached `display_only` source whose viewer IS ready has
+                    # exactly one route back: the level-triggered reconcile,
+                    # which `_suspend_sidebar_gates`' done-callback reaches
+                    # through `_source_frontend_changed`. An escape in the card
+                    # predicate would tell the reconcile the preview is fine and
+                    # the card would stay gone. The connect is suppressed, so
+                    # it cannot heal this leg instead.
+                    monkeypatch.setattr(
+                        OperatorApp,
+                        "_start_sidebar_connection",
+                        lambda self, candidate, **_kwargs: None,
+                    )
+                    await _pump(pilot, 20)
+                    source.display_only = True
+                    app._suspend_sidebar_gates(source)
+                    healed = await _pump_until(
+                        pilot,
+                        lambda: app._ask_screen is not None and not alpha._gates_detached,
+                        tries=_RESURFACE_TURNS,
+                    )
+                    assert healed, (
+                        "the reconcile did not bring back the card of a detached, "
+                        "card-less display_only source whose viewer is ready. The "
+                        "display_only escape is answering the reconcile's question "
+                        "as well as the frame's." + _state(app, alpha, source, probe)
+                    )
+                finally:
+                    release_sync.set()
+                    gate_task.cancel()
+                    await asyncio.gather(gate_task, return_exceptions=True)
+    finally:
+        await rig.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_delta_inside_a_departing_detach_does_not_rearm_the_bridge(
+    tmp_path, monkeypatch
+) -> None:
+    """The reconcile must not undo ``detach_viewer_gates`` on a departing session.
+
+    ``/resume`` onto a live owner (``_attach_or_refuse``) detaches the outgoing
+    session's gates behind an ``await`` and then disposes the session. For the
+    whole of that await ``self._interaction`` is still the outgoing source, so
+    a frontend delta landing there reaches the reconcile looking like "current,
+    pending gate, no ready card". Nothing in the latch tells a departure from a
+    sidebar suspension: both set ``_gates_detached``. The reconcile tells them
+    apart by the window it runs in (``_session_transition_pending``), and this
+    pins that.
+
+    DRIVEN THROUGH THE REAL SEAM. The transition runs through
+    ``_run_session_transition`` into the real ``_attach_or_refuse``, dialling a
+    real in-process owner. The only thing added is the delta, delivered from
+    inside the real ``detach_viewer_gates`` after its own await, which is the
+    window the race needs. The latch is read right there, before the dispose
+    that follows can hide the outcome.
+    """
+    rig = await _rig(tmp_path / "config", monkeypatch, "alpha", "beta")
+    app = _app(rig, "alpha")
+    try:
+        with patch("local_operator.mobile.attach_client.find_runtime_record", rig.find_owner):
+            async with app.run_test(size=(100, 30)) as pilot:
+                assert await _pump_until(pilot, lambda: app._session is not None, tries=300)
+                alpha, source = _attached(app._session), app._interaction
+                app._set_approve_all(False)
+                probe = _install_probe(monkeypatch, alpha)
+
+                gate_task = await _raise_ask(rig, "alpha", _one_question())
+                try:
+                    assert await _pump_until(
+                        pilot, lambda: app._ask_screen is not None, tries=300
+                    ), "the ask card never mounted; the premise is unmet"
+
+                    real_detach = alpha.detach_viewer_gates
+                    seen: dict[str, object] = {}
+
+                    async def detach_with_a_delta(**kwargs):
+                        await real_detach(**kwargs)
+                        seen["detached_before_delta"] = alpha._gates_detached
+                        seen["current"] = app._interaction is source
+                        app._source_frontend_changed(source)
+                        seen["detached_after_delta"] = alpha._gates_detached
+
+                    monkeypatch.setattr(alpha, "detach_viewer_gates", detach_with_a_delta)
+                    app._run_session_transition(app._attach_or_refuse(rig.config, "beta"))
+                    landed = await _pump_until(
+                        pilot,
+                        lambda: getattr(app._session, "session_id", "") == "beta",
+                        tries=_RESURFACE_TURNS,
+                    )
+                    diagnosis = f"\n  seen = {seen!r}" + _state(app, alpha, source, probe)
+                    _dump(diagnosis)
+
+                    assert landed, "the /resume attach never landed on beta" + diagnosis
+                    assert seen.get("detached_before_delta") is True and seen.get("current"), (
+                        "the delta did not land inside the departing detach, so the "
+                        "window under test was not exercised" + diagnosis
+                    )
+                    assert seen.get("detached_after_delta") is True, (
+                        "REGRESSION: a frontend delta inside /resume's detach cleared "
+                        "_gates_detached, re-arming a gate bridge for the conversation "
+                        "being disposed" + diagnosis
                     )
                 finally:
                     gate_task.cancel()

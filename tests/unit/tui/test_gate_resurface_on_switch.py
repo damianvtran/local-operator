@@ -34,6 +34,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -117,31 +118,31 @@ def _attached(session: SessionProtocol | None) -> AttachedSession:
 # --- instrumentation ---------------------------------------------------------
 
 
-#: The ladder in ``AttachedSession._maybe_start_gate`` (attached.py:5588-5605),
-#: in evaluation order. Each entry is (name, source line, predicate) and the
-#: predicate answers "does THIS guard return early?". Replayed read-only rather
-#: than inferred from the outcome, so the readout names a guard rather than a
-#: theory about one.
+#: The ladder in ``AttachedSession._maybe_start_gate``, in evaluation order,
+#: labelled with the same G1-G5 names as its debug lines. Each check answers
+#: "does THIS guard return early?". Replayed read-only just before each real
+#: call, so the readout names a guard rather than a theory about one. It
+#: carries no line numbers: they move with every edit to the file.
 def _first_guard_that_drops(session: AttachedSession) -> str:
     if session._disposed or not session._ready_for_events:
-        return "G1:5589 disposed-or-not-ready"
+        return "G1 disposed-or-not-ready"
     pending = _pending_request(session.pending_gate)
     if pending is None:
-        return "G2a:5593 no-pending-gate"
+        return "G2a no-pending-gate"
     if session._gate_task is not None:
-        return "G2b:5593 gate-task-already-set"
+        return "G2b gate-task-already-set"
     if session._gate_identity(pending) == session._gate_answered_key:
-        return "G3:5595 identity-equals-answered-key"
+        return "G3 identity-equals-answered-key"
     background = (
         session._gates_detached and session._background_approval and pending.kind == "approval"
     )
     if session._gates_detached and not background:
-        return "G4:5600 gates-detached"
+        return "G4 gates-detached"
     if pending.kind == "approval" and (session._approval_handler is not None or background):
         return ""
     if pending.kind == "ask" and session._ask_handler is not None:
         return ""
-    return "G5:5602-5605 handler-is-None (no else branch)"
+    return "G5 handler-is-None"
 
 
 @dataclass
@@ -405,42 +406,43 @@ async def test_a_live_gate_resurfaces_when_the_user_switches_back(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["approval", "ask"])
-async def test_a_display_only_source_never_rearms_its_gate_bridge(
+async def test_a_display_only_commit_rearms_its_gate_bridge(
     tmp_path, monkeypatch, kind: str
 ) -> None:
-    """``display_only`` is sticky, and it gates the ONLY re-arm of the bridge.
+    """A ``display_only`` commit re-arms the gate bridge, and the card follows.
 
-    ``_commit_sidebar_session`` (app.py:7537-7539) calls
-    ``resume_viewer_gates()`` only ``if not source.display_only``. The guard was
-    added by e1f1603c3 (#808, "reveal saved conversations independently of
-    runtime sync"), which turned an unconditional resume into a conditional
-    one -- verified with ``git log -L 7535,7540:local_operator/tui/app.py``:
+    THE NAMED DEFENDER of the commit site. ``_commit_sidebar_session`` guards
+    ``_submit_boot_prompt`` with ``not source.display_only``, because submitting
+    starts a turn and a saved preview must never do that. ``resume_viewer_gates``
+    sits outside that guard, because it submits nothing: it clears the
+    ``_gates_detached`` latch and re-runs the ``_maybe_start_gate`` ladder. The
+    flag is also sticky. ``_prepare_sidebar_session`` ORs into it
+    (``source.display_only or session.is_cold or not
+    session.display_history_current``) and only the connect/bind path clears
+    it. So a source that goes ``display_only`` once, for a reason as transient
+    as a display resync in flight at the instant of preparation, still has to
+    get its bridge back on this and every later return.
 
-        -            self._submit_boot_prompt(session)
-        -            session.resume_viewer_gates()
-        +            if not source.display_only:
-        +                self._submit_boot_prompt(session)
-        +                session.resume_viewer_gates()
+    ISOLATED, so the commit site is the only thing that can pass. Three other
+    routes also clear the latch, and each would satisfy an outcome assertion:
+    the level-triggered reconcile, the settled-navigation arm of
+    ``_sidebar_navigation_pending``, and the reconnect's ``refresh=True``
+    re-commit (which clears ``display_only`` first). All three are suppressed
+    for the ``display_only`` return leg, and the assertion made right after that
+    commit is on the LATCH rather than on a card.
 
-    And the flag is STICKY. ``_prepare_sidebar_session`` (app.py:5912-5913)
-    ORs into it -- ``source.display_only or session.is_cold or not
-    session.display_history_current`` -- and the only clear is at app.py:7973,
-    inside the connect/bind path. So a source that goes ``display_only`` even
-    ONCE, for a reason as transient as a display resync in flight at the
-    instant of preparation, stops calling ``resume_viewer_gates`` on every
-    later return. ``_gates_detached`` (set by the switch AWAY) then stays True
-    forever and guard G4:5600 drops the gate on every visit after that.
-
-    HOW THE FLAG IS SET HERE, and why this is honest. The third disjunct is
-    driven for real: ``session.display_history_current`` is
-    ``not self._display_invalidated`` (attached.py:4386-4388), and
-    ``_display_invalidated`` is set by ``_invalidate_display_history`` on a
-    history-generation move. This test moves it through the OWNER's transcript
-    -- a real ``append_compaction``, which bumps ``_history_generation``
-    (transcript.py:1593-1594) exactly as a production compaction does -- and
+    HOW THE FLAG IS SET, and why this is honest. The third disjunct is driven
+    for real: ``session.display_history_current`` is ``not
+    self._display_invalidated``, and ``_display_invalidated`` is set by
+    ``_invalidate_display_history`` on a history-generation move. This test moves
+    it through the OWNER's transcript with a real ``append_compaction``, which
+    bumps ``_history_generation`` exactly as a production compaction does. It
     then holds the viewer's refresh off the loop so preparation observes the
     invalidated state, which is the race the user hits on a busy session.
     Nothing assigns ``display_only`` by hand.
+
+    The rest of the test is the user-visible outcome: once the owner heals, the
+    card comes back where the user is, and again after an ordinary round trip.
     """
     async with (
         _remote(tmp_path, "adelta") as (alpha, alpha_handle),
@@ -563,9 +565,27 @@ async def test_a_display_only_source_never_rearms_its_gate_bridge(
                 )
 
                 # --- return to alpha while the display is invalidated ---------
+                # Every OTHER route that clears `_gates_detached` is suppressed
+                # for this leg (see the docstring), so the latch assertion below
+                # can only be satisfied by the commit site's own call.
+                assert alpha._gates_detached, "the premise needs a detached bridge"
                 back_marker = probe.marker
-                await visit(alpha.session_id)
-                resurfaced = await _pump_until(pilot, card_is_mounted, tries=120)
+                with (
+                    patch.object(
+                        OperatorApp, "_reconcile_gate_surface", lambda self, candidate: None
+                    ),
+                    patch.object(
+                        OperatorApp, "_sidebar_navigation_pending", lambda self, session_id: None
+                    ),
+                    patch.object(
+                        OperatorApp,
+                        "_start_sidebar_connection",
+                        lambda self, candidate, **_kwargs: None,
+                    ),
+                ):
+                    await visit(alpha.session_id)
+                    rearmed_by_commit = not alpha._gates_detached
+                    resurfaced = await _pump_until(pilot, card_is_mounted, tries=120)
                 back_calls = probe.since(back_marker)
 
                 diagnosis = (
@@ -585,6 +605,13 @@ async def test_a_display_only_source_never_rearms_its_gate_bridge(
                 assert alpha_source.display_only, (
                     "the return leg did not actually latch display_only, so this "
                     "test did not exercise the guard it exists for" + diagnosis
+                )
+                assert rearmed_by_commit, (
+                    "REGRESSION: the display_only commit did NOT clear "
+                    "_gates_detached. Every other route was suppressed for this leg, "
+                    "so the commit site's resume_viewer_gates() is the call that is "
+                    "missing; with it gated on `not source.display_only` again, a "
+                    "source that latched display_only once loses its gate card." + diagnosis
                 )
                 assert not gate_task.done(), (
                     "the gate resolved without the user answering it" + diagnosis
@@ -667,7 +694,7 @@ async def test_a_display_only_source_never_rearms_its_gate_bridge(
                     "session does not bring the prompt back: the commit saw "
                     "source.display_only and skipped resume_viewer_gates() "
                     "(app.py:7537), so _gates_detached stayed True and guard "
-                    "G4:5600 dropped every re-arm attempt." + clean_diagnosis
+                    "G4 dropped every re-arm attempt." + clean_diagnosis
                 )
                 assert clean_resurfaced, (
                     f"REPRODUCED (H1), display_only is a PERMANENT latch: the "
@@ -676,7 +703,7 @@ async def test_a_display_only_source_never_rearms_its_gate_bridge(
                     "round trip the control test passes -- still does not bring the "
                     "card back. source.display_only stayed True, so the commit at "
                     "app.py:7537 skipped resume_viewer_gates(), _gates_detached "
-                    "stayed True, and guard G4:5600 dropped the gate again. The "
+                    "stayed True, and guard G4 dropped the gate again. The "
                     "turn is blocked with no surface to answer it, permanently." + clean_diagnosis
                 )
             finally:
