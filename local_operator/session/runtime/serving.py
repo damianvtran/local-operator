@@ -360,6 +360,10 @@ class _PromptCommand:
     #: ``Session.prompt``'s own keyword so the row carries the STRUCTURAL
     #: provenance stamp from the one place a row is born.
     harness_injected: bool = False
+    #: Whether the drain waits out a turn it did not open (a wake, a job-result
+    #: delivery, a compaction) before handing this command to ``Session.prompt``.
+    #: See ``ServingSessionHandle.prompt``'s ``wait_for_turn``.
+    wait_for_turn: bool = True
 
     def __iter__(self):  # type: ignore[no-untyped-def]
         # Tuple compatibility for older diagnostics that inspect the queue.
@@ -2661,7 +2665,19 @@ class ServingSessionHandle(SessionHandle):
         *,
         wait_complete: bool = False,
         harness_injected: bool = False,
+        wait_for_turn: bool = True,
     ) -> str:
+        """Admit one ordinary prompt; the receipt is its durable append.
+
+        ``wait_for_turn`` — True for every front end — makes an accepted prompt
+        WAIT for a turn this queue did not open instead of failing after
+        admission (see ``_await_turn_lock_free``). The one caller that passes
+        False is the boot inbox drain (``process._run_owner_prompt``): it runs
+        BEFORE the control socket listens, so waiting there would keep the
+        runtime unreachable for a whole wake turn, and it already answers the
+        refusal by steering the row into the turn in flight — which needs the
+        refusal to arrive rather than the wait.
+        """
         self._check_loop_thread()
         if not command_id:
             # Only old in-process callers omit the v3 field. Minting here keeps
@@ -2836,7 +2852,9 @@ class ServingSessionHandle(SessionHandle):
         self._maybe_name_conversation(text)
         admitted: asyncio.Future[None] = self._loop.create_future()
         completed = self._loop.create_future() if wait_complete else None
-        command = _PromptCommand(command_id, text, blocks, admitted, completed, harness_injected)
+        command = _PromptCommand(
+            command_id, text, blocks, admitted, completed, harness_injected, wait_for_turn
+        )
         position = len(self._prompt_queue) + 1
         legacy_prompt = "message_id" not in inspect.signature(self._session.prompt).parameters
         # Compatibility-only fake/third-party sessions predate durable
@@ -3346,6 +3364,40 @@ class ServingSessionHandle(SessionHandle):
         self._refresh_state()
         self._notify()
 
+    async def _await_turn_lock_free(self) -> None:
+        """Wait out a turn this queue did not open before handing it the head.
+
+        ``Session.prompt`` REFUSES outright (``TurnInFlight``) when its turn lock
+        is held, and this queue is not the only thing that takes that lock: a
+        background job's result delivery, a peer wake, a scheduled wake, a resume
+        catch-up (all ``Session._prompt_messages``) and an on-demand compaction
+        do too. A prompt this queue had already ACCEPTED was therefore failed
+        after admission whenever one of those won the race to the lock — a
+        desktop send answered 503, and before the reservation fix its same-id
+        retry was reported admitted without ever landing (QA on PR #1528,
+        Q1-5, and the "prompt failed after admission … TurnInFlight" log line).
+        The accepted prompt has to wait its turn exactly as it waits behind a
+        prompt queued ahead of it here.
+
+        ACQUIRED AND RELEASED, not polled: the lock's own FIFO is the event, so
+        this wakes the moment the holder (and anything queued before this wait)
+        lets go. Holding it for no work is harmless. What makes the hand-off
+        sound is that the caller's ``Session.prompt`` probe then runs with NO
+        await in between — a coroutine's body runs synchronously up to its first
+        suspension — so the probe sees the lock free; a wake that queued behind
+        this wait is then ahead of the prompt's own ``acquire``, which waits
+        rather than refusing.
+
+        A session without the lock (a reduced double, a third-party protocol
+        host) keeps the historical behaviour of refusing at the probe.
+        Cancellation (``dispose``) propagates, and ``asyncio.Lock`` hands the
+        lock on for a cancelled waiter.
+        """
+        lock = getattr(self._session, "_turn_lock", None)
+        if isinstance(lock, asyncio.Lock) and lock.locked():
+            async with lock:
+                pass
+
     async def _drain_prompt_queue(self) -> None:
         """Run admitted ordinary prompts in owner order, one safe turn at a time.
 
@@ -3389,6 +3441,8 @@ class ServingSessionHandle(SessionHandle):
             # goal loop submits its next turn after the model already failed.
             unsubscribe_outcome = self._session.subscribe(observe_end)
             try:
+                if command.wait_for_turn:
+                    await self._await_turn_lock_free()
                 parameters = inspect.signature(self._session.prompt).parameters
                 if "message_id" in parameters:
                     fields: dict[str, Any] = {
