@@ -64,6 +64,12 @@ _AMBIENT_VARS = (
     # reach a test. (The guard itself reads only the command's own assignments,
     # never the process environment, but the name still has to be scrubbed.)
     "LOCAL_OPERATOR_ALLOW_UNBOUNDED_SEARCH",
+    # The long-sleep guard's escape hatch (``tools/sleep_guard.ALLOW_ENV``),
+    # the same ESCAPE-HATCH class and scrubbed for the same reason: an
+    # inherited value would waive the refusal every cell in
+    # ``test_bash_long_sleep_guard.py`` asserts. Read off the command's own
+    # assignments only, never the process environment.
+    "LOCAL_OPERATOR_ALLOW_LONG_SLEEP",
     "LOCAL_OPERATOR_HOME",
     "LOCAL_OPERATOR_DEBUG",
     # Names the session a `lop secret` retrieval is attributed to in the audit
