@@ -2799,7 +2799,28 @@ class ServingSessionHandle(SessionHandle):
             async def prompt(text: str) -> None:
                 self._loop_command_id = str(uuid.uuid4())
                 try:
-                    await self.prompt(text, command_id=self._loop_command_id, wait_complete=True)
+                    await self.prompt(
+                        text,
+                        command_id=self._loop_command_id,
+                        wait_complete=True,
+                        # A loop's own turn is HARNESS CHROME, on both of its
+                        # modes: the count loop's ``LOOP_PROMPT`` and the
+                        # goal-mode loop's ``LOOP_GOAL_PROMPT``. It is persisted
+                        # as a user row so the transcript records why the
+                        # conversation continued, and the structural stamp is
+                        # what tells a front end it was never typed. Without it
+                        # this route was the hole in that contract: the goal
+                        # loop's text is recognised by NEITHER
+                        # ``harness_chrome_prompts()`` NOR a producer-side
+                        # recogniser, and ``docs/DESKTOP_API.md`` names "the goal
+                        # loop's own prompt" as a row that must carry the marker
+                        # — so it replayed on every surface as the user's own
+                        # words (measured on a real session through this handle:
+                        # the row read ``stamp=no, chrome-recognised=False``).
+                        # The judge's continuation beside it is stamped for the
+                        # same reason; this is the sibling the census found.
+                        harness_injected=True,
+                    )
                 finally:
                     self._loop_command_id = None
 
