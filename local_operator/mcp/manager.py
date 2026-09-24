@@ -536,6 +536,22 @@ RECONNECT_BURST_LIMIT = 5
 # fleet-wide. Exported so tests can shrink it without patching a private name.
 AUTH_REVALIDATE_INTERVAL_S = 60.0
 
+
+class _NotRecorded:
+    """The type of :data:`_MARKER_NOT_RECORDED` — "this caller cannot say".
+
+    A real type rather than ``Any``, and that is the whole point of it existing:
+    with the sentinel annotated ``Any``, a call site added later that forgets the
+    ``is`` check type-checks silently, so the one mechanism that would flag it is
+    disabled (agent review round 2, minor-1).
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover — diagnostics only
+        return "_MARKER_NOT_RECORDED"
+
+
 #: "This caller cannot say what grant it tried", as distinct from ``None``,
 #: which is the real and different fact "the attempt read the store and the
 #: store was unreadable". Collapsing the two made an unreadable pre-attempt
@@ -544,7 +560,33 @@ AUTH_REVALIDATE_INTERVAL_S = 60.0
 #: prevent (agent review round 1, minor-1). Unknown-to-the-caller and
 #: unknown-to-the-store are both "unknown" in English and must not be one
 #: value in code.
-_MARKER_NOT_RECORDED: Any = object()
+_MARKER_NOT_RECORDED: _NotRecorded = _NotRecorded()
+
+
+class _AttemptRecord:
+    """One connect ATTEMPT's own record of the grant it started with.
+
+    Created by the caller that can block on auth, filled by ``_connect_server``
+    as its first act, and consumed by the single arm that blocks. Ownership is
+    the fix, not a tidiness: the per-server dict this replaced could outlive the
+    attempt it described, because ``_connect_server`` runs for callers that
+    never block (``connect_configured_server``, and every non-auth failure), so a
+    LATER auth failure that died before the seam popped a marker from an
+    unrelated, older attempt and blocked against it (agent review round 2,
+    major-2). A local record cannot do that by construction: nothing is keyed by
+    server name, an unconsumed record is collected with the attempt's frame, and
+    a caller that passes nothing records nothing.
+
+    ``marker`` starts as "not recorded" rather than ``None`` so that a connect
+    failing BEFORE it could read the store stays distinguishable from one that
+    read the store and found it unreadable — see :data:`_MARKER_NOT_RECORDED`.
+    """
+
+    __slots__ = ("marker",)
+
+    def __init__(self) -> None:
+        self.marker: tuple[float, bool] | None | _NotRecorded = _MARKER_NOT_RECORDED
+
 
 # Reconnect attempts are accounted in one sliding window per server
 # (``_reconnect_history``); the backoff ladder position is separate state
@@ -1762,27 +1804,34 @@ class McpManager:
         # unchanged; the reconnect guards check both sets, so refusal behaviour
         # is byte-identical to before.
         self._auth_blocked: set[str] = set()
-        # The grant marker observed at the moment we blocked each server:
-        # ``(tokens_obtained_at, grant_is_dead)``. ``revalidate_auth_blocked``
-        # retries a server only when this pair MOVES, which is what makes the
-        # retry safe — we retry because the grant CHANGED, never because time
-        # passed. A timer-based retry would re-spend a refresh token the server
-        # may have already rejected, across nine processes, which is precisely
-        # the family-revoking storm ``GRANT_DEAD_AT_KEY`` exists to stop.
+        # The grant marker the blocked attempt used, per server:
+        # ``(chain_stamp, grant_is_dead)``. ``revalidate_auth_blocked`` retries
+        # a server only when this pair MOVES, which is what makes the retry
+        # safe — we retry because the grant CHANGED, never because time passed.
+        # A timer-based retry would re-spend a refresh token the server may
+        # have already rejected, across nine processes, which is precisely the
+        # family-revoking storm ``GRANT_DEAD_AT_KEY`` exists to stop.
         # ``None`` for a server whose store could not be read at block time:
         # unknown is a state, not the value ``(0.0, False)``. See
-        # :meth:`_grant_marker`.
+        # :meth:`_grant_marker` — and note the float is the CHAIN stamp, so a
+        # rotation this process performed does not read as movement.
         self._auth_grant_marker: dict[str, tuple[float, bool] | None] = {}
-        # The grant marker read immediately BEFORE the connect attempt now in
-        # flight, per server. ``_block_on_auth`` blocks against THIS rather than
-        # against a fresh read, so a peer's re-auth landing during the attempt
-        # is not mistaken for the grant the attempt used — which made the block
-        # unfalsifiable and the server permanently dead on a healthy credential.
-        # Written by ``_connect_server`` at the one seam between its own OAuth
-        # refresh and opening the transport, and consumed (popped) by the block,
-        # so a stale entry can never outlive its attempt. That position is
-        # load-bearing in BOTH directions — see the comment at the write.
-        self._attempt_grant_marker: dict[str, tuple[float, bool] | None] = {}
+        # There is deliberately NO per-server field holding "the marker for the
+        # attempt in flight". A connect attempt's marker lives in the
+        # :class:`_AttemptRecord` its (blocking) caller created and handed to
+        # ``_connect_server``, which fills it at the one seam — the first thing
+        # the attempt does, before secret resolution, before its own OAuth
+        # refresh, before the transport opens. It is consumed by the arm that
+        # blocks, and it is a LOCAL object, so an entry cannot outlive its
+        # attempt or be adopted by a later, unrelated failure: the per-server
+        # dict this replaced could do both (agent review round 2, major-2).
+        #
+        # Why the marker has to be taken by the ATTEMPT rather than read when the
+        # block is taken: a peer's ``/mcp reauth`` landing during the connect
+        # would otherwise be recorded as "the grant we already failed on", and a
+        # working grant is never re-obtained, so the block would never move again
+        # — a server dead for the life of the process on a perfectly good
+        # credential. See :meth:`_block_on_auth`.
         # Backoff ladder position is separate from the breaker window (MCP-07):
         # a successful reconnect resets the ladder but keeps the window intact,
         # so a flapping server still trips the breaker.
@@ -2111,6 +2160,15 @@ class McpManager:
             return result
 
         tasks: dict[str, asyncio.Task[ServerConnection]] = {}
+        # One attempt record per server, owned by THIS round: the marker is
+        # filled by ``_connect_server`` as the attempt's first act (see the
+        # comment at that seam) and consumed by whichever of the two block arms
+        # owns the failure — the gate arm below, or ``_finish_pending`` for a
+        # server that missed the gate. A server lands in ``done_names`` or in the
+        # deferred set and never both, so exactly one arm reads one record, and
+        # the record dies with the round: a failure that never blocks cannot
+        # leave a marker behind for an unrelated later attempt to adopt.
+        attempts: dict[str, _AttemptRecord] = {}
         for name, cfg in configs.items():
             errors = validate_server_config(name, cfg)
             if errors:
@@ -2120,11 +2178,10 @@ class McpManager:
                 # is never the network's fault.
                 self._note_startup_failure(name, message)
                 continue
-            # The attempt marker is recorded INSIDE ``_connect_server``, after
-            # its own proactive refresh rotates the grant — see the comment at
-            # that seam. Recording it here instead would describe a grant the
-            # dial never presents and storm refresh tokens on every poll.
-            tasks[name] = asyncio.get_running_loop().create_task(self._connect_server(name, cfg))
+            attempts[name] = _AttemptRecord()
+            tasks[name] = asyncio.get_running_loop().create_task(
+                self._connect_server(name, cfg, attempt=attempts[name])
+            )
 
         if not tasks:
             result.tools = self.get_tools()
@@ -2158,7 +2215,7 @@ class McpManager:
                 # cached process-wide, so every later ``/mcp reload`` and ``/new``
                 # fails warm (measured ~15 ms), and a stdio server with a missing
                 # command fails in microseconds.
-                self._block_on_auth(name, self._take_attempt_marker(name))
+                self._block_on_auth(name, attempts[name].marker)
                 logger.info("MCP server %r needs authorization: %s", name, exc)
                 waiter = self._connect_futures.pop(name, None)
                 _settle_future_error(waiter, exc)
@@ -2219,7 +2276,7 @@ class McpManager:
             if future is None or future.done():
                 self._connect_futures[name] = asyncio.get_running_loop().create_future()
             continuation = asyncio.get_running_loop().create_task(
-                self._finish_pending(name, task, self._epoch)
+                self._finish_pending(name, task, self._epoch, attempts[name])
             )
             self._pending_continuations[name] = (continuation, task)
 
@@ -2394,7 +2451,12 @@ class McpManager:
     # --- connection lifecycle ----------------------------------------------
 
     async def _connect_server(
-        self, name: str, cfg: MCPServerConfig, *, interactive: bool = False
+        self,
+        name: str,
+        cfg: MCPServerConfig,
+        *,
+        interactive: bool = False,
+        attempt: _AttemptRecord | None = None,
     ) -> ServerConnection:
         """Open transport + session, initialize, list tools, update cache.
 
@@ -2421,11 +2483,43 @@ class McpManager:
         reference form is what both ``self._configs`` (which ``config_digest``
         hashes for the tool cache) and the live :class:`ServerConnection` keep, so
         no resolved value outlives the transport that needed it.
+
+        ``attempt`` is the CALLER's record of the grant this attempt starts
+        with, filled here and read by that caller if the connect fails on auth.
+        Only callers that can block on auth pass one (see :class:`_AttemptRecord`)
+        — ``connect_configured_server`` passes nothing, because the interactive
+        login path has no block to take.
         """
         from pathlib import Path
 
         from local_operator.mcp.secret_refs import has_references
 
+        # THE ATTEMPT MARKER IS TAKEN HERE — the first thing this attempt does
+        # to its own state, before secret resolution, before the proactive
+        # refresh below, before the transport opens.
+        #
+        # Why it is FIRST, when the previous revision argued it had to sit
+        # between the refresh and the transport: that constraint existed only
+        # because our own rotation moved the marker. Under the CHAIN stamp it
+        # does not — ``store_refresh_result`` carries the chain forward, at all
+        # three of our refresh sites, including the two that run INSIDE the
+        # transport (the in-flight coordinator an ``async_auth_flow`` runs, and
+        # the 401-recovery refresh). So the marker no longer has to be read
+        # between two of them, and reading it first is strictly better: it is
+        # then the closest available reading of "the grant this attempt started
+        # with", so a peer's ``/mcp reauth`` landing during secret resolution or
+        # during our own refresh is not adopted as the grant we failed on.
+        #
+        # Adopting it would restore the defect this change fixes: the block would
+        # name a grant the attempt never presented, a working grant is never
+        # re-obtained, and the marker would therefore never move again — a server
+        # dead for the life of the process on a healthy credential. Conversely, a
+        # marker taken LATER, after our own rotation, is the mirror-image bug: the
+        # block would re-arm itself on every attempt that rotates, spending a
+        # refresh token once per tick in every process (agent review round 1,
+        # blocker-1, measured at 30 connects over 30 polls).
+        if attempt is not None:
+            attempt.marker = self._grant_marker(name)
         # Registration is COLLECTED in the resolver and applied here on the loop:
         # the value goes into live redaction sets that this loop iterates while
         # scrubbing output, and adding to a set another thread is iterating is a
@@ -2452,24 +2546,6 @@ class McpManager:
             self.register_secret_redaction(value)
         timeout_s = resolve_mcp_timeout_s(transport_cfg)
         await self._ensure_oauth_fresh(name, transport_cfg)
-        # THE ATTEMPT MARKER IS TAKEN HERE, and the position is the whole point.
-        #
-        # It must be read AFTER our own proactive refresh, because that refresh
-        # ROTATES the grant and moves ``tokens_obtained_at``. A marker read
-        # before it describes a grant this dial never presents, so the row is
-        # newer than the marker the moment the connect fails — and every
-        # subsequent poll reads that as "a peer re-authed", spending a refresh
-        # token per tick, in every process, forever. That is the self-write
-        # retry storm ``GRANT_DEAD_AT_KEY`` and ``_grant_marker`` exist to
-        # prevent, reached through the pre-attempt read instead of through a
-        # naive ``updated_at``; an agent review measured it at 30 connects over
-        # 30 polls before the read was moved here (round 1, blocker-1).
-        #
-        # …and BEFORE the transport opens, so a peer's ``/mcp reauth`` landing
-        # while we are dialling is still not mistaken for the grant we used,
-        # which is the defect this whole change fixes. Between the two is the
-        # only window where both hold.
-        self._attempt_grant_marker[name] = self._grant_marker(name)
         stack = AsyncExitStack()
         # One collector per connect ATTEMPT, so a retry never quotes the
         # previous attempt's stderr as this one's reason. Made unconditionally:
@@ -3409,9 +3485,19 @@ class McpManager:
         return bool(self._startup_deferred)
 
     async def _finish_pending(
-        self, name: str, task: asyncio.Task[ServerConnection], epoch: int
+        self,
+        name: str,
+        task: asyncio.Task[ServerConnection],
+        epoch: int,
+        attempt: _AttemptRecord,
     ) -> None:
-        """Background continuation for a server still connecting at the gate."""
+        """Background continuation for a server still connecting at the gate.
+
+        ``attempt`` is the record ``_connect_round`` created for THIS attempt,
+        which ``_connect_server`` filled as its first act. It arrives as an
+        argument rather than being looked up per server name, so a continuation
+        can only ever consume the marker of the attempt it was created for.
+        """
         try:
             conn = await task
         except asyncio.CancelledError:
@@ -3482,9 +3568,10 @@ class McpManager:
                 # This arm is the one that matters most for the attempt marker:
                 # an OAuth connect that missed the 250 ms gate is by definition
                 # the SLOW one, so its window for a peer re-auth is the widest
-                # of the five. The marker was recorded by ``_connect_round``
-                # before this server's task was created.
-                self._block_on_auth(name, self._take_attempt_marker(name))
+                # of the five. The record was created by ``_connect_round`` and
+                # filled by ``_connect_server`` at the start of this very
+                # attempt, so it names the grant the attempt began with.
+                self._block_on_auth(name, attempt.marker)
             # Whether this continuation still belongs to the CURRENT round. A
             # reload()/dispose() during the await bumps the epoch, and a stale
             # continuation must not write the new round's startup accounting —
@@ -4022,38 +4109,23 @@ class McpManager:
             logger.debug("MCP grant marker read failed for %r", name, exc_info=True)
             return None
 
-    def _take_attempt_marker(self, name: str) -> tuple[float, bool] | None:
-        """The marker recorded for the attempt that just failed, and forget it.
-
-        POPPED rather than read: the entry describes one attempt, and leaving
-        it behind would let a later failure on a path that recorded nothing
-        block against a marker from an unrelated, older attempt.
-
-        Returns :data:`_MARKER_NOT_RECORDED` — NOT ``None`` — when no entry
-        exists, because ``None`` is a real recorded value here meaning "the
-        attempt read the store and it was unreadable". A recorded ``None`` must
-        keep any good marker already held; an ABSENT entry means the caller
-        cannot say what it tried and ``_block_on_auth`` falls back to reading
-        the store itself. Sharing one value for the two made the unreadable
-        case fall through to a post-failure read, which is the very bug this
-        feature removes (review round 1, minor-1).
-        """
-        return self._attempt_grant_marker.pop(name, _MARKER_NOT_RECORDED)
-
-    def _block_on_auth(self, name: str, attempted: Any = _MARKER_NOT_RECORDED) -> None:
+    def _block_on_auth(
+        self, name: str, attempted: tuple[float, bool] | None | _NotRecorded = _MARKER_NOT_RECORDED
+    ) -> None:
         """Hold ``name`` back from auto-reconnect until its stored grant moves.
 
         Called from every arm that gives up over authorization. Recording the
         marker AT BLOCK TIME is what lets ``revalidate_auth_blocked`` tell "the
         grant we already failed on" from "a grant somebody has since replaced".
 
-        ``attempted`` is the marker read BEFORE the connect that just failed,
-        and passing it is what keeps the block FALSIFIABLE. Reading the marker
-        here instead — after the failure — records whatever is on disk *now*,
-        which is not necessarily what the attempt used: an OAuth connect takes
-        seconds (PRM/ASM discovery plus a token exchange), and a peer's
-        ``/mcp reauth`` landing inside that window is written before this line
-        runs. The block was then taken against the NEW grant, and since a
+        ``attempted`` is the marker the FAILED ATTEMPT started with — in
+        practice ``_AttemptRecord.marker``, filled by ``_connect_server`` as its
+        first act — and passing it is what keeps the block FALSIFIABLE. Reading
+        the marker here instead — after the failure — records whatever is on
+        disk *now*, which is not necessarily what the attempt used: an OAuth
+        connect takes seconds (PRM/ASM discovery plus a token exchange), and a
+        peer's ``/mcp reauth`` landing inside that window is written before this
+        line runs. The block was then taken against the NEW grant, and since a
         working grant is never re-obtained its marker never moves again — so
         ``revalidate_auth_blocked`` could never lift it and the server stayed
         dead for the life of the process against a perfectly good credential.
@@ -4081,6 +4153,12 @@ class McpManager:
         Keeping the old value means a transient failure costs nothing, and a
         first block that cannot read the store simply stays unknown until one
         can.
+
+        The sentinel is a real TYPE (:class:`_NotRecorded`), not ``Any``, so a
+        call site that hands over the wide ``marker`` value without checking for
+        it fails type-check rather than silently blocking against the sentinel.
+        That check IS the contract: :data:`_MARKER_NOT_RECORDED` means "cannot
+        say", and it must be resolved here or never passed.
         """
         self._auth_blocked.add(name)
         marker = self._grant_marker(name) if attempted is _MARKER_NOT_RECORDED else attempted
@@ -4091,10 +4169,9 @@ class McpManager:
         """Drop the auth block and the marker it was taken against."""
         self._auth_blocked.discard(name)
         self._auth_grant_marker.pop(name, None)
-        # …and any attempt marker recorded for a connect still in flight. A
-        # server that healed (or left the config) must not have a LATER failure
-        # blocked against the grant some abandoned attempt was using.
-        self._attempt_grant_marker.pop(name, None)
+        # There is no attempt marker to drop: an attempt's record is a local
+        # owned by its caller, so a connect still in flight cannot leave one
+        # here for a later failure to pick up (agent review round 2, major-2).
 
     async def revalidate_auth_blocked(self) -> list[str]:
         """Re-read the SHARED grant store for auth-blocked servers; heal movers.
@@ -4173,8 +4250,11 @@ class McpManager:
             if future is None or future.done():
                 future = asyncio.get_running_loop().create_future()
                 self._connect_futures[name] = future
+            # A record for THIS retry, so the re-block below names the grant the
+            # retry itself started with rather than the one this tick healed on.
+            attempt = _AttemptRecord()
             try:
-                conn = await self._connect_server(name, cfg)
+                conn = await self._connect_server(name, cfg, attempt=attempt)
             except Exception as exc:  # noqa: BLE001 — any failure re-blocks
                 logger.info(
                     "MCP revalidation attempt for %r failed after its grant changed: %s",
@@ -4185,17 +4265,29 @@ class McpManager:
                     future.set_exception(exc)
                     future.exception()  # mark retrieved; waiters still see the raise
                 self._connect_futures.pop(name, None)
-                # The seam inside ``_connect_server`` recorded what this retry
-                # actually presented, AFTER its own refresh rotated the grant.
-                # ``marker`` — the value this tick healed on — is deliberately
-                # NOT used: it is the pre-rotation grant, so blocking against it
-                # would leave the row permanently newer than the block and storm
-                # a refresh token every tick. Falls back to ``marker`` only if
-                # the connect failed before reaching that seam, in which case no
-                # rotation happened and the two are the same grant anyway.
-                attempted = self._take_attempt_marker(name)
+                # Re-block against the grant this RETRY started with (the record
+                # ``_connect_server`` filled), not against ``marker`` — the
+                # value this tick healed on. Blocking against ``marker`` would
+                # re-arm the block immediately for a retry that was refused on
+                # the grant it had just been handed.
+                #
+                # What keeps that from being a storm is the CHAIN RULE, not the
+                # position of the read: our own rotations - the proactive refresh
+                # below the seam, the in-transport coordinator, and the
+                # 401-recovery refresh - all CARRY the chain stamp forward, so an
+                # attempt that rotates its own grant still records the stamp it
+                # started with and the next poll sees no movement. Every rotation
+                # shape that used to tax or storm here is measured in
+                # ``test_the_real_seam_is_above_every_rotation_of_ours``.
+                #
+                # The sentinel is resolved explicitly rather than merely passed
+                # through: it means "the caller cannot say" (only reachable if
+                # the connect died before the seam, e.g. secret resolution
+                # raising), and this is the ONE arm that falls back to the marker
+                # it healed on for that case, because there no grant was written
+                # during the attempt and the two describe the same grant.
                 self._block_on_auth(
-                    name, marker if attempted is _MARKER_NOT_RECORDED else attempted
+                    name, marker if attempt.marker is _MARKER_NOT_RECORDED else attempt.marker
                 )
                 continue
             # Re-check ownership AFTER the await, as every other reconnect path
@@ -4345,8 +4437,9 @@ class McpManager:
         if future is None or future.done():
             future = asyncio.get_running_loop().create_future()
             self._connect_futures[name] = future
+        attempt = _AttemptRecord()
         try:
-            conn = await self._connect_server(name, cfg)
+            conn = await self._connect_server(name, cfg, attempt=attempt)
         except (McpAuthRequiredError, McpAuthChallengeError) as exc:
             # An expired grant will not heal by retrying: auto-reconnect is
             # non-interactive by design, so further attempts would only burn the
@@ -4388,8 +4481,10 @@ class McpManager:
             # cleared without user action IN THIS PROCESS — so a peer session's
             # ``/mcp reauth`` healed nothing here. ``_block_on_auth`` records the
             # grant we failed on, and ``revalidate_auth_blocked`` lifts the block
-            # when that grant is replaced, by this process or any other.
-            self._block_on_auth(name, self._take_attempt_marker(name))
+            # when that grant is replaced, by this process or any other. The
+            # marker is the record THIS attempt filled, so it names the grant the
+            # attempt started with — not whatever a peer wrote while it dialled.
+            self._block_on_auth(name, attempt.marker)
             self._abandon_reconnect(name, str(exc))
             return
         except Exception as exc:
@@ -4427,15 +4522,16 @@ class McpManager:
             return None
         epoch = self._epoch
         await self._teardown_connection(name)
+        attempt = _AttemptRecord()
         try:
-            conn = await self._connect_server(name, cfg)
+            conn = await self._connect_server(name, cfg, attempt=attempt)
         except (McpAuthRequiredError, McpAuthChallengeError) as exc:
             logger.info("MCP call-site reconnect needs authorization for %r", name)
             self._fire_auth_required(name, exc)
             # This arm previously recorded NOTHING, so the next tool call tried
             # the same dead grant again. Blocking here both stops that and makes
             # the server eligible for revalidation when the grant is replaced.
-            self._block_on_auth(name, self._take_attempt_marker(name))
+            self._block_on_auth(name, attempt.marker)
             return None
         except Exception as exc:
             logger.warning("MCP call-site reconnect failed for %r: %s", name, exc)

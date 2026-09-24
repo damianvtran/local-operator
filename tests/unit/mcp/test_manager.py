@@ -195,7 +195,7 @@ class TestFastStartupGate:
         slow_release = asyncio.Event()
         sessions: dict[str, FakeSession] = {}
 
-        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             session = FakeSession()
             sessions[name] = session
             if name == "slow":
@@ -252,7 +252,7 @@ class TestFastStartupGate:
         manager = McpManager(str(project))
         slow_release = asyncio.Event()
 
-        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             if name == "slow":
                 await asyncio.wait_for(slow_release.wait(), timeout=10)
             return _make_conn(name, cfg)
@@ -275,7 +275,7 @@ class TestFastStartupGate:
     ) -> None:
         manager = McpManager(str(project))
 
-        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             if name == "fast":
                 raise RuntimeError("boom: spawn failed")
             return _make_conn(name, cfg)
@@ -305,7 +305,7 @@ class TestStartupSettleReporting:
         manager = McpManager(str(project))
         slow_release = asyncio.Event()
 
-        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             if name == "slow":
                 await asyncio.wait_for(slow_release.wait(), timeout=10)
             return _make_conn(name, cfg)
@@ -346,7 +346,7 @@ class TestStartupSettleReporting:
         manager = McpManager(str(tmp_path))
         slow_release = asyncio.Event()
 
-        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             if name == "boom":
                 raise RuntimeError("boom: spawn failed")
             await asyncio.wait_for(slow_release.wait(), timeout=10)
@@ -383,7 +383,7 @@ class TestStartupSettleReporting:
         nothing was deferred, so the settle callback never fires."""
         manager = McpManager(str(project))
 
-        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             return _make_conn(name, cfg)
 
         monkeypatch.setattr(manager, "_connect_server", fake_connect)
@@ -412,7 +412,7 @@ class TestStartupSettleReporting:
         manager = McpManager(str(tmp_path))
         slow_release = asyncio.Event()
 
-        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             if name == "slow":
                 await asyncio.wait_for(slow_release.wait(), timeout=10)
                 raise RuntimeError("slow exploded after the gate")
@@ -452,7 +452,7 @@ class TestStartupSettleStaleRound:
         manager = McpManager(str(tmp_path))
         slow_release = asyncio.Event()
 
-        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             if name == "slow":
                 await asyncio.wait_for(slow_release.wait(), timeout=10)
                 raise RuntimeError("slow failed after the gate")
@@ -495,7 +495,7 @@ class TestDeferredExecuteFailure:
         manager = McpManager(str(project), tool_cache=cache)
         release = asyncio.Event()
 
-        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             if name == "slow":
                 await asyncio.wait_for(release.wait(), timeout=10)
                 raise RuntimeError("slow server exploded")
@@ -533,7 +533,7 @@ class TestCircuitBreaker:
 
         monkeypatch.setattr(asyncio, "sleep", instant_sleep)
 
-        async def failing_connect(name: str, cfg: Any) -> ServerConnection:
+        async def failing_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             raise RuntimeError("still down")
 
         monkeypatch.setattr(manager, "_connect_server", failing_connect)
@@ -559,7 +559,7 @@ class TestCircuitBreaker:
         assert [d for d in sleeps if d > 0] == [0.5, 1.0, 2.0, 4.0, 4.0]
 
         # Manual reconnect resets the breaker and reconnects.
-        async def good_connect(name: str, cfg: Any) -> ServerConnection:
+        async def good_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             return _make_conn(name, cfg)
 
         monkeypatch.setattr(manager, "_connect_server", good_connect)
@@ -575,7 +575,7 @@ class TestCircuitBreaker:
         manager = McpManager(str(project))
         connected = 0
 
-        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             nonlocal connected
             connected += 1
             return _make_conn(name, cfg)
@@ -607,7 +607,7 @@ class TestToolCallHygieneAndRetry:
         sessions.append(first_session)
         call_count = {"n": 0}
 
-        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             call_count["n"] += 1
             if name == "fast" and call_count["n"] == 1:
                 return _make_conn(name, cfg, first_session)
@@ -633,7 +633,7 @@ class TestToolCallHygieneAndRetry:
     ) -> None:
         manager = McpManager(str(project))
 
-        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             return _make_conn(name, cfg)
 
         calls: list[tuple[Any, ...]] = []
@@ -661,7 +661,7 @@ class TestToolCallHygieneAndRetry:
         manager = McpManager(str(project))
         connects = {"n": 0}
 
-        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             connects["n"] += 1
             if name == "fast":
                 return _make_conn(
@@ -750,7 +750,7 @@ class TestCallSiteReconnectGuards:
         manager = McpManager(str(project))
         connects = {"n": 0}
 
-        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             connects["n"] += 1
             return _make_conn(name, cfg)
 
@@ -771,7 +771,7 @@ class TestCallSiteReconnectGuards:
         manager = McpManager(str(project))
         connects = {"n": 0}
 
-        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             connects["n"] += 1
             return _make_conn(name, cfg)
 
@@ -801,7 +801,7 @@ class TestBreakerWindowSeparateFromLadder:
 
         monkeypatch.setattr(asyncio, "sleep", instant_sleep)
 
-        async def good_connect(name: str, cfg: Any) -> ServerConnection:
+        async def good_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             connects["n"] += 1
             return _make_conn(name, cfg)
 
@@ -853,7 +853,7 @@ class TestBreakerTrippedCallsFailPromptly:
 
         monkeypatch.setattr(asyncio, "sleep", instant_sleep)
 
-        async def flaky_connect(name: str, cfg: Any) -> ServerConnection:
+        async def flaky_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             if state["fail"]:
                 raise RuntimeError("still down")
             return _make_conn(name, cfg)
@@ -896,7 +896,7 @@ class TestBreakerTrippedCallsFailPromptly:
         manager = McpManager(str(project), tool_cache=cache)
         release = asyncio.Event()
 
-        async def slow_connect(name: str, cfg: Any) -> ServerConnection:
+        async def slow_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             if name == "slow":
                 await asyncio.wait_for(release.wait(), timeout=30)
             return _make_conn(name, cfg)
@@ -943,7 +943,7 @@ class TestToolNameCollision:
         )
         manager = McpManager(str(tmp_path))
 
-        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             tool_name = "a_b" if name == "my-server" else "server_a_b"
             conn = _make_conn(name, cfg)
             conn.tools = [_tool(tool_name)]
@@ -994,7 +994,7 @@ class TestAbortStaysAbort:
                 await asyncio.sleep(3600)
                 raise AssertionError("unreachable: the call is aborted first")
 
-        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             return ServerConnection(
                 name=name, config=cfg, session=HangingSession(), tools=[_tool("search")]
             )
@@ -1020,7 +1020,7 @@ class TestReload:
         cache = McpToolCache(tmp_path / "cache.db")
         manager = McpManager(str(project), tool_cache=cache)
 
-        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             return _make_conn(name, cfg)
 
         monkeypatch.setattr(manager, "_connect_server", fake_connect)
@@ -1055,7 +1055,7 @@ class TestSecuritySurface:
 
         manager = McpManager(str(project))
 
-        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             return _make_conn(name, cfg)
 
         monkeypatch.setattr(manager, "_connect_server", fake_connect)
@@ -1107,7 +1107,7 @@ class TestTeardownLatency:
                 await asyncio.sleep(0.05)
                 in_flight -= 1
 
-        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             conn = _make_conn(name, cfg)
             conn.stack = cast(Any, SlowStack())
             return conn
@@ -1145,7 +1145,7 @@ class TestTeardownLatency:
                     cancelled.set()
                     raise
 
-        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             conn = _make_conn(name, cfg)
             conn.stack = cast(Any, WedgedStack())
             return conn
@@ -3035,7 +3035,7 @@ class TestMcpRecoveryNotice:
 
         monkeypatch.setattr(asyncio, "sleep", instant_sleep)
 
-        async def failing_connect(server: str, cfg: Any) -> ServerConnection:
+        async def failing_connect(server: str, cfg: Any, **_: Any) -> ServerConnection:
             raise RuntimeError("still down")
 
         monkeypatch.setattr(manager, "_connect_server", failing_connect)
@@ -3058,7 +3058,7 @@ class TestMcpRecoveryNotice:
         manager = McpManager(str(project))
         incidents, recoveries = self._sinks(manager)
 
-        async def good_connect(name: str, cfg: Any) -> ServerConnection:
+        async def good_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             return _make_conn(name, cfg)
 
         monkeypatch.setattr(manager, "_connect_server", good_connect)
@@ -3146,7 +3146,7 @@ class TestMcpRecoveryNotice:
         manager = McpManager(str(tmp_path))
         _incidents, recoveries = self._sinks(manager)
 
-        async def good_connect(name: str, cfg: Any) -> ServerConnection:
+        async def good_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             conn = _make_conn(name, cfg)
             conn.tools = [_tool("search"), _tool("hidden")]
             return conn
@@ -3183,7 +3183,7 @@ class TestMcpRecoveryNotice:
         manager.on_incident = lambda server, reason: None
         manager.on_recovery = exploding
 
-        async def good_connect(name: str, cfg: Any) -> ServerConnection:
+        async def good_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             return _make_conn(name, cfg)
 
         monkeypatch.setattr(manager, "_connect_server", good_connect)
@@ -3209,7 +3209,7 @@ class TestMcpRecoveryNotice:
         manager = McpManager(str(project))
         _incidents, recoveries = self._sinks(manager)
 
-        async def good_connect(name: str, cfg: Any) -> ServerConnection:
+        async def good_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             return _make_conn(name, cfg)
 
         monkeypatch.setattr(manager, "_connect_server", good_connect)
@@ -3237,7 +3237,7 @@ class TestMcpRecoveryNotice:
         manager = McpManager(str(tmp_path))
         _incidents, recoveries = self._sinks(manager)
 
-        async def good_connect(name: str, cfg: Any) -> ServerConnection:
+        async def good_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             return _make_conn(name, cfg)
 
         monkeypatch.setattr(manager, "_connect_server", good_connect)
@@ -3268,7 +3268,7 @@ class TestMcpRecoveryNotice:
         manager = McpManager(str(tmp_path))
         _incidents, recoveries = self._sinks(manager)
 
-        async def good_connect(name: str, cfg: Any) -> ServerConnection:
+        async def good_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             return _make_conn(name, cfg)
 
         monkeypatch.setattr(manager, "_connect_server", good_connect)
@@ -3325,7 +3325,7 @@ class TestMcpRecoveryNotice:
         manager = McpManager(str(project))
         _incidents, recoveries = self._sinks(manager)
 
-        async def good_connect(name: str, cfg: Any) -> ServerConnection:
+        async def good_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             return _make_conn(name, cfg)
 
         monkeypatch.setattr(manager, "_connect_server", good_connect)
@@ -3353,7 +3353,7 @@ class TestMcpRecoveryNotice:
         manager = McpManager(str(project))
         _incidents, recoveries = self._sinks(manager)
 
-        async def good_connect(name: str, cfg: Any) -> ServerConnection:
+        async def good_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             return _make_conn(name, cfg)
 
         monkeypatch.setattr(manager, "_connect_server", good_connect)
@@ -3403,7 +3403,7 @@ class TestMcpRecoveryNotice:
         manager.on_incident = lambda server, reason: None
         assert manager.on_recovery is None
 
-        async def good_connect(name: str, cfg: Any) -> ServerConnection:
+        async def good_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             return _make_conn(name, cfg)
 
         monkeypatch.setattr(manager, "_connect_server", good_connect)
@@ -3684,7 +3684,7 @@ class TestAuthBlockRevalidation:
             seen: list[bool] = []
 
             async def recording(
-                name: str, cfg: Any, *, interactive: bool = False
+                name: str, cfg: Any, *, interactive: bool = False, **_: Any
             ) -> ServerConnection:
                 seen.append(interactive)
                 return _make_conn(name, cfg)
