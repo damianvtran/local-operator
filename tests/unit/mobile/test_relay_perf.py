@@ -1570,6 +1570,58 @@ async def test_a_listing_load_in_flight_cannot_overwrite_newer_pins(tmp_path, mo
     assert next(r["pinned"] for r in rows if r["session_id"] == "durable-1") is True
 
 
+@pytest.mark.asyncio
+async def test_a_same_size_same_mtime_replace_is_still_detected(tmp_path, monkeypatch) -> None:
+    """The fingerprint's INODE term is the one that cannot miss, and it has to be
+    shown doing work (review round 7, F3: dropping ``st_ino`` left every pin test
+    green).
+
+    Two writes are forced to agree on the fingerprint's other two terms -- the
+    same byte length (two four-character ids, the same JSON shape) and the same
+    ``st_mtime_ns``, set explicitly rather than hoped for -- so the new inode is
+    the only difference left. The pass must still see a change, wake the list and
+    publish the new set; with the inode stubbed out of ``fingerprint()`` the two
+    reads compare equal and this fails.
+    """
+    import os
+
+    from local_operator.tui.sidebar_pins import PINS_FILE, set_pin
+
+    cfg = tmp_path / "config"
+    # Both ids need a folder: ``read_pins`` prunes ids with no directory, and a
+    # pruned read would make this pass for the wrong reason.
+    for session_id in ("aaaa", "bbbb"):
+        (cfg / "sessions" / session_id).mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
+
+    daemon = MobileDaemon(port=0, password="pw123", dial_registrants=False)
+    daemon._attention_bootstrapped = True
+    set_pin(cfg, "aaaa", True)
+    await daemon._scan_once()
+    assert daemon.table.pins == ("aaaa",), "the first pass seeds the table's pins"
+    before = (cfg / PINS_FILE).stat()
+    queue: asyncio.Queue[None] = asyncio.Queue()
+    daemon.table.list_subscribers.add(queue)
+
+    # A same-length id, then the new file's mtime forced back onto the old one: a
+    # same-mtime, same-size replace, which is what a burst of writes on a coarse
+    # clock looks like.
+    set_pin(cfg, "aaaa", False)
+    set_pin(cfg, "bbbb", True)
+    os.utime(cfg / PINS_FILE, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = (cfg / PINS_FILE).stat()
+    assert (after.st_size, after.st_mtime_ns) == (
+        before.st_size,
+        before.st_mtime_ns,
+    ), "this test only means anything if size and mtime_ns are held equal"
+    assert after.st_ino != before.st_ino, "os.replace must land a new inode"
+
+    await daemon._scan_once()
+    assert not queue.empty(), "a same-size same-mtime replace must still reach the phone"
+    assert daemon.table.pins == ("bbbb",)
+
+
 def test_pin_route_refuses_a_live_session_with_no_folder_yet(tmp_path, monkeypatch) -> None:
     """A pin the list cannot show is refused, not answered 200 (QA Q2).
 
