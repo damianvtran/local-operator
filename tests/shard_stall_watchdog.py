@@ -554,6 +554,17 @@ class _Controller:
         self._lock = threading.Lock()
         self._in_flight: dict[str, float] = {}
         self._last_progress = time.monotonic()
+        #: When this controller started, and how many tests have COMPLETED since.
+        #: Reported with every stall, because a silence has two explanations and
+        #: the artifact cannot tell them apart without them: a run that is parked
+        #: and a run that is grinding through slow tests look identical in `-q`
+        #: output (one progress line per 72 completed tests, so the last partial
+        #: line is withheld until its slowest item finishes). Measured 2026-09-24:
+        #: a local whole-tree run whose log stood still at 69% for 29 minutes was
+        #: neither -- it had been killed by the wall-clock `timeout` its operator
+        #: passed, and was progressing at a healthy rate until that second.
+        self._started_at = time.monotonic()
+        self._completed = 0
         self._reported_at = 0.0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -583,6 +594,7 @@ class _Controller:
         with self._lock:
             self._last_progress = time.monotonic()
             if when == "teardown":
+                self._completed += 1
                 self._in_flight.pop(nodeid, None)
 
     def start(self) -> None:
@@ -622,11 +634,18 @@ class _Controller:
 
     def _format(self, idle: float, in_flight: list[tuple[str, float]]) -> str:
         now = time.monotonic()
+        elapsed = now - self._started_at
+        rate = self._completed / elapsed if elapsed > 0 else 0.0
         lines = [
             "",
             "!" * 72,
             f"SHARD STALL: no test has completed for {idle:.0f}s "
             f"(bound {self.seconds:g}s). {len(in_flight)} still in flight:",
+            # The rate is what turns "silent" into a diagnosis. A run at 0.2/s
+            # that has been quiet for a minute is working; the same numbers with
+            # a rate near zero are a park, or a dead worker set. Printed BEFORE
+            # the node ids because it decides how to read them.
+            f"  {self._completed} tests completed in {elapsed:.0f}s ({rate:.2f}/s)",
         ]
         for nodeid, started in in_flight:
             lines.append(f"  {now - started:7.0f}s  {nodeid}")
