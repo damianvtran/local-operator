@@ -20,7 +20,8 @@ import pytest
 from local_operator.harness.guard_area import EXEMPT_SOURCES, READING_TOOLS
 from local_operator.harness.guard_area import exempt_from_escalation as exempt
 from local_operator.harness.guard_area import reads_exempt_source, source_is_exempt
-from local_operator.harness.loop import AgentLoop, LoopContext
+from local_operator.harness.loop import AgentLoop, LoopContext, _scrub_history_arguments
+from local_operator.harness.redaction import current_tool_source, tool_source
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentTool,
@@ -32,6 +33,7 @@ from local_operator.harness.types import (
     StreamTextDelta,
     StreamToolCallDelta,
     TextContent,
+    ToolCall,
     ToolResult,
 )
 from local_operator.redaction_shapes import REDACTION_MARKER
@@ -349,6 +351,53 @@ async def test_a_registered_credential_still_escalates_loudly_outside_the_guard_
     assert REGISTERED_VALUE not in rows[0], "a registered credential was not masked"
     assert ESCALATING_TEXT not in rows[0], "the escalating case reached the model"
     assert "rotate" in body, "the escalated notice no longer reaches the transcript"
+
+
+def test_publishing_a_call_identity_alone_confers_nothing() -> None:
+    """The carrier that names the tool is NOT the carrier that exempts it.
+
+    ``tool_source`` also wraps the scrub of a call's own ARGUMENTS, so if the
+    exemption rode there, a credential typed into a second argument of a reading
+    tool — a ``grep`` pattern, with the call scoped to the corpus to buy the
+    exemption — would be laundered past the guard.
+    """
+    with tool_source("read", {"path": str(CORPUS)}):
+        assert current_tool_source() == ("read", str(CORPUS))
+        assert source_is_exempt() is False
+    with exempt("read", {"path": str(CORPUS)}):
+        assert source_is_exempt() is True
+
+
+@pytest.mark.asyncio
+async def test_a_credential_in_a_reading_tools_other_argument_still_escalates(
+    tmp_path: Path,
+) -> None:
+    """The exemption covers the RESULT's bytes, never the call's argument text.
+
+    A ``grep`` scoped to the corpus whose PATTERN is the credential it went to
+    look for is a real call an agent can make, and the call's own arguments are
+    what would reach the model there. It is reported: the argument scrub runs
+    under ``tool_source`` and deliberately not under the exemption.
+    """
+    session = _session(tmp_path)
+    message = Message(
+        role="assistant",
+        content=[TextContent(text="")],
+        tool_calls=[
+            ToolCall(
+                id="c1",
+                name="grep",
+                arguments={"path": str(CORPUS), "pattern": ESCALATING_TEXT},
+            )
+        ],
+    )
+
+    _scrub_history_arguments(message, session._redact_tool_result_text)
+
+    assert _escalation_flags(session) == [
+        True
+    ], "a credential in a reading tool's own argument was laundered past the guard"
+    assert session._pending_shape_incidents[0][0] == "grep"
 
 
 def test_the_publication_is_per_call_and_resets() -> None:
