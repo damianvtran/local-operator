@@ -111,8 +111,8 @@ def _stat_key(st: os.stat_result) -> tuple[int, ...]:
 def config_file_key(path: Path) -> "tuple[int, ...] | None":
     """The identity :func:`_parse_config_stream` caches a parse under, or ``None``.
 
-    Public because a pre-imported spare runtime records it when it warms and
-    compares it before adopting a session (``session.runtime.spare``): a spare
+    Public because a pre-imported standby runtime records it when it warms and
+    compares it before adopting a session (``session.runtime.standby``): a standby
     whose config moved since it warmed is discarded rather than served.
     """
     try:
