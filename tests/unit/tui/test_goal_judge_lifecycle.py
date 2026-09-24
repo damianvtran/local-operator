@@ -428,9 +428,9 @@ async def test_a_replaced_session_is_not_silenced_by_the_old_judgement() -> None
         await _settle(pilot, 2)
 
         assert app._interaction is not stale, "a replacement leases a new source"
-        assert app._interaction.goal.judge_in_flight is False, (
-            "the new session's own binding must not start silenced"
-        )
+        assert (
+            app._interaction.goal.judge_in_flight is False
+        ), "the new session's own binding must not start silenced"
         app.post_message(TurnEnded(aborted=False, error=None))
         await _settle(pilot)
         assert second.judge_calls == 1, "the new session's first turn end is judged"
