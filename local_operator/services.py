@@ -813,17 +813,17 @@ def reclaim_serve_daemon(
             pid=pid,
             verdict=STALE,
             problem="not-running",
-            lines=[f"pid {pid} is not a running process"],
+            lines=(f"pid {pid} is not a running process",),
         )
     if not is_serve_command(command):
         return ReclaimReport(
             pid=pid,
             verdict="",
             problem="not-a-serve-daemon",
-            lines=[
+            lines=(
                 f"pid {pid} is not a `lop serve` daemon, so this command will not end it",
                 f"    it is running: {command}",
-            ],
+            ),
         )
     uid = read_uid(pid)
     ours = getattr(os, "getuid", None)
@@ -832,7 +832,7 @@ def reclaim_serve_daemon(
             pid=pid,
             verdict="",
             problem="foreign-user",
-            lines=[f"pid {pid} belongs to uid {uid}, not this account — end it with sudo"],
+            lines=(f"pid {pid} belongs to uid {uid}, not this account — end it with sudo",),
         )
 
     # WHICH RECORD DESCRIBES THIS PID — and therefore what its address is.
@@ -860,11 +860,11 @@ def reclaim_serve_daemon(
                 pid=pid,
                 verdict="",
                 problem="no-address",
-                lines=[
+                lines=(
                     f"pid {pid} is a `lop serve` daemon but its address could not be read",
                     "    (a daemon started with --listener-fd does not name its port in",
                     "    argv), and no record of this install describes it; nothing was sent",
-                ],
+                ),
             )
         host, port = argv_address
         address = f"{host}:{port}"
@@ -899,12 +899,12 @@ def reclaim_serve_daemon(
                     verdict=SERVING,
                     address=address,
                     problem="serving",
-                    lines=[
+                    lines=(
                         f"{address} IS being served, by the daemon pid {subject.pid} names — "
                         "nothing was sent",
                         f"    pid {pid} is a different process, so ending it would not free the",
                         "    address the record is about",
-                    ],
+                    ),
                 )
             verdict = basis if basis in (DEAF, SQUATTED) else STRAY
 
@@ -918,11 +918,11 @@ def reclaim_serve_daemon(
             verdict=verdict,
             address=address,
             problem="serving",
-            lines=[
+            lines=(
                 f"pid {pid} IS the daemon serving {address} — nothing was sent",
                 "    a working plane is never ended by this command; use `lop stop` for a",
                 "    session, or `lop services restart` to move this daemon onto the current build",
-            ],
+            ),
         )
     if verdict not in (DEAF, SQUATTED, WEDGED, STRAY):
         return ReclaimReport(
@@ -930,11 +930,11 @@ def reclaim_serve_daemon(
             verdict=verdict,
             address=address,
             problem="not-actionable",
-            lines=[
+            lines=(
                 f"pid {pid} reads as {verdict or 'an unknown state'} on {address}, which is not a",
                 "    state this command ends — nothing was sent. Run `lop services status` for",
                 "    what this install knows about the address.",
-            ],
+            ),
         )
 
     # CONFIRM THE EVIDENCE, not the word: ``basis`` can be DEAF for a WEDGED record
@@ -950,11 +950,11 @@ def reclaim_serve_daemon(
                     verdict=again.verdict,
                     address=address,
                     problem="unconfirmed",
-                    lines=[
+                    lines=(
                         f"pid {pid} read as {basis} on {address}, but the next reading was "
                         f"{again.verdict} — nothing was sent",
                         "    run it again to act on the newer reading",
-                    ],
+                    ),
                 )
 
     # SIGNAL TIME: the process must still be the one this verdict was measured on.
@@ -967,10 +967,10 @@ def reclaim_serve_daemon(
             verdict=verdict,
             address=address,
             problem="changed",
-            lines=[
+            lines=(
                 f"pid {pid} is no longer the serve daemon this was measured on — "
-                "nothing was sent"
-            ],
+                "nothing was sent",
+            ),
         )
 
     # THE LAST READING BEFORE THE SIGNAL IS AN ADDRESS READING (review round 1,
@@ -986,12 +986,12 @@ def reclaim_serve_daemon(
                 verdict=last.verdict,
                 address=address,
                 problem="serving",
-                lines=[
+                lines=(
                     f"{address} began answering as {holder}… since the last reading — "
                     "nothing was sent",
                     "    a working plane is never ended by this command; run it again if that",
                     "    changes",
-                ],
+                ),
             )
         if last.verdict != basis:
             return ReclaimReport(
@@ -999,11 +999,11 @@ def reclaim_serve_daemon(
                 verdict=last.verdict,
                 address=address,
                 problem="changed",
-                lines=[
+                lines=(
                     f"{address} changed while this was being confirmed ({basis} to "
                     f"{last.verdict}) — nothing was sent",
                     "    run it again to act on the newer reading",
-                ],
+                ),
             )
 
     # WHAT THE EVIDENCE ACTUALLY SAYS, in the receipt rather than a claim that
