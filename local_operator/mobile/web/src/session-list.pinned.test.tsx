@@ -296,15 +296,25 @@ describe("a refused pin reports where the reader is looking (D12/D14, R8-2, Q4)"
 		);
 	}
 
-	/* The band's grid wrapper: <div grid> > <div overflow-hidden> > <p role=alert>,
-	   the same shape the caption uses — and the inner child is asserted rather
-	   than walked past, because without it a `1fr` track paints at full height and
-	   the collapse silently stops reaching zero. */
+	/* The band: <div absolute> > <p role=alert>. Its positioning is asserted on
+	   the way in rather than walked past, because every test below leans on the
+	   band being an overlay, and a band that slid back into the flow would have
+	   them asserting on the wrong element's classes. */
 	function errorBox(): HTMLElement {
-		const alert = screen.getByRole("alert");
-		const inner = alert.parentElement as HTMLElement;
-		expect(inner.className).toContain("overflow-hidden");
-		return inner.parentElement as HTMLElement;
+		const band = screen.getByRole("alert").parentElement as HTMLElement;
+		expect(band.className).toContain("absolute");
+		return band;
+	}
+
+	/* The band's two states are spelled by these classes alone (hidden:
+	   slid up, faded, click-through; shown: in place, opaque). */
+	const HIDDEN = ["-translate-y-full", "opacity-0", "pointer-events-none"];
+	const SHOWN = ["translate-y-0", "opacity-100"];
+
+	function expectBand(state: string[], not: string[]) {
+		const classes = errorBox().className.split(/\s+/);
+		for (const name of state) expect(classes).toContain(name);
+		for (const name of not) expect(classes).not.toContain(name);
 	}
 
 	/* The list's scroll container, found by what makes it one (its overflow
@@ -319,20 +329,24 @@ describe("a refused pin reports where the reader is looking (D12/D14, R8-2, Q4)"
 	/* THE PROPERTY, structurally, because happy-dom has no layout: no
 	   `getBoundingClientRect` or `scrollTop` here moves anything, so a pixel
 	   assertion would pass on every placement. What keeps the band on screen at
-	   any scroll position is that it is NOT scroll content: it is a sibling of the
-	   scroller in the fixed `h-dvh` column, ahead of it, with no scrolling
-	   ancestor of its own. The rendered frames at 100% and 200% root font on the
-	   PR are the pixel half of this claim. */
+	   any scroll position is that it is NOT scroll content, and what keeps it
+	   out of the scroller's layout is that it is taken out of the flow: an
+	   `absolute` sibling of the scroller, pinned to the top of a `relative`
+	   parent they share. An absolutely positioned child of a flex column is not
+	   a flex item, so its height can never come out of the scroller's. The
+	   rendered frames at 100% and 200% root font on the PR are the pixel half of
+	   this claim. */
 	function expectOutsideTheScroller(alert: HTMLElement) {
 		const list = scroller();
 		expect(list.contains(alert)).toBe(false);
 		expect(alert.closest(".overflow-y-auto")).toBeNull();
 		const band = errorBox();
 		expect(band.parentElement).toBe(list.parentElement);
-		expect(band.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-		/* A flex child that may shrink could be squeezed to nothing by a long list,
-		   which is the silent version of the same defect. */
-		expect(band.className).toContain("shrink-0");
+		const classes = band.className.split(/\s+/);
+		for (const name of ["absolute", "inset-x-0", "top-0"]) expect(classes).toContain(name);
+		/* The overlay is positioned against the list's own wrapper, not the page,
+		   so it sits over the list's top edge rather than over the header. */
+		expect((band.parentElement as HTMLElement).className.split(/\s+/)).toContain("relative");
 	}
 
 	async function refuseAPinOn(name: string) {
@@ -372,121 +386,108 @@ describe("a refused pin reports where the reader is looking (D12/D14, R8-2, Q4)"
 		expect(alert.textContent).toContain("Could not save the pin: no saved messages yet");
 		expectOutsideTheScroller(alert);
 		expect(list.scrollTop).toBe(900);
-		expect(errorBox().className).toContain("grid-rows-[1fr]");
+		expectBand(SHOWN, HIDDEN);
 	});
 
-	/* happy-dom lays nothing out and never clamps `scrollTop`, and the defect
-	   this guards (QA round 4, Q5) lives exactly in the clamp. So the scroller
-	   gets a small model of the column it sits in: `<main>`'s top is the band's
-	   height below a fixed header, its viewport shrinks by the same amount, and
-	   `scrollTop` rounds to whole pixels and is clamped into the scroll range
-	   whenever it is written OR the range shrinks under it, as a browser does
-	   during layout before any observer runs. What is asserted is where a row
-	   is DRAWN, not a class or a DOM order: the previous round's tests passed on
-	   a layout that moved the rows 34px. */
-	type Resized = (entries: Array<{ contentRect: { height: number } }>) => void;
-	const HEADER = 60;
-	const COLUMN = 800;
+	/* happy-dom lays nothing out and never clamps `scrollTop`, so the scroller
+	   gets a small model of the column it sits in: a fixed viewport over a
+	   fixed amount of content, with `scrollTop` rounded to whole pixels, clamped
+	   into the scroll range, and every write the SCREEN makes to it counted. The
+	   band is an overlay, so nothing about it is an input to this model — which
+	   is the claim: if a later change put the band back in the flow or brought a
+	   `scrollTop` compensation back, the writes counted here stop being zero. */
+	const COLUMN = 740;
 	const CONTENT = 3000;
+	const BOTTOM = CONTENT - COLUMN;
 
 	function modelTheColumn(list: HTMLElement) {
-		let band = 0;
 		let offset = 0;
-		const range = () => CONTENT - (COLUMN - HEADER - band);
-		const clamp = (value: number) => Math.min(Math.max(Math.round(value), 0), range());
+		let writes = 0;
+		const clamp = (value: number) => Math.min(Math.max(Math.round(value), 0), BOTTOM);
 		Object.defineProperty(list, "scrollTop", {
 			configurable: true,
 			get: () => offset,
 			set: (value: number) => {
+				writes += 1;
 				offset = clamp(value);
 			},
 		});
 		Object.defineProperty(list, "scrollHeight", { configurable: true, get: () => CONTENT });
-		Object.defineProperty(list, "clientHeight", {
-			configurable: true,
-			get: () => COLUMN - HEADER - band,
-		});
-		list.getBoundingClientRect = () => new DOMRect(0, HEADER + band, 400, COLUMN - HEADER - band);
+		Object.defineProperty(list, "clientHeight", { configurable: true, get: () => COLUMN });
 		return {
-			/* The reader scrolls: the offset changes and the browser says so. */
+			/* The reader scrolls: the offset changes and the browser says so, and
+			   the reader's own scroll is not counted as the screen's write. */
 			scrollTo(value: number) {
 				offset = clamp(value);
 				fireEvent.scroll(list);
 			},
-			/* One layout of the band's track: the column re-flows, and a range that
-			   shrank below the offset clamps it, all before the observer is told. */
-			layOutBand(height: number) {
-				band = height;
-				offset = clamp(offset);
-			},
-			/* Where a row at content offset `at` is drawn, in viewport pixels. */
-			rowTop(at: number) {
-				return HEADER + band - offset + at;
-			},
-			bottom: range,
+			writes: () => writes,
 		};
 	}
 
-	function observeTheBand() {
-		/* Only an OBSERVED element is reported, and to whom, so the test cannot pass
-		   on a callback that was built but never pointed at the band. */
-		const observed = new Map<Element, Resized>();
+	/* Any ResizeObserver the screen builds is recorded with what it watches, so
+	   the band's own resize frames can be delivered to it: the old
+	   compensation was driven from exactly this callback. */
+	type Resized = (entries: Array<{ contentRect: { height: number } }>) => void;
+	function observeEverything() {
+		const observed: Array<Resized> = [];
 		vi.stubGlobal(
 			"ResizeObserver",
 			class {
 				constructor(private readonly callback: Resized) {}
-				observe(target: Element) {
-					observed.set(target, this.callback);
+				observe() {
+					observed.push(this.callback);
 				}
+				unobserve() {}
 				disconnect() {}
 			},
 		);
 		return observed;
 	}
 
-	/* Opens the band to 34.8px and closes it again over the track's frames,
-	   fractions included, starting `fromBottom` px above the end of the list,
-	   and returns how far a row under the reader's eye was drawn from where it
-	   started after each direction. */
-	function openAndClose(fromBottom: number) {
+	/* Opens the band with a refusal on a row the band does NOT cover (so the one
+	   deliberate move stays out of it), plays the band's frames, fractions
+	   included, to anything watching, then closes it with a successful press on
+	   another row. Returns the scroll offset after each direction and how many
+	   times the screen wrote it. */
+	async function openAndClose(at: number) {
+		const observed = observeEverything();
 		sessionList = longList();
 		render(<SessionListScreen />);
 		const list = scroller();
 		/* Browser scroll anchoring must stay on: opting out moved a scrolled
 		   reader's rows on every unrelated list change (Q6, +76px measured). */
 		expect(list.className).not.toContain("overflow-anchor");
-		const onBandResize = observeTheBandCallbacks.get(errorBox());
-		expect(onBandResize).toBeDefined();
 		const column = modelTheColumn(list);
-		column.scrollTo(column.bottom() - fromBottom);
-		const row = column.bottom() - fromBottom + 300;
-		const before = column.rowTop(row);
-		const frame = (height: number) =>
+		column.scrollTo(at);
+		const frames = (heights: number[]) =>
 			act(() => {
-				column.layOutBand(height);
-				onBandResize?.([{ contentRect: { height } }]);
+				for (const height of heights) {
+					for (const callback of observed) callback([{ contentRect: { height } }]);
+				}
 			});
-		for (const height of [0.9, 1.8, 2.7, 3.6, 12.4, 34.8]) frame(height);
-		const opened = column.rowTop(row) - before;
-		for (const height of [22.1, 9.3, 2.7, 0.9, 0]) frame(height);
-		const closed = column.rowTop(row) - before;
-		return { opened, closed, list };
+		await refuseAPinOn("Row 20");
+		frames([0.9, 1.8, 2.7, 3.6, 12.4, 34.8]);
+		const opened = list.scrollTop;
+		longPress(cardByName("Row 21"));
+		fireEvent.click(await screen.findByRole("button", { name: "Pin to the top" }));
+		await waitFor(() => expect(screen.getByRole("alert").textContent).toBe(""));
+		frames([22.1, 9.3, 2.7, 0.9, 0]);
+		return { opened, closed: list.scrollTop, writes: column.writes() };
 	}
 
-	let observeTheBandCallbacks = new Map<Element, Resized>();
-
-	it("holds the rows still while the band opens and closes, whatever the scroll", () => {
-		/* At the top, mid-list, 60px and 20px from the bottom. The rows-hold-still
-		   half of D14 / Q4 / Q5: the band sits ABOVE the
-		   scroller, so its growth would push every visible row down (+42.8px at 100%
-		   root font, measured) unless the list scrolls by the same amount. */
-		observeTheBandCallbacks = observeTheBand();
+	it("holds the rows still while the band opens and closes, whatever the scroll", async () => {
+		/* At the top, mid-list, 60px and 20px from the bottom (D14 / Q4 / Q9 /
+		   Q10). The rows hold because the screen never touches the scroll: the
+		   band paints over the list instead of taking height from it. The old
+		   layout sibling needed a compensation here, and QA measured it leaving
+		   every row one row higher after the rollback (−51.2px at 100% text). */
 		try {
-			for (const fromBottom of [CONTENT - (COLUMN - HEADER), 1200, 60, 20]) {
-				const { opened, closed } = openAndClose(fromBottom);
-				/* Whole-pixel rounding may leave half a pixel mid-way; never more. */
-				expect(Math.abs(opened)).toBeLessThanOrEqual(0.5);
-				expect(Math.abs(closed)).toBeLessThanOrEqual(0.5);
+			for (const at of [0, 1200, BOTTOM - 60, BOTTOM - 20]) {
+				const { opened, closed, writes } = await openAndClose(at);
+				expect(opened).toBe(at);
+				expect(closed).toBe(at);
+				expect(writes).toBe(0);
 				cleanup();
 			}
 		} finally {
@@ -494,30 +495,58 @@ describe("a refused pin reports where the reader is looking (D12/D14, R8-2, Q4)"
 		}
 	});
 
-	it("does not pay a collapse twice when the browser already clamped it at the bottom (Q5)", () => {
-		/* THE REGRESSION. At the very bottom, the collapse grows `<main>` and the
-		   browser clamps `scrollTop` down by the band's height before the observer
-		   runs; that clamp alone keeps the rows still. The old carry subtracted the
-		   band's height again on top of it, and QA measured the rows ending 34.2px
-		   lower at 100% root font, permanently. Run against that carry, this model
-		   reproduces it: the row is drawn 14px lower after the collapse (the
-		   residual depends on the frame sequence; QA's real one gave 34.2px). */
-		observeTheBandCallbacks = observeTheBand();
+	it("does not pay a collapse twice when the browser already clamped it at the bottom (Q5)", async () => {
+		/* THE REGRESSION. At the very bottom, the old layout sibling's collapse
+		   grew `<main>`, the browser clamped `scrollTop` by the band's height, and
+		   the compensation subtracted it again: QA measured the rows ending 34.2px
+		   lower. With the band out of the flow the scroll range never changes, so
+		   there is no clamp to pay and nothing paying it twice — the reader is
+		   still exactly at the end of the list. */
 		try {
-			const { opened, closed, list } = openAndClose(0);
-			expect(Math.abs(closed)).toBeLessThanOrEqual(0.5);
-			expect(Math.abs(opened)).toBeLessThanOrEqual(0.5);
-			/* And the reader is still at the end of the list, not 34px short of it. */
-			expect(list.scrollTop).toBe(CONTENT - (COLUMN - HEADER));
+			const { opened, closed, writes } = await openAndClose(BOTTOM);
+			expect(opened).toBe(BOTTOM);
+			expect(closed).toBe(BOTTOM);
+			expect(writes).toBe(0);
 		} finally {
 			vi.unstubAllGlobals();
 		}
 	});
 
+	it("shows and hides the band without reflowing the list", async () => {
+		/* THE PROPERTY THAT RETIRES THE WHOLE CLASS OF DEFECT (Q9–Q11, D18–D21):
+		   if showing the band cannot change the scroller's client height, nothing
+		   has to be compensated and the browser's anchoring is left alone. happy-dom
+		   has no layout engine, so the client height cannot be measured here; what
+		   is asserted is the structural guarantee instead. (1) The band is out of
+		   the flow: `absolute`, positioned inside the `relative` wrapper it shares
+		   with the scroller, so it is not a flex item of that column. (2) Between
+		   its two states only transform, opacity and pointer-events change, none of
+		   which reflow; no height, grid-track, padding or display class toggles.
+		   (3) It transitions only transform and opacity. (4) The scroller itself
+		   is identical in both states. */
+		sessionList = longList();
+		render(<SessionListScreen />);
+		const band = errorBox();
+		const list = scroller();
+		expectOutsideTheScroller(screen.getByRole("alert"));
+		expect(band.className).toContain("transition-[transform,opacity]");
+		const hidden = new Set(band.className.split(/\s+/));
+		const listBefore = list.className;
+		await refuseAPinOn("Row 0");
+		const shown = new Set(errorBox().className.split(/\s+/));
+		const toggled = [...hidden, ...shown].filter((name) => hidden.has(name) !== shown.has(name));
+		expect(toggled.length).toBeGreaterThan(0);
+		for (const name of toggled) {
+			expect(name).toMatch(/^(-?translate-y-|opacity-|pointer-events-)/);
+		}
+		expect(list.className).toBe(listBefore);
+		expect(list.getAttribute("style")).toBeNull();
+	});
+
 	it("keeps the band collapsed and empty until a refusal arrives", () => {
 		sessionList = longList();
 		render(<SessionListScreen />);
-		expect(errorBox().className).toContain("grid-rows-[0fr]");
+		expectBand(HIDDEN, SHOWN);
 		expect(screen.getByRole("alert").textContent).toBe("");
 		/* Mounted in the fixed region from the first render, so the live region a
 		   screen reader registered is the one the refusal later arrives in. */
@@ -535,7 +564,7 @@ describe("a refused pin reports where the reader is looking (D12/D14, R8-2, Q4)"
 		const alert = await refuseAPinOn("Row 0");
 		expect(alert.getAttribute("aria-hidden")).toBeNull();
 		expect(alert.closest("[aria-hidden]")).toBeNull();
-		expect(errorBox().className).toContain("grid-rows-[1fr]");
+		expectBand(SHOWN, HIDDEN);
 		const caption = screen.getByText("touch and hold a row to pin it");
 		const captionBox = caption.parentElement?.parentElement as HTMLElement;
 		expect(captionBox.className).toContain("grid-rows-[1fr]");
