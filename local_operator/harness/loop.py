@@ -36,6 +36,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from local_operator.ansi import sanitize_prompt_line
 from local_operator.harness.approval import ask_approval
+from local_operator.harness.guard_area import exempt_from_escalation
 from local_operator.harness.intent import (
     INTENT_FIELD,
     INTENT_SCAN_LIMIT,
@@ -4056,13 +4057,20 @@ class AgentLoop:
         finishing a pure function the loop is no longer waiting on. PR #1422
         accepted exactly this cost for the same function on the bash stream; an
         abort channel here would put a signal into a table every caller shares.
+
+        The GUARD-AREA exemption is published HERE, around the result's bytes, and
+        not in ``tool_source`` beside it: this text came from the file the call
+        named, which is the only thing the exemption is about, while the same
+        context also wraps the scrub of a call's own ARGUMENTS — where a
+        credential typed into a different argument of a reading tool would be
+        laundered past the guard by scoping the call to the guard's own file.
         """
         texts = [item.text for item in content if isinstance(item, TextContent)]
         if not texts:
             return content  # decided ON THE LOOP: imagery/empty pays no hop
 
         def _run() -> list[str]:
-            with tool_source(tool_name, arguments):
+            with tool_source(tool_name, arguments), exempt_from_escalation(tool_name, arguments):
                 return [redact(text) for text in texts]
 
         masked = await asyncio.to_thread(_run)
