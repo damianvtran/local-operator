@@ -150,26 +150,41 @@ def test_the_probe_url_brackets_an_ipv6_host(probe_env: dict[str, Any]) -> None:
 def test_reports_compose_the_shared_state_with_the_address(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``wedged`` and ``stale`` come from the shared classifier and cost no probe.
+    """The probe outranks the beat where a probe ran; the beat is the story without one.
 
-    The address axis is ADDITIVE: a reader that asks "is the owner there" keeps
-    the answer it had, and the records whose owner is not reporting are not worth
-    a loopback round trip.
+    Both halves of that composition matter, and they pull in opposite directions:
+
+    * ``wedged`` is NOT a verdict on the process — the shared classifier says a
+      stale beat is a long turn or a starved loop — so a wedged record whose
+      address answers as its own instance is SERVING, and the report has to say so
+      or ``reclaim`` has no guard left against ending a working plane (review
+      round 1, R1-1: it had none for every state but ``live``).
+    * a wedged record the address ALSO cannot reach keeps its own, truer word:
+      "the daemon stopped reporting" says more than "nothing is answering".
+    * ``stale`` is not probed at all — its pid is gone and the record is on its way
+      to ``reaped/`` — so the shared state is the whole answer there.
     """
     live = _record(pid=1, instance_id="instance-one")
     deaf = _record(pid=2, instance_id="two")
-    wedged = _record(pid=3)
+    wedged_serving = _record(pid=3)
+    wedged_deaf = _record(pid=5)
     stale = _record(pid=4)
     monkeypatch.setattr(
         services.serve_registry,
         "scan",
-        lambda root=None: [(live, "live"), (deaf, "live"), (wedged, "wedged"), (stale, "stale")],
+        lambda root=None: [
+            (live, "live"),
+            (deaf, "live"),
+            (wedged_serving, "wedged"),
+            (wedged_deaf, "wedged"),
+            (stale, "stale"),
+        ],
     )
     asked: list[int] = []
 
     def _probe(record: Any) -> services.AddressProbe:
         asked.append(record.pid)
-        if record.pid == 2:
+        if record.pid in (2, 5):
             return services.AddressProbe(services.DEAF, "nothing answered")
         return services.AddressProbe(services.SERVING)
 
@@ -177,7 +192,8 @@ def test_reports_compose_the_shared_state_with_the_address(
     assert [(report.record.pid, report.verdict) for report in reports] == [
         (1, services.SERVING),
         (2, services.DEAF),
-        (3, services.WEDGED),
+        (3, services.SERVING),
+        (5, services.WEDGED),
         (4, services.STALE),
     ]
     # ``wedged`` IS probed: its owner stopped reporting, but its address can still
@@ -185,7 +201,7 @@ def test_reports_compose_the_shared_state_with_the_address(
     # by a stranger" is a different thing to tell an operator than "nothing is
     # answering there". ``stale`` alone is not probed — its pid is gone and its
     # record is on its way to ``reaped/``.
-    assert asked == [1, 2, 3]
+    assert asked == [1, 2, 3, 5]
 
 
 def test_the_spawn_contract_is_matched_as_words_not_a_substring() -> None:
@@ -280,6 +296,7 @@ def _reclaim(
     uid: int | None = None,
     alive: list[bool] | None = None,
     records: list[services.ServeDaemonReport] | None = None,
+    probe_script: list[str] | None = None,
     **over: Any,
 ) -> tuple[services.ReclaimReport, list[tuple[int, int]]]:
     """Run ``reclaim_serve_daemon`` against injected evidence.
@@ -315,9 +332,20 @@ def _reclaim(
     def _probe(_record: Any) -> services.AddressProbe:
         return services.AddressProbe(verdict, "" if verdict == services.SERVING else "silent")
 
+    # ``probe_script`` is the same idea for the ADDRESS: a script of readings
+    # consumed in order (last repeats), so a test can say "deaf, deaf, and then it
+    # began serving" without a real listener.
+    script = list(probe_script) if probe_script is not None else []
+
+    def _scripted(_record: Any) -> services.AddressProbe:
+        value = script.pop(0)
+        if not script:
+            script.append(value)
+        return services.AddressProbe(value, "" if value == services.SERVING else "silent")
+
     outcome = services.reclaim_serve_daemon(
         pid,
-        probe=_probe,
+        probe=_scripted if probe_script is not None else _probe,
         reports=lambda: reports,
         read_command=lambda _pid: command,
         read_uid=lambda _pid: (uid if uid is not None else os_mod.getuid()),
@@ -560,3 +588,233 @@ def test_a_serving_daemon_is_not_reported_as_stuck() -> None:
         ],
     )
     assert out == []
+
+
+# ---------------------------------------------------------------------------
+# Review round 1. Each test below fails on the pre-remediation commit.
+# ---------------------------------------------------------------------------
+
+
+def test_a_wedged_owner_that_answers_as_itself_is_serving() -> None:
+    """R1-1: the probe outranks the beat, so the "never end a working plane" guard
+    is reachable for a daemon whose owner stopped reporting but is still serving.
+
+    Before the fix ``ServeDaemonReport.verdict`` returned the shared state for every
+    non-``live`` state and DISCARDED the probe it had paid for, so this record read
+    ``wedged``, was signalled with 0 address probes and no confirmation, and its
+    receipt claimed it was not serving.
+    """
+    wedged_but_serving = services.ServeDaemonReport(
+        record=_record(pid=7), state="wedged", probe=services.AddressProbe(services.SERVING)
+    )
+    assert wedged_but_serving.verdict == services.SERVING
+    outcome, kills = _reclaim(7, records=[wedged_but_serving])
+    assert kills == []
+    assert outcome.refused
+    assert "IS the daemon serving" in "\n".join(outcome.lines)
+
+
+def test_a_wedged_owner_that_answers_nothing_keeps_its_own_word() -> None:
+    """R1-1's other half: the shared word survives where it says more."""
+    wedged_deaf = services.ServeDaemonReport(
+        record=_record(pid=8),
+        state="wedged",
+        probe=services.AddressProbe(services.DEAF, "nothing answered"),
+    )
+    assert wedged_deaf.verdict == services.WEDGED
+    # And it is still actionable: the ADDRESS reading is the evidence that gets
+    # confirmed, which is why a wedged record now costs probes it never used to.
+    outcome, kills = _reclaim(8, records=[wedged_deaf], alive=[False])
+    assert kills == [(8, 15)], "SIGTERM, once, after the address was confirmed"
+    assert "ending wedged serve daemon on 127.0.0.1:1111" in "\n".join(outcome.lines)
+
+
+def test_a_non_http_listener_is_classified_rather_than_raising() -> None:
+    """R1-2: ``http.client.HTTPException`` is neither an ``OSError`` nor a ``ValueError``.
+
+    A bare TCP listener (or a proxy speaking something else) on the port raises
+    ``BadStatusLine`` out of the response parser. It used to escape ``probe_address``
+    — so ``status_lines``, which made no network calls at all before this change,
+    and ``reload_serve_daemons``, whose docstring promises NEVER RAISES, both died
+    with a traceback instead of classifying the address.
+    """
+    import socket
+    import threading
+
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+
+    def _serve_once() -> None:
+        try:
+            conn, _ = server.accept()
+            conn.sendall(b"this is not HTTP at all\r\n\r\n")
+            conn.close()
+        finally:
+            server.close()
+
+    threading.Thread(target=_serve_once, daemon=True).start()
+    probe = services.probe_address(_record(port=port))
+    assert probe.verdict == services.DEAF
+    assert "did not identify itself" in probe.detail
+
+
+def test_a_wrapped_mention_of_the_launcher_is_not_a_serve_daemon() -> None:
+    """R1-8: the launcher form is adjacent, at argv[0] — the process IS `lop serve`.
+
+    The stray path signals on this proof ALONE (no record of ours describes the
+    pid), and matching the pair anywhere in argv accepted a shell wrapper or a
+    ``grep`` that merely mentions the command.
+    """
+    assert services.is_serve_command("/Users/me/.local/bin/lop serve --port 1111")
+    assert services.is_serve_command("/Users/me/.local/bin/local-operator serve")
+    assert services.is_serve_command(SERVE_ARGV)
+    assert not services.is_serve_command('/bin/zsh -c "lop serve --port 1111"')
+    assert not services.is_serve_command("grep -rn lop serve src/")
+    assert not services.is_serve_command("/Users/me/.local/bin/lop stop --all")
+
+
+def test_a_live_but_deaf_daemon_prints_exactly_one_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1-6: one scan, one row per record.
+
+    Two scans printed the incident's own daemon twice — an ordinary `serve daemon`
+    row AND a stuck one — breaking the "exactly one line per record" property
+    ``_fleet_action_lines`` documents and `grep`/`awk` counting relies on.
+    """
+    report = services.ServeDaemonReport(
+        record=_record(pid=9),
+        state="live",
+        probe=services.AddressProbe(services.DEAF, "nothing answered"),
+    )
+    monkeypatch.setattr(services, "serve_daemon_reports", lambda **_kwargs: [report])
+    monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
+    lines = services.status_lines()
+    assert not any(line.startswith("serve daemon pid 9") for line in lines), (
+        "an ordinary row claims the daemon serves its address, and nothing answered"
+    )
+    assert sum(1 for line in lines if "serve pid 9" in line) == 1
+    assert any("nothing is answering" in line for line in lines)
+    assert any("lop services reclaim 9" in line for line in lines)
+
+
+def test_a_serving_record_is_listed_as_serving_even_if_the_beat_is_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1-6's other face: the probe decides the ordinary row too."""
+    report = services.ServeDaemonReport(
+        record=_record(pid=10, version="0.62.24"),
+        state="wedged",
+        probe=services.AddressProbe(services.SERVING),
+    )
+    monkeypatch.setattr(services, "serve_daemon_reports", lambda **_kwargs: [report])
+    monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
+    lines = services.status_lines()
+    assert any(line.startswith("serve daemon pid 10") for line in lines)
+    assert not any("reclaim" in line for line in lines)
+
+
+def test_an_unreadable_process_table_after_sigkill_is_doubt() -> None:
+    """R1-7: three-valued liveness, and the third value is not a diagnosis.
+
+    ``alive=None`` (unreadable) used to be folded into "STILL RUNNING — it is wedged
+    in the kernel; a reboot is the only way left", which is a diagnosis made from a
+    reading that never arrived.
+    """
+    outcome, kills = _reclaim(alive=[None])
+    assert len(kills) == 2, "the escalation still runs: doubt is not a reason to stop"
+    assert outcome.problem == "unreadable-after-signal"
+    text = "\n".join(outcome.lines)
+    assert "DOUBT" in text
+    assert "STILL RUNNING" not in text
+
+
+def test_a_daemon_that_begins_serving_is_refused_at_the_last_reading() -> None:
+    """R1-5: the last reading before the signal is an ADDRESS reading.
+
+    The brand re-read cannot see a daemon that starts answering between the
+    confirmation and the signal — the recovery this command must not punish.
+    """
+    outcome, kills = _reclaim(
+        probe_script=[services.DEAF, services.DEAF, services.SERVING]
+    )
+    assert kills == []
+    assert outcome.problem == "serving"
+    assert "began answering" in "\n".join(outcome.lines)
+
+
+def test_a_stray_that_is_serving_its_own_plane_says_so() -> None:
+    """R1-4: the stray arm ASKS the address instead of claiming nothing answers.
+
+    A rig's stray can perfectly well be serving a plane of its own — its records
+    are simply not this install's — and that is a different thing to tell an
+    operator than "it is not serving that address", which nothing had earned.
+    """
+    command = "/opt/rig/bin/local-operator serve --host 127.0.0.1 --port 11331"
+    outcome, kills = _reclaim(
+        pid=555, command=command, records=[], probe_script=[services.SQUATTED], alive=[False]
+    )
+    assert len(kills) == 1
+    text = "\n".join(outcome.lines)
+    assert "under records that are not this install's" in text
+    assert outcome.verdict == services.STRAY
+
+
+def test_a_stray_is_refused_when_the_records_address_is_served() -> None:
+    """R1-5's fail-closed face, in the claimant arm."""
+    claimant = services.ServeDaemonReport(
+        record=_record(pid=600, host="127.0.0.1", port=11331),
+        state="live",
+        probe=services.AddressProbe(services.SERVING),
+    )
+    outcome, kills = _reclaim(
+        pid=555,
+        command="/opt/rig/bin/local-operator serve --host 127.0.0.1 --port 11331",
+        records=[claimant],
+        probe_script=[services.SERVING],
+    )
+    assert kills == []
+    assert outcome.problem == "serving"
+    assert "IS being served" in "\n".join(outcome.lines)
+
+
+def test_every_row_verdict_has_one_sentence_and_one_adjective() -> None:
+    """N1: ONE vocabulary, and it is read with ``[]`` so a missing row is loud."""
+    assert set(services.VERDICTS) == {
+        services.DEAF,
+        services.SQUATTED,
+        services.WEDGED,
+        services.STALE,
+        services.STRAY,
+    }
+    assert services.SERVING not in services.VERDICTS, (
+        "a serving daemon gets the ordinary `serve daemon` row, not a stuck one"
+    )
+    for entry in services.VERDICTS.values():
+        assert "{address}" in entry.row
+        assert entry.phrase and " " not in entry.phrase
+
+
+def test_the_update_warning_reuses_the_axis_sentence_and_real_remedies() -> None:
+    """R1-3: one sentence for both surfaces, and a remedy only where one exists.
+
+    The update path's first version typed a second sentence, and it said "nothing
+    is answering there" about a SQUATTED address (something was), told the reader to
+    reclaim a STALE record's pid (which is gone), and printed the raw verdict token.
+    """
+    squatted = services.ServeDaemonReport(
+        record=_record(pid=11),
+        state="live",
+        probe=services.AddressProbe(services.SQUATTED, "answered as somebody else", "other"),
+    )
+    text = "\n".join(services.stuck_report_lines(squatted))
+    assert "something else is answering there" in text
+    assert "nothing is answering" not in text
+    assert "lop services reclaim 11" in text
+
+    stale = services.ServeDaemonReport(record=_record(pid=12), state="stale")
+    text = "\n".join(services.stuck_report_lines(stale))
+    assert "its process has exited" in text
+    assert "reclaim" not in text, "there is no pid left to reclaim"
