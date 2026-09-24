@@ -1294,6 +1294,39 @@ def _process_argv(pid: int) -> str | None:
     (``group_reaper._owner_start_token``) does so to pin a locale-FORMATTED date,
     and there is no format to pin in a process's own bytes.
 
+    ``-ww`` IS NOT DECORATION, and a CI failure is what made it a required
+    argument rather than a style choice (measured 2026-09-24: this PR's own
+    end-to-end test read ``None`` on a Linux runner while passing here, and the
+    same trap had already cost a 3.12 shard in
+    ``tests/unit/secrets/test_broker_sweep.py`` — "Linux ``ps`` falls back to an
+    80-column screen width and CUTS the row" whenever stdout is not a tty, which
+    is every time this module calls it). The generation component lands past the
+    cut — the image path alone is ~150 columns — so the row arrives with the
+    generation id severed, no ancestor can match it, and this module reads that as
+    "no move": silently, and exactly the case this repair exists for.
+    :mod:`local_operator.procname` states the rule this now follows ("a reader that
+    needs the whole line uses ``ps -ww`` or ``/proc/<pid>/cmdline``"), as does the
+    environment reader in ``session/runtime/reclaim``.
+
+    Measured in a Linux container against a live 145-column argv, to pin which
+    spellings are and are not safe:
+
+    ====================  ========================================
+    ``COLUMNS``           ``ps -o args= -p <pid>`` (145-char argv)
+    ====================  ========================================
+    unset                 full line
+    ``132``                 132 columns, generation id CUT
+    ``80``                  80 columns, generation id CUT
+    ``1000``              full line
+    ====================  ========================================
+
+    Add ``-ww`` ("unlimited width") and the line is complete at every one of those
+    widths. macOS/BSD ``ps`` truncates only when it is writing to a TERMINAL
+    (measured: identical output with and without ``COLUMNS=80`` through a pipe), so
+    this repair was never wrong on the platform it runs on — but the flag is what
+    makes the answer independent of the host, and the end-to-end test now pins a
+    narrow ``COLUMNS`` so the hazard cannot come back.
+
     ``MemoryError`` is caught with the rest (review round 1, Q4, which measured one
     escaping): a host under memory pressure can fail the FORK itself, and the only
     caller that matters here is a repair inside an upgrade that has already
@@ -1310,7 +1343,7 @@ def _process_argv(pid: int) -> str | None:
 
     try:
         completed = subprocess.run(
-            ["ps", "-o", "args=", "-p", str(pid)],
+            ["ps", "-ww", "-o", "args=", "-p", str(pid)],
             capture_output=True,
             text=True,
             errors="replace",

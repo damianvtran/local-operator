@@ -118,21 +118,26 @@ def test_the_generation_is_read_from_the_first_field_of_a_live_argv(
 def test_a_real_process_reports_the_generation_it_was_executed_from(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """END TO END THROUGH THE REAL ``ps``, SYNCHRONISED on the child's own exec.
+    """END TO END THROUGH THE REAL ``ps``, under a NARROW ``COLUMNS``.
 
-    WHY THE ANNOUNCEMENT IS NOT DECORATION (review round 1, R1; QA Q1). ``Popen``
-    returns as soon as the child is FORKED, and its ``execve`` lands afterwards. In
-    that window the child's argv — what ``/proc/<pid>/cmdline`` and therefore
-    ``ps -o args=`` report — is still the PARENT'S, and a parent's command line
-    names no generation, so an unsynchronised probe answers ``None`` for a child
-    that is about to be perfectly readable. That is how this test failed on a loaded
-    Linux CI runner twice (``test (3.12, 4)``) while never losing the race here
-    (0/200 immediate probes). The window is reproduced deterministically in
-    ``test_a_child_that_has_not_exec_d_yet_reports_its_parents_argv``.
+    WHY THE NARROW COLUMN IS IN HERE (this is the CI failure of 2026-09-24, and it
+    is a defect in the probe rather than in the test). ``ps`` cuts its row to the
+    screen width whenever stdout is not a tty — 80 columns on Linux, and this row is
+    ~150 — so the generation component arrives severed, no ancestor can match it, and
+    the probe answers "no move" for a daemon that is unmistakably somewhere else.
+    That is what failed on the Linux runner (twice on ``test (3.12, 4)``, then on
+    ``test (3.12, 1)``) while passing here, where BSD ``ps`` truncates only when it
+    writes to a TERMINAL. ``_process_argv`` now passes ``-ww``; this test pins the
+    narrow case, and the same trap is recorded in
+    ``tests/unit/secrets/test_broker_sweep.py`` for the broker's own reader.
 
-    So the child says so itself: the ``-c`` code writes a byte to a pipe from INSIDE
-    the exec'd image, and this reads it before asking ``ps`` anything. That is the
-    only synchronisation — no sleep that merely has to be "long enough".
+    WHY THE CHILD ANNOUNCES ITS OWN EXEC (a second, independent hazard). ``Popen``
+    returns as soon as the child is FORKED, and its ``execve`` lands afterwards; in
+    that window the child's argv is still the PARENT'S, which names no generation.
+    Nothing observed that live, but it is real and reproducible
+    (``test_a_child_that_has_not_exec_d_yet_reports_its_parents_argv``), so the test
+    waits for the child's own byte from inside the image rather than assuming an
+    exec happened — no sleep that merely has to be "long enough".
 
     The generation directory deliberately does not exist, and the child is
     ``sys.executable`` executed with a generation path as ``argv[0]``: the argv is a
@@ -143,8 +148,18 @@ def test_a_real_process_reports_the_generation_it_was_executed_from(
     generation = "20260924T103058Z-509c7450dbf6"
     argv0 = str(root / "generations" / generation / Path(*_GENERATION_IMAGE))
 
+    # THE NARROW-COLUMN CASE, PINNED (this is the CI failure of 2026-09-24). `ps`
+    # cuts its row to the screen width whenever stdout is not a tty, which is 80
+    # columns on Linux — and the image path alone is ~150 — so the reading arrives
+    # with the generation id severed and the probe answers "no move" for a daemon
+    # that is unmistakably elsewhere. `_process_argv` passes `-ww` for exactly this;
+    # without it this test is red on the Linux shard (measured: 80 columns with
+    # `COLUMNS=80`, full row with `-ww`). Same trap the secrets broker's test
+    # records for its own reader.
+    monkeypatch.setenv("COLUMNS", "80")
+
     read_fd, write_fd = os.pipe()
-    child: subprocess.Popen | None = None
+    child: subprocess.Popen[str] | None = None
     try:
         code = f"import os, time; os.write({write_fd}, b'1'); time.sleep(60)"
         child = subprocess.Popen(  # noqa: S603 — a fixed argv, and this test's own child
@@ -157,7 +172,13 @@ def test_a_real_process_reports_the_generation_it_was_executed_from(
         readable, _, _ = select.select([read_fd], [], [], _EXEC_ANNOUNCEMENT_DEADLINE_S)
         assert readable, "the child never announced that its exec landed"
         assert os.read(read_fd, 1) == b"1"
-        assert update_mod.generation_of_process(child.pid) == root / "generations" / generation
+        # The raw reading travels into the message: if this ever fails on a runner
+        # again, the row `ps` actually returned is in the failure, rather than a
+        # second round spent guessing which branch produced the `None`.
+        raw = update_mod._process_argv(child.pid)
+        assert update_mod.generation_of_process(child.pid) == root / "generations" / generation, (
+            f"argv0={argv0!r} COLUMNS={os.environ.get('COLUMNS')!r} ps said {raw!r}"
+        )
     finally:
         os.close(read_fd)
         os.close(write_fd)
@@ -167,16 +188,18 @@ def test_a_real_process_reports_the_generation_it_was_executed_from(
 
 
 def test_a_child_that_has_not_exec_d_yet_reports_its_parents_argv() -> None:
-    """THE WINDOW THE TEST ABOVE SYNCHRONISES AROUND, made deterministic.
+    """THE FORK WINDOW THE TEST ABOVE ALSO GUARDS AGAINST, made deterministic.
 
     ``fork`` copies the parent's command line into the child, and it stays there
     until ``execve`` replaces it — so between ``Popen`` returning and the exec
     landing, ``ps -o args=`` describes the PARENT. Forking without exec'ing
-    reproduces that state exactly, on every platform, and the reading below is the
-    same one that returned ``None`` on the runner.
+    reproduces that state exactly, on every platform.
 
-    This is also why the assertion in the live test is not "a sleep long enough for
-    the exec": the only sound signal is the child's own announcement.
+    NOBODY OBSERVED IT IN THE WILD, and it is not what failed on the runner (that was
+    the ``COLUMNS`` cut, see the live test): this pins the state, so the announcement
+    in the live test is asserted to be load-bearing rather than decorative — a later
+    edit that drops it and probes straight after ``Popen`` has a documented way to
+    fail on a loaded host.
     """
     pid = os.fork()
     if pid == 0:  # pragma: no cover — the child; it never returns into pytest
