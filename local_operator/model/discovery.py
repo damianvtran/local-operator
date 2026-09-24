@@ -1945,12 +1945,19 @@ def cached_available_models(
     *,
     cache_dir: Path | None = None,
     base_url: str | None = None,
+    values: Mapping[str, Any] | None = None,
 ) -> tuple[list[DiscoveredModel], ListingStatus]:
     """Every model cached on disk for ``provider_id`` with zero network calls.
 
     Synchronous, non-blocking, and I/O-isolated: uses :func:`peek_listing` so it
     never acquires fetch leases, spawns background revalidation threads, or
     attempts network requests.
+
+    ``values`` is the caller's ALREADY-READ config mapping, for a caller that
+    resolves several local providers in one pass (the catalogue's first frame).
+    ``None`` -- every caller with no snapshot to hand over -- keeps the
+    per-provider read :func:`.providers.local.provider_settings` does itself, so
+    the answer is identical either way.
 
     Returns:
         ``(models, status)`` where status is ``"cached"`` if a valid cached
@@ -1968,7 +1975,28 @@ def cached_available_models(
     if definition.local_setup:
         from local_operator.providers.local import endpoint_cache_key, resolve_base_url
 
-        key = endpoint_cache_key(key, resolve_base_url(definition.id, override=base_url))
+        try:
+            endpoint = resolve_base_url(definition.id, override=base_url, values=values)
+        except ValueError:
+            # A stored endpoint `normalize_base_url` rejects: reachable by a
+            # hand-edited config.yml, because the settings editor validates and
+            # the file does not. The frame still has to answer, and with no
+            # usable endpoint there is no document NAME to look under, so this
+            # provider contributes its SHIPPED rows and nothing else -- exactly
+            # what it contributed before every provider was read through here.
+            # Deliberately caught rather than re-raised: the read is now the
+            # first frame's reader for EVERY provider, so one unconfigured local
+            # server emptied the whole catalogue (measured on the desktop route:
+            # 409 with 0 rows on `command-entities`, 500 on the models route,
+            # 502 on the phone, all three 200 with 120 rows before this reader
+            # was reached from the frame at all).
+            return merge_models(rows, None), "static"
+        if not endpoint:
+            # No endpoint at all -- the generic gateway's preset is empty and
+            # nothing was configured. Same answer, for the same reason: an
+            # endpoint-scoped document name would name a file nothing writes.
+            return merge_models(rows, None), "static"
+        key = endpoint_cache_key(key, endpoint)
     listing = peek_listing(key, cache_dir=cache_dir)
     capture = listing_capture_version(storage_id)
     live_rows = _rows_from_payload(listing.payload, capture)

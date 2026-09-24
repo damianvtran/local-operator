@@ -61,13 +61,28 @@ def normalize_base_url(value: str) -> str:
 
 def provider_settings(provider: str, values: Mapping[str, Any] | None = None) -> Mapping[str, Any]:
     if values is None:
-        from local_operator.config import ConfigManager
-        from local_operator.paths import config_dir
-
-        values = ConfigManager(config_dir()).get_config().values
+        values = config_values()
     providers = values.get("providers", {})
     entry = providers.get(provider, {}) if isinstance(providers, Mapping) else {}
     return entry if isinstance(entry, Mapping) else {}
+
+
+def config_values() -> Mapping[str, Any]:
+    """The config VALUES mapping ``provider_settings`` reads when none is handed in.
+
+    Public because a caller that resolves SEVERAL local providers in one pass has
+    to read the config ONCE: every read constructs a ``ConfigManager`` and parses
+    config.yml (measured ~2 ms), and the catalogue's first frame is painted on
+    the keystroke that opens a picker and, on the desktop, on the keystroke that
+    types a ``/model `` argument. Five providers reading the file themselves
+    turned that frame from 0.24 ms into 14.5 ms (agent review round 2, R2-2); the
+    frame hands its snapshot down instead, and a caller with no snapshot to hand
+    over keeps the per-call read this function still performs.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.paths import config_dir
+
+    return ConfigManager(config_dir()).get_config().values
 
 
 def resolve_base_url(

@@ -22,6 +22,7 @@ from typing import Any, AsyncIterator
 
 import pytest
 import pytest_asyncio
+import yaml
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
@@ -33,9 +34,12 @@ from local_operator.server.utils.desktop_sessions import DesktopSessions
 TOKEN = "desktop-first-frame-token"
 
 #: An id the shipped registry does not carry, in the shape a provider listing
-#: would hand it over. The registry's own anthropic rows are asserted below, so
-#: the test cannot pass by the fixture having emptied them.
+#: would hand it over. No shipped id is planted with it, so the registry-union
+#: assertion below can only pass for the reason it states (review round 2, R2-5).
 UNSHIPPED_ID = "claude-fable-6"
+
+#: A shipped anthropic id the listing never mentions -- the union's proof.
+SHIPPED_ID = "claude-opus-5"
 
 pytestmark = pytest.mark.asyncio
 
@@ -100,9 +104,25 @@ def _poison_network(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(discovery, "fetch_models", exploding)
 
 
+def _hand_edit_local_endpoint(root: Path, provider: str, base_url: str) -> None:
+    """A local provider's endpoint, written the way a person's editor writes it.
+
+    Reachable on the shipped app: the settings editor validates through
+    ``validate_endpoint_setting`` and the config FILE does not, which is how a
+    ``localhost:notaport`` value gets in. The ``values`` wrapper is the real file
+    shape -- a top-level ``providers`` block is silently ignored by
+    ``ConfigManager._load_config``, and a test that wrote one would measure the
+    cold path while claiming to measure this one.
+    """
+    (root / "config.yml").write_text(
+        yaml.safe_dump({"values": {"providers": {provider: {"base_url": base_url}}}}),
+        encoding="utf-8",
+    )
+
+
 async def test_the_inline_model_list_offers_a_cached_provider_listed_id(composer) -> None:
     client, session_id, root = composer
-    _plant(root / ".local-operator" / "cache", "anthropic", ids=["claude-opus-5", UNSHIPPED_ID])
+    _plant(root / ".local-operator" / "cache", "anthropic", ids=[UNSHIPPED_ID])
 
     response = await client.get(
         f"/v1/desktop/sessions/{session_id}/command-entities", params={"command": "model"}
@@ -117,11 +137,10 @@ async def test_the_inline_model_list_offers_a_cached_provider_listed_id(composer
         "read the shipped registry for a direct provider; a cached listing id "
         "must reach it without the dialog having to go live first"
     )
-    # The registry rows ride along: an anthropic listing is a union, not an
-    # authoritative set, so a cold-cache regression that dropped them would be a
-    # different bug than the one this test is about -- and it would be invisible
-    # without this line.
-    assert "claude-opus-5" in ids
+    # The listing never mentions this id, so its presence is the registry union
+    # and nothing else: a regression that dropped the registry's rows on a cached
+    # listing would fail HERE.
+    assert SHIPPED_ID in ids
 
 
 async def test_the_inline_model_list_fetches_nothing(composer, monkeypatch) -> None:
@@ -136,3 +155,31 @@ async def test_the_inline_model_list_fetches_nothing(composer, monkeypatch) -> N
 
     assert response.status_code == 200, response.text
     assert UNSHIPPED_ID in {entity["model_id"] for entity in response.json()["result"]["entities"]}
+
+
+async def test_a_hand_edited_local_endpoint_still_answers_the_inline_list(composer) -> None:
+    """The R2-1 regression, on the surface it was reported against.
+
+    A local provider's stored endpoint that ``normalize_base_url`` rejects used to
+    raise straight out of ``initial_catalogue`` -- reachable only once the frame
+    began reading every provider through the cache reader -- and this route then
+    answered **409 with zero rows** where it had answered 200 before, i.e. the
+    composer's ``/model `` list went empty. The endpoint stays rejected (asserted
+    below through ``resolve_base_url``), so the frame's rows are produced DESPITE
+    it rather than because the config was never read.
+    """
+    from local_operator.providers.local import resolve_base_url
+
+    client, session_id, root = composer
+    _hand_edit_local_endpoint(root, "lmstudio", "http://localhost:notaport")
+    with pytest.raises(ValueError):
+        resolve_base_url("lmstudio")
+
+    response = await client.get(
+        f"/v1/desktop/sessions/{session_id}/command-entities", params={"command": "model"}
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()["result"]
+    assert body["entities"], "the catalogue came back empty for one unconfigured local server"
+    assert SHIPPED_ID in {entity["model_id"] for entity in body["entities"]}
