@@ -44,6 +44,11 @@ ACTIONS = (
     # The session plane's client half (mesh-session-mobility.md §9.3): what the
     # peers hold, and the three acts on a session that lives on one of them.
     "sessions",
+    # The credential broker's surfaces (mesh-credentials.md §2.2): the READ of what
+    # this device owns and borrows, and the ACT of sharing or revoking one. Both are
+    # design verbs, which is why they belong in this list rather than beside it.
+    "credentials",
+    "credential",
 )
 
 
@@ -87,7 +92,9 @@ def test_every_leaf_action_accepts_json() -> None:
     missing: list[str] = []
     for name, subparser in net_fixtures.subcommands_of(group).items():
         flags = {option for action in subparser._actions for option in action.option_strings}
-        if name in ("member", "identity"):
+        # The three groups whose verbs are sub-commands, so ``--json`` is asserted on
+        # each LEAF rather than on the group (a bare group prints usage).
+        if name in ("member", "identity", "credential"):
             for nested_name, nested_parser in net_fixtures.subcommands_of(subparser).items():
                 nested_flags = {
                     option for action in nested_parser._actions for option in action.option_strings

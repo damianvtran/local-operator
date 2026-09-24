@@ -125,6 +125,28 @@ EVENT_KINDS: frozenset[str] = frozenset(
         "disconnect_initiated",
         "audit_rotated",
         "audit_pruned",
+        # The credential broker (mesh-credentials.md; build plan §2.3). Five events,
+        # because a lent bearer is a DELEGATION and an incident review has to be able
+        # to reconstruct who could spend what, on whose account, from where.
+        #
+        # `act` is the owning device (the broker), `sub` is the borrowing device that
+        # received the delegation; both are device ids, which is the RFC 8693
+        # vocabulary mesh-credentials.md §1.4 names.
+        "credential.grant",
+        # A refusal: which device asked, for which key, and the machine code. The
+        # person-facing sentence is rendered where the operator is, never stored here.
+        "credential.grant_refused",
+        # The owner refreshed because a peer's report asked it to. At most one per
+        # credential per five minutes, and worth having: a burst is a borrower
+        # hammering a failing login.
+        "credential.refresh",
+        # A borrower's attribution of a failure it observed with a borrowed bearer.
+        # Deliberately NOT a verdict about the login — see `owner.py`'s report arm for
+        # why routing this into `rotate_sibling` would log the operator out everywhere.
+        "credential.report",
+        # A membership-class event: who may borrow what changed here. "How could that
+        # device spend my OpenAI account" is answered by exactly this record.
+        "credential.placement",
     }
 )
 
@@ -201,6 +223,32 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "disconnect_initiated": frozenset({"epoch", "reachable_peers"}),
     "audit_rotated": frozenset({"generation", "bytes", "records"}),
     "audit_pruned": frozenset({"generation", "age_days"}),
+    # -- the credential broker (mesh-credentials.md §2.3, DOC2 §4.3) -----------
+    #
+    # NOTE THE KEY NAME: `credential_key`, never `key`. `key` is in
+    # FORBIDDEN_DETAIL_KEYS below because in this log it means KEY MATERIAL, and the
+    # credential's NAME (`openai`) is not material — so the placement document may use
+    # `key` for it while the audit log may not. Renaming here rather than relaxing
+    # there is the whole reason both lists exist.
+    #
+    # `act`/`sub` are the delegation markers: act = the broker (owning) device,
+    # sub = the device the grant was lent to. Both are device ids.
+    "credential.grant": frozenset(
+        {
+            "credential_key",
+            "act",
+            "sub",
+            "grant_id",
+            "credential_kind",
+            "scope",
+            "refreshed",
+            "latency_ms",
+        }
+    ),
+    "credential.grant_refused": frozenset({"credential_key", "act", "sub", "code", "capability"}),
+    "credential.refresh": frozenset({"credential_key", "act", "sub", "cause"}),
+    "credential.report": frozenset({"credential_key", "act", "sub", "failure"}),
+    "credential.placement": frozenset({"credential_key", "act", "sub", "owner_device", "holders"}),
 }
 
 #: Detail keys that are dropped on sight, whatever the whitelist says. The second
