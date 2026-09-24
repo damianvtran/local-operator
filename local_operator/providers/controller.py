@@ -2493,9 +2493,12 @@ def _price_listing_only_rows(
     surface never goes live, so nothing would ever fill it (agent review round 2,
     R2-3). The chain that fills it is the one ``live_catalogue`` already runs
     (:func:`_enrich_prices`): disk only, no request, one document read for the
-    whole frame -- measured 1.1 ms medians against a 139 KiB models.dev
-    projection, and it is not entered at all when nothing needs it, so a cold
-    cache costs this frame exactly what it cost before.
+    whole frame -- 0.9-1.0 ms here for the whole helper against a 138 KiB
+    models.dev projection, 0.9-2.1 ms for the document read inside it (measured
+    2026-09-24 on the fleet host: isolated cache, 25-call median after a
+    warm-up; the range is three runs and the magnitude is rig-dependent). It is
+    not entered at all when nothing needs it, so a cold cache costs this frame
+    exactly what it cost before.
 
     WHY NOT EVERY ROW, which would be the smaller change: the SHIPPED rows are
     the frame's contract with the registry. With nothing cached, frame one is

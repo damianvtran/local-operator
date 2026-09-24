@@ -1986,10 +1986,23 @@ def cached_available_models(
             # what it contributed before every provider was read through here.
             # Deliberately caught rather than re-raised: the read is now the
             # first frame's reader for EVERY provider, so one unconfigured local
-            # server emptied the whole catalogue (measured on the desktop route:
-            # 409 with 0 rows on `command-entities`, 500 on the models route,
-            # 502 on the phone, all three 200 with 120 rows before this reader
-            # was reached from the frame at all).
+            # server emptied the whole catalogue -- review round 2 measured it on
+            # the shipped app over loopback as 409 with 0 rows on
+            # `command-entities`, 500 on the models route and 502 on the phone,
+            # where the previous head answered 200 with 120 rows on all three;
+            # reproduced here 2026-09-24 as `assert 409 == 200` in
+            # `tests/unit/server/test_desktop_first_frame_catalogue.py`.
+            #
+            # THE BREADTH IS A KNOWN CONSTRAINT, not an oversight: this catches
+            # any `ValueError` raised below, not only the resolver's. The live
+            # path's guard for the same call is equally broad
+            # (`live_catalogue`'s `_fetch_provider`), and narrowing this one
+            # would mean catching a private exception type or re-deriving the
+            # resolution here -- the second spelling of the endpoint policy that
+            # this reader exists to be the first of. If a future caller adds a
+            # `ValueError` to the path below, it will be swallowed into the
+            # static rows: teach this guard about it then, rather than assuming
+            # it cannot happen.
             return merge_models(rows, None), "static"
         if not endpoint:
             # No endpoint at all -- the generic gateway's preset is empty and
