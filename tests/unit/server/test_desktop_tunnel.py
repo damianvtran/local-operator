@@ -172,16 +172,18 @@ async def test_a_hanging_token_endpoint_cannot_hold_the_poll_open(desktop, monke
     serves every other request.
 
     The assertion is structural rather than a stopwatch: the stubbed endpoint
-    parks for several times the bound and records whether it ever finished, so a
-    passing test means the refresh was CANCELLED at the bound. An unbounded call
-    would have completed it, and `finished` is what says which happened — a
-    duration would only say how fast the machine is.
+    parks on an event THIS test holds, so it cannot finish however long the route
+    is awaited, and a passing test therefore means the route returned without the
+    token endpoint's answer. Since the fix the exchange is not CANCELLED at the
+    bound but handed to the store's supervisor (a cancelled exchange strands the
+    write-ahead marker only its own answer can resolve), so the test ends by
+    releasing it and draining that supervisor — and asserts the row it resolves,
+    because "detached" must not come to mean "abandoned".
     """
     import asyncio
     from contextlib import closing
 
     from local_operator.providers import auth_store
-    from local_operator.tunnels import report
 
     client, tmp_path, _app = desktop
     with closing(auth_store.AuthStore()) as store:
@@ -200,24 +202,77 @@ async def test_a_hanging_token_endpoint_cannot_hold_the_poll_open(desktop, monke
         )
     _configure(tmp_path, credential_id=row.id)
 
-    started = asyncio.Event()
-    finished = asyncio.Event()
+    entered = asyncio.Event()
+    release = asyncio.Event()
 
     async def hanging(credentials):  # noqa: ANN001 — the store's own refresh fn
-        started.set()
-        await asyncio.sleep(report.REFRESH_WAIT_S * 3)
-        finished.set()
+        entered.set()
+        await release.wait()
+        return {"access": "fresh-access", "refresh": "rotated", "expires": 4_000_000_000}
 
     monkeypatch.setattr(auth_store.AuthStore, "_refresh_fn", lambda self, provider: hanging)
 
     result = (await client.get("/v1/desktop/tunnel")).json()["result"]
 
-    assert started.is_set(), "the refresh was never attempted: the fixture proves nothing"
-    assert not finished.is_set(), "the route waited for the token endpoint instead of bounding it"
+    await asyncio.wait_for(entered.wait(), 5)
     # The honest answer for a check that did not finish, and NOT `login_required`:
     # sending an operator whose network is down to a login is the misdirection
     # this surface exists to remove.
     assert result["login"] == {"credential_id": row.id, "state": "unknown"}
+
+    # Let the exchange finish, on an event rather than a clock: a route that stops
+    # waiting leaves it running on purpose, and a test that ended here would destroy
+    # a live task — and its store's own done-callback — when the loop closed.
+    release.set()
+    pending = list(auth_store._DETACHED_REFRESHES)
+    assert pending, "the route abandoned the exchange instead of supervising it"
+    await asyncio.gather(*pending, return_exceptions=True)
+    with closing(auth_store.AuthStore()) as store:
+        settled = store.get_credential(row.id)
+        assert settled is not None
+        assert settled.data.get("access") == "fresh-access", "the exchange did not survive"
+        assert auth_store.REFRESH_SEND_UNCONFIRMED_KEY not in settled.data
+
+
+async def test_a_deferral_reaches_the_desktop_as_its_own_state(desktop, monkeypatch) -> None:
+    """The route forwards the verdict, and a deferral is offered no remedy.
+
+    Two properties the UI depends on: the state arrives UNCHANGED (the route
+    re-derives nothing), and `remedy` is `None`, because the only command this
+    route could hand the UI is a sign-in that would not help — the state clears by
+    itself. The refresh fn is stubbed to fail loudly, so a regression that made this
+    route attempt one cannot reach Radient from a test.
+    """
+    from contextlib import closing
+
+    from local_operator.providers import auth_store
+
+    client, tmp_path, _app = desktop
+    with closing(auth_store.AuthStore()) as store:
+        row = store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "account_id": "qa",
+                "access": "stale-access",
+                "refresh": "stored-refresh",
+                "expires": 1,
+            },
+        )
+        # The state the store defers on: a live marker from an exchange whose
+        # outcome is not settled, with the bearer it was armed against spent.
+        store._arm_send_marker(row.id, "stored-refresh")
+    _configure(tmp_path, credential_id=row.id)
+
+    async def refresh(credentials):  # noqa: ANN001 — the store's own refresh fn
+        raise httpx.ConnectError("the refresh must never be attempted here")
+
+    monkeypatch.setattr(auth_store.AuthStore, "_refresh_fn", lambda self, provider: refresh)
+
+    result = (await client.get("/v1/desktop/tunnel")).json()["result"]
+
+    assert result["login"] == {"credential_id": row.id, "state": "deferred"}
+    assert result["remedy"] is None
 
 
 async def test_a_verdict_that_cost_a_call_is_not_re_asked_on_every_poll(

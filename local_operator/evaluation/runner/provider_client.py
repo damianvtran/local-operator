@@ -61,7 +61,11 @@ from local_operator.evaluation.runner.model import (
 from local_operator.evaluation.runner.public_reply import (
     _MISPLACED_REPLY_VERSION as _MISPLACED_REPLY_VERSION_MARKER,
 )
-from local_operator.evaluation.runner.public_reply import MAX_PUBLIC_OBSERVATIONS_CHARS
+from local_operator.evaluation.runner.public_reply import (
+    COMPACT_ACTION_BINDING,
+    LEGACY_ACTION_BINDING,
+    MAX_PUBLIC_OBSERVATIONS_CHARS,
+)
 from local_operator.evaluation.runner.public_reply import (
     MAX_REJECTED_REPLY_CHARS as _MAX_REJECTED_REPLY_CHARS,
 )
@@ -70,6 +74,7 @@ from local_operator.evaluation.runner.public_reply import (
     REJECTED_PUBLIC_REPLY,
     DecisionParseError,
     _decode_leading_json,
+    bind_compact_actions,
     is_public_reply,
     is_quotable_key,
     looks_like_public_reply,
@@ -1279,8 +1284,11 @@ def _paste_instructions(surface: ActionSurface) -> str:
 """
 
 
-def build_system_prompt(surface: ActionSurface = LEGACY_ACTION_SURFACE) -> str:
-    """Compose the episode system prompt around the live protocol schema."""
+def build_system_prompt(
+    surface: ActionSurface = LEGACY_ACTION_SURFACE,
+    action_binding: str = LEGACY_ACTION_BINDING,
+) -> str:
+    """Compose the evaluation episode prompt for its selected wire contract."""
 
     native_text = (
         "Only ASCII text is supported by this adapter; "
@@ -1315,6 +1323,32 @@ def build_system_prompt(surface: ActionSurface = LEGACY_ACTION_SURFACE) -> str:
         "Do not ask a question you can resolve by acting."
         if surface.ask_user
         else ""
+    )
+    compact = action_binding == COMPACT_ACTION_BINDING
+    if action_binding not in (LEGACY_ACTION_BINDING, COMPACT_ACTION_BINDING):
+        raise ValueError("action_binding must be 'legacy' or 'compact'")
+    action_binding_instructions = (
+        'Every action is an object whose type is given by the key "kind" (NOT "type").\n'
+        'The single required top-level "observation_id" must exactly match the '
+        "current observation. Omit observation_id from individual actions; if you "
+        "include legacy per-action IDs, every one must match the top-level ID."
+        if compact
+        else 'Every action is an object whose type is given by the key "kind" (NOT "type"),\n'
+        'and every action must carry the "observation_id" of the observation you are\n'
+        "looking at right now: that echo is what binds a decision to the screen it was\n"
+        "made about, and a batch naming any other observation is refused. These are the"
+    )
+    shape_intro = (
+        "\nThese are the only permitted shapes:" if compact else "\nonly permitted shapes:"
+    )
+    action_lines = _action_schema_lines(surface)
+    if compact:
+        action_lines = [line.replace(', "observation_id": "<id>", ', ", ") for line in action_lines]
+    reply_example = (
+        '{"observation_id": "<current observation id>", "actions": [ ... ], '
+        '"public_observations": ""}'
+        if compact
+        else '{"actions": [ ... ], "public_observations": ""}'
     )
     return f"""You are operating a computer to complete one task.
 
@@ -1352,7 +1386,7 @@ observation with a corrected batch; nothing was executed.
 Reply with a single JSON object and nothing else, with no prose and no code
 fence:
 
-  {{"actions": [ ... ], "public_observations": ""}}
+  {reply_example}
 
 This is a MODEL-REPLY object, not the adapter protocol. "public_observations"
 is optional -- a string of at most {MAX_PUBLIC_OBSERVATIONS_CHARS} characters,
@@ -1363,13 +1397,9 @@ prior notes, invent facts, record credentials/secrets, or provide deliberation,
 plans, explanations of your decision, or private reasoning. Do not claim the
 chosen actions succeeded until a later observation shows their result.
 
-Every action is an object whose type is given by the key "kind" (NOT "type"),
-and every action must carry the "observation_id" of the observation you are
-looking at right now: that echo is what binds a decision to the screen it was
-made about, and a batch naming any other observation is refused. These are the
-only permitted shapes:
+{action_binding_instructions}{shape_intro}
 
-{chr(10).join(_action_schema_lines(surface))}
+{chr(10).join(action_lines)}
 
 Field names are JSON keys spelled exactly as quoted above -- "keys" is not
 "key", "text" is not "value". Where a field lists alternatives separated by
@@ -1500,6 +1530,7 @@ def parse_decision(
     context_tokens: int | None = None,
     compaction: CompactionRecord | None = None,
     action_surface: ActionSurface = LEGACY_ACTION_SURFACE,
+    action_binding: str = LEGACY_ACTION_BINDING,
 ) -> ModelDecision:
     """Parse the reply's ACTIONS strictly and bind them to the current observation.
 
@@ -1525,7 +1556,29 @@ def parse_decision(
     decoded, trailing = _decode_leading_json(payload)
     if not isinstance(decoded, Mapping):
         raise DecisionParseError("decision must be a JSON object")
-    actions, note = normalise_public_reply(decoded)
+    actions, note = normalise_public_reply(decoded, action_binding=action_binding)
+    if action_binding == COMPACT_ACTION_BINDING:
+        try:
+            actions = bind_compact_actions(decoded, actions, observation.observation_id)
+        except ValueError as error:
+            raise ActionBatchRefused(
+                "decision does not bind to the current observation_id",
+                class_key="observation-binding",
+            ) from error
+    elif action_binding == LEGACY_ACTION_BINDING:
+        # Legacy schemas still require every per-action ID. Check those values
+        # against the pending observation before ActionBatch can normalize them.
+        for action in actions:
+            if (
+                isinstance(action, Mapping)
+                and action.get("observation_id") != observation.observation_id
+            ):
+                raise ActionBatchRefused(
+                    "actions at indexes [0] bind to a different observation_id",
+                    class_key="observation-binding",
+                )
+    else:
+        raise ValueError("action_binding must be 'legacy' or 'compact'")
     # Keep the visible response, not a reconstruction from its actions, whenever
     # the model wrote one -- that is the only part of a reply the next turn's
     # context carries verbatim. It is redacted at the runner's resolved-secret
@@ -2006,6 +2059,7 @@ class ProviderModelClient:
         model_spec: Any,
         artifact_root: Path,
         system_prompt: str = _SYSTEM_PROMPT,
+        action_binding: str = LEGACY_ACTION_BINDING,
         compaction: "CompactionSettings | None" = None,
         keep_recent_frames: int = DEFAULT_KEEP_RECENT_FRAMES,
         rebuild_every_frames: int = DEFAULT_REBUILD_EVERY_FRAMES,
@@ -2016,6 +2070,11 @@ class ProviderModelClient:
         self._stream_fn = stream_fn
         self._route = route
         self._model_spec = model_spec
+        if action_binding not in (LEGACY_ACTION_BINDING, COMPACT_ACTION_BINDING):
+            raise ValueError("action_binding must be 'legacy' or 'compact'")
+        self._action_binding = action_binding
+        # ``decide`` composes the capability-filtered prompt from this stable
+        # base; compact mode must not accidentally reuse the legacy instructions.
         self._system_prompt = system_prompt
         self._prompt_cache_key = prompt_cache_key
         base = compaction or CompactionSettings()
@@ -2090,7 +2149,7 @@ class ProviderModelClient:
     def model_reply_metadata(self) -> dict[str, Any]:
         # Optional client capability: scripted/historic clients must not claim
         # a prompt contract they never used. The runner stays provider-free.
-        return public_reply_contract()
+        return public_reply_contract(action_binding=self._action_binding)
 
     async def decide(
         self,
@@ -2138,9 +2197,11 @@ class ProviderModelClient:
             model=request_model,
             system_blocks=[
                 (
-                    build_system_prompt(action_surface)
+                    build_system_prompt(action_surface, self._action_binding)
                     if self._system_prompt == _SYSTEM_PROMPT
-                    else self._system_prompt + "\n\n" + build_system_prompt(action_surface)
+                    else self._system_prompt
+                    + "\n\n"
+                    + build_system_prompt(action_surface, self._action_binding)
                 )
             ],
             messages=list(messages),
@@ -2164,7 +2225,7 @@ class ProviderModelClient:
             # across steps and the cache prefix is unaffected.
             tools=reply_channel_tools(
                 self._model_spec,
-                public_reply_schema(action_surface),
+                public_reply_schema(action_surface, self._action_binding),
                 description=PUBLIC_REPLY_TOOL_DESCRIPTION,
             ),
             # Still "none" in intent for every OTHER tool: the episode drives
@@ -2383,6 +2444,7 @@ class ProviderModelClient:
                 context_tokens=_estimate_context(messages),
                 compaction=compaction,
                 action_surface=action_surface,
+                action_binding=self._action_binding,
                 # Was hardcoded to 0 while the runner sent no tools and read no
                 # call. Now that the reply channel exists, the bundle records
                 # how the model actually answered — which is the measurement
@@ -3128,6 +3190,7 @@ def create_provider_model_client(
     keep_recent_frames: int = DEFAULT_KEEP_RECENT_FRAMES,
     rebuild_every_frames: int = DEFAULT_REBUILD_EVERY_FRAMES,
     compaction: "CompactionSettings | None" = None,
+    action_binding: str = LEGACY_ACTION_BINDING,
 ) -> ProviderModelClient:
     """Build a provider-backed client from the harness's own stream function.
 
@@ -3186,6 +3249,7 @@ def create_provider_model_client(
         keep_recent_frames=keep_recent_frames,
         rebuild_every_frames=rebuild_every_frames,
         prompt_cache_key=session_id,
+        action_binding=action_binding,
     )
 
 

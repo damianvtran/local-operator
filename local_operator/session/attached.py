@@ -834,12 +834,18 @@ def frontend_attach_refusal(record: SessionRecord) -> str | None:
     mirrors — and the disagreement would be silent, since both spellings would
     keep compiling.
     """
-    if (
-        record.protocol < FRONTEND_ATTACH_MIN_PROTOCOL
-        or FRONTEND_CAPABILITY not in record.capabilities
-    ):
+    if FRONTEND_CAPABILITY not in record.capabilities:
         return (
             f"owner lacks {FRONTEND_CAPABILITY}; canonical full-TUI attach needs "
+            f"protocol >= {FRONTEND_ATTACH_MIN_PROTOCOL}"
+        )
+    if record.protocol < FRONTEND_ATTACH_MIN_PROTOCOL:
+        # Its own clause, because "lacks <capability>" is FALSE here: the owner
+        # announces the capability and is merely too old a protocol to attach
+        # canonically. `lop --resume` prints this sentence to the user (#1474,
+        # review round 2, N1), so it has to name the gap that actually exists.
+        return (
+            f"owner runs protocol v{record.protocol}; canonical full-TUI attach needs "
             f"protocol >= {FRONTEND_ATTACH_MIN_PROTOCOL}"
         )
     return None
@@ -967,6 +973,13 @@ class AttachedSession:
     asking. See :class:`SessionProtocol`'s runtime-role block.
     """
 
+    #: Paint-first marker (``ViewerSessionProtocol.attach_behind``). A CLASS
+    #: default, not only the ``__init__`` assignment below: ``False`` is the
+    #: right answer for every facade nobody chose paint-first for, and a class
+    #: attribute keeps a hand-built instance (``__new__`` in the protocol
+    #: conformance test) a viewer without reciting it.
+    attach_behind: bool = False
+
     def __init__(
         self,
         *,
@@ -1061,6 +1074,13 @@ class AttachedSession:
         #: prints it once on adoption so the user is told why the session came
         #: up bare instead of being left to guess (UX round 1, U2).
         self.degraded_reason: str = ""
+        #: The launcher opened this viewer cold IN FRONT OF a live owner it will
+        #: bind to behind the paint (``lop --resume`` / ``/resume`` onto a live
+        #: owner whose conversation is on disk). The TUI reads it to narrate and
+        #: bound that attach, which the ordinary cold open does not need: there
+        #: nothing is waiting on an owner that exists. Set by the caller that
+        #: chose paint-first, never inferred here.
+        self.attach_behind: bool = False
         #: Told when the runtime vanished for good; see ``_go_cold``.
         self._went_cold_callback: Callable[[], Any] | None = None
         #: Told when the runtime retired ITSELF for a newer build (the
@@ -1170,6 +1190,12 @@ class AttachedSession:
         self._degraded_resync_retry_task: asyncio.Task[None] | None = None
         self._frontend_refresh_cut: tuple[str, int] | None = None
         self._hydrated_once = False
+        #: The rows a COLD facade painted from disk before it ever bound, by id.
+        #: Set by :meth:`cold` / :meth:`saved_preview` and consumed by the first
+        #: :meth:`_load_frontend_history`, the one place that can see what the
+        #: owner wrote between that read and the bind (see
+        #: :meth:`_replay_cold_gap`).
+        self._cold_painted_ids: set[str] | None = None
         self._display_history: DisplayHistoryWindow | None = None
         self._history_hydrated = True
         #: Whether the PRE-COMPACTION rows behind the context replay are
@@ -1586,6 +1612,7 @@ class AttachedSession:
         self._can_go_cold = True
         self._display_window_requested = True
         self._bind_history(preview.messages, None, drop_history_duplicates=True)
+        self._cold_painted_ids = set(self._history_ids)
         model = FrontendModelSpec(provider="", model_id="")
         self._install_frontend(
             FrontendSessionState(
@@ -1657,6 +1684,7 @@ class AttachedSession:
             # title are present in the FIRST state the widgets ever see —
             # installing twice would paint an empty panel and then repaint it,
             # which is the visible flicker this whole change exists to remove.
+        self._cold_painted_ids = set(self._history_ids)
         # Children can persist a roster before the parent's first transcript
         # row. Absence of that file must not hide independently durable spend.
         state = self._restore_cold_details(state)
@@ -4386,6 +4414,7 @@ class AttachedSession:
         )
         self._display_revision += 1
         previous = self._display_history
+        cold_painted, self._cold_painted_ids = self._cold_painted_ids, None
         if window is None or window.status != "ok":
             # A REMOTE PLACEMENT REFUSES THE LEGACY FALLBACK (§3.4). The local
             # replay below reads ``sessions/<id>/transcript.jsonl`` — a file that,
@@ -4410,6 +4439,8 @@ class AttachedSession:
                 self._buffered_events.insert(
                     0, HistoryDeltaEvent(messages=list(self._history), reset=True)
                 )
+            elif cold_painted is not None:
+                self._replay_cold_gap(cold_painted)
             return
         self._validate_display_window(window, frontend.epoch, frontend.live_cursor)
         rows = list(window.messages)
@@ -4451,6 +4482,8 @@ class AttachedSession:
             self._buffered_events.insert(0, HistoryDeltaEvent(messages=rows, reset=True))
         elif self._hydrated_once and previous is not None:
             self._replay_durable_suffix(rows[max(0, previous.total_message_count - page.start) :])
+        elif cold_painted is not None:
+            self._replay_cold_gap(cold_painted)
         # Loaded rows suppress duplicate relay, but are not all painted: the
         # TUI mounts only its viewport and pages older rows later.
         self._live_message_phase.clear()
@@ -5292,6 +5325,45 @@ class AttachedSession:
         self._runtime_ready.set()
         self._drain_buffered_events()
         self._maybe_start_gate()
+
+    def _replay_cold_gap(self, cold_painted: set[str]) -> None:
+        """Paint the rows a cold facade's owner wrote after the cold read.
+
+        A COLD facade's FIRST bind. Its frontend painted the transcript it read
+        off disk, and the owner may have written rows since — a turn that
+        finished between the read and the bind, or the one it is still in.
+        :meth:`_replay_durable_suffix` never ran for that gap, because a
+        facade that has never hydrated has no ``previous`` window to measure
+        it against; and the bind has just folded those rows' ids into
+        ``_history_ids`` and ``_message_events``, so ``_is_duplicate`` swallows
+        their live ``message_end`` too. Neither route painted them: messages
+        silently missing from the screen on every paint-first attach, which
+        is the TUI's ``/resume`` and ``lop --resume`` onto a live owner.
+
+        The fix is to un-claim exactly the ids the cold read did NOT paint and
+        run the ordinary durable replay over the bound history, which claims
+        them again and emits them as ONE typed delta ahead of the buffered live
+        events — so they land in transcript order, once, before anything the
+        relay adds. Rows the cold read painted stay claimed and are not
+        repainted.
+
+        AN ID-LESS ROW IS DROPPED FROM THE UN-CLAIM ON PURPOSE (review round 1,
+        F3). Nothing can claim or dedupe a row without an id —
+        :meth:`_replay_durable_suffix` skips it for the same reason — so
+        releasing "" would release nothing. It is not lost: the TUI projects its
+        transcript from this facade's ``history()`` on the bind's rollover, and
+        that list carries the row whatever its id.
+        """
+        gap = {
+            str(getattr(message, "id", "") or "")
+            for message in self._history
+            if str(getattr(message, "id", "") or "") not in cold_painted
+        }
+        gap.discard("")
+        if not gap:
+            return
+        self._message_events -= gap
+        self._replay_durable_suffix(self._history)
 
     def _replay_durable_suffix(self, history: list[Any]) -> None:
         """Emit ONE typed history delta for durable rows nothing ever painted.
@@ -7587,19 +7659,53 @@ class AttachedSession:
         self,
         turns: list[Any],
         *,
+        aside_instruction: bool = True,
         on_delta: Callable[[str], None] | None = None,
         on_usage: Callable[[Usage], None] | None = None,
     ) -> str:
+        """Ask the owner for the off-record answer, STREAMING it as it arrives.
+
+        ``aside_instruction`` rides the wire with the request and the owner acts
+        on it: it is the caller's declaration that its turns still need the
+        off-record wrapper (see ``SessionProtocol.complete_aside``). False is what
+        a viewer that wrapped its own question sends — the TUI's ``/btw`` overlay
+        and its goal-loop judge — and sending it is what keeps the owner from
+        wrapping a request that already carries its own instruction.
+
+        ``on_delta`` is fed each chunk the owner streams while this request is
+        in flight — the same connection carries them, tagged with this request's
+        id — so the card paints the answer as the model writes it rather than
+        after the receipt. The RETURNED string is still the authoritative answer
+        (the receipt's ``detail``); a chunk that never arrived is cosmetic, a
+        receipt that never arrived is a failure.
+
+        THE FALLBACK IS THE OLD BEHAVIOUR, and it is deliberately kept: an owner
+        that sent NO deltas at all (one built before the stream existed, which
+        simply ignores the callback) gets its settled answer fed through the same
+        callback ONCE at the end. ``streamed`` is what stops a streaming owner
+        from being charged twice — the single post-hoc call fires only when
+        nothing was streamed, never as well as it.
+        """
         client = self._client
         if client is None:
             raise ConnectionError(self._unavailable_reason())
-        # The authoritative request currently returns a settled answer. Feed it
-        # through the normal delta callback once so the existing aside widget
-        # uses the same rendering path without inventing remote-only UI state.
+        payload = [turn.model_dump(mode="json") for turn in turns if hasattr(turn, "model_dump")]
+        if on_delta is None:
+            # No sink to feed, so nothing to fall back to: the settled answer is
+            # the whole reply, exactly as this method behaved before the stream.
+            return await client.complete_aside(payload, aside_instruction=aside_instruction)
+        streamed = False
+
+        def relay(text: str) -> None:
+            nonlocal streamed
+            streamed = True
+            if text:
+                on_delta(text)
+
         answer = await client.complete_aside(
-            [turn.model_dump(mode="json") for turn in turns if hasattr(turn, "model_dump")]
+            payload, aside_instruction=aside_instruction, on_delta=relay
         )
-        if answer and on_delta is not None:
+        if answer and not streamed:
             on_delta(answer)
         return answer
 

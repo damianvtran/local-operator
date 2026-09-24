@@ -418,3 +418,118 @@ def test_an_attached_pane_parks_a_gate_without_anyone_watching_it(monkeypatch) -
     )
 
     assert handle._gate_timeout_s() == 24 * 3600.0
+
+
+def _handle_with_marker(monkeypatch, directory):  # noqa: ANN001
+    """A handle whose session lives in ``directory``, so its origin decides.
+
+    ``_announce_pending`` asks the marker question of the session's own
+    transcript directory (:func:`serving._session_may_announce`), so the rig has
+    to place the session there rather than double the predicate — otherwise the
+    test would pass on a stub instead of on the rule the product reads.
+    """
+
+    class _Transcript:
+        def __init__(self) -> None:
+            self.directory = directory
+
+        async def append_message(self, message):  # noqa: ANN001
+            return None
+
+    handle = _handle(monkeypatch, attached=0)
+    handle._session = type(
+        "S", (), {"conversation_name": "deploy checks", "transcript": _Transcript()}
+    )()
+    return handle
+
+
+def test_a_hidden_session_publishes_the_gate_but_sends_no_toast(monkeypatch, tmp_path) -> None:
+    """The DURABLE half runs even when the OS half is skipped, and that is the design.
+
+    A parked gate holds a process resident for up to a day, so "a gate nobody can
+    see is a process nobody can find": the record's ``pending`` field is what
+    keeps it in ``lop sessions`` and first in the picker, and the supervising
+    session may itself be waiting on it. What a hidden run must not do is put a
+    card on the operator's lock screen about work he cannot see in any list.
+    """
+    from local_operator.resume import ORIGIN_AGENT_SHELL, mark_session_origin
+
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "local_operator.tui.notify.detached_notify",
+        lambda title, body, **kwargs: sent.append((title, body)) or True,
+        raising=False,
+    )
+    directory = tmp_path / "sessions" / "hidden000001"
+    directory.mkdir(parents=True)
+    mark_session_origin(directory, ORIGIN_AGENT_SHELL)
+    handle = _handle_with_marker(monkeypatch, directory)
+
+    handle._announce_pending("approval", "bash", "rm -rf build/")
+
+    assert sent == [], "a hidden session toasted the operator about work he cannot see"
+    assert handle._registrant.pending == ["approval"], "the gate stopped being findable"
+
+
+def test_a_workstream_gate_is_still_toasted(monkeypatch, tmp_path) -> None:
+    """The mirror case: a run the operator asked for keeps its out-of-band card."""
+    from local_operator.resume import ORIGIN_AGENT_WORKSTREAM, mark_session_origin
+
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "local_operator.tui.notify.detached_notify",
+        lambda title, body, **kwargs: sent.append((title, body)) or True,
+        raising=False,
+    )
+    directory = tmp_path / "sessions" / "workstr000001"
+    directory.mkdir(parents=True)
+    mark_session_origin(directory, ORIGIN_AGENT_WORKSTREAM, opened_by={"session": "req000000001"})
+    handle = _handle_with_marker(monkeypatch, directory)
+
+    handle._announce_pending("approval", "bash", "rm -rf build/")
+
+    assert len(sent) == 1, sent
+    assert "deploy checks" in sent[0][0]
+
+
+@pytest.mark.parametrize(
+    ("origin", "expected"),
+    [
+        ("agent-shell", PENDING_REQUEST_TIMEOUT_S),
+        ("agent-workstream", DEFAULT_UNATTENDED_GATE_TIMEOUT_H * 3600.0),
+        (None, DEFAULT_UNATTENDED_GATE_TIMEOUT_H * 3600.0),
+    ],
+)
+def test_an_unattached_gate_parks_only_where_a_banner_may_reach_someone(
+    monkeypatch, tmp_path, origin, expected
+) -> None:
+    """The long park is a bet that the OS banner tells a person; a hidden run sends none.
+
+    `_announce_pending` skips the OS leg for a session the listings hide, so the
+    notify flag alone promised a reader who never came: an unattached
+    ``agent-shell`` gate parked for 86,400 s with zero toasts, holding its
+    process for a day (PR #1436 agent review round 1, F2). The workstream and the
+    operator's own session (no marker) keep the day, because their banner goes.
+    """
+    from local_operator.resume import mark_session_origin
+
+    directory = tmp_path / "sessions" / "gate00000001"
+    directory.mkdir(parents=True)
+    if origin is not None:
+        mark_session_origin(directory, origin)
+    handle = _handle_with_marker(monkeypatch, directory)
+
+    assert handle._gate_timeout_s() == expected
+
+
+def test_an_attached_pane_still_parks_a_hidden_sessions_gate(monkeypatch, tmp_path) -> None:
+    """The short cap is for "nobody can learn of it"; a mounted pane can present it."""
+    from local_operator.resume import ORIGIN_AGENT_SHELL, mark_session_origin
+
+    directory = tmp_path / "sessions" / "gate00000002"
+    directory.mkdir(parents=True)
+    mark_session_origin(directory, ORIGIN_AGENT_SHELL)
+    handle = _handle_with_marker(monkeypatch, directory)
+    handle._registrant._attached = 1
+
+    assert handle._gate_timeout_s() == DEFAULT_UNATTENDED_GATE_TIMEOUT_H * 3600.0

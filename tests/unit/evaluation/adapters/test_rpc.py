@@ -30,7 +30,12 @@ from local_operator.evaluation.adapters.rpc import (
     parse_canonical_line,
 )
 from local_operator.evaluation.evidence.models import canonical_digest
-from local_operator.evaluation.protocol import MAX_TEXT_LENGTH, ActionBatch, TypeAction
+from local_operator.evaluation.protocol import (
+    MAX_TEXT_LENGTH,
+    ActionBatch,
+    ClickAction,
+    TypeAction,
+)
 
 
 def request_line() -> bytes:
@@ -535,6 +540,131 @@ async def test_a_funded_call_reports_the_budget_it_exceeded_not_the_callers_cons
     # unchanged by which number the sentence names.
     assert "(request 1; operation_id exec-declared)" in message
     assert terminated.is_set()
+
+
+def _overhead_only_execute() -> ExecuteParams:
+    """An ``execute`` whose ONLY declared duration is the per-action overhead.
+
+    One mutating action and no waits, so the batch declares 0.0 s of its own: the
+    one shape that separates "the rate reached ``funded_timeout``" from "the rate
+    was dropped on the way". A wait-bearing batch funds the call whether or not
+    the rate survives, which is why the episode-level test -- whose fake adapter
+    calls ``funded_timeout`` in its own body -- could not see a dropped argument.
+    """
+
+    batch = ActionBatch(
+        protocol_version="1.0",
+        task_id="task",
+        episode_id="episode",
+        observation_id="obs",
+        actions=(ClickAction(observation_id="obs", frame_id="screen", x=1, y=2),),
+    )
+    return ExecuteParams(
+        operation_id="exec-overhead",
+        action_batch=batch,
+        action_batch_id=canonical_digest("adapter-action-batch-v1", batch),
+    )
+
+
+async def _execute_timeout_message(
+    params: ExecuteParams,
+    *,
+    timeout: float,
+    execution_overhead_seconds_per_action: float | None = None,
+) -> str:
+    """The ``TimeoutError`` sentence from a real ``RpcClient.call`` on ``execute``.
+
+    The peer reads the request and never answers, so the call can only end by
+    firing its deadline -- which is what makes the sentence's elapsed field a
+    reading of THAT deadline rather than of a reply arriving first.
+    """
+
+    requests_read, requests_write = os.pipe()
+    responses_read, responses_write = os.pipe()
+
+    async def terminate() -> None:
+        return None
+
+    client = RpcClient(requests_write, responses_read, terminate=terminate)
+    peer = asyncio.create_task(_silent_peer(requests_read))
+    try:
+        with pytest.raises(TimeoutError) as excinfo:
+            if execution_overhead_seconds_per_action is None:
+                await client.call("execute", params, timeout=timeout)
+            else:
+                await client.call(
+                    "execute",
+                    params,
+                    timeout=timeout,
+                    execution_overhead_seconds_per_action=(execution_overhead_seconds_per_action),
+                )
+        message = str(excinfo.value)
+    finally:
+        # Before any assertion and for every exception: see `_finish_peer`.
+        await _finish_peer(peer, requests_read, requests_write, responses_read, responses_write)
+    return message
+
+
+@pytest.mark.asyncio
+async def test_the_per_action_overhead_rate_raises_the_execute_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rate has to arrive at ``funded_timeout`` from the real RPC call.
+
+    This is the hop the episode-level test cannot see: ``FakeAdapter._call_raw``
+    calls ``funded_timeout`` in its own body, so an argument lost anywhere
+    between ``VerifiedAdapterSession`` and this method still funds the fake
+    deadline and the fake still reports the funded number. Here the call is the
+    real one and the deadline is the real ``wait_for``, so the budget the
+    sentence names can only have come from the rate threaded through this call.
+    The headroom is monkeypatched for the reason its sibling funded test gives:
+    at the 30 s default a funded call cannot be made to time out inside a test.
+    """
+
+    monkeypatch.setattr(deadlines, "DECLARED_WORK_HEADROOM_S", 0.5)
+    rate_s, configured_s = 0.5, 0.01
+    message = await _execute_timeout_message(
+        _overhead_only_execute(),
+        timeout=configured_s,
+        execution_overhead_seconds_per_action=rate_s,
+    )
+
+    funded_s = rate_s + 0.5
+    assert f"execute exceeded its {funded_s:g}s budget" in message
+    # The caller's constant is the only other number in scope, and naming it
+    # would report a budget the call never ran under.
+    assert f"its {configured_s:g}s budget" not in message
+    # Pinned on the number the sentence itself renders, never on a stopwatch out
+    # here: the timeout path adds its own 1 s cancel grace AFTER ``elapsed`` is
+    # sampled, so a floor measured around ``client.call`` is satisfied by
+    # construction and would pass against a ``wait_for`` left on the constant.
+    match = re.search(r"after (\d+\.\d)s \(request 1; operation_id exec-overhead\)$", message)
+    assert match is not None, f"the elapsed field moved out of the message contract: {message!r}"
+    rendered_elapsed = float(match.group(1))
+    assert rendered_elapsed >= funded_s
+    assert rendered_elapsed < funded_s + 0.5
+
+
+@pytest.mark.asyncio
+async def test_the_zero_overhead_default_leaves_the_execute_deadline_unchanged() -> None:
+    """The opt-in is inert by default: an unset rate funds nothing.
+
+    Every ordinary caller -- the observation resume, the cleanup call, every
+    adapter that is not the paper-settle path -- keeps the caller's constant as
+    the whole deadline for a batch that declares no waiting of its own. Asserted
+    on the deadline's own firing time rather than only on the sentence: a default
+    that quietly funded some nominal rate would raise the rendered elapsed by the
+    same order of magnitude the funded case shows.
+    """
+
+    configured_s = 0.01
+    message = await _execute_timeout_message(_overhead_only_execute(), timeout=configured_s)
+
+    assert f"execute exceeded its {configured_s:g}s budget" in message
+    match = re.search(r"after (\d+\.\d)s \(request 1; operation_id exec-overhead\)$", message)
+    assert match is not None, f"the elapsed field moved out of the message contract: {message!r}"
+    # 0.01 s of deadline, not the 1.0 s a funded 0.5 s-per-action rate would give.
+    assert float(match.group(1)) < 0.5
 
 
 @pytest.mark.asyncio

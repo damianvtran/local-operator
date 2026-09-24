@@ -4655,3 +4655,73 @@ async def test_the_drawn_age_column_band_edge_is_pinned() -> None:
             assert plan.age_width == AGE_CELLS, size
             assert cell_len(row) == expected, (size, cell_len(row), expected)
             assert cell_len(row) <= results.size.width, size
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("opened_by", "gutter"),
+    [
+        ({"agent": "coder", "label": "1428 review", "session": "req000000001"}, "▸ coder"),
+        # Every member unreadable: the fact that an AGENT opened it is still
+        # certain, so the label says that rather than falling back to `you`.
+        ({"agent": None, "label": None, "session": None}, "▸ agent"),
+    ],
+)
+async def test_an_agent_opened_preview_does_not_attribute_the_agents_prompt_to_you(
+    tmp_path: Path, opened_by: dict[str, str | None], gutter: str
+) -> None:
+    """Design round 1, D1: the preview labelled the delegating agent's prompt `▸ you`.
+
+    A workstream's first user turn is the agent's words, so `you` was a positive,
+    wrong answer to "is this session mine?" — the 2026-09-18 incident restated as
+    a label. The first user turn is gutted with the opener instead, and the meta
+    row carries the desktop's literal `· agent-opened` (#448). Only the FIRST
+    user turn is relabelled: a later one may be the operator resuming the run,
+    and the transcript does not say which. The operator's own row, beside it in
+    the same picker, keeps `▸ you` and no mark.
+    """
+    _write_transcript(
+        tmp_path,
+        "ws0000000001",
+        [
+            _message("user", "Audit the ingest pipeline for dropped rows"),
+            _message("assistant", "On it."),
+            _message("user", "Also check the retry queue"),
+        ],
+    )
+    _write_transcript(tmp_path, "own000000001", [_message("user", "My own question")])
+    workstream = SessionRow(
+        id="ws0000000001", mtime=NOW - 60, name="Fan-out audit", opened_by=opened_by
+    )
+    app = _PickerHost([workstream, _row("own000000001", "My own question", age_s=120)])
+    async with app.run_test(size=(120, 36)) as pilot:
+        screen = await app.open_picker()
+        screen.use_previews_for_test(tmp_path / "sessions")
+        await pilot.pause()
+        pane = [line.rstrip() for line in screen.render_preview_for_test()]
+        assert pane[1].endswith("· agent-opened"), pane[:3]
+        gutters = [line for line in pane if line.startswith("▸") or line.startswith("▪")]
+        assert gutters == [gutter, "▪ lop", "▸ you"], pane
+        # And the row's own list line is untouched: the fix is in the pane.
+        assert any("Fan-out audit" in line for line in screen.render_lines_for_test())
+
+        await pilot.press("down")
+        await pilot.pause()
+        own = [line.rstrip() for line in screen.render_preview_for_test()]
+        assert "agent-opened" not in own[1], own[:3]
+        assert [line for line in own if line.startswith("▸")] == ["▸ you"], own
+
+
+def test_the_agent_opened_mark_outranks_started_on_a_narrow_meta_row() -> None:
+    """The mark is what stops the row reading as the operator's own; `started` is not."""
+    assert (
+        _clocks_row("3h ago", "1m ago", 60, agent_opened=True)
+        == "started 3h · last worked 1m · agent-opened"
+    )
+    assert _clocks_row("3h ago", "1m ago", 30, agent_opened=True) == "last worked 1m · agent-opened"
+    assert _clocks_row("3h ago", "1m ago", 16, agent_opened=True) == "last worked 1m"
+    # Unflagged rows are byte-for-byte the old ladder.
+    for width in (60, 30, 16, 5):
+        assert _clocks_row("3h ago", "1m ago", width) == _clocks_row(
+            "3h ago", "1m ago", width, agent_opened=False
+        )

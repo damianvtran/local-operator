@@ -2886,3 +2886,161 @@ def test_migrate_is_registered_in_the_parser() -> None:
     than erroring out at argparse."""
     parsed = cli.build_cli_parser().parse_args(["qwencloud-ticket", "migrate"])
     assert parsed.qwencloud_command == "migrate"
+
+
+@pytest.mark.parametrize(
+    ("protocol", "capable", "expect_dial"),
+    [
+        # An owner on an OLDER build: the dial must still run, because `connect`
+        # raising its static refusal is the only thing that tells the user why
+        # the conversation opened inert. v3, not v1: `find_runtime_record`
+        # drops any record below protocol 2 before `cli.py` sees it, so a v1
+        # row here would be a logic probe of a shape production never delivers
+        # (review round 2, M2). v2-v4 with the capability is the reachable gap.
+        (3, True, True),
+        (5, False, True),
+        # A current owner: paint first, attach behind (no dial on this path).
+        (5, True, False),
+    ],
+)
+def test_resume_onto_a_refused_owner_keeps_the_compatibility_notice(
+    tmp_home: Path,
+    quiet_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    protocol: int,
+    capable: bool,
+    expect_dial: bool,
+) -> None:
+    """`lop --resume <id>` onto an older-build owner (review round 1, F1).
+
+    The paint-first branch skipped `connect` whenever a transcript was on disk,
+    and `connect`'s `ConnectionError(refusal)` is what fills `degraded_reason`,
+    so the "opened without live session state — needs protocol >= N" notice
+    silently disappeared for exactly the owner it was written for. Driven
+    through the real `main()` so the record, the refusal and the viewer the TUI
+    receives are the production ones; only `cold`, the record lookup and the
+    TUI entry are stand-ins.
+    """
+    from local_operator.session.attached import FRONTEND_ATTACH_MIN_PROTOCOL
+    from local_operator.session.frontend_state import FRONTEND_CAPABILITY
+    from local_operator.session.runtime.types import SessionRecord
+
+    config = tmp_home / ".local-operator"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    directory = config / "sessions" / "older0owner1"
+    directory.mkdir(parents=True)
+    (directory / "transcript.jsonl").write_text("", encoding="utf-8")
+    record = SessionRecord(
+        pid=424242,
+        kind="daemon",
+        session_id="older0owner1",
+        conversation_name="older",
+        cwd=str(tmp_home),
+        model_label="test/model",
+        control_port=1,
+        control_key="k",
+        protocol=protocol,
+        capabilities=[FRONTEND_CAPABILITY] if capable else [],
+    )
+    seen: dict[str, Any] = {"dials": 0}
+
+    class _Viewer:
+        degraded_reason = ""
+
+    async def fake_cold(*args, **kwargs):
+        return _Viewer()
+
+    real_connect = cli_attached_connect()
+
+    async def counting_connect(record_arg, *args, **kwargs):
+        seen["dials"] += 1
+        # The REAL refusal: a current record would dial a socket that is not
+        # there, so only the refused shapes reach the production body.
+        return await real_connect(record_arg, *args, **kwargs)
+
+    async def run_tui(session_factory, *args, **kwargs):
+        seen["viewer"] = await session_factory()
+        return 0
+
+    fake_tui = _fake_tui_module()
+    setattr(fake_tui, "run_tui", run_tui)
+    monkeypatch.setitem(sys.modules, "local_operator.tui", fake_tui)
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.find_runtime_record",
+        lambda _root, _sid: (record, record.pid),
+    )
+    monkeypatch.setattr(
+        "local_operator.session.attached.AttachedSession.cold", staticmethod(fake_cold)
+    )
+    monkeypatch.setattr(
+        "local_operator.session.attached.AttachedSession.connect",
+        staticmethod(counting_connect),
+    )
+    monkeypatch.setattr(
+        "local_operator.session_factory.resolve_hosting_model",
+        lambda *a, **k: ("test", "mock"),
+    )
+    monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
+    monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    with patch("sys.argv", ["program", "--resume", "older0owner1"]):
+        assert main() == 0
+
+    reason = seen["viewer"].degraded_reason
+    if expect_dial:
+        assert seen["dials"] == 1, "a refused owner must still be dialled for its sentence"
+        assert f"protocol >= {FRONTEND_ATTACH_MIN_PROTOCOL}" in reason, reason
+        # The sentence names the gap that exists (review round 2, N1): an owner
+        # that ANNOUNCES the capability must not be told it lacks it.
+        if capable:
+            assert "lacks" not in reason and f"v{protocol}" in reason, reason
+        else:
+            assert "lacks" in reason, reason
+    else:
+        assert seen["dials"] == 0, "a current owner paints first; the dial is behind"
+        assert reason == ""
+
+
+def cli_attached_connect():
+    """The unpatched `AttachedSession.connect`, captured before a test swaps it."""
+    from local_operator.session.attached import AttachedSession
+
+    return AttachedSession.connect
+
+
+def test_the_workstream_flag_is_carried_and_leaves_the_approval_posture_alone(
+    tmp_home: Path, quiet_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`lop exec --workstream` chooses the row's visibility and nothing else.
+
+    It used to imply ``--control`` on the belief that only a controlled run is
+    steerable. Every exec run already publishes its record and serves the socket,
+    so that bought nothing, while ``--control`` changes the APPROVAL posture:
+    gates park for a day instead of being denied, and ``--tools`` stops standing
+    as the approval. The fan-out shape (`--workstream --background --tools
+    bash,write`) then parked on its first write where the same command without
+    the flag ran (PR #1436 agent review round 1, F1). The two flags stay
+    composable: a caller who wants both says both.
+    """
+    captured: dict[str, Any] = {}
+
+    def fake_run_exec(command: str, exec_args) -> int:
+        captured["args"] = exec_args
+        return 0
+
+    monkeypatch.setattr("local_operator.exec_mode.run_exec", fake_run_exec)
+    monkeypatch.setattr(
+        "local_operator.exec_mode.resolve_hosting_model_dry", lambda args: ("test", "m")
+    )
+    base = ["program", "--hosting", "test", "--model", "m", "exec", "do it"]
+    monkeypatch.setattr("sys.argv", [*base, "--workstream"])
+    assert main() == 0
+    exec_args = captured.pop("args")
+    assert exec_args.workstream is True
+    assert exec_args.control is False, "--workstream changed the approval posture"
+
+    monkeypatch.setattr("sys.argv", [*base, "--workstream", "--control"])
+    assert main() == 0
+    exec_args = captured.pop("args")
+    assert (exec_args.workstream, exec_args.control) == (True, True)

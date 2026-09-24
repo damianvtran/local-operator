@@ -138,10 +138,24 @@ async def _wait_for_resume(pilot, app: OperatorApp, *, min_blocks: int = 1) -> N
     the first frame, and asserting on an empty transcript then reads as the
     bound dropping every row. Wait for the replay the same way the bang-mode
     tests wait for ``shell_records``.
+
+    WAITS FOR THE SETTLED WINDOW, not for the first block (QA round 1, Q1).
+    The viewport-first resume paints one screen, then mounts the rest of the
+    80-message window a frame later under the paging lease — and the first
+    frame's head notice is that lease's LOADING copy. "Any block exists" returned
+    on that interim frame, so an assertion about the settled window (the head
+    notice's text, the painted count) raced the backfill and lost under xdist
+    load. The predicate is the one the paging suite already settles on: the
+    resume fill and every page it owns have finished.
     """
-    for _ in range(50):
+    for _ in range(200):
         await pilot.pause()
-        if len(app.query_one(TranscriptView).blocks()) >= min_blocks:
+        if (
+            len(app.query_one(TranscriptView).blocks()) >= min_blocks
+            and not app._resume_fill_active
+            and not app._resume_paging
+            and not app._resume_check_pending
+        ):
             return
     raise AssertionError(
         f"resume never painted (blocks={len(app.query_one(TranscriptView).blocks())})"
@@ -2117,3 +2131,167 @@ async def test_a_refused_fill_start_post_does_not_strand_the_fill_flag() -> None
 
         assert refused["hit"], "the fill's start post was never refused; hazard not armed"
         assert app._resume_fill_active is False
+
+
+# --- The viewport-first split (review round 1, F2) -------------------------
+#
+# `_render_resumed_history` paints ONE SCREEN first and mounts the rest of the
+# 80-message window as one page after that paint. These pin the three halves of
+# its contract through the real app's compositor, not through the helper: the
+# frames asserted on are the frames `Screen._compositor_refresh` actually
+# painted, which is the only place an off-tail frame is observable.
+
+
+class _PaintLog:
+    """Every composited frame of the transcript, and whether its NEWEST row was on it.
+
+    "On the tail" is read off the compositor's own ``visible_widgets`` for the
+    frame it just painted, NOT off ``scroll_y`` against ``max_scroll_y``: both of
+    those are the transcript's reactive state, and in the frames the tail hold
+    exists for they agree with each other (0 == 0 on an extent the placement has
+    not caught up with) while the painted rows are a screenful above the newest
+    one. Measured: with the hold disabled the reactive comparison passed every
+    frame, and this one caught 2-3 per resume.
+    """
+
+    def __init__(self, monkeypatch, app: OperatorApp) -> None:
+        from textual.screen import Screen
+
+        self.frames: list[tuple[int, bool, str | None]] = []
+        #: EMPTY transcript frames painted AFTER the first content frame. Kept
+        #: rather than skipped (review round 2, M3): a frame with no rows is the
+        #: one blank-transcript artefact this family can produce, and skipping
+        #: it made "no more than that" unpinnable. Frames before the first
+        #: content are the boot composition, not a regression, so not counted.
+        self.blank_after_content = 0
+        #: Frames skipped because the newest row was not mounted yet (see below).
+        self.mid_mount = 0
+        original = Screen._compositor_refresh
+
+        def recording(screen) -> None:  # noqa: ANN001
+            original(screen)
+            try:
+                view = app.query_one(TranscriptView)
+            except Exception:  # noqa: BLE001 — before the transcript is composed
+                return
+            blocks = view.blocks()
+            if not blocks:
+                if self.frames:
+                    self.blank_after_content += 1
+                return
+            if not blocks[-1].is_mounted:
+                # A frame composited while the batch mount is still IN FLIGHT:
+                # the view's list already names the newest row, the DOM has not
+                # placed it (region 0x0), so "is it on screen" has no answer yet.
+                # Under host load a refresh can land between the list append and
+                # the mount (measured at load ~170: `is_mounted=False`, region
+                # 0x0, scroll exactly on the tail target) on the pre-remediation
+                # head as well, 3/8 runs. Judging it as "off the tail" made this
+                # instrument flaky rather than discriminating; the placement the
+                # tail hold owns is judged on every frame whose rows exist.
+                self.mid_mount += 1
+                return
+            head = blocks[0].text() if isinstance(blocks[0], NoticeBlock) else None
+            newest_painted = blocks[-1] in screen._compositor.visible_widgets
+            self.frames.append((len(blocks), newest_painted, head))
+
+        monkeypatch.setattr(Screen, "_compositor_refresh", recording)
+
+    def off_tail(self) -> list[tuple[int, bool, str | None]]:
+        return [frame for frame in self.frames if not frame[1]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "n_turns",
+    [
+        # 600 messages: the window keeps a head notice.
+        200,
+        # 60 messages: the whole conversation fits the window, so the backfill
+        # REMOVES the first paint's head notice, which shrinks the extent — the
+        # frame the tail hold exists for.
+        20,
+    ],
+)
+async def test_the_first_painted_frame_is_the_screenful_cut_on_the_tail(
+    monkeypatch, n_turns: int
+) -> None:
+    """The first frame carries only the screenful, and no painted frame is off the tail."""
+    session = FakeSession()
+    session._history = _history(n_turns)
+    history = list(session.history())
+    app = OperatorApp(lambda: _factory(session))
+    log = _PaintLog(monkeypatch, app)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _wait_for_resume(pilot, app)
+        screenful = app_module._viewport_message_budget(app.size.height)
+        first_cut = _resume_tail_start(history, screenful)
+        full_cut = _resume_tail_start(history, RESUME_RENDER_MESSAGES)
+        assert first_cut > full_cut, "the fixture must exercise the split"
+        first_blocks = log.frames[0][0]
+        settled_blocks = len(app.query_one(TranscriptView).blocks())
+        assert first_blocks < settled_blocks, (
+            "the first paint carried the whole window: the split did not run",
+            log.frames[:3],
+        )
+        assert not log.off_tail(), ("a painted frame left the tail", log.off_tail())
+        # The backfill mounts INTO the painted screenful; it never clears it.
+        assert log.blank_after_content == 0, "the fill painted an empty transcript"
+
+
+@pytest.mark.asyncio
+async def test_the_backfill_lands_on_the_one_shot_frames_snapped_cut() -> None:
+    """Once settled, the held head is exactly what the one-shot frame held."""
+    session = FakeSession()
+    session._history = _history(200)
+    history = list(session.history())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _wait_for_resume(pilot, app)
+        full_cut = _resume_tail_start(history, RESUME_RENDER_MESSAGES)
+        held = [getattr(m, "id", None) for m in app._resume_pending_head]
+        assert held == [
+            getattr(m, "id", None) for m in history[:full_cut]
+        ], "the backfill ended on a different boundary than the one-shot frame"
+        blocks = app.query_one(TranscriptView).blocks()
+        assert isinstance(blocks[0], NoticeBlock)
+        assert blocks[0].text() == RESUME_OLDER_NOTICE
+        mounted_users = _user_texts(app)
+        expected_users = [m.text for m in history[full_cut:] if m.role == "user"]
+        assert mounted_users == expected_users
+
+
+@pytest.mark.asyncio
+async def test_a_block_above_the_fold_growing_after_settle_keeps_the_reader_on_the_tail() -> None:
+    """Growth above the viewport after the window settles leaves a follower on the tail.
+
+    What is pinned is where the reader ENDS UP, because that is the part the
+    split is responsible for: the backfill releases its tail hold at settle, and
+    a release that also dropped the follow would strand the reader above the
+    newest row the first time anything above them grew. The single frame IN
+    WHICH such growth lands is deliberately not asserted here: it paints without
+    the newest row on this head and identically on main (measured on both), so
+    it is the settled transcript's own growth handling, not something this
+    split introduced or can hold across — the hold ends when the window does.
+    """
+    session = FakeSession()
+    session._history = _history(200)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _wait_for_resume(pilot, app)
+        view = app.query_one(TranscriptView)
+        assert not view._hold_tail_placement, "the split's tail hold outlived the window"
+        before = view.virtual_size.height
+        # A block well above the fold grows by forty rows — the shape a refit
+        # or a late-expanding card produces.
+        above = next(
+            b
+            for b in view.blocks()
+            if isinstance(b, UserBlock) and b.virtual_region.bottom < view.scroll_y
+        )
+        above.styles.min_height = above.virtual_region.height + 40
+        for _ in range(8):
+            await pilot.pause()
+        assert view.virtual_size.height > before, "the fixture must actually grow"
+        assert view.max_scroll_y - view.scroll_y <= 0.5, (view.scroll_y, view.max_scroll_y)
+        assert view.blocks()[-1] in app.screen._compositor.visible_widgets

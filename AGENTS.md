@@ -259,14 +259,19 @@ stylistic, and both are documented at length in `tests/e2e/watchdog.py`:
 
 - **Its failure mode is a hang, not an assertion.** The deadlock parks two
   threads inside syscalls, so `asyncio.wait_for`, thread watchdogs and
-  signal-based timeouts all fail to fire — verified, not assumed. Only
-  `faulthandler.dump_traceback_later(exit=True)` survives it, because it runs
-  in a C thread and needs no GIL. A tripped watchdog kills the process and
-  writes every thread's stack to a file; `python -m tests.e2e.watchdog` prints
-  it back.
-- **It is why the stage is deselected and runs `-n0`.** Under xdist a fired
-  watchdog would kill a worker carrying unrelated tests and report them as an
-  infrastructure error rather than as the freeze they are.
+  Python-level signal timeouts all fail to fire — verified, not assumed, and
+  *Python-level* is the narrow claim: a Python signal handler runs only between
+  bytecodes, which a wedged process never produces.
+  `faulthandler.dump_traceback_later` survives it, because it runs in a C
+  thread and needs no GIL. It is armed dump-only (`exit=False`): the C callback
+  writes every thread's stack to a file and ends nothing, and the fast-fail is
+  a kernel-level `SIGALRM` one grace later — disposition `SIG_DFL`, so nothing
+  has to be scheduled for it to fire. `python -m tests.e2e.watchdog`
+  prints the retained dump back.
+- **It is why the stage is deselected and runs `-n0`.** `faulthandler`'s timer
+  is process-global, so under xdist a `bounded` block would take a worker's
+  stacks with it for the rest of the item, and a hang nothing in-process can end
+  would strand the run as an infrastructure error rather than a freeze.
 
 Most of it is headless (Textual's `run_test()` pilot, no window, no display),
 but not all of it, and the exception is load-bearing: a few members drive the
@@ -1574,6 +1579,25 @@ every agent shell (which is why this paragraph names the `exec` form). A
 conversation a run merely RESUMES is never re-marked — that
 is the operator's own work.
 
+**`--workstream` is the ONE explicit exception, and it is opt-in per run.**
+`lop exec --workstream` asks for the opposite disposition: a long-lived parallel
+workstream the operator asked for is LISTED in the sidebar, `/resume` and the
+phone list — by minting `resume.ORIGIN_AGENT_WORKSTREAM`, a second value
+registered in `USER_ORIGINS`, which every listing in the tree already funnels
+through — and it carries `opened_by` (the opening session's role, task label and
+session id) so a machine-started row cannot be mistaken for one the operator
+opened. It chooses visibility only and does NOT imply `--control`: every exec
+run already publishes a discovery record, so the row is steerable either way,
+and `--control` would change the approval posture. Absent the flag nothing changes: an
+unflagged agent run is `agent-shell`, hidden and silent, and a hidden run raises
+no completion banner of its own — its supervising session owns it, and the durable
+records still make it findable. Reach for the flag only when the operator asked
+for parallel sessions; a run that was not asked for is noise in their list. The
+marker is written once, at creation, so a run started without the flag cannot be
+promoted later by editing it — start it as a workstream instead — while
+`lop exec --resume <id>` of a workstream does not re-stamp and therefore keeps the
+row listed. `docs/EXEC.md` owns the flag table and the full semantics.
+
 **Scripts that drive the real CLI must declare themselves.** A bench, an eval
 driver or a pty harness runs `exec` — or the TUI — as a child of YOUR shell, so
 it inherits the marker and every inner run would be refused, which reads as a
@@ -2636,12 +2660,14 @@ because a Python signal handler only runs between bytecodes. The pre-fix code
 ignored a 20 s thread watchdog and had to be `kill -9`'d.
 
 That class is covered by `tests/e2e/watchdog.py`, whose
-`faulthandler.dump_traceback_later(exit=True)` is armed in C and fires from a
-separate OS thread, so it survives a wedged interpreter and takes the process
-down with a full thread dump. It runs as its own CI stage (`tui-e2e`, both
-Linux and macOS) rather than in the unit run, since firing it under `-n auto`
-would kill a worker carrying unrelated tests. If you are guarding against a
-hang rather than a stall, that is the file to read.
+`faulthandler.dump_traceback_later(exit=False)` is armed in C and fires from a
+separate OS thread, so it survives a wedged interpreter and dumps every thread —
+and whose `SIGALRM` arm is what ends a process still wedged at its bound a 5 s
+grace later, so the run fails at the bound instead of the job ceiling. It runs as
+its own CI stage (`tui-e2e`, both Linux and macOS) rather than in the unit run:
+`faulthandler`'s timer is process-global, so under `-n auto` a `bounded` block
+would take a worker's stacks for the rest of the item. If you are guarding
+against a hang rather than a stall, that is the file to read.
 
 ## TUI conventions worth knowing before you edit a widget
 

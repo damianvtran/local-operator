@@ -329,6 +329,28 @@ before any descriptor is persisted, before anything is allocated. The
 credential-store resolver (`runner/host_secrets.py`) is the only runner
 module besides `provider_client.py` allowed near the store.
 
+## Action pacing and protocol comparison
+
+The evaluation runner seals the effective `OSWORLD_ACTION_SETTLE_POLICY` in
+episode infra and manifest metadata. `throughput` is the default: it preserves
+the legacy one-settle-per-model-batch behavior. `paper` is an opt-in mode that
+settles for 3.0 seconds after each compiled nonterminal semantic action. A
+`WAIT` runs for its requested duration first, then receives a separate 3.0 s
+settle; a compound compiled scroll statement is one semantic action.
+
+Both policies retain one observation/readback after each whole model batch.
+Upstream OSWorld can expose/log intermediate states between primitive actions,
+so paper mode provides settle-timing parity, not exact trajectory or
+observation parity. Multi-action paper batches therefore add wall time and
+provider execute overhead compared with throughput mode.
+
+For current benchmark comparisons use release `osworld-v2.1` and its 500-step
+headline budget explicitly (`--benchmark-release osworld-v2.1 --max-steps 500`);
+the wrapper's ordinary defaults (25 steps and the older release) are not that
+protocol. Upstream has no official wall-clock cap. The local five-hour
+`--max-wall-s` watchdog is operational only, and any run truncated by it is
+non-comparable to an uncapped benchmark score.
+
 ## Running one episode
 
 `scripts/run_episode.py` runs ONE episode end to end — real spawned worker,
@@ -359,7 +381,9 @@ python ~/local-operator/scripts/run_episode.py \
     --infra AWS_SCHEDULER_ROLE_ARN=<role arn> \
     --infra OSWORLD_CLIENT_PASSWORD=<guest password> \
     --infra OSWORLD_FILE_BASE_URL=<asset mirror> \
-    --max-steps 25 --max-usd 0.50 --max-wall-s 1800 --keep-recent-frames 3
+    --infra OSWORLD_ACTION_SETTLE_POLICY=throughput \
+    --benchmark-release osworld-v2.1 --max-steps 500 \
+    --max-usd 0.50 --max-wall-s 18000 --keep-recent-frames 3
 ```
 
 Exit 0 only on `completed`; 1 on any other terminal; 2 when a secret is

@@ -29,6 +29,7 @@ from local_operator.resume import (
     format_age,
     peer_reason_words,
 )
+from local_operator.session.preview import AGENT_OPENED_MARK, opener_role
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import BLURRED_SPINNER_INTERVAL_S, animation_focused
 from local_operator.tui.session_catalog import CatalogEntry, rank_entries
@@ -1249,11 +1250,21 @@ class SessionSidebar(Widget, can_focus=True):
                 location += f" — unreachable: {peer_reason_words(entry.row.unreachable_reason)}"
             if entry.row.placement_stale:
                 location += " (last known state)"
-        parts = [entry.row.name, status]
+        lines = [entry.row.name, status]
         if location:
-            parts.append(location)
-        parts.append(entry.id)
-        return "\n".join(parts)
+            lines.append(location)
+        # An AGENT-OPENED row names its opener here, the one TUI place with room
+        # for it: the row itself is width-bound and otherwise identical to the
+        # operator's own (PR #1436 design review round 1, D2). Same vocabulary
+        # as the desktop flyout (#448) — `opened by <role>`, or the certain fact
+        # `agent-opened` when the role could not be read. It follows the device
+        # clause (where the row lives, then who opened it) and precedes the id,
+        # which both features keep as the tooltip's last line.
+        if entry.row.opened_by is not None:
+            role = opener_role(entry.row.opened_by)
+            lines.append(f"opened by {role}" if role else AGENT_OPENED_MARK)
+        lines.append(entry.id)
+        return "\n".join(lines)
 
     def _set_hover(self, y: int | None) -> bool:
         """Point the hover affordance and the tooltip at the row under `y`.

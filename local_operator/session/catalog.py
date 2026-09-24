@@ -1074,10 +1074,12 @@ def cached_session_rows(
     store rather than by every session ever listed.
     """
     from local_operator.resume import (
+        ORIGIN_AGENT_WORKSTREAM,
         ORIGIN_FORK,
         _recent_sessions_with_origin,
         session_name,
         wears_inherited_title,
+        workstream_opened_by,
     )
 
     rows: list[SessionRow] = []
@@ -1129,6 +1131,16 @@ def cached_session_rows(
                 # a page row does not read its birth a second time on a cold call.
                 created_at=_memoized_birth(directory / "sessions", session_id),
                 archived=archived,
+                # Gated on the origin the scan already parsed, like the fork
+                # probe above. The `_replace` on the cache-hit path carries the
+                # field through untouched, which is the right answer rather
+                # than a lucky one: the marker is written once, at creation,
+                # and the cache key is the transcript's stat — the same
+                # immutability argument `_ROW_CACHE` and the marker both rest
+                # on.
+                opened_by=(
+                    workstream_opened_by(session_dir) if origin == ORIGIN_AGENT_WORKSTREAM else None
+                ),
             )
         rows.append(row)
         if key is not None:
@@ -1561,6 +1573,13 @@ def load_catalog(
                     # rather than from the row cache; see
                     # ``cached_session_rows``.
                     archived=named[entry.id].archived,
+                    # WHO opened this row, for a workstream only (``None``
+                    # otherwise). Hydration is an allow-list of fields, so
+                    # leaving it out here would drop the attribution on the one
+                    # path every desktop sidebar row travels — the rows would
+                    # be listed and read as the operator's own, which is
+                    # exactly the confusion the field exists to remove.
+                    opened_by=named[entry.id].opened_by,
                 ),
             )
             if entry.id in named
