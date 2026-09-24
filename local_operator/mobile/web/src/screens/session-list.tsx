@@ -520,6 +520,17 @@ export function SessionListScreen() {
 	   bring it back. */
 	const showPinHint = visible.length > 0 && !sessions.some((session) => session.pinned);
 
+	/* One predicate for the REFUSAL band, spelled exactly as the hint's is: the
+	   track's class and the text inside it are one condition, so the band cannot
+	   be painted expanded while it reads out collapsed (review round 3, NIT 1).
+	   It is deliberately NOT the hint's predicate — the two lifecycles differ.
+	   The caption retires for good on the first pin the STORE holds, while a
+	   refusal can arrive on a list that already has pins and outlives the next
+	   successful press, so sharing one condition would either hide a refusal
+	   that is on screen or bring the retired caption back with it. */
+	const pinErrorText = pinError ? `Could not save the pin: ${pinError}` : "";
+	const showPinError = pinErrorText !== "";
+
 	/* One card factory for all three sections, so a section cannot forget the FLIP
 	   ref or the long-press handler — the bug a fourth copy of this markup would
 	   eventually grow. */
@@ -615,6 +626,44 @@ export function SessionListScreen() {
 					placeholder="Search conversations…"
 					className="mx-2 mb-2 min-h-10 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
 				/>
+				{/* THE REFUSAL IS REPORTED WHERE THE PRESS HAPPENED (design round 5,
+				    D12). It used to render after the last row, so on a list longer than
+				    the screen a refused pin looked like it had silently done nothing:
+				    the reader watched the optimistic ★ lift and fall back, and the one
+				    sentence saying why sat at the bottom of the scroll container where
+				    they would never look. It now shares the top of the list surface
+				    with the caption — in the same frame as the row it is about, at any
+				    scroll position and any list length — and takes the FIRST slot,
+				    because it answers the press the reader just made while the caption
+				    below it is standing chrome.
+
+				    IT COLLAPSES RATHER THAN VANISHES, on the caption's own `0fr`/`1fr`
+				    track and for the caption's own D8 reason: both its appearance and
+				    its retirement (the next pin attempt clears it) move every row below
+				    it, and an unanimated insert would snap the list by the band's height
+				    at the exact moment the reader is watching the row they pressed. The
+				    `<p>` stays mounted with empty text for the same reason a conditional
+				    child would not: the track has nothing left to measure, so the
+				    collapse would be an instant step.
+
+				    NO `aria-hidden`, unlike the caption. The band has no second state to
+				    express — when it is collapsed its text is empty, so there is nothing
+				    for assistive tech to read — and hanging the caption's predicate on it
+				    is exactly the confusion D12 names. The live region is present from
+				    the first render, which is the shape screen readers announce
+				    reliably, and the refusal is announced when its text arrives. */}
+				<div
+					className={cn(
+						"grid transition-[grid-template-rows] duration-200 ease-out",
+						showPinError ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
+					)}
+				>
+					<div className="overflow-hidden">
+						<p role="alert" className="mx-2 mb-2 text-meta text-danger">
+							{pinErrorText}
+						</p>
+					</div>
+				</div>
 				{/* THE GESTURE'S DISCOVERER, on the surface that owns the gesture (design
 				    round 1, D2). The session view's ☆ is one tap away and does the same
 				    thing, but a reader has to already be in a conversation to find it, so
@@ -703,11 +752,6 @@ export function SessionListScreen() {
 						{pinned.length + active.length + previous.length === 0 ? (
 							<p className="px-2 py-4 text-center text-body-sm text-ink-dim">
 								no matching conversations
-							</p>
-						) : null}
-						{pinError ? (
-							<p role="alert" className="px-2 text-meta text-danger">
-								Could not save the pin: {pinError}
 							</p>
 						) : null}
 					</div>

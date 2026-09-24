@@ -282,3 +282,78 @@ describe("the list teaches its own pin gesture (design round 1, D2)", () => {
 		expect(hintBox().className).toContain("grid-rows-[0fr]");
 	});
 });
+
+describe("a refused pin reports where the press happened (design round 5, D12)", () => {
+	/* A list LONGER THAN THE SCREEN, which is the case that exposed the placement:
+	   with a handful of rows the old bottom-of-list band was on screen too, so a
+	   short list would pass either way. */
+	const ROWS = 32;
+
+	function longList(): SessionSummary[] {
+		return Array.from({ length: ROWS }, (_, index) =>
+			summary({ session_id: `r${index}`, conversation_name: `Row ${index}` }),
+		);
+	}
+
+	/* The band's grid wrapper: <div grid> > <div overflow-hidden> > <p role=alert>,
+	   the same shape the caption uses — and the inner child is asserted rather
+	   than walked past, because without it a `1fr` track paints at full height and
+	   the collapse silently stops reaching zero. */
+	function errorBox(): HTMLElement {
+		const alert = screen.getByRole("alert");
+		const inner = alert.parentElement as HTMLElement;
+		expect(inner.className).toContain("overflow-hidden");
+		return inner.parentElement as HTMLElement;
+	}
+
+	async function refuseAPinOn(name: string) {
+		setSessionPin.mockRejectedValueOnce(
+			new Error("no saved messages yet — pin it after you send one"),
+		);
+		render(<SessionListScreen />);
+		longPress(cardByName(name));
+		fireEvent.click(await screen.findByRole("button", { name: "Pin to the top" }));
+		return screen.findByRole("alert");
+	}
+
+	it("renders the refusal above the first row, not after the last", async () => {
+		sessionList = longList();
+		const alert = await refuseAPinOn("Row 0");
+		expect(alert.textContent).toContain("Could not save the pin: no saved messages yet");
+
+		/* STRUCTURAL, not pixel: the band PRECEDES both the first and the last row
+		   in document order, so it sits at the top of the list surface instead of
+		   being appended after the list. The last-row comparison is the one that
+		   fails on the old placement; the first-row one is what makes "top" mean
+		   top rather than "somewhere above the end". */
+		const first = cardByName("Row 0");
+		const last = cardByName(`Row ${ROWS - 1}`);
+		expect(first.compareDocumentPosition(alert) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+		expect(last.compareDocumentPosition(alert) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+		/* And it is inside the SAME scroll container as the rows, so it is on screen
+		   with the row it is about rather than in some other pane. */
+		expect(alert.closest("main")).toBe(first.closest("main"));
+	});
+
+	it("keeps the band collapsed and empty until a refusal arrives", () => {
+		sessionList = longList();
+		render(<SessionListScreen />);
+		expect(errorBox().className).toContain("grid-rows-[0fr]");
+		expect(screen.getByRole("alert").textContent).toBe("");
+	});
+
+	it("reads the refusal out while the caption beside it is still expanded", async () => {
+		/* The band's predicate is its own, NOT the caption's: with nothing pinned
+		   the caption is expanded (its own condition), and a refusal can arrive on
+		   exactly that list. A shared predicate would have to collapse one of the
+		   two here — and the band is the one that must never be hidden while its
+		   text is on screen (D12's a11y half). */
+		sessionList = longList();
+		const alert = await refuseAPinOn("Row 0");
+		expect(alert.getAttribute("aria-hidden")).toBeNull();
+		expect(errorBox().className).toContain("grid-rows-[1fr]");
+		const caption = screen.getByText("touch and hold a row to pin it");
+		const captionBox = caption.parentElement?.parentElement as HTMLElement;
+		expect(captionBox.className).toContain("grid-rows-[1fr]");
+	});
+});
