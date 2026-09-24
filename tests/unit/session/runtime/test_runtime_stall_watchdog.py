@@ -1802,14 +1802,14 @@ def test_engagement_takes_the_exit_leg_from_the_arm_and_not_from_a_literal(
     carrying ``exit=True`` (or with the flag hard-coded either way) — the held case
     fails, because what is captured is the flag the module would have armed with.
     """
-    captured: list[bool] = []
-    monkeypatch.setattr(
-        stall_watchdog.faulthandler,
-        "dump_traceback_later",
-        lambda timeout, *, file, exit: captured.append(exit),
-    )
-    # The sampler refreshes the exit leg from the probe on its own schedule; stubbed so
-    # this cell is about the two arms it names and nothing else.
+    # THE LEG IS NOT A PARAMETER ANY MORE, so there is no arming call left to spy on:
+    # it used to be threaded through the arm, which is why a double could capture what the
+    # entry point and the engagement each handed the timer. ``_fire`` reads it from the
+    # busy probe when the fire is taken, and what an arm HOLDS is ``held`` — so the two
+    # directions this cell names are asserted where the answer now lives.
+    #
+    # The sampler is stubbed for the same reason it always was: it refreshes the leg from
+    # the probe on its own schedule, and this cell is about the two arms it names.
     monkeypatch.setattr(stall_watchdog, "_start_sampler", lambda armed: None)
     try:
         assert (
@@ -1818,30 +1818,32 @@ def test_engagement_takes_the_exit_leg_from_the_arm_and_not_from_a_literal(
             )
             is True
         )
-        assert captured == [
-            False
-        ], f"the entry point armed a FATAL timer on a runtime holding work: {captured}"
-        assert stall_watchdog.engage() is True
-        assert captured == [False, False], (
-            "engagement armed a FATAL timer on a runtime holding a turn, a subagent or a "
-            f"job: {captured}"
+        armed = stall_watchdog._ARMED
+        assert armed is not None
+        assert armed.held is True, (
+            "the entry point held no leg on a runtime reporting work in flight, so a turn "
+            "in progress could be cut"
         )
+        assert stall_watchdog.engage() is True
+        assert (
+            armed.held is True
+        ), "engagement dropped the held leg on a runtime holding a turn, a subagent or a job"
 
-        # ...and the other direction: an IDLE runtime still gets a fatal arm from the
-        # engagement, which is the wedge recovery the steady bound exists for.
+        # ...and the other direction: an IDLE runtime is NOT held, which is the wedge
+        # recovery the steady bound exists for.
         stall_watchdog.disarm()
-        captured.clear()
         assert (
             stall_watchdog.arm(
                 boot_seconds=600.0, seconds=300.0, busy=lambda: False, directory=tmp_path
             )
             is True
         )
+        armed = stall_watchdog._ARMED
+        assert armed is not None
         assert stall_watchdog.engage() is True
-        assert captured[-1] is True, (
-            f"an IDLE runtime was left on a non-fatal arm, so the steady bound can never "
-            f"end a wedge: {captured}"
-        )
+        assert (
+            armed.held is False
+        ), "an IDLE runtime was left on a held leg, so the steady bound can never end a wedge"
     finally:
         stall_watchdog.disarm()
 
@@ -5402,21 +5404,19 @@ def test_a_failed_re_arm_leaves_the_timer_on_the_shorter_deadline(
     fake_sys = _FakeSys()
     monkeypatch.setattr(stall_watchdog, "sys", fake_sys)
 
-    class _RaisingFaulthandler(_FakeFaulthandler):
-        """A C timer that refuses every arming, which is the branch under test."""
+    # THE FAILURE IS INJECTED AT THE RECORDER, which is the seam the fix moved it to:
+    # the re-arm used to have a C call in it, so a double could make THAT raise. The whole
+    # of a re-arm is now the RECORD of when the bound next holds, so ``_arm_timer`` -- the
+    # one spelling every deadline site goes through -- is what refuses here. It is also
+    # the only part of a re-arm that can fail on a live host (a disk that will not take
+    # the write), which keeps this a statement about the failure mode and not about a stub.
+    attempts: list[float] = []
 
-        def __init__(self) -> None:
-            super().__init__()
-            #: What the extension TRIED to hand the timer, so "did it try" and "did it
-            #: land" stay separate facts.
-            self.attempts: list[float] = []
+    def refusing_recorder(armed_obj: Any, remaining: float) -> None:
+        attempts.append(max(stall_watchdog.MIN_REARM_S, remaining))
+        raise OSError("the deadline recorder refused this arm")
 
-        def dump_traceback_later(self, seconds: float, **kwargs: Any) -> None:
-            self.attempts.append(seconds)
-            raise OSError("the C timer refused this arming")
-
-    spy = _RaisingFaulthandler()
-    monkeypatch.setattr(stall_watchdog, "faulthandler", spy)
+    monkeypatch.setattr(stall_watchdog, "_arm_timer", refusing_recorder)
 
     dump, handle = _observed_dump(tmp_path, 4253)
     armed = stall_watchdog._Armed(dump, handle, 4.0, 4253, lambda: ("still", True))
@@ -5431,7 +5431,7 @@ def test_a_failed_re_arm_leaves_the_timer_on_the_shorter_deadline(
     fake_sys.frames[ident] = _Frame("loop.py", 12, "walk")
     fake.wall += 1.0
     assert stall_watchdog._sample(armed) is False, "a failed re-arm fired the bound"
-    assert spy.attempts, "the extension never reached the C timer at all"
+    assert attempts, "the extension never reached the recorder at all"
     # The extension is IN FORCE even though the arming failed: a later beat measures
     # from it, which is what keeps a transient arming failure from being a way for the
     # hand-off to be silently withdrawn.
@@ -6586,12 +6586,12 @@ def test_the_executing_extension_takes_the_exit_leg_from_the_arm(
     The ARMED FLAG is what this cell reads, which is why it is cheap and exact: an
     integration run of the same shape is the counterfactual above, not a unit cell.
     """
-    captured: list[bool] = []
-    monkeypatch.setattr(
-        stall_watchdog.faulthandler,
-        "dump_traceback_later",
-        lambda timeout, *, file, exit: captured.append(exit),
-    )
+    # THE EXTENSION CARRIES NO LEG ANY MORE, so its two directions cannot be asserted on
+    # an arming call: what it does is RECORD a deadline, and the leg is read at the fire.
+    # The invariant the retired assertions protected is kept — the hand-off must be IN
+    # FORCE whichever leg this runtime holds, since a held runtime losing its extension
+    # silently would be the "cut a working turn" defect in its other direction.
+    spy = _record_deadlines(monkeypatch)
     dump, handle = _observed_dump(tmp_path, 4248)
     armed = stall_watchdog._Armed(dump, handle, 300.0, 4248, lambda: ("still", True))
     armed.last_beat[stall_watchdog.WORKLOAD] = 100.0
@@ -6599,15 +6599,15 @@ def test_the_executing_extension_takes_the_exit_leg_from_the_arm(
     armed.held = True
 
     stall_watchdog._extend_for_execution(armed, 500.0, (stall_watchdog.WORKLOAD,))
-    assert captured == [
-        False
-    ], f"the extension armed a FATAL timer on a runtime holding work: exit={captured}"
+    held_arm = list(spy.remaining)
+    assert armed.executing_at == {stall_watchdog.WORKLOAD: 500.0}, armed.executing_at
 
-    # ...and the other direction, so the cell cannot pass by never arming fatally at
-    # all: an idle arm still arms fatally, which is the wedge recovery.
     armed.held = False
     stall_watchdog._extend_for_execution(armed, 501.0, (stall_watchdog.WORKLOAD,))
-    assert captured[-1] is True, "an IDLE arm must still be a fatal one"
+    assert spy.remaining != held_arm, (
+        "the extension stopped recording a deadline once the leg flipped, so a held "
+        "runtime loses a hand-off the idle one keeps"
+    )
 
 
 def test_every_reader_finds_a_dump_in_the_store_the_writer_used(
