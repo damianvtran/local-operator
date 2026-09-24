@@ -214,8 +214,10 @@ access token and never its refresh token (`lop network credential share|revoke`,
 Revocation is not instant, and an incident response must not assume it is.
 `credential revoke` refuses new borrows at once; a grant already lent is dropped
 by the borrower within `network.credentials.grant_ttl_s` (900 s by default); and
-a bearer copied out of the borrower stays valid at the provider until the token
-itself expires. To end that last one now, sign the account out at the provider.
+an OAuth bearer copied out of the borrower stays valid at the provider until the
+token itself expires — to end it now, sign the account out at the provider. A
+shared static API key never expires, so a copy of one lives until the key is
+rotated at the provider; rotating it is the only way to end it.
 
 ## When something looks wrong
 

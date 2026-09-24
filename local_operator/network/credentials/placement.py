@@ -52,6 +52,7 @@ from local_operator.network.credentials.types import (
     Holder,
     credential_key_for_mcp,
     credential_key_for_provider,
+    peer_int,
 )
 
 #: The document's integer schema, matching the transport's whole-file convention
@@ -560,7 +561,7 @@ class PlacementDocument:
             self.entries[candidate.key] = candidate
             changed.append(candidate.key)
         if changed:
-            self.epoch = max(self.epoch, int(incoming.get("epoch") or 0))
+            self.epoch = max(self.epoch, peer_int(incoming.get("epoch")))
         return changed
 
     # -- persistence --------------------------------------------------------
@@ -614,7 +615,7 @@ class PlacementDocument:
             return document
         if not isinstance(payload, dict):
             return document
-        document.epoch = int(payload.get("epoch") or 0)
+        document.epoch = peer_int(payload.get("epoch"))
         document.written_by = str(payload.get("written_by") or self_device)
         for row in payload.get("credentials") or []:
             if not isinstance(row, dict) or not row.get("key"):

@@ -1172,19 +1172,36 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         from local_operator.network.credentials import grant_ttl_s
 
         ttl_s = int(grant_ttl_s())
+        # WHAT A COPY OUTLIVES DEPENDS ON THE CREDENTIAL IN HAND (review round 3, F3).
+        # An OAuth access token dies at its own expiry; a STATIC API KEY never expires,
+        # so "until the token expires" was a bound that does not exist — false in
+        # exactly the case where the remedy matters most. Read from the entry the
+        # revoke just wrote, so the receipt describes what was actually lent.
+        static = str(entry_json.get("kind") or "") == "api-key-static"
+        copied = (
+            "valid at the provider until the key is rotated there (a static key never expires)"
+            if static
+            else "valid at the provider until the token expires"
+        )
         payload["revocation"] = {
             "new_grants": "refused now",
             "lent_grant_max_s": ttl_s,
-            "copied_bearer": "valid at the provider until the token expires",
+            "copied_bearer": copied,
         }
         lines.append(
             f"new borrows by {name}: refused now; a grant already lent is dropped by "
             f"{name} within {ttl_s} s"
         )
-        lines.append(
-            "a bearer copied out of that device stays valid at the provider until the "
-            f"token expires: to end it now, sign out of {key!r} at the provider"
-        )
+        if static:
+            lines.append(
+                f"a copy of the key taken out of that device never expires: to end it, "
+                f"rotate the {key!r} key at the provider"
+            )
+        else:
+            lines.append(
+                "a bearer copied out of that device stays valid at the provider until the "
+                f"token expires: to end it now, sign out of {key!r} at the provider"
+            )
     return _emit(args, payload, lines)
 
 

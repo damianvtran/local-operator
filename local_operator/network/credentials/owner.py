@@ -857,8 +857,13 @@ class MeshCredentialBroker:
         if credential_id is None:
             return {"kind": "ack", "key": key, "action": "noted"}
         now = time.monotonic()
-        last = self._report_refreshed.get(credential_id, 0.0)
-        if now - last < REPORT_REFRESH_MIN_INTERVAL_S:
+        # ``None`` MEANS "NEVER REFRESHED", and it is checked as such (review round 3,
+        # F1). A ``0.0`` default read as "refreshed at clock zero", and ``monotonic``
+        # counts from boot: on any host up for less than the window — a fresh CI
+        # runner, a laptop just after a reboot — the FIRST report was coalesced and
+        # nothing was refreshed. The same ``is not None`` guard the block arm uses.
+        last = self._report_refreshed.get(credential_id)
+        if last is not None and now - last < REPORT_REFRESH_MIN_INTERVAL_S:
             return {"kind": "ack", "key": key, "action": "coalesced"}
         self._report_refreshed[credential_id] = now
         try:

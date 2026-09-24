@@ -498,77 +498,109 @@ def test_the_credential_verbs_parse() -> None:
     assert parser.parse_args(["network", "credentials", "--json"]).json is True
 
 
-def _attributes_read(function: Any) -> set[str]:
-    """Every ``args.<name>`` a handler reads — directly or via ``getattr(args, "…")``."""
+def _bare_args_reads(function: Any, verb: str, seen: set[str] | None = None) -> set[str]:
+    """Every bare ``args.<name>`` ``function`` can reach for ``verb`` — through helpers too.
+
+    THREE REFINEMENTS OVER A FLAT SCAN, each for a way a real gap could hide:
+
+    * **Per verb.** ``_cmd_credential`` serves ``share`` and ``revoke``, and a read inside
+      ``if verb == "share":`` is not one ``revoke`` ever makes. Branches guarded by the
+      OTHER verb are skipped, so each verb is checked against exactly its own reads
+      and a future revoke-only read cannot hide behind ``share`` (review round 3, F4).
+    * **Through helpers.** A module function the handler hands ``args`` to is followed
+      (``_emit``, ``_cmd_credential`` from the guard), so a read moved into a helper is
+      still seen.
+    * **Bare reads only.** ``getattr(args, name, default)`` is a deliberate optional read
+      and cannot crash; ``args.name`` raises ``AttributeError`` when the parser never
+      defined it, which is the Q1 crash.
+    """
     import ast
     import inspect
     import textwrap
 
+    from local_operator.network import cli as network_cli
+
+    seen = set() if seen is None else seen
+    if function.__name__ in seen:
+        return set()
+    seen.add(function.__name__)
     tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+
+    def _verb_test(node: ast.AST) -> str | None:
+        """The verb an ``if verb == "<x>":`` names, else ``None``."""
+        test = getattr(node, "test", None)
+        if (
+            isinstance(node, ast.If)
+            and isinstance(test, ast.Compare)
+            and isinstance(test.left, ast.Name)
+            and test.left.id == "verb"
+            and isinstance(test.ops[0], ast.Eq)
+            and isinstance(test.comparators[0], ast.Constant)
+        ):
+            return str(test.comparators[0].value)
+        return None
+
     names: set[str] = set()
-    for node in ast.walk(tree):
+
+    def _walk(node: ast.AST) -> None:
+        named = _verb_test(node)
+        if named is not None and isinstance(node, ast.If):
+            # ``if verb == X`` with two verbs: the body is X's, the ``else`` the other's.
+            # Only the half that belongs to THIS verb is walked.
+            for child in node.body if named == verb else node.orelse:
+                _walk(child)
+            return
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
             if node.value.id == "args":
                 names.add(node.attr)
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "getattr"
-            and isinstance(node.args[0], ast.Name)
-            and node.args[0].id == "args"
-            and isinstance(node.args[1], ast.Constant)
-        ):
-            names.add(str(node.args[1].value))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            helper = getattr(network_cli, node.func.id, None)
+            passes_args = any(isinstance(a, ast.Name) and a.id == "args" for a in node.args)
+            if passes_args and inspect.isfunction(helper):
+                names.update(_bare_args_reads(helper, verb, seen))
+        for child in ast.iter_child_nodes(node):
+            _walk(child)
+
+    _walk(tree)
     return names
 
 
 @pytest.mark.parametrize(
-    "argv",
+    ("argv", "handler_name"),
     [
-        # ``share`` reads the SUPERSET of what ``_cmd_credential`` reads (its one bare
-        # read that ``revoke`` lacks, ``args.scope``, sits under ``verb == "share"``).
-        # ``revoke`` is executed through this same parser, end to end, in
-        # ``test_credentials_real_link.py``, which is the stronger check for it.
-        ["credential", "share", "openai", "--with", "peer-b"],
-        ["credentials"],
+        (["credential", "share", "openai", "--with", "peer-b"], "_guard_credential_subcommand"),
+        (["credential", "revoke", "openai", "--from", "peer-b"], "_guard_credential_subcommand"),
+        (["credentials"], "_cmd_credentials"),
     ],
 )
 def test_every_argument_the_credential_handlers_read_is_one_the_parser_defines(
-    argv: list[str],
+    argv: list[str], handler_name: str
 ) -> None:
     """THE CLASS OF GAP BEHIND Q1, checked for every credential verb at once.
 
     ``_cmd_credential`` read ``args.network`` and no parser defined it, so the only
     share/revoke surface raised ``AttributeError`` for every input; the test that should
-    have caught it set the attribute by hand. Here the handler's own source says which
-    attributes it reads, and the namespace the SHIPPED parser produces must carry each
-    one — so the next field a handler starts reading without a flag fails here, whatever
-    a test elsewhere sets by hand.
+    have caught it set the attribute by hand. Here the handler's own source — followed
+    into every helper it hands ``args`` to, and narrowed to the verb under test — says
+    which attributes it reads, and the namespace the SHIPPED parser produces for that
+    verb must carry each one.
     """
     from local_operator.network import cli as network_cli
 
     namespace = vars(_parser().parse_args(["network", *argv]))
-    handlers = (
-        network_cli._cmd_credential,  # noqa: SLF001
-        network_cli._guard_credential_subcommand,  # noqa: SLF001
-    )
-    if argv[0] == "credentials":
-        handlers = (network_cli._cmd_credentials,)  # noqa: SLF001
-    for handler in handlers:
-        # ``getattr(args, …)`` with a default is a deliberate optional read; only a
-        # bare ``args.<name>`` crashes when the parser never defined it.
-        missing = {
-            name
-            for name in _attributes_read(handler)
-            if name not in namespace and f"args.{name}" in _source(handler)
-        }
-        assert not missing, f"{handler.__name__} reads {sorted(missing)} but {argv} defines none"
-
-
-def _source(function: Any) -> str:
-    import inspect
-
-    return inspect.getsource(function)
+    verb = argv[1] if argv[0] == "credential" else argv[0]
+    handler = getattr(network_cli, handler_name)
+    reads = _bare_args_reads(handler, verb)
+    if argv[0] == "credential":
+        # A LIVENESS CHECK ON THE INSTRUMENT: share/revoke really do read ``key`` and
+        # ``device`` bare, so a scan that returned nothing would be a scan that stopped
+        # looking. ``credentials`` reads ``args`` only through ``getattr``, so nothing
+        # bare is the correct answer there.
+        assert {"key", "device", "network"} <= reads, reads
+    missing = reads - set(namespace)
+    assert (
+        not missing
+    ), f"{handler_name} reads {sorted(missing)} for {argv} but the parser defines none"
 
 
 def test_a_bare_credential_verb_is_a_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
@@ -1105,3 +1137,77 @@ def test_the_credentials_listing_names_the_owner_and_who_may_borrow(
     assert "borrowed: owner_offline" in out
     # The owner's own row is not a share, and this device is the reader.
     assert "shared with" not in out.split("owner:")[1].split("\n")[0]
+
+
+_GARBLED = ("abc", -5, 10**18, float("nan"), float("inf"), True, [1], {"x": 1}, None)
+
+
+@pytest.mark.parametrize("value", _GARBLED)
+def test_every_number_a_peer_sends_is_validated_at_the_boundary(value: Any) -> None:
+    """QA round 2's question, answered for EVERY sibling field, not the one reported.
+
+    A refusal, a grant and a placement document are all parsed from a peer's bytes.
+    Each numeric field, garbled, must yield a defined value — never an exception — and
+    the value must fail SAFE for what that field controls:
+
+    * a refusal's ``retry_after_ms`` is bounded, so no peer can silence a borrower for
+      longer than the borrower's own longest refusal TTL;
+    * a grant's expiries read as 0, i.e. already expired, so a garbled grant is never
+      cached as a live bearer;
+    * a placement row's ``doc_rev`` reads as the floor (1), so a garbled revision can
+      never outrank one this device already holds; the epoch reads as 0 for the same
+      reason, since the merge takes the max.
+    """
+    from local_operator.network.credentials.placement import PlacementDocument
+    from local_operator.network.credentials.types import (
+        MAX_PEER_RETRY_AFTER_MS,
+        BrokerError,
+        CredentialPlacementEntry,
+        Grant,
+    )
+
+    error = BrokerError.from_detail({"code": "quota_blocked", "retry_after_ms": value})
+    assert 0 <= error.retry_after_ms <= MAX_PEER_RETRY_AFTER_MS
+    assert 0 < error.cache_ttl_ms <= MAX_PEER_RETRY_AFTER_MS
+
+    grant = Grant.from_detail(
+        {
+            "kind": "grant",
+            "token_expires_at_ms": value,
+            "grant_expires_at_ms": value,
+            "latency_ms": value,
+            "credential_ref": {"credential_id": value},
+            "identity": value,
+        }
+    )
+    if value != 10**18:
+        assert grant.grant_expires_at_ms == 0 and grant.token_expires_at_ms == 0
+    assert grant.latency_ms >= 0 and grant.credential_ref.credential_id >= 0
+    assert isinstance(grant.identity, dict)
+
+    entry = CredentialPlacementEntry.from_json(
+        {
+            "key": "k",
+            "doc_rev": value,
+            "declared_at": value,
+            "holders": [{"device": "d_x", "granted_at": value}],
+        }
+    )
+    assert entry.doc_rev >= 1 and entry.declared_at >= 0
+    assert entry.holders[0].granted_at >= 0
+
+    document = PlacementDocument(network_id="n")
+    changed = document.merge(
+        {"epoch": value, "credentials": [{"key": "k", "owner_device": "d_peer"}]},
+        from_device="d_peer",
+    )
+    assert changed == ["k"]
+    assert document.epoch >= 0
+
+
+def test_a_numeric_string_from_a_peer_still_reads_as_its_number() -> None:
+    """The boundary check refuses garbage, not a well-formed number in string form."""
+    from local_operator.network.credentials.types import BrokerError
+
+    assert BrokerError.from_detail({"code": "x", "retry_after_ms": "1500"}).retry_after_ms == 1500
+    assert BrokerError.from_detail({"code": "x"}).retry_after_ms == 0

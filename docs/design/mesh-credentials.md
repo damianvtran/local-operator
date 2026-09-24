@@ -732,7 +732,9 @@ does not surface, add it as a purely additive method there (§8 Q2).
   access token lives until its own expiry at the provider. Three latencies, so
   three statements: new grants stop now; a lent grant stops within
   `grant_ttl_s`; a copied bearer stops only when the token expires or is
-  revoked at the provider. `lop network credential revoke` prints all three.
+  revoked at the provider. A shared `api-key-static` credential has no expiry,
+  so a copy of it stops only when the key is rotated at the provider.
+  `lop network credential revoke` prints the statement for the kind revoked.
 - **A malicious holder can spend the operator's quota.** `holders` is a real
   capability increase and is granted explicitly. Least authority is the
   defence: `scope: "session"` by default, `api-key-static` default-off.
