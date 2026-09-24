@@ -300,8 +300,15 @@ def test_resolve_missing_values_raise_legacy_messages() -> None:
     with pytest.raises(HostingNotConfiguredError, match="Hosting platform is not configured."):
         resolve_hosting_model(None, _args(), config)
     # A hosting with a KNOWN default model no longer errors on the missing
-    # model — it resolves to that default (item 3).
-    assert resolve_hosting_model(None, _args(hosting="openai"), config) == ("openai", "gpt-4o")
+    # model — it resolves to that default (item 3). Compared against the table
+    # rather than a literal id: the subject is "falls back to the provider's
+    # default", and a pinned id broke this test the moment the suggested
+    # defaults moved on (PR #1507 review round 3, MAJOR 1).
+    from local_operator.model.defaults import default_model_for
+
+    expected = default_model_for("openai")
+    assert expected, "openai must keep a default for this case to test the fallback"
+    assert resolve_hosting_model(None, _args(hosting="openai"), config) == ("openai", expected)
 
 
 def test_resolve_known_hosting_no_default_still_raises_for_model() -> None:

@@ -10,8 +10,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, SecretStr, StrictBool, model_validator
 
 from local_operator.harness.types import Message
+from local_operator.mcp.catalog import public_server_config
 from local_operator.mcp.credentials import MCPCredentials
-from local_operator.mcp.desktop import MCPControl, public_server_config
+from local_operator.mcp.desktop import MCPControl, refusal_detail
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import (
@@ -276,12 +277,13 @@ async def mcp_control(session_id: str, body: MCPControl, request: Request):
         await bridge.remote.bind_runtime()
         result = await bridge.remote.route_shared_slash("desktop_mcp", body.model_dump_json())
         if result.get("kind") == "error":
+            # ``{code, message}`` rather than one fixed sentence: the owner now
+            # names WHICH refusal (exists, not_owned, mcp_starting, ...), and
+            # an owner from before that answers ``mcp_control_refused``, which
+            # maps to the old generic copy. Never the owner's exception text.
+            data = result.get("data")
             raise HTTPException(
-                409,
-                (
-                    "The MCP control was refused. Check server ownership, transport and "
-                    "current operation state."
-                ),
+                409, refusal_detail(data.get("code") if isinstance(data, dict) else None)
             )
         return reply({"data": result["data"]})
 

@@ -226,10 +226,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model",
         type=str,
-        help="Model to use (e.g., gpt-4o, claude-3-5-sonnet-latest, deepseek-chat, "
-        "grok-3, glm-5.3, gemini-2.0-flash-001, qwen-plus, moonshot-v1-32k, "
-        "mistral-large-latest, deepseek/deepseek-chat). Optional: when omitted, "
-        "the provider's default model is used.",
+        help="Model to use (e.g., gpt-6-astra, claude-opus-5-5, deepseek-flash, "
+        "grok-4.7, glm-5.3, gemini-3.8-flash, qwen3.8-max, kimi-k3, "
+        "mistral-medium-latest, anthropic/claude-opus-5.5). Optional: when omitted, "
+        "the provider's suggested model is used.",
     )
     parser.add_argument(
         "--run-in",

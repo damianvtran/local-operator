@@ -67,6 +67,7 @@ from local_operator.redaction_shapes import (
     ShapeReport,
     is_registerable_component,
     scrub_secrets_with_hits,
+    scrub_values,
     shape_report,
 )
 
@@ -258,15 +259,19 @@ def redact_secret_values(text: str, secrets: Mapping[str, str] | Sequence[str]) 
     """Replace every known secret byte-string in ``text`` with ``[redacted]``.
 
     Longest first so a value that is a prefix of another cannot leave a tail
-    behind. Empty strings are skipped: replacing nothing with a marker would
+    behind, and in every SPELLING the value may be printed in
+    (:func:`~local_operator.redaction_shapes.credential_forms`) rather than only
+    verbatim. Empty strings are skipped: replacing nothing with a marker would
     insert ``[redacted]`` between every character.
+
+    The loop itself lives in :func:`~local_operator.redaction_shapes.scrub_values`
+    and this delegates to it rather than repeating it. Two copies of a mask policy
+    is how they drift — the copy that misses a spelling is the one that leaks — and
+    the surfaces here (MCP diagnostics) and there (the composed result pass, the
+    eval ledger) are all hiding the same values.
     """
     values = list(secrets.values()) if isinstance(secrets, Mapping) else list(secrets)
-    ordered = sorted((value for value in values if value), key=len, reverse=True)
-    for value in ordered:
-        if value in text:
-            text = text.replace(value, "[redacted]")
-    return text
+    return scrub_values(text, values)
 
 
 def _is_secret(name: str) -> bool:

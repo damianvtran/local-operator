@@ -109,7 +109,17 @@ async def list_providers() -> CRUDResponse[ProviderListResponse]:
     try:
         # Discovery belongs to the model request. Hiding stopped servers here
         # made them impossible to select in the desktop application's setup UI.
-        provider_details = SupportedHostingProviders
+        from local_operator.model.defaults import suggested_model_for
+
+        def with_suggestion(provider: ProviderDetail) -> ProviderDetail:
+            suggested = suggested_model_for(provider.id)
+            if suggested is None:
+                return provider
+            return provider.model_copy(
+                update={"suggestedModel": {"id": suggested.id, "name": suggested.name}}
+            )
+
+        provider_details = [with_suggestion(provider) for provider in SupportedHostingProviders]
 
         return CRUDResponse(
             status=200,

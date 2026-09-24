@@ -39,7 +39,6 @@ from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass, field
-from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, TypedDict, TypeVar
 from urllib.parse import urlsplit
@@ -73,6 +72,7 @@ from local_operator.mcp.config import (
     MCPSseServerConfig,
     MCPStdioServerConfig,
     load_all_mcp_configs,
+    tool_enabled_by_config,
     validate_server_config,
 )
 from local_operator.mcp.secret_refs import resolve_config_secrets
@@ -2209,6 +2209,28 @@ class McpManager:
         result.tools = self.get_tools()
         return result
 
+    async def wait_settled(self, timeout_s: float) -> bool:
+        """Wait, bounded, for servers deferred past the startup gate to settle.
+
+        ``reload()`` and ``discover_and_connect()`` return at the 250 ms gate
+        and leave slower servers (any ``npx``/``uvx`` spawn) to background
+        continuations, so a snapshot taken right after them reads
+        ``connecting`` with no tools. That snapshot was the desktop's ANSWER to
+        Reload: the settings list showed "connecting / 0 tools" for a server
+        that connected a second later, and nothing asked again (measured: the
+        continuation settles; the caller simply read too early). A caller that
+        is about to REPORT the outcome awaits this first.
+
+        Waits on the continuations only — never cancels them on timeout, so a
+        server slower than the bound keeps connecting and honestly reads
+        ``connecting``. Returns whether everything settled within the bound.
+        """
+        pending = [continuation for continuation, _ in self._pending_continuations.values()]
+        if not pending:
+            return True
+        _done, still = await asyncio.wait(pending, timeout=max(0.0, timeout_s))
+        return not still
+
     async def wait_for_connection(self, name: str) -> ServerConnection:
         """Block until ``name`` has a live connection (deferred tool path)."""
         conn = self._connections.get(name)
@@ -2308,8 +2330,19 @@ class McpManager:
         """
         return self._disposed
 
-    async def disconnect_all(self) -> None:
-        """Tear everything down; bumps the epoch so late reconnects die."""
+    async def disconnect_all(self, *, in_task: bool = False) -> None:
+        """Tear everything down; bumps the epoch so late reconnects die.
+
+        ``in_task=True`` closes each connection in the CALLING task, one after
+        another, instead of concurrently in child tasks. A caller that opened
+        its connections itself — ``connect_configured_server`` awaited in its
+        own task, as a short-lived probe manager does — must pass it: the
+        transport's anyio cancel scope was entered in that task, and exiting it
+        from a ``gather`` child cancels the ENTERING task instead (measured: the
+        desktop's sessionless Test op read ``cancelled`` after a successful
+        connect). The concurrent default stays for sessions, whose connections
+        were each opened in their own connect task.
+        """
         self._epoch += 1
         self._disposed = True
         for task in list(self._pending_reconnects.values()):
@@ -2333,7 +2366,10 @@ class McpManager:
         # each pops its own entry from ``_connections`` and closes its own
         # stack, so the only thing serial order bought was the wait.
         names = list(self._connections)
-        if names:
+        if in_task:
+            for name in names:
+                await self._teardown_connection(name)
+        elif names:
             await asyncio.gather(
                 *(self._teardown_connection(name) for name in names),
                 return_exceptions=True,
@@ -2693,6 +2729,18 @@ class McpManager:
             raise stderr_log.explain(exc) from exc
 
         conn.tools = tools
+        # This connect got IN: the server accepted us, so any "it refused us and
+        # has no OAuth" observation this process recorded is disproved. Without
+        # this, a transient 403 (a WAF or rate-limit edge that later cleared) kept
+        # the catalog row claiming ``signed_in: false`` + ``add_key`` for the life
+        # of the daemon, and that claim is what the desktop writes a SECOND key
+        # header on the strength of (review round 3, R3-m2). Cleared HERE rather
+        # than in the desktop host so every surface that connects — a Test, a
+        # login, the TUI, the CLI, a session's startup round — clears it.
+        if isinstance(url, str) and url:
+            from local_operator.mcp.auth import forget_refused_challenge
+
+            forget_refused_challenge(url)
         if self.tool_cache is not None:
             self.tool_cache.put(
                 name,
@@ -3638,14 +3686,7 @@ class McpManager:
         provider tools array (the context-cost and trust guarantees are the
         same at startup and after recovery).
         """
-        cfg = self._configs.get(server_name)
-        if cfg is None:
-            return True
-        denied = getattr(cfg, "disabled_tools", []) or []
-        if any(fnmatchcase(tool_name, pattern) for pattern in denied):
-            return False
-        allowed = getattr(cfg, "enabled_tools", []) or []
-        return not allowed or any(fnmatchcase(tool_name, pattern) for pattern in allowed)
+        return tool_enabled_by_config(self._configs.get(server_name), tool_name)
 
     def _build_tool(
         self, server_name: str, tool: Tool | dict[str, Any], *, deferred: bool

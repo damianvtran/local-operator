@@ -852,6 +852,28 @@ that takes a session — every mutation, every receipt, `/warm`, `/interrupt`,
 `/move` — keeps the control envelope, because none of those can be served
 without the owner that admitted them.
 
+`GET /v1/desktop/mcp` is outside that list because it is outside the session: it
+answers the MCP catalog from the config files and the grant store for a folder, so
+there is no owner to wait for at all. Its optional `session_id` is an ENRICHMENT, not
+a dependency — an already-bound runtime in that same folder may overlay live
+statuses inside a 2 s bound, and a cold, silent or foreign one degrades to the
+config answer rather than to a refusal. That is the whole reason the key exists
+(`features.mcp_catalog`): the Settings page must be able to list servers on an
+install with no model configured, which is the install that could not start a
+session to ask. The two writes beside it are the same shape: `POST /v1/desktop/mcp`
+takes one control, and `POST /v1/desktop/mcp/credentials` takes the MCP credential
+body (`{name, values, confirmed_replace?}`) plus the same optional
+`cwd`, plus ONE request-only field, `header` — the `add_key` form, where the server
+declares no `${ID}` for a key to fill, so the request also names the header the key
+travels in and the server binds `headers[<header>] = "${<id>}"` before storing the
+value. `header` is request-only: no response, no catalog row and no fixture carries
+it, because what crosses back is the row's own `auth.secret_refs`. A `header` on a
+row the catalog does not offer `add_key` for (an OAuth server, a server that
+already sends a credential header, a stdio server), or with more than one id, is
+`200` with
+`code: "invalid_target"`, and the whole code vocabulary of that route is in
+[DESKTOP_CONTROLS.md](DESKTOP_CONTROLS.md).
+
 `POST .../{id}/watch` is the one route whose envelope is WIDER than that budget,
 and it says so rather than leaving it to be discovered: after the attach it
 re-states the viewer's presence lease to the owner, bounded by
@@ -1048,6 +1070,40 @@ qualifier under "A submit is ACKNOWLEDGED" for what that is worth.
    and must not be painted into the transcript — it is a notice about a request,
    not a turn — and a renderer that does not know the type ignores it and still
    advances its receipt cursor.
+
+### Harness-injected rows: `provider_payload.harness_injected`
+
+Some user-role rows were NOT typed by a person. The harness itself queues them:
+the goal judge's continuation prompt ("Continue working toward this goal: …"), the
+goal loop's own prompt, the post-compaction auto-continuation, the connectivity
+continuation that records why one answer arrived in two pieces across a network
+interruption. They are persisted as `Message(role="user")` because the TRANSCRIPT
+must record why the conversation continued — and painting one attributes the
+harness's words to the user, which no human-facing surface may do.
+
+Two fields answer "was this row minted by the harness?":
+
+* `message_start.message.provider_payload.harness_injected` — the live event's
+  copy. Structured marker, present only where the producer stamped the row.
+* the durable row's `payload.provider_payload.harness_injected` — the same key on
+  the journal entry a `snapshot`/`/history` page serves, because
+  `encode_message_payload` keeps a non-`None` `provider_payload`.
+
+Both mean, in the words of `harness/rows.py::is_harness_injection`'s docblock:
+*a row carrying it was never typed by a person, so no human-facing surface may
+paint it as their words.* A renderer that reads the marker on user rows paints
+nothing for an injected row — the transcript's own copy is the record, and the
+user's composer row is reserved for the user's own words.
+
+Neither field is new, and no protocol version moves for this: `provider_payload`
+has always been a `Message` field and has always ridden both wires. What changed
+is that surfaces are expected to READ it for `role == "user"` (the desktop's
+transcript reducer already reads the same key for tool rows), and that the
+harness now honours the rule at the emit site as well: a row the shared
+`is_harness_chrome` decision recognises is no longer announced as a
+`message_start` event at all, so a viewer that has not been taught the marker
+cannot paint chrome it was never sent. An owner on an older build still sends
+these rows, which is why the marker (and the recogniser) remain the contract.
 
 ### The `notification` frame
 
@@ -1660,6 +1716,7 @@ absent.
 |---|---|---|---|
 | `desktop_feed` | 1 | `GET /v1/desktop/events`, `POST /v1/desktop/presence` and their frame/lease shapes | the app opens no feed, beats no presence, and keeps its 5 s catalogue poll and its per-session notification path verbatim |
 | `desktop_presence` | 1 | the backend reads the per-publisher records under `run/desktop/delivery/` (plus the legacy `run/desktop/delivery.json` while an older sibling writes it) and defers its own completion banner to a notify-capable desktop | nothing is suppressed on the strength of a lease nobody publishes |
+| `mcp_catalog` | 1 | `GET|POST /v1/desktop/mcp` and `POST /v1/desktop/mcp/credentials`: MCP list, add, remove, test, sign-in and credentials with NO session and NO configured model, in the catalog vocabulary (`connected`/`needs_sign_in`/`not_started`/`connecting`/`error`, per-row `actions`, bounded refusal codes) — see [DESKTOP_CONTROLS.md](DESKTOP_CONTROLS.md) | the app keeps the session-scoped `/v1/desktop/sessions/{id}/mcp` path verbatim; it must NOT show "update the backend", because that path still works |
 | `tunnel` | 1 | `GET /v1/desktop/tunnel`, and `radient_login`/`tunnel_remedy` on `GET /v1/auth/status` | the app shows no tunnel state and no sign-in callout, and the account section keeps its current wording — it must not read the absent key as "the tunnel is fine" |
 
 Neither bumps `notification_contract`, which stays 1: the payload is unchanged
