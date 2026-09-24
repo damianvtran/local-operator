@@ -327,7 +327,7 @@ def _initialized_then_damaged(root: Any, payload: bytes) -> Any:
         stored_provider_env_keys,
     )
 
-    store_provider_key("OPENROUTER_API_KEY", "sk-or-from-settings", base=root)
+    store_provider_key("OPENROUTER_API_KEY", "fixture-key", base=root)
     assert stored_provider_env_keys(root) == {"OPENROUTER_API_KEY"}, "a real store, readable"
     return _seed_store_file(root, payload)
 
@@ -396,3 +396,38 @@ def test_a_store_connection_used_from_another_thread_still_raises(
     monkeypatch.setattr("local_operator.secrets.access.open_store", raiser)
     with pytest.raises(sqlite3.ProgrammingError):
         stored_provider_env_keys(tmp_path)
+
+
+def test_a_row_whose_blob_columns_hold_text_reads_as_no_provider_rows(tmp_path: Any) -> None:
+    """R3-1: a malformed ROW is a store state the reader must survive too.
+
+    A store that is otherwise intact, with one row's ``ciphertext`` holding text
+    instead of a BLOB, raised ``TypeError: string argument without an encoding``
+    out of the decryptor's ``bytes(row[5])`` — so the reader answered nothing about
+    that store except an exception, and the live route answered 500. The reader's
+    contract is "no provider rows I can see", for every shape it cannot read, which
+    is what this asserts.
+
+    The deeper fix belongs in ``secrets.store._decode`` (validate the byte columns
+    and raise ``SecretCorrupt``, so ``_enumerate`` reports the row through
+    ``damaged_records`` — the treatment ``_read_meta_int`` already got); that is the
+    secrets layer's contract, and it is recorded on the clause rather than fixed
+    here.
+    """
+    import sqlite3
+
+    from local_operator.providers.registry import (
+        store_provider_key,
+        stored_provider_env_keys,
+    )
+    from local_operator.secrets.keys import store_path
+
+    store_provider_key("OPENROUTER_API_KEY", "fixture-key", base=tmp_path)
+    assert stored_provider_env_keys(tmp_path) == {"OPENROUTER_API_KEY"}, "a real store, readable"
+
+    connection = sqlite3.connect(store_path(tmp_path))
+    with connection:
+        connection.execute("UPDATE secrets SET ciphertext = 'not-bytes'")
+    connection.close()
+
+    assert stored_provider_env_keys(tmp_path) == set()

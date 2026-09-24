@@ -68,6 +68,18 @@ class Catalogue(BaseModel):
     #: Whether the credential store could be read. When False, every row's
     #: `connected` is a listing default rather than a statement about auth, and
     #: a caller must not group or badge on it.
+    #:
+    #: It answers for the AUTH store only (``ProviderController.usable_providers``),
+    #: and the asymmetry is deliberate rather than an oversight: those are the rows
+    #: the picker groups on, and the secret store's provider rows are a second
+    #: source that this flag does not speak for. In the state a round-2 fix made
+    #: answerable — a secret store that cannot be read — this field is therefore
+    #: still True while no store credential was visible, and the honest reading is
+    #: "auth is known; nothing here claims the secret store was". Naming the secret
+    #: half in this flag was considered and rejected: with no store credential
+    #: visible the rows of a provider whose key lives there read `connected: false`,
+    #: and a flag that also said "credentials unknown" would invite a caller to
+    #: badge rows that are not in doubt (Q3-2).
     credentials_known: bool = True
 
 

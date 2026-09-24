@@ -358,8 +358,28 @@ def _damage_secret_store(root: Path, payload: bytes) -> None:
     from local_operator.providers.registry import store_provider_key
     from local_operator.secrets.keys import store_path
 
-    store_provider_key("OPENROUTER_API_KEY", "sk-or-from-settings", base=root)
+    store_provider_key("OPENROUTER_API_KEY", "fixture-key", base=root)
     store_path(root).write_bytes(payload)
+
+
+def _tamper_with_a_secret_row(root: Path) -> None:
+    """A REAL secret store whose one row's BLOB column holds TEXT instead (R3-1).
+
+    The store itself is intact and still opens; it is the ROW's shape that is
+    wrong, so this reaches the decryptor's ``bytes(row[5])`` — a different failure
+    from the sqlite family above, and one the reader has to survive for the same
+    reason.
+    """
+    import sqlite3
+
+    from local_operator.providers.registry import store_provider_key
+    from local_operator.secrets.keys import store_path
+
+    store_provider_key("OPENROUTER_API_KEY", "fixture-key", base=root)
+    connection = sqlite3.connect(store_path(root))
+    with connection:
+        connection.execute("UPDATE secrets SET ciphertext = 'not-bytes'")
+    connection.close()
 
 
 async def test_a_store_first_key_reaches_the_live_fetch_and_its_rows(
@@ -419,27 +439,32 @@ async def test_a_store_first_key_that_failed_is_named_for_a_real_reason(
     ), "the wire shape is a provider -> generic reason map"
 
 
+@pytest.mark.parametrize("damage_kind", ["garbage-file", "tampered-row"])
 async def test_a_damaged_secret_store_still_answers_the_live_read(
-    catalogue, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    catalogue, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage_kind: str
 ):
-    """Q2-1: an unreadable store degrades, it does not 500 the picker's Refresh.
+    """Q2-1 and R3-1: an unreadable store or an unreadable ROW degrades, never 500s.
 
-    With ``secrets/store.db`` — a store this rig really created, holding a
-    provider row — replaced by a non-store file, this route answered 500: the
-    reader the union reaches (``stored_provider_env_keys`` through
-    ``persisted_providers``) caught neither ``sqlite3.DatabaseError`` nor
-    ``sqlite3.OperationalError``, and the route has no handler but ``finally:
-    controller.close()``. The body below is what "cannot be read" must look like:
-    a normal answer, with the store contributing nothing (exactly as if it held no
-    provider rows at all) while the CONFIG axis keeps its verdicts — an
-    unconfigured local preset stays silent even now, because the config is
-    readable. The AUTH store here is untouched, so ``credentials_known`` stays
-    true: this is the secret store's failure mode, not the auth store's.
+    Two failure shapes, because they arrive by different routes: with
+    ``secrets/store.db`` — a store this rig really created, holding a provider row —
+    replaced by a non-store file, the reader gets ``sqlite3.DatabaseError``; with
+    the store intact and one row's ``ciphertext`` holding text instead of a BLOB,
+    the decryptor raises ``TypeError``. Neither was caught, so this route answered
+    500 for both — its only handler is ``finally: controller.close()``. The body
+    below is what "cannot be read" must look like: a normal answer, with the store
+    contributing nothing (exactly as if it held no provider rows at all) while the
+    CONFIG axis keeps its verdicts — an unconfigured local preset stays silent even
+    now, because the config is readable. The AUTH store here is untouched, so
+    ``credentials_known`` stays true: this is the secret store's failure mode, not
+    the auth store's.
     """
     from local_operator.providers.registry import stored_provider_env_keys
 
     client, app, store = catalogue
-    _damage_secret_store(tmp_path, b"not-a-store-at-all")
+    if damage_kind == "garbage-file":
+        _damage_secret_store(tmp_path, b"not-a-store-at-all")
+    else:
+        _tamper_with_a_secret_row(tmp_path)
     _stub_transport(monkeypatch, {})
     app.state.desktop_auth = _RealHost(store)
 

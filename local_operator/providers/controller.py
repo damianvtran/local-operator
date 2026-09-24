@@ -2131,21 +2131,33 @@ class ProviderController:
         environment, ``persisted_providers`` adds the provider-class rows of the
         encrypted secret store — what ``PATCH /v1/credentials``, ``lop credential
         update`` and the desktop Settings / onboarding flows write — which the
-        first cannot see at all. Either reader answering ``None`` means its store
-        could not be read, and unknown is not unengaged: the answer is ``None``.
+        first cannot see at all.
+
+        ``None`` means UNKNOWABLE, and only ONE reader can say it:
+        ``usable_providers`` answers ``None`` when the AuthStore cannot be read,
+        and that alone makes this answer ``None``. The secret-store reader never
+        answers ``None`` — a store it cannot read yields an EMPTY SET (it swallows
+        the sqlite family and a malformed row; see
+        ``registry.stored_provider_env_keys``), so an unreadable secret store
+        contributes nothing to the union rather than suppressing it. Either way an
+        unknown is not an unengaged: the caller narrows on nothing it cannot
+        know.
 
         COST, and it is on the event-loop thread: exactly one ``open_store()`` per
-        call — measured ~20.4 ms with a secret store on disk against ~0.022 ms for
-        ``usable_providers()`` alone (~0.09 ms with no store) — which is bounded
-        and immaterial beside the live fetch fan-out this feeds (up to 2 s per
-        provider of network budget), but it is real synchronous store I/O where
+        call — measured ~8.6-20.4 ms with a secret store on disk against ~0.018 ms
+        for ``usable_providers()`` alone (~0.09 ms with no store) — which is
+        bounded and immaterial beside the live fetch fan-out this feeds (up to 2 s
+        per provider of network budget), but it is real synchronous store I/O where
         the route otherwise documents what it runs there. On a host whose store
         exists with no broker listening, this can also START a secret-broker
         daemon as a side effect of a ``GET``.
 
         Deliberately NOT memoised on the instance: the answer depends on a store
         other processes can change between the two calls in a single request, and
-        a stale engagement is precisely the bug this method exists to stop.
+        a stale engagement is precisely the bug this method exists to stop. Its
+        callers match that: :meth:`live_catalogue` computes it only when it will
+        read it (R3-2), so the ``providers=`` path pays nothing for a value it
+        discards.
         """
         usable = self.usable_providers()
         persisted = self.persisted_providers()
@@ -2297,8 +2309,12 @@ class ProviderController:
         # (Settings, `lop credential update`) has to reach the fetch as a
         # credential, or the provider is listed ANONYMOUSLY, fails, and is then
         # named as failing by `catalogue_failures` on every read — with its key on
-        # disk. See `_engaged_providers`.
-        engaged = self._engaged_providers()
+        # disk. See `_engaged_providers`. Computed HERE, and only when it is read:
+        # with an explicit ``providers`` set (the mobile daemon's admission path,
+        # itself a GET) the value below is never consulted, so buying it would be
+        # one ``open_store()`` and a possible broker spawn for a discarded answer
+        # (R3-2).
+        engaged = self._engaged_providers() if providers is None else None
         # ``_chat_providers()`` filters FIRST, so an explicit ``providers`` set
         # naming a decision-only provider is honoured as "this catalogue request
         # mentions it" and still contributes no rows: the caller is asking for a

@@ -691,6 +691,19 @@ union, so a key saved in Settings made the listing 401 ANONYMOUSLY and the banne
 name that provider on every live read, forever, with the working key resolvable on
 disk the whole time.
 
+**`credentials_known` answers for the AUTH store, deliberately.** The picker's
+`Catalogue.credentials_known` is `usable_providers() is not None`, so on a request
+where the SECRET store cannot be read it is still `true` while no store credential
+was visible, and the providers whose keys live there read `connected: false`. That
+is the honest split rather than a gap: the flag exists so a caller does not badge
+rows whose `connected` is only a listing default, and it names exactly the store
+whose rows the picker groups on. Folding the secret half in was considered and
+rejected — with the store unreadable, a flag saying "credentials unknown" would
+invite exactly the badging the flag was added to prevent, and the alternative
+(naming every provider whose key just became unreadable) is a false accusation
+(Q3-2 — the asymmetry is documented here and on the field rather than re-interpreted
+on the wire).
+
 ---
 
 ## 7. Files to touch
