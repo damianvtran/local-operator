@@ -3,13 +3,21 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import inspect
+import textwrap
 import time
 
 import pytest
 
 from local_operator.session.runtime import process as child_mod
-from local_operator.session.runtime.process import _clean_exit, _reaper, _should_exit
+from local_operator.session.runtime.process import (
+    _clean_exit,
+    _clean_ordering_already_ran,
+    _reaper,
+    _should_exit,
+)
 
 
 class FakeRegistrant:
@@ -50,6 +58,17 @@ class FakeHandle:
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+async def _finishes_with(value: bool) -> bool:
+    """A stand-in for one of ``_reaper``'s two normal returns."""
+    return value
+
+
+async def _never_finishes() -> bool:
+    """A stand-in for a reaper that is still running (or was cancelled)."""
+    await asyncio.sleep(5)
+    return True
 
 
 @pytest.mark.parametrize(
@@ -161,7 +180,206 @@ async def test_grace_elapses_then_clean_exit(monkeypatch) -> None:
         await asyncio.sleep(0.05)
     assert stop.is_set()
     assert handle.disposed and not handle.denied and reg.closed
-    await task
+    # The exit leg SAYS it ran the clean ordering: that return is what earns
+    # ``amain`` the right to skip its own deny → dispose → aclose block.
+    assert await task is True
+
+
+@pytest.mark.asyncio
+async def test_a_reaper_that_wakes_to_a_stop_reports_no_clean_exit(monkeypatch) -> None:
+    """The stop-wins race (issue #1250): the reaper parks, someone else sets ``stop``.
+
+    This is the return ``amain`` must still owe its own deny → dispose → aclose
+    ordering for. It happens for real whenever a signal drain's bound expires in
+    the same loop iteration as a 0.25 s reaper tick: the drain sets ``stop``, the
+    reaper wakes to find it already set and leaves with nothing disposed. The
+    parent commit read that return through ``reaper.exception() is None`` — which
+    is also ``None`` here — so the whole exit block was skipped: no turn
+    journal exit note (the row kept ``exit_cause=''``, and the SIGTERM cell
+    asserting ``signal_exit_token(row.exit_cause) == "SIGTERM"`` failed with
+    ``'' == 'SIGTERM'`` on ``macos-latest`` over four days (issue #1250), no
+    gate deny and no dispose.
+
+    DETERMINED HERE RATHER THAN RACED: park the reaper on its first tick, set
+    ``stop`` from outside, and read what it says about itself.
+    """
+    monkeypatch.setattr(child_mod, "REAP_CHECK_S", 0.05)
+    handle = FakeHandle()
+    reg = FakeRegistrant(supported=True)
+    stop = asyncio.Event()
+    task = asyncio.ensure_future(_reaper(handle, reg, stop))
+    await asyncio.sleep(0)  # the first tick parks the reaper on its sleep
+    stop.set()
+    assert await task is False
+    # ...and it really did leave the exit to its caller: nothing was touched.
+    assert not handle.disposed and not handle.denied and not reg.closed
+
+
+@pytest.mark.asyncio
+async def test_the_skip_is_earned_only_by_a_clean_exit_return() -> None:
+    """``_clean_ordering_already_ran``: ask the reaper, not the absence of a raise.
+
+    The two normal returns of ``_reaper`` differ only in that value, and a
+    cancelled task raises rather than answering ``None``, so the three cases
+    below are the whole question ``amain`` asks after ``await stop.wait()``.
+    """
+
+    clean = asyncio.ensure_future(_finishes_with(True))
+    stopped = asyncio.ensure_future(_finishes_with(False))
+    await asyncio.gather(clean, stopped)
+    assert _clean_ordering_already_ran(clean) is True
+    assert _clean_ordering_already_ran(stopped) is False
+
+    cancelled = asyncio.ensure_future(_never_finishes())
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    assert _clean_ordering_already_ran(cancelled) is False
+
+    running = asyncio.ensure_future(_never_finishes())
+    try:
+        assert _clean_ordering_already_ran(running) is False
+    finally:
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+
+
+def _own_body(node: ast.AST) -> list[ast.AST]:
+    """Every node in a function's OWN body — nested scopes excluded.
+
+    The idiom is ``test_inbox.test_the_drain_is_wired_before_the_socket_starts_
+    listening``'s, and for its reason: a call inside a nested ``def`` is not part
+    of the statement order an assertion about ``amain``'s own body is about, so
+    it must not be able to satisfy one.
+    """
+    out: list[ast.AST] = []
+    stack = list(ast.iter_child_nodes(node))
+    while stack:
+        child = stack.pop()
+        out.append(child)
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        stack.extend(ast.iter_child_nodes(child))
+    return out
+
+
+def test_the_exit_block_is_gated_on_the_reapers_own_return() -> None:
+    """THE WIRING, asserted against the source that provides it (#1250, R1-1).
+
+    ``amain`` must ask whether the reaper ran the clean exit ordering by reading
+    the reaper's RETURN VALUE. Its predecessor asked ``reaper.exception() is
+    None``, and BOTH of ``_reaper``'s normal returns are exception-free, so that
+    read credited the skip to a reaper that had disposed nothing and the whole
+    exit block below it was skipped — the defect this PR fixes.
+
+    WHY A SOURCE ASSERTION. Nothing that runs here can discriminate: the one cell
+    that reaches this branch is the ``tui-e2e`` journal cell
+    (``tests/e2e/test_session_survival_journal_e2e.py``), and it fails only ~6%
+    of runs on the parent — so a revert to ``reaper.exception() is None`` would
+    pass it ~94% of the time, and a green run proves nothing.
+
+    AT THE ROUND-1 REVIEW THAT LEG DID NOT RUN AT ALL, and naming the real
+    reason is deliberate so that nobody reads it as a rule about diffs:
+    ``tui-e2e`` is ``needs: [changes, lint, type-check]`` and gates on
+    ``needs.lint.result == 'success'``, so the unrelated ``lint`` red inherited
+    from the tree (an ``isort`` failure in ``test_session_delete.py``, since
+    fixed by #1371) skipped all six shards — while the ``changes`` classifier
+    itself printed ``tui = true`` / ``tui-e2e: run``. ``tui`` is ``unit``'s
+    predicate, not "this diff reaches an e2e file" (see ``FLAG_REASONS`` in
+    ``scripts/ci_scope.py``), and this PR's e2e legs ran on every head whose
+    ``lint`` was green.
+
+    The other tests here pin the pieces (``_reaper``'s return value, and
+    ``_clean_ordering_already_ran``'s contract against stand-in futures); this
+    pins the call site that joins them, which is the line whose absence caused
+    the defect.
+
+    PARSED, NOT SUBSTRING-MATCHED, for the reason ``test_inbox`` spells out: a
+    substring match can be satisfied by prose, and this module's own comments
+    necessarily name ``reaper.exception()`` while explaining why it is gone.
+
+    WHAT IT PINS, SO A CORRECT CHANGE UPDATES THIS TEST RATHER THAN BEING
+    REWORKED AROUND IT. Two narrownesses are deliberate, and both are about the
+    answer coming from the reaper's RETURN VALUE at this call site. The verdict
+    must be the ``if``'s test DIRECTLY: hoisting it into a local
+    (``verdict = _clean_ordering_already_ran(reaper)``, then ``elif verdict:``)
+    is correct code this assertion rejects. And ``offenders`` forbids ANY read
+    of ``<reaper>.exception()`` in ``amain``'s own body, a logging-only one
+    included. A change that keeps the property but moves those shapes is a
+    change to this pin, not a reason to rework the change.
+    """
+    source = textwrap.dedent(inspect.getsource(child_mod.amain))
+    tree = ast.parse(source)
+    body = _own_body(tree.body[0])
+
+    def starts_a_reaper(value: ast.AST) -> bool:
+        """Does this expression start ``_reaper``? ``ensure_future`` is one wrapper of many."""
+        return any(
+            isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Name)
+            and inner.func.id == "_reaper"
+            for inner in ast.walk(value)
+        )
+
+    def reaper_local() -> str:
+        """The local ``_reaper``'s task is bound to — ``reaper`` today, whatever after.
+
+        Resolved from the construction rather than hard-coded, so renaming the
+        local cannot fail a valid classification (the convention
+        ``test_inbox``'s ``runtime_name`` sets).
+        """
+        for node in body:
+            if (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and starts_a_reaper(node.value)
+            ):
+                return node.targets[0].id
+        raise AssertionError("amain no longer starts a _reaper task")
+
+    name = reaper_local()
+
+    asks = [
+        node
+        for node in body
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_clean_ordering_already_ran"
+        and any(isinstance(arg, ast.Name) and arg.id == name for arg in node.args)
+    ]
+    assert asks, f"amain must gate the exit block on _clean_ordering_already_ran({name})"
+
+    def assigns_ran_clean(node: ast.AST) -> bool:
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            return False
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        return any(
+            isinstance(target, ast.Name) and target.id == "reaper_ran_clean_exit"
+            for target in targets
+        )
+
+    assert any(
+        isinstance(node, ast.If)
+        and node.test is asks[0]
+        and any(assigns_ran_clean(stmt) for stmt in node.body)
+        for node in body
+    ), "the reaper's answer must be what sets reaper_ran_clean_exit"
+
+    offenders = [
+        node
+        for node in body
+        if isinstance(node, ast.Attribute)
+        and node.attr == "exception"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == name
+    ]
+    assert not offenders, (
+        f"amain must not read {name}.exception() itself: BOTH of _reaper's normal "
+        "returns are exception-free, so that read credits the skip to a reaper that "
+        "ran no exit ordering and drops the exit note entirely (issue #1250, R1-1)"
+    )
 
 
 @pytest.mark.asyncio
@@ -341,7 +559,10 @@ def test_the_runtime_child_logs_to_its_own_bounded_file_apart_from_the_daemon(
 
     monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
 
-    async def fake_amain() -> int:
+    async def fake_amain(**_kwargs: object) -> int:
+        # ``**kwargs`` because ``main`` passes the operator capability through
+        # to the real ``amain`` (issue #1310); a double that pins the signature
+        # would fail on a parameter this test is not about.
         return 0
 
     monkeypatch.setattr(process, "amain", fake_amain)

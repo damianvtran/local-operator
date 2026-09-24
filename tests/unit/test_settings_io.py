@@ -44,6 +44,12 @@ def _consumer_defaults() -> dict[str, object]:
     from local_operator.compaction.thresholds import CompactionSettings
     from local_operator.harness.jobs import DEFAULT_MAX_RUNNING_JOBS
     from local_operator.harness.subagent import DEFAULT_MODEL_CHOICE
+    from local_operator.memory_guard import (
+        BASH_MEMORY_ENABLED_DEFAULT,
+        BASH_MEMORY_LIMIT_MB_DEFAULT,
+        BASH_MEMORY_MODE_DEFAULT,
+        BASH_MEMORY_SOFT_FRACTION_DEFAULT,
+    )
     from local_operator.model.configure import (
         ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS,
         OPENAI_USE_MAX_CONTEXT_WINDOW,
@@ -61,13 +67,22 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_REMOVE_EMPTY,
     )
     from local_operator.session.runtime.control import DEFAULT_BACKGROUND_ON_RESUME
+    from local_operator.session.runtime.process import (
+        DEFAULT_KEEP_ALIVE_MAX,
+        DEFAULT_KEEP_ALIVE_SECONDS,
+    )
     from local_operator.session.runtime.serving import DEFAULT_UNATTENDED_GATE_TIMEOUT_H
     from local_operator.spawn.policy import (
         DEFAULT_FORK_CMUX_PLACEMENT,
         DEFAULT_FORK_MODE,
     )
     from local_operator.tools import shell_env
-    from local_operator.tools.builtin import BASH_SHELL_DEFAULT
+    from local_operator.tools.builtin import (
+        BASH_SHELL_DEFAULT,
+        SEARCH_INTERCEPTION_BLOCK_DEFAULT,
+        SEARCH_INTERCEPTION_ENABLED_DEFAULT,
+        SEARCH_INTERCEPTION_RG_CONFIG_DEFAULT,
+    )
     from local_operator.tui.resume_click import DESKTOP_LAUNCH_COMMAND_DEFAULT
     from local_operator.tui.session_catalog import (
         DEFAULT_SIDEBAR_POSITION,
@@ -105,7 +120,24 @@ def _consumer_defaults() -> dict[str, object]:
         # Empty means "auto-resolve" (bash on PATH, else /bin/sh) rather than
         # an interpreter, so the consumer's constant is the empty string too.
         "bash.shell": BASH_SHELL_DEFAULT,
+        # The four memory_guard keys. The consumer constants live next to the
+        # reader in memory_guard.py, so this mapping is what stops the registry
+        # default and the code default drifting.
+        "bash.memory.enabled": BASH_MEMORY_ENABLED_DEFAULT,
+        "bash.memory.mode": BASH_MEMORY_MODE_DEFAULT,
+        "bash.memory.limit_mb": BASH_MEMORY_LIMIT_MB_DEFAULT,
+        "bash.memory.soft_fraction": BASH_MEMORY_SOFT_FRACTION_DEFAULT,
+        # The three search_interception keys. The consumer constants live next to
+        # the reader in tools/builtin.py, so this mapping is what stops the
+        # registry default and the code default drifting.
+        "tools.search_interception.enabled": SEARCH_INTERCEPTION_ENABLED_DEFAULT,
+        "tools.search_interception.block": SEARCH_INTERCEPTION_BLOCK_DEFAULT,
+        "tools.search_interception.rg_excludes": SEARCH_INTERCEPTION_RG_CONFIG_DEFAULT,
         "runtime.background_on_resume": DEFAULT_BACKGROUND_ON_RESUME,
+        # The residency knobs, whose consumer constants sit beside the reaper
+        # that reads them (``process._keep_alive_*``).
+        "runtime.keep_alive_seconds": DEFAULT_KEEP_ALIVE_SECONDS,
+        "runtime.keep_alive_max": DEFAULT_KEEP_ALIVE_MAX,
         # The registry restates this empty string rather than importing the
         # reader (an import edge from the CLI's settings layer into the TUI for
         # one empty string), so THIS is what stops the two drifting — the same
@@ -274,6 +306,7 @@ def _classification_consumer_defaults() -> dict[str, object]:
 _NO_SINGLE_VALUE_CONSUMER: dict[str, str] = {
     "display.shimmer": "tui/settings.py derives its defaults from this registry",
     "display.narration": "tui/settings.py derives its defaults from this registry",
+    "display.reasoning": "tui/settings.py derives its defaults from this registry",
     "display.rail": "tui/settings.py derives its defaults from this registry",
     "display.comfortable_rows": "tui/settings.py derives its defaults from this registry",
     "display.nerd_icons": "derived; tri-state None means auto-detect, not a value",
@@ -577,6 +610,86 @@ def test_bash_shell_row_shares_the_consumer_path(manager: ConfigManager) -> None
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(manager.config_dir))
         assert _configured_bash_shell() == "/opt/x/bash"
+
+
+def test_search_interception_rows_share_the_consumer_paths(manager: ConfigManager) -> None:
+    """The three ``search_interception`` rows write exactly where
+    ``tools.builtin`` reads, and a stored value round-trips through the real
+    reader.
+
+    Pinned by test rather than import for the same reason the rows around it
+    are: ``settings_io`` must stay cheap for the CLI while the reader lives in
+    ``tools/builtin``. A registry writing ``tools.search_interception.*`` while
+    the reader looked elsewhere would leave the guard reading its defaults
+    forever — silently un-configurable from ``/settings`` — so the paths and the
+    defaults are asserted against the consumer's own constants.
+    """
+    from local_operator.tools.builtin import (
+        SEARCH_INTERCEPTION_BLOCK_PATH,
+        SEARCH_INTERCEPTION_ENABLED_PATH,
+        SEARCH_INTERCEPTION_RG_CONFIG_PATH,
+        _search_interception_config,
+    )
+
+    assert (
+        settings_io.BY_KEY["tools.search_interception.enabled"].path
+        == SEARCH_INTERCEPTION_ENABLED_PATH
+    )
+    assert (
+        settings_io.BY_KEY["tools.search_interception.block"].path == SEARCH_INTERCEPTION_BLOCK_PATH
+    )
+    assert (
+        settings_io.BY_KEY["tools.search_interception.rg_excludes"].path
+        == SEARCH_INTERCEPTION_RG_CONFIG_PATH
+    )
+    assert settings_io.BY_KEY["tools.search_interception.enabled"].default is True
+
+    settings_io.write_setting(manager, settings_io.BY_KEY["tools.search_interception.block"], False)
+    stored = yaml.safe_load((manager.config_dir / "config.yml").read_text())["values"]
+    assert stored["tools"]["search_interception"]["block"] is False
+    assert "tools.search_interception.block" not in stored
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(manager.config_dir))
+        _enabled, block, _rg = _search_interception_config()
+        assert block is False
+
+
+def test_memory_guard_rows_share_the_consumer_paths(manager: ConfigManager) -> None:
+    """The four ``memory_guard`` rows write exactly where ``memory_guard.py``
+    reads, and a stored ``limit_mb`` round-trips through the real reader.
+
+    Pinned by test rather than import for the same reason the rows above are:
+    ``settings_io`` must stay cheap for the CLI while the reader lives in
+    ``memory_guard``. A registry writing ``bash.memory.*`` while the reader
+    looked elsewhere would leave the guard silently unbounded — the failure this
+    key exists to close — so the paths and the mode default are asserted against
+    the consumer's own constants.
+    """
+    from local_operator import memory_guard
+
+    assert settings_io.BY_KEY["bash.memory.enabled"].path == memory_guard.BASH_MEMORY_ENABLED_PATH
+    assert settings_io.BY_KEY["bash.memory.mode"].path == memory_guard.BASH_MEMORY_MODE_PATH
+    assert settings_io.BY_KEY["bash.memory.limit_mb"].path == memory_guard.BASH_MEMORY_LIMIT_MB_PATH
+    assert (
+        settings_io.BY_KEY["bash.memory.soft_fraction"].path
+        == memory_guard.BASH_MEMORY_SOFT_FRACTION_PATH
+    )
+    assert settings_io.BY_KEY["bash.memory.mode"].default == memory_guard.BASH_MEMORY_MODE_DEFAULT
+
+    settings_io.write_setting(manager, settings_io.BY_KEY["bash.memory.mode"], "manual")
+    settings_io.write_setting(manager, settings_io.BY_KEY["bash.memory.limit_mb"], 1024)
+    stored = yaml.safe_load((manager.config_dir / "config.yml").read_text())["values"]
+    assert stored["bash"]["memory"] == {"mode": "manual", "limit_mb": 1024}
+    assert "bash.memory.mode" not in stored
+
+    # Round-trip through the REAL reader: a stored manual ceiling must resolve to
+    # that ceiling, so the registry and the guard cannot disagree about a number
+    # the user set. `compute_budget` takes no host probes on the manual arm.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(manager.config_dir))
+        budget = memory_guard.compute_budget(mode="manual", limit_mb=1024)
+        assert budget.source == "manual"
+        assert budget.ceiling_mb == 1024
 
 
 def test_shell_environment_rows_share_the_reader_paths(manager: ConfigManager) -> None:
@@ -1884,6 +1997,37 @@ class TestTheApprovalsCopyIsTrueOnBothSurfaces:
         section = next(entry for entry in settings_io.SECTIONS if entry.name == "approvals")
         assert "tightens every running session" in section.description, section.description
         assert "that session's own process" in section.description, section.description
+
+
+class TestTheResidencyKeysStateTheirOwnCaveats:
+    """Review round 1, F6 and QA round 1, Q-5: the two warm-runtime keys.
+
+    Both are ``Scope.LIVE``, and the qualification a user needs is that LIVE is a
+    statement about the KEY, not a promise that an edit reaches a runtime that is
+    already inside the window it drew — that runtime keeps it. A caveat living
+    only in a code comment is a claim the user cannot read, so it belongs in the
+    section description, and this pins it there (and out of the per-key comment,
+    which contradicted itself on exactly this point).
+
+    Q-5 rides along because it is the same class of correction: the cap is
+    enforced over the runtime's OWN config root, so "machine-wide" was a promise
+    the code does not make — two installs on one host hold a cap each.
+    """
+
+    def test_the_section_says_an_edit_lands_at_the_next_window(self) -> None:
+        section = next(entry for entry in settings_io.SECTIONS if entry.name == "runtime")
+        assert "next draws its window" in section.description, section.description
+
+    def test_the_cap_names_its_scope_and_not_the_machine(self) -> None:
+        setting = settings_io.resolve_key("runtime.keep_alive_max")
+        assert setting is not None
+        assert "this install" in setting.help, setting.help
+        assert "Machine-wide" not in setting.help, setting.help
+
+    def test_the_window_help_still_names_the_off_switch(self) -> None:
+        setting = settings_io.resolve_key("runtime.keep_alive_seconds")
+        assert setting is not None
+        assert "keeps nothing warm" in setting.help, setting.help
 
 
 class TestConfigEditQualifiesALoosening:

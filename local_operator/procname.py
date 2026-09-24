@@ -87,6 +87,16 @@ on the link broke an unrelated worktree's ``local-operator`` console script with
 ``bad interpreter: Permission denied``. Nothing in this module writes modes, and
 nothing added to it should. Unlinking is safe (it only drops one name).
 
+A TEMP NAME IS THE LINK'S INODE TOO, so the same rule covers WRITING THROUGH one:
+the plant's ``.<brand>.<pid>.<thread>.tmp`` is a second name for whatever the
+``os.replace`` is about to install, and before that replace it is a second name
+for the interpreter the link already resolves to. Measured 2026-09-18, the hard
+way: a write through a LEAKED temp truncated a uv-managed, machine-wide
+interpreter — ``~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/bin/python3.12``
+— to a 12-byte text file reachable under 23 different names, breaking every 3.12
+venv on the host until ``uv`` re-materialised it. "Unlinking is safe" holds for a
+temp precisely because it only drops one name.
+
 STALENESS
 ---------
 The hardlink pins an **inode**, not a version. When ``uv tool install --force``
@@ -99,6 +109,14 @@ here, against a startup already north of a second) and re-plants when any
 fails. The
 inode is ground truth; there is deliberately **no version-stamp file**, because
 a stamp is a second source of truth that can itself go stale.
+
+AND A FOURTH ROT IS NOT OURS BUT IS MEASURED: the link is not always the
+interpreter's inode any more. On the operator's machine an EDR replaced it in
+five worktree venvs with a 49968-byte, mode-``-rw-------`` file owned by its
+own agent user (``_sentinel``), so the path named a file we can neither exec
+nor read. "Present but not executable by us" is therefore stale as well, and
+a spawn site that would have been handed such an image takes rung 2 instead of
+failing at ``execve``.
 
 EVERY FUNCTION HERE IS NO-RAISE BY CONTRACT, in the style of ``proc.py``. This
 is decoration on a process listing: no failure of it may ever stop a session
@@ -118,6 +136,21 @@ THE LADDER, AND WHERE EACH RUNG IS IMPLEMENTED
 - **Rung 3 — nothing.** :func:`launchd_job` falls back to the plist shape every
   installer wrote before branding (no ``Program`` key), and
   :func:`brand_this_process` is a no-op off Linux.
+
+**AND THE PLANT MUST GO WHERE THE EXEC GOES, which is not always this venv.**
+Two spawn sites run a DIFFERENT tree's interpreter: the post-upgrade repair
+child (``update._post_upgrade_invocation``, which must run the build just
+installed) and a session runtime engaged onto the next generation
+(``session/runtime/launch._spawn_runtime``). ``ensure_branded_interpreter`` can
+only brand the venv THIS process runs from, so both sites used to keep the
+label while replacing the image with a bare interpreter — a labelled
+``argv[0]`` on a ``python3.x`` image, which both breaks the "rides with the
+image" rule above and is the exact row an EDR killed 1079 times on a
+colleague's Mac on 2026-09-19 (threat name ``python3.14``, the flagged child's
+``argv`` = ``Local Operator [daemons] refresh …``). So the link is planted
+BESIDE the interpreter that will actually be executed
+(:func:`spawn_identity_for_interpreter`), and no spawn site patches
+``executable`` itself.
 
 **THE ARGV-ONLY RUNG THIS MODULE USED TO PROMISE IS DELIBERATELY NOT
 IMPLEMENTED, and the reason is measured.** A label is not free: on Linux
@@ -144,8 +177,6 @@ import logging
 import os
 import sys
 from pathlib import Path
-
-from local_operator import procstate
 
 logger = logging.getLogger(__name__)
 
@@ -328,6 +359,41 @@ def _libpython_name() -> str | None:
     return os.path.basename(name)
 
 
+def _libpython_name_for(real: Path) -> str | None:
+    """Basename of the dylib an EXPLICIT interpreter loads, or None.
+
+    :func:`_libpython_name` answers this for the interpreter RUNNING this code,
+    out of ``sysconfig``. That answer is wrong for the target of
+    :func:`spawn_identity_for_interpreter`, which may be a different CPython
+    minor (or a free-threaded build) than ours, and a mismatched libpython
+    beside a fresh interpreter is the measured 100%-abort mode.
+
+    Read from the interpreter's OWN FILE NAME rather than by running it: a
+    ``python3.12 -> libpython3.12.dylib`` mapping is exact for every
+    interpreter uv installs (including the ``python3.13t`` free-threaded
+    spelling), and a subprocess here would put an interpreter startup on every
+    spawn. Existence is checked, so a name that does not resolve to a real
+    dylib is refused rather than planted — a link to nothing is the abort.
+
+    The fallback matters for a tree whose interpreter is not version-named
+    (``python3``): exactly one ``libpython*.dylib`` beside it is unambiguous,
+    more than one is not, and an ambiguous ABI is refused.
+    """
+    try:
+        lib = real.parent.parent / "lib"
+        name = real.name
+        if name.startswith("python") and len(name) > len("python"):
+            candidate = f"lib{name}.dylib"
+            if (lib / candidate).is_file():
+                return candidate
+        matches = sorted(entry.name for entry in lib.glob("libpython*.dylib"))
+        if len(matches) == 1:
+            return matches[0]
+    except OSError:
+        return None
+    return None
+
+
 def _real_interpreter() -> Path | None:
     """``sys.executable`` with symlinks resolved, or None when unusable.
 
@@ -409,7 +475,16 @@ def _needs_replant(link: Path, real: Path, libpython: Path | None) -> bool:
     (c) the companion libpython symlink is missing, dangling, or points at
         something other than THIS interpreter's dylib — the measured
         100%-abort mode, plus the subtler case where an interpreter upgrade
-        leaves a live symlink aimed at the previous install's library.
+        leaves a live symlink aimed at the previous install's library;
+    (d) the file at the link path is present but WE CANNOT EXECUTE IT. Not
+        hypothetical, and not necessarily ours: an EDR on the operator's
+        machine replaced the planted link in five worktree venvs with a
+        49968-byte mode-0600 file owned by its own agent user, so the path
+        named an image that would fail at ``execve`` while every inode/ABI
+        trigger above was satisfied by whatever it replaced (measured
+        2026-09-19). Asking "can we exec it" rather than reading mode bits is
+        deliberate: the answer depends on owner, group and the effective uid
+        together, which is exactly the question ``subprocess`` will ask.
 
     The inode is ground truth, so no version-stamp file is written; a stamp
     would be a second source of truth that can itself go stale while the inode
@@ -430,6 +505,17 @@ def _needs_replant(link: Path, real: Path, libpython: Path | None) -> bool:
         return True  # (a)
     if link_stat.st_nlink < 2:
         return True  # (b)
+    # (d) A separate check from the inode comparison above, and deliberately
+    # not a mode-bit read: an EDR-owned reproduction on this machine had a
+    # DIFFERENT inode (so (a) fires too), but a copy that happens to preserve
+    # the inode is not required for the question to matter — what must never
+    # reach `subprocess` is an image we cannot execute. Wrapped because the
+    # contract here is no-raise, and `access` is not total on every path shape.
+    try:
+        if not os.access(link, os.X_OK):
+            return True
+    except OSError:
+        return True
     if libpython is not None:
         # `exists` follows the symlink, so a dangling one is already False.
         # Inside the try because it is NOT total: an unreadable parent
@@ -456,8 +542,27 @@ def _needs_replant(link: Path, real: Path, libpython: Path | None) -> bool:
     return False
 
 
+def _executable_image(link: Path | None) -> Path | None:
+    """``link`` when it is an image we can actually EXEC, else ``None``.
+
+    The last gate before a path is handed to ``subprocess`` as ``executable=``,
+    and it exists because the plant can be defeated after it succeeds: an EDR
+    on the operator's machine rewrote the link between two of our starts
+    (measured 2026-09-19), and a spawn that passed such a path to ``execve``
+    dies with ``Permission denied`` at the child's expense. ``None`` is the
+    honest answer — it means rung 2, which still runs the requested
+    interpreter, just without a name.
+    """
+    if link is None:
+        return None
+    try:
+        return link if os.access(link, os.X_OK) else None
+    except OSError:  # pragma: no cover — access answers False for a bad path
+        return None
+
+
 def _sweep_orphan_temps(directory: Path, prefix: str) -> None:
-    """Remove ``.<prefix>.<pid>.tmp`` entries left by a plant that was killed.
+    """Remove ``.<prefix>.<pid>[.<thread>].tmp`` entries left by a plant that was killed.
 
     The plant is link-to-temp + ``os.replace``, which is atomic and cleans up
     after itself on an ``OSError`` — but NOT when the process is killed between
@@ -466,36 +571,117 @@ def _sweep_orphan_temps(directory: Path, prefix: str) -> None:
     once per crashed startup and turn ``ls <venv>/bin`` into a junkyard.
 
     Only entries whose embedded pid is no longer alive are removed, so a plant
-    running concurrently in another worktree is never disturbed.
+    running concurrently in another worktree is never disturbed. That question
+    is answered by TWO probes, and the second one is the fix: existence, then
+    zombiehood.
 
-    The liveness question goes through :func:`procstate.pid_alive` and NEVER
-    through ``os.kill(pid, 0)``. That call is a liveness PROBE on POSIX and
-    TERMINATE on Windows — CPython's ``os_kill_impl`` ends in
-    ``TerminateProcess`` for any signal that is not ``CTRL_C_EVENT`` /
-    ``CTRL_BREAK_EVENT`` — so the sweep would kill whichever live process
-    happened to match a stale entry's embedded pid and then read the
-    successful kill as "still running", keeping the entry. Housekeeping must
-    not be able to do that, and this is the same shared probe the rest of the
-    package was moved onto.
+    Existence goes through :func:`procstate.pid_alive` and NEVER through
+    ``os.kill(pid, 0)``. That call is a liveness PROBE on POSIX and TERMINATE on
+    Windows — CPython's ``os_kill_impl`` ends in ``TerminateProcess`` for any
+    signal that is not ``CTRL_C_EVENT`` / ``CTRL_BREAK_EVENT`` — so a sweep
+    written on it would kill whichever live process happened to match a stale
+    entry's embedded pid, and then read the successful kill as "still running"
+    and keep the entry. Housekeeping must not be able to do that, and this is
+    the same shared probe the rest of the package was moved onto.
+
+    A ZOMBIE IS NOT A LIVE PLANT, THOUGH, and existence is not the whole
+    question because a zombie exists. ``pid_alive`` is
+    ``pid_liveness(pid) is not False``, and on POSIX ``pid_liveness`` is itself
+    signal 0 — so it answers for an exited-but-unreaped process exactly as it
+    does for a running one, which is the same answer the raw call it replaced
+    gave. Measured here: a ``kill -9``'d child reads as alive through signal 0
+    while ``ps`` reports it as ``Z``. That is precisely the fleet-wide case this
+    sweep exists for, so the error is worst exactly when it matters: when a
+    whole fleet dies at once (the incident shape this repo has now seen three
+    times) every leaked temp belongs to a zombie and NONE is reclaimed, because
+    the parent that would have reaped it is the long-lived frontend that just
+    lost all its children.
+
+    The pids that read alive are therefore asked the ZOMBIE question as well,
+    through :func:`procstate.zombie_states` — the module that owns it, in ONE
+    ``ps`` fork for the whole surviving set, rather than through a second probe
+    written here that could answer it differently.
+
+    A pid the zombie probe does not answer for reads as NOT a zombie, the
+    fail-closed direction ``procstate`` documents: an unprobeable set may cost a
+    leftover file, and must never cost a live plant its temp. Another account's
+    pid lands on that side by construction rather than through the branch this
+    function used to carry — ``pid_alive`` answers True for ``EPERM`` (the
+    process exists and cannot be a corpse of ours), and ``ps`` still reports
+    such a pid's state, which is not a zombie — so it is passed over, exactly as
+    the old ``EPERM`` arm left it.
     """
     try:
+        # Function-local import: this sweep runs only on the REPLANT path, and
+        # ``procstate`` is a module body nothing above this function reads — the
+        # house rule here is that the common startup (a stat probe and no writes)
+        # pays for nothing it does not use (see the ``update`` and ``ctypes``
+        # imports below).
+        #
+        # THE SAVING IS ONE MODULE, MEASURED (review round 4, MINOR 2):
+        # ``import local_operator.procname`` leaves BOTH ``procstate`` and
+        # ``subprocess`` out of ``sys.modules``, but ``subprocess`` is not what this
+        # deferral is buying. ``cli.py`` imports it at module scope, so on the ``lop``
+        # path the module-level form would add only ``procstate`` — a stdlib-only
+        # body. The deferral is kept because that body is still the whole saving and
+        # because the sweep is not on the common path at all; the locality is pinned
+        # by ``test_importing_procname_defers_procstate``, so collapsing it reads as
+        # a no-op cleanup only until that test reddens.
+        from local_operator import procstate
+
+        gone: list[Path] = []
+        unproven: dict[int, Path] = {}
         for entry in directory.glob(f".{prefix}.*.tmp"):
-            pid_text = entry.name[len(prefix) + 2 : -4]
+            # THE PID, NOT THE WHOLE TAIL: a temp is ``.<brand>.<pid>.<thread>.tmp``
+            # (see ``_plant_hardlink`` on why the thread is there), and the thread
+            # component is what this sweep does NOT need to answer its question —
+            # the pid is the planter either way.
+            pid_text = entry.name[len(prefix) + 2 : -4].split(".", 1)[0]
             if not pid_text.isdigit():
                 continue
             # POSIX semantics preserved exactly: a gone pid is False and is
             # swept, while EPERM (alive, another user's) and an unanswerable
             # probe both fail CLOSED to "alive" — ``pid_alive`` is
-            # ``pid_liveness(pid) is not False`` — which leaves the entry
-            # alone rather than racing somebody else's plant.
-            if procstate.pid_alive(int(pid_text)):
-                continue  # still running, or unprovable: not ours to clean
+            # ``pid_liveness(pid) is not False`` — which leaves the entry alone
+            # rather than racing somebody else's plant. "Alive" is not the end
+            # of it: it is the input to the zombie probe below.
+            if not procstate.pid_alive(int(pid_text)):
+                gone.append(entry)
+                continue
+            unproven[int(pid_text)] = entry
+        zombies = procstate.zombie_states(unproven)
+        # A pid absent from the probe's answer reads as NOT a zombie, the same
+        # fail-closed direction ``procstate`` documents: an unprobeable set may
+        # cost a leftover file, and must never cost a live plant its temp.
+        gone.extend(entry for pid, entry in unproven.items() if zombies.get(pid, False))
+        for entry in gone:
             try:
                 entry.unlink()
             except OSError:
                 pass
     except Exception:  # noqa: BLE001 — housekeeping never fails a startup
         logger.debug("orphan temp sweep skipped", exc_info=True)
+
+
+def _temp_thread_token() -> str:
+    """The thread component of a plant's temp name (see :func:`_plant_hardlink`).
+
+    WHY THE NAME NEEDS A SECOND COMPONENT AT ALL: the plant unlinks its own
+    ``.<brand>.<pid>.tmp`` before linking, which is right for one thread and wrong
+    for two — a second plant in the same process would drop the first's freshly
+    written temp, its ``os.link`` would then fail ``ENOENT``, and one plant would
+    have cost a sibling its rung 1 (review round 1, NIT 2). All four
+    ``ensure_branded_interpreter()`` call sites are single-threaded startup paths
+    today, so that collision is unreachable rather than impossible, and a name that
+    cannot collide is cheaper than the reasoning that keeps re-proving it cannot.
+
+    Isolated at this seam to keep ``threading`` out of the common startup, which is
+    this module's standing house rule: the plant runs only on the REPLANT path, and
+    everything above it is a stat probe and no writes.
+    """
+    import threading
+
+    return str(threading.get_ident())
 
 
 def _plant_hardlink(link: Path, real: Path) -> bool:
@@ -511,7 +697,7 @@ def _plant_hardlink(link: Path, real: Path) -> bool:
     hardlinked, and the caller falls back to rung 2 — the interpreter, with no
     label on either axis (see the ladder in the module docstring).
     """
-    tmp = link.with_name(f".{BRAND}.{os.getpid()}.tmp")
+    tmp = link.with_name(f".{BRAND}.{os.getpid()}.{_temp_thread_token()}.tmp")
     try:
         link.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -520,6 +706,30 @@ def _plant_hardlink(link: Path, real: Path) -> bool:
             pass
         os.link(real, tmp)
         os.replace(tmp, link)
+        # THE TEMP IS CONSUMED ONLY WHEN THE TWO NAMES ARE DIFFERENT INODES, and
+        # the ordinary replant is the case where they are the SAME one: trigger
+        # (c) (a missing or wrong companion libpython) fires while the link
+        # already names the right interpreter, so ``link`` and ``tmp`` are two
+        # hardlinks to one inode — and POSIX says ``os.replace`` of two
+        # hardlinks to one file "shall return successfully and perform no other
+        # action". The temp therefore survived EVERY such replant, one per
+        # stale-fleet startup: measured on this host as 573 leftovers across 17
+        # generations, each a real directory entry in ``<venv>/bin`` (and
+        # reproduced directly: one ``_plant_hardlink`` call onto the link's own
+        # inode leaves ``.<BRAND>.<pid>.tmp`` behind).
+        #
+        # Unlinking the NAME is safe in both shapes and touches nothing else:
+        # when the replace did consume it this raises ``ENOENT``; when it did
+        # not, the temp is a second name for ``link``'s own inode, so removing
+        # it leaves ``link`` — the file the caller asked for — exactly as it
+        # was, and every process already running that inode keeps running it.
+        # ``link`` itself is never unlinked here, and no mode or owner is
+        # changed: see the module docstring on why mutating the shared inode's
+        # metadata is forbidden.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass  # already consumed by the replace — the expected case
         return True
     except OSError as exc:
         # EXDEV, EPERM (a read-only or foreign-owned prefix), ENOSPC — all mean
@@ -572,6 +782,55 @@ def _plant_libpython(link: Path, real: Path, name: str) -> bool:
         return False
 
 
+def _plant_branded_image(link: Path, real: Path, name: str | None) -> Path | None:
+    """The injected plant: refresh the shape beside ``real`` if stale.
+
+    Factored out of :func:`ensure_branded_interpreter` so the SAME logic can
+    plant beside an interpreter that is not this process's — the two spawn
+    sites that must run another tree's build (see
+    :func:`spawn_identity_for_interpreter`). Everything it needs is an explicit
+    argument: ``link`` is where the branded name must appear, ``real`` is the
+    interpreter it must be a second name FOR, and ``name`` is the dylib (from
+    ``sysconfig`` for this venv, from the target's own file name otherwise).
+
+    Returns the usable link, or ``None``: when no dylib can be identified, when
+    either plant fails (``EXDEV``, ``EPERM``, a read-only prefix — all
+    supported outcomes), and when the link that is there is not executable by
+    us. ``None`` is rung 2 for every caller, never an error to report.
+    """
+    # NO IDENTIFIABLE DYLIB MEANS NO IMAGE AT ALL — not "keep the one that is
+    # already there". The refusal has to come BEFORE the staleness early return,
+    # because with ``name is None`` trigger (c) cannot run at all: a link that
+    # is the interpreter's inode, executable and ``nlink >= 2`` would otherwise
+    # be handed out with its companion dylib missing or unidentifiable, and
+    # dyld aborts at load — the measured 100%-abort mode, and the one failure no
+    # ``os.access`` check can see (review round 1, R-4).
+    #
+    # THE COUNTER-ARGUMENT, recorded rather than left implicit: a STATIC build
+    # legitimately has no dylib, so a hardlink of one might execute with no
+    # companion pin at all. It is refused anyway, because "this interpreter needs
+    # no dylib" and "a dylib we could not identify" are indistinguishable from
+    # here, and a name is worth less than a launch: every interpreter this
+    # ships on is uv's dynamic Mach-O build whose only ``LC_RPATH`` is
+    # ``@executable_path/../lib`` (see the module docstring's abort measurement).
+    if name is None:
+        return None
+    libpython = link.parent.parent / "lib" / name
+    if not _needs_replant(link, real, libpython):
+        return _executable_image(link)
+    # BOTH plant directories. A killed plant can leak a temp in `bin/`
+    # (named for the brand) or in `lib/` (named for the dylib), and sweeping
+    # only the first left lib temps accumulating forever. Only on the replant
+    # path, so the common startup stays a stat probe with no directory scan.
+    _sweep_orphan_temps(link.parent, BRAND)
+    _sweep_orphan_temps(link.parent.parent / "lib", name)
+    if not _plant_libpython(link, real, name):
+        return None
+    if not _plant_hardlink(link, real):
+        return None
+    return _executable_image(link)
+
+
 def ensure_branded_interpreter() -> Path | None:
     """Plant/refresh the branded interpreter image; return its path or None.
 
@@ -594,28 +853,7 @@ def ensure_branded_interpreter() -> Path | None:
         real = _real_interpreter()
         if real is None:
             return None
-        name = _libpython_name()
-        libpython = (link.parent.parent / "lib" / name) if name else None
-
-        if not _needs_replant(link, real, libpython):
-            return link
-
-        if name is None:
-            # No dylib to pin means the hardlink would abort at launch. Refuse
-            # rather than plant a landmine.
-            return None
-        # BOTH plant directories. A killed plant can leak a temp in `bin/`
-        # (named for the brand) or in `lib/` (named for the dylib), and
-        # sweeping only the first left lib temps accumulating forever. Only on
-        # the replant path, so the common startup stays a stat probe with no
-        # directory scan.
-        _sweep_orphan_temps(link.parent, BRAND)
-        _sweep_orphan_temps(link.parent.parent / "lib", name)
-        if not _plant_libpython(link, real, name):
-            return None
-        if not _plant_hardlink(link, real):
-            return None
-        return link
+        return _plant_branded_image(link, real, _libpython_name())
     except Exception:  # noqa: BLE001 — decoration must never break a startup
         logger.debug("branded interpreter setup skipped", exc_info=True)
         return None
@@ -653,6 +891,21 @@ def should_reexec() -> Path | None:
 #: `[project.scripts]` defines both; `lop` is the launcher the operator uses.
 _LAUNCHER_NAMES = frozenset({"lop", "lo", "local-operator"})
 
+#: Interpreter options that may legitimately precede the program on the
+#: command line. Deliberately EXACTLY these: each is either measured on a real
+#: launch of this product (``-P``, what every spawn site of ours passes) or is
+#: an option an operator or an app can plausibly add to a ``lop`` line. An
+#: option not listed here answers "not our launch", which only costs a name —
+#: see :func:`is_own_launch` for why that direction is the safe one.
+_LEADING_OPTION_FLAGS = frozenset({"-P", "-u", "-E", "-s", "-I", "-B"})
+
+#: The same, for options that take a SEPARATE value (``-X dev``, ``-W ignore``):
+#: the token after one of these is its value, not the program.
+_OPTION_WITH_VALUE_FLAGS = frozenset({"-X", "-W"})
+
+#: Long options that can precede the program, always with an attached ``=``.
+_LONG_OPTION_PREFIXES = ("--check-hash-based-pycs",)
+
 
 def is_own_launch() -> bool:
     """True only when this process was started as the ``lop`` command itself.
@@ -670,6 +923,18 @@ def is_own_launch() -> bool:
     process correctly declines to replace itself. ``-m local_operator.cli`` is
     also accepted: that is a documented way to launch the app.
 
+    **LEADING INTERPRETER OPTIONS ARE SKIPPED, because they are not the
+    program.** ``python3 -P -m local_operator.cli serve …`` is a real launch —
+    it is the shape ``server/reload.py`` execs as a reload successor, and the
+    shape a ``lop serve`` daemon has after one (measured live on the operator's
+    machine: pid 1343, ``python3.14``, ppid 1, ``--listener-fd``). Reading
+    ``orig_argv[1]`` directly answered False for every one of those, so the
+    successor never branded itself and the daemon stayed a bare ``python3.x``
+    row for its whole life. The options that may legitimately precede the
+    program are skipped one by one — the ones that take a SEPARATE value
+    (``-X dev``, ``-W ignore``) skip their value too — and an UNKNOWN option
+    still answers False, which is the safe direction: it can delay a name, but
+    it can never re-exec something that is not a launch of this product.
     **THE ``-c`` LAUNCHER SHAPE IS A DELIBERATE NON-GOAL — do not "fix" it by
     accepting it.** The desktop app (``~/local-operator-ui``,
     ``src/main/backend/owned-serve-launch.ts``) starts its managed backend as
@@ -686,14 +951,48 @@ def is_own_launch() -> bool:
     """
     try:
         argv = sys.orig_argv
-        if len(argv) < 2:
-            return False  # a bare REPL
-        first = argv[1]
-        if first == "-m":
-            return len(argv) > 2 and argv[2] in {"local_operator", "local_operator.cli"}
-        if first.startswith("-"):
-            return False  # -c, -X, an inline flag: never a launcher invocation
-        return os.path.basename(first) in _LAUNCHER_NAMES
+        index = 1
+        while index < len(argv):
+            first = argv[index]
+            if first.startswith("-c"):
+                # The ``-c`` shape, and it stays a non-goal even when options
+                # precede it: see the paragraph above. ``startswith`` rather
+                # than equality because CPython accepts ``-ccode`` too, and a
+                # missed ``-c`` is the app-compat break this refuses.
+                return False
+            if first == "-m":
+                if index + 1 >= len(argv):
+                    return False
+                module = argv[index + 1]
+                # The package, or ANY submodule of it. `-m local_operator.x`
+                # is a launch of this product by construction, and the modules
+                # the product spawns itself are all in that set
+                # (`local_operator.cli`, `local_operator.session.runtime
+                # .process`, `local_operator.tools.eval_worker`,
+                # `local_operator.secrets.brokerd`, the wake supervisor, the
+                # tunnel service, the browser bridge). The prefix test is
+                # bounded at a dot, so a similarly-named distribution
+                # (`local_operators`) cannot slip in; a sibling module that is
+                # NOT ours would have to be literally inside this package.
+                return module == "local_operator" or module.startswith("local_operator.")
+            if first in _OPTION_WITH_VALUE_FLAGS:
+                index += 2  # the option AND its separate value
+                continue
+            if first in _LEADING_OPTION_FLAGS:
+                index += 1
+                continue
+            if first.startswith(("-X", "-W")) or first.startswith(_LONG_OPTION_PREFIXES):
+                # Attached spelling (``-Xdev``, ``-Wignore``,
+                # ``--check-hash-based-pycs=always``). The detached spellings
+                # are handled above; a long option given AS ``name value`` is
+                # not something CPython accepts, so it is not skipped here
+                # either.
+                index += 1
+                continue
+            if first.startswith("-"):
+                return False  # an option we do not know: never a launcher
+            return os.path.basename(first) in _LAUNCHER_NAMES
+        return False  # options and nothing else: a bare REPL, not a launch
     except Exception:  # noqa: BLE001
         return False
 
@@ -799,6 +1098,85 @@ def spawn_identity(label: str, **fields: object) -> tuple[str, str | None]:
         # here to restore it.
         return sys.executable, None
     return branded_argv0(label, **fields), str(link)
+
+
+def _branded_link_beside(interpreter: str | os.PathLike[str]) -> Path | None:
+    """Where the branded link for an EXPLICIT interpreter belongs, or ``None``.
+
+    The target-side twin of :func:`branded_link_path`, and the reason that one
+    cannot be reused: it answers with ``<sys.prefix>/bin/<BRAND>``, the venv
+    THIS process runs from, while a cross-tree spawn site needs the venv of the
+    interpreter it is about to execute.
+
+    Venv-ness is answered by the target's OWN ``pyvenv.cfg`` rather than by
+    :func:`_is_venv` (which compares ``sys.prefix`` against ``sys.base_prefix``
+    and would therefore describe us). A target with no ``pyvenv.cfg`` beside it
+    is a system/Homebrew/managed interpreter, and planting into one is out of
+    the question for a cosmetic feature — same refusal as the own-venv path,
+    reached from the other direction.
+    """
+    try:
+        if sys.platform != "darwin":
+            return None
+        if len(BRAND) > _PROC_NAME_MAX:
+            return None
+        target = Path(interpreter)
+        root = target.parent.parent
+        if not (root / "pyvenv.cfg").is_file():
+            return None
+        if _is_framework_build(Path(os.path.realpath(target))):
+            return None
+        return root / "bin" / BRAND
+    except OSError:
+        return None
+
+
+def spawn_identity_for_interpreter(
+    label: str, interpreter: str | os.PathLike[str], **fields: object
+) -> tuple[str, str | None]:
+    """``(argv[0], executable)`` for a child that runs a DIFFERENT interpreter.
+
+    :func:`spawn_identity` brands THIS process's venv, so a site that must run
+    another tree's build — the post-upgrade repair child (``update``) and a
+    runtime engaged onto the next generation (``session/runtime/launch``) —
+    could only ever keep the label and replace the image, which produced the
+    ``python3.14`` row an EDR killed 1079 times on 2026-09-19. This plants the
+    link BESIDE ``interpreter`` and hands back the pair, so both axes describe
+    the tree that will actually be executed.
+
+    THE TARGET'S VENV IS WHAT MAKES THE NAME STICK. The link lives in
+    ``<target venv>/bin``, so the kernel takes ``p_comm`` from it AND the child
+    still resolves ``sys.prefix`` from the ``pyvenv.cfg`` beside it — the
+    generation and build the caller asked for are unchanged. That is not a
+    side effect to preserve carefully; it is what the plant is for.
+
+    Returns ``(str(interpreter), None)`` — rung 2, the bare interpreter with
+    the label deliberately WITHHELD — when no image can be planted (not
+    darwin, not a venv, a framework build, cross-device, a read-only prefix, no
+    dylib to pin) or when the link that is there cannot be executed by us. The
+    caller MUST pass both halves straight through, and must not treat ``None``
+    as "use my own executable": the whole point is that this child runs the
+    OTHER build.
+
+    Cheap in the steady state: one ``pyvenv.cfg`` probe and one ``realpath``,
+    then the plant path's own staleness probe; a plant happens only on a miss
+    (a fresh venv, a replaced interpreter, or an EDR-neutered link).
+
+    Never raises — a name is decoration, and a spawn may not fail for one.
+    """
+    target = str(interpreter)
+    try:
+        link = _branded_link_beside(target)
+        if link is None:
+            return target, None
+        real = Path(os.path.realpath(target))
+        image = _plant_branded_image(link, real, _libpython_name_for(real))
+        if image is None:
+            return target, None
+        return branded_argv0(label, **fields), str(image)
+    except Exception:  # noqa: BLE001 — a name is decoration, never a failure
+        logger.debug("cross-tree spawn identity unavailable", exc_info=True)
+        return target, None
 
 
 def supervised_image() -> Path | None:

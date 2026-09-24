@@ -30,10 +30,12 @@ from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_sessions import (
     AdmissionStatus,
     AnswerReceipt,
+    ArchiveState,
     AttentionState,
     ChildTranscriptPage,
     CommandReceipt,
     CreatedSession,
+    DeletedSession,
     DraftPreviewPayload,
     HistoryPage,
     InterruptReceipt,
@@ -64,6 +66,7 @@ from local_operator.server.utils.desktop_sessions import (
     DesktopSessionBridge,
     DesktopSessions,
     LegacySubscriberDuringMove,
+    SessionDeletionRefused,
     SubagentChildUnavailable,
     move_session,
     resolve_working_directory,
@@ -76,9 +79,14 @@ from local_operator.server.utils.store_failures import (
     sqlite_store_failure,
     store_failure,
 )
+from local_operator.session.attached import RuntimeUnresponsiveError
 from local_operator.session.attention import SupersededCompletionToken
 from local_operator.session.cold_model import synthesise_cold_state
-from local_operator.session.errors import MoveIndeterminate, SessionStoreUnavailable
+from local_operator.session.errors import (
+    MoveIndeterminate,
+    OperatorAuthorityRequired,
+    SessionStoreUnavailable,
+)
 from local_operator.session.frontend_state import (
     FrontendSync,
     SlashResult,
@@ -133,6 +141,34 @@ RUNTIME_UNREACHABLE = "runtime_unreachable"
 RUNTIME_UNREACHABLE_MESSAGE = (
     "Session owner is unavailable. Reconnect and reconcile before retrying."
 )
+
+#: The machine code for a control call whose runtime IS alive and reachable but
+#: did not answer inside the desktop control envelope
+#: (``session/attached.py::DESKTOP_CONTROL_ATTACH_S``) — a loop busy mid-turn, a
+#: long synchronous step. Split from :data:`RUNTIME_UNREACHABLE` because the two
+#: call for different client behaviour: unreachable means reconcile, busy means
+#: the same request will very likely succeed shortly and is safe to resend (the
+#: receipt journal makes an admission at-most-once per request id).
+#:
+#: The MESSAGE is deliberately the unchanged :data:`RUNTIME_UNREACHABLE_MESSAGE`:
+#: a shipped app that predates this code matches that prefix for its copy, and a
+#: backend fix must not move user-visible text on machines whose app has not
+#: updated. ``retryable``/``retry_after_ms`` and a ``Retry-After`` header are
+#: additive fields a newer renderer keys on.
+RUNTIME_BUSY = "runtime_busy"
+
+#: How soon a client may usefully resend a ``runtime_busy`` request. Short
+#: because the refusal is produced in ``DESKTOP_CONTROL_ATTACH_S`` rather than
+#: 15 s, so two retries still fit well inside the renderer's 20 s deadline.
+#:
+#: DELIBERATELY SHORTER THAN THE 3 s ENVELOPE (review round 1, N2). It is the
+#: PAUSE before the next attempt, not a forecast of when the owner answers: the
+#: retry spends its own ``DESKTOP_CONTROL_ATTACH_S`` waiting for the owner, so an
+#: owner that recovers within ~5 s of the refusal is admitted by the first
+#: retry, and refuse + pause + retry cycles (3 + 2 + 3 + 2 + 3 = 13 s) keep three
+#: attempts inside the renderer's 20 s deadline. Aligning it to 3 s buys no extra
+#: chance of admission and costs the third attempt's headroom.
+RUNTIME_BUSY_RETRY_AFTER_MS = 2000
 
 #: The receipt's three dispositions (``AdmissionDetail.status``). ``status`` is
 #: the ONE-WORD answer to "did the owner take this text", which is why a false
@@ -563,6 +599,51 @@ class Pin(Input):
     """
 
     pinned: StrictBool
+
+
+class Archive(Input):
+    """The ARCHIVE state the caller wants this session to be in.
+
+    ``Pin``'s shape and ``Pin``'s reasons: a desired state rather than a toggle
+    verb (a retried toggle flips the archive back, which the user reports as
+    "the archive keeps un-archiving itself"), ``extra="forbid"`` so an omitted
+    ``archived`` is a 422 rather than a silent false, and ``StrictBool`` so a
+    client whose serialiser produces ``"yes"`` or ``1`` gets a signal instead of
+    a 200 over state it did not mean to set.
+    """
+
+    archived: StrictBool
+
+
+class ConfirmDeletion(Input):
+    """The explicit confirmation a PERMANENT deletion requires.
+
+    THE FIELD IS THE WHOLE REQUEST, which is why it is required and why
+    ``extra="forbid"`` is inherited: a delete that dispatch sends without a
+    confirmation must not be a delete. ``confirmed: true`` is the only accepted
+    value — see :meth:`_require_confirmation` for why ``false`` is a 422 rather
+    than a quieter refusal.
+    """
+
+    confirmed: StrictBool
+
+    @model_validator(mode="after")
+    def _require_confirmation(self) -> "ConfirmDeletion":
+        """Refuse ``confirmed: false`` as a malformed request, not as a decision.
+
+        ``StrictBool`` alone is not enough: it accepts ``False``, and a body that
+        explicitly says it is NOT confirming would then reach the handler, where
+        the only honest things to do are refuse it (a 409 that says the user
+        withholds consent for something they never asked to withhold) or delete
+        (silence, and the worst possible reading). Recognising it HERE makes it a
+        422 — the status this ladder already uses for a body it cannot honour,
+        the same one an omitted field gets — so a client bug reads as a client
+        bug. The UI only ever sends ``true``; this is the guard for the day it
+        does not.
+        """
+        if not self.confirmed:
+            raise ValueError("confirmed must be true")
+        return self
 
 
 class PresenceWindow(Input):
@@ -1181,6 +1262,19 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         # through the record (design §7) — a message and a code it can key on,
         # never a traceback.
         raise HTTPException(503, {"code": error.code, "message": str(error)}) from None
+    except OperatorAuthorityRequired as error:
+        # THE REFUSAL IS THE ANSWER (agent review round 1 R1-2 = design D1 = UX
+        # U4 = QA Q1). This one arrived as a bare ``RuntimeError`` and fell
+        # through to the 503 below, so the desktop client was told the runtime
+        # was UNREACHABLE and asked to reconcile — a different problem, with a
+        # remedy that cannot work — while every other route (the phone relay's
+        # 422) carried the copy that names the real remedies. 422, not 503: the
+        # runtime answered, promptly and deliberately, and the request is the
+        # thing that has to change.
+        #
+        # ``code`` rides along so a client can key on the category rather than
+        # on the sentence, exactly as the ladder's other arms do.
+        raise HTTPException(422, {"code": error.code, "message": str(error)}) from None
     except SubagentChildUnavailable as error:
         # The child read route's containment refusal (design § 9.1). Not folded
         # into the generic 404 below because the code is part of the contract:
@@ -1267,9 +1361,31 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         from local_operator.session.errors import (
             AttachmentUnavailable,
             ProfileRegistryUnavailable,
+            RuntimeRetiring,
         )
 
-        if isinstance(error, (AttachmentUnavailable, ProfileRegistryUnavailable)):
+        if isinstance(error, (AttachmentUnavailable, ProfileRegistryUnavailable, RuntimeRetiring)):
+            # ``RuntimeRetiring`` IS IN THIS TUPLE FOR THE REASON THE ARM'S
+            # OTHER FOUR REFUSALS ARE: the code is the contract. A retiring runtime refuses an
+            # admission the client can ACT on differently from a broken one —
+            # the message was provably not admitted, so the app restores its
+            # echo and retries the same id instead of holding the text in the
+            # composer as a draft the backend already took (design of record
+            # ``docs/design-ownerless-session-attach.md`` §1.6/F5, §6 U1, which
+            # read this route as carrying ``{code: "runtime_retiring", ...}``).
+            # It reached the bare ``str(error)`` answer below only because it
+            # was never listed here, and that answer is the one shape a renderer
+            # cannot key on: the category it needs was nowhere in the body.
+            #
+            # ADDITIVE FOR OLDER CLIENTS, which is what makes listing it here
+            # safe rather than a wire change: such a client read ``detail`` as a
+            # string and read it as nothing more than that here — the sentence a
+            # refusal object carries in ``message`` is character-for-character
+            # the one the bare 409 carried, so the only difference it can observe
+            # is an object where it expected prose, which it ignores. The same
+            # claim the ``MoveIndeterminate`` arm above states for the same
+            # body shape ("The client is already built for this shape: it reads
+            # ``detail.message`` when ``detail`` is an object").
             raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
         if isinstance(error, SupersededCompletionToken):
             # Stale, not broken: the caller's token is real but no longer current,
@@ -1277,6 +1393,15 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
             # acknowledge the token it names. The machine code is what lets the
             # renderer take that path quietly instead of backing off as if the
             # store had refused (the `code` field of its control error).
+            raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
+        if isinstance(error, SessionDeletionRefused):
+            # A DELETION THE MACHINE REFUSED, and it is a 409 rather than the
+            # generic ``str(error)`` arm below for the one reason that matters to
+            # the client: the sentence is a REMEDY (stop the session, cancel the
+            # wake, read the mail) and the code is what lets a renderer offer
+            # that control instead of retrying a call that cannot succeed. The
+            # conversation exists, so 404 would be a lie about the user's own
+            # work, and nothing failed, so 500 would be a lie about the machine.
             raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
         raise HTTPException(409, str(error)) from None
     except sqlite3.Error as error:
@@ -1296,6 +1421,21 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         # classifier's (QA round 2, Q1).
         raise _store_refusal(
             request, sqlite_store_failure(error, store_root(request)), error, copy
+        ) from None
+    except RuntimeUnresponsiveError:
+        # BEFORE the generic ConnectionError arm (it subclasses it). The runtime
+        # is alive and this host reached it; it did not answer inside the desktop
+        # control envelope. Answered fast and typed so the renderer can retry
+        # instead of reporting a lost session at its 20 s deadline.
+        raise HTTPException(
+            503,
+            {
+                "code": RUNTIME_BUSY,
+                "message": RUNTIME_UNREACHABLE_MESSAGE,
+                "retryable": True,
+                "retry_after_ms": RUNTIME_BUSY_RETRY_AFTER_MS,
+            },
+            headers={"Retry-After": str(max(1, RUNTIME_BUSY_RETRY_AFTER_MS // 1000))},
         ) from None
     except ConnectionError as error:
         # A cold session that cannot start a runtime reports WHY -- but only when
@@ -1356,7 +1496,11 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
 
 
 @router.get("/v1/desktop/sessions", response_model=CRUDResponse[SessionList])
-async def list_sessions(request: Request, limit: int = Query(default=100, ge=1, le=500)):
+async def list_sessions(
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=500),
+    include_archived: bool = Query(default=False),
+):
     # Wrapped like its neighbours: the list gained a receipt-store read, and an
     # unmapped failure there answered the app's primary navigation surface with
     # a bare 500. The decoration is already omitted per row inside `list()`;
@@ -1373,7 +1517,9 @@ async def list_sessions(request: Request, limit: int = Query(default=100, ge=1, 
         # contract an older backend's rows carry.
         engine = getattr(request.app.state, "desktop_feed", None)
         stamps = engine.status_stamps() if engine is not None else None
-        page = await host(request).list(limit, status_stamps=stamps)
+        page = await host(request).list(
+            limit, status_stamps=stamps, include_archived=include_archived
+        )
         # THE PAGE, THEN THE PINNED CONVERSATIONS IT DID NOT CARRY, as ONE list.
         # DECIDED, not left open: concatenated on the wire rather than published
         # as a second field, because of what the client does with this array — it
@@ -1428,6 +1574,7 @@ async def search_sessions(
     request: Request,
     q: str = Query(default="", max_length=256),
     limit: int = Query(default=100, ge=1, le=500),
+    include_archived: bool = Query(default=False),
 ):
     """Past conversations matching ``q`` by name, id, or what was SAID in them.
 
@@ -1450,11 +1597,19 @@ async def search_sessions(
     session directory's head and one cache file — while ``q`` is bounded at 256
     characters because the query is only ever a user's typing, and an unbounded
     one would be projected into every digest comparison.
+
+    ``include_archived`` defaults FALSE and the default is the contract: an
+    archived conversation is not a search result, which is why the archive had
+    to be threaded through the scanning layer rather than filtered here — the
+    index is built from the rows the scan returned, so an archived id is never
+    handed to it and cannot be reached by a body match. Raising the flag is a
+    deliberate act for a surface that has already revealed them (the picker's
+    reveal toggle), and every hit carries its own ``archived`` either way.
     """
     async with errors(request):
         return reply(
             {
-                "sessions": await host(request).search(q, limit),
+                "sessions": await host(request).search(q, limit, include_archived=include_archived),
                 "query": q,
                 "limit": limit,
             }
@@ -2196,6 +2351,19 @@ async def answer(session_id: str, body: Answer, request: Request):
                 approved=body.approved,
                 question_index=body.question_index,
             )
+        except OperatorAuthorityRequired as error:
+            # BEFORE the ``RuntimeError`` arm below, which would otherwise
+            # swallow this as "no longer pending" — the opposite of the truth:
+            # the card is STILL PARKED, waiting for a console that may approve
+            # it, and this caller is not one (agent review round 1 R1-2, QA Q1:
+            # the route answered 409 "no longer pending" while the card was
+            # still on screen, so the operator's next move was to stop looking
+            # for it). ``still_pending`` says so in a field rather than only in
+            # prose, and the copy names the remedies.
+            raise HTTPException(
+                422,
+                {"code": error.code, "message": str(error), "still_pending": True},
+            ) from None
         except RuntimeError:
             raise HTTPException(409, "This question or approval is no longer pending") from None
         return reply({"detail": detail})
@@ -2354,6 +2522,101 @@ async def pin(session_id: str, body: Pin, request: Request):
     """
     async with errors(request):
         return reply(await host(request).set_pin(session_id, body.pinned))
+
+
+@router.post("/v1/desktop/sessions/{session_id}/archive", response_model=CRUDResponse[ArchiveState])
+async def archive(session_id: str, body: Archive, request: Request):
+    """Set a session's durable archive to the state the caller asked for.
+
+    THE PIN ROUTE'S SHAPE, field for field, and for the same reasons — read that
+    docstring before changing either, because the two are one convention:
+    desired state rather than a toggle (a retry of a toggle flips the archive
+    back and the user reports "the archive keeps un-archiving itself"),
+    receipt-free because the call is idempotent by construction, last-writer-wins
+    on the whole index across processes, and ID SHAPE AND IS-DIR as the only
+    admission — deliberately NOT ``is_user_session``, because the sidebar can
+    show a delegated run and a state the user can see must be a state the user
+    can change.
+
+    THE 200 REPORTS THE STATE THAT WAS ASKED FOR, which on a config root this
+    process cannot write is not the state the store holds: ``set_archived``
+    swallows its ``OSError`` and echoes the desired value, as ``set_pin`` does.
+    The pin route's discipline, restated here because a reader of THIS docstring
+    should not have to know the other one to learn that the response is a
+    statement about intent rather than a durability claim (review round 1, NIT).
+    A client that needs the store's own answer re-reads the listing, which is
+    also what settles the two-writers race this route accepts.
+
+    WHAT IT DOES NOT DO, because the pin route's silence about it was reasoned:
+    archiving NEVER removes anything, so there is no guard, no refusal and no
+    409 — the worst case is a flag on a conversation that is still on disk and
+    still resumable by id. It also does not make the archived flag reachable in a
+    listing: every surface that offers rows filters them out through the scan
+    unless its own ``include_archived`` asked for them, so a client cannot
+    archive a conversation and keep seeing it in a list it did not ask to change.
+    """
+    async with errors(request):
+        return reply(await host(request).set_archived(session_id, body.archived))
+
+
+@router.delete("/v1/desktop/sessions/{session_id}", response_model=CRUDResponse[DeletedSession])
+async def delete_session_route(session_id: str, body: ConfirmDeletion, request: Request):
+    """Permanently remove ONE conversation. Irreversible, so it is guarded.
+
+    A DELETE WITH A BODY, which is unusual enough to state: the body is not
+    parameters, it is the CONFIRMATION — the request is refused without it (422,
+    see :class:`ConfirmDeletion`), so a client cannot reach this route by
+    accident with the right URL and the wrong method. The alternative spellings
+    were considered and rejected: a query parameter is invisible to anyone
+    reading a log or a URL, and a header is a convention with no precedent in
+    this API.
+
+    THREE ANSWERS:
+
+    * **200** — ``{"session_id", "deleted": true}``. The removal happened.
+    * **404** — an unknown or malformed id, including a session the user did not
+      open (a delegated subagent run). One generic answer for all of them, the
+      pin route's rule: separate refusals would let an authenticated renderer
+      enumerate the machine's store by the difference between them.
+    * **409** — a hard guard refused, carrying the sentence that names the
+      condition and its remedy (a live session, an armed wake, unread spooled
+      mail, or a guard that could not be read). Not 404: the conversation exists
+      and the user can see it. Not 500: nothing failed.
+
+    WHAT IT REMOVES, exactly: the addressed session's own directory and nothing
+    else. Subagent runs it launched live as SIBLINGS under ``sessions/`` and are
+    not touched — the client is told that in the confirmation it shows BEFORE
+    this call (the TUI states it in words), because a receipt is the wrong place
+    to learn the blast radius of an irreversible act.
+
+    Consistency for the two stores that mention sessions is FREE rather than
+    handled here, and deliberately so: the pin and archive indexes both PRUNE AT
+    READ against the store, so an id whose directory is gone reads back as
+    neither pinned nor archived, and deletion needs no cooperation from either.
+    The wake index is pruned by the deletion path itself (``cleanup``), and the
+    search cache is keyed by ids the caller lists, so a stale entry is never
+    consulted for a conversation that no longer exists.
+
+    THE DAEMON'S OWN RESIDENCY IS NOT FREE, so the pool drops it explicitly
+    (``DesktopSessions.forget``): a conversation this process has already opened
+    is served from a resident bridge without re-reading the directory, so a
+    deleted one stayed reachable — measured 200 on ``sessions.get`` and
+    ``/history`` — until the daemon restarted, while a FRESH daemon over the same
+    store answered 404 (desktop QA round 2, PR #390). After the fix every
+    session-scoped route answers 404 for the removed id, exactly as a fresh daemon
+    does, and that is measured rather than argued: the snapshot, ``/history``,
+    ``/mcp``, ``/report`` and ``/failovers`` reads, the ``/pin`` and ``/archive``
+    desired-state writes and the ``/seen`` receipt clear were each probed against
+    both daemons after a delete, and every cell agrees.
+    The RECORD plane needs no cooperation and gets none, which is the half that
+    was already true: the catalogue (``GET /v1/desktop/sessions``) and the search
+    digest are built from a store walk, so the id is simply gone from them —
+    re-read after a delete, the catalogue lists the surviving conversation and
+    nothing else. What a client holds until it re-reads is its own state, not this
+    daemon's.
+    """
+    async with errors(request):
+        return reply(await host(request).delete(session_id))
 
 
 @router.post("/v1/desktop/sessions/{session_id}/watch", response_model=CRUDResponse[WatchReceipt])

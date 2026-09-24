@@ -32,6 +32,7 @@ record should pay for.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import secrets
 import sys
@@ -42,6 +43,8 @@ from typing import Any
 
 from local_operator.session.runtime import registry as session_registry
 from local_operator.session.runtime.types import HEARTBEAT_INTERVAL_S, SERVE_RUN_DIRNAME
+
+logger = logging.getLogger(__name__)
 
 #: ``app.state`` attribute carrying the address ``cli.serve_command`` announced.
 #:
@@ -500,12 +503,98 @@ def unpublish(pid: int, root: Path | None = None) -> None:
     session_registry.unpublish(pid, root, SERVE_RUN_DIRNAME)
 
 
-def scan(root: Path | None = None) -> list[tuple[ServeRecord, str]]:
+def scan(
+    root: Path | None = None, *, reap: bool = True, unreadable_ttl_s: float = 0.0
+) -> list[tuple[ServeRecord, str]]:
     """Every serve record, classified ``live`` / ``wedged`` / ``stale``.
 
     The classification is the shared one, asked for this namespace and this
     record type — ``stale`` means the pid is gone and the file has just been
     reaped, ``wedged`` means the pid lives but its heartbeat stopped, and only
     ``live`` is a daemon to talk to.
+
+    ``reap`` is passed straight through for the ONE caller that must not sweep:
+    ``update.referenced_install_roots`` reads this namespace to decide whether a
+    tree is still named, and the shared scan DELETES a record it cannot parse — so
+    a reader-mode pass leaves a torn record for the next reader to see instead of
+    turning it into a clean namespace and an unprotected tree. Every other caller
+    wants the default, and until :func:`prune_serve_records` existed this
+    namespace had none in production at all (review round 2, MAJOR 1).
+
+    ``unreadable_ttl_s`` falls through for the same reason and to the same place:
+    the retention window this namespace's reaper applies to a record that will not
+    parse (see :func:`prune_serve_records`). Defaulted here rather than only on the
+    shared scan so that a future caller of THIS function has to choose.
     """
-    return session_registry.scan(root, SERVE_RUN_DIRNAME, ServeRecord.from_json)
+    return session_registry.scan(
+        root,
+        SERVE_RUN_DIRNAME,
+        ServeRecord.from_json,
+        reap=reap,
+        unreadable_ttl_s=unreadable_ttl_s,
+    )
+
+
+def prune_serve_records(root: Path | None = None) -> int:
+    """Reap this namespace's dead and unreadable records. Returns how many went.
+
+    ``run/serve`` IS A NAMESPACE WITH NO REAPER UNTIL THIS FUNCTION, and that made
+    it the second half of review round 2's MAJOR 1. ``update.referenced_install_roots``
+    reports its answer INCOMPLETE while any entry in this namespace is unreadable
+    (``update._serve_records_under``), and an incomplete answer keeps EVERY
+    generation a prune would otherwise reclaim — so one torn record here stopped
+    generation reclamation on every later ``lop update``, permanently, because
+    nothing in the product ever removed it. ``run/host`` had the same gap and now
+    ages its unreadable records out on its own boot path (:func:`journal.
+    prune_boot_records`); this is the same fix on the same shape of moment — the
+    daemon's own boot, which is the one time a new writer joins this namespace.
+
+    THE REAPING SCAN IS THE WHOLE IMPLEMENTATION, deliberately: :func:`scan`
+    already deletes a record it cannot parse (past the window below), moves a
+    proven-dead one into the sidecar (bounded by ``registry._prune_reaped``'s 24 h /
+    200-file policy), and leaves a live daemon's record alone, so a second reaper
+    written here would be the one place where "is this daemon alive" could come to
+    disagree with every other reader of this file.
+
+    A FRESH UNREADABLE RECORD SURVIVES THIS CALL, and that is the direction chosen
+    for the two halves of review round 3's MINOR 2 (report it as such):
+    ``unreadable_ttl_s`` makes this namespace age an unparseable entry out on
+    ``REAPED_MAX_AGE_S`` instead of deleting it at the first boot after it lands,
+    because that is exactly what ``journal.prune_boot_records`` does for the same
+    shape in ``run/host`` ("evidence is worth one look soon after it lands"). The
+    cost is stated rather than hidden: for up to a day this namespace reads
+    INCOMPLETE, which keeps every generation a prune would reclaim — and the same
+    reaper clears it once the window is out, on the next daemon boot, so the wedge
+    is bounded rather than permanent. The alternative (delete on sight) threw away
+    the only artifact an explanation of a torn serve record would start from, for a
+    protection that is usually redundant because the tree an unreadable record might
+    name is normally named by a live record too.
+
+    The names are MEASURED rather than tracked — one listing before and one after —
+    because :func:`scan` reports records, not removals, and a number the caller can
+    only get by subtraction says nothing about WHAT went; the removed files are the
+    evidence (review round 3, MINOR 2). A concurrent daemon publishing between the
+    two listings can only shrink the difference, which is why this is a report and
+    never a reconciliation.
+    """
+    directory = session_registry.run_dir(root, SERVE_RUN_DIRNAME)
+    try:
+        before = {entry.name for entry in directory.glob("*.json")}
+    except OSError:  # pragma: no cover — unlistable: there is nothing to reap
+        return 0
+    if not before:
+        return 0
+    scan(root, unreadable_ttl_s=session_registry.REAPED_MAX_AGE_S)
+    try:
+        after = {entry.name for entry in directory.glob("*.json")}
+    except OSError:  # pragma: no cover — the listing itself went away under us
+        return 0
+    gone = sorted(before - after)
+    if gone:
+        logger.info(
+            "reaped %d dead or unreadable serve record(s) from %s: %s",
+            len(gone),
+            directory,
+            ", ".join(gone),
+        )
+    return len(gone)

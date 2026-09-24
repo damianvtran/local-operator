@@ -276,6 +276,62 @@ async def capabilities():
                 # permanently reserved empty slot costs every row width to
                 # advertise nothing.
                 "session_pins": 1,
+                # Whether a session can be ARCHIVED: hidden from every default
+                # listing and from search, still resumable by id.
+                #
+                # ITS OWN KEY rather than a bump of `session_catalogue`, on the
+                # rule that entry states: every catalogue key above publishes a
+                # VERSION of a surface whose older form still works, while this
+                # one is a capability that is either there or not. A renderer
+                # reading it gets the archive control, the `archived` flag on
+                # rows and the `include_archived` parameter; a renderer that does
+                # not has an older backend, whose catalogue rows have no such
+                # flag to merge and whose routes would 404 a control the user
+                # could press. Absent => no affordance, no slot, no handler.
+                #
+                # A NEW KEY RATHER THAN A BUMP, and that is the fail-closed half:
+                # the archive is not a shape change to the catalogue (the rows
+                # are the same rows, one field richer, and that field is ADDITIVE
+                # — an older renderer ignores it), so bumping would hide a
+                # catalogue that works perfectly well from a client that predates
+                # the feature.
+                "session_archive": 1,
+                # Whether a session can be PERMANENTLY DELETED.
+                #
+                # SEPARATE FROM `session_archive`, deliberately, even though
+                # this change ships both: the two are not one capability wearing
+                # two names. Archive is reversible and receipt-free; delete is
+                # irreversible, carries a confirmation the client must render and
+                # can be refused with a sentence (409) the client must be able to
+                # SHOW. A client that could archive but not delete is a
+                # representable product, and a single key would make that
+                # impossible to express — the same argument `session_search`
+                # makes for not riding `session_catalogue`.
+                "session_delete": 1,
+                # This machine's tunnel and Radient-login state:
+                # `GET /v1/desktop/tunnel`, plus `radient_login` and
+                # `tunnel_remedy` on `GET /v1/auth/status`.
+                #
+                # ITS OWN KEY, and it gates one narrow thing: whether the
+                # account section may tell a user that their stored Radient
+                # login is no longer accepted for remote access, and whether the
+                # tunnel panel may show a connector state at all. The question
+                # those answer is about THIS MACHINE, which the rest of the auth
+                # surface cannot answer — a row can be `configured` with an
+                # unexpired access token and still be refused by the identity
+                # provider.
+                #
+                # Absent ⇒ the renderer shows no tunnel state and no sign-in
+                # callout, and the account section keeps its current wording
+                # (which is not wrong, only incomplete). It must NOT treat an
+                # absent key as "the tunnel is fine": a backend that has never
+                # heard of this route cannot be asked, and a green claim nobody
+                # made is worse than the silence.
+                #
+                # NOT a bump of `auth`: nothing on that surface changes shape,
+                # an old renderer ignores the extra fields, and bumping would
+                # hide a working sign-in flow behind an update it does not need.
+                "tunnel": 1,
             },
         },
     )

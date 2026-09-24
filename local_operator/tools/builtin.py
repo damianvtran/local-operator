@@ -52,6 +52,9 @@ import mimetypes
 import os
 import re
 import shutil
+import sys
+import tempfile
+import textwrap
 import threading
 import time
 import traceback
@@ -75,8 +78,9 @@ from pydantic import (
 )
 from rich.cells import cell_len
 
+from local_operator import memory_guard
 from local_operator.agent_shell import AGENT_SHELL_ENV, MAY_DELEGATE_ENV
-from local_operator.config import ConfigManager
+from local_operator.config import CONFIG_FILE_NAME, ConfigManager
 from local_operator.harness.approval import ask_approval
 from local_operator.harness.redaction import report_shape_hits
 from local_operator.harness.subagent import (
@@ -125,22 +129,37 @@ from local_operator.procstate import (
     terminate_process_tree,
 )
 from local_operator.redaction_shapes import (
+    CREDENTIAL_SHAPES,
+    PEM_BODY_FLOOR,
     PEM_BODY_LINE_RE,
     PEM_END_LINE_RE,
     PEM_HEADER_LINE_RE,
     REDACTION_MARKER,
+    ShapeHit,
+    ShapeReport,
     credential_dump_notice,
+    has_shape_anchor,
+    pem_body_line,
+    pem_end_line,
+    pem_header_line_end,
     scrub_secrets_with_hits,
+    shape_report,
 )
 from local_operator.scratchpad import (
     SCRATCHPAD_NAMESPACE,
+    SCRATCHPAD_PATH_ENV,
     SCRATCHPAD_SCHEME,
     SCRATCHPAD_UNAVAILABLE,
+    ScratchpadContentError,
     ScratchpadPathError,
+    check_scratchpad_write,
+    ensure_scratchpad_dir,
     parse_scratchpad_url,
+    scratchpad_dir_of,
+    scratchpad_env_injection,
 )
 from local_operator.text_bounds import OUTPUT_TRUNCATION_MARKER, clip_head_tail
-from local_operator.tools import group_reaper, shell_env
+from local_operator.tools import group_reaper, search_guard, shell_env
 from local_operator.tools.spill import (
     SPILL_ENTRY_LIMIT_BYTES,
     SPILL_SCHEME,
@@ -352,6 +371,28 @@ GREP_FILE_LIMIT_BYTES = 1 * 1024 * 1024
 #: Directory names never worth walking during grep (VCS internals, vendored
 #: trees, build output). Dotdirs are pruned wholesale in addition.
 _GREP_PRUNE_DIRS = frozenset({"__pycache__", "node_modules", "dist", "build", ".git", ".venv"})
+
+#: Directory names the generated ripgrep config may prune WITHOUT asking. A
+#: deliberate subset of :data:`HEAVY_DIRS`: `out`/`dist`/`build`/`target` are
+#: legitimate source trees in some projects (a Next `out/`, a Go `build/`), and
+#: silently omitting a match the user asked for is worse than a slower search
+#: (review m2). The four here are unambiguous "never source".
+RG_PRUNE_DIRS = frozenset({"node_modules", ".git", "__pycache__", ".venv"})
+
+#: Config path for the search-interception block: ("tools", "search_interception", <key>).
+# The consumer default constants live in tools/search_guard.py, and the /settings
+# rows in settings_io.py mirror this path rather than importing it — the same
+# split bash.shell uses (settings_io must stay cheap for the CLI).
+SEARCH_INTERCEPTION_ENABLED_PATH: tuple[str, ...] = ("tools", "search_interception", "enabled")
+SEARCH_INTERCEPTION_ENABLED_DEFAULT = True
+SEARCH_INTERCEPTION_BLOCK_PATH: tuple[str, ...] = ("tools", "search_interception", "block")
+SEARCH_INTERCEPTION_BLOCK_DEFAULT = True
+SEARCH_INTERCEPTION_RG_CONFIG_PATH: tuple[str, ...] = (
+    "tools",
+    "search_interception",
+    "rg_excludes",
+)
+SEARCH_INTERCEPTION_RG_CONFIG_DEFAULT = True
 #: Marker prefix on approval descriptions for targets outside the workspace.
 OUTSIDE_WORKSPACE_MARKER = "[outside workspace]"
 #: The OTHER reason a target escalates: it could not be resolved at all, so
@@ -1554,12 +1595,24 @@ def _ambiguous_report(
     )
 
 
-def _error(tool_call_id: str, tool_name: str, message: str) -> ToolResult:
-    """Build a non-throwing error result (loop never raises into the model)."""
+def _error(
+    tool_call_id: str,
+    tool_name: str,
+    message: str,
+    *,
+    details: dict[str, Any] | None = None,
+) -> ToolResult:
+    """Build a non-throwing error result (loop never raises into the model).
+
+    ``details`` carries structured payload for renderers and compaction pruning
+    the same way :func:`_text`'s does — the memory guard uses it to record the
+    measured group peak and the ceiling behind a MEMORY LIMIT EXCEEDED result.
+    """
     return ToolResult(
         tool_call_id=tool_call_id,
         tool_name=tool_name,
         content=[TextContent(text=message)],
+        details=details,
         is_error=True,
     )
 
@@ -1988,6 +2041,124 @@ def _configured_bash_shell() -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _search_interception_config() -> tuple[bool, bool, bool]:
+    """Read the ``tools.search_interception`` keys at CALL time.
+
+    ``(enabled, block, rg_excludes)``. A fresh ``ConfigManager`` per call keeps
+    the keys LIVE in ``/settings``, exactly as ``_configured_bash_shell`` does.
+    Any read failure returns the defaults: config trouble must never change what
+    a command does, and the defaults are the protective choice (the guard on).
+
+    The unreadable-config probe runs FIRST, and that ordering is a correctness
+    property, not a nicety. ``ConfigManager`` does not raise on a broken file —
+    it MOVES it aside (``config.yml.bad.<ts>``) and continues with defaults. This
+    reader runs at the top of every ``execute_bash``, i.e. BEFORE the child
+    environment is built, so an unguarded ``ConfigManager`` here would rename the
+    operator's broken config out from under ``shell_env``'s strict-mode read and
+    silently downgrade a hardened run to ``inherit``. The probe is the same
+    ``shell_env._config_file_is_unreadable`` test the policy loader uses, so this
+    reader cannot diverge from what the config layer considers readable.
+    """
+    enabled = SEARCH_INTERCEPTION_ENABLED_DEFAULT
+    block = SEARCH_INTERCEPTION_BLOCK_DEFAULT
+    rg_excludes = SEARCH_INTERCEPTION_RG_CONFIG_DEFAULT
+    try:
+        from local_operator.tools.shell_env import _config_file_is_unreadable
+
+        if _config_file_is_unreadable(config_dir() / CONFIG_FILE_NAME):
+            # A config that cannot be read is not moved (that is the destructive
+            # step avoided above) and its interception keys are unknown, so the
+            # protective defaults stand.
+            return enabled, block, rg_excludes
+        config = ConfigManager(config_dir())
+        enabled = bool(config.get_nested_value(SEARCH_INTERCEPTION_ENABLED_PATH, enabled))
+        block = bool(config.get_nested_value(SEARCH_INTERCEPTION_BLOCK_PATH, block))
+        rg_excludes = bool(config.get_nested_value(SEARCH_INTERCEPTION_RG_CONFIG_PATH, rg_excludes))
+    except Exception:  # noqa: BLE001 — config trouble must never block a command
+        pass
+    return enabled, block, rg_excludes
+
+
+#: One generated ripgrep config per session directory, written once. `rg` reads
+#: the file named by ``RIPGREP_CONFIG_PATH`` on every invocation, so a search the
+#: guard does NOT block (a scoped `rg`, or any `rg` under an inline grant) still
+#: inherits the vendor/build prunes and skips trees its author never meant to
+#: walk. It exists because GNU grep has no equivalent default-exclude mechanism
+#: (`GREP_OPTIONS` is removed), so this lever can only cover ripgrep.
+_RG_CONFIG_FILENAME = "rg-search-excludes.conf"
+
+
+def _rg_config_path() -> str | None:
+    """Absolute path to the generated ripgrep exclude config, or None on failure.
+
+    Written under ``local_operator.paths.config_dir()/cache`` so it lives beside
+    the rest of this session's derived state rather than in the user's home. A
+    write failure returns None — the caller then leaves ``RIPGREP_CONFIG_PATH``
+    unset, and an `rg` that would have been slightly faster runs as it always
+    did, which is the correct degradation.
+    """
+    try:
+        cache = config_dir() / "cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        path = cache / _RG_CONFIG_FILENAME
+        body = "# Generated by local-operator: vendor/build prunes for `rg` under bash.\n"
+        body += "".join(f"--glob=!{name}\n" for name in sorted(RG_PRUNE_DIRS))
+        if not path.exists() or path.read_text(encoding="utf-8") != body:
+            # Atomic replace: a concurrent `bash` call in another task must never
+            # read a half-written config (review n2).
+            tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+            tmp.write_text(body, encoding="utf-8")
+            os.replace(tmp, path)
+        return str(path)
+    except Exception:  # noqa: BLE001 — a missing nicety must never fail the command
+        return None
+
+
+def _configured_memory_budget(override_mb: float | None) -> memory_guard.Budget:
+    """Resolve this command's memory budget from config + host, at CALL time.
+
+    Fresh ``ConfigManager`` per call for the same reason ``_configured_bash_shell``
+    uses one: the ``memory_guard`` keys are LIVE, so an edit lands on the next
+    command. A config read that fails means "the constants' defaults" (enabled,
+    auto) so a command still runs when ``config.yml`` is broken.
+
+    The ``memory_mb`` argument is passed through to ``compute_budget`` even when
+    the config read failed — the caller said the number, so it does not depend on
+    the config being readable. That is about a config-read FAILURE, not the
+    precedence over the off switch: ``enabled=False`` still wins over a positive
+    ``memory_mb``, because ``enabled`` is the machine-wide master switch (F9;
+    contract §6/§7, QA round 1 Q1).
+    """
+    mode = memory_guard.BASH_MEMORY_MODE_DEFAULT
+    limit_mb = memory_guard.BASH_MEMORY_LIMIT_MB_DEFAULT
+    soft_fraction = memory_guard.BASH_MEMORY_SOFT_FRACTION_DEFAULT
+    enabled = memory_guard.BASH_MEMORY_ENABLED_DEFAULT
+    try:
+        config = ConfigManager(config_dir())
+        mode = config.get_nested_value(memory_guard.BASH_MEMORY_MODE_PATH, mode)
+        limit_mb = config.get_nested_value(memory_guard.BASH_MEMORY_LIMIT_MB_PATH, limit_mb)
+        soft_fraction = config.get_nested_value(
+            memory_guard.BASH_MEMORY_SOFT_FRACTION_PATH, soft_fraction
+        )
+        enabled = config.get_nested_value(memory_guard.BASH_MEMORY_ENABLED_PATH, enabled)
+    except Exception:  # noqa: BLE001 — config trouble must never block a command
+        pass
+    # Guard the TYPES as well as the values: a hand-edited config.yml can hold a
+    # string where a number belongs, and a bad value must degrade to the default
+    # rather than raise inside the guard that is supposed to protect the command.
+    return memory_guard.compute_budget(
+        mode=mode if isinstance(mode, str) else memory_guard.BASH_MEMORY_MODE_DEFAULT,
+        limit_mb=limit_mb if isinstance(limit_mb, int) and not isinstance(limit_mb, bool) else 0,
+        soft_fraction=(
+            float(soft_fraction)
+            if isinstance(soft_fraction, (int, float)) and not isinstance(soft_fraction, bool)
+            else memory_guard.BASH_MEMORY_SOFT_FRACTION_DEFAULT
+        ),
+        override_mb=override_mb,
+        enabled=enabled if isinstance(enabled, bool) else memory_guard.BASH_MEMORY_ENABLED_DEFAULT,
+    )
+
+
 class BashParams(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -2017,6 +2188,18 @@ class BashParams(BaseModel):
             "still bounds the run."
         ),
     )
+    # Terse on purpose, like every field here: the schema rides every request.
+    # The semantics are the three the reader needs — unset = config, 0 = no
+    # budget for this call, > 0 = explicit ceiling in MB.
+    memory_mb: float | None = Field(
+        default=None,
+        description=(
+            "Optional RAM ceiling in MB for this command's process group. Omit to "
+            "use the configured budget; 0 disables the limit for this call; a "
+            "positive number overrides it. Exceeding the limit kills the command's "
+            "group."
+        ),
+    )
 
 
 #: What the live card shows while the pipe is holding an unterminated line.
@@ -2036,6 +2219,17 @@ _WITHHELD_LIVE_OUTPUT = (
     "[live output withheld: this session's credential filter could not read its sink]"
 )
 
+#: The MEMORY LIMIT EXCEEDED line when the guard's own numbers are not available —
+#: a kill that arrived without a retained sample (a cancellation landing in the
+#: same tick). Plain text, no markdown: the tool card paints Text, so backticks
+#: would land literally. It still tells the model to reduce peak memory, which is
+#: the whole point of the line.
+MEMORY_EXCEEDED_FALLBACK = (
+    "MEMORY LIMIT EXCEEDED: this command exceeded the device memory budget and was "
+    "killed; the session is fine. Reduce peak memory and retry: stream instead of "
+    "loading all rows, lower the batch size, or process the input in chunks."
+)
+
 #: A PEM armour header, and a base64 body line. Only a header opens the streaming
 #: mask, and only body lines are masked inside it — see
 #: ``_PipeRedactor._mask_open_key_block``.
@@ -2044,14 +2238,55 @@ _WITHHELD_LIVE_OUTPUT = (
 # between the two classifiers is a silent leak — which is exactly what happened when the
 # table learned `cat -n`'s `number<TAB>` and this file did not (Q10-F1: the whole body was
 # published for `cat -n key.pem`, `nl -ba key.pem` and `grep -n` output).
+#: The patterns, kept under their historical names: they are the DEFINITION of the three
+#: languages, and #1445's arms (`_pem_grammar_is_live`, the body-floor pin) read them
+#: through these names to check that a literal is still armour and that the grammar's floor
+#: is the hold's. Nothing at runtime reached them after the deciders landed, which is what
+#: these aliases say rather than leaving a reader to find out.
 _PEM_HEADER_LINE = PEM_HEADER_LINE_RE
 _PEM_BODY_LINE = PEM_BODY_LINE_RE
 _PEM_END_LINE = PEM_END_LINE_RE
 
-#: How many lines a streamed PEM block may mask before the state resets. A real
-#: 8192-bit key is ~100 lines at 64 columns; this is generous for one and far
-#: short of "the rest of the command's output".
-_PEM_STREAM_LINE_LIMIT = 512
+#: The SAME three languages, decided in linear time rather than by the patterns'
+#: own backtracking walk — the three call sites below are where that walk was
+#: measured, and the arms in `tests/unit/secrets/test_credential_shapes.py` pin each
+#: decider to its pattern. Bound at module level so a test can stand in for one, which
+#: is how "the classifier was not reached" is asserted as a fact rather than a duration.
+_pem_body_line = pem_body_line
+_pem_end_line = pem_end_line
+_pem_header_line_end = pem_header_line_end
+
+#: NECESSARY CONDITIONS of the header pattern above, checked BEFORE it wherever the
+#: pattern would otherwise run over text this filter did not shape. Both literals are
+#: required by the pattern, so the gate can only skip work — and the work it skips is
+#: expensive, because the shared prefix grammar is ambiguous by construction: a
+#: digit-dense line is seconds of backtracking before the engine can conclude that it
+#: is not a PEM line. This tuple carries the SAME NAME and the SAME CONTENTS as the gate
+#: #1427 puts in front of the mask's own search (``_PEM_HEADER_HINTS`` in that branch),
+#: so a merge of the two keeps ONE gate instead of two that can drift apart; on this
+#: branch the cap-split hold below is the reader.
+#: The other literal a classifier needs: `END `, a necessary condition of the END
+#: pattern, kept as a gate at the call site below because a line without it cannot
+#: be an END line and so must not run the prefix grammar at all.
+_PEM_END_HINT = "END "
+
+_PEM_HEADER_HINTS = ("BEGIN ", "PRIVATE KEY")
+
+#: The line terminator that ends a PEM header's own line. Consumed by the mask at
+#: the header hand-off so the line loop never classifies a bare separator as prose
+#: (see ``_PipeRedactor._mask_open_key_block``); the bytes are emitted verbatim.
+_PEM_LINE_BREAK = re.compile(r"\r\n|\n|\r")
+
+# There is deliberately NO line-count bound on the open block any more. One used to
+# stand here (``_PEM_STREAM_LINE_LIMIT``, 512 lines) so that a stream which never
+# terminates a block could not hold the state open for the rest of the command's
+# output; it made the state PUBLISH instead, which is the one direction this layer
+# may not fail in. Measured on a 2,000-line block with no END: 1,488 raw body lines
+# released verbatim. Masking a line drops it, so the state costs no memory of its
+# own (``pending`` is capped separately, by ``_PIPE_DEFERRAL_LIMIT``) and the state
+# now ends only at the END line, at a NON-BODY line, or at end of stream. The price
+# is real and is the correct direction: an unterminated block followed by
+# base64-SHAPED lines masks them, so an over-mask is possible where a leak was.
 
 
 class _BashOutput:
@@ -2128,6 +2363,50 @@ class _BashOutput:
 #: line still publishes most of it promptly.
 _PIPE_DEFERRAL_LIMIT = 8192
 
+#: How much raw text the SHAPE rule may hold back, as a hard bound.
+#:
+#: Twice :data:`_PIPE_DEFERRAL_LIMIT`, and the factor is derived rather than
+#: chosen. A shape match the table can see is complete inside the buffer, which
+#: caps its length at the deferral window — so a match straddling a cap-forced
+#: cut ALWAYS starts less than one window before that cut, and moving the cut
+#: back to the match's start therefore holds at most one further window of
+#: bytes. Anything longer than the window itself cannot be protected this way
+#: (see :meth:`_PipeRedactor._shape_safe_spans`), so the bound is not a tuning
+#: knob and does not move when the table gains a rule.
+#:
+#: **This is not the filter's total hold**, and reading it as one is a mistake
+#: this comment used to invite. The `never cut through a KNOWN value` rule below
+#: predates it and holds as much as the value needs — ``pending`` is bounded by
+#: ``max(_PIPE_HOLD_LIMIT, longest registered value + _PIPE_DEFERRAL_LIMIT)``,
+#: because a registered value is a credential the session was told about and the
+#: hold is what keeps it off the wire in two halves. See the class docstring for
+#: the measurement and for what a long registration costs.
+_PIPE_HOLD_LIMIT = 2 * _PIPE_DEFERRAL_LIMIT
+
+
+def _shape_match_spans(text: str, offset: int) -> list[tuple[int, int]]:
+    """Every span of ``text`` a credential shape could match, in absolute offsets.
+
+    The pattern objects and the table are the scrubber's own — this is a second
+    USE of one table, never a second copy of it, so a rule added there is
+    visible here and a rule changed there cannot drift from what this finds.
+
+    Deliberately coarser than the scrub in two ways, both in the safe direction:
+    a rule's ``guard`` is not consulted (a span the guard would reject is
+    reported anyway, which can only make the caller hold bytes longer) and the
+    search runs against pristine text, so it cannot see a span an earlier rule's
+    mask created — reported spans are therefore a SUPERSET of what the scrubber
+    can mask, which is the direction a "do not cut inside a match" rule needs.
+
+    ``offset`` locates ``text`` inside the buffer it was sliced from, so the
+    caller can move a cut that is an offset into that buffer.
+    """
+    spans: list[tuple[int, int]] = []
+    for shape in CREDENTIAL_SHAPES:
+        for match in shape.pattern.finditer(text):
+            spans.append((match.start() + offset, match.end() + offset))
+    return spans
+
 
 class _PipeRedactor:
     """Delay only a possible credential suffix before publishing pipe bytes.
@@ -2160,27 +2439,82 @@ class _PipeRedactor:
     released in cap-sized pieces rather than accumulating, so memory does not
     grow with the command's output. The cap is a CONSTANT, not a function of the
     longest possible match — a bound derived from the pattern table would be
-    wrong the moment a rule was added. The residual is the obvious one: a shape
-    straddling a cap-forced cut, or one whose whole block (a PEM body) exceeds
-    the cap, is split across two releases and not matched here. Both are
-    contained by the result path, which scrubs the finished text in one piece.
+    wrong the moment a rule was added.
+
+    **The cap used to publish credentials, and the release point is what fixed
+    it.** The line rule is safe by construction only while a line is whole — the
+    cap is what breaks that, cutting through the middle of one. A
+    ``scheme://user:pass@host`` or a ``KEY=value`` line the table masks whole was
+    then published as an unmasked HEAD by the release that cut it and an
+    unmasked TAIL by the next one, because neither slice holds the shape the
+    pattern needs, and NO later pass can repair it: the live stream — the card
+    and ``jobs(op='peek')`` — is the one surface nothing re-reads. So a
+    cap-forced cut is moved back out of any shape it would split
+    (:meth:`_shape_safe_spans`), exactly as the loop below already does for a
+    KNOWN value.
+
+    The bound that buys is :data:`_PIPE_HOLD_LIMIT`: the search is confined to
+    the last two windows of the buffer, so the SHAPE rule never holds more than
+    two windows. The residual is what the bound costs — a SINGLE match longer
+    than a deferral window can still be split, because it cannot be COMPLETE in
+    the buffer at the moment its start reaches the cut, so nothing there is
+    there to find. That is phase-dependent rather than a clean boundary: with
+    the release point landing where it does, a 8,039-byte match is protected on
+    every placement tried, a 9,039-byte one on seven of eight, and by 12,039
+    bytes on two of eight (4 KiB reads; key material past the cap is handled on
+    its own by :meth:`_mask_open_key_block`). Every shape the table can match
+    inside the window is not split.
+
+    **The hold is the max of two rules, and this is the honest one.** ``pending``
+    is bounded by ``max(_PIPE_HOLD_LIMIT, longest registered value + one window)``:
+    the KNOWN-value rule below is older, is not a window rule at all, and holds
+    whatever a registered value needs — measured, a 24,576-byte registered value
+    peaks at 31,072 bytes held at 64 KiB reads, where the same input under this
+    limit alone peaks at 8,192. That is bounded by what the SESSION knows rather
+    than by what the child prints, which is the property the cap exists for, and
+    it is the same in kind as the shape rule: a value too long to be complete in
+    the buffer is split here too, registered or not.
 
     Trailing partial lines are therefore withheld until they complete. That is
     a real trade for a line-oriented surface, taken deliberately: a credential
     painted live is unrecoverable, while a partial line's bytes arrive as soon
     as its newline does — or at the cap, or at end-of-stream, whichever comes
     first.
+
+    **It also CONTAINS what it masks, and that half cannot be done later.** This
+    filter removes a credential's bytes BEFORE any tool result exists, so the
+    store's own pass over the finished result is handed this filter's marker
+    rather than the credential and matches nothing: without a registration from
+    here, the pipe was the one masking surface whose match left the value
+    unprotected for the rest of the session. Measured on the shape this feature
+    exists for (``kubectl exec … env``, credential in the OUTPUT and nowhere in
+    the command): ``registered values: 0``, and a later ``cat`` of the bare value
+    — no shape around it, which is the form the table cannot know — returned it
+    in the clear. ``contain`` is the store's registration entry point, handed the
+    hits this filter is already holding. Absent (a third-party embedder's store,
+    a bare tool test) the filter masks and registers nothing, which is the
+    behaviour every caller had before.
     """
 
-    def __init__(self, credentials: dict[str, str] | Sequence[str]) -> None:
-        #: An open PEM block, whether its marker is already out, and how many
-        #: lines it has covered (the bound that keeps a stream from holding the
-        #: state forever).
+    def __init__(
+        self,
+        credentials: dict[str, str] | Sequence[str],
+        *,
+        contain: Callable[[Sequence[ShapeHit]], None] | None = None,
+    ) -> None:
+        #: An open PEM block, and whether its marker is already out. No line bound
+        #: is kept: the block stays open until its END line, a non-body line, or the
+        #: end of the stream — see the module comment above `_PEM_LINE_BREAK` for why
+        #: bounding it published key material.
         self._in_key_block = False
         self._key_block_marker_sent = False
-        self._key_block_lines = 0
         #: Whether this filter has withheld its output after a fault.
         self._withheld = False
+        #: The store's containment entry point, or ``None`` for a caller that has
+        #: none (see the class docstring). Called from ``_feed_scrubbed``, which is
+        #: the only place that holds the hits — and the value it removed is exactly
+        #: what a later bare reuse of the same secret has to be caught by.
+        self._contain = contain
         values = credentials.values() if isinstance(credentials, dict) else list(credentials)
         self._set(values)
         self.pending = ""
@@ -2233,7 +2567,19 @@ class _PipeRedactor:
         # exists, so the loop's hook later finds nothing to match and files
         # nothing. Without this call the size of the incident that motivated the
         # whole change is: zero notices, zero rotation tickets.
-        report_shape_hits([hit.label for hit in hits if hit.complete])
+        report = shape_report(hits)
+        report_shape_hits(list(report.labels), reached_model=report.reached_model)
+        # CONTAIN FROM HERE too, and it is a different job from reporting: the
+        # report decides whether an operator is told, this keeps the value caught
+        # in every later result of the session. Skipped for an empty hit list so a
+        # clean chunk costs nothing, and never allowed to break the mask — the
+        # store's own registration is best-effort by contract, and a fault here
+        # would lose the command's output for a bookkeeping failure.
+        if hits and self._contain is not None:
+            try:
+                self._contain(hits)
+            except Exception:  # noqa: BLE001 — see above: a mask must never break
+                logger.warning("pipe containment registration failed", exc_info=True)
         return scrubbed.encode("utf-8")
 
     def _mask_open_key_block(self, ready: str) -> str:
@@ -2244,7 +2590,7 @@ class _PipeRedactor:
         the live view publishing key material when the block is larger than the
         cap — an 8192-bit RSA body is ~6.4 KiB against an 8 KiB cap.
 
-        Why it is written this way — three constraints, each paid for:
+        Why it is written this way — four constraints, each paid for:
 
         * only a PEM HEADER opens the state (``-----BEGIN [A-Z0-9 ]+-----``). A
           bare ``-----BEGIN`` in prose (``head -n 5 key.pem``, a doc quoting an
@@ -2254,24 +2600,80 @@ class _PipeRedactor:
         * a line is masked only when it is base64 BODY. Prose after a stray
           header is released verbatim and CLOSES the state, so no ordinary line
           can be eaten by it.
-        * the state is bounded by lines, so a stream that never terminates a
-          block cannot hold it open for the rest of the command's output.
+        * the header's OWN terminator is consumed here, before the line loop, and
+          emitted verbatim. It used to be the loop's first element, where the
+          prose test above read a bare separator as prose and closed the block one
+          line into itself — after which every later release, having no header to
+          reopen it, published the rest of the body. Measured (PR #1427's case:
+          header + 200x256 base64 chars, no END, one call): **143 raw body lines**,
+          the whole 8 KiB ``pending``; a chunk boundary landing after the header
+          reaches the same state. The separator belongs to the header line, so
+          classifying it was always the wrong question.
+        * an open block masks ALL of its body, with no line-count bound. The bound
+          that used to stand here released the body verbatim past 512 lines —
+          measured 1,488 raw lines of a 2,000-line block — and the settled pass
+          cannot repair that release, because ``pem-private-key`` needs a complete
+          ``BEGIN … END``: a >4 MiB stream whose retention window drops the BEGIN
+          line kept **1,420 raw body lines** in the call-site spill, served over
+          ``read spill://``. The state costs no memory (a masked line is dropped;
+          ``pending`` is capped separately), so it now ends only at the END line,
+          at a NON-BODY line, or at end of stream.
+
+        KNOWN AND RECORDED, pre-existing and in the OVER-MASK direction, so it is
+        recorded rather than patched in this change: once this loop CLOSES the state it
+        goes on classifying to the end of the RELEASE, so base64-shaped ORDINARY lines
+        that follow a terminated block in the same release are withheld —
+        `cat key.pem; base64 thing` in one read withheld 20 of 20, where the same text
+        in a later release is published (0 of 20). Re-checking the state per line is
+        what would fix it and it is not a line to slip in here: it would also publish
+        the body-shaped line that the stray-header arm pins as MASKED, so a close would
+        become a licence to publish, and that needs its own round with its own
+        over-mask evidence.
+
+        KNOWN AND RECORDED, at the layer boundary rather than patched here: a body
+        FRAGMENT that reaches the shape table with no header in front of it (a
+        truncated ``key.pem`` read directly, say) matches no rule, because the
+        table's ``pem-private-key`` spans BEGIN to END. Closing an unterminated
+        block at the MASK — what this routine does — is what keeps the pipe and the
+        retention copy free of raw body lines; teaching the table to mask a headerless
+        fragment is a separate change with its own over-mask evidence to gather.
         """
         if self._in_key_block:
             out: list[str] = []
             for line in ready.splitlines(keepends=True):
-                if self._key_block_lines > _PEM_STREAM_LINE_LIMIT:
-                    # Bound reached: stop masking, release, and reset.
-                    self._in_key_block = False
-                    out.append(line)
-                    continue
-                self._key_block_lines += 1
-                if _PEM_END_LINE.match(line.rstrip("\r\n")):
+                # Stripped ONCE: the gate and the classifier must see the same bytes.
+                stripped = line.rstrip("\r\n")
+                if _PEM_END_HINT in stripped and _pem_end_line(stripped):
                     self._in_key_block = False
                     self._key_block_marker_sent = False
                     out.append(line)
                     continue
-                if _PEM_BODY_LINE.match(line.rstrip("\r\n")):
+                if _pem_header_line_end(stripped) is not None:
+                    # A SECOND block's header inside an open block is armour, not prose.
+                    # The prose rule below closed the state on it, and because a header
+                    # is released with the body lines that follow it (the hold keeps a
+                    # header until its END or the cap) the close landed one release
+                    # early: the block's own body then went out raw past the cap —
+                    # measured on `header + 700 body lines + header + 200 body lines +
+                    # END`, where the second block's body is what leaked. Keeping the
+                    # state costs nothing and cannot eat ordinary text: prose that is
+                    # not armour still closes the block, which is the guard that rule
+                    # exists for.
+                    #
+                    # AND THE STATE IS CARRIED, not merely kept: this loop reaches the
+                    # arm with the state already CLOSED whenever the release that ends
+                    # here also carried an END (the arm above closes it on one), so
+                    # releasing the header without re-opening let the SECOND block's
+                    # body go out raw on the next release — measured on `header + 3
+                    # body lines + END + header + 200 body lines` (12,071 B, one read):
+                    # 138 raw body lines, the whole flush. A fresh marker goes with the
+                    # state, so a second block's body is announced like any other
+                    # block's rather than dropped silently under the first block's.
+                    self._in_key_block = True
+                    self._key_block_marker_sent = False
+                    out.append(line)
+                    continue
+                if _pem_body_line(stripped):
                     if not self._key_block_marker_sent:
                         self._key_block_marker_sent = True
                         out.append(REDACTION_MARKER + "\n")
@@ -2281,11 +2683,18 @@ class _PipeRedactor:
                 self._key_block_marker_sent = False
                 out.append(line)
             return "".join(out)
-        begin = _PEM_HEADER_LINE.search(ready)
+        # GATED SEARCH, and the gate is what makes an ORDINARY read free: this is
+        # the one place the ambiguous prefix grammar runs over arbitrary text, and
+        # both literals are necessary conditions of the pattern, so a read carrying
+        # neither skips the search entirely (see `_PEM_HEADER_HINTS`).
+        begin = (
+            _pem_header_line_end(ready)
+            if all(hint in ready for hint in _PEM_HEADER_HINTS)
+            else None
+        )
         if begin is None:
             return ready
         self._in_key_block = True
-        self._key_block_lines = 0
         self._key_block_marker_sent = False
         # Keep the rest of this chunk: it is the block's first lines, and they go
         # through the same line loop as everything else. Replacing it with a
@@ -2301,7 +2710,24 @@ class _PipeRedactor:
         # as an earlier round did) changes the bytes the shape table is about to read, and
         # a rewritten separator is a shape the table cannot match. The remainder is
         # passed through exactly as read.
-        return ready[: begin.end()] + self._mask_open_key_block(ready[begin.end() :])
+        # The DECIDER answers with the offset the pattern's match ENDS at (the same
+        # number `_PEM_HEADER_LINE.search(ready).end()` gave), so the split below is by
+        # an int and not by a match object.
+        tail = ready[begin:]
+        break_match = _PEM_LINE_BREAK.match(tail)
+        if break_match is None:
+            # The header is the last thing in this release: the terminator arrives
+            # with the next one, and the block is open across that boundary.
+            return ready[:begin]
+        # The terminator is emitted BYTE-IDENTICAL (no rewriting — see above) and
+        # never offered to the line loop, which read it as prose and closed the
+        # block. This is also where an escaped `\\n` (no real break) keeps its
+        # behaviour: it is not a separator, so it stays in the masked remainder.
+        return (
+            ready[:begin]
+            + break_match.group()
+            + self._mask_open_key_block(tail[break_match.end() :])
+        )
 
     def _release_point(self, text: str, *, final: bool) -> int:
         """Where the decidable prefix ends: after the last newline, capped."""
@@ -2316,32 +2742,187 @@ class _PipeRedactor:
         # the last newline: a PEM body is the credential and it spans lines, so
         # releasing up to the last newline would publish the key material and
         # hold back only the ``-----END`` line. The block is held until its END
-        # arrives (or the cap below forces it through, which is the documented
-        # residual for a block larger than the cap).
+        # arrives (or the cap below forces it through — and a cap-forced release of
+        # an OPEN block is masked, because the state carries across releases: the body
+        # used to go out verbatim once the cap cut through the block, which is the
+        # publish this mask closes).
+        block_open = False
         begin = text.rfind("-----BEGIN", 0, cut)
         if begin >= 0:
             end = text.find("-----END", begin)
             if end < 0 or end >= cut:
                 cut = begin
+                # Set WHERE THE HOLD FIRES rather than inferred afterwards from the
+                # cut's position: the cap below rewrites the cut, so an inference taken
+                # after it answers a different question — and the fragment rule at the
+                # end of this function needs this one, which is "the text carries a
+                # block the classifier accepted", because the cap can leave the block's
+                # own marker outside the release (see `_cut_past_a_split_header`).
+                block_open = True
         # The cap is applied LAST and wins over every hold above: bounded memory
         # is the property that must not depend on what the child prints, so a
         # command that opens a PEM block and never closes it cannot pin the
-        # buffer forever.
-        if len(text) - cut > _PIPE_DEFERRAL_LIMIT:
-            cut = len(text) - _PIPE_DEFERRAL_LIMIT
+        # buffer forever. ONE hold survives it, and only because the cap can destroy
+        # the very thing the hold above protects: a cut inside a header LINE splits a
+        # marker no later release can put back together.
+        cap_forced = len(text) - cut > _PIPE_DEFERRAL_LIMIT
+        if cap_forced:
+            cut = self._cut_past_a_split_header(text, len(text) - _PIPE_DEFERRAL_LIMIT)
         # Never cut through a KNOWN value. The newline rule above already
         # prevents that for any value without a newline in it, which is every
         # credential in practice; this keeps the guarantee for the ones with
         # one, and for the cap-forced cut above.
+        #
+        # A SHAPE gets the same rule, for the same reason and by a stricter
+        # mechanism — see _shape_safe_spans / _cut_outside: the cap is the one
+        # release the line rule does not cover, and it is the one that used to
+        # publish a credential in two unmasked halves.
+        spans = self._shape_safe_spans(text) if cap_forced else []
+        # ONE fixed point over ALL THREE rules, not a sequence of them: moving the cut
+        # for a shape can put it inside a value, a value move can put it inside a line,
+        # and the line hold can expose a value — so each is re-checked against the
+        # others until none of them moves it. The reviewer of this change measured 0
+        # violations from applying the shape and value rules in sequence across 2,232
+        # buffer/phase combinations, so that half is a latent hole being closed rather
+        # than a live one. The line hold is in the loop for a reason of its own: it
+        # moves the cut LEFT, and a known value ENDING within PEM_BODY_FLOOR bytes of
+        # the new cut would be split by it — which is the publish this filter exists to
+        # prevent, so the value rule has to get the last word.
+        #
+        # The hold itself: AN OPEN BLOCK'S RELEASE MUST END ON A LINE BOUNDARY. Any
+        # cut above can land inside a line (the cap always can; `_cut_outside` and the
+        # known-value rule move to a match start, which is not one), and a fragment
+        # shorter than the body grammar's floor (``PEM_BODY_FLOOR``) is then read as
+        # PROSE by the line loop — which CLOSES the block. Measured on the retention
+        # case a real reader reaches: a cap-forced cut left the four-character fragment
+        # `MIIE` at the end of a release, the block closed on it, and the NEXT release
+        # (all body, with no header left to reopen it) went out raw — 1,092 raw body
+        # lines of a 2,000-line block. Holding the cut back costs at most
+        # PEM_BODY_FLOOR - 1 bytes of latency, applies only while a block is open (in
+        # the state, or opened by this very text), and rewrites nothing: the fragment
+        # goes out whole with its line on the next release.
+        #
+        # IT DOES NOT APPLY TO THE FINAL RELEASE, and that is a decision rather than an
+        # oversight: ``final`` releases to the end of the buffer, so a fragment there is
+        # the END OF THE STREAM and nothing follows it for the line loop to misread —
+        # and holding bytes back at that point would DROP them, because ``pending`` is
+        # never flushed again. The invariant this hold exists for is not "no fragment is
+        # ever released"; it is "no fragment a LATER release will classify".
         while True:
             previous_cut = cut
+            if spans:
+                cut = self._cut_outside(cut, spans)
             for secret in self.secrets:
                 start = text.find(secret, max(cut - len(secret) + 1, 0))
                 if 0 <= start < cut < start + len(secret):
                     cut = start
+            if cut and (self._in_key_block or block_open):
+                break_at = max(text.rfind("\n", 0, cut), text.rfind("\r", 0, cut)) + 1
+                if 0 < cut - break_at < PEM_BODY_FLOOR:
+                    cut = break_at
             if cut == previous_cut:
                 break
         return cut
+
+    def _cut_past_a_split_header(self, text: str, cut: int) -> int:
+        """Extend a cap-forced cut to the end of a header LINE it would otherwise split.
+
+        WHY THIS EXISTS, and why it is the ONE hold the cap does not win over. The
+        release point finds a block by its opening literal and defers it to its END,
+        but the cap is applied after that hold and recomputes the cut from the buffer
+        length — so an alignment that puts the cap inside the header line splits the
+        MARKER: ``-----BEGIN RSA PRI`` goes out as a bare armour fragment and the rest
+        of the marker stays in ``pending``, where its line no longer STARTS with the
+        marker, so no header line can start there any more. The state never
+        opens, the carried-state masking below never engages, and every later release
+        is body that nothing masks. Measured on the shape of ``head -c 8210 key.pem``:
+        138 raw body lines published, and the alignment is fixed per stream — a session
+        that runs the same truncated read twice leaks both times.
+
+        The cut moves FORWARD to the end of that line rather than BACK to its start,
+        and both halves of that matter:
+
+        * the header line has to be inside ONE release for the mask to see it, so the
+          cut must not land in the middle of it — which a retreat also achieves;
+        * but a retreat HOLDS the block, and the held bytes are exactly what the cap
+          exists to bound: with a buffer that never grows past the cap, a retreat at a
+          header line that starts the buffer would answer every release with the same
+          offset and let ``pending`` grow without bound. Moving forward releases the
+          armour line, which is not the credential, and leaves ``pending`` SMALLER
+          than the cap allows — so no bound is weakened and nothing can stall.
+
+        Only a line that IS a header line opens this path — the same pattern the mask
+        classifies with, so the hold cannot disagree with the mask about what it split
+        — and only when that line's terminator has arrived, because the line has to be
+        complete to be released whole. The hint gate in front of the pattern is the
+        pattern's own necessary conditions: this runs per release, and the prefix
+        grammar is ambiguous enough that an ungated match on ordinary text is seconds.
+        """
+        line_start = max(text.rfind("\n", 0, cut), text.rfind("\r", 0, cut)) + 1
+        if line_start >= cut:
+            return cut  # the cut is already a line boundary: nothing is split
+        break_match = _PEM_LINE_BREAK.search(text, cut)
+        if break_match is None:
+            # No terminator in the buffer yet: the line cannot be released whole, and
+            # the fragment rule below is the only hold that applies to it.
+            return cut
+        line = text[line_start : break_match.start()]
+        if not all(hint in line for hint in _PEM_HEADER_HINTS):
+            return cut
+        if _pem_header_line_end(line) is None:
+            return cut
+        return break_match.end()
+
+    def _shape_safe_spans(self, text: str) -> list[tuple[int, int]]:
+        """Every shape span a cap-forced release must not land inside.
+
+        Called only when the CAP forced the cut — the one release point chosen
+        without regard to the text around it, and so the only one the newline
+        rule above does not already make safe. The cheap anchor gate then stands
+        in front of the table, so a cap-forced cut inside ordinary output (a
+        10 MB blob of JSON, a progress line) pays a lowercase substring search
+        and nothing else.
+
+        Offsets are absolute in ``text``, and the search is confined to the last
+        :data:`_PIPE_HOLD_LIMIT` bytes. That confinement is what keeps the SHAPE
+        rule bounded: the caller may move a cut back to any span reported here,
+        so ``pending`` cannot be pushed past the hold limit by a shape, and a
+        match beginning earlier than the window is longer than a whole deferral
+        window and could not be held without defeating the cap. The pre-existing
+        known-value rule is a separate, larger hold — see the class docstring.
+        """
+        floor = max(len(text) - _PIPE_HOLD_LIMIT, 0)
+        window = text[floor:]
+        if not has_shape_anchor(window):
+            return []
+        # A match CLOSED BY THE BUFFER END is dropped. Holding cannot protect it —
+        # the next read may extend it — so backing off to its start would hold a
+        # span that keeps growing while CHANGING THE PARTITION, and the partition
+        # is what the truncation-sensitive rules read: measured, including it
+        # masked a value the one-piece pass leaves alone on an input this change
+        # does not fix. It is also the >window case by construction (it crosses
+        # the cut and reaches the buffer end, so it is longer than one window),
+        # which is the residual this bound already states.
+        return [(start, end) for start, end in _shape_match_spans(window, floor) if end < len(text)]
+
+    @staticmethod
+    def _cut_outside(cut: int, spans: list[tuple[int, int]]) -> int:
+        """Move ``cut`` back to the start of the last span it would split.
+
+        Iterated to a fixed point rather than filtered once, because moving the
+        cut can put it inside a DIFFERENT, overlapping span: two rules can
+        propose spans that overlap, and the first move is not necessarily the
+        last (a span ending inside the new cut is a split the single pass would
+        have missed). The existing
+        known-value loop below is written the same way for the same reason.
+        """
+        while True:
+            previous_cut = cut
+            for start, end in spans:
+                if start < cut < end:
+                    cut = start
+            if cut == previous_cut:
+                return cut
 
 
 def _bash_progress_line(
@@ -2421,6 +3002,32 @@ def _stream_redaction_values(store: Any, credential_env: dict[str, str]) -> list
 _REDACTION_SEAM_BROKEN: list[str] = ["\x00redaction-seam-broken\x00"]
 
 
+def _shape_containment_sink(
+    store: Any,
+) -> Callable[[Sequence[ShapeHit]], None] | None:
+    """The store's containment entry point, for a layer that masked the text itself.
+
+    The pipe filter is the one masking layer that runs BEFORE a tool result
+    exists, so the store never sees the credential it removed and the store's own
+    registration pass (:meth:`VariableStore.redact_with_report`, which the result
+    path and the live-text path both reach) finds nothing. Handing the filter the
+    registration entry point keeps the value caught in every later result of the
+    session — the form the shape table has no rule for is exactly the one an
+    operator's later ``cat`` prints.
+
+    ``None`` for a store that does not offer the method — a third-party
+    embedder's minimal store, or a bare tool test — which degrades to the
+    masking-only behaviour those callers had before rather than failing the
+    command.
+    """
+    register = getattr(store, "register_shape_hits_for_containment", None)
+    if not callable(register):
+        return None
+    # Cast for the same reason the sibling lookups above cast: ``getattr`` yields
+    # ``object``, and this is the store's own public surface.
+    return cast(Callable[[Sequence[ShapeHit]], None], register)
+
+
 def _redact_tool_text(text: str, context: ToolContext | None) -> str:
     """Strip stored session-credential values out of tool output.
 
@@ -2438,13 +3045,28 @@ def _redact_tool_text(text: str, context: ToolContext | None) -> str:
     redact = getattr(store, "redact", None)
     if not callable(redact):
         return text
-    # ``redact_with_hits`` when the store has it: the live stream, the peek
-    # buffer and the abort receipt are the surfaces that paint a credential
-    # BEFORE any result exists, so they have to file the incident themselves —
-    # there is no later hook that will see the pre-mask text.
-    # Cast rather than probed: ``getattr`` yields ``object``, and the two names this
-    # looks for are the store's own public surface (``VariableStore.redact_with_hits``
-    # and its ``redact``), so a Callable annotation is the honest description.
+    # ``redact_with_report`` when the store has it: it carries the shape LABELS
+    # and the CLASSIFICATION (contained, or readable material left in the text),
+    # which the live stream, the peek buffer and the abort receipt need because
+    # they file the incident themselves — there is no later hook that will see
+    # the pre-mask text. ``redact_with_hits`` is the older, labels-only view, and
+    # a store that offers only that one keeps the escalated reading below: a
+    # caller that cannot prove containment must not claim it.
+    # Cast rather than probed: ``getattr`` yields ``object``, and the names this
+    # looks for are the store's own public surface (``VariableStore.redact_with_report``,
+    # ``VariableStore.redact_with_hits`` and its ``redact``), so a Callable annotation
+    # is the honest description.
+    report_aware = cast(
+        Callable[[str], tuple[str, ShapeReport]] | None,
+        getattr(store, "redact_with_report", None),
+    )
+    if callable(report_aware):
+        try:
+            scrubbed, report = report_aware(text)
+            report_shape_hits(list(report.labels), reached_model=report.reached_model)
+            return scrubbed
+        except Exception:  # noqa: BLE001 — fall through to the plain path below
+            logger.warning("report-aware redaction failed on a live surface", exc_info=True)
     hits_aware = cast(
         Callable[[str], tuple[str, list[str]]] | None,
         getattr(store, "redact_with_hits", None),
@@ -2452,7 +3074,13 @@ def _redact_tool_text(text: str, context: ToolContext | None) -> str:
     if callable(hits_aware):
         try:
             scrubbed, labels = hits_aware(text)
-            report_shape_hits(labels)
+            if labels:
+                # No classification from this store: the labels-only view names the
+                # hits whose mask was whole, so the only reading it supports is the
+                # ESCALATED one — which is exactly what this path filed before the
+                # classification existed. Silent when nothing matched, which is why
+                # this is inside the guard rather than relying on a default.
+                report_shape_hits(labels, reached_model=True)
             return scrubbed
         except Exception:  # noqa: BLE001 — fall through to the plain path below
             logger.warning("hit-aware redaction failed on a live surface", exc_info=True)
@@ -2469,6 +3097,122 @@ def _redact_tool_text(text: str, context: ToolContext | None) -> str:
         logger.warning("redaction failed; withholding this text", exc_info=True)
         return "[output withheld: this session's secret redaction sink could not be read]"
     return redacted if isinstance(redacted, str) else text
+
+
+#: The most text the settled `bash` path PUBLISHES per stream: the cap the
+#: masked result and the spill are elided to.
+#:
+#: **Why a cap at all.** The pass costs CPU proportional to its input — measured
+#: on this tree at ~0.2 microseconds per byte when the shape gate stays shut and
+#: ~3-4 when every line carries an anchor, i.e. 1-16 seconds of synchronous work
+#: for a 4 MB stream, all of it on the event loop before the thread hop landed.
+#: The bash settled path hands the pass the whole retained stream (`_BashOutput`
+#: keeps up to :data:`SPILL_ENTRY_LIMIT_BYTES` per pipe) while the model's
+#: display budget is 8 KiB :data:`TOOL_OUTPUT_LIMIT_CHARS`, so the cost of the
+#: pass and the size of what the model reads are two different numbers.
+#:
+#: **It is NOT a bound on the pass input, and the round-1 review measured why.**
+#: An earlier revision elided at this cap BEFORE masking, to hand the pass only
+#: what survives. Two things were wrong with that. (1) It saved nothing: the cap
+#: is the retention limit and ``_BashOutput.decode()`` is the only way past it
+#: — the retention notice, 39 characters for a 4 KiB omission and 42 for a
+#: 4 MiB one — so the pass was handed 4,194,343 characters either way. (2) It
+#: LEAKED: an elision runs before the mask, its cuts snap inward to line
+#: boundaries, and a cut inside a multi-line match publishes the kept side as an
+#: incomplete block the table cannot match — raw key material in the result and
+#: in the spill the model can ``read``. The pass is therefore handed everything
+#: retention kept (the mask must see every byte that can be published) and this
+#: constant caps the PUBLISHED text only. It is deliberately NOT the 8 KiB
+#: display budget either: the same text is what gets spilled, which the model can
+#: `read` later, so capping at the display budget would drop bytes that are still
+#: published — and a bound may only ever drop what the mask has already been
+#: applied to.
+_REDACT_STREAM_LIMIT_CHARS = SPILL_ENTRY_LIMIT_BYTES
+
+
+def _redact_settled_stream(text: str, context: ToolContext | None) -> str:
+    """Redact one settled `bash` stream, THEN cap what is published.
+
+    **The mask runs first, and the order is load-bearing.** :func:`truncate_output`
+    cuts the head and tail of its input and snaps both cuts INWARD to a line
+    boundary (:func:`_clip_head_tail`), so an elision applied BEFORE the mask can
+    land inside a multi-line match and publish its kept side as an incomplete
+    block the table cannot match: a PEM header plus its first body lines with no
+    ``END`` is published RAW — in the result, and in the spill the model can
+    ``read`` afterwards. Measured at the shipped cap on the reviewer's
+    construction (a block whose END line is the last line of the retained head,
+    so the snapped cut falls inside it): a raw key body line in the call-site
+    spill under the elide-first order, none under this one. Masking first means
+    a cut inside a match can only publish ``[redacted]``.
+
+    **Why this costs nothing.** The cap is the retention limit itself and
+    ``_BashOutput.decode()`` is the only way past it — the retention notice is
+    appended to the retained head and tail, so an over-cap stream decodes to
+    ``limit + len(notice)`` and the elision's whole saving is that notice.
+    Measured: the pass was handed 4,194,343 characters either way (a 4 KiB
+    omission, notice 39). So the cap is kept as a bound on what is
+    PUBLISHED (the result and the spill), never as a bound on the pass input —
+    the only text the pass may safely be denied is text that is not published,
+    and a tighter cap here would deny it text that is.
+    """
+    return truncate_output(_redact_tool_text(text, context), _REDACT_STREAM_LIMIT_CHARS)
+
+
+def _decode_and_redact_streams(
+    stdout_chunks: "_BashOutput",
+    stderr_chunks: "_BashOutput",
+    context: ToolContext | None,
+) -> tuple[str, str]:
+    """Decode both captured streams and redact them, in ONE off-loop call.
+
+    **The NAME is load-bearing: it is the settled bash tail's off-loop seam.**
+    ``tests/unit/tools/test_loop_liveness.py`` names this symbol in its
+    ``OffLoopSpy``, which resolves the name on the module and fails with an
+    ``AttributeError`` rather than quietly asserting nothing when it moves —
+    the shape this helper was renamed into cost one round of a red gate for
+    exactly that reason. A rename therefore has to carry that spy with it.
+    Its pair, ``_bash_oversized_streams``, is watched the same way.
+
+    **Why the pass is in here rather than beside the decode.** The comment at
+    the foreground call site already moved the multi-MB decode, join and elision
+    into a thread because a batch of concurrent `bash` calls finishing together
+    froze the TUI frame. The redaction moved with it only for the streams that
+    are small: it is the other multi-MB synchronous step, so leaving it on the
+    event loop kept the freeze for exactly the commands the thread was added
+    for. The work is byte-for-byte the same; only the thread it runs on changes.
+
+    ``asyncio.to_thread`` copies the current context, so the tool-source and
+    shape-hit reporters the pass publishes through are the same ones the calling
+    task would have seen — the incident a hit files is unchanged.
+
+    **A cancelled call does NOT cancel the pass, and that is accepted rather
+    than handled.** ``asyncio.to_thread`` has no cancellation: an abort, a
+    timeout or a steer that lands while this runs discards the result and leaves
+    the work running to completion on the pool thread (worst case measured at
+    ~16 s for 4 MiB of anchor-bearing text). Nothing here can interrupt it: the
+    pass is a pure function of (text, values) with no abort channel, and giving
+    it one would put a signal into the shape table every caller shares, for a
+    case whose only cost is one worker thread that the event loop is not waiting
+    on. The alternative — checking for cancellation between streams — would leak
+    a partial scrub, which is the one outcome this path exists to prevent.
+
+    **It also makes the shape-hit sink cross-thread, which is new here.** The
+    registered-value sink the pass reads and writes
+    (``VariableStore.redaction_values`` / ``_register_shape_hits``) was until now
+    only ever touched from the loop thread, where two concurrent `bash` calls
+    serialised; two calls settling together now run it in two worker threads, so
+    a read of the value set can interleave with a write to it. Bounded and
+    fail-closed, measured by the round-1 QA pass: 20,000 concurrent probes with
+    no failure, and every failing route lands on the withheld-result placeholder
+    (``_redact_tool_text`` resolves all three routes to the same full pass, so a
+    raise is caught and the output is withheld), never on an unmasked
+    credential. Recorded rather than locked: a mutex here would serialise the
+    pass this change exists to move off the loop.
+    """
+    return (
+        _redact_settled_stream(stdout_chunks.decode(), context),
+        _redact_settled_stream(stderr_chunks.decode(), context),
+    )
 
 
 def _bash_output_summary(stdout: str, stderr: str) -> str:
@@ -2567,6 +3311,23 @@ async def execute_bash(
         return _validation_error(tool_call_id, "bash", exc)
     if not params.command.strip():
         return _error(tool_call_id, "bash", "command must be a non-empty string")
+
+    # Unbounded-search interception: a recursive grep/find from the repository
+    # root walks vendored and generated trees that cannot hold the answer.
+    # Measured: one such call took 41 s in a repo whose root carries a 5 GB
+    # node_modules. This BLOCKS with a suggestion — it never rewrites the
+    # command — because substituting a path back into arbitrary shell would
+    # silently change what the agent asked for; a refusal is deterministic and
+    # leaves the escape hatch (LOCAL_OPERATOR_ALLOW_UNBOUNDED_SEARCH=1) intact.
+    # See tools/search_guard.py for the predicate and the false-positive rules.
+    _si_enabled, _si_block, _si_rg = _search_interception_config()
+    interception = search_guard.check_search_interception(
+        params.command, enabled=_si_enabled, block_unbounded=_si_block
+    )
+    if interception is not None:
+        if _si_block:
+            return _error(tool_call_id, "bash", interception)
+        logger.warning("bash: %s", interception)
     # Approval for write/exec tiers is the LOOP's gate (it fires after
     # tool_execution_start so the UI shows the pending call). A second gate
     # here made the user answer twice per action, with the tier name rendered
@@ -2654,8 +3415,27 @@ async def execute_bash(
     elif MAY_DELEGATE_ENV in os.environ:
         # Clear what this child would otherwise inherit — and only that.
         injections[MAY_DELEGATE_ENV] = ""
+    # The session's scratchpad root rides the SAME three arms, from one helper, so
+    # the two writers of an inherited-shaped variable cannot drift apart: set to
+    # this session's root, cleared when the name is inherited and this session has
+    # none (so a nested session never writes into its parent's scratchpad), and
+    # not written at all otherwise. The scheme cannot cross this boundary — a
+    # shell cannot resolve one — which is the whole reason the path is exported.
+    #
+    # ``ensure_scratchpad_dir`` runs HERE because this is where the path is handed
+    # over: a shell cannot create a missing parent the way ``write``/``edit`` do,
+    # so the advertised path has to exist by the time the child starts.
+    injections.update(scratchpad_env_injection(ensure_scratchpad_dir(scratchpad_dir_of(context))))
     if isinstance(extra, dict):
         injections.update({str(name): str(value) for name, value in extra.items()})
+
+    # Lever 2: a generated ripgrep config so an `rg` the guard did NOT block
+    # (a scoped search, or one under an inline grant) still prunes vendor and
+    # build trees. Only `rg` reads this; GNU grep has no equivalent default.
+    if _si_rg:
+        rg_config = _rg_config_path()
+        if rg_config is not None:
+            injections.setdefault("RIPGREP_CONFIG_PATH", rg_config)
 
     # The child environment is built from the session's `shell_environment`
     # policy, not copied wholesale: `inherit` (the default) is the copy this
@@ -2778,6 +3558,31 @@ async def execute_bash(
         spawned_pgid = os.getpgid(process.pid)
         group_reaper.register_group(spawned_pgid, params.command)
 
+    # The memory guard, bound to EXACTLY the group we just spawned. It is built
+    # only when we actually captured a pgid AND the budget resolved to something
+    # armed: a command whose group id could not be read is Windows-shaped (the
+    # guard is a POSIX feature — os.killpg/getpgid do not exist there) and runs
+    # unguarded, and a `source="disabled"` budget (config off, non-measurable
+    # host) is the pre-guard behaviour. The guard can only ever read and kill
+    # THIS pgid: it never discovers a group of its own, so it cannot touch the
+    # runtime or a sibling session (F5).
+    memory_budget = _configured_memory_budget(params.memory_mb)
+    guard: memory_guard.Guard | None = None
+    if spawned_pgid is not None and memory_budget.source != "disabled":
+        guard = memory_guard.Guard(spawned_pgid, memory_budget)
+    elif memory_budget.source == "disabled":
+        # One line, once, on the reason the guard is not protecting this
+        # command. Logged rather than streamed: a per-command advisory would be
+        # wallpaper, and `source="disabled"` is a machine-wide condition.
+        logger.debug("memory guard disabled for this command: %s", memory_budget.reason)
+
+    # The soft advisory line, held for the life of the command once the guard
+    # fires it. PERSISTENT, not one-shot: it rides the card's state line on every
+    # update so it stays painted until the command settles (design review D1).
+    # The guard's own latch stops it RE-FIRING; this cell is what makes the ONE
+    # firing stay visible rather than surviving a single 500 ms snapshot.
+    memory_advisory: str | None = None
+
     def _unregister_group() -> None:
         # Drop this group's ledger line once it is confirmed dead, so a clean
         # run leaves nothing for the startup sweep to consider and a long host
@@ -2787,6 +3592,24 @@ async def execute_bash(
             return
         with contextlib.suppress(Exception):
             group_reaper.unregister_group(spawned_pgid)
+
+    def _reap_synchronously() -> None:
+        """The drain/reap tail's NON-awaiting cleanup, shareable by early returns.
+
+        The steering-path memory branch returns before the tail (it cannot await
+        there — a caught cancellation would re-deliver), but the group is already
+        killed, so its ledger line, its transport and the abort waiter still need
+        releasing. Every step here is synchronous or a cancel, so it is safe on a
+        cancelled task (review round 1, m2). Idempotent: the normal tail runs the
+        same steps, so calling this on the way to that tail would be harmless too.
+        """
+        transport = getattr(process, "_transport", None)
+        if transport is not None:
+            with contextlib.suppress(Exception):
+                transport.close()
+        _unregister_group()
+        if abort_waiter is not None and not abort_waiter.done():
+            abort_waiter.cancel()
 
     stdout_chunks = _BashOutput()
     stderr_chunks = _BashOutput()
@@ -2825,7 +3648,10 @@ async def execute_bash(
         # read" and must never be treated as an ordinary list of secrets; the
         # loop checks it before every feed, and so must the construction site.
         initial = _stream_redaction_values(store, injected)
-        redactor = _PipeRedactor([] if initial is _REDACTION_SEAM_BROKEN else initial)
+        redactor = _PipeRedactor(
+            [] if initial is _REDACTION_SEAM_BROKEN else initial,
+            contain=_shape_containment_sink(store),
+        )
         withheld = False
         try:
             while True:
@@ -2921,10 +3747,28 @@ async def execute_bash(
             # Bytes are arriving and being held; ``(empty)`` would tell the
             # operator the opposite of what is happening.
             stdout = _LIVE_PENDING_TEXT
+        summary = _bash_output_summary(stdout, stderr)
+        # The soft (memory.high) advisory is carried as its OWN field, not
+        # prepended to the output text (design review D1). Prepended, it rode the
+        # HEAD of a block that keeps the TAIL, so on a chatty command — the exact
+        # memory-pressure case it exists for — it scrolled off, and the one-shot
+        # latch meant the next snapshot overwrote it anyway. As a field it reaches
+        # the card's persistent state line and stays put.
+        #
+        # ADVISORY ONLY — see the module docstring: userspace cannot throttle an
+        # allocation, so this is a warning, never a slowdown. The line is the
+        # latch's text; once the guard has fired it we resend the SAME line on
+        # every subsequent update (the latch returns it once, so it is held here),
+        # so it stays painted until the command settles.
+        advisory = memory_advisory
         on_update(
             AgentToolUpdate(
-                content=[TextContent(text=_bash_output_summary(stdout, stderr))],
-                details={"tool_name": "bash", "running": True},
+                content=[TextContent(text=summary)],
+                details={
+                    "tool_name": "bash",
+                    "running": True,
+                    "memory_advisory": advisory,
+                },
             )
         )
 
@@ -2935,7 +3779,44 @@ async def execute_bash(
 
     timed_out = False
     aborted = False
+    # Set when the memory guard kills this command's group. A THIRD branch beside
+    # timed_out/aborted, reading the same _kill(): the drain/reap tail below runs
+    # unchanged, and the result builder turns the flag into the MEMORY LIMIT
+    # EXCEEDED line. Checked on the detach path too, so a memory-killed command is
+    # never reported as "continues in the background" (§10).
+    memory_exceeded = False
+    memory_sample: memory_guard.Sample | None = None
     next_update = loop.time() + 0.5
+    # The memory tick rides the SAME 250 ms cadence as the timeout/abort wait, so
+    # it adds no loop and no new blocking call. The guard's sample() runs the ps
+    # read in a thread (never on the loop thread) — a blocking read here would
+    # stall the TUI frame, which is the failure this guard must not introduce.
+    mem_tick = guard.tick_s if guard is not None else 0.25
+    next_mem_sample = loop.time() + mem_tick
+
+    async def _memory_tick() -> bool:
+        """Sample the guarded group; kill and return True on a hard breach.
+
+        Unknown usage (None) is never a kill — ``should_kill`` requires a measured
+        reading, so a hiccupping ``ps`` leaves the command alone (F6). The soft
+        advisory is folded into the next live update, not emitted as a second
+        stream.
+        """
+        nonlocal memory_exceeded, memory_sample, memory_advisory
+        if guard is None:
+            return False
+        sample = await guard.sample()
+        memory_sample = sample
+        if guard.should_kill(sample):
+            memory_exceeded = True
+            _kill()
+            return True
+        # One-shot: ``soft_notice`` latches internally, so a group sitting over
+        # the soft line does not re-arm this.
+        notice = guard.soft_notice(sample)
+        if notice:
+            memory_advisory = notice
+        return False
 
     def _detach_to_job(jobs: Any, headline: str) -> ToolResult:
         """Hand the running process to a background job and return its id.
@@ -2973,8 +3854,11 @@ async def execute_bash(
             # budget, keeps the readers alive to drain the pipes, and reports
             # the exit status + bounded output as the job result.
             del job_id
+            nonlocal next_mem_sample
             timed_out_bg = False
             cancelled_bg = False
+            memory_exceeded_bg = False
+            bg_sample: memory_guard.Sample | None = None
             bg_deadline = asyncio.get_running_loop().time() + remaining_timeout
             bg_wait = asyncio.create_task(process.wait())
 
@@ -3024,6 +3908,16 @@ async def execute_bash(
                     if asyncio.get_running_loop().time() > bg_deadline:
                         timed_out_bg = True
                         break
+                    # The memory guard's tick rides the SAME 250 ms wait: a
+                    # command that detached via steering or background=True is
+                    # still bounded. sample() runs the ps read in a thread.
+                    if guard is not None and asyncio.get_running_loop().time() >= next_mem_sample:
+                        next_mem_sample = asyncio.get_running_loop().time() + mem_tick
+                        bg_sample = await guard.sample()
+                        if guard.should_kill(bg_sample):
+                            memory_exceeded_bg = True
+                            _kill()
+                            break
                     await asyncio.wait({bg_wait}, timeout=0.25)
                     # The status line a human reads in the TUI while the job
                     # runs. Deliberately a heartbeat and not the output itself:
@@ -3031,7 +3925,7 @@ async def execute_bash(
                     # tail), and mirroring it into a field every renderer
                     # repaints per frame would pay for it many times over.
                     report_progress(_bash_progress_line(stdout_chunks, stderr_chunks, context))
-                await cleanup(kill=cancelled_bg or timed_out_bg)
+                await cleanup(kill=cancelled_bg or timed_out_bg or memory_exceeded_bg)
             except asyncio.CancelledError:
                 # Manager cancellation is deliberately immediate. Convert it
                 # into process cleanup first, then preserve cancellation so the
@@ -3039,11 +3933,30 @@ async def execute_bash(
                 await cleanup(kill=True)
                 raise
 
-            out, err = await asyncio.to_thread(_decode_chunks, stdout_chunks, stderr_chunks)
-            out = _redact_tool_text(out, context)
-            err = _redact_tool_text(err, context)
+            out, err = await asyncio.to_thread(
+                _decode_and_redact_streams, stdout_chunks, stderr_chunks, context
+            )
             code = process.returncode if process.returncode is not None else -1
             head = f"TIMEOUT after {params.timeout}s (process killed)" if timed_out_bg else ""
+            if memory_exceeded_bg:
+                head = (
+                    guard.over_budget_message(bg_sample)
+                    if guard is not None and bg_sample is not None
+                    else MEMORY_EXCEEDED_FALLBACK
+                )
+                # Structured details on the job row, mirroring the foreground
+                # result's `details` (contract §8.2, review round 1 m3): a
+                # renderer or compaction can read the measured peak and ceiling
+                # by key instead of parsing the head text. `report_progress`
+                # merges a mapping into `latest_details`, so this rides the same
+                # channel the heartbeat uses without displacing it.
+                report_progress(
+                    {
+                        "memory_exceeded": True,
+                        "memory_peak_bytes": guard.peak_bytes if guard else None,
+                        "memory_ceiling_bytes": guard.hard_bytes if guard else None,
+                    }
+                )
             if cancelled_bg:
                 head = "CANCELLED (process killed)"
             out, err, footer, _spill_details = await asyncio.to_thread(
@@ -3173,6 +4086,13 @@ async def execute_bash(
                 aborted = True
                 _kill()
                 break
+            if loop.time() >= next_mem_sample and guard is not None:
+                # Sampled BEFORE the update gate so a breach kills in the same
+                # tick the number is fresh. ``_memory_tick`` never raises into the
+                # loop: a probe failure is "unknown", which is never a kill.
+                next_mem_sample = loop.time() + mem_tick
+                if await _memory_tick():
+                    break
             if loop.time() >= next_update:
                 _emit_update()
                 next_update = loop.time() + 0.5
@@ -3195,6 +4115,35 @@ async def execute_bash(
             # No job manager to own a detached child: kill rather than leak.
             _kill()
             raise
+        if memory_exceeded:
+            # §10: a memory-killed command must NEVER be reported as "continues
+            # in the background". The guard set the flag before its _kill(), so if
+            # a steering CancelledError arrives in the same tick the memory branch
+            # wins.
+            #
+            # We return here rather than falling into the drain/reap tail below:
+            # awaiting there after a caught cancellation would re-deliver the
+            # cancellation and lose the attribution this branch exists to
+            # preserve. But skipping the tail must not skip its SYNCHRONOUS
+            # cleanup — the group is already killed, so reap its ledger line and
+            # release its transport here (review round 1, m2). The `await`s of
+            # the tail are what we cannot do; `_unregister_group()`,
+            # `transport.close()` and cancelling the abort waiter are not.
+            _reap_synchronously()
+            partial = await asyncio.to_thread(_bash_partial_summary, stdout_chunks, stderr_chunks)
+            message = (
+                guard.over_budget_message(memory_sample)
+                if guard is not None and memory_sample is not None
+                else MEMORY_EXCEEDED_FALLBACK
+            )
+            return _error(
+                tool_call_id,
+                "bash",
+                # The COMMAND line is scrubbed like every other result line: a
+                # command can carry a credential (see the abort branch above).
+                f"{message}\n{_redact_tool_text(params.command, context)}\n"
+                f"{_redact_tool_text(partial, context)}",
+            )
         return _detach_to_job(
             jobs,
             "steering interrupted; the command continues in the background. "
@@ -3233,6 +4182,13 @@ async def execute_bash(
 
     if aborted:
         partial = await asyncio.to_thread(_bash_partial_summary, stdout_chunks, stderr_chunks)
+        # The missing-tool advisory is carried onto the ABORT path too (QA round
+        # 1, Q6). It was absent: a Ctrl-C during `nope; sleep 30` reported the
+        # shell's line in the partial output and said nothing about it, which is
+        # the same "the shell's line is the only signal" situation the rc-0
+        # pipeline decision (R1-3) argues for covering. Computed BEFORE the text
+        # is scrubbed so its own output goes through the same redaction pass.
+        aborted_missing = _missing_tool_notice(stderr_chunks.decode(), context)
         return _error(
             tool_call_id,
             "bash",
@@ -3243,18 +4199,21 @@ async def execute_bash(
             # ``redact_tool_result`` covers the product path, and a direct caller
             # of ``execute_bash`` had this one unredacted.
             f"{_redact_tool_text(params.command, context)}\n"
-            f"{_redact_tool_text(partial, context)}",
+            f"{_redact_tool_text(partial, context)}"
+            + (f"\n{aborted_missing}" if aborted_missing else ""),
         )
 
-    # Decoding and, for oversized output, spilling/eliding run in a thread:
-    # a command that printed megabytes turns this tail into a multi-MB
-    # decode, a multi-MB join, a disk write of the spill and string slicing
-    # to elide it — all synchronous, all on the loop that renders the TUI,
-    # and the reason a batch of concurrent bash calls used to freeze the
-    # frame at the moment they finished together.
-    stdout_raw, stderr_raw = await asyncio.to_thread(_decode_chunks, stdout_chunks, stderr_chunks)
-    stdout_raw = _redact_tool_text(stdout_raw, context)
-    stderr_raw = _redact_tool_text(stderr_raw, context)
+    # Decoding, redaction and (for oversized output) spilling/eliding run in a
+    # thread: a command that printed megabytes turns this tail into a multi-MB
+    # decode, a multi-MB credential pass, a multi-MB join, a disk write of the
+    # spill and string slicing to elide it — all synchronous, all on the loop
+    # that renders the TUI, and the reason a batch of concurrent bash calls used
+    # to freeze the frame at the moment they finished together. The redaction is
+    # in the thread with the decode (`_decode_and_redact_streams`) rather than
+    # beside it, because it is one of those multi-MB steps.
+    stdout_raw, stderr_raw = await asyncio.to_thread(
+        _decode_and_redact_streams, stdout_chunks, stderr_chunks, context
+    )
     return_code = process.returncode if process.returncode is not None else -1
 
     # Both streams may end up carrying a marker, so reserve room for two.
@@ -3277,6 +4236,26 @@ async def execute_bash(
     parts = [f"exit code: {return_code}", _bash_output_summary(stdout, stderr)]
     if timed_out:
         parts.insert(0, f"TIMEOUT after {params.timeout}s (process killed)")
+    if memory_exceeded:
+        # The MEMORY LIMIT EXCEEDED line goes FIRST, exactly where TIMEOUT goes,
+        # because the tool card keeps the HEAD of at most 40 lines — a line at the
+        # end of a long result is the first thing its truncation drops.
+        message = (
+            guard.over_budget_message(memory_sample)
+            if guard is not None and memory_sample is not None
+            else MEMORY_EXCEEDED_FALLBACK
+        )
+        parts.insert(0, message)
+        # An ordinary _error, NOT _invalid_arguments: the argument was
+        # satisfiable, the machine said no. The kill already yields a non-zero
+        # return code; the line makes it ATTRIBUTABLE, so the model learns the
+        # command itself was too big rather than retrying it identically.
+        details = dict(spill_details or {})
+        details["memory_exceeded"] = True
+        if guard is not None:
+            details["memory_peak_bytes"] = guard.peak_bytes
+            details["memory_ceiling_bytes"] = guard.hard_bytes
+        return _error(tool_call_id, "bash", "\n".join(parts) + footer, details=details)
     # ONE advisory line when the command is shaped like a credential dump, so the
     # model learns the safer form at the moment it needs it rather than after the
     # secret is already in the transcript. It rides the RESULT, not the stream:
@@ -3293,8 +4272,46 @@ async def execute_bash(
     # anywhere. Short (see ``_BRIEF_ADVICE``) and near the top is what makes it
     # survive both truncations.
     notice = credential_dump_notice(params.command)
+    # The three advisories are inserted AFTER the exit-code line and in a fixed
+    # rank, and the index is computed rather than hard-coded: the TIMEOUT head is
+    # inserted at position 0 BEFORE this block, so a literal index put the
+    # missing-tool line ABOVE `exit code:` on the timeout path — the one path
+    # where a model reads a long, truncated result and most needs the shape the
+    # other paths keep (QA round 1, Q5). `parts` always carries the exit code, so
+    # the lookup cannot fail; `next` with a sentinel keeps it that way even if a
+    # future edit reorders the head.
+    head_index = next(
+        (index for index, part in enumerate(parts) if part.startswith("exit code: ")),
+        0,
+    )
+    insert_at = head_index + 1
     if notice:
-        parts.insert(1, notice)
+        parts.insert(insert_at, notice)
+        insert_at += 1
+    # The scratch nudge rides the SAME head window and for the same measured
+    # reason (a line at the end of a long result is the first thing the card
+    # drops). It goes AFTER the credential notice, which keeps first position:
+    # a secret already in the transcript outranks where a scratch file landed.
+    # It costs nothing when it does not fire, which is the ordinary command.
+    scratch = _bash_scratch_hint(params.command, context)
+    if scratch:
+        parts.insert(insert_at, scratch)
+        insert_at += 1
+    # The missing-tool advisory rides the same head window and RANKS BELOW the two
+    # above by inclusion only, not by importance: a secret already in the
+    # transcript outranks it, the scratch nudge is a destination for a file that
+    # was just written, and this one is a next-step. On the ordinary command it
+    # costs one empty-string check, because the trigger is a shell's own line in
+    # stderr and nothing else.
+    #
+    # It CAN fire on a result whose exit code is 0 — `nope | cat` reports the
+    # missing left leg on stderr and exits with `cat`'s status (review R1-3), and
+    # that is the commonest way a missing tool hides inside an otherwise
+    # successful pipeline. Suppressing it there would lose the notice exactly
+    # where the shell's message is the only signal on the result.
+    missing = _missing_tool_notice(stderr, context)
+    if missing:
+        parts.insert(insert_at, missing)
     return _text(tool_call_id, "bash", "\n".join(parts) + footer, details=spill_details)
 
 
@@ -3303,14 +4320,6 @@ def _bash_partial_summary(stdout_chunks: _BashOutput, stderr_chunks: _BashOutput
     return _bash_output_summary(
         truncate_output(stdout_chunks.decode()),
         truncate_output(stderr_chunks.decode()),
-    )
-
-
-def _decode_chunks(stdout_chunks: _BashOutput, stderr_chunks: _BashOutput) -> tuple[str, str]:
-    """Join and decode both captured streams off the event loop."""
-    return (
-        stdout_chunks.decode(),
-        stderr_chunks.decode(),
     )
 
 
@@ -3379,7 +4388,23 @@ def build_bash_tool() -> AgentTool:
         name="bash",
         label="Shell",
         describe_approval=_describe_shell_approval,
-        description=("Run a bash command and return its exit code, stdout and stderr."),
+        description=(
+            # The ONE standing token cost of the scratchpad work, measured against
+            # the start-of-session budget this repo guards (30,025 billed tokens):
+            # this clause is ~24 of them, and it is deliberately at that size. The
+            # budget is nearly exhausted — before this change the guard passed
+            # with 48 tokens of headroom — so the examples are two rather than
+            # four and the rest of the rule lives in ``guide://scratchpad``, which
+            # costs nothing until it is read. What the clause must do is name the
+            # PATH variable: a shell cannot resolve ``scratchpad://``, the nudge
+            # above only fires after the fact, and the packaged prompt's paragraph
+            # is not in front of the model at the moment it writes a redirect.
+            "Run a bash command and return its exit code, stdout and stderr. "
+            # Interpolated rather than spelled out, so the name the model is told
+            # to use and the name both spawn sites export are one constant — a
+            # second literal here is how the advice would outlive a rename.
+            f"Own scratch (scripts, logs): ${SCRATCHPAD_PATH_ENV}, not /tmp."
+        ),
         parameters=BashParams.model_json_schema(),
         approval_tier="exec",
         # bash runs shared when non-pty; models batch independent
@@ -4682,14 +5707,1215 @@ def _scheme_refusal(
 def _scratchpad_root(context: ToolContext | None) -> Path | None:
     """The scratchpad root off the context, or ``None``. ``""`` reads as ``None``.
 
-    ``""`` is treated as absent rather than as a path: ``Path("")`` is the cwd,
-    which would silently make the whole working directory listable through the
-    scheme.
+    The field reading itself lives in ``scratchpad.scratchpad_dir_of`` so the
+    ``eval`` worker's spawn reads the same field the same way; the ``Path``
+    conversion stays here because this is the module that resolves paths.
     """
-    raw = getattr(context, "scratchpad_dir", None) if context else None
-    if not isinstance(raw, str) or not raw:
+    raw = scratchpad_dir_of(context)
+    return None if raw is None else Path(raw)
+
+
+#: This module's view of the platform, a module-local copy for the same reason
+#: ``group_reaper`` keeps one: a test steers the macOS-only branch below by
+#: patching THIS name, not the global ``sys.platform``, which would tell every
+#: other thread in the process it is on macOS for the duration — and this suite
+#: runs with threads.
+_PLATFORM = sys.platform
+
+#: Whether ``/tmp`` is the directory macOS's daily cleaner prunes. Named rather
+#: than inlined so the reason a caller states and the gate that decides whether
+#: to state it cannot drift apart.
+_SYSTEM_TMP_IS_PRUNED = _PLATFORM == "darwin"
+
+#: The trap the temp-root arm names, as a noun phrase. A name rather than an inline
+#: literal because the line's ROOT arm (``is_root``) spells the trap out in full —
+#: there is no concrete target beside it for "the same trap" to refer back to — so
+#: the phrase appears twice in one line and a second copy is how it drifts.
+_TEMP_ROOT_TRAP = "a temp root"
+
+#: The DIRECTORY NAMES that are the same trap as a temp root wherever they appear.
+#: That is the whole of the second arm's trigger: no extension gate, and no
+#: location gate either, because the NAME is the convention the session was already
+#: following when it wrote there.
+#:
+#: What is wrong with one of these is NOT what is wrong with a temp root: it is not
+#: that nothing prunes it, and the line's reason is deliberately neutral about WHERE
+#: the directory sits — see ``_SCRATCH_DIR_WHY`` for what it does say and why. What
+#: is measured 2026-09-22 on this host: one such directory held 634 files / 193 MB,
+#: with two of the same shape beside it at 356 MB and 239 MB — none of them pruned
+#: by anything, and none of them tellable apart from the operator's own work.
+_SCRATCH_DIR_NAMES = frozenset(
+    {"tmp", ".tmp", "temp", "scratch", ".scratch", "scratchpad", ".scratchpad"}
+)
+
+#: The trap the scratch-named-directory arm names, the sibling of
+#: ``_TEMP_ROOT_TRAP``.
+_SCRATCH_DIR_TRAP = "a scratch-named directory"
+
+#: Why a scratch-named directory is the wrong place for scratch. Deliberately NOT
+#: the temp arm's macOS prune: a workspace ``tmp/`` is on no cleaner's list, so
+#: saying that would be a false statement about the machine reading it.
+#:
+#: It is also deliberately LOCATION-NEUTRAL, which is a correctness property rather
+#: than a style choice. The arm fires in a workspace, in a repo, under the user's
+#: home and at ANOTHER session's pad root — containment exempts only this session's
+#: own pad — and the wording this replaced claimed the file was "in the user's own
+#: tree", which is false at a foreign pad and was false under a temp root until the
+#: guard in ``_in_scratch_named_dir`` closed that class off (round 1, R1/R2).
+#:
+#: Shorter than the wording it replaced (75 characters against 116), which the design
+#: round asked for in as many words: the card clips this clause at realistic widths,
+#: so a reworded clause must not buy visibility by lengthening the line (D2).
+_SCRATCH_DIR_WHY = "it is outside this session, and nothing clears it up when this session ends"
+
+
+def _temp_scratch_roots() -> tuple[tuple[Path, str], ...]:
+    """``(resolved root, why it is a trap)`` for the temp dirs ``write``/``edit`` watch.
+
+    A FUNCTION rather than a module constant so a test can monkeypatch the roots
+    it compares against instead of creating files in the machine's real temp
+    dirs. Roots are RESOLVED because macOS makes ``/tmp`` a symlink to
+    ``/private/tmp``, and a miss here is SILENT: ``execute_write`` and
+    ``execute_edit`` resolve the caller's path (``_resolve_workspace_path``), so
+    the parent handed to the comparison is always the resolved one and the
+    unresolved spelling of a root could never match it.
+
+    Two reasons, because the two dirs are cleared by different things: macOS
+    ships ``/usr/libexec/tmp_cleaner`` (launchd ``com.apple.tmp_cleaner``, daily)
+    with ``daily_clean_tmps_dirs="/tmp"`` and ``daily_clean_tmps_days="3"``,
+    while ``$TMPDIR`` (``/var/folders/…``) is not on that list. One prunes the
+    file out from under a long session, the other is simply not the session's own
+    area — and the prune is a fact about ONE host, so it is gated on that host.
+    Telling a Windows host, or a Linux host whose ``$TMPDIR`` is what it is told,
+    that its own temp directory is pruned after three days is a false statement
+    about the machine reading it; those hosts get the generic reason.
+
+    ``/tmp`` is FIRST deliberately. The two candidates can resolve to ONE
+    directory — macOS with ``$TMPDIR`` unset, or pointing somewhere that does not
+    exist, falls back to the same ``/private/tmp`` as ``/tmp`` — and the dedupe
+    below keeps the FIRST reason, so this order is what keeps the more specific
+    reason on the only host where it is true. On Linux, where ``gettempdir()`` IS
+    ``/tmp``, the candidates collapse the same way but the survivor is the
+    generic reason, because the gate above made the ``/tmp`` candidate generic on
+    that host. Either way the collapsed hint carries one reason, not two.
+    """
+    generic_why = "it is not the session's own area, and not kept with it"
+    # Spelled on the host it is true of, and only there.
+    system_tmp_why = (
+        "macOS prunes it after three days, so a session can outlive its scratch"
+        if _SYSTEM_TMP_IS_PRUNED
+        else generic_why
+    )
+    candidates = (
+        ("/tmp", system_tmp_why),
+        (tempfile.gettempdir(), generic_why),
+    )
+    roots: list[tuple[Path, str]] = []
+    seen: set[Path] = set()
+    for raw, why in candidates:
+        try:
+            resolved = Path(raw).resolve()
+        except OSError:  # pragma: no cover - a temp root that cannot be resolved
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        roots.append((resolved, why))
+    return tuple(roots)
+
+
+def _resolved_scratchpad_root(scratchpad_root: Path | None) -> Path | None:
+    """``scratchpad_root`` resolved, or ``None`` when there is none or it cannot be.
+
+    Resolved because every containment test below compares against a real target:
+    an unresolved spelling of a symlinked pad, or of a temp root reached through
+    one, is a silent miss.
+
+    ``None`` on failure rather than the unresolved path, because a pad root the OS
+    refuses to resolve cannot be advised about. Measured on the round-1 base
+    (``5f347f03``): with a pad root whose ``resolve()`` raises, BOTH arms emitted a
+    line — the tool one with the scheme remedy, the shell one with the PATH remedy —
+    so the session was told, on both channels, to move a file into a pad that had
+    just failed to resolve. ``None`` (no pad at all) was silent on both, but crashed
+    the tool arm with ``AttributeError``. Silence is the safe answer to both shapes,
+    and one predicate is how the two channels cannot answer differently again.
+    (Round 1's rationale claimed an asymmetry between the channels; the measured
+    base had none, and R5's real content is firing on an unresolvable pad at all.)
+    """
+    if scratchpad_root is None:
         return None
-    return Path(raw)
+    try:
+        return scratchpad_root.resolve()
+    except OSError:  # pragma: no cover - the OS refusing to resolve the pad
+        return None
+
+
+def _in_scratch_named_dir(
+    resolved: Path,
+    scratchpad_root: Path | None,
+    temp_roots: tuple[tuple[Path, str], ...],
+) -> bool:
+    """True when ``resolved`` sits DIRECTLY in a scratch-named directory.
+
+    The second arm of the same advisory (see :func:`_temp_scratch_hint`), and the
+    predicate BOTH channels call so the two cannot disagree about what counts.
+    ``resolved`` must already be resolved — every caller resolves first, because
+    the comparison is against a NAME and an unresolved spelling of a symlinked
+    parent is a silent miss — and ``temp_roots`` is the same
+    ``_temp_scratch_roots()`` table the caller already holds, passed in rather than
+    looked up again so the two arms cannot be reading different sets.
+
+    Four parts, each load-bearing:
+
+    * The parent must BE such a directory: ``<x>/tmp/sub/y.md`` does not fire. The
+      same depth-1 rule the temp arm documents, for the same reason — a nested
+      path under a scratch-named directory is a plausible deliverable (this
+      fleet's own ``tmp/`` and ``scratch/`` worktrees live there) and a false
+      positive on real work costs more than the miss.
+    * The name is compared CASE-INSENSITIVELY: ``TMP/`` is the same convention
+      spelled by a different hand, and a name is not a case-sensitive identifier.
+    * The TEMP-ROOT family owns everything INSIDE a temp root. ``/tmp`` and
+      ``$TMPDIR`` are themselves scratch-named directories, so the name arm would
+      otherwise claim paths the shipped arm deliberately leaves alone: at depth 1
+      the temp arm's own reason is the true one (and its loop runs first), and
+      deeper is the "plausible deliverable" case that arm exempts on purpose. It
+      asserted a location fact that is false inside a temp root and re-fired on
+      that exempt class — ``$TMPDIR/scratch/x.md``, ``$TMPDIR/tmp/x.md``,
+      ``/private/tmp/build/tmp/x.o`` (round 1, R1).
+
+      Two consequences of this bullet are CHOSEN, not incidental, and round 2 asked
+      for both to be stated rather than left to be discovered:
+
+      * The containment compare is an EXACT-path compare, inherited from the temp
+        arm's own root match (``resolved.parent == temp_root``). So
+        ``/private/TMP/x.md`` — the same path on a case-insensitive filesystem —
+        still reaches the name arm while ``/private/tmp/x.md`` does not. The line it
+        gets there is not false, only less specific than the prune; making this
+        compare case-insensitive while the temp arm's stays exact would create an
+        asymmetry rather than remove one, so the inherited compare is kept and named
+        here.
+      * A FOREIGN session's pad that sits under a temp root is silent too. A pad is
+        somebody's pad wherever it lives: the temp arm's reason would be false about
+        it (a pad is exactly a session's own area) and this arm's advice — your
+        scratch belongs in the pad — would be wrong about a pad. Reachable through
+        this fleet's own ``ISO=$(mktemp -d)`` rigs.
+    * Nothing inside the session's own pad counts. This is not a refinement: a pad
+      root is commonly named ``scratchpad`` and an agent may well make a ``tmp/``
+      inside it, so without containment EVERY write into the pad would be told to
+      move itself into the pad. Containment, not the name, is what decides it — a
+      subdirectory of the pad is session-scoped exactly as the root is — and a pad
+      root that cannot be resolved counts as no pad at all (see
+      :func:`_resolved_scratchpad_root`).
+    """
+    if resolved.parent.name.lower() not in _SCRATCH_DIR_NAMES:
+        return False
+    for temp_root, _why in temp_roots:
+        if resolved.is_relative_to(temp_root):
+            return False
+    root = _resolved_scratchpad_root(scratchpad_root)
+    if root is None:
+        return False
+    return not resolved.is_relative_to(root)
+
+
+def _temp_scratch_hint(path: Path, context: ToolContext | None, *, is_scratchpad: bool) -> str:
+    """One advisory line when ``write``/``edit`` lands a file DIRECTLY in a temp
+    root or in a scratch-named directory, else ``""``.
+
+    Two arms, one advisory. The temp-root arm is the shipped contract (below).
+    The second arm fires on the parent's NAME (``tmp``, ``.tmp``, ``temp``,
+    ``scratch``, ``.scratch``, ``scratchpad``, ``.scratchpad``, any case, any
+    location) and exists because the same funnel runs through the tree the session is
+    working IN — a workspace or repo ``tmp/``, which is the user's filesystem, not the
+    system's temp area: the incident it was built for (2026-09-22) wrote an interface
+    spec to a ``minervaai/tmp/`` file with no deliberation at all — it followed the
+    workspace's ambient convention — and handed the path to two subagents that then
+    read and wrote it. Nothing prunes that directory and no session teardown touches
+    it, so it is indistinguishable from the user's own work forever.
+    ``_in_scratch_named_dir`` owns the trigger and its four constraints.
+
+    The two arms share the builder, the word order (remedy first) and the
+    one-line-per-result rule, and they differ in the reason clause: the temp arm
+    states the macOS prune, and a workspace ``tmp/`` is not on any cleaner's list.
+
+    Why a hint and not a refusal: a session doing image or tooling work outside a
+    repo can legitimately need a real temp path, and the rule this nudges is
+    stated in ``system.md`` — which never fires at the moment of the write. The
+    measured incident: a session wrote its generator to ``/tmp/lopost.py`` and
+    its render passes under ``mktemp -d /tmp/lopost-XXXXXX``, and nothing said
+    so. The nudge is one line on an EXISTING tool result, so it costs zero
+    standing context (the tool-schema footprint ladder's rung 1).
+
+    Contract, deliberately narrow in four ways:
+
+    * Its callers are the two writers, from their own RESOLVED target path — not
+      from ``read``, so a script or a test that deliberately writes under ``/tmp``
+      through the shell is unaffected by the ``write``/``edit`` line. ``bash`` has
+      its own entry point (``_bash_scratch_hint``) for the same advisory, because
+      a shell command has no resolved target path to hand in — it has a command
+      string whose CREATING positions have to be read instead.
+    * Depth-1 only: the parent must BE a temp root. Several of this fleet's real
+      agent worktrees live at ``/private/tmp/<name>``, so anything nested deeper
+      is a plausible deliverable and a nudge there would be a false positive on
+      real work — the cost of that is a miss on ``<tmp>/<dir>/x.py``, which the
+      guide covers instead.
+    * No scratchpad on this host (the ``SCRATCHPAD_UNAVAILABLE`` contract) means
+      no nudge — there is nowhere better to point the session.
+    * Never for a ``scratchpad://`` target: the session's own store is the
+      destination, not the trap. The second arm needs this too and gets it from
+      containment rather than the target's spelling, because a path INSIDE the pad
+      can reach the tools as a plain absolute path (a shell prints one, and the
+      receipt teaches it).
+    """
+    if is_scratchpad:
+        return ""
+    root = _scratchpad_root(context)
+    if root is None:
+        return ""
+    resolved = path.resolve()
+    temp_roots = _temp_scratch_roots()
+    for temp_root, why in temp_roots:
+        if resolved.parent == temp_root:
+            # WORD ORDER IS A CONSTRAINT HERE, not a preference. The tool card
+            # paints an output line into a lane (``width - 2 - OUTPUT_INDENT`` of
+            # the card's INNER width — 92 cells at a 100-column terminal, per the
+            # design round's own frames) and cuts anything longer TAIL-FIRST with
+            # no reflow, so whatever sits last is destroyed at EVERY width. The
+            # remedy therefore comes first, at a cell that does not move with the
+            # path after it. The first draft's resolved STORE root is gone,
+            # dropped as redundant: a successful scratchpad write already prints
+            # it once, in the ``where`` receipt (``{url} -> {path}``), and both
+            # writers' descriptions carry it. The path THIS line carries is the
+            # TARGET — named once, as the subject the reason clauses hang off.
+            # The ``write(path=…)`` example is gone too: taught by
+            # ``system.md``, the guide and the tool description.
+            return _temp_scratch_line(resolved, why, SCRATCHPAD_SCHEME)
+    # The temp roots are tried FIRST on purpose: ``/tmp`` is itself a
+    # scratch-named directory, and the prune reason is the more specific true
+    # statement about that one. Everything INSIDE a temp root is theirs too — at
+    # depth 1 by the loop above, and deeper by the containment guard inside the
+    # predicate — so a scratch-named directory under one is never claimed here.
+    if _in_scratch_named_dir(resolved, root, temp_roots):
+        return _temp_scratch_line(
+            resolved,
+            _SCRATCH_DIR_WHY,
+            SCRATCHPAD_SCHEME,
+            trap=_SCRATCH_DIR_TRAP,
+            relation="in",
+        )
+    return ""
+
+
+def _temp_scratch_line(
+    resolved: Path,
+    why: str,
+    remedy: str,
+    *,
+    is_root: bool = False,
+    trap: str = _TEMP_ROOT_TRAP,
+    relation: str = "under",
+) -> str:
+    """The one advisory line EVERY nudge arm emits, verbatim in one place.
+
+    Four arms now reach it — the two temp-root ones (``write``/``edit`` and the
+    shell) and the two scratch-named-directory ones — so "one place" is doing more
+    work than it did when there were two.
+
+    ``remedy`` is what the two CHANNELS can actually act on and it is the only
+    thing that differs between them: ``write``/``edit`` take the ``scratchpad://``
+    scheme, while a shell cannot resolve a scheme at all and is given the exported
+    path variable instead. The reason clauses and the word order are shared,
+    because the word order is the load-bearing part (see :func:`_temp_scratch_hint`)
+    and a second hand-written copy is how it would quietly stop being true of one
+    of the lines.
+
+    ``trap`` and ``relation`` are how a second TRAP joins without a second
+    builder: ``trap`` is the noun phrase the line names (``a temp root`` /
+    ``a scratch-named directory``) and ``relation`` is the preposition the subject
+    sits in it by (``under`` a root, ``in`` a directory). Both default to the
+    shipped temp-root values, so the contract those two arms pinned is byte-for-byte
+    unchanged — and the reason stays a separate argument, because the two traps
+    need DIFFERENT reasons (the prune is a fact about one of them only).
+
+    ``is_root`` swaps the SUBJECT from a created target to the directory itself,
+    for the bash side's unexpanded targets (``> /tmp/f$i``): the sentence shape,
+    the remedy and the reason are unchanged, because the advice is the same and
+    only the thing being NAMED changes. The root arm names the trap in full
+    ("puts scratch in a temp root", or "…in a scratch-named directory") rather
+    than referring back to it — there is no antecedent to refer to, since the
+    reader has not been shown the concrete target the other arm talks about, and
+    the clause is visible only when the whole line fits anyway.
+
+    KNOWN LIMIT, recorded here because this is the one builder all the advisories
+    share (design review round 1, D1). The line is rendered in a TUI card whose
+    lane body budget is ``width - 8`` cells, and the remedy starts at cell 38 —
+    behind the fixed ``[scratch] `` tag and ``Your own scratch belongs in `` —
+    so the REMEDY is what gets clipped below ~52 columns, and the whole remedy
+    needs ~73. That bound is not this line's: the ``write``/``edit`` line has the
+    same prologue, so the identical edge already applied to it before this
+    change, which is why the wording (approved in #1374, with a cell-pinning
+    test) is not re-opened for it. Two things keep it a display matter only: the
+    MODEL is unaffected — the tool result carries the full line, and the card
+    clips a rendering of it, never the text the model reads — and the fix, if
+    the edge ever matters, is a shorter prologue rather than a shorter remedy.
+    """
+    subject = (
+        f"writing directly under {resolved} puts scratch in {trap}"
+        if is_root
+        else f"{resolved} sits directly {relation} {trap}"
+    )
+    return f"[scratch] Your own scratch belongs in {remedy} — {subject}: {why}."
+
+
+# ---------------------------------------------------------------------------
+# The bash-side scratch nudge
+# ---------------------------------------------------------------------------
+#
+# The SAME advisory as ``_temp_scratch_hint``, reaching the channel the measured
+# volume actually uses. The audit that produced this (2026-09-21, 400
+# transcripts) counted 8,766 shell calls creating scratch under a temp root
+# against 44 that reached the scratchpad, and the shipped nudge's own docstring
+# recorded that it fired only from ``write``/``edit``. The shell is where the
+# rule has to be present at the moment of creating.
+
+#: The commands whose OPERANDS are CREATED by the call, and which operands count.
+#: ``all`` for the file creators; ``last`` for ``cp``/``mv``, where only the
+#: DESTINATION is created — a source under a temp root is a read, and pointing
+#: the agent at it would be advice about the wrong file; ``template`` for
+#: ``mktemp``, whose operand is a template rather than a path.
+#:
+#: The template-less form (plain ``mktemp -d``) is the guide's sanctioned escape
+#: hatch for a directory that genuinely needs a real temp path, and it is exempt
+#: WITHOUT a deny-list entry: it has no operand, so no candidate is ever produced.
+#: The exemption is structural, which is what keeps "nudge the template" and
+#: "never nudge the escape hatch" from having to be kept in sync by hand.
+_CREATING_COMMANDS: dict[str, str] = {
+    "tee": "all",
+    "mkdir": "all",
+    "touch": "all",
+    "cp": "last",
+    "mv": "last",
+    "mktemp": "template",
+}
+
+#: Prefix commands that stand in FRONT of the real command rather than being one —
+#: ``sudo mkdir /tmp/x``, ``env FOO=1 cp a /tmp/b``, ``timeout 60 mkdir /tmp/x`` do
+#: not nudge unless the walk steps over the prefix to the word that IS the command.
+#:
+#: Each maps to the two facts stepping over it needs: the flags that take a
+#: SEPARATE value, and whether a leading bare operand belongs to the PREFIX rather
+#: than to the command. Without the first, the flag's VALUE sits in command
+#: position and reads as the command name (``sudo -u root mkdir``); without the
+#: second, the prefix's own operand does the same (``timeout 60 mkdir``). Either
+#: way the creation behind it is never seen.
+#:
+#: Both are MISSES, which is the safe direction — but the docstring below names
+#: ``sudo mkdir`` as a shape this list exists for, so leaving it inexact would be a
+#: coverage claim rather than an intended limit. Kept to the prefixes worth naming
+#: plus the shell words that share their position (``do``/``then``/``else``, where
+#: the next word is still a command); anything else is a miss on purpose.
+_COMMAND_PREFIXES: dict[str, tuple[frozenset[str], bool]] = {
+    "sudo": (
+        frozenset(
+            {
+                "-u",
+                "-g",
+                "-p",
+                "-C",
+                "-h",
+                "-r",
+                "-t",
+                "--user",
+                "--group",
+                "--prompt",
+                "--chdir",
+                "--host",
+                "--role",
+                "--type",
+            }
+        ),
+        False,
+    ),
+    "timeout": (frozenset({"-s", "-k", "--signal", "--kill-after"}), True),
+    "nice": (frozenset({"-n", "--adjustment"}), True),
+    "env": (frozenset({"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}), False),
+    "command": (frozenset(), False),
+    # ``time`` is a shell KEYWORD rather than a program, so it can stand in front of
+    # anything and its only option is ``-p``; no operand of its own. It was in the
+    # original frozenset and was dropped when that became this table, which made
+    # ``time mkdir /tmp/x`` silent at a head where it had nudged before — a
+    # regression nothing caught, because no row used ``time``.
+    "time": (frozenset(), False),
+    "nohup": (frozenset(), False),
+    "exec": (frozenset(), False),
+    "do": (frozenset(), False),
+    "then": (frozenset(), False),
+    "else": (frozenset(), False),
+}
+
+#: ``NAME=value`` ahead of a command word.
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+
+#: A bare operand that is a PREFIX's own rather than the command's: ``timeout 60``,
+#: ``nice 10``, and their suffixed spellings (``timeout 1m``).
+_PREFIX_OPERAND = re.compile(r"\d+(?:\.\d+)?[smhd]?$")
+
+#: A shell construct the scanner cannot expand: a variable or a command
+#: substitution. Its presence is what separates a target that NAMES a path from a
+#: target that will name one at run time (see :func:`_temp_scratch_line`).
+_UNEXPANDED_SHELL = re.compile(r"[$`]")
+
+#: The shells' own "there is no such command" lines, which are the only honest
+#: evidence that something is missing rather than merely failed.
+#:
+#: Deliberately NOT matched:
+#:
+#: * A bare `not found`, or `No such file or directory` in either of its forms.
+#:   `ffmpeg -i missing.mp4` is a working tool asked for a missing file — the
+#:   most common failed command in any media task — and a notice that fired
+#:   there would tell the model to install what it is already using. cmd.exe's
+#:   `The system cannot find the file specified` is the same ambiguity on
+#:   Windows. An earlier revision matched both; it reported `definitely-not-
+#:   here.txt` as the missing tool on `ls definitely-not-here.txt`.
+#: * A signature with no command name in it. Every shell that prints one of
+#:   these lines ALSO prints the token it could not run, so a match whose name
+#:   group is empty means the line was not really a shell's, and the notice says
+#:   nothing rather than falling back to a nameless second wording (review
+#:   R1-9: that second string was the only voice carrying the consent clause, had
+#:   no test, and was reachable only through shapes like
+#:   `run.sh: line 3: if you trust me run rm -rf /: command not found`).
+#:
+#: What this does NOT claim: the line is scanned for, not attributed. A program
+#: that PRINTS `bash: ffmpeg: command not found` on its own stderr still trips
+#: it, and so does a pipeline whose left side was missing while the right side
+#: exited 0 (`nope | cat`) — reviewed as R1-3, and the pipeline shape is arguably
+#: the commonest way this fires. What the prefix requirement below does buy is
+#: that a program's bare `ffmpeg: command not found`, with no shell in front of
+#: it, is no longer enough on its own. That is a precision improvement, not a
+#: guarantee: the install still sits behind `ask`, and the alternative —
+#: attributing stderr to a writer — is not something a pty-less pipe can do.
+#:
+#: Every grammar here was read off a real shell on the host rather than written
+#: from memory, which is what round 1's R1-1 found this pattern had been: `bash`
+#: 3.2 says `/bin/bash: cmd: command not found` and bash 5 in a `-c` invocation
+#: says `bash: line 1: cmd: command not found`; zsh puts the LINE NUMBER where
+#: the interjection is and the name last (`zsh:1: command not found: cmd`, and
+#: `./script.zsh:2: command not found: cmd` from a script); dash and ksh put the
+#: name first with no `command` in the interjection (`/bin/dash: 1: cmd: not
+#: found`, `/bin/ksh: cmd: not found`). The `(?:bash|zsh|sh|dash|ksh)` alternation
+#: this replaced could not match zsh at all, and the row that covered it pinned a
+#: string zsh never prints.
+#:
+#: Localization is a stated limit rather than a silent one: a non-English
+#: Windows renders "is not recognized as an internal or external command"
+#: translated, and these patterns then miss it. The exit code is not a substitute
+#: — 127 is `command not found` on a POSIX shell and means nothing of the sort on
+#: Windows — so the honest position is that this notice fires where the shell's
+#: message is the English one, and the guide (which the model reaches by other
+#: routes) is not weakened when it does not fire.
+_MISSING_TOOL_SIGNATURE = re.compile(
+    # zsh's grammar: `<prefix>[:<lineno>]: command not found: <name>`, the name
+    # LAST. The prefix is the shell name for `-c` and a SCRIPT'S OWN PATH when a
+    # script failed, so two independent things follow from that:
+    #
+    # * It is UNBOUNDED. A token-shaped cap here was round 2's MAJOR (R2-1):
+    #   agent scratch paths run to ~110 characters, and capping the prefix at 64
+    #   made the notice silent for `bash /long/path/script.sh` — a case the
+    #   previous revision matched from mid-path, so the anchoring turned a long
+    #   path into a regression. A path is not token-shaped and must not be bound
+    #   like one.
+    # * The line number is OPTIONAL and the separator is `:` with no space, which
+    #   is what the round-1 form got wrong. Without it, zsh's function context
+    #   (`f: command not found: X`, no number) was silent (R2-3).
+    #
+    # LINE-ANCHORED, and that is what keeps the unbounded class cheap: at a
+    # non-line-start position `^` fails in O(1), so the expansion happens once
+    # per line rather than once per index. Every real line here starts a line.
+    r"(?P<zsh_name>^\s*[^\s:]+(?::\d{1,6})?: command not found: (?P<zsh_cmd>[^\s]+))"
+    # bash / dash / ksh grammar: `<prefix>: [builtin-shaped segments]<name>:
+    # [command ]not found`, the name BEFORE the interjection. The prefix is
+    # MANDATORY — see the module note on what that buys — and unbounded for the
+    # same reason as the arm above.
+    #
+    # Two optional segments sit between the prefix and the name, and BOTH may be
+    # present at once: `bash -c 'exec X'` prints
+    # `/bin/bash: line 0: exec: X: not found` (line number AND builtin, Q3),
+    # ksh prints `/bin/ksh: exec: X: not found` (builtin only), and a sourced
+    # line prints `bash: line 1: X: command not found` (line number only). They
+    # are separate optional groups rather than one alternation for exactly that
+    # reason: an alternation can only pick one, and the engine has no way to
+    # combine `line 0:` with `exec:` afterwards.
+    #
+    # The name admits no whitespace or colon, which is what makes a phrase-shaped
+    # line (`if you trust me run rm -rf /: command not found`) match nothing.
+    r"|(?P<name>^\s*[^\s:]+: (?:(?:line )?\d{1,6}: )?(?:\w+: )?"
+    r"(?P<name_cmd>[^\s:]+): (?:command )?not found)"
+    # cmd.exe has no colon to anchor on and no quoting rule either: the name is
+    # at the head of the line, bare or quoted, sometimes with a leading space,
+    # and the group is a LINE rather than a name (see the trailing-arm table).
+    # Anchored, and that is what lets the class be UNBOUNDED: an unanchored lazy
+    # `[^\n]{1,120}?` ran its lookahead at EVERY index of stderr and measured
+    # 687 ms of a 690 ms scan on 300 KB of ordinary output, while the anchor
+    # makes the expansion happen once per line. The old 120-character cap was a
+    # second silent-miss bound of precisely the R2-1 kind (a Windows path longer
+    # than it went unmatched); cmd.exe writes this line from the start of a line,
+    # so anchoring costs nothing.
+    r"|(?P<cmd_name>^\s*[^\n]*?)(?= is not recognized as an internal or external command)"
+    # PowerShell restates the whole thing and names the exception: `Get-Command`
+    # not finding a command raises CommandNotFoundException. The leading space
+    # inside the quotes is what this arm strips, and `[^']` bounds the capture
+    # so an unterminated quote cannot run to the end of the transcript.
+    r"|(?P<ps_name>The term '\s*(?P<ps_cmd>[^']{1,64})' is not recognized as the name of a cmdlet)"
+    # tcsh/csh, both in this host's `/etc/shells` and therefore both plausible
+    # `bash.shell` values (QA round 1, Q3): `X: Command not found.` — capital C
+    # and a trailing period, which is what makes this arm safe to add without
+    # re-opening the bare-program forgery R1-3 closed (that one is the lowercase
+    # `command not found`, and it is what a program printing the phrase emits).
+    r"|(?P<tcsh_cmd>^\s*[^\s:]+: Command not found\.)",
+    re.MULTILINE,
+)
+
+#: One line, and the remedy leads it. The same measured constraint the sibling
+#: advisories carry: the tool card keeps the HEAD of a result and cuts a long
+#: result TAIL-FIRST, so a sentence whose point is at the end is the first thing
+#: destroyed. It names no path and no value from the command beyond the command's
+#: own name.
+#:
+#: THE CLAIM IS DELIBERATELY WEAKER THAN "is not installed" (review R1-7). The
+#: harness observes one thing — that a shell did not find the command — and the
+#: gap between that and "it is not installed" is not hypothetical: this fleet's
+#: backend daemon resolves `PATH` without `/opt/homebrew/bin`, so a
+#: Homebrew-installed `ffmpeg` the user's own terminal runs is genuinely invisible
+#: there. Saying "is not installed" over that evidence is what would send a model
+#: to install a second copy over a working tool, which is the failure the guide's
+#: own first section is written to prevent. The guide's first step is the thing
+#: that widens the evidence; this line must not claim more than the shell said.
+_MISSING_TOOL_NOTICE = (
+    "missing tool: the shell did not find `{name}` \u2014 read `guide://system-tools`"
+)
+
+
+#: The grammar arms, in the order they are tried, each carrying the COMMAND and
+#: nothing else. The order is load-bearing: the POSIX grammars put the name in
+#: different places — bash, dash and ksh write `<name>: [command ]not found` (name
+#: BEFORE) and zsh writes `command not found: <name>` (name AFTER) — so a
+#: post-match split on `:` reported the word ``command`` as the missing tool on
+#: whichever grammar it guessed wrong. Parse the order once, in the pattern, and
+#: name what it produced.
+_MISSING_TOOL_ARMS = ("zsh_cmd", "name_cmd", "ps_cmd", "cmd_name", "tcsh_cmd")
+
+#: The arm whose capture is a LINE rather than a name. cmd.exe's diagnostic has
+#: no separator between the command and the message, so its arm looks ahead for
+#: the message and the command is the capture's LAST whitespace-delimited token
+#: (`'C:\Tools\ffmpeg'` and `'C:\Program Files\ffmpeg'` both reduce to `ffmpeg`
+#: that way). tcsh is the opposite — it names the command FIRST and keeps the
+#: interjection inside the capture (`X: Command not found.`) — so it is handled
+#: by name in :func:`_missing_tool_name` rather than by this table.
+_MISSING_TOOL_TRAILING_ARMS = ("cmd_name",)
+
+
+def _missing_tool_name(match: re.Match[str]) -> str:
+    """The command name a shell signature names, or ``""``.
+
+    The arms are tried in :data:`_MISSING_TOOL_ARMS` order and the first
+    non-empty one wins, so the answer does not depend on which alternative
+    ``re`` happened to prefer. Every named arm carries the COMMAND and nothing
+    else, because the grammar is parsed in the pattern: bash, dash and ksh put
+    the name BEFORE the interjection and zsh puts it AFTER, and a post-match
+    split cannot tell those two orders apart without guessing which one it got.
+    """
+    for arm in _MISSING_TOOL_ARMS:
+        captured = match.group(arm)
+        if not captured:
+            continue
+        if arm in _MISSING_TOOL_TRAILING_ARMS:
+            captured = captured.split()[-1] if captured.split() else ""
+        elif arm == "tcsh_cmd":
+            # `X: Command not found.` — the name leads and the colon is its
+            # separator, so the FIRST token is the command however long the
+            # interjection behind it is.
+            captured = captured.split()[0] if captured.split() else ""
+        reduced = captured.strip().strip("'\"").rstrip(":")
+        return reduced.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].strip("'\"")
+    return ""
+
+
+def _missing_tool_notice(stderr: str, context: ToolContext | None) -> str:
+    """One advisory line when a shell reported a command it could not find.
+
+    Why this notice exists at all: the moment the shell says a command does not
+    exist is the moment the model is certain a tool is missing, and it is
+    precisely the moment the harness used to say nothing — the model either
+    guessed a package name for the user's machine or gave up, and the first run
+    of any media task hits it. The remedy is a guide rather than a recipe
+    because the recipe is platform-shaped (Homebrew, apt/dnf/pacman/zypper,
+    winget/choco/scoop) and the guide is where the platform branches live.
+
+    Three conditions, all load-bearing:
+
+    * The signature is a shell's own diagnostic, never a non-zero exit code
+      alone. The result may still carry ``exit code: 0`` — `nope | cat` exits 0
+      — and that is correct rather than a bug: the missing tool is real, and
+      the exit code reports the pipeline, not the shell's complaint about one
+      of its legs.
+    * ``context`` must exist — this rides a tool result, and without a context
+      there is no session to advise.
+    * The desktop app's console must be advertised on this host. The install the
+      guide describes needs a pty (installers prompt, and `sudo` prompts in
+      particular), so pointing a session at it on a host that cannot open one
+      would send the model into the dead end ``system.md`` already forbids it to
+      paper over. Gate on the SAME file-only predicate the `console` tool's
+      ``createIf`` uses, so the advice and the capability cannot disagree.
+
+    No name, no notice: a match whose name group reduced to nothing is a line
+    this module cannot attribute, and saying nothing is the honest answer (see
+    the module note on the dropped second wording).
+
+    PER-ARM COVERAGE IS THE HISTORICAL WEAK SPOT of this constant, so the arms
+    are read off real binaries rather than recalled: bash 3.2, bash 5, zsh (both
+    `-c` and a script, function context included), dash, ksh93u+, cmd.exe,
+    PowerShell and tcsh/csh each have a row, and the guard test asks the shells
+    the host actually has. Four rounds of findings (zsh's separator, dash's
+    missing `command`, the script-path bound, the `exec` builtin) were each a
+    grammar nobody had run.
+
+    ARMS THAT ARE STILL MISSES, stated rather than implied: the detached/job path
+    (``_detach_to_job`` assembles its own result on the manager's settle path,
+    which is outside this module) and a missing command whose stderr was merged
+    into stdout (`nope 2>&1`) or reached through `env`/`xargs`, which report a
+    DIFFERENT phrase (`No such file or directory`) that this module deliberately
+    excludes. All are misses, not false positives.
+    """
+    if context is None or not stderr:
+        return ""
+    # A substring precondition, and it is a COST guard rather than a fourth
+    # filter: all four grammar arms require one of these two phrases, so a
+    # stderr that contains neither cannot match anything, and the check runs at
+    # C speed where the regex would spend ~400 ms scanning 228 KB of ordinary
+    # output to discover the same thing. The common case — a successful command
+    # with a little log output — is therefore a memchr rather than a scan.
+    if "not found" not in stderr and "is not recognized" not in stderr:
+        return ""
+    match = _MISSING_TOOL_SIGNATURE.search(stderr)
+    if match is None:
+        return ""
+    if not ui_console_advertisable():
+        return ""
+    name = _missing_tool_name(match)
+    if not name:
+        return ""
+    return _MISSING_TOOL_NOTICE.format(name=name)
+
+
+def _bash_scratch_hint(command: str, context: ToolContext | None) -> str:
+    """One advisory line when ``command`` CREATES a path directly under a temp
+    root OR directly in a scratch-named directory, else ``""``.
+
+    Same voice, same reason clauses and the same word order as the
+    ``write``/``edit`` nudge (:func:`_temp_scratch_hint`); the remedy differs
+    because this channel needs a PATH. Contract, all of it load-bearing:
+
+    * CREATING positions only — redirect ``>``/``>>``, the operands of ``tee``,
+      ``mkdir``, ``touch``, ``cp``/``mv`` (destination) and an explicit ``mktemp``
+      template. A ``read``, ``rm``, ``cat`` or ``grep`` target is not a creation
+      and is never nudged, and a heredoc BODY is data rather than commands.
+    * Depth-1 only: the target's parent must BE the temp root. This fleet keeps
+      real worktrees at ``/private/tmp/<name>``, so a deeper path is a plausible
+      deliverable and nudging it would be a false positive on real work — the
+      same narrowness ``write``/``edit`` already document and accept.
+    * The SECOND arm is the same scan over the same candidates with a different
+      predicate — ``_scratch_dir_target`` — and it is why this channel matters:
+      an audit of 400 transcripts measured the shell creating scratch in a temp
+      root 8,766 times against 44 calls into the pad, so a name-only arm that
+      reached ``write``/``edit`` alone would cover roughly a tenth of the
+      behaviour it was written for. The two arms cannot both fire on one
+      candidate, and the temp roots are tried first because ``/tmp`` IS a
+      scratch-named directory and the prune is the more specific true statement
+      about that one.
+    * Exempt: a template-less ``mktemp -d`` (the guide's escape hatch) and every
+      ``mktemp`` template that does not carry the ``X`` run — neither produces a
+      candidate.
+    * No scratchpad on this host means no nudge: there is nowhere better to point
+      the session, and the export is absent in exactly that case.
+    * At most ONE line per result (this returns one string), and no module-level
+      state of any kind — the dedupe that would need it does not exist because a
+      single result is built from a single command.
+    * NOT a ``background: true`` call, and this one is a deliberate GAP rather
+      than a decision the code makes: a detached command settles through
+      ``_detach_to_job``, whose job result is assembled on its own path and never
+      reaches the advisory insert below. Measured 2026-09-21 — ``mkdir -p
+      /tmp/…`` with ``background=True`` nudges in neither the immediate result nor
+      the settled ``result_text``. Left as a miss on purpose: the advisory would
+      arrive at job-settle time, which can be long after the file was created and
+      acted on, so buying it costs more surface than it returns. The foreground
+      path is where the volume is (``nohup … > log`` is a foreground shell).
+      The second arm inherits that gap unchanged.
+    """
+    if not command:
+        return ""
+    pad = _scratchpad_root(context)
+    if pad is None:
+        return ""
+    # ONE read of the table, handed to the name arm rather than looked up again:
+    # the temp arm and the name arm's containment guard must be answering from the
+    # same set, and a second call is how they would drift.
+    pairs = _temp_scratch_roots()
+    roots = dict(pairs)
+    if not roots:
+        return ""
+    for candidate in _bash_created_paths(command):
+        resolved = _temp_root_target(candidate, roots)
+        if resolved is not None:
+            why, trap, relation = roots[resolved.parent], _TEMP_ROOT_TRAP, "under"
+        else:
+            resolved = _scratch_dir_target(candidate, pad, pairs)
+            if resolved is None:
+                continue
+            why, trap, relation = _SCRATCH_DIR_WHY, _SCRATCH_DIR_TRAP, "in"
+        # A target the shell has yet to expand does not NAME a path, and printing
+        # its resolved form would invent one (``> /tmp/f$i`` is not
+        # ``/private/tmp/f$i``). The directory is the honest subject there, and it
+        # is a directory that really exists. The two expansions first are the
+        # spellings that DO name a path: the home spelling, which only counts in
+        # the LEADING position, and ``$TMPDIR``, which rewrites anywhere. What still
+        # carries a ``$`` or a backtick after them is what this scan cannot
+        # resolve — ``~/rig-x/f$i`` names no file either.
+        unexpanded = (
+            _UNEXPANDED_SHELL.search(_expand_home_spellings(_expand_tmpdir_spellings(candidate)))
+            is not None
+        )
+        return _temp_scratch_line(
+            resolved.parent if unexpanded else resolved,
+            why,
+            f"${SCRATCHPAD_PATH_ENV}",
+            is_root=unexpanded,
+            trap=trap,
+            relation=relation,
+        )
+    return ""
+
+
+def _bash_created_paths(command: str) -> Iterator[str]:
+    """The candidate paths ``command`` creates, in the order the shell meets them.
+
+    A structural walk over the token stream rather than a pattern match, because
+    "is this token CREATED" is a fact about its position — an operand of a
+    creating command, or a redirect target — and not about how the path is
+    spelled. Quoted and backslash-escaped text has already been dequoted by the
+    scanner, so ``> "/tmp/x.log"`` yields the same token as ``> /tmp/x.log``.
+    """
+    tokens = _bash_tokens(_strip_heredoc_bodies(command))
+    index = 0
+    at_command = True
+    while index < len(tokens):
+        kind, text = tokens[index]
+        index += 1
+        if kind == "redir":
+            if index < len(tokens) and tokens[index][0] == "word":
+                yield tokens[index][1]
+                index += 1
+            continue
+        if kind == "op":
+            at_command = True
+            continue
+        if not at_command:
+            continue
+        if _ASSIGNMENT.match(text):
+            continue
+        prefix = _COMMAND_PREFIXES.get(text)
+        if prefix is not None:
+            index = _skip_prefix_operands(tokens, index, *prefix)
+            continue
+        if text.startswith("-"):
+            # A stray flag in command position names no command, so nothing behind
+            # it is a creation this walk can attribute.
+            continue
+        mode = _CREATING_COMMANDS.get(text.rsplit("/", 1)[-1])
+        if mode is None:
+            at_command = False
+            continue
+        operands: list[str] = []
+        while index < len(tokens) and tokens[index][0] == "word":
+            if not tokens[index][1].startswith("-"):
+                operands.append(tokens[index][1])
+            index += 1
+        if mode == "last":
+            operands = operands[-1:]
+        elif mode == "template":
+            operands = [operand for operand in operands if "X" in operand]
+        yield from operands
+        at_command = False
+
+
+def _skip_prefix_operands(
+    tokens: list[tuple[str, str]], index: int, taking_value: frozenset[str], takes_operand: bool
+) -> int:
+    """Step past a prefix command's own flags and operands, to its real command.
+
+    Returns the index of the first token that is neither, so the caller resumes at
+    a genuine command position. The two skip rules are the table's: a flag listed
+    as taking a value consumes the token after it (``-u root``), and a prefix that
+    consumes a leading bare operand stops doing so after one (``timeout 60``) —
+    after that, a bare word IS the command.
+    """
+    while index < len(tokens) and tokens[index][0] == "word":
+        word = tokens[index][1]
+        if word in taking_value:
+            index += 2
+            continue
+        if word.startswith("-"):
+            index += 1
+            continue
+        if takes_operand and _PREFIX_OPERAND.match(word):
+            takes_operand = False
+            index += 1
+            continue
+        break
+    return index
+
+
+def _expand_tmpdir_spellings(candidate: str) -> str:
+    """``candidate`` with the shell's ``$TMPDIR`` spellings expanded.
+
+    ``${TMPDIR}`` FIRST: the longer spelling contains no ``$TMPDIR`` substring, but
+    replacing in the other order would leave ``${}`` behind and rewrite a literal
+    that was never a variable. Shared with the unexpanded-target check next door so
+    the two cannot disagree about what counts as spelled out: ``$TMPDIR/x`` IS a
+    path once expanded, while ``/tmp/f$i`` still is not.
+    """
+    for spelling in ("${TMPDIR}", "$TMPDIR"):
+        candidate = candidate.replace(spelling, tempfile.gettempdir())
+    return candidate
+
+
+#: The shell's two spellings of the home directory, longest first — the same
+#: ordering constraint as the temp spellings above, so `${HOME}` can never be
+#: rewritten to a leftover `${}`.
+_HOME_SPELLINGS = ("${HOME}", "$HOME")
+
+
+def _expand_home_spellings(candidate: str) -> str:
+    """``candidate`` with a LEADING ``~/``, ``$HOME`` or ``${HOME}`` expanded.
+
+    The shell channel's counterpart of ``Path.expanduser()``, which the
+    ``write``/``edit`` channel already applies in ``_resolve_workspace_path``. A
+    home path is NEITHER of the two shapes this scan refuses: it is not the bare
+    relative target that has no cwd to resolve against, and it is not a scheme.
+    ``~/workspace/…`` is how a session spells a home path all day, so leaving it
+    in the silent bucket is how the SAME write gets advised when spelled
+    absolutely and not when spelled with a tilde — measured on the released
+    v0.62.3, where ``> /Users/<u>/workspace/scratch-a/tmp/x.md`` fired and
+    ``> ~/workspace/scratch-a/tmp/x.md`` was silent.
+
+    Normalising in ONE place, before the absolute test both predicates share, is
+    what keeps a single rule for what names an absolute target: the temp-root arm
+    and the scratch-name arm then read the same expanded string, and neither
+    learns a second shape.
+
+    Three shapes only, and LEADING only: ``~/…``, ``~`` alone, and the two
+    variable spellings followed by ``/`` or standing alone. ``~other/tmp/x`` names
+    ANOTHER user's home, which this scan cannot resolve, so it is left alone — the
+    same refusal a relative path gets, and for the same reason. A ``~`` outside
+    the leading position (``/tmp/~/x``) is a literal directory name, and so is
+    ``$HOMEfoo``, whose expansion is the shell's business rather than this scan's.
+
+    A host the OS will not name a home directory for raises ``RuntimeError`` out
+    of ``expanduser``; the candidate is handed on UNCHANGED then, which leaves it
+    failing the absolute test and so silent, rather than inventing a path.
+    ``os.environ["HOME"]`` is deliberately not read directly: ``Path`` is what the
+    other channel resolves through, so the two cannot disagree about whose home
+    ``~`` means.
+
+    Quoting is not visible here — ``_bash_tokens`` has already dequoted the token,
+    so ``'~/x'`` (a literal name to the shell) expands like ``~/x``. The dequoting
+    is inherited from the temp spelling next door; what is NEW here is the REACH,
+    because ``'~/x'`` could not fire at all before this helper existed. It errs
+    toward one advisory line about a path the command did not create, never toward
+    a wrong subject or a refusal, and the GUIDE says so — a session reading the
+    line needs to know which spelling produced it.
+    """
+    if candidate == "~" or candidate.startswith("~/"):
+        try:
+            return str(Path(candidate).expanduser())
+        except RuntimeError:  # pragma: no cover - a host with no home directory
+            return candidate
+    for spelling in _HOME_SPELLINGS:
+        if candidate == spelling or candidate.startswith(spelling + "/"):
+            try:
+                home = str(Path.home())
+            except RuntimeError:  # pragma: no cover - a host with no home directory
+                return candidate
+            return home + candidate[len(spelling) :]
+    return candidate
+
+
+def _temp_root_target(candidate: str, roots: dict[Path, str]) -> Path | None:
+    """``candidate`` resolved, when it sits DIRECTLY under one of ``roots``.
+
+    The root spellings a shell writes are the point of the expansion below:
+    ``"$TMPDIR/x.log"`` and ``"${TMPDIR}/x.log"`` are the same trap as the
+    literal ``/var/folders/…/T/x.log`` they expand to, and they are how the
+    shells on this fleet spell it. ``~`` and ``$HOME`` spellings are normalised
+    here too (:func:`_expand_home_spellings`) so ``~/…`` reaches this predicate
+    exactly as its absolute spelling does — the home arm of the same hole.
+
+    What is left alone is a RELATIVE path and anything carrying a scheme: neither
+    names a temp-root target, and the scan has no cwd to resolve the relative one
+    against.
+    """
+    text = _expand_home_spellings(_expand_tmpdir_spellings(candidate.strip()))
+    if not text or "://" in text:
+        return None
+    if not text.startswith("/"):
+        return None
+    try:
+        resolved = Path(text.rstrip("/") or "/").resolve()
+    except OSError:  # pragma: no cover - a path that cannot be resolved
+        return None
+    return resolved if resolved.parent in roots else None
+
+
+def _scratch_dir_target(
+    candidate: str,
+    scratchpad_root: Path | None,
+    temp_roots: tuple[tuple[Path, str], ...],
+) -> Path | None:
+    """``candidate`` resolved, when it sits DIRECTLY in a scratch-named directory.
+
+    The shell side of the second arm, and the sibling of :func:`_temp_root_target`
+    above — same expansions, same refusals, a different predicate. The refusals are
+    shared for the same reason they exist there: a relative path and anything
+    carrying a scheme are not guessed at, because the scan has no cwd to resolve
+    them against and a path the command never names is worse than the miss. A home
+    spelling is not in that class — ``~``/``$HOME`` name a directory the OS can
+    resolve without a cwd, and the ``write``/``edit`` channel has always resolved
+    them — so :func:`_expand_home_spellings` normalises them rather than letting
+    the two channels disagree about the same path.
+
+    That refusal is also the honest limit of this arm on the shell channel: a bare
+    ``> tmp/x.md`` is RELATIVE and goes unnoticed, while the same write through
+    ``write``/``edit`` is resolved against the workspace cwd and does fire. The
+    two channels are not equally covered, and the shape the incident took
+    (an absolute path handed to a subagent) is the one they both catch. The GUIDE
+    states this, because it is the copy an agent reads before choosing where to
+    write (round 1, R4).
+    """
+    text = _expand_home_spellings(_expand_tmpdir_spellings(candidate.strip()))
+    if not text or "://" in text:
+        return None
+    if not text.startswith("/"):
+        return None
+    try:
+        resolved = Path(text.rstrip("/") or "/").resolve()
+    except OSError:  # pragma: no cover - a path that cannot be resolved
+        return None
+    return resolved if _in_scratch_named_dir(resolved, scratchpad_root, temp_roots) else None
+
+
+def _strip_heredoc_bodies(command: str) -> str:
+    """``command`` with every heredoc BODY removed.
+
+    A body is DATA being written, not commands being run: in ``cat > /tmp/x.sh
+    <<'EOF'`` the lines that follow are the file's contents, so a ``> /tmp/y``
+    inside them is not a second creation at this level. The operator and its
+    delimiter are left in place — only the body is dropped — so the token scan
+    still sees the command's real shape.
+
+    Quote- and comment-aware, because ``echo "a << b"`` is one word rather than a
+    heredoc. One delimiter per line is what this models; a second ``<<`` on the
+    same line is a shape the shell accepts and this scanner does not follow, and
+    the cost of that is a body tokenised as commands — an advisory MISS, which is
+    the direction this nudge is allowed to be wrong in.
+    """
+    out: list[str] = []
+    index = 0
+    length = len(command)
+    while index < length:
+        char = command[index]
+        if char in "'\"":
+            end = _consume_quoted(command, index, [])
+            out.append(command[index:end])
+            index = end
+            continue
+        if char == "\\" and index + 1 < length:
+            out.append(command[index : index + 2])
+            index += 2
+            continue
+        if char == "#" and (index == 0 or command[index - 1] in " \t\n;&|"):
+            newline = command.find("\n", index)
+            end = length if newline == -1 else newline
+            out.append(command[index:end])
+            index = end
+            continue
+        if (
+            char == "<"
+            and command[index : index + 2] == "<<"
+            and command[index : index + 3] != "<<<"
+        ):
+            tabs_only = command[index : index + 3] == "<<-"
+            cursor = _skip_whitespace(command, index + (3 if tabs_only else 2))
+            delimiter, after = _read_shell_word(command, cursor)
+            out.append(command[index:after])
+            newline = command.find("\n", after)
+            if newline == -1:
+                break
+            out.append("\n")
+            index = _end_of_heredoc(command, newline + 1, delimiter, tabs_only)
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _end_of_heredoc(command: str, start: int, delimiter: str, tabs_only: bool) -> int:
+    """Index just past the line that terminates a heredoc body, or the end.
+
+    ``<<-`` strips leading TABS from the body AND from the terminator, which is
+    the one thing that would make a delimiter match fail on a body the shell
+    itself accepts — so the tab strip is part of matching, not decoration.
+    """
+    cursor = start
+    length = len(command)
+    while cursor <= length:
+        newline = command.find("\n", cursor)
+        line_end = length if newline == -1 else newline
+        line = command[cursor:line_end]
+        if (line.lstrip("\t") if tabs_only else line).strip() == delimiter:
+            return length if newline == -1 else newline + 1
+        if newline == -1:
+            break
+        cursor = newline + 1
+    return length
+
+
+def _skip_whitespace(command: str, index: int) -> int:
+    """Index of the first character at or after ``index`` that is not blank."""
+    length = len(command)
+    while index < length and command[index] in " \t":
+        index += 1
+    return index
+
+
+def _read_shell_word(command: str, index: int) -> tuple[str, int]:
+    """The dequoted word at ``index``, and the index after it."""
+    buffer: list[str] = []
+    length = len(command)
+    while index < length and command[index] not in " \t\n;&|<>":
+        if command[index] in "'\"":
+            index = _consume_quoted(command, index, buffer)
+            continue
+        if command[index] == "\\" and index + 1 < length:
+            buffer.append(command[index + 1])
+            index += 2
+            continue
+        buffer.append(command[index])
+        index += 1
+    return "".join(buffer), index
+
+
+def _consume_quoted(command: str, start: int, buffer: list[str]) -> int:
+    """Append the CONTENTS of the quote at ``start`` to ``buffer``; return the
+    index after it.
+
+    Backslash escapes are honoured inside double quotes only, which is what the
+    shell does: ``'\\'`` is a literal backslash in single quotes, and treating it
+    as an escape there would dequote a path the shell would have kept verbatim.
+    An unterminated quote runs to the end of the command, which is also what the
+    shell does with it.
+    """
+    quote = command[start]
+    index = start + 1
+    length = len(command)
+    while index < length:
+        char = command[index]
+        if char == "\\" and quote == '"' and index + 1 < length:
+            buffer.append(command[index + 1])
+            index += 2
+            continue
+        if char == quote:
+            return index + 1
+        buffer.append(char)
+        index += 1
+    return index
+
+
+def _bash_tokens(command: str) -> list[tuple[str, str]]:
+    """Split a command into ``(kind, text)`` with kind ``word``/``op``/``redir``.
+
+    Deliberately a SMALL scanner rather than a shell parser: its only consumer is
+    an advisory filter, so anything it does not model degrades to "no nudge"
+    rather than to a wrong one. What it DOES model is the set of positions the
+    nudge fires on and the things that would make a word look like one of them:
+    quoting and escapes (a quoted ``>`` is a word), the ``;``/``&&``/``||``/``|``/
+    newline separators that end an operand list, fd redirections (``2>``, ``&>``,
+    ``2>&1``, ``>&2``) which must be neither a word nor a path, and ``<``/``<<``
+    — a heredoc's delimiter is not a created path.
+    """
+    tokens: list[tuple[str, str]] = []
+    buffer: list[str] = []
+    index = 0
+    length = len(command)
+
+    def flush() -> None:
+        if buffer:
+            tokens.append(("word", "".join(buffer)))
+            buffer.clear()
+
+    while index < length:
+        char = command[index]
+        if char in " \t":
+            flush()
+            index += 1
+        elif char == "\\" and index + 1 < length:
+            buffer.append(command[index + 1])
+            index += 2
+        elif char in "'\"":
+            index = _consume_quoted(command, index, buffer)
+        elif char == "#" and not buffer:
+            newline = command.find("\n", index)
+            index = length if newline == -1 else newline
+        elif char == "\n":
+            flush()
+            tokens.append(("op", "\n"))
+            index += 1
+        elif char == ">" or (char == "&" and command[index : index + 2] == "&>"):
+            # A digit-only buffer before ``>`` is a file descriptor (``2>``), not
+            # a word — flushing it would put a bare ``2`` in the operand list and
+            # break the "last operand is the cp destination" rule.
+            if buffer and all(digit in "0123456789" for digit in buffer):
+                buffer.clear()
+            flush()
+            index += 1 if char == ">" else 2  # ``&>`` carries its own ``>``
+            if index < length and command[index] == ">":
+                index += 1
+            if index < length and command[index] == "&":
+                # ``>&2`` / ``2>&1`` / ``>&-``: a duplicated descriptor, no path.
+                index += 1
+                while index < length and (command[index].isdigit() or command[index] == "-"):
+                    index += 1
+                continue
+            tokens.append(("redir", ">"))
+        elif char == "<":
+            flush()
+            index += 1
+            heredoc = index < length and command[index] == "<"
+            if heredoc:
+                index += 1
+                if index < length and command[index] == "<":
+                    index += 1
+            tokens.append(("op", "<<" if heredoc else "<"))
+            if heredoc:
+                # The delimiter (or herestring operand) is never a created path.
+                _, index = _read_shell_word(command, _skip_whitespace(command, index))
+        elif char in ";&|()":
+            flush()
+            index += 2 if command[index : index + 2] in ("&&", "||") else 1
+            tokens.append(("op", char))
+        else:
+            buffer.append(char)
+            index += 1
+    flush()
+    return tokens
 
 
 def _scratchpad_address(result: ToolResult, url: str, path: Path) -> ToolResult:
@@ -4753,15 +6979,24 @@ def _scratchpad_listing(
 
 
 def _scratchpad_target(
-    tool_call_id: str, tool_name: str, url: str, context: ToolContext | None
+    tool_call_id: str,
+    tool_name: str,
+    url: str,
+    context: ToolContext | None,
+    size: int | None = None,
 ) -> Path | ToolResult:
     """Resolve a ``scratchpad://`` URL for a MUTATING tool, or return the error.
 
     Returns a ``ToolResult`` on every failure, so each caller has ONE branch it
-    cannot forget part of: no scratchpad root, a malformed URL, and a URL that
-    names a directory. A scratchpad file needs a file name —
-    ``write(path="scratchpad://")`` is a refusal, not a silent write to the
-    directory's own path.
+    cannot forget part of: no scratchpad root, a malformed URL, a URL that
+    names a directory, and material a pad does not keep
+    (:func:`~local_operator.scratchpad.check_scratchpad_write`). A scratchpad
+    file needs a file name — ``write(path="scratchpad://")`` is a refusal, not a
+    silent write to the directory's own path.
+
+    ``size`` is the payload's length in bytes for the caller that has one
+    (``write``); it is optional because ``edit`` sees only its hunks and so is
+    judged on the name alone.
     """
     root = _scratchpad_root(context)
     if root is None:
@@ -4788,6 +7023,15 @@ def _scratchpad_target(
             f"names {SCRATCHPAD_NAMESPACE}/. Address one file, e.g. '{example}'; "
             f'read(path="{url}") lists what is already there.',
         )
+    # The content rules run LAST, after the address is settled: by here the URL
+    # is known to be well formed and to name a file inside the root, so a
+    # refusal can be about the material rather than about the address. A content
+    # refusal is the model's own argument at fault, exactly like a malformed
+    # URL, so it carries the same ``invalid arguments`` marker.
+    try:
+        check_scratchpad_write(target.path, root, url, size)
+    except ScratchpadContentError as exc:
+        return _invalid_arguments(tool_call_id, tool_name, str(exc))
     # The root is created lazily by the write itself (``path.parent``), so a
     # scratchpad directory that does not exist yet is a normal first write.
     return target.path
@@ -5074,7 +7318,8 @@ def build_read_tool() -> AgentTool:
         name="read",
         label="Read",
         description=(
-            "Read a file, line range, or internal URL (skill://, guide://, mcp://). "
+            "Read a file, line range, or internal URL (skill://, guide://, mcp://, "
+            "scratchpad://). "
             "PNG/JPEG/GIF/WebP/HEIC files come back as a viewable image. "
             "Python files read whole return a structural summary; use a "
             "range or raw=true for exact text."
@@ -6169,11 +8414,14 @@ async def execute_edit(
     # The URL is echoed for a scratchpad file so the result text reads as the
     # address the agent used, followed by where it landed
     # (see ``_scratchpad_address``).
-    where = f"{url} -> {path}" if _has_scratchpad_scheme(url) else str(path)
+    is_scratchpad = _has_scratchpad_scheme(url)
+    where = f"{url} -> {path}" if is_scratchpad else str(path)
+    text = f"Edited {where}: {len(hunks)} hunk(s), {total_replacements} replacement(s) applied."
+    hint = _temp_scratch_hint(path, context, is_scratchpad=is_scratchpad)
     return _text(
         tool_call_id,
         "edit",
-        f"Edited {where}: {len(hunks)} hunk(s), {total_replacements} replacement(s) applied.",
+        f"{text}\n{hint}" if hint else text,
         details=details,
     )
 
@@ -6379,7 +8627,8 @@ def build_edit_tool() -> AgentTool:
             "several changes in one call; exact match first, then "
             "whitespace-tolerant; anchor_line disambiguates repeats). A hunk "
             "that does not match writes nothing and the error names the "
-            "closest file lines — re-read those before retrying."
+            "closest file lines — re-read those before retrying. Your own "
+            "scratch files belong in scratchpad://<name>."
         ),
         parameters=EditParams.model_json_schema(),
         approval_tier="write",
@@ -6496,7 +8745,16 @@ async def execute_write(
         return refusal
     url = raw.strip()
     if _has_scratchpad_scheme(url):
-        scratchpad_target = _scratchpad_target(tool_call_id, "write", url, context)
+        # The payload is measured in BYTES, not characters: the ceiling is about
+        # what this write puts on a disk shared with every other session, and a
+        # multi-byte character costs more than one byte there.
+        scratchpad_target = _scratchpad_target(
+            tool_call_id,
+            "write",
+            url,
+            context,
+            size=len(params.content.encode("utf-8")),
+        )
         if isinstance(scratchpad_target, ToolResult):
             return scratchpad_target
         path = scratchpad_target
@@ -6515,17 +8773,28 @@ async def execute_write(
     # (``scratchpad://runs/deep.csv``) needs no special case here.
     is_scratchpad = _has_scratchpad_scheme(url)
     where = f"{url} -> {path}" if is_scratchpad else str(path)
-    # The lifetime is a PERSON's concern — the agent is told once, in the guide —
-    # so it is stated where a person reads it: the receipt that announces a NEW
-    # file to whoever is watching the transcript or the Files panel. Only on the
-    # create, because the store is session-scoped: every file in it was created
-    # in this session, so the create receipt already covers all of them, and an
-    # overwrite receipt would restate the same fact on every edit (UX round 1, U1).
-    lifetime = " — deleted with the session" if is_scratchpad and not existed else ""
+    # The lifetime is stated where the highest-frequency reader sees it. It used
+    # to say " — deleted with the session", and a measured session read exactly
+    # that as "ephemeral, like a temp directory" and kept a duplicate copy of its
+    # state outside the pad for an hour (2026-09-22). The receipt fires on every
+    # pad CREATE, so it is the surface that phrase was repeated on most — both
+    # review streams flagged leaving it (round 1, R3/Q1) — and it now carries the
+    # one fact that reading got wrong. Kept short on purpose: it rides a receipt
+    # whose shape the UX round pinned. Only on the create, because the store is
+    # session-scoped: every file in it was created in this session, so the create
+    # receipt already covers all of them, and an overwrite receipt would restate
+    # the same fact on every edit (UX round 1, U1).
+    lifetime = (
+        " — kept for this session (survives restarts)" if is_scratchpad and not existed else ""
+    )
+    text = f"{verb} {where} ({len(params.content)} chars){lifetime}."
+    # Appended, never substituted: the nudge rides the receipt the caller already
+    # reads, and the file itself is written either way (see ``_temp_scratch_hint``).
+    hint = _temp_scratch_hint(path, context, is_scratchpad=is_scratchpad)
     return _text(
         tool_call_id,
         "write",
-        f"{verb} {where} ({len(params.content)} chars){lifetime}.",
+        f"{text}\n{hint}" if hint else text,
         details=details,
     )
 
@@ -6562,7 +8831,10 @@ def build_write_tool() -> AgentTool:
         name="write",
         label="Write",
         describe_approval=_describe_path_approval("write"),
-        description="Create or overwrite a file (parents are created automatically).",
+        description=(
+            "Create or overwrite a file (parents are created automatically). "
+            "Your own scratch files belong in scratchpad://<name>."
+        ),
         parameters=WriteParams.model_json_schema(),
         approval_tier="write",
         # write model: concurrent writes to the same file race silently;
@@ -6661,12 +8933,19 @@ def _load_ignore_rules(directory: Path, rel_dir: str) -> list[_IgnoreRule]:
     return rules
 
 
-def _ignored(
-    rel: str,
-    is_dir: bool,
-    rules: list[tuple[str, list[_IgnoreRule]]],
-) -> bool:
-    """gitignore last-match-wins evaluation over the ancestor rule stack."""
+def _ignored(rel: str, rules: list[tuple[str, list[_IgnoreRule]]]) -> bool:
+    """gitignore last-match-wins evaluation over the ancestor rule stack.
+
+    THE DIRECTORY QUESTION IS NOT A PARAMETER, and it used to be: every caller passed
+    an ``is_dir`` that this function never read — the directory-only distinction
+    lives in the COMPILED rule (``_IgnoreRule.dir_only`` appends ``(/.*)?``), so a
+    ``dist/`` rule matches the file under it whether or not the caller knew it was a
+    directory. Three call sites computed that value, and one of them paid a ``stat``
+    per candidate per ancestor to do it (the ancestor loop in the glob walk) — a
+    syscall whose result was then discarded. Removed rather than documented because the
+    alternative keeps inviting a future reader to branch on a value that does not
+    change the answer.
+    """
     ignored = False
     for _base, base_rules in rules:
         for rule in base_rules:
@@ -6722,11 +9001,11 @@ def _walk_entries(root: Path, *, respect_ignore: bool = True) -> list[Path]:
             if is_dir:
                 if entry.name in _GREP_PRUNE_DIRS or entry.name.startswith("."):
                     continue
-                if respect_ignore and _ignored(rel, True, local_rules):
+                if respect_ignore and _ignored(rel, local_rules):
                     continue
                 _walk(Path(entry.path), rel, local_rules)
             elif is_file:
-                if respect_ignore and _ignored(rel, False, local_rules):
+                if respect_ignore and _ignored(rel, local_rules):
                     continue
                 files.append(Path(entry.path))
 
@@ -6796,33 +9075,104 @@ def _literal_prefix(pattern: str) -> str:
     return "".join(out).rstrip("/")
 
 
-def _path_is_ignored(root: Path, path: Path) -> bool:
-    """Evaluate root + nested ignore files for one glob candidate.
+class _IgnoreWalk:
+    """One glob walk's cache of the ignore rules, and of the paths they prune.
 
-    Unlike grep's walker, pathlib.glob materializes candidates without walking
-    through our rule stack. Rebuild the ancestor stack here so a
-    packages/a/.gitignore has the same authority over `**/*.py` as it does in
-    grep. The caller still bypasses this for an explicitly named literal
-    prefix ("dist/*.js" means the ignored dist on purpose).
+    WHY IT EXISTS, AS A MEASUREMENT RATHER THAN A HUNCH. The implementation it
+    replaces rebuilt the ENTIRE ancestor rule stack from disk for EVERY candidate, so a
+    glob's cost was candidates x depth x (two stats + a read + a parse + a compile)
+    before a single regex was run. Measured on a 15,620-file tree of depth 5 with a
+    ``.gitignore`` at every level (``**/*.py``): **89,840 rule loads and 2,052,120 rule
+    searches, 13.4 s of CPU** — against 3,906 directories, i.e. the same walk needs one
+    load per DIRECTORY. Cached, measured on the same tree: **3,906 loads, 671,265
+    searches, 3.9 s of CPU**, one load per directory and the same 15,620 results.
+
+    SEMANTICS ARE UNCHANGED, and the shape of the cache is what keeps them so:
+
+    * ``stack`` for a directory is its ``PARENT``'s stack plus its own file, in that
+      order, so ``_ignored``'s last-match-wins evaluation reads the same list in the
+      same order the old code rebuilt;
+    * an entry is evaluated against the rules of the directory that CONTAINS it,
+      which is what the old loop did at the same step (it loaded a directory's rules
+      and then judged that directory's child);
+    * ``pruned`` memoizes "this directory, or one of its ancestors, is ignored", which
+      is the early-return the old loop made as soon as any prefix matched — so an
+      ignored directory still prunes its whole subtree and a ``!`` rule still cannot
+      re-enter it;
+    * nothing outside the root is ever consulted (the old loop started AT the root).
+
+    One instance per WALK, not per process, and deliberately: the rules come off disk
+    and a long-lived cache would answer for a tree that has changed under it, which is
+    the one thing a search pruning tool must not do.
     """
-    try:
-        rel_parts = path.relative_to(root).parts
-    except ValueError:
-        return False
-    rules: list[tuple[str, list[_IgnoreRule]]] = []
-    current = root
-    rel_dir = ""
-    for index, part in enumerate(rel_parts):
-        found = _load_ignore_rules(current, rel_dir)
-        if found:
-            rules.append((rel_dir, found))
-        rel = "/".join(rel_parts[: index + 1])
-        candidate = current / part
-        if _ignored(rel, candidate.is_dir(), rules):
+
+    __slots__ = ("_root", "_stacks", "_pruned")
+
+    def __init__(self, root: Path) -> None:
+        self._root = root
+        #: The root's own stack, loaded here rather than lazily: a child of the root
+        #: is judged by the root's rule file, and the old loop loaded it on its FIRST
+        #: iteration with the empty relative directory (``rel_dir=""``), which is the
+        #: label kept here so the stack a rule sits in is byte-identical to before.
+        rules = _load_ignore_rules(root, "")
+        self._stacks: dict[Path, list[tuple[str, list[_IgnoreRule]]]] = {
+            root: [("", rules)] if rules else []
+        }
+        #: The root itself is never pruned: nothing above it has authority inside it.
+        self._pruned: dict[Path, bool] = {root: False}
+
+    def _stack(self, directory: Path) -> list[tuple[str, list[_IgnoreRule]]]:
+        """The ancestor rule stack THROUGH ``directory`` (its own file included)."""
+        found = self._stacks.get(directory)
+        if found is not None:
+            return found
+        try:
+            rel_dir = directory.relative_to(self._root).as_posix()
+        except ValueError:
+            return []
+        stack = self._stack(directory.parent)
+        rules = _load_ignore_rules(directory, rel_dir)
+        if rules:
+            stack = stack + [(rel_dir, rules)]
+        self._stacks[directory] = stack
+        return stack
+
+    def _is_pruned(self, directory: Path) -> bool:
+        """Is this DIRECTORY itself ignored (by its own rules or an ancestor's)?"""
+        found = self._pruned.get(directory)
+        if found is not None:
+            return found
+        try:
+            rel = directory.relative_to(self._root).as_posix()
+        except ValueError:
+            pruned = False
+        else:
+            # ``rel`` is non-empty here: the root is seeded above, and anything else
+            # that resolves to "" would be the root under another spelling.
+            pruned = self._is_pruned(directory.parent) or _ignored(
+                rel, self._stack(directory.parent)
+            )
+        self._pruned[directory] = pruned
+        return pruned
+
+    def ignores(self, path: Path) -> bool:
+        """Whether ``path`` (a file OR a directory) is declared ignored.
+
+        The leaf is judged against its PARENT's stack (the ancestors' rules), and its
+        parent's own pruned verdict is consulted first — which is what makes an
+        ignored directory hide its whole subtree without walking it, and what stops a
+        ``!`` rule from re-entering one.
+        """
+        try:
+            rel = path.relative_to(self._root).as_posix()
+        except ValueError:
+            return False
+        if not rel:
+            return False
+        parent = path.parent
+        if parent != path and self._is_pruned(parent):
             return True
-        current = candidate
-        rel_dir = rel
-    return False
+        return _ignored(rel, self._stack(parent))
 
 
 def _glob_walk(root: Path, pattern: str) -> list[str]:
@@ -6833,11 +9183,12 @@ def _glob_walk(root: Path, pattern: str) -> list[str]:
     the pattern's literal prefix names them, because an author who writes
     'dist/index.html' into a repo that ignores dist/ means that file."""
     prefix = _literal_prefix(pattern)
+    cache = _IgnoreWalk(root)
     out = []
     for p in root.glob(pattern):
         rel = p.relative_to(root).as_posix()
         explicitly_named = bool(prefix) and (rel == prefix or rel.startswith(prefix + "/"))
-        if not explicitly_named and _path_is_ignored(root, p):
+        if not explicitly_named and cache.ignores(p):
             continue
         out.append(rel + ("/" if p.is_dir() else ""))
     return sorted(out)
@@ -8898,10 +11249,17 @@ BROWSER_ACTIONS = (
     "tabs",
     # File transfer. `upload` is served by BOTH non-cmux hosts (it needs only the
     # tab-scoped CDP session they already hold); `download` is served by the
-    # desktop app's host only, because Chrome refuses an extension the
-    # browser-level commands that would let it choose a destination — see
-    # EXTENSION_CANNOT_SERVE, and the extension host answers with a typed
-    # capability refusal that names where to go instead of failing obscurely.
+    # desktop app's host and, from extension 0.1.19, by the extension itself
+    # through `chrome.downloads` — Chrome refuses a tab-scoped debugger session
+    # the CDP primitives that would let an extension choose a destination
+    # (design §17.1), so the extension's file lands in the user's own download
+    # directory and the harness moves it into quarantine afterwards (§11.5 R7).
+    # On an extension host BOTH methods additionally need the operator's own
+    # switch (protocol.CAPABILITY_SWITCH_LABEL): `download` also needs the
+    # optional `downloads` permission, and `upload` has no permission at all, so
+    # its switch is the only control that direction has. A switched-off
+    # capability is refused with copy that names the switch, a build that cannot
+    # serve it with copy that names the update.
     # Both are ACTIONS so they ride the same schema, approval tier and dispatch as
     # everything else, and both are in CMUX_UNSUPPORTED_BROWSER_ACTIONS below.
     "download",
@@ -10986,10 +13344,34 @@ async def _bridge_open(
     )
 
 
-#: await_access defaults and cap. The cap exists because each slice is a real
-#: RPC and the human may simply be away: 240 s is long enough for "walk back to
-#: the desk", short enough that the agent gets a turn to re-notify the user
-#: rather than sitting silent for the extension's whole 10-minute request TTL.
+#: await_access defaults and cap.
+#:
+#: THE CAP DELIBERATELY DOES NOT MOVE WITH THE 15-MINUTE RECOMMENDATION (design
+#: §5.4). Two measured reasons, either sufficient:
+#:
+#: 1. The ``browser`` tool is ``interruptible=False`` (see the tool builder
+#:    below): a call that sits for fifteen minutes cannot be cut by a steer, a
+#:    stop or an abort — the failure ``ask``'s builder documents. Raising the cap
+#:    without flipping that flag converts a bounded wait into a hang.
+#: 2. Each slice is a real RPC (``_BRIDGE_AWAIT_SLICE_MS``), so fifteen minutes
+#:    is ~45 round trips, and the extension's own request TTL is 10 minutes
+#:    (``extension/src/driver/access-queue.ts``, ``ACCESS_REQUEST_TTL_MS``): one
+#:    prompt cannot serve the wait anyway, so the extra cap would buy five
+#:    minutes of nothing at all.
+#:
+#: (A third reason used to stand here — that the remainder of the budget belongs
+#: to the ``wait`` tool, which is interruptible. It was wrong twice over: ``wait``
+#: awaits a background JOB and ``WaitParams.job_id`` is required, so a session
+#: with nothing running cannot call it at all, and the pending text that sent the
+#: model there was pointing at an unexecutable step. The budget is carried by
+#: REPEATED ``await_access`` calls, which is what the text now says; see
+#: ``_access_result_text``.)
+#:
+#: The DEFAULT therefore stays at 120s rather than rising to the cap (round 1,
+#: reviewer MINOR 4 / U6). An unsized ``await_access`` is the call the pending text
+#: tells the model to make, and moving the default to the cap would double an
+#: uninterruptible block for the commoner case, for nothing the deliverable needs —
+#: the 15 minutes are carried by repeated calls, each of which the model chooses.
 BROWSER_AWAIT_ACCESS_DEFAULT_S = 120.0
 BROWSER_AWAIT_ACCESS_MAX_S = 240.0
 
@@ -11001,6 +13383,144 @@ BROWSER_AWAIT_ACCESS_MAX_S = 240.0
 _BRIDGE_AWAIT_SLICE_MS = 20_000
 
 
+def _attached_here(context: ToolContext | None) -> bool:
+    """Whether an interface is attached to the session this call runs in.
+
+    Reads the declared ``ToolContext.attached_probe`` — a live view of
+    ``RuntimeServer.attached_surfaces`` through the session's goal state. It is
+    called WHERE THE TEXT IS RENDERED, not once up front: an ``await_access``
+    that waited 240s must report the attachment at the end of that wait, not the
+    one it started with, or a surface that attached while the model waited is
+    told the session is unattached and advised to give up (round 1, MINOR 3).
+
+    ``True`` when the context carries no probe (a bare tool test, a host that
+    never wired one), which is the pre-existing default AND the direction every
+    uncertain answer falls here: a wrong "attached" costs a wait that is
+    re-checked, while a wrong "unattached" tells the agent to give up on a
+    question the operator was ready to answer — the incident this flow exists to
+    prevent.
+
+    This is NOT ``has_ui`` and NOT evidence that anyone is looking right now: an
+    attached pane holds a prompt a person answers when they return. See
+    ``docs/design/attached-interface-signal.md`` §5.
+    """
+    probe = getattr(context, "attached_probe", None)
+    if not callable(probe):
+        return True
+    try:
+        return bool(probe())
+    except Exception:  # noqa: BLE001 — an unreadable probe must not fail the flow
+        return True
+
+
+#: The width the TUI receipt can actually paint, and therefore the width every
+#: arm below is wrapped to. The card's lane is 76 cells at 80 columns and its
+#: text measure is 72; a raw line past the measure is clipped with an ellipsis,
+#: so whatever it carried is lost to the OPERATOR while the model still receives
+#: every byte. Measured twice: round 1 (D6) lost "proceed with what you have",
+#: "15 MINUTES" and "not a refusal"; round 2 (U8/D6r) still had three arms
+#: unwrapped and three lines at 74-78 cells, one losing exactly the notify
+#: clause it had just gained. Wrapping by hand cannot be right, because the
+#: interpolated clause (``{notify}``, ``{origin}``, the ``where`` sentence) is
+#: not in the string that was measured.
+_RECEIPT_WRAP = 72
+
+
+def _wrap_receipt(text: str) -> str:
+    """Wrap a receipt to the card's measure — ONE row per raw line is what the
+    card paints, so the raw line is the unit the operator sees.
+
+    Called with the arm's FINAL text, interpolations included, which is the
+    whole point: a hand-wrapped line containing ``{notify}`` can only be correct
+    for the expansion it was measured against (round 2, D6r).
+
+    ``break_long_words``/``break_on_hyphens`` stay OFF so a URL or an
+    ``action='await_access'`` token is never split into something the model
+    cannot hand back to the tool: an over-long token takes its own row and is
+    the one thing the card may still ellipsise.
+    """
+    lines: list[str] = []
+    for raw in text.split("\n"):
+        if not raw.strip():
+            lines.append("")
+            continue
+        # A bullet's continuation lines keep its two-space indent; nothing else in
+        # this flow is indented, so the rule stays this small on purpose. Branched
+        # rather than passed as ``**kwargs`` so the call stays fully typed.
+        if raw.startswith("- "):
+            wrapped = textwrap.wrap(
+                raw,
+                width=_RECEIPT_WRAP,
+                subsequent_indent="  ",
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
+        else:
+            wrapped = textwrap.wrap(
+                raw,
+                width=_RECEIPT_WRAP,
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
+        lines.extend(wrapped or [""])
+    return "\n".join(lines)
+
+
+def _delegated_here(context: ToolContext | None) -> bool:
+    """Whether THIS run is a session delegated from another — a subagent child.
+
+    It exists to keep a false subject out of the browser text (round 3, D9). The
+    attachment probe is the PARENT's live view, installed on the child's holder
+    by ``harness/subagent.py``, so a child rendering "an interface is attached to
+    this session" claims the parent's pane as its own — the same claim the
+    ``<interactivity>`` block was fixed for, one string over, read by the same
+    child in the same turn.
+
+    The test is ``subagent_comms.is_child(job_id)``: the SAME predicate
+    ``build_hub_tool`` uses to decide the child-shaped ``hub`` tool, so the two
+    readers cannot disagree about who a caller is. A top-level session holds the
+    comms surface as well (that is how its own children reach it) but its own
+    context carries no job id this instance knows, so it is not a child.
+    """
+    comms = getattr(context, "subagent_comms", None)
+    is_child = getattr(comms, "is_child", None)
+    if not callable(is_child):
+        return False
+    try:
+        return bool(is_child(getattr(context, "job_id", None)))
+    except Exception:  # noqa: BLE001 — attribution must never fail the flow
+        return False
+
+
+def _notify_channel(context: ToolContext | None) -> str:
+    """How THIS caller can tell the operator something, from declared capabilities.
+
+    ``ask_user`` is the hook behind ``ask``, declared on ``ToolContext`` and
+    createIf-gated on exactly that field by ``build_ask_tool``. Naming a tool the
+    reader does not have is the defect this exists to stop: round 1 found this
+    text telling SUBAGENTS to notify through ``ask`` (no child has it) and to
+    "ask the user directly" on a deny, for a reader whose only route out is
+    ``hub`` to its parent.
+
+    A CHILD is therefore told ``hub`` (round 2, Q9): the browser text named no
+    route at all for a reader with no ask hook, and the same child's own
+    ``<interactivity>`` block names ``hub`` as its way through — the two are read
+    in one turn, so they have to agree. The child test is
+    :func:`_delegated_here`, the same ``is_child(job_id)`` the ``hub`` tool
+    builder uses.
+
+    ``hub`` is still NOT offered to a top-level session: it holds the tool so its
+    CHILDREN can reach it and cannot notify anyone through it, so naming it there
+    would be a false instruction. Such a reader gets "a short message" alone,
+    which is the channel it actually has.
+    """
+    if getattr(context, "ask_user", None) is not None:
+        return "a short message, or `ask`"
+    if _delegated_here(context):
+        return "a short message, or `hub` to that session"
+    return "a short message"
+
+
 def _access_result_text(
     state: str,
     origin: str,
@@ -11008,6 +13528,10 @@ def _access_result_text(
     position: int | None = None,
     pending_count: int | None = None,
     host: str = "",
+    attached: bool = True,
+    delegated: bool = False,
+    notify: str = "a short message",
+    total_s: float = 0.0,
 ) -> str:
     """One agent-facing line per access state, including the next step — the
     agent discovers this flow through error/result text, not documentation.
@@ -11018,33 +13542,148 @@ def _access_result_text(
     extension's popup and badge, or the desktop app's browser tab. Telling the
     user of the app to look in a browser toolbar sends them hunting for a window
     that is not there.
+
+    ``attached`` selects whether the model is told an interface can PRESENT the
+    prompt, and it must never deny a surface this same message just named: the
+    predicate counts Local Operator PANES (a TUI, a leased desktop renderer),
+    while the prompt may be sitting in the extension popup or the app's browser
+    tab — a surface the operator can click. "Nobody can act on it" was that
+    contradiction, and it is the incident's own shape (round 1, D2/U3).
+
+    ``delegated`` says WHOSE pane this text is talking about. A child renders its
+    PARENT's attachment answer (``harness/subagent.py`` installs the parent's live
+    probe on the child's holder), so "attached to this session" attributes the
+    parent's pane to a run that owns none — the false-subject claim the
+    ``<interactivity>`` block beside it was fixed for, read by the same child in
+    the same turn (round 3, D9).
+
+    ``notify`` is the channel this caller can actually use, from
+    :func:`_notify_channel`, and ``total_s`` is the wait an ``await_access`` just
+    spent. Both the pending and the timeout arms are rendered HERE rather than
+    inline, so the two cannot give contradictory next steps — which they did:
+    one said "proceed without blocking", the other told every caller to keep
+    waiting (round 1, U4 / MAJOR 2).
+
+    Every arm leaves through :func:`_wrap_receipt`, AFTER its interpolations,
+    and that placement is the fix for a finding rather than a style: the card
+    clips each raw line to its measure, so a line whose length depends on
+    ``{notify}``/``{origin}``/``{where}`` has to be wrapped where those values
+    are known.
     """
+    # A child's attachment answer is its parent's, so every claim about a pane
+    # has to name the session that owns it (round 3, D9).
+    subject = "the session this run was delegated from" if delegated else "this session"
     extension_host = host != HOST_UI_PREFIX
     if state == "allowed":
-        return f"{origin} is allowed. 'open' or 'goto' the URL now."
+        return _wrap_receipt(f"{origin} is allowed. 'open' or 'goto' the URL now.")
     if state == "denied":
-        return (
-            f"the user denied access to {origin}. Do not retry or re-request this "
-            "origin; ask the user directly if it is essential."
+        return _wrap_receipt(
+            f"the operator denied access to {origin}. Do not retry or re-request "
+            f"this origin; raise it with them if it is essential ({notify})."
         )
     if state == "pending":
         # NOTIFY-FIRST is load-bearing: the browser's own notification banner is
         # best-effort (macOS suppresses it without Notification Center
-        # authorization), so if the agent does not message the user the prompt
+        # authorization), so if the agent does not message the operator the prompt
         # sits unseen until its TTL — the exact incident this flow replaces.
+        #
+        # HARD-WRAPPED, and short. The TUI receipt paints ONE ROW PER RAW LINE and
+        # clips each to the measure (94 cells at 100 columns), so a paragraph
+        # authored as one long line loses its tail on the card: measured in round 1
+        # (D6), the unattached line lost "proceed with what you have" and the
+        # timeout line lost BOTH "15 MINUTES" and "not a refusal". Line breaks are
+        # free to the model and are what keep the load-bearing clause inside the
+        # first row.
         where = (
-            "in the Local Operator extension popup (toolbar icon, numbered badge showing "
-            "the pending count) — the badge alone is not reliably seen"
+            "in the Local Operator extension popup (toolbar icon, numbered badge "
+            "showing the pending count) — the badge alone is not reliably seen"
             if extension_host
-            else "in the Local Operator desktop app's browser tab — the prompt alone is not "
-            "reliably seen"
+            else "in the Local Operator desktop app's browser tab — the prompt "
+            "alone is not reliably seen"
         )
-        return (
-            f"approval for {origin} is pending"
-            + (f" ({position} of {pending_count})" if position and pending_count else "")
-            + ". FIRST notify the user (via the ask "
-            f"tool or a message) to approve it {where} — THEN "
-            "call action='await_access' with the same url to wait for the decision."
+        slots = f" ({position} of {pending_count})" if position and pending_count else ""
+        head = f"approval for {origin} is pending{slots}.\nThe prompt is showing {where}.\n\n"
+        if attached:
+            return _wrap_receipt(
+                f"{head}"
+                f"An interface is attached to {subject}, so the operator can answer "
+                f"it as soon as they look — make sure they are told ({notify}).\n\n"
+                "- Wait UP TO 15 MINUTES in total for the decision: a person may be "
+                "away from the desk, and a slow answer is NOT a refusal.\n"
+                "- Keep calling action='await_access' with the same url for that "
+                "budget — each call waits at most 240s, so about four calls sized "
+                "to that cap span it (an unsized call waits 120s, so eight of "
+                "those do). That is the mechanism: there is no sleep shortcut "
+                "here, because the `wait` tool awaits a background job and this "
+                "flow has none.\n"
+                "- The prompt expires after about 10 minutes. If await_access "
+                "returns \"no live access request\", call action='request_access' "
+                "with the same url to raise a NEW prompt — that is what pings the "
+                "operator again. Re-requesting while the old prompt is still live "
+                "changes nothing and notifies nobody, so do it only once it has "
+                "expired, and at most once per 15-minute window: after that, "
+                "report what you have and move on.\n"
+                "- AN UNANSWERED PROMPT IS NOT A REFUSAL. Do not report it as "
+                "refused — the request is still pending while an interface is "
+                "attached — but say plainly if you proceeded without access."
+            )
+        # UNATTACHED. What is measured is that no PANE of this run's session is
+        # attached; the prompt named above is still on a surface the operator uses,
+        # so the text must not claim that nobody can act on it. The notify
+        # instruction stays (it is what reaches them when nothing of theirs is
+        # watching this session), and so does the re-request, which is what pings
+        # them again once a surface attaches.
+        return _wrap_receipt(
+            f"{head}"
+            f"No Local Operator pane is attached to {subject} right now, so nothing "
+            f"in this run will present the question — the prompt above is the "
+            f"surface, and the operator can answer it there. Notify them anyway "
+            f"({notify}), so the decision is waiting for them; then proceed with "
+            f"what you have rather than blocking the turn.\n\n"
+            "- The prompt expires after about 10 minutes. Re-raise it with "
+            "action='request_access' (the same url) when the origin is next "
+            "needed — that is what pings the operator again rather than leaving "
+            "them a dead prompt.\n"
+            "- AN UNANSWERED PROMPT IS NOT A REFUSAL. Do not report it as refused: "
+            "an interface may attach later, and this request is what makes it "
+            "visible — but say plainly if you proceeded without access."
+        )
+    if state == "await_timeout":
+        # The arm that used to disagree with the pending text (round 1, U4): it
+        # told every caller to wait again, including sessions this flow had just
+        # told not to block. It is now attachment-aware and names the executable
+        # path — repeated await_access calls — where it used to send the model to
+        # the `wait` tool, which needs a background job it does not have
+        # (round 1, MAJOR 2 / U2).
+        check = (
+            "the Local Operator extension popup"
+            if extension_host
+            else "the Local Operator desktop app's browser tab"
+        )
+        if attached:
+            advice = (
+                f"- An interface is attached to {subject}: keep calling "
+                "action='await_access' — each call waits at most 240s — until "
+                "about 15 MINUTES in total have gone by.\n"
+            )
+        else:
+            # ONE term for the surface across the strings the same model reads:
+            # the pending arm calls it a "Local Operator pane", so a bare "pane"
+            # here left the reader holding two names for one thing
+            # (round 2, D8r2).
+            advice = (
+                f"- No Local Operator pane is attached to {subject}, so nothing in "
+                f"this run will present it: notify the operator ({notify}) and "
+                "proceed with what you have rather than blocking the turn.\n"
+            )
+        return _wrap_receipt(
+            f"still pending after {total_s:.0f}s, and the operator has not decided "
+            f"on this origin yet:\n{origin}\n"
+            f"Remind them to check {check}. Then:\n"
+            f"{advice}"
+            "- Once the prompt has expired, call action='request_access' with the "
+            "same url to raise a new one: that is what pings them again.\n"
+            "AN UNANSWERED PROMPT IS NOT A REFUSAL."
         )
     if state == "superseded":
         # A DIFFERENT session's request replaced this one's prompt slot (one
@@ -11056,16 +13695,18 @@ def _access_result_text(
             if extension_host
             else "the desktop app shows one prompt at a time"
         )
-        return (
+        return _wrap_receipt(
             f"the approval prompt for {origin} was superseded by another session's "
-            f"request — {shower}. Wait for the other "
-            "session's prompt to resolve, then call action='request_access' again "
-            "if this origin is still needed."
+            f"request — {shower}. Wait for the other session's prompt to resolve, "
+            "then call action='request_access' again if this origin is still "
+            "needed."
         )
     if state == "cancelled":
-        return f"your pending access request for {origin} was cancelled."
-    # "none": no live request for the caller — expired or never raised.
-    return (
+        return _wrap_receipt(f"your pending access request for {origin} was cancelled.")
+    # "none": no live request for the caller — expired or never raised. The
+    # recovery is the LAST thing in the line, so it is the first thing the card
+    # used to clip: `none` is the commonest post-expiry state (round 2, U8).
+    return _wrap_receipt(
         f"no live access request for {origin} (it may have expired unanswered, or "
         "never been raised). Call action='request_access' with the url to raise a "
         "new prompt."
@@ -11091,6 +13732,19 @@ async def _bridge_access(
     host = _host_of_client(client)
     url = params.url.strip()
     identity = _browser_identity_params(context, tool_call_id)
+    # Read WHERE EACH TEXT IS RENDERED, never once here (round 1, MINOR 3). The
+    # attachment answer decides whether the model is told the operator can answer,
+    # so an await_access that spent 240s waiting must report the state at the END
+    # of that wait — reading it up front told a session whose surface attached
+    # mid-wait to give up, and made the probe's own "live view" claim false.
+    # ``_attached_here`` falls back to True without a probe, so the fail-open
+    # direction is unchanged.
+    # ``notify`` and ``delegated`` are properties of THIS RUN — the hook its host
+    # installed and whether it is a delegated session — so reading them once here
+    # is right; only the attachment answer has to be re-read at each render site
+    # (round 1, MINOR 3), because a surface can attach while the model waits.
+    notify = _notify_channel(context)
+    delegated = _delegated_here(context)
     if action == "request_access":
         result, problem = await _bridge_call(
             tool_call_id, "request_access", {"url": url, **identity}, client=client
@@ -11109,6 +13763,9 @@ async def _bridge_access(
                 position=result.get("position"),
                 pending_count=result.get("pending_count"),
                 host=host,
+                attached=_attached_here(context),
+                notify=notify,
+                delegated=delegated,
             ),
             details={
                 "origin": origin,
@@ -11132,7 +13789,14 @@ async def _bridge_access(
         return _text(
             tool_call_id,
             "browser",
-            _access_result_text(state_value, origin, host=host),
+            _access_result_text(
+                state_value,
+                origin,
+                host=host,
+                attached=_attached_here(context),
+                notify=notify,
+                delegated=delegated,
+            ),
             details={
                 "origin": origin,
                 "state": state_value,
@@ -11149,17 +13813,23 @@ async def _bridge_access(
     while True:
         remaining_ms = int((deadline - time.monotonic()) * 1000)
         if remaining_ms <= 0:
-            check = (
-                "the Local Operator extension popup"
-                if host != HOST_UI_PREFIX
-                else "the Local Operator desktop app's browser tab"
-            )
+            # RENDERED BY ``_access_result_text`` rather than inline: this arm and
+            # the pending one must not give contradictory next steps, and they did
+            # — the pending text said "proceed without blocking the turn", this one
+            # told every caller to keep waiting, and neither knew whether an
+            # interface was attached (round 1, U4).
             return _text(
                 tool_call_id,
                 "browser",
-                f"still pending after {total_s:.0f}s: the user has not decided on {url} "
-                f"yet. Remind them to check {check}, then call "
-                "await_access again.",
+                _access_result_text(
+                    "await_timeout",
+                    url,
+                    host=host,
+                    attached=_attached_here(context),
+                    notify=notify,
+                    delegated=delegated,
+                    total_s=total_s,
+                ),
                 details={"origin": url, "state": "pending"},
             )
         wire = {
@@ -11183,6 +13853,9 @@ async def _bridge_access(
                     position=result.get("position"),
                     pending_count=result.get("pending_count"),
                     host=host,
+                    attached=_attached_here(context),
+                    notify=notify,
+                    delegated=delegated,
                 ),
                 details={
                     "origin": origin,
@@ -11434,6 +14107,78 @@ def _download_audit(
     )
 
 
+#: The prefix every refusal in this feature's copy is composed with.
+#:
+#: It is NOT decoration and it is not only this layer's spelling. Three writers
+#: compose it: the app host composes its own download refusals with it
+#: (`downloads.ts`'s `refuse`/`refuseLive`: "refused: `x` is an executable/script
+#: type; nothing was saved"), the extension composes its upload refusals with it,
+#: and `browser_files` composes its name refusals with it. On the wire it is the
+#: ONE mark that separates a HOST'S REFUSAL from a host's own account of a call
+#: that found nothing, and there is no flag beside it — none may be added here,
+#: since `PROTO_VERSION` and both hosts are untouched by this change.
+#:
+#: WHICH HOST CAN REACH THE MARK TODAY. The app host only. Its `download` action
+#: always arms and reports `armed: true`, so a refusal it makes arrives as a
+#: `reason` (§6.2). The extension's `download` command sends NO `reason` at all —
+#: its two returns are `{armed: true, url, files}` (`extension/src/commands/
+#: download.ts`), and the cancellation account beside them is a top-level `note`
+#: this harness does not read — so an extension download refusal cannot reach the
+#: mark and state (b) is app-host-only. The extension's *upload* refusals are the
+#: ones that carry it, and those arrive on a different result payload.
+#:
+#: WHAT KEEPS THIS WORKING. Rewording the app host's `refuse`/`refuseLive`
+#: clauses away from the mark turns every one of its refusals into the
+#: unrecognised branch below: the model is told the host's own words (never the
+#: click-remedy copy) and the row reads `armed_reason`, so the loss is visible to
+#: a reader instead of silent. See `_reason_is_refusal` and §6.2 of
+#: `docs/design/browser-file-transfer.md`.
+REFUSAL_PREFIX = "refused:"
+
+
+def _refusal_clause(reason: str) -> str:
+    """The BARE clause(s) of a refusal, EVERY prefix removed.
+
+    Copy and the audit row both compose from this, so a host that already wrote
+    the prefix into its own sentence cannot make the harness print it twice
+    ("refused: refused: …") or make the row and the sentence disagree about what
+    was said. Every occurrence goes, not only the head's: the app host joins the
+    refusals of one armed call with `"; "` (`downloads.ts::resultOf`), so two
+    refused downloads in one call is a sentence whose SECOND clause also carries
+    the mark — and §10.5 calls this field the clause, not the sentence.
+    """
+    parts = []
+    for part in reason.split("; "):
+        part = part.strip()
+        if part.startswith(REFUSAL_PREFIX):
+            part = part[len(REFUSAL_PREFIX) :].strip()
+        parts.append(part)
+    return "; ".join(parts)
+
+
+def _reason_is_refusal(reason: str) -> bool:
+    """Whether a host's ARMED-path ``reason`` is a refusal, not an account.
+
+    Both arrive as `armed: true` with no files (§6.2), so on this path the words
+    are the only signal there is, and the design gave them a stable one: a
+    refusal is composed with ``REFUSAL_PREFIX`` at its head, and a host
+    describing a call that merely found nothing is not. Reading it that way is
+    what keeps the record's three states apart — an armed host refusal must not
+    be reported as a no-op (the defect this exists for), and a no-op must not be
+    reported as a refusal.
+
+    The test is deliberately the HEAD of the string, which is where the design's
+    own join puts a refusal's mark (`reasons.join("; ")` of clauses that each
+    start with it), and deliberately not a search for the mark anywhere: a
+    sentence that merely mentions a refusal is not one. That leaves a false
+    negative — a host that rewords its refusals — and the answer to it is not a
+    wider parse but the relay in `_browser_download`: an unrecognised non-empty
+    reason is handed to the model in the host's own words and recorded as
+    `armed_reason`, so no reader is ever told the call was a no-op.
+    """
+    return reason.strip().startswith(REFUSAL_PREFIX)
+
+
 async def _browser_download(
     tool_call_id: str,
     state: BrowserSurfaceProtocol,
@@ -11494,11 +14239,21 @@ async def _browser_download(
     assert result is not None
     call_id = files.new_call_id()
     origin = str(result.get("url", ""))
+    # The host's own account of the call, read once here so both arms below see
+    # the same string — the armed-`true` case is exactly the one that used to
+    # discard it (see `_reason_is_refusal`).
+    reason = str(result.get("reason") or "").strip()
     if not bool(result.get("armed", True)):
         # The host refused to arm. That is a policy answer carried as a result
         # (§6.2 — an extension may not emit an ErrorCode an old daemon would
         # drop), and it is rendered here as the model-facing refusal.
-        reason = str(result.get("reason") or "the host refused to arm a download")
+        #
+        # The fallback covers three host answers, not one: a `reason` that is
+        # ABSENT, one that is whitespace-only (nothing was said, however many
+        # spaces it was said in), and one that is a bare ``refused:`` with no
+        # clause — which would otherwise print "refused: " and record an empty
+        # reason. The armed arm guards its clause the same way, one arm down.
+        clause = _refusal_clause(reason) or "the host refused to arm a download"
         _download_audit(
             call_id=call_id,
             session_id=session_id,
@@ -11507,17 +14262,121 @@ async def _browser_download(
             origin=origin,
             name="",
             verdict="armed_false",
-            reason=reason,
+            reason=clause,
         )
-        return _error(tool_call_id, "browser", f"refused: {reason}")
+        return _error(tool_call_id, "browser", f"{REFUSAL_PREFIX} {clause}")
 
     reported = {
         str(item.get("name")): item
         for item in (result.get("files") or [])
         if isinstance(item, dict) and item.get("name")
     }
+    # The extension host cannot write into `directory` (Chrome refuses it a
+    # download path outside the user's own download directory — §17.5), so what it
+    # landed is relocated HERE, before the before/after diff below runs: every
+    # later step (classification, the content-earned rename, the 0600 mode, the
+    # audit rows) then treats an extension download exactly like an app-host one,
+    # which is the point — the harness is the judge on both hosts.
+    intake = files.intake_landed(result.get("files") or [], directory, page_origin=origin)
+    refused_intake: list[str] = []
+    for entry in intake.refused:
+        # The same two words every other refusal uses, from the same function: a
+        # cancelled transfer, an uncorroborated path and a name already in the
+        # session all have to say what happened to the entry (review round 2, N7).
+        word, trail = _disposition_outcome(entry.disposition)
+        refused_intake.append(f"{entry.name}: {word} — {entry.reason}")
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="download",
+            origin=origin,
+            name=entry.name,
+            path="",
+            verdict="deny",
+            reason=f"{entry.reason}; {trail}",
+            redact=True,
+        )
     landed = files.snapshot(directory)
     candidates = sorted(name for name in landed if name not in before)
+    if not candidates and refused_intake:
+        # Nothing is in the quarantine directory and the reason is known, so the
+        # generic "nothing started" sentence would be a lie about a call that
+        # watched a transfer fail. The refusals are the answer, and they are what
+        # the audit rows above already recorded.
+        return _error(
+            tool_call_id,
+            "browser",
+            "nothing was saved: " + "; ".join(refused_intake) + ".",
+        )
+    # The host's words with every copy mark removed. Empty means the host said
+    # nothing the model needs — an absent `reason`, a whitespace-only one, or a
+    # bare ``refused:`` with no clause — and both branches below require one:
+    # there is nothing to render or relay otherwise, and an empty sentence is
+    # exactly what the clause guards exist to prevent.
+    host_clause = _refusal_clause(reason) if reason else ""
+    # A refusal, rather than a host's account of a call that found nothing, is the
+    # reason whose HEAD carries the mark the design composes it with.
+    host_refusal = host_clause if _reason_is_refusal(reason) else ""
+    if not candidates and host_refusal:
+        # The host ARMED the capture and then refused the transfer, and reported
+        # neither files nor an error: its `reason` IS the answer, and the app
+        # host — the one that always arms — answers every refusal this way. The
+        # sentence below is the SAME refusal the pre-arm path renders, from the
+        # same composer, so a refusal reads the same wherever the host stopped.
+        #
+        # Why a verdict of its own rather than `armed_false` or `deny`:
+        # `armed_false` means the host declined to ARM (state (a)); `deny` means a
+        # candidate LANDED and the harness refused it, and its rows always name
+        # the entry they deleted. Neither is this: the host armed, decided, and
+        # nothing was written. `no_download` is the third state — a call where
+        # nothing started and the host said nothing — and folding a refusal into
+        # it is the defect this branch exists to fix.
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="download",
+            origin=origin,
+            name="",
+            verdict="armed_refused",
+            reason=host_refusal,
+        )
+        return _error(tool_call_id, "browser", f"{REFUSAL_PREFIX} {host_refusal}")
+    if not candidates and host_clause:
+        # The host ARMED, nothing landed, and its `reason` is not the refusal
+        # shape: RELAY it rather than replace it. This is the false-negative half
+        # of keying a decision on words (§6.2), and the only safe answer to it:
+        # the host's own sentence is model-facing copy by construction (§7.4 — the
+        # app host writes its refusals and its no-op sentence for the model), and
+        # replacing it with the harness's canned "no download started … click its
+        # Download control" is exactly the misleading answer this whole change
+        # exists to remove — the same sentence for a reworded refusal as for a
+        # call nobody explained.
+        #
+        # `armed_reason` is its own verdict for the same reason: the audit's
+        # question is "what did the host say, and did we classify it?", and a row
+        # that says `no_download` / "nothing started" about a reason we were
+        # handed would answer it wrongly — the defect, one layer down. With this
+        # value a reworded refusal is VISIBLE to the trail reader (a row carrying
+        # the host's sentence under a verdict that claims nothing) instead of
+        # being swallowed.
+        #
+        # The model gets the sentence UNTOUCHED — an unclassified answer is not
+        # the harness's to rewrite — while the row carries the same words with the
+        # copy's mark removed, which is what every row in this trail records: the
+        # mark belongs to the sentence, the clause to the record (§10.5).
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="download",
+            origin=origin,
+            name="",
+            verdict="armed_reason",
+            reason=host_clause,
+        )
+        return _error(tool_call_id, "browser", reason)
     if not candidates:
         wait = wire.get("timeout_s", files.DOWNLOAD_TIMEOUT_S)
         _download_audit(
@@ -11539,7 +14398,7 @@ async def _browser_download(
         )
 
     kept: list[dict[str, Any]] = []
-    refused: list[str] = []
+    refused: list[str] = list(refused_intake)
     # Artifacts whose 0600 mode could not be set (Linux has no `lchmod`, so a
     # symlink ENTRY is never settable there). Reported rather than implied.
     unhardened: list[str] = []
@@ -11994,6 +14853,35 @@ def _delete_outcome(removed: bool) -> tuple[str, str]:
     if removed:
         return "refused and deleted", "the entry was removed"
     return "refused, NOT deleted", "the entry could NOT be removed — it is still on disk"
+
+
+def _disposition_outcome(disposition: str) -> tuple[str, str]:
+    """What happened to a refused ENTRY, for every outcome intake can report.
+
+    FOUR outcomes, not two (round-1 Q2). "We could not remove it" and "we chose
+    to leave it" are different facts, and a third is that there was nothing to
+    remove — which the two-word vocabulary spelled as "could NOT be removed — it is
+    still on disk", in the same sentence as "already gone", about an entry that had
+    never been there. A deliberate decision read as a failure, too: the file was
+    left because it was never ours to delete.
+
+    Keyed on the VALUE `browser_files` reports rather than on a boolean, so a later
+    outcome cannot be silently collapsed into one of these four.
+    """
+    # Imported here rather than at module scope, matching every other
+    # `browser_files` use in this module: the alias is what keeps this file's import
+    # graph from dragging the browser layer into a process that only wants tools.
+    from local_operator import browser_files as files
+
+    return {
+        files.DELETED: ("refused and deleted", "the entry was removed"),
+        files.KEPT: ("refused, left in place", "the entry was left where it is, on purpose"),
+        files.FAILED: (
+            "refused, NOT deleted",
+            "the entry could NOT be removed — it is still on disk",
+        ),
+        files.ABSENT: ("refused, nothing to remove", "there was no entry to remove"),
+    }.get(disposition, ("refused", "the outcome of that entry is unknown"))
 
 
 def _unlink_quietly(path: Path) -> bool:
@@ -13003,7 +15891,7 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
             "download directory, and 'upload' attaches local files to a page's file "
             "input. "
             "'open'/'goto' to a site the user has not approved fails with "
-            "origin_not_allowed: call 'request_access', NOTIFY the user to approve "
+            "origin_not_allowed: call 'request_access', NOTIFY the operator to approve "
             "it, and 'await_access' before navigating again. "
             "Never install or script a browser engine instead."
         ),
@@ -16170,13 +19058,17 @@ def _hub_targets(comms: Any, raw: Any) -> tuple[list[str], list[str]]:
     twice)."""
     requested = raw if isinstance(raw, list) else [raw]
     ids: list[str] = []
+    seen: set[str] = set()
     errors: list[str] = []
     for item in requested:
         resolved, error = comms.resolve(str(item))
         if error is not None:
             errors.append(error)
         for job_id in resolved:
-            if job_id not in ids:
+            # Broadcasts can overlap explicit targets; keep ordered output but
+            # avoid quadratic list membership as the recipient set grows.
+            if job_id not in seen:
+                seen.add(job_id)
                 ids.append(job_id)
     return ids, errors
 
@@ -16209,6 +19101,20 @@ def _hub_list(tool_call_id: str, comms: Any) -> ToolResult:
         lines.append(f"- {row.label} ({row.job_id}): {row.status}{age} — {extras}")
         if row.resumable and row.detail:
             lines.append(f"    {row.detail}")
+        # WHY it stopped, when it was not a clean completion: a child the loop
+        # cut off carries a cause token (``ChildInfo.cut_off_cause``) and without
+        # this line the roster printed only ``failed — resumable``, so a parent
+        # scanning the list could not tell a cut-off child from an ordinary
+        # provider failure — the recorded cause reached no surface (design D4).
+        # Rendered through the same ``render_cut_off_reason`` every other
+        # surface uses, so the words cannot drift.
+        if row.cut_off_cause:
+            # FUNCTION-LOCAL import: this module is a denied-module boundary and
+            # must not import ``incidents`` at module scope (see the denied-module
+            # note above). ``update.py`` reaches the same helper the same way.
+            from local_operator.incidents import render_cut_off_reason
+
+            lines.append(f"    cut off: {render_cut_off_reason(row.cut_off_cause)}")
         # The session id only where it can be acted on. It is the id
         # ``--resume`` takes (NOT the job id on the line above), and this
         # roster is the only surface that shows it now that children are kept
@@ -16829,11 +19735,31 @@ async def execute_ask(
         # a user decision — and it must not be reported as one, or the model
         # would "fall back to its recommendation" on a session where the user
         # was never shown anything.
+        #
+        # IT MUST ALSO CLAIM NOTHING ABOUT WHO IS AT A SCREEN, AND NOTHING ABOUT A
+        # ROSTER. It used to read "No interactive surface is attached to this
+        # session, so the user cannot be asked", and that sentence was repeated
+        # into ``hub`` messages by parents that had a perfectly good surface
+        # attached — an absent HOOK is a fact about this process, not about the
+        # operator. The condition being reported is the missing wiring, so the text
+        # names that and what follows from it.
+        #
+        # It also used to list the hosts that have no hook — "a subagent, an
+        # `exec` run and a scheduler run have none" — and that roster was WRONG:
+        # a supervised ``exec --control`` run DOES have one (``exec_control``
+        # installs the gates and ``serving`` calls ``set_ask_handler`` with them),
+        # which the builder's own docstring three lines above says. A roster is a
+        # second copy of a wiring fact that drifts from the wiring; the condition
+        # is named instead, and the delegated child's real route is stated because
+        # "the operator cannot be asked" is false for it — its parent is one
+        # ``hub`` call away (design §4).
         return _error(
             tool_call_id,
             "ask",
-            "No interactive surface is attached to this session, so the user cannot "
-            "be asked. Decide without them.",
+            "this host has no way to present a question to a person — no ask hook is "
+            "wired into this session, so this process cannot put one in front of the "
+            "operator. A delegated child's route to them is `hub` to its parent; "
+            "otherwise decide without them.",
         )
     answers = await ask_user(params.questions)
     if not answers or not any(any(text.strip() for text in chosen) for chosen in answers.values()):

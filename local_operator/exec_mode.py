@@ -111,6 +111,15 @@ class ExecArgs:
     #: mechanism. Carried through to the worker so `--background --control` is
     #: the same request run elsewhere, exactly like ``resume``.
     control: bool = False
+    #: The descriptor a supervised run hands its own capability UP (stage E).
+    #: Carried as an INTEGER, not a flag, because the supervisor's socketpair end
+    #: is created before this process starts — the number is only meaningful to
+    #: the process it was inherited by, which is why it must survive the
+    #: ``--background`` argv boundary unaltered if it is serialized at all.
+    #: ``None`` (the default) means no supervisor is holding the other end, and
+    #: the run then holds no capability and every authority-increasing request
+    #: that does not carry a signature is refused — the fail-closed state.
+    supervisor_fd: int | None = None
     team: str | None = None
     profile: str | None = None
     #: Comma-separated tools this run may reach, and the only ones. Reaches the
@@ -186,6 +195,16 @@ def build_worker_argv(command: str, exec_args: ExecArgs) -> list[str]:
         # Dropped here it would be accepted by the front end and silently lost,
         # the identical failure the ``resume`` note below records.
         argv.append("--control")
+    if exec_args.supervisor_fd is not None:  # pragma: no cover — refused upstream
+        # NEVER REACHED: the front end refuses ``--background --supervisor-fd``
+        # (see :func:`reject_detached_supervisor_fd`) because ``--background``
+        # detaches the worker and its launcher exits, closing the other end of the
+        # supervisor's socketpair. A descriptor serialized past that point names a
+        # number the worker does not hold, and the failure would surface as an
+        # EPIPE in the run rather than as the configuration error it is. The
+        # append stays as the assertion of intent and is guarded so it can never
+        # be a silent pass — the branch that would produce it raises first.
+        raise AssertionError("a detached run must not be given a supervisor descriptor")
     if exec_args.resume:
         # Serialized like every other field, because `--background` is supposed to
         # be the same request run elsewhere. Omitted, `exec --background --resume`
@@ -588,7 +607,6 @@ def _make_default_session_factory(exec_args: ExecArgs) -> SessionFactory:
     def factory() -> Any:
         from local_operator.agents import AgentRegistry
         from local_operator.config import ConfigManager
-        from local_operator.credentials import CredentialManager
         from local_operator.paths import config_dir
         from local_operator.session_factory import create_session
 
@@ -602,7 +620,6 @@ def _make_default_session_factory(exec_args: ExecArgs) -> SessionFactory:
         # a benchmark).
         base_dir = config_dir()
         config_manager = ConfigManager(base_dir)
-        credential_manager = CredentialManager(base_dir)
         agent_registry = AgentRegistry(base_dir)
 
         session_args = argparse.Namespace(
@@ -614,7 +631,7 @@ def _make_default_session_factory(exec_args: ExecArgs) -> SessionFactory:
             train=exec_args.train,
             resume=exec_args.resume,
         )
-        return create_session(session_args, config_manager, credential_manager, agent_registry)
+        return create_session(session_args, config_manager, agent_registry)
 
     return factory
 
@@ -657,6 +674,39 @@ def resolve_prompt(
     return text.strip()
 
 
+def reject_detached_supervisor_fd(args: ExecArgs) -> str | None:
+    """Why ``--background --supervisor-fd`` is refused, or ``None`` when it is fine.
+
+    THE COMBINATION CANNOT WORK, so it is refused rather than degraded. The
+    descriptor names one end of a socketpair the SUPERVISOR holds; ``--background``
+    detaches a worker and the launcher that owns that end exits immediately, so the
+    run's upward capability write finds a closed peer. The observable outcome would
+    be a run that appears supervised and whose cards nobody can approve — the
+    failure mode the whole stage exists to remove. The design names the row: a
+    detached ``--background --control`` run has no live supervisor, and unattended
+    approval there is ``--yolo`` or ``tool_approval_mode: auto``.
+
+    Also refused WITHOUT ``--control``: nothing installs a supervisor's gate on an
+    unsupervised run, so a descriptor there asks for authority over a surface that
+    does not exist.
+    """
+    if args.supervisor_fd is None:
+        return None
+    if args.background:
+        return (
+            "--supervisor-fd cannot be combined with --background: the background "
+            "launcher exits, so nothing holds the other end of the supervisor's "
+            "socket and the run could never hand its capability up. Use --yolo or "
+            "tool_approval_mode: auto for an unattended run."
+        )
+    if not args.control:
+        return (
+            "--supervisor-fd requires --control: only a supervised run installs the "
+            "gates a supervisor credential could answer"
+        )
+    return None
+
+
 def run_exec(command: str | None, args: ExecArgs) -> int:
     """Entry point for the ``exec`` subcommand (README contract: exit 0 on
     success, non-zero on error).
@@ -677,6 +727,10 @@ def run_exec(command: str | None, args: ExecArgs) -> int:
     """
     from local_operator.exec_startup import resolve_startup
 
+    refusal = reject_detached_supervisor_fd(args)
+    if refusal is not None:
+        print(f"exec failed: {refusal}", file=sys.stderr)
+        return 1
     has_loop = args.loop is not None or args.loop_goal is not None
     try:
         team = resolve_startup(args)

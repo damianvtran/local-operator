@@ -34,8 +34,191 @@ class Case:
     reason: str
 
 
+def _compact(*fields: tuple[str, str], quote: str = '"') -> str:
+    """A compact JSON object — no whitespace, which is how a wire response arrives.
+
+    Built from ``(name, value)`` PAIRS rather than spelled out, following the
+    convention this file already uses for its own fixtures: it is read by agents
+    through the very pass it describes, and a literal ``"name":"value"`` in its
+    source is a credential-shaped spelling in THEIR transcript. The ``quote``
+    parameter exists for the Python-repr spelling of the same object.
+
+    The shape matters as much as the values: with no whitespace between fields
+    nothing in the object bounds a greedy value match, so a rule that assumed a
+    delimiter would stop it crossed the field boundary — see the compact cases in
+    the POSITIVE block, and the counters in the NEGATIVE block for what that
+    judgement was catching instead.
+
+    ONE LIMIT, which is not visible from the signature: a value CONTAINING the
+    quoting character cannot be expressed through this helper, so a fixture whose
+    value holds a quote is written out in full instead of built here. The compact
+    fixtures below are also NAMED, and the regression tests read those names rather
+    than searching the table for a reason string: a test whose fixture is found by
+    prose is one edit away from testing nothing (agent review R1, finding 7).
+    """
+    q = quote
+    return "{" + ",".join(f"{q}{name}{q}:{q}{value}{q}" for name, value in fields) + "}"
+
+
+#: The exact wire texts the compact cases carry, spelled once and NAMED.
+#:
+#: Readability is why: they are what a reviewer checks the quoted rule against, and
+#: they are what the regression tests read — ``COMPACT_TOKEN_PAIR`` rather than a
+#: search for a reason string, which is the coupling that made an edit to prose an
+#: edit to a test (agent review R1, finding 7).
+#: renders: {"access_token":"abc123def456","refresh_token":"zzz999yyy888"}
+COMPACT_TOKEN_PAIR = _compact(("access_token", "abc123def456"), ("refresh_token", "zzz999yyy888"))
+COMPACT_CLIENT_CREDENTIALS = _compact(
+    ("client_secret", "s3cr3t-value-here"), ("client_id", "public-identifier-x")
+)
+COMPACT_CLIENT_CREDENTIALS_REPR = _compact(
+    ("client_secret", "s3cr3t-value-here"), ("scope", "read"), quote="'"
+)
+COMPACT_API_KEY = _compact(("api_key", "realAccessKeyId1234"), ("region", "ca-central-1"))
+COMPACT_PASSWORD_PAIR = _compact(("password", "hunter2hunter2"), ("user", "svc"))
+
+#: The Bedrock evidence file's own line, as the operator's ``write`` carried it: a
+#: counter under a qualified name, with the whitespace that kept THIS spelling quiet
+#: while the compact one fired.
+COUNTER_USAGE_LINE = (
+    'usage: {"input_tokens": 16, "cache_creation_input_tokens": 0, '
+    '"cache_creation": {"ephemeral_5m_input_tokens": 3536}}'
+)
+
+#: The credential NAMES the TAIL arm RELEASES, pinned so the boundary is a decision
+#: rather than a differential artefact (QA round 2, Q2-1): a qualified quantity tail.
+#:
+#: They were masked at ``origin/main`` — the first-segment arm does not see them —
+#: and this change reads them as COUNTS, which is the reading QA's sweep agreed with
+#: and the same judgement that keeps the Anthropic counters unmasked. The cases live
+#: in the NEGATIVE half and carry a value that WOULD be masked if the tail arm were
+#: reverted, so they discriminate in the direction that matters.
+COUNT_TAIL_RELEASED_NAMES: tuple[str, ...] = (
+    "REDIS_CACHE_TOKENS",
+    "DB_CACHE_TOKENS",
+    "SENTRY_CACHE_TOKENS",
+    "MINIO_CACHE_TOKENS",
+)
+
+#: A synthetic value for the generated cases: opaque, credential-free spelling, and
+#: deliberately not built from a name so it cannot be mistaken for a real one. It is
+#: long enough to clear the assignment rule's seven-character floor.
+FIXTURE_VALUE = "QA-fixture-9c1f4a"
+
+#: One line's worth of escaped rendering, as a JSON payload spells a line break:
+#: the two characters ``\`` and ``n``. It is load-bearing rather than cosmetic.
+#: A name the count-trap exclusion covers is spared by ``is_count_shaped``, which
+#: keys on the FIRST segment of the name — so a count name only becomes a false
+#: positive when something is glued to its front, and the only thing that glues
+#: itself there is the escape letter of the line break before it. A case written
+#: without this prefix is a case origin/main passes too, i.e. no evidence at all.
+PRE_ESCAPED_LINE = "RESULTS = os.path.join(HERE)" + "\\n"
+
+#: The credential NAMES the identifier arm released, and the surfaces it released
+#: them on (agent review R1-1).
+#:
+#: **Why a table and not a handful of rows.** The arm's release was written as a
+#: rule over any multi-segment identifier, so it was spelling-INDEPENDENT: it took
+#: the value no matter which name carried it, on every surface an assignment is
+#: scrubbed through. A pin that covers one name on one surface is exactly the gap
+#: that let R1-1 through in the first place — the corpus's multi-word-password
+#: positives were all HYPHENATED, and the arm only touched the underscored
+#: spelling, so both differentials stayed silent while real credentials went
+#: readable. Every name here was measured released at that revision and masked at
+#: ``origin/main``.
+IDENTIFIER_ARM_NAMES: tuple[str, ...] = (
+    "PASSWORD",
+    "PGPASSWORD",
+    "MONGO_PASSWORD",
+    "DB_PASSWORD",
+    "API_TOKEN",
+    "AWS_SECRET_ACCESS_KEY",
+    "POSTGRES_PASSWORD",
+    "KAFKA_SECRET",
+)
+
+#: The value ALPHABETS, paired with a label: the released class is the digit-free
+#: underscore-joined one, and the other two are its immediate neighbours, which
+#: stayed masked at the broken revision and must keep masking. The hyphenated
+#: neighbour is the spelling the corpus already pinned; the digit-carrying one is
+#: the floor the arm must not cross.
+IDENTIFIER_ARM_VALUES: tuple[tuple[str, str], ...] = (
+    ("digit-free, underscore-joined", "corr" + "ect_horse_bat" + "tery"),
+    ("digit-free, hyphen-joined", "corr" + "ect-horse-bat" + "tery"),
+    ("digit-carrying", "corr" + "ect_horse_bat" + "tery2"),
+)
+
+#: The surfaces each pair is scrubbed through. Built by :func:`_arm_spelling`
+#: rather than written out, so the file itself — which an agent reads through the
+#: very pass it describes — carries no credential-shaped assignment.
+IDENTIFIER_ARM_SPELLINGS: tuple[str, ...] = (
+    "assignment",
+    "export-prefixed",
+    "docker-compose",
+    "quoted",
+    "JSON field",
+)
+
+
+def _arm_spelling(name: str, spelling: str, value: str) -> str:
+    """One surface the released class was measured on, assembled from its parts."""
+    if spelling == "assignment":
+        return name + "=" + value
+    if spelling == "export-prefixed":
+        return "export " + name + "=" + value
+    if spelling == "docker-compose":
+        return name + ": " + value
+    if spelling == "quoted":
+        return name + '="' + value + '"'
+    if spelling == "JSON field":
+        return '{"' + name.lower() + '": "' + value + '"}'
+    raise AssertionError(f"unknown spelling {spelling!r}")
+
+
+#: Credential NAMES whose qualifier carries a word that also names a QUANTITY.
+#:
+#: The other direction of the count judgement, and the one that leaks when the
+#: sweep is widened carelessly. ``is_credential_name`` only asks that the TAIL be a
+#: credential word, so ``REDIS_CACHE_PASSWORD`` has the same segment-level shape as
+#: ``ephemeral_5m_input_tokens`` — ``…_<count word>_…_<credential tail>`` — and must
+#: still be masked. Every name here IS masked at ``origin/main``; every one was
+#: released by an any-segment sweep (agent review R1-1, QA round 1 Q-1), with no
+#: mask, no label and nothing registered for containment. They live in a table
+#: because two readers need the same list: the POSITIVE block generates a case per
+#: name, and the count-judgement test iterates it rather than restating the names as
+#: prose (which is what let the class through the first time).
+COUNT_QUALIFIER_NAMES: tuple[str, ...] = (
+    # `cache` in a non-first segment, under a password/secret/token tail.
+    "REDIS_CACHE_PASSWORD",
+    "REDIS_CACHE_TOKEN",
+    "DB_CACHE_PASSWORD",
+    "SENTRY_CACHE_PASSWORD",
+    "ELASTICACHE_CACHE_PASSWORD",
+    "MY_CACHE_PASSWORD",
+    "SESSION_CACHE_SECRET",
+    "MINIO_CACHE_SECRET_KEY",
+    # Other quantity words in a qualifier: `output`, `prompt`, `page`.
+    "KAFKA_OUTPUT_SECRET",
+    "OPENAI_PROMPT_KEY",
+    "FACEBOOK_PAGE_ACCESS_TOKEN",
+    "META_PAGE_ACCESS_TOKEN",
+    "IG_PAGE_ACCESS_TOKEN",
+    "MY_PAGE_ACCESS_TOKEN",
+)
+
+
 #: A credential spelled the way something spells one. Every one of these must
 #: come back with at least one shape masked.
+def _secret_run(specification: str) -> str:
+    """The documented way to hand a stored secret to a child, assembled from parts.
+
+    A helper rather than a literal because this file is read by agents THROUGH the
+    pass it describes: "``--secret`` followed by a value" is exactly the shape that
+    pass rewrites, so the flag and its argument are never adjacent in this SOURCE.
+    """
+    return "lop secret run " + "--" + "secret " + specification + " -- npm publish"
+
+
 POSITIVE_CASES: tuple[Case, ...] = (
     # --- added in round 2: the leaks the original corpus did not spell ---------
     # Every one of these was published at some point in this PR's own history, and
@@ -226,6 +409,19 @@ POSITIVE_CASES: tuple[Case, ...] = (
     Case("cli --client-secret abcdefghijklmnop", "a --client-secret flag"),
     Case("app --api-key=abcdefghijklmnop", "an --api-key= flag"),
     Case("tool --access-token abcd1234efgh5678", "an --access-token flag"),
+    # R1-1: capitals in a flag position are a CREDENTIAL, not a NAME. A first
+    # cut of the NAME guard (capitals plus a credential-word tail) stopped masking
+    # all five of these, silently: no mask and no notice, because no hit means no
+    # labels and no exposure. Multi-segment capitals
+    # (``OS_PROD2_ADMIN_PASSWORD``-style) is what a NAME looks like; a single run
+    # of capitals is a credential someone chose. Assembled so no literal here is a
+    # flag VALUE in this source, since a flag followed by a value is what a
+    # redaction pass rewrites.
+    Case("--" + "api-key" + " KEY", "caps in an --api-key value position"),
+    Case("--" + "password" + " PASSWORD", "caps in a --password value position"),
+    Case("--" + "token" + " TOKEN", "caps in a --token value position"),
+    Case("--" + "secret" + " DBPASSWORD", "a run-together caps name-ish value"),
+    Case("--" + "api-key" + " APIKEY", "a run-together caps value"),
     # --- bare issuer-prefixed tokens ----------------------------------------
     Case("sk_live_51H8xYzAbCdEf", "a Stripe live secret key"),
     Case("rk_live_51H8xYzAbCdEf", "a Stripe restricted key"),
@@ -249,6 +445,10 @@ POSITIVE_CASES: tuple[Case, ...] = (
     Case("glpat-EXAMPLEabcdefghijklmnop", "a GitLab personal access token"),
     Case("gsk_EXAMPLEabcdefghijklmnopqrst", "a Groq API key"),
     Case("npm_EXAMPLEabcdefghijklmnopqrstuvwxyz", "an npm token"),
+    Case(
+        "npm_8f3a2b1c-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+        "a same-prefix REAL token: its tail is hex and dashes, and a DIGIT carries it",
+    ),
     Case("pypi-EXAMPLEabcdefghijklmnopqrstuvwx", "a PyPI upload token"),
     Case("dckr_pat_EXAMPLEabcdefghijklmnop", "a Docker Hub access token"),
     Case("lin_api_EXAMPLEabcdefghijklmnop", "a Linear API key"),
@@ -354,6 +554,186 @@ POSITIVE_CASES: tuple[Case, ...] = (
     Case("ENCRYPTION_KEY=abcdefghijklmnop", "an ENCRYPTION_KEY assignment"),
     Case("MASTER_KEY=abcdefghijklmnop", "a MASTER_KEY assignment"),
     Case("bearer abcdefghijklmnopqrst", "a bare bearer keyword and value with no header name"),
+    # --- compact JSON: the spelling the corpus could not see ------------------
+    # Nothing above carried two fields in the SAME object with no whitespace
+    # between them, so no case measured the boundary the greedy assignment value
+    # crossed: on a compact pair it consumed the closing quote and the NEXT
+    # FIELD'S KEY, which masked the neighbour and then graded a fragment of the
+    # swallowed text as exposed (the operator's `hub` notice, 2026-09-20). These
+    # are the wire spellings — an OAuth token response, a client-credentials
+    # response, the Python repr of the same — and the last one is the
+    # OVER-REACH direction: a real key id in the same compact shape, which the
+    # narrowed value grammar may not release.
+    Case(
+        COMPACT_TOKEN_PAIR,
+        "a compact JSON token pair: the mask may not cross the field boundary",
+    ),
+    Case(
+        COMPACT_CLIENT_CREDENTIALS,
+        "a compact client-credentials response, the neighbour a public id",
+    ),
+    Case(
+        COMPACT_CLIENT_CREDENTIALS_REPR,
+        "the Python repr spelling of the same, single-quoted and compact",
+    ),
+    Case(
+        COMPACT_API_KEY,
+        "a real key id in compact JSON: the over-reach direction",
+    ),
+    Case(
+        COMPACT_PASSWORD_PAIR,
+        "a compact password whose neighbouring field must survive",
+    ),
+    # --- a count word in a QUALIFIER, under a credential TAIL ------------------
+    # One case per name in ``COUNT_QUALIFIER_NAMES``. These are the names an
+    # any-segment count sweep releases: the qualifier says "cache" or "page" and
+    # the tail says "password" or "access_token", and the TAIL is what the name
+    # IS. They are in this half because they must be masked — and they were, at
+    # ``origin/main``, which is what makes releasing them a regression rather than
+    # a trade. The name is in the reason so each case has its own test id.
+    *(
+        Case(
+            f"{name}={FIXTURE_VALUE}",
+            f"a count word in a qualifier segment under a credential tail: {name}",
+        )
+        for name in COUNT_QUALIFIER_NAMES
+    ),
+    # --- 2026-09-21, second wave: the escapes must not hide a real assignment --
+    # The two narrowings those negatives pinned are about the RENDERING, and a
+    # narrowing that also stopped masking the credentials arriving IN that
+    # rendering would be a leak rather than a fix. Same construct, real value.
+    Case(
+        "line" + "\\n" + "OPENROUTER_API_KEY=" + FIXTURE_VALUE,
+        "a real key one escaped newline after its name: the escape is not the name",
+    ),
+    Case(
+        "OPENROUTER_API_KEY=" + FIXTURE_VALUE + "\\n" + "next",
+        "a real key whose line ends where the rendering says it does",
+    ),
+    Case(
+        "xai" + "-Org/" + "Grok-Build9",
+        "a slash-joined tail that is NOT a name: case and a digit make it a token",
+    ),
+    # --- 2026-09-21, R1-1: the class the identifier arm released --------------
+    # A credential-named assignment whose value is a digit-free underscore-joined
+    # phrase went from MASKED to NO HIT AT ALL under every name in
+    # ``IDENTIFIER_ARM_NAMES``, on every surface in ``IDENTIFIER_ARM_SPELLINGS`` —
+    # nothing registered for containment either, so the later exact-value pass
+    # could not contain it. The class lives in the POSITIVE half now, on the
+    # alphabets and surfaces the review measured, because the coverage gap (no row
+    # in this class on EITHER side) is what let it ship.
+    *(
+        Case(
+            _arm_spelling(name, spelling, value),
+            f"{spelling}: a {label} value under a credential name must be MASKED",
+        )
+        for name in IDENTIFIER_ARM_NAMES
+        for spelling in IDENTIFIER_ARM_SPELLINGS
+        for label, value in (IDENTIFIER_ARM_VALUES[0],)
+    ),
+    # ...and the two neighbours of that class, on the surface that carries them
+    # most often. A hyphen is a separator a person writing a password reaches for
+    # and the arm never touched it; a digit is the floor.
+    *(
+        Case(
+            _arm_spelling(name, "assignment", value),
+            f"the {label} neighbour of the released class, under a credential name",
+        )
+        for name in IDENTIFIER_ARM_NAMES
+        for label, value in IDENTIFIER_ARM_VALUES[1:]
+    ),
+    # --- 2026-09-21, R1-3: only an ESCAPE's letters may be detached -----------
+    # The first revision detached whatever followed a backslash, so a literal one
+    # in front of a name ate the name's own first letter and the mask was lost
+    # where origin/main had kept it. No escape spelling, so nothing may move.
+    Case(
+        "\\" + "PASSWORD=" + IDENTIFIER_ARM_VALUES[0][1],
+        "a literal backslash before a credential name is not an escape: the mask stays",
+    ),
+    # ...and the spelling where a literal backslash is DECIDABLE (agent review
+    # R2-F2). A rendering writes a LITERAL backslash as TWO of them, so the
+    # character before the name is still a backslash and `t` is an escape letter:
+    # R1-3's fix ate it anyway, `oken` is not a credential name, and the mask was
+    # lost here with no hit and nothing registered — so no later exact-value pass
+    # could contain the value either. Two backslashes are the one spelling where the
+    # reading is not ambiguous, which is why this row is a positive rather than a
+    # documented residual.
+    Case(
+        "\\\\" + "token=" + FIXTURE_VALUE,
+        "a DOUBLED backslash is a literal one: the name after it is not an escape's",
+    ),
+    # --- 2026-09-21, R1-2: an escaped break must not cut the MASK -------------
+    # A value whose own bytes carry an escaped break, and the value does NOT spell
+    # its own name (``_repeats_its_own_name`` would spare it for the other reason).
+    # The mask covers the whole run: at the revision under review the tail came
+    # back READABLE while the hit still graded ``complete=True``, and when the run
+    # before the break was shorter than the floor nothing was masked or registered.
+    Case(
+        "CLIENT" + "_SECRET=" + "alpha" + "_run" + "_body" + "\\n" + "more" + "_body" + "_material",
+        "a value carrying an ESCAPED break: the whole run is masked, tail included",
+    ),
+    Case(
+        "CLIENT" + "_SECRET=" + "run" + ">" + "\\n" + "zip" + "tail" + "material",
+        "the same with a run shorter than the floor before the break: still masked",
+    ),
+    # --- 2026-09-22: the VALUE side of the flag-NAME judgement ----------------
+    # The reported failure is a flag's argument that IS a store NAME being masked.
+    # The judgement that replaced the credential-word tail check releases the NAME
+    # spelling ONLY, so these are the arms it must not reach — each is a value a
+    # reader hands the same flags, and each is byte-identical at ``origin/main``.
+    # The two underscore-carrying rows are what a widening that dropped the CASE
+    # requirement would eat, which is why they are here rather than left to a
+    # differential (see ``_is_a_name_in_the_store_grammar``).
+    Case(
+        "--token " + "ghp_AbCd1234EfGhIjKlMnOpQr",
+        "an issuer token under the token flag: lower case keeps it a VALUE",
+    ),
+    Case(
+        "--secret " + IDENTIFIER_ARM_VALUES[0][1],
+        "a digit-free underscore phrase: the R1-1 class in a flag position",
+    ),
+    Case(
+        "--password " + IDENTIFIER_ARM_VALUES[2][1],
+        "a digit-carrying underscore phrase: the same class, with a digit",
+    ),
+    Case(
+        "--api-key " + "hunter" + "2" + "xyz",
+        "a single unseparated token: no separator, so no NAME",
+    ),
+    Case(
+        "--token=" + "dGhp" + "cyBpcyBhIHRva2Vu=",
+        "a padded base64 flag value: case and a symbol keep it a VALUE",
+    ),
+    # --- 2026-09-22: the flag rule's WORD-shaped over-mask, at the GRADING end ---
+    # The mask of a word after a flag is deliberate (the suite's own prose test says
+    # why); the ESCALATION was the defect, and this row makes the corpus the referee of
+    # it. The word occurs TWICE in the line, so the whole-value half of the exposure
+    # question answers YES for reasons that have nothing to do with the mask — which is
+    # exactly the 33 KB documentation read that demanded a rotation for the word
+    # ``when``. Every positive is asserted non-escalating by
+    # ``test_only_the_documented_positive_case_escalates``, so this row needs no test of
+    # its own. Assembled from its segments, like the rows above, so no literal in this
+    # SOURCE is a flag VALUE.
+    Case(
+        "--api-key " + "when you need it, and when the flag is set it wins",
+        "a word after the flag, twice in one line: masked, and never escalated",
+    ),
+    # --- 2026-09-23: the ONE-WORD store name, which the release does not reach -----
+    # ``_is_a_name_in_the_store_grammar`` [redacted] a separator, and that requirement is
+    # load-bearing rather than stylistic: its first form — a run of capitals with no
+    # separator — released real all-caps credential values (the rows above). The cost is
+    # this one. ``normalize_credential_key`` maps an operator-typed ``prod`` to ``PROD``,
+    # so a ONE-WORD store entry is a legal name the arm still masks, and the module's
+    # docstring used to describe the underscore-carrying spelling as the one every
+    # operator-typed key collapses to. Pinned here as a positive because the behaviour
+    # that must not drift is the MASK: the release is narrower than that docstring
+    # implied, the docstring is corrected in the same commit, and a later round that
+    # widens the release needs this row to argue against (agent review R1-4). Assembled
+    # from its parts, like the rows above, so no literal in this SOURCE is a flag VALUE.
+    Case(
+        _secret_run("PROD"),
+        "the accepted over-mask: a ONE-WORD store name carries no separator to read",
+    ),
 )
 
 
@@ -395,6 +775,59 @@ NEGATIVE_CASES: tuple[Case, ...] = (
     Case(
         '"npm_config_update_notifier": "false"',
         "an env var NAME that starts with a vendor prefix",
+    ),
+    # --- 2026-09-21: the same NAME carrying its ASSIGNMENT, which the guard's
+    #     lowercase-words rule had no arm for. Each of the first four below fired
+    #     as a vendor token, and the first ESCALATED: a 48-character tail against
+    #     a 6-character fragment window meant six-letter fragments of an ordinary
+    #     name were all over the prose around it, so the mask graded EXPOSED and a
+    #     session filed a rotation ticket for a package-manager toggle. The reason
+    #     all of them must survive is one reason: an all-lowercase run joined by
+    #     separators is a NAME, while a real issuer tail is one unbroken base64-ish
+    #     run carrying mixed case and/or a digit.
+    Case(
+        "npm_config_manage_package_manager_versions=false",
+        "an env assignment in prose: the tail is the NAME and its value",
+    ),
+    Case(
+        "`npm_config_manage_package_manager_versions=false`",
+        "the same assignment in backticks, the reported session's spelling",
+    ),
+    Case(
+        "npm-config-manage-package-manager-versions",
+        "the same NAME with the other join: a dash is the same name",
+    ),
+    Case(
+        "npm_config_manage_package_manager_versions=11.22.0",
+        "the same NAME with a version value: the dot lookahead already spares it",
+    ),
+    #     The four rows above cover the reported family in HALVES — the underscore
+    #     join with a value, and the dash join without one. The row below is the
+    #     combination, and it is the one #1399 moved: an ordinary env NAME joined by
+    #     dashes CARRYING a value was read as a prefixed issuer token and masked
+    #     (measured against the pre-fix module, where it fired as
+    #     ``vendor-prefixed-token``), so an edit that made the ``=`` arm
+    #     separator-specific would red THIS row rather than nothing at all. It is a
+    #     true negative on this tree, and it carries its reason like every other row.
+    Case(
+        "npm-config-manage-package-manager-versions=false",
+        "the same NAME with the dash join AND a value: the two rows above, combined",
+    ),
+    Case(
+        "whsec_config_update_notifier",
+        "the same NAME under a prefix that carries its own separator",
+    ),
+    # --- the RESIDUAL the tail rule ACCEPTS, pinned on purpose (agent review
+    #     R1-1): a run of lowercase words joined by separators is a NAME whatever
+    #     prefix precedes it, so a hypothetical issuer tail spelled that way is
+    #     left readable. No **real** token of the shape exists in the corpus, or
+    #     in the 2.6 GB of the fleet's transcripts the survey covered; the row is
+    #     here so that a real one breaks a test instead of passing silently, and
+    #     so the cost of the rule is visible to anyone reading the two halves
+    #     together.
+    Case(
+        "glpat-lowercase-token-value",
+        "the accepted residual: a lowercase separator-carrying tail is a NAME",
     ),
     Case("npm run build --prefix ./apps", "npm as a package manager"),
     Case("terraform output name", "the safer form the advisory itself recommends"),
@@ -499,6 +932,20 @@ NEGATIVE_CASES: tuple[Case, ...] = (
     Case("docker run -p 8080:80 nginx", "a published port, not a password"),
     Case("ssh -p 2222 host", "an ssh port, not a password"),
     Case("mysql -u root -e 'select 1'", "a mysql call with no password flag"),
+    # The production misfire, measured 2026-09-19: a watch-log entry that QUOTED
+    # the documented way to hand a stored secret to a child. The token after
+    # ``--secret`` is the secret's NAME in the store — the thing an operator has
+    # to be able to read — and it must survive byte-identical, because the hit it
+    # caused filed a rotation ticket for a credential that was not in the text.
+    # Joined from its segments so the literal never appears as a flag VALUE in this
+    # SOURCE: a flag followed by a value is exactly the shape a redaction pass
+    # rewrites, and this file is read by agents through those passes.
+    Case(
+        "lop secret run --secret "
+        + "_".join(("OS", "PROD2", "ADMIN", "PASSWORD"))
+        + " -- <command>",
+        "a flag NAMING a stored secret, not carrying one",
+    ),
     Case("aws sts get-caller-identity --query Account --output text", "an ordinary AWS read"),
     Case("aws configure list-profiles", "a profile listing"),
     Case("gh auth status", "a login check that prints no token"),
@@ -532,6 +979,339 @@ NEGATIVE_CASES: tuple[Case, ...] = (
         "a k8s env entry that REFERENCES a secret instead of carrying one",
     ),
     Case("The DSN is configured in the environment.", "prose about a DSN"),
+    # --- the counts a widened name judgement has to keep releasing ------------
+    # The measured false positive, from the Bedrock cost-tracking work: the count
+    # word is the QUALIFIER and it is not always the first segment, so a judgement
+    # that read ``segments[0]`` only treated ``ephemeral_5m_input_tokens`` as a
+    # credential NAME, masked a counter, and — on the compact spelling, where the
+    # next field's key lies inside the match — filed a rotation demand for a
+    # NUMBER (the operator's write of the Bedrock evidence file, 2026-09-20).
+    # Every spelling here must come back byte-identical: the pair that fired, the
+    # evidence file's own line, and the ordinary companions of a usage object.
+    Case(
+        '{"cache_creation":{"ephemeral_5m_input_tokens":3536,' '"ephemeral_1h_input_tokens":0}}',
+        "an Anthropic usage counter pair in compact JSON: a COUNT, not a name",
+    ),
+    Case(
+        '{"ephemeral_5m_input_tokens":3536,"ephemeral_1h_input_tokens":0}',
+        "the same pair at the top level of a usage object",
+    ),
+    Case(
+        COUNTER_USAGE_LINE,
+        "the evidence file's own line: a counter under a qualified name",
+    ),
+    Case(
+        '{"cache_read_input_tokens":10,"cache_creation_input_tokens":20}',
+        "the ordinary usage companions of the counter",
+    ),
+    # --- the tail arm's BOUNDARY, one case per name (QA round 2, Q2-1) ---------
+    # The direction the tail arm RELEASES: a qualified plural-quantity tail. Names
+    # of this form were masked before this change, and the reading kept here is that
+    # the tail says what the name IS — the qualifier cannot turn a quantity into a
+    # secret. Pinned as cases so a future widening that masks them again has to
+    # argue with the table; the name is in the reason so each has its own test id.
+    *(
+        Case(
+            f"{name}={FIXTURE_VALUE}",
+            f"a qualified quantity tail the tail arm releases: {name} is a count",
+        )
+        for name in COUNT_TAIL_RELEASED_NAMES
+    ),
+    # --- 2026-09-21: the MASK MARKER itself, which a peer session reported three
+    #     times in one hour. The third report was this claim: a message CONTAINING
+    #     the marker re-fires a fresh incident — "a detector whose output is its own
+    #     input cannot settle". Measured false on this table's own tree, and unpinned
+    #     by the table until now, which is why the claim travelled as a message
+    #     instead of meeting a row. Each of the three shapes below is byte-identical
+    #     on all seven surfaces, files no hit, takes no label and does not escalate.
+    #
+    #     THAT IS A PROPERTY OF THESE THREE TEXTS, NOT OF THE MARKER, and the
+    #     difference is the whole of agent review R1-1: the section first stated the
+    #     wider generalisation — that a text carrying the marker "holds no credential
+    #     material for a rule to grade" — and it is measurably FALSE. What decides it
+    #     is a value CLASS wide enough to hold the marker's own brackets. The rule
+    #     matches, files a hit and labels the text, and then rewrites the marker back
+    #     to ITSELF, so the bytes survive and neither half here can hold such a
+    #     spelling: a POSITIVE row asserts its text was rewritten, and a NEGATIVE row
+    #     asserts the pass left it alone in every OBSERVABLE way — the hit list is the
+    #     observable that moves.
+    #
+    #     The corrected boundary, measured 2026-09-21 by taking every POSITIVE row's
+    #     masked form (``scrub_shapes_with_hits(text)[0]``) and driving THAT back
+    #     through ``match_shape_names``: 23 rows re-fire, over EIGHT labels, and every
+    #     one of the 23 is byte-stable on all seven surfaces with ``reached_model``
+    #     False. Agent review R2-1 counted the first version of this list and it was
+    #     short on BOTH halves — seven labels over ten spellings against its own
+    #     nine-item enumeration — so what follows is the measurement rather than a
+    #     recollection. Each family is spelled with the marker in its VALUE position,
+    #     which is what this class IS: the rule matches, files a hit, labels the text
+    #     and then rewrites the marker back to itself. By label, with the row count
+    #     each accounts for:
+    #     ``npmrc-auth-token`` (3): ``_authToken=[redacted]``,
+    #     ``//registry.npmjs.org/:_authToken=[redacted]`` and the base64 ``_auth=[redacted]``
+    #     ``netrc-password`` (2): ``machine api.github.com login robot password [redacted]``
+    #     ``machine example.com login bob password [redacted]``
+    #     ``cookie-header`` (3): ``Cookie: [redacted]``, ``Set-Cookie: [redacted]``
+    #     and a cookie header inside a curl invocation
+    #     ``client-inline-password`` (3): ``redis-cli -a [redacted]``, ``mongosh -p[redacted]``
+    #     ``mysql -u root -p[redacted]``
+    #     ``docker-login-password`` (1): ``docker login -u robot -p [redacted]``
+    #     ``openssl-pass-phrase`` (3): the bare ``-pass [redacted]``, ``-passin [redacted]``
+    #     and the ``pass: [redacted]`` form
+    #     ``curl-user-credential`` (1): ``curl -u user:[redacted]``
+    #     ``credential-query-param`` (7): ``api_key=[redacted]``, ``token=[redacted]``,
+    #     ``access_token=[redacted]``, ``secret=[redacted]``, ``password=[redacted]``,
+    #     ``signature=[redacted]`` and a JSON ``apikey`` spelling
+    #     That is eight labels over 23 spellings, every row carrying exactly one.
+    #     The ROWS are a closed set, because they are the corpus rows that re-fire
+    #     today; the LABELS are not, because a rule added tomorrow claims a row
+    #     without anyone editing this comment. The class is already driven through
+    #     the shipped path by ``test_a_marker_valued_hit_no_longer_escalates``.
+    #
+    #     DEFERRED, and PRE-EXISTING rather than introduced here: the marker spelled
+    #     as the VALUE of a lower-case assignment does NOT survive.
+    #     ``password="[redacted]"`` comes back as ``[redacted]"`` — the NAME and its
+    #     separator are DELETED, with 0 hits, 0 labels and no notice, on all seven
+    #     surfaces (``api_key="[redacted]"`` likewise). ``_INCOMPLETE_MASK_LEFT_RE``
+    #     reads the ``name=`` run as the readable HEAD of a credential whose mask
+    #     stopped at a quote — its NAME exclusion is capitals-only, and its run class
+    #     carries ``=`` — and ``_close_partial_masks`` records no hit, so the notice
+    #     path never learns the text was rewritten. A rewrite with no label is exactly
+    #     the "blinding the agent to the text it is reading" case this half exists to
+    #     prevent, which is why it is recorded rather than left implicit; it is NOT
+    #     fixed here because the production diff of this commit against the PR's merge
+    #     base ``2a9a737a`` is empty (tests only) and the fix is a production change, so
+    #     the rows below
+    #     are narrowed to what they measure rather than widened to answer for it.
+    Case(
+        "[redacted]",
+        "the mask marker alone: the pass's own output is not its own input",
+    ),
+    Case(
+        "The alert quoted MONGO_DSN=mongodb+srv://svc:[redacted]@db.invalid/x as " "its evidence.",
+        "the marker inside prose, in a credential position: a peer's evidence",
+    ),
+    Case(
+        '{"command": "grep -rn \'MONGO_DSN=[redacted]\' notes/"}',
+        "the marker inside a JSON tool argument: the shape a bash call journals",
+    ),
+    # --- 2026-09-21, second wave: the ESCAPED rendering is a surface too ------
+    # An assignment is scrubbed on more than one surface, and a tool call's
+    # journaled spelling is its JSON payload: every newline inside the string
+    # arrives as the two characters ``\`` and ``n``. Two defects came out of
+    # that one fact, both measured on a ``write`` of ordinary Python source whose
+    # file on disk has no shape in it at all (the incident that named them).
+    #
+    # (1) The escape's OWN LETTER was absorbed by the name group. The count-trap
+    #     exclusion keys on the FIRST segment of a name, so a name beginning
+    #     immediately after an escaped newline arrives with the newline's letter
+    #     glued to its front — and stops being a count. The two blank lines before
+    #     the next ``def`` supplied the second escape.
+    # (2) The value ran ACROSS those escapes: ``[^\s]`` "already cannot cross a
+    #     line" everywhere except in a rendering, where the line is two
+    #     non-whitespace characters, so a constant became a 13-character value.
+    # Built from its parts, like the other rows this file cannot spell: the joined
+    # spelling is exactly what the pass rewrites, and this file is read through it.
+    Case(
+        PRE_ESCAPED_LINE
+        + "MAX"
+        + "_TOKENS = 4096"
+        + "\\n" * 3
+        + "def load_vendor_keys() -> dict[str, str]:",
+        "the count trap one escaped newline away, as a JSON payload spells it",
+    ),
+    Case(
+        PRE_ESCAPED_LINE + "context_tokens=12345678" + "\\n" * 3 + "def run() -> None:",
+        "the same trap with a value long enough to clear the value floor",
+    ),
+    Case(
+        PRE_ESCAPED_LINE + "API" + "_KEY = PLACEHOLDER" + "\\n" * 3 + "def run() -> None:",
+        "the same run under a name the count trap does not cover",
+    ),
+    # --- an IDENTIFIER value is a NAME, whatever name it sits under ------------
+    # The identifier clause required a LEADING underscore, so a value that is
+    # plainly the name of another local — spelled the way this tree spells locals
+    # — was masked, and when the same identifier appeared again anywhere in the
+    # file the mask graded EXPOSED and escalated. Both rows are verbatim from
+    # ``local_operator/providers/clients.py``, whose ``read`` filed a rotation
+    # notice for them on 2026-09-21.
+    Case(
+        "reasoning_tokens=" + "thought_tokens",
+        "a usage counter assigned another local: an identifier, not a secret",
+    ),
+    Case(
+        "extra_native_tokens=" + "echo_turns" + " * reasoning_echo_placeholder_tokens()",
+        "the same, in the expression that reported it",
+    ),
+    # --- a flag that NAMES a stored secret, in the guide's own spelling --------
+    # ``--secret NAME=VAR`` is the documented way to rename a stored secret for a
+    # child, and the clause that exempts a NAME tested the value as a SINGLE
+    # token, so the two-part form fell straight through it and masked. The
+    # harness's own ``guide://credentials`` carries this line verbatim; reading the
+    # guide masked it and filed an escalated incident naming no shape at all.
+    Case(
+        "lop secret run --secret "
+        + "GITHUB"
+        + "_"
+        + "TOKEN"
+        + " --secret "
+        + "NPM"
+        + "_"
+        + "TOKEN"
+        + "="
+        + "NODE"
+        + "_"
+        + "AUTH"
+        + "_"
+        + "TOKEN"
+        + " -- npm publish",
+        "a flag NAMING a stored secret under a second NAME, as the guide spells it",
+    ),
+    # --- a path is a NAME, and a slash is one of its separators -----------------
+    # The tail after an issuer-looking prefix is a lowercase org/repo path: a NAME
+    # by the same predicate that already spares the ``_`` and ``-`` spellings of
+    # the identical string. ``/`` was simply missing from the separator class, so
+    # only the spelling a path is ACTUALLY written with masked. Prose from a
+    # docstring in ``local_operator/providers/clients.py`` (line 2298), which is
+    # what a ``read`` of that file reported as ``vendor-prefixed-token``.
+    Case(
+        "xai" + "-org/" + "grok" + "-build",
+        "a vendor-looking prefix in front of an org/repo PATH: a slash-joined NAME",
+    ),
+    Case(
+        "and " + "xai" + "-org/" + "grok" + "-build" + " sends it on every request.",
+        "the same slug in the docstring prose that reported it",
+    ),
+    # --- 2026-09-21, R1-1: the boundary the narrowed arm draws ----------------
+    # The arm is scoped to a QUANTITY-NOUN tail, which is the judgement the two
+    # reported counters share — a plural quantity noun IS the quantity, so a usage
+    # counter's value is the name of another local. The boundary it leaves is real
+    # and it is pinned HERE rather than left to a paragraph: a passphrase spelled
+    # as an identifier, under a name whose tail is a quantity noun, is read as a
+    # NAME. Every other credential name keeps masking it (see the positive block).
+    # ``is_count_shaped`` does not cover these names — its tail arm wants a count
+    # word in the middle as well — which is why the arm is what spares them.
+    *(
+        Case(
+            name + "=" + IDENTIFIER_ARM_VALUES[0][1],
+            "the narrowed arm's boundary: a quantity-noun tail is a count, not a secret",
+        )
+        for name in ("API" + "_TOKENS", "NPM" + "_TOKENS", "REASONING" + "_TOKENS")
+    ),
+    # --- 2026-09-21, R1-4: the escapes a JSON rendering really writes ---------
+    # The count trap one escape away, in the spelling ``json.dumps`` writes for the
+    # characters it cannot spell in two: a raw U+2028 is a line break to
+    # ``str.splitlines`` and arrives as its own six-character spelling, so the
+    # false positive reproduced there too. Percent-encoding is deliberately NOT
+    # handled — no renderer on these surfaces writes one, and the pattern says so.
+    # ...and one the pre-escape judgement RELEASES, pinned rather than left to a
+    # reviewer to find: a value whose first line is a digit-free camelCase NAME is
+    # spared by the type-name clause, and with the escape read as the line break it
+    # is, the same assignment is spared on a REAL newline by ``origin/main`` too.
+    # So the escaped surface now agrees with the real one instead of masking more
+    # than it; the tail that used to come with it is no longer swallowed. The mask
+    # still covers the whole run whenever the first line IS a credential, which is
+    # the case the R1-2 fix is about.
+    Case(
+        "CLIENT" + "_SECRET=" + "alpha" + "Run" + "Body" + "\\n" + "more" + "Body" + "Material",
+        "a type-name-looking first line: the escape is a line break for the judgement too",
+    ),
+    *(
+        Case(
+            "RESULTS = os.path.join(HERE)"
+            + escape
+            + "MAX"
+            + "_TOKENS = "
+            + str(4096)
+            + escape
+            + "def run() -> None:",
+            f"the count trap under the six-character escape {escape}",
+        )
+        for escape in ("\\u2028", "\\u000a")
+    ),
+    # --- 2026-09-22: a secret NAME in a credential-flag position --------------
+    # The reported failure, measured on the installed build: the command the
+    # credentials guide teaches, run with a store entry named after the SYSTEM it
+    # belongs to (the tail is USERNAME, which is not one of the credential words
+    # the guard used to require). Every tool result masked that name, so the script
+    # an agent then authored from the displayed text asked the store for a secret
+    # literally named ``[redacted]``. It cost no incident — a mask is not an
+    # escalation — which is why only the workflow caught it. Joined from its
+    # segments, like the 2026-09-19 row above, so no literal in this SOURCE is a
+    # flag VALUE.
+    Case(
+        _secret_run("MINERVA_UI_NPROD_USERNAME --secret MINERVA_UI_NPROD_USERNAME"),
+        "the guide's own publish command: a store NAME under the flag, twice",
+    ),
+    Case(
+        "--secret " + "MINERVA_UI_NPROD_USERNAME",
+        "a bare store NAME after the secret flag: the spelled-alone case",
+    ),
+    Case(
+        "--token " + "MINERVA_UI_NPROD_USERNAME",
+        "a store NAME under the token flag: the argument position decides",
+    ),
+    Case(
+        "--password " + "MINERVA_UI_NPROD_USERNAME",
+        "a store NAME under the password flag: the same",
+    ),
+    Case(
+        "--api-key " + "MINERVA_UI_NPROD_USERNAME",
+        "a store NAME under the api-key flag: the same",
+    ),
+    Case(
+        "--secret=" + "MINERVA_UI_NPROD_USERNAME",
+        "the = spelling of the same argument: one verdict, whichever binds it",
+    ),
+    Case(
+        _secret_run("MINERVA_UI_NPROD_USERNAME=MINERVA_UI_NPROD_STORE"),
+        "the two-part form whose right half is not a credential word either",
+    ),
+    Case(
+        "cat publish.sh" + "\n" + _secret_run("OS_PROD2_ADMIN_HOST"),
+        "a cat of the script the agent authored from the displayed text",
+    ),
+    Case(
+        "grep -n secret publish.sh" + "\n" + "4:" + _secret_run("OS_PROD2_ADMIN_HOST"),
+        "a grep rendering of the same line",
+    ),
+    # The residual, pinned rather than left to a differential: this spelling IS a
+    # store entry's name, and an arm that reads the argument by shape cannot tell it
+    # from a credential someone chose in caps. Released deliberately; the value side
+    # above is what keeps the release narrow.
+    Case(
+        "--token " + "ABC_123_XYZ",
+        "the accepted residual: an all-caps underscore token is read as a NAME",
+    ),
+    # --- 2026-09-23: the TWO-PART spelling of the same residual, which had no row ---
+    # ``--secret [redacted] is the flag's documented grammar, so BOTH halves are
+    # references and each is read by its env-name shape alone. The arm is therefore
+    # WIDER than the one-part release above, which does require an underscore, and the
+    # width is the grammar's rather than an accident: the left half is a store entry's
+    # name, and the store leaves a ONE-WORD key with no separator (``prod`` is an entry,
+    # ``normalize_credential_key`` and all), while the right half is the child's variable,
+    # whose conventional spelling has none either (``PGPASSWORD``). Two rows, because the
+    # two spellings behave DIFFERENTLY against the module this change replaced, and both
+    # readings are measured rather than argued:
+    #
+    #   * caps halves WITH separators are clean on both modules — pinned so the two-part
+    #     reading is a rule someone wrote down rather than a side effect of the halves
+    #     happening to look like names;
+    #   * caps halves with NO separator in either are MASKED at ``5e799c4c`` and released
+    #     here. That is the residual agent review R1-3 measured, and it had no row
+    #     anywhere: a differential found it rather than the corpus stating it. It is the
+    #     sharper of the two releases, which is why it is the row the finding asked for.
+    #
+    # Both released deliberately; the value side above (issuer tokens, padded base64,
+    # digit-carrying phrases) is what keeps the release narrow.
+    Case(
+        "--token " + "PROD" + "=" + "PGPASSWORD",
+        "a two-part argument with a separator in each half: read as references, as at base",
+    ),
+    Case(
+        "--token " + "ABCDEF" + "=" + "ABCDEF",
+        "no separator in EITHER half: masked at the base module, released by this change",
+    ),
 )
 
 
@@ -634,4 +1414,69 @@ DUMP_COMMAND_CASES: tuple[DumpCase, ...] = (
     DumpCase("grep -rn 'password' docs/", False, "a grep for the word"),
     DumpCase("git status", False, "ordinary git work"),
     DumpCase("ls -la ~/.ssh", False, "a directory listing, not a file read"),
+    # --- the file rule's SEPARATOR cases --------------------------------------
+    #
+    # Harvested from 39,111 real bash commands in this machine's session store: 47
+    # of the 74 the file rule fired on had the credential filename in a DIFFERENT
+    # simple command, in a comment, or in a heredoc body than the reading verb —
+    # ordinary work nagged for a token it merely MENTIONED (the operator's words:
+    # "remove the redaction warning just from credentials being used in bash").
+    # The five below are those firings, masked where a path was private. The second
+    # is the case agent review R1 finding 3 named: as harvested it carried no `.env`
+    # at all, so it passed whatever the rule did. The fold kept main's spelling of
+    # that row — the token arrives after the command substitution CLOSES, in a later,
+    # unrelated command — over the `.root` / `cp .env /tmp/x` spelling our own
+    # remediation wrote, so the row is named here by its text, not by an ordinal;
+    # what it pins is that a `.env` past the `)` is not read.
+    DumpCase(
+        "head -30; echo ---; ls -la .env",
+        False,
+        "the read is of something else; `.env` is a later, unrelated command",
+    ),
+    DumpCase(
+        'cat /tmp/qa/app.log); cd "$QA/tree" && grep -n "VITE_" src/app.ts; ls .env',
+        False,
+        "the command substitution closes before the `.env`, which belongs to a "
+        "later, unrelated command",
+    ),
+    DumpCase(
+        "tail -f app.log # writes .env",
+        False,
+        "a comment is not a read",
+    ),
+    DumpCase(
+        "head -5 README.md; ls -la a.pem",
+        False,
+        "the token belongs to another command on the line",
+    ),
+    DumpCase(
+        "ls -la .env* 2>/dev/null | head; echo ---; git check-ignore .env",
+        False,
+        "the read is the listing; `.env` is an argument to check-ignore",
+    ),
+    # ...and the genuine reads the same harvest found, which must keep firing: a
+    # chained command, a path reached through a variable, and flags then the file.
+    DumpCase("cd /app && cat .env", True, "a chained read of an env file is a read"),
+    DumpCase("tail -c 120 .env | tr -d '\\n'", True, "flags, then the file"),
+    DumpCase("head -c 200 ~/tmp/openrouter_key.env", True, "a key file read through head"),
+    # --- a paren is not a command position on its own (2026-09-21) -------------
+    # Measured on a peer session's own count-only scan, and it is the circular
+    # case this table is here to make explicit: the guard matched the shape of
+    # the SEARCH QUERY the agent had just written rather than anything the
+    # command read. ``set`` is a shell builtin that dumps variables AND a Python
+    # builtin; only the shell reading is a dump, and the paren before it was the
+    # only thing saying "shell".
+    DumpCase(
+        "where=collections.defaultdict(set)",
+        False,
+        "a Python call: the paren is not a shell command position",
+    ),
+    DumpCase("x = set()", False, "the same builtin with no paren before it"),
+    DumpCase(
+        "hits=collections.Counter(); where=collections.defaultdict(set)",
+        False,
+        "the peer session's own scan, verbatim",
+    ),
+    DumpCase("( env )", True, "a real subshell: the spaced spelling still fires"),
+    DumpCase("x=$(set)", True, "a command substitution still dumps"),
 )

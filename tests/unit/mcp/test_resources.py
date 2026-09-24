@@ -287,3 +287,78 @@ def test_unknown_resource_errors_are_actionable_and_namespaces_do_not_leak() -> 
     missing = resolver("mcp://linear/missing")
     assert missing is not None
     assert "Read `mcp://linear` for available tools" in missing
+
+
+def test_a_deferred_enable_says_next_turn_not_next_model_call() -> None:
+    """The reply must not promise a schema the request in flight does not carry.
+
+    ``activate`` reports whether the swap reaches the next model call. The session
+    host publishes its tools array once per turn (``Session._wire_tools``), so an
+    enable read mid-turn lands at the next TURN — and "the next model call" is a
+    claim the model acts on: it would reach for a tool whose schema is not in this
+    turn's request. ``None`` (a host that reports nothing) keeps the historical
+    sentence, which is what the test above pins.
+    """
+    manager = FakeManager()
+    deferred = make_mcp_resolver(manager, lambda server, tool: False)
+    immediate = make_mcp_resolver(manager, lambda server, tool: True)
+
+    deferred_detail = deferred("mcp://linear/get_user")
+    assert deferred_detail is not None
+    assert "NEXT TURN, not the next model call" in deferred_detail
+    assert "full input schema is now available" not in deferred_detail
+    # The tool IS callable in that turn — the live inventory carries it and
+    # resolution reads the inventory — so the reply says so and conditions the
+    # call on the description carrying the arguments (the schema is in neither
+    # the array nor the block, and a blind call is what the conditional avoids).
+    # It must NOT tell the model to stop: that is the stall this reply exists to
+    # prevent (copy round 2, C4).
+    assert "The tool is callable now." in deferred_detail
+    assert "say so and stop" not in deferred_detail
+    # Everything else about the reply is unchanged: same activation, same header,
+    # same untrusted-description warning.
+    assert "# Enabled MCP tool: mcp__linear_get_user" in deferred_detail
+    assert "untrusted reference data" in deferred_detail
+
+    immediate_detail = immediate("mcp://linear/get_user")
+    assert immediate_detail is not None
+    assert "full input schema is now available" in immediate_detail
+
+
+def test_the_search_header_a_session_renders_states_when_a_schema_arrives() -> None:
+    """Both arms carry the timing rule; the RENDERED one must not grow.
+
+    ``make_mcp_resolver`` renders the DEFERRED arm whenever it is given a deferrer,
+    and both shipped callers give it one (``session_factory.wire_mcp_into_session``
+    and ``harness/subagent.py``), so this is the header a real session reads (copy
+    round 2's correction; QA round 2, Q-r2-1). Its length is not cosmetic: the line
+    is appended before ``used = sum(map(len, lines))``, and that running total
+    decides which matched tools are shown AND enabled against
+    ``MAX_SEARCH_RESULT_CHARS``.
+
+    WHICH ARM THE BOUNDARY NUMBER BELONGS TO (review round 3, F3-2): QA's flip — a
+    growth of 63 characters taking 4 enabled matches to 3 at ``used`` 31,968 ->
+    32,031 — was measured on the OTHER arm, the ``defer=None`` one no shipped
+    caller reaches (161 -> 224 after round 1's rewrite, 238 now). The arm pinned
+    HERE moved the other way across these rounds, 157 -> 155, so the shipped
+    path's running total sits two characters LOWER than it did, not closer to the
+    cap. The mechanism is shared (both lines enter ``used``); the direction is not.
+    """
+    rendered = make_mcp_resolver(FakeManager(), lambda *a: None, defer=lambda *a: None)
+    result = rendered("mcp://?search=authenticated+user&limit=2")
+    assert result is not None
+    header = next(line for line in result.splitlines() if line.startswith("Call discovered"))
+    # The clause names the tool LIST, not "here": the entries below this header
+    # carry each match's input schema, so a claim about "here" would be
+    # contradicted by the result it heads (review round 3, F3-1).
+    assert "No schema added to your tool list" in header
+    assert "its URL says when" in header
+    # 155 today, from 157: the pin is what makes the next copy edit argue for the
+    # budget rather than spend it silently.
+    assert len(header) == 155, "the rendered search header grew; see this test's docstring"
+
+    unreachable = make_mcp_resolver(FakeManager(), lambda *a: None)
+    enabled_result = unreachable("mcp://?search=authenticated+user&limit=2")
+    assert enabled_result is not None
+    assert "at the next model call, or at the next turn" in enabled_result
+    assert "mcp://<server>/<tool>" in enabled_result

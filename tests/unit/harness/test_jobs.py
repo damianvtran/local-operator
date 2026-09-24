@@ -169,6 +169,39 @@ async def test_progress_burst_publishes_every_edge_without_persisting() -> None:
     await manager.dispose()
 
 
+@pytest.mark.asyncio
+async def test_a_mapping_report_merges_structured_fields_onto_the_job_row() -> None:
+    """A mapping progress report lands its keys on ``latest_details`` (m3).
+
+    This is the channel bash uses to record a background memory kill's peak and
+    ceiling by key, so a renderer/compaction can read them without parsing the
+    head text. A plain string still writes ``progress`` — the two shapes must
+    coexist without one clobbering the other.
+    """
+    release = asyncio.Event()
+
+    async def blocked(job_id, signal, report_progress):  # noqa: ANN001, ANN202
+        await release.wait()
+        return "done"
+
+    manager = AsyncJobManager()
+    job_id = manager.register("bash", "hog", blocked)
+    report = manager._progress_fn(job_id)
+    report("heartbeat")
+    assert require_job(manager, job_id).latest_details == {"progress": "heartbeat"}
+    # A mapping merges in without displacing the progress line.
+    report({"memory_exceeded": True, "memory_peak_bytes": 123, "memory_ceiling_bytes": 64})
+    assert require_job(manager, job_id).latest_details == {
+        "progress": "heartbeat",
+        "memory_exceeded": True,
+        "memory_peak_bytes": 123,
+        "memory_ceiling_bytes": 64,
+    }
+    release.set()
+    await manager.settled_event(job_id).wait()
+    await manager.dispose()
+
+
 def test_accumulate_usage_preserves_provider_reported_calls() -> None:
     """A tool-using child's receipts stay attached to their original calls."""
     from local_operator.harness.subagent import _accumulate_usage
@@ -259,6 +292,47 @@ def _task_row(
         usage=usage,
         descendant_usage=descendant_usage or [],
     )
+
+
+def test_lookup_snapshot_matches_get_without_sweeping_retained_rows() -> None:
+    """Roster indexing must preserve aliases without making a read sweep."""
+    manager = AsyncJobManager(retention_ms=1)
+    current = _task_row("current", status="completed")
+    current.attempt_aliases = ["previous"]
+    manager.restore([current])
+    manager._jobs["expired"] = AsyncJob(
+        id="expired",
+        type="task",
+        status="completed",
+        start_time=1.0,
+        settled_at=time.time() - 86_400.0,
+        label="expired",
+    )
+
+    snapshot = manager.lookup_snapshot()
+
+    assert snapshot["current"] is manager.get("current")
+    assert snapshot["previous"] is manager.get("previous")
+    assert snapshot["expired"] is manager.get("expired")
+    assert "missing" not in snapshot
+    # Unlike list(), building a read index is not an observation that ages the
+    # roster out from under the projection currently being built.
+    assert "expired" in manager._jobs
+
+
+def test_lookup_snapshot_does_not_expose_direct_row_shadowed_by_swept_alias() -> None:
+    """Alias resolution precedes direct ids even after the target was swept."""
+    manager = AsyncJobManager()
+    manager._aliases["alias"] = "already-swept-target"
+    manager._jobs["alias"] = _task_row("alias")
+
+    snapshot = manager.lookup_snapshot()
+
+    assert manager.get("alias") is None
+    assert snapshot.get("alias") is None
+    assert "alias" not in snapshot
+    # Snapshot construction, unlike list(), does not itself sweep a row.
+    assert "alias" in manager._jobs
 
 
 def test_accounting_summary_is_bounded_for_hundred_child_fanout() -> None:

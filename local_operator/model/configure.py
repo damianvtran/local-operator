@@ -25,11 +25,13 @@ import logging
 import math
 import os
 import re
+import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextvars import ContextVar
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 from pydantic import BaseModel, SecretStr
@@ -59,7 +61,6 @@ from local_operator.model.registry import (
     unknown_model_info,
 )
 from local_operator.model.speed import supports_fast_mode
-from local_operator.paths import config_dir
 
 logger = logging.getLogger("local_operator.model.configure")
 
@@ -71,7 +72,6 @@ if TYPE_CHECKING:
 
     from local_operator.clients.openrouter import OpenRouterListModelsResponse
     from local_operator.clients.radient import RadientListModelsResponse
-    from local_operator.credentials import CredentialManager
     from local_operator.env import EnvConfig
     from local_operator.model.discovery import DiscoveredModel
     from local_operator.providers.auth_store import AuthStore
@@ -543,6 +543,119 @@ _DEEPSEEK_DIRECT_MODELS = frozenset(
 )
 
 
+#: The effort ladder an AGGREGATOR ROUTER route (``auto`` / ``openrouter/auto``)
+#: offers, and the level it starts on.
+#:
+#: WHY A ROUTE-KEYED RULE, not an id-keyed ``model.effort`` table row. That
+#: table is keyed on the MODEL id precisely so a route cannot change the knob
+#: (``anthropic/claude-opus-5`` through an aggregator is the same weights as the
+#: direct route). A router's id breaks that premise: ``auto`` is not a model at
+#: all, and the same word is a LOCAL model on ``ollama/auto`` (see
+#: ``discovery.is_meta_route_id``, which takes the provider for this reason).
+#: So the router's ladder belongs to the ROUTE, and the route is exactly what
+#: ``registry.AGGREGATOR_ROUTER_MODEL_IDS`` names.
+#:
+#: WHY THIS VOCABULARY. The router's product is dispatching to a frontier model
+#: chosen per request, so the honest ladder is the one the AGGREGATOR documents
+#: for the ``reasoning_effort`` parameter it fronts -- the three real depths
+#: low/medium/high, which is both OpenAI's canonical value set and the set
+#: Radient's own OpenAI-compatible request schema names for the field
+#: (``internal/requests/openai.go``: "Constrains reasoning effort (low, medium,
+#: high)"), PLUS the ``auto`` sentinel on the aggregators whose server resolves
+#: it (see the provider split below). The alternative -- the
+#: rungs of whichever model the router selects today (``deepseek/deepseek-v4.1-flash``
+#: takes none/low/high/max) -- would pin this table to a selection that is random
+#: by design and would offer rungs a future route rejects. A level the selected
+#: model does not itself offer is mapped to the nearest rung it does by the
+#: aggregator, so an aggregator-wide ladder cannot 400; the current route's own
+#: top rung, ``high``, is on both sets, which is what the operator requires the
+#: wire to carry.
+#:
+#: WHY THE LADDER IS SPLIT BY AGGREGATOR, and why the split is load-bearing
+#: rather than cosmetic. The two routers front different request schemas.
+#: Radient's own OpenAI-compatible schema is now readonly for an explicit
+#: ``auto`` sentinel -- the SERVER interprets ``"auto"`` and resolves it to a
+#: real depth (see the agent-server ``resolveEffort`` seam) -- so the ladder
+#: the harness offers on ``radient``/``radient-key`` carries ``auto`` as its
+#: floor AND its default. OpenRouter does NOT: it validates ``reasoning_effort``
+#: against an enum it defines and rejects values outside it (measured: openclaw
+#: issue #77350; it 400s on an unknown enum member), and it documents no
+#: ``auto`` member, so its ladder stays the three canonical rungs and its
+#: default stays ``high`` -- the level the route's current model documents.
+#: One shared ladder would either 400 every OpenRouter router turn on ``auto``
+#: or leave Radient's sentinel unreachable; keyed on the PROVIDER is the only
+#: spelling that keeps both routes legal.
+#:
+#: WHY A ROUTE-KEYED RULE AT ALL, not an id-keyed ``model.effort`` table row:
+#: see ``aggregator_router_effort_ladder``.
+ROUTER_EFFORT_LADDERS: dict[str, tuple[str, ...]] = {
+    "radient": ("auto", "low", "medium", "high"),
+    "radient-key": ("auto", "low", "medium", "high"),
+    "openrouter": ("low", "medium", "high"),
+}
+
+#: The level each router seeds when the user has set none. Radient seeds
+#: ``auto`` -- the sentinel the server resolves, so the harness states the
+#: route's own default dispatch intent rather than a depth it chose. OpenRouter
+#: seeds ``high``: it has no ``auto`` member, and ``high`` is the level the
+#: route's current model documents as its default, so the emitted body states
+#: the depth already in force rather than switching reasoning on.
+ROUTER_EFFORT_DEFAULTS: dict[str, str] = {
+    "radient": "auto",
+    "radient-key": "auto",
+    "openrouter": "high",
+}
+
+#: The fallback for an aggregator router route this table has no provider entry
+#: for. ``high`` rather than ``auto`` because an unknown router's schema is not
+#: known to accept the sentinel -- failing back to a real rung cannot 400.
+ROUTER_EFFORT_FALLBACK: tuple[str, ...] = ("low", "medium", "high")
+ROUTER_EFFORT_FALLBACK_DEFAULT: str = "high"
+
+
+def aggregator_router_effort_ladder(provider: str, model_id: str) -> tuple[str, ...]:
+    """The effort ladder for an aggregator ROUTER route, or ``()`` for anything else.
+
+    THE single owner of both the ladder and the "is this the router" test, so
+    the builder's ladder and its seed cannot disagree about which route they
+    describe. Keyed on the route (provider in ``AGGREGATOR_PROVIDERS``) AND the
+    id (in ``registry.AGGREGATOR_ROUTER_MODEL_IDS``), because neither alone is
+    enough: the id avoids ``ollama/auto`` and the provider avoids a vendor that
+    happens to serve a model literally named ``auto``.
+
+    The ladder is keyed on the PROVIDER too -- see :data:`ROUTER_EFFORT_LADDERS`
+    for why Radient's carries the ``auto`` sentinel and OpenRouter's must not.
+
+    ``model_id`` is the CANONICAL id ``build_model_spec`` has already stripped
+    its own ``<hosting>/`` prefix from, which is why ``openrouter/auto`` arrives
+    intact (the strip deliberately skips aggregator hostings, whose ids
+    legitimately begin with their own name).
+    """
+    from local_operator.model.registry import AGGREGATOR_ROUTER_MODEL_IDS
+    from local_operator.providers.registry import AGGREGATOR_PROVIDERS
+
+    if provider in AGGREGATOR_PROVIDERS and model_id in AGGREGATOR_ROUTER_MODEL_IDS:
+        return ROUTER_EFFORT_LADDERS.get(provider, ROUTER_EFFORT_FALLBACK)
+    return ()
+
+
+def aggregator_router_effort_default(provider: str, model_id: str) -> str | None:
+    """The level an aggregator ROUTER route seeds, or ``None`` when not a router.
+
+    The sibling of :func:`aggregator_router_effort_ladder`, split out so the seed
+    is asked for the same way the ladder is rather than read from a constant the
+    builder has to remember to key on the provider itself. ``None`` for every
+    non-router route, which is what keeps the ``if router_levels`` branch in
+    ``build_model_spec`` the only place a seed is applied on an aggregator.
+    """
+    from local_operator.model.registry import AGGREGATOR_ROUTER_MODEL_IDS
+    from local_operator.providers.registry import AGGREGATOR_PROVIDERS
+
+    if provider in AGGREGATOR_PROVIDERS and model_id in AGGREGATOR_ROUTER_MODEL_IDS:
+        return ROUTER_EFFORT_DEFAULTS.get(provider, ROUTER_EFFORT_FALLBACK_DEFAULT)
+    return None
+
+
 def reasoning_echo_required(provider: str, model_id: str) -> bool:
     """Whether requests to ``(provider, model_id)`` must echo reasoning back.
 
@@ -806,7 +919,17 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     # see a provider listing.
     direct_levels = deepseek_effort_ladder(canonical, model_name)
     direct_deepseek = bool(direct_levels)
-    fallback_levels = direct_levels or supported_efforts(model_name)
+    # An aggregator ROUTER route owns its own ladder, and it is checked BEFORE
+    # the listing and the table for the same reason the deepseek arm is: the
+    # route is the only thing that knows the router's capability, and no
+    # listing row exists for a route neither aggregator publishes (``auto`` is
+    # absent from both cached listings) and no ``model.effort`` row can exist
+    # for a word that is a model on another provider. See
+    # ``aggregator_router_effort_ladder`` for why the vocabulary is the
+    # aggregator's and why this route seeds a default where every other
+    # aggregator id must not.
+    router_levels = aggregator_router_effort_ladder(canonical, model_name)
+    fallback_levels = router_levels or direct_levels or supported_efforts(model_name)
     # Whether requests to this model must echo reasoning back on every
     # assistant turn. Keyed on the MODEL FAMILY, on every route, and NOT on
     # ``direct_deepseek`` -- that flag also decides the effort ladder, and the
@@ -821,7 +944,8 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     # The ladder: the provider's own listing wins where it speaks (above), the
     # table answers its silence.
     #
-    # The seed: NOTHING is seeded on an aggregator route. Not the listing's
+    # The seed: NOTHING is seeded on an aggregator route — with ONE exception,
+    # the ROUTER, argued in full at the branch below. Not the listing's
     # `default_effort`, and not the table's either. On a direct provider route
     # the table still seeds exactly as it always has.
     #
@@ -867,6 +991,24 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     # user gets today if they never touch the dial, and one keystroke sets a
     # real rung.
     #
+    # THE ROUTER IS THE ONE EXCEPTION, and the measurements above do not reach
+    # it. Every argument in this block is about a NAMED model reached through an
+    # aggregator: the seed would be a second-hand claim about a model whose own
+    # API we are not talking to, and the aggregator's gate makes omission and a
+    # level meaningfully different. The router is not a model — it is one
+    # endpoint this module ships a row for, whose PRODUCT is dispatching to a
+    # frontier model per request. On ``radient/auto`` there is no upstream model
+    # to make a claim about: the level is an instruction to the router, which
+    # maps it to whatever the selected route accepts. The operator's decision is
+    # that the harness EMITS this level on that route rather than leaving the
+    # dial invisible, and ``high`` is the level the current route's own model
+    # documents as its default — so the emitted body states the depth already in
+    # force on today's route rather than switching reasoning on. The exception is
+    # scoped to the router id on an aggregator hosting (see
+    # ``aggregator_router_effort_ladder``); every OTHER aggregator id, including
+    # a vendor model genuinely named ``auto`` on a non-aggregator hosting, keeps
+    # the omit rule above.
+    #
     # What this costs, stated plainly: 8 OpenRouter Anthropic rows that boot
     # showing `high` today (`claude-opus-5`, `claude-sonnet-5`, `claude-fable-5*`
     # and their `:batch` twins) now boot showing `auto`. That is wire-neutral —
@@ -889,7 +1031,27 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     # its catalogue happens to be readable without a key. The two sets are equal
     # today, and this is the one that stays right if they diverge.
     if canonical in AGGREGATOR_PROVIDERS:
-        reasoning_effort = None
+        # ...except the ROUTER, which is the one aggregator route this module
+        # ships a row for and selects as a route. Its default is a recorded
+        # intent rather than a guess about a model behind it (see
+        # ``aggregator_router_effort_ladder``), so it seeds a level where an
+        # arbitrary aggregator id must seed nothing. The seed is asked of
+        # ``aggregator_router_effort_default`` rather than read from a constant,
+        # so the ladder and the seed are keyed on the provider in ONE place and
+        # cannot disagree: Radient seeds its ``auto`` sentinel, OpenRouter seeds
+        # ``high``. The router branch is the consequence of the operator's
+        # decision to have the harness EMIT an effort level on this route; the
+        # no-seed rule stands for every other aggregator id, which is what this
+        # branch and the tests around it still pin.
+        if router_levels:
+            # Guarded by membership for the same reason the direct branch is: a
+            # listing that ever NARROWS the router's ladder must not be sent a
+            # level it stopped offering, so seed nothing rather than a rung the
+            # resolved ladder no longer carries.
+            router_default = aggregator_router_effort_default(canonical, model_name)
+            reasoning_effort = router_default if router_default in effort_levels else None
+        else:
+            reasoning_effort = None
     else:
         # The direct route, i.e. exactly today's behaviour and the one that must
         # not regress: 91 shipped registry rows never fetch a listing, and every
@@ -1484,62 +1646,47 @@ def _listing_can_correct(info: ModelInfo) -> bool:
 _PUBLIC_LISTING_TOKEN = "public-catalogue-read"
 
 
-def _credential_file_names(provider: str) -> list[str]:
-    """The ``CredentialManager`` keys worth trying for ``provider``.
-
-    Delegates to :func:`~local_operator.providers.registry.credential_file_names`,
-    which is where this question is answered for the whole repo. It lived here
-    first; the mobile picker needed the identical answer, and two readers of the
-    two ``env_keys`` forms is exactly how one of them ends up handling only the
-    plain-string form and dropping ``anthropic``. Kept as a module-private alias
-    rather than deleted because this module's call sites read better against a
-    local name and the indirection costs nothing.
-    """
-    from local_operator.providers.registry import credential_file_names
-
-    return credential_file_names(provider)
-
-
-def _catalogue_api_key(provider: str) -> str:
-    """An explicit API key for ``provider`` from env or the credential file, else "".
+def _catalogue_api_key(provider: str, *, base: Path | None = None) -> str:
+    """An explicit API key for ``provider`` from the provider store or the
+    environment, else "".
 
     Reading ONLY ``os.environ`` was a real defect rather than a shortcut: both
     sanctioned credential flows bypass the environment. ``local-operator
-    credential update OPENROUTER_API_KEY`` writes the ``CredentialManager`` file,
-    and the TUI's ``/login`` writes the ``AuthStore``. So the users who configured
-    credentials the app's own way were exactly the ones this enrichment silently
-    skipped — their sessions streamed fine (the stream-time cascade reads those
-    stores) while their band showed a 128k window and no cost, forever, with the
-    failure recorded only at debug level. Every other key reader in the repo goes
-    through ``CredentialManager``; this one was the outlier.
+    credential update OPENROUTER_API_KEY`` writes a provider-class ``LOP_PROVIDER_*``
+    STORE row (``store_provider_key`` never writes the legacy file — that file has
+    no writers left), and the TUI's ``/login`` writes the ``AuthStore``. So the
+    users who configured credentials
+    the app's own way were exactly the ones this enrichment silently skipped —
+    their sessions streamed fine (the stream-time cascade reads those stores)
+    while their band showed a 128k window and no cost, forever, with the failure
+    recorded only at debug level. Every other key reader in the repo now goes
+    through the shared store-first reader; this one was the outlier.
 
-    The env leg goes through ``resolve_env_key`` rather than reading the
-    definition's ``env_keys`` directly, because that field has TWO forms —
-    ``str | Callable[[], str | None]`` — and an ``isinstance(..., str)`` test
-    silently drops the callable one. Anthropic is the only provider using it, so
-    the reader that skipped it skipped precisely the provider whose listing needs
-    a credential most: its catalogue 401s unauthenticated, so enrichment never ran
-    and every unshipped Claude id kept the 128k unknown default.
+    The env leg goes through ``registry.provider_env_key``, which reads the
+    provider-class STORE row first, then the environment — the legacy plaintext
+    file it used to consult last is GONE (PR2a) —
+    and does so for BOTH forms of ``env_keys`` — ``str | Callable[[], str |
+    None]`` — where an ``isinstance(..., str)`` test silently drops the callable
+    one. Anthropic is the only provider using it, so the reader that skipped it
+    skipped precisely the provider whose listing needs a credential most: its
+    catalogue 401s unauthenticated, so enrichment never ran and every unshipped
+    Claude id kept the 128k unknown default.
 
     The OAuth store is NOT read here — see :func:`_catalogue_credential`, which
     layers it underneath this and reports which kind of secret it found.
+
+    ``base`` is threaded from the caller's config root (R4), so a catalogue
+    resolve for a host configured at a non-default root reads the store that root
+    holds.
     """
-    from local_operator.providers.registry import resolve_env_key
-
     canonical = "test" if provider == "noop" else provider
-    from_env = resolve_env_key(canonical)
-    if from_env:
-        return from_env
-
     try:
-        from local_operator.credentials import CredentialManager
+        from local_operator.providers.registry import provider_env_key
 
-        manager = CredentialManager(config_dir())
-        for name in _credential_file_names(canonical):
-            secret = manager.get_credential(name)
-            if secret is not None and secret.get_secret_value():
-                return secret.get_secret_value()
-    except Exception as exc:  # noqa: BLE001 - an unreadable store is not fatal
+        value = provider_env_key(canonical, base=base)
+        if value:
+            return value
+    except Exception as exc:  # noqa: BLE001 - a store failure is not fatal here
         logger.debug("could not read %s key for the catalogue: %s", provider, exc)
     return ""
 
@@ -1572,7 +1719,9 @@ def _env_secret_is_oauth(secret: str) -> bool:
     return bool(names) and all("OAUTH" in name for name in names)
 
 
-def _catalogue_credential(provider: str) -> tuple[str, bool, str | None]:
+def _catalogue_credential(
+    provider: str, *, base: Path | None = None
+) -> tuple[str, bool, str | None]:
     """``(secret, is_oauth, account_id)`` for a listing call.
 
     The OAuth flag selects provider-specific auth, while OpenAI additionally
@@ -1585,7 +1734,7 @@ def _catalogue_credential(provider: str) -> tuple[str, bool, str | None]:
     practice for Anthropic: the env leg could not see a callable ``env_keys``, so
     a stored OAuth row beat an explicitly exported ``ANTHROPIC_API_KEY``.
     """
-    key = _catalogue_api_key(provider)
+    key = _catalogue_api_key(provider, base=base)
     if key:
         return key, _env_secret_is_oauth(key), None
     return _oauth_listing_token(provider)
@@ -1628,7 +1777,12 @@ def _oauth_listing_token(provider: str) -> tuple[str, bool, str | None]:
 
 
 def _info_from_discovery(
-    provider: str, model_name: str, fallback: ModelInfo, *, timeout: float | None = None
+    provider: str,
+    model_name: str,
+    fallback: ModelInfo,
+    *,
+    timeout: float | None = None,
+    base: Path | None = None,
 ) -> ModelInfo:
     """Fill ``fallback``'s gaps from the provider's own live model listing.
 
@@ -1664,7 +1818,9 @@ def _info_from_discovery(
     try:
         from local_operator.model.discovery import DEFAULT_TIMEOUT_S, available_models
 
-        secret, is_oauth, account_id = _listing_credential.get() or _catalogue_credential(provider)
+        secret, is_oauth, account_id = _listing_credential.get() or _catalogue_credential(
+            provider, base=base
+        )
         rows, status = available_models(
             provider,
             api_key=secret or None,
@@ -2046,7 +2202,7 @@ _listing_credential: ContextVar[tuple[str, bool, str | None] | None] = ContextVa
 
 @functools.lru_cache(maxsize=64)
 def _resolve_model_info_cached(
-    provider: str, model_id: str, _bucket: int, _scope: str = ""
+    provider: str, model_id: str, _bucket: int, _scope: str = "", _base: Path | None = None
 ) -> ModelInfo:
     """Memoized body of :func:`resolve_model_info`.
 
@@ -2104,6 +2260,7 @@ def _resolve_model_info_cached(
             model_id,
             info,
             timeout=None if _needs_enrichment(info) else _REFRESH_TIMEOUT_S,
+            base=_base,
         )
     route_context = (info.context_window, info.default_context_window, info.max_context_window)
     if _needs_enrichment(info) and canonical != "deepseek":
@@ -2177,7 +2334,11 @@ def invalidate_model_info_cache() -> None:
 
 
 def resolve_model_info(
-    provider: str, model_id: str, *, credential: tuple[str, bool, str | None] | None = None
+    provider: str,
+    model_id: str,
+    *,
+    credential: tuple[str, bool, str | None] | None = None,
+    base: Path | None = None,
 ) -> ModelInfo:
     """A model's real metadata: static registry first, catalogue to fill gaps.
 
@@ -2224,17 +2385,19 @@ def resolve_model_info(
     if provider == "openai":
         from local_operator.model.discovery import _cache_key
 
-        credential = credential if credential is not None else _catalogue_credential(provider)
+        credential = (
+            credential if credential is not None else _catalogue_credential(provider, base=base)
+        )
         scope = _cache_key("openai", account_scoped=credential[1], account_id=credential[2])
         if credential[1] and not credential[2]:
             scope = "openai-oauth-unscoped"
         token = _listing_credential.set(credential)
         try:
-            info = _resolve_model_info_cached(provider, model_id, bucket, scope)
+            info = _resolve_model_info_cached(provider, model_id, bucket, scope, base)
         finally:
             _listing_credential.reset(token)
     else:
-        info = _resolve_model_info_cached(provider, model_id, bucket)
+        info = _resolve_model_info_cached(provider, model_id, bucket, "", base)
     # Feed the paint memo from the authoritative answer, so a renderer that
     # resolves AFTER the session does (the common order) paints the real row,
     # and so the background refresh is the only writer on a cold process.
@@ -2522,7 +2685,7 @@ def refresh_model_info_background(provider: str, model_id: str) -> None:
 def configure_model(
     hosting: str,
     model_name: str,
-    credential_manager: CredentialManager | None = None,
+    config_dir: Path | None = None,
     model_info_client: ModelListingClient | None = None,
     env_config: EnvConfig | None = None,
     temperature: Optional[float] = None,
@@ -2558,16 +2721,22 @@ def configure_model(
     if not model_name:
         model_name = DEFAULT_MODEL_NAMES.get(canonical, "")
 
-    # Best-effort static key for legacy consumers; the cascade at stream time
-    # re-resolves (OAuth refresh, env, stored keys) — see AuthStore.
+    # Best-effort static key for legacy consumers; the store-first reader tries
+    # the provider-class row, then the environment (the legacy plaintext file is
+    # no longer a rung, PR2a). The cascade at
+    # stream time re-resolves (OAuth refresh, env, stored keys) — see AuthStore.
     api_key: Optional[SecretStr] = None
-    if credential_manager is not None and isinstance(definition.env_keys, str):
+    if config_dir is not None:
         try:
-            secret = credential_manager.get_credential(definition.env_keys)
-        except Exception:
-            secret = None
-        if secret is not None and secret.get_secret_value():
-            api_key = secret
+            from local_operator.providers.registry import provider_env_key
+
+            # The caller's own root (R4): a store configured elsewhere is the
+            # one this key must come from.
+            static_key = provider_env_key(canonical, base=config_dir)
+        except Exception:  # noqa: BLE001 - a store failure must not block config
+            static_key = None
+        if static_key:
+            api_key = SecretStr(static_key)
 
     model_info: ModelInfo
     if model_info_client is not None:
@@ -2583,7 +2752,7 @@ def configure_model(
         # compaction sizes itself off a 128k fallback on a 1M model and cost
         # cannot be reported at all. `resolve_model_info` fills the gap from a
         # disk-cached catalogue: one HTTP call a day, and never a blocked start.
-        model_info = resolve_model_info(canonical, model_name)
+        model_info = resolve_model_info(canonical, model_name, base=config_dir)
 
     spec = build_model_spec(canonical, model_name, model_info)
     if definition.local_setup:
@@ -2880,6 +3049,34 @@ class _SessionTransport:
     owners: int = 1
 
 
+class _ChildModelRequestCounter:
+    """Count provider streams owned by this session's delegated children.
+
+    The runtime's native watchdog samples the count from another thread, so
+    keep the shared state to one lock-protected integer rather than walking the
+    child-session registry or reading mutable child contexts there.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._count = 0
+
+    def begin(self) -> None:
+        with self._lock:
+            self._count += 1
+
+    def end(self) -> None:
+        with self._lock:
+            if self._count <= 0:
+                raise RuntimeError("child model request counter underflow")
+            self._count -= 1
+
+    @property
+    def count(self) -> int:
+        with self._lock:
+            return self._count
+
+
 class SessionStreamFn:
     """One conversation's stateful router over a shareable client pool.
 
@@ -2972,6 +3169,8 @@ class SessionStreamFn:
         cache_lineage_id: str | None = None,
         *,
         _transport: _SessionTransport | None = None,
+        _child_request_counter: _ChildModelRequestCounter | None = None,
+        _counts_as_child_request: bool = False,
     ) -> None:
         import httpx
 
@@ -2998,6 +3197,14 @@ class SessionStreamFn:
         )
         self._http = self._transport.http
         self._closed = False
+        # Forked child streams share this scalar counter with their root session.
+        # The root's own calls never increment it; only forks set the per-stream
+        # marker, so unrelated manager work and detached streams stay out.
+        self._child_request_counter = _child_request_counter or _ChildModelRequestCounter()
+        self._counts_as_child_request = _counts_as_child_request
+        # Descendants inherit this stream's shared counter. If this is a root
+        # session, its own request calls still never count as child activity.
+        self._descendant_request_counter = self._child_request_counter
         self._context_tracker = ContextTokenTracker()
         self._notice_handler: Callable[[str, str], Awaitable[None] | None] | None = None
         # The session's route bridge: called with the pinned fallback target
@@ -3387,11 +3594,13 @@ class SessionStreamFn:
         )
 
     def fork(self, session_id: str, *, cache_lineage_id: str | None = None) -> "SessionStreamFn":
-        """Create a conversation owner sharing only auth and HTTP transport.
+        """Create a conversation owner sharing transport and parent activity count.
 
         Route pins, callbacks, effort decisions and usage attribution are local
         to the child. Cache lineage sharing is opt-in for true transcript forks;
         a fresh delegated prompt does not inherit a parent's cache identity.
+        Nested forks retain the same parent-owned counter so one scalar answers
+        whether any delegated model request is outstanding.
         """
         if self._closed:
             raise RuntimeError("cannot fork a closed session stream")
@@ -3401,9 +3610,12 @@ class SessionStreamFn:
             session_id,
             cache_lineage_id,
             _transport=self._transport,
+            _child_request_counter=self._descendant_request_counter,
+            _counts_as_child_request=True,
         )
         self._transport.owners += 1
         child._parent_session_id = self._session_id
+        child._descendant_request_counter = self._descendant_request_counter
         if cache_lineage_id:
             # A TRUE transcript fork replays a byte-identical prefix, so the
             # parent's host is genuinely warm for it — the same reasoning that
@@ -5419,6 +5631,17 @@ class SessionStreamFn:
                 self._context_tracker.record(binding.measured if binding else measured, usage)
             yield event
 
+    @property
+    def child_model_requests_in_flight(self) -> bool:
+        """Whether any forked child stream is currently awaiting a provider.
+
+        This O(1) read is intended for a parent runtime's watchdog probe. It is
+        deliberately narrower than child-job liveness: a child counts only while
+        its provider stream is active, so a hung child outside that request is
+        not made immune to the parent watchdog.
+        """
+        return self._descendant_request_counter.count > 0
+
     async def _record_stream(
         self, request: ChatRequest, stream: AsyncIterator[StreamEvent]
     ) -> AsyncIterator[StreamEvent]:
@@ -5443,6 +5666,14 @@ class SessionStreamFn:
         started_at = time.monotonic()
         request_id = uuid.uuid4().hex
         first_token_at: float | None = None
+        # Stream start to the model's first REASONING fragment. Recorded
+        # alongside ``ttft_ms`` rather than folded into it: they are two
+        # different waits on the same call -- first thing the model SAID versus
+        # the first thing the user could SEE -- and before the harness rendered
+        # reasoning at all, the second one was invisible to the ledger as well as
+        # to the operator. Same clock and same origin as ``ttft_ms``, so the two
+        # are directly comparable and the reasoning gap is a subtraction.
+        first_reasoning_at: float | None = None
         outcome = "incomplete"
         # Snapshot char lengths BEFORE streaming: cheap (string length reads,
         # sub-millisecond even on a very large context) and safe to hand a
@@ -5456,6 +5687,12 @@ class SessionStreamFn:
 
         final_usage: Usage | None = None
         ok = True
+        counted_child_request = self._counts_as_child_request
+        if counted_child_request:
+            # This is immediately before the first provider-stream await. The
+            # child wrapper's finally also runs on early close, failure, and
+            # cancellation, keeping concurrent/nested requests balanced.
+            self._descendant_request_counter.begin()
         try:
             async for event in stream:
                 if first_token_at is None and getattr(event, "type", "") in (
@@ -5463,6 +5700,13 @@ class SessionStreamFn:
                     "tool_call_delta",
                 ):
                     first_token_at = time.monotonic()
+                if first_reasoning_at is None and getattr(event, "type", "") == "reasoning_delta":
+                    # Matched on the event's own type string, exactly as
+                    # ``ttft_ms`` matches its two above: this wrapper is written
+                    # against the provider stream contract, and importing the
+                    # wire classes here to isinstance them is what the existing
+                    # line deliberately avoids.
+                    first_reasoning_at = time.monotonic()
                 usage = getattr(event, "usage", None)
                 if usage is not None:
                     final_usage = usage
@@ -5528,6 +5772,10 @@ class SessionStreamFn:
             outcome = type(exc).__name__
             raise
         finally:
+            if counted_child_request:
+                # Stop representing provider work before the separate analytics
+                # handoff; that bookkeeping must not widen the in-flight window.
+                self._descendant_request_counter.end()
             # In a ``finally`` so an aborted/failed stream (which still cost
             # input tokens) is recorded too — best-effort and never raising.
             self._record_usage(
@@ -5539,6 +5787,11 @@ class SessionStreamFn:
                 duration_ms=(time.monotonic() - started_at) * 1000,
                 ttft_ms=(
                     (first_token_at - started_at) * 1000 if first_token_at is not None else -1
+                ),
+                first_reasoning_ms=(
+                    (first_reasoning_at - started_at) * 1000
+                    if first_reasoning_at is not None
+                    else -1
                 ),
                 outcome=outcome,
                 usage_reported=final_usage is not None,
@@ -5554,6 +5807,7 @@ class SessionStreamFn:
         request_id: str = "",
         duration_ms: float = -1,
         ttft_ms: float = -1,
+        first_reasoning_ms: float = -1,
         outcome: str = "unknown",
         usage_reported: bool = True,
     ) -> None:
@@ -5620,6 +5874,7 @@ class SessionStreamFn:
                     purpose=request.purpose,
                     duration_ms=duration_ms,
                     ttft_ms=ttft_ms,
+                    first_reasoning_ms=first_reasoning_ms,
                     preparation_ms=request.preparation_ms,
                     outcome=outcome,
                     usage_reported=usage_reported,

@@ -85,10 +85,25 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Atomic plant of <venv>/bin/'Local Operator'; both paths are venv-derived",
     ),
     (
+        "local_operator/tools/builtin.py::_rg_config_path",
+        "os.replace",
+        # Atomic write of the generated ripgrep exclude config. Both paths come
+        # from `config_dir()/cache/` plus a fixed basename — no session id, no
+        # caller input — so neither can name a path under `sessions/`.
+        "Atomic replace of <config_dir>/cache/rg-search-excludes.conf; both paths config-derived",
+    ),
+    (
         "local_operator/procname.py::_plant_hardlink",
         "os.unlink",
-        "Clears this pid's own .tmp link in <venv>/bin before/after linking",
-        2,
+        # THREE calls, and each is the SAME ``tmp`` name (``.<brand>.<pid>.tmp``)
+        # in the merged venv's ``bin/``: before the link (a leftover from this
+        # pid), after ``os.replace`` (a same-inode replace is a documented no-op
+        # and consumes nothing, so the temp would otherwise leak once per replant
+        # — 609 leftovers across 16 generations measured on the reporting host),
+        # and on the error path. Never ``link`` itself, and never a path derived
+        # from a session id or a config dir.
+        "Clears this pid's own .tmp link in <venv>/bin before, after and on error",
+        3,
     ),
     (
         "local_operator/procname.py::_plant_libpython",
@@ -104,6 +119,41 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/procname.py::_sweep_orphan_temps",
         "<path>.unlink",
         "Removes <venv>/bin/.'Local Operator'.<dead-pid>.tmp orphans only; glob is venv-scoped",
+    ),
+    # -- operator/device pairing store (stage D, issue #1310) ----------------
+    # Every path in these FOUR is built from `config_dir()/operator/...` plus a
+    # device id validated by `_safe_name` (alphanumerics, '-' and '_', at most 128
+    # chars) — no session id, no caller-chosen directory component, and nothing
+    # that can name a path under `sessions/`. The VALUES they unlink are the
+    # pairing code, a pending pairing request, one device certificate, and the
+    # revocation record itself: four single files this module itself wrote, never a
+    # directory.
+    (
+        "local_operator/operator/devices.py::clear_pairing",
+        "<path>.unlink",
+        "Drops <config>/operator/pairing.json, the code this process minted",
+    ),
+    (
+        "local_operator/operator/devices.py::drop_pending",
+        "<path>.unlink",
+        "Drops one <config>/operator/pending/<device-id>.json this module wrote",
+    ),
+    (
+        "local_operator/operator/devices.py::record_revocation",
+        "<path>.unlink",
+        "Drops one <config>/operator/devices/<device-id>.json on revocation",
+    ),
+    (
+        "local_operator/operator/devices.py::forget_revocation",
+        "<path>.unlink",
+        # The inverse verb's last step (agent review round 10, R10-1). The path is
+        # `revoked_path(config_root)` = `operator_root(config_root)/"revoked.json"`
+        # — a LITERAL basename joined onto the literal segment "operator" under the
+        # config root, so it is a fixed sibling of `sessions/` and no input reaches
+        # it: there is no device id, session id or caller path in the expression,
+        # and nothing here can name a directory at all. Reached only when the last
+        # entry goes, which is why the record does not survive as an empty list.
+        "Drops <config>/operator/revoked.json when its last entry is lifted",
     ),
     (
         "local_operator/tui/app.py::OperatorApp._release_sidebar_preparation",
@@ -167,6 +217,28 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.rename",
         "Renames one landed file WITHIN that same quarantine directory to its "
         "content-corrected name; both sides are direct children of it",
+    ),
+    # The same quarantine, reached from `browser_files` itself — the two additions
+    # the operator's decision needs and PR A did not have. The proof is a BRANCH,
+    # not an assumption: `intake_landed` refuses `is_within(source, config_dir())`
+    # BEFORE any of these calls, so a source can never be a session directory (or
+    # anything else under the config root), and the destination is composed by
+    # `session_dir()` as `<config_dir>/browser/downloads/<stamp>-<session8>/`, a
+    # SIBLING of `sessions/`. Same reasoning, one level down: the unlink removes
+    # the ENTRY the host named (never a resolved target — review round 1's R1) and
+    # the move relocates the file the browser wrote into the user's own download
+    # directory, which is outside the config root by definition.
+    (
+        "local_operator/browser_files.py::_unlink_entry",
+        "os.unlink",
+        "Removes the single entry intake refused; every caller runs after the "
+        "config-root refusal, so the path cannot be under sessions/",
+    ),
+    (
+        "local_operator/browser_files.py::intake_landed",
+        "shutil.move",
+        "Relocates one landed file into <config_dir>/browser/downloads/<stamp>-<session8>/ "
+        "(a sibling of sessions/); the source is outside the config root by the same branch",
     ),
     (
         "local_operator/tui/session_drafts.py::SessionDraftStore._write",
@@ -263,6 +335,24 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Removes only its own named temporary file after a failed atomic replacement",
     ),
+    # -- the archive index: the pins store's row, for the pins store's reasons --
+    # One file at the config root with a FIXED basename (`archived-sessions.json`
+    # plus a pid-named sibling while it is written). No session id, no caller
+    # input and no directory ever reaches either path: the ids the file CONTAINS
+    # are guarded by `session_directory_name` on the way in, and the ids it is
+    # pruned against are only ever joined onto `config_dir()/sessions` to be
+    # stat-ed.
+    (
+        "local_operator/session/archived.py::_write_archived",
+        "os.replace",
+        "Atomic replacement of the single archived-sessions.json file in the config "
+        "dir, never a directory and never under sessions/",
+    ),
+    (
+        "local_operator/session/archived.py::_write_archived",
+        "<path>.unlink",
+        "Removes only its own named temporary file after a failed atomic replacement",
+    ),
     # -- the one legitimate remover -----------------------------------------
     (
         "local_operator/session/cleanup.py::remove_session_dir",
@@ -279,6 +369,23 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/session/cleanup.py::_write_record",
         "<path>.unlink",
         "the tmp FILE of a failed record write",
+    ),
+    # Store-maintenance completion metadata (2026-09-23). Startup passes the
+    # AgentRegistry config root to this worker; session directories are its
+    # separate `sessions/<id>` children. The target uses a fixed stamp basename
+    # at that root, and mkstemp creates the temporary FILE beside it in the same
+    # config root, so neither replace nor failure cleanup can displace a session.
+    (
+        "local_operator/session_factory.py::_write_store_maintenance_stamp",
+        "os.replace",
+        "atomically publishes only the fixed config-root .store-maintenance.json FILE; "
+        "its tmp FILE is created in that same root, outside sessions/<id>",
+    ),
+    (
+        "local_operator/session_factory.py::_write_store_maintenance_stamp",
+        "<path>.unlink",
+        "removes only the same-root temporary FILE after stamp publication fails; "
+        "config_dir is the store root, not a session directory",
     ),
     # -- agent / team storage (agents/<id>/, teams/<name>/), never sessions/ --
     ("local_operator/agents.py::AgentRegistry.delete_agent", "shutil.rmtree", "agents/<id>"),
@@ -463,13 +570,8 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.replace",
         "FrontendStateStore.replace(state) — an in-memory paint swap, not a path",
     ),
-    (
-        "local_operator/credentials.py::CredentialManager.write_to_file",
-        "os.replace",
-        "temp FILE -> .env",
-    ),
-    # Same shape as the credentials writer above: a temp FILE inside the
-    # secrets directory replacing master.key in that same directory. Both
+    # Same shape as the browser-bridge/keys writers below: a temp FILE inside
+    # the secrets directory replacing master.key in that same directory. Both
     # paths come from `keys.key_path()`, which is `config_dir()/secrets/` plus
     # a fixed basename — no caller input and no session id reaches either, so
     # neither can name a path under sessions/.
@@ -610,11 +712,6 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/secrets/keys.py::discard_staged_wrapped_key",
         "<path>.unlink",
         "master.wrapped.incoming* under config_dir()/secrets, staged by this call",
-    ),
-    (
-        "local_operator/credentials.py::CredentialManager.write_to_file",
-        "os.unlink",
-        "temp FILE -> .env",
     ),
     ("local_operator/browser_bridge/daemon.py::_private_write", "os.replace", "temp FILE"),
     ("local_operator/browser_bridge/state.py::publish", "os.replace", "temp FILE"),
@@ -961,6 +1058,34 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         ".session.pid marker FILE",
     ),
+    # The update window's handover marker (2026-09-19): the outgoing runtime drops a
+    # FILE beside the inbox so its successor can report the move as applied
+    # (``types.UPDATING``). Both calls are built from ``update_window_path``, i.e.
+    # ``<the passed session dir>/update-window.json`` — one fixed basename, no caller
+    # input, no session id, and neither can name a DIRECTORY, so a session directory
+    # is not reachable from either: the unlink removes only the marker itself.
+    #
+    # THE TEMPORARY IS A UNIQUE ``mkstemp`` NAME, not ``update-window.json.tmp``
+    # (agent review round 1, MINOR 4): that one shared name measured 59 absent-or-
+    # corrupt reads and 2374 failed writes when two runtimes served one session
+    # directory, so the temp is now created by ``mkstemp`` with this fixed PREFIX
+    # inside the same directory — still a fixed basename plus a random suffix from
+    # the kernel, and still unable to name a directory.
+    (
+        "local_operator/session/runtime/inbox.py::write_update_window",
+        "os.replace",
+        "temp FILE -> update-window.json, both fixed names inside the session dir",
+    ),
+    (
+        "local_operator/session/runtime/inbox.py::write_update_window",
+        "os.unlink",
+        "removes only this call's own mkstemp sidecar temp file",
+    ),
+    (
+        "local_operator/session/runtime/inbox.py::clear_update_window",
+        "<path>.unlink",
+        "update-window.json marker FILE",
+    ),
     (
         "local_operator/session/runtime/registry.py::scan",
         "<path>.unlink",
@@ -1121,6 +1246,23 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         4,
     ),
     ("local_operator/wakes/store.py::remove_entry", "<path>.unlink", "wakes/<id>.json FILE"),
+    # The spooled-turn store is the third of the supervisor's own state files
+    # (`local_operator/wakes/spooled.py`), beside the index and the ledger and
+    # with the same shape: every path is `<config>/wakes/spooled/<session-id>.json`
+    # built from the config dir plus a FIXED suffix, and the id reaches it only as
+    # a filename (from a session directory's own name, or from this directory's
+    # listing), so it can carry no separator. Nothing in the module walks,
+    # renames or removes a directory, under `sessions/` or anywhere else.
+    (
+        "local_operator/wakes/spooled.py::_write",
+        "os.replace",
+        "temp FILE -> wakes/spooled/<id>.json",
+    ),
+    (
+        "local_operator/wakes/spooled.py::clear_spooled_turn",
+        "<path>.unlink",
+        "wakes/spooled/<id>.json FILE",
+    ),
     ("local_operator/web_fetch/service.py::_prune_cache", "<path>.unlink", "fetch cache FILEs"),
     # -- container/in-memory .remove()/.replace(), not the filesystem --------
     (
@@ -1144,7 +1286,10 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "in-memory .replace",
     ),
     (
-        "local_operator/session/frontend_state.py::FrontendStateStore.subscribe.unsubscribe",
+        # ``_join`` rather than ``subscribe``: both entry points (``subscribe``
+        # and ``subscribe_threadsafe``) admit their callback through this one
+        # private method, so the closure that removes it is qualified here.
+        "local_operator/session/frontend_state.py::FrontendStateStore._join.unsubscribe",
         "<path>.remove",
         "list.remove(listener)",
     ),
@@ -1175,11 +1320,6 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/session/frontend_state.py::SnapshotMcpManager.__init__",
         "<path>.replace",
         "in-memory .replace",
-    ),
-    (
-        "local_operator/session/frontend_state.py::FrontendStateStore.replace_and_notify",
-        "<path>.replace",
-        "self.replace(state): FrontendStateStore.replace, an in-memory snapshot swap",
     ),
     (
         "local_operator/session/frontend_state.py::SnapshotSubagentComms.__init__",
@@ -1317,6 +1457,10 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "our recorded copy of the Windows task definition FILE",
     ),
+    # Both rows below arrived independently and BOTH are kept: each side
+    # appended its own entry to this tuple, so the union is the resolution —
+    # neither row supersedes the other and dropping either would let a real
+    # removal go unallow-listed (the guard would fail, not silently pass).
     # The phone web bundle's refused build (2026-09-19). The call removes
     # `<web>/dist` and nothing else: `web_dir` is `Path(__file__).parent /
     # "web"` for this install, or the snapshot tree the updater is about to
@@ -1330,6 +1474,60 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/mobile/install.py::_discard_bundle",
         "shutil.rmtree",
         "Drops <web>/dist after the bundle guard refuses it; web_dir is package/snapshot-derived",
+    ),
+    # The tunnel connector's park record (2026-09-19). `state.clear()` unlinks
+    # `tunnel/state.json` when the condition it describes is over — the connector
+    # is serving again, or retrying, or the operator stopped the tunnel — because
+    # every surface (the terminal's notice, `lop tunnel status`, the desktop
+    # route) reads that file as the truth about a process none of them can see,
+    # and a park that outlived its condition would have all of them describing a
+    # connector that is not parked. The path is `config.directory()` + a fixed
+    # basename: that is `$LOCAL_OPERATOR_CONFIG_DIR` (or `~/.local-operator`),
+    # never a session id, never a caller, and never a directory under
+    # `sessions/`; `unlink` takes the one FILE the connector itself wrote.
+    (
+        "local_operator/tunnels/state.py::clear",
+        "<path>.unlink",
+        "Removes only the park FILE tunnel/state.json under the config dir; "
+        "never a directory, never under sessions/",
+    ),
+    # The stall watchdog's own dump files (2026-09-20). `dump_path` composes
+    # these from `paths.log_dir()` and an int pid ALONE — never a session id,
+    # never a `sessions/` path, never caller input — so neither call can name a
+    # session file. `arm` removes the header IT just wrote when the timer could
+    # not be armed (a header left there reads as an armed runtime), and `disarm`
+    # removes the file of a clean exit, which is what makes a surviving file mean
+    # the process died without disarming. The module docstring argues both, and
+    # the alternative — leave the file and carry the outcome in its content —
+    # accumulates one file per runtime process with nothing to prune them.
+    (
+        "local_operator/session/runtime/stall_watchdog.py::arm",
+        "<path>.unlink",
+        "log_dir()+pid FILEs of THIS pid: the header this call just created (a header-only "
+        "survivor reads as armed) and a deadline sibling an EARLIER holder of the pid left, "
+        "which would otherwise read as a beat of the life being armed (QA round 1, Q1)",
+        2,
+    ),
+    (
+        "local_operator/session/runtime/stall_watchdog.py::disarm",
+        "<path>.unlink",
+        "log_dir()+pid FILE of a CLEAN exit; surviving means the process died disarmed",
+        2,
+    ),
+    # The deadline sibling is written THROUGH a sidecar temp so a concurrent reader
+    # never sees a truncated file (QA round 1, Q4). Both paths are the same
+    # `log_dir()` + int-pid pair the rows above argue for, in the same directory, so
+    # neither can name a session file; and the temp is this process's own pid-keyed
+    # name, written and consumed under `_LOCK`.
+    (
+        "local_operator/session/runtime/stall_watchdog.py::_record_deadline",
+        "os.replace",
+        "Atomic replace of this pid's OWN runtime-stall-<pid>.deadline from its pid-keyed temp",
+    ),
+    (
+        "local_operator/session/runtime/stall_watchdog.py::_record_deadline",
+        "<path>.unlink",
+        "Removes only its own pid-keyed temp file after a failed atomic replacement",
     ),
 )
 
@@ -1518,12 +1716,12 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/resume.py::_write_title_scan_sentinel",  # tmp -> title-scan.json
         "local_operator/resume.py::_save_origin_cache",  # tmp -> origin cache FILE
         "local_operator/session/cleanup.py::_write_record",  # tmp -> last-cleanup.json
+        # tmp -> update-window.json (the update window's handover marker)
+        "local_operator/session/runtime/inbox.py::write_update_window",
         "local_operator/session/frontend_state.py::SnapshotJobs.__init__",  # str.replace
         "local_operator/session/frontend_state.py::SnapshotWakeScheduler.__init__",
         "local_operator/session/frontend_state.py::SnapshotSubagentComms.__init__",
         "local_operator/session/frontend_state.py::SnapshotMcpManager.__init__",
-        # self.replace(state) = in-memory snapshot swap
-        "local_operator/session/frontend_state.py::FrontendStateStore.replace_and_notify",
         # Same receiver, same reason: the local publication installs an accepted
         # directory onto the in-memory FrontendStateStore before the desktop
         # bridge repaints from it. `store.replace(state)` is a state swap, never
@@ -1538,7 +1736,18 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/runtime/registry.py::_reap_dead_record",  # -> reaped/ FILE
         "local_operator/session/runtime/viewers.py::publish_viewer",  # tmp -> viewer FILE
         "local_operator/session/search_index.py::_save",  # tmp -> index FILE
+        "local_operator/session/archived.py::_write_archived",  # tmp -> archive index FILE
         "local_operator/session/session.py::_write_roster_sidecar",  # tmp -> roster FILE
+        # tmp -> runtime-stall-<pid>.deadline FILE. Both paths are log_dir() + an int
+        # pid and nothing else (see the allow-list rows above): no session id, no
+        # caller input, so neither can name a path under sessions/.
+        "local_operator/session/runtime/stall_watchdog.py::_record_deadline",
+        # The worker is called with AgentRegistry.config_dir (the config root),
+        # while sessions live in its separate sessions/<id> child. Its destination
+        # is config_dir / the fixed .store-maintenance.json basename and its temp
+        # FILE is created with mkstemp(dir=config_dir), so these file replacements
+        # cannot rename a session directory.
+        "local_operator/session_factory.py::_write_store_maintenance_stamp",
         "local_operator/session/transcript.py::Transcript._replace_file",  # tmp -> transcript
         "local_operator/session_lease.py::acquire_session_lease",  # tmp -> lease FILE
     }

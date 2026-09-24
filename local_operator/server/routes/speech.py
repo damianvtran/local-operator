@@ -3,20 +3,19 @@ from typing import Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
+from pydantic import SecretStr
 
 from local_operator.agents import AgentRegistry
 from local_operator.clients._http import APIError
 from local_operator.clients.openrouter import OpenRouterClient
 from local_operator.clients.radient import RadientClient
 from local_operator.config import ConfigManager
-from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig, get_env_config
 from local_operator.model.configure import configure_model
 from local_operator.providers.auth_store import AuthStore
 from local_operator.server.dependencies import (
     get_agent_registry,
     get_config_manager,
-    get_credential_manager,
     get_provider_auth_store,
     get_radient_client,
 )
@@ -131,7 +130,6 @@ async def create_agent_speech(
     speech_request: AgentSpeechRequest,
     radient_client: RadientClient = Depends(get_radient_client),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
-    credential_manager: CredentialManager = Depends(get_credential_manager),
     provider_auth_store: AuthStore = Depends(get_provider_auth_store),
     config_manager: ConfigManager = Depends(get_config_manager),
     env_config: EnvConfig = Depends(get_env_config),
@@ -154,9 +152,12 @@ async def create_agent_speech(
 
         model_info_client: Optional[Union[OpenRouterClient, RadientClient]] = None
         if hosting == "openrouter":
-            api_key = credential_manager.get_credential("OPENROUTER_API_KEY")
-            if api_key:
-                model_info_client = OpenRouterClient(api_key)
+            # Store-first like the rest of the provider-key surface.
+            from local_operator.providers.registry import provider_env_key
+
+            raw_key = provider_env_key("openrouter", base=config_manager.config_dir)
+            if raw_key:
+                model_info_client = OpenRouterClient(SecretStr(raw_key))
             else:
                 logger.warning("OpenRouter hosting selected but OPENROUTER_API_KEY not found.")
         elif hosting == "radient":
@@ -165,7 +166,9 @@ async def create_agent_speech(
             )
 
             api_key = await resolve_radient_credential(
-                credential_manager, env_config.radient_api_base_url, store=provider_auth_store
+                config_manager.config_dir,
+                env_config.radient_api_base_url,
+                store=provider_auth_store,
             )
             if api_key:
                 model_info_client = RadientClient(api_key, env_config.radient_api_base_url)
@@ -175,7 +178,7 @@ async def create_agent_speech(
         model_config = configure_model(
             hosting=hosting,
             model_name=model_name,
-            credential_manager=credential_manager,
+            config_dir=config_manager.config_dir,
             # Pass the agent's knobs THROUGH, including "unset". The former
             # `or 0.2`/`or 0.9` re-asserted the app-wide constants that the
             # per-family sampling policy exists to stop sending, so an agent
@@ -195,7 +198,6 @@ async def create_agent_speech(
         )
         executor = ServerExecutor(
             model_configuration=model_config,
-            credential_manager=credential_manager,
             config_manager=config_manager,
             agent_registry=agent_registry,
             agent=agent,

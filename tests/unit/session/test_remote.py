@@ -208,11 +208,18 @@ async def test_remote_aside_runs_on_owner_without_joining_transcript(
 
 
 @pytest.mark.asyncio
-async def test_remote_prompt_steer_and_approval_route_to_owner(tmp_path: Path, monkeypatch) -> None:
+async def test_remote_prompt_steer_and_approval_route_to_owner(
+    tmp_path: Path, monkeypatch, operator_cap: bytes
+) -> None:
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "sessions" / "s1").mkdir(parents=True)
     handle = FakeHandle()
-    registrant = RuntimeServer(handle, kind="tui")
+    # ``operator_cap`` (issue #1310): this registrant is built in-process, so
+    # the test IS the console that started it — the follower's card approval is
+    # therefore a legitimate authority-increasing request and must keep working.
+    # The refusal half of the same rule is pinned in
+    # ``tests/unit/session/runtime/test_approval_authority_seam.py``.
+    registrant = RuntimeServer(handle, kind="tui", operator_cap=operator_cap)
     registrant.start()
     remote = None
     try:

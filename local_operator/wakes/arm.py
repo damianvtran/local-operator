@@ -810,14 +810,22 @@ async def _refuse_if_owned(config_dir: Path, session_id: str) -> None:
     prevent, one layer down. So the test is the owner PID
     (``find_runtime_record(...)[1]``), and the record is not part of it.
 
-    ``[1]`` IS NOT "nothing else holds this pid", and round 3's minor is that
-    claim: a marker left by a crash keeps naming a number the OS may since have
-    recycled onto an unrelated process, and that stranger answers this guard
-    forever. There is no bound to give it — a lease-style deadline exists to hand
-    ownership to a COMPETITOR, and this writer competes with nobody (it has no
-    claim to take) — so the honest fix is the copy, which is why the two states
-    below get different sentences instead of one sentence that is false in one of
-    them.
+    ``[1]`` IS NOT "nothing else holds this pid". A marker left by a crash keeps
+    naming a number the OS may since have recycled onto an unrelated process, and
+    that stranger used to answer this guard forever. There is no bound to give it
+    — a lease-style deadline exists to hand ownership to a COMPETITOR, and this
+    writer competes with nobody (it has no claim to take) — so the honest fix was
+    the copy: the two states below get different sentences instead of one
+    sentence that is false in one of them.
+
+    **The recycled-pid half of that is fixed at the source (2026-09-21).**
+    ``find_runtime_record`` resolves its owner through ``resume.live_runtime_pid``,
+    which now reads the session's claim and requires the live process to be the one
+    that WROTE it (``procstate.same_birth``). A recycled pid therefore yields
+    ``owner is None`` and this guard allows the write, while a genuine live owner —
+    record or no record — is still refused. What remains for the two-state copy is
+    the case it was written for: a live owner holding a session with no usable
+    record.
 
     BOTH OWNER STATES ARE REFUSED, and the order below is load-bearing: a WEDGED
     owner (alive, heartbeat stale, lease held so no engage can succeed) is asked

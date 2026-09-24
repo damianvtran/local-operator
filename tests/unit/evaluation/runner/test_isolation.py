@@ -358,6 +358,19 @@ PINNED_DEFERRED_DENIED_IMPORTS: tuple[tuple[str, str, str], ...] = (
         "create_provider_model_client",
         "local_operator.model.configure",
     ),
+    # `_one_rung_lower` is the eval-side spelling of `harness.loop._lower_effort`
+    # and MUST reach `model.effort.real_rungs` for the same reason the four above
+    # reach their modules: the rule it encodes (which ladder members are ranks
+    # rather than sentinels) has one owner, and a local copy would drift. The
+    # import is deferred (inside the function) because `provider_client` may not
+    # pull `model.effort` into its import-time closure -- `effort.py` is pure and
+    # cheap, but the seam is the module boundary, not the cost. Pinned here so an
+    # added deferred denied import still fails (round-2 review R2-1).
+    (
+        "local_operator.evaluation.runner.provider_client",
+        "_one_rung_lower",
+        "local_operator.model.effort",
+    ),
 )
 
 
@@ -573,9 +586,9 @@ def test_provider_client_defers_its_configure_import() -> None:
 def test_host_secrets_is_the_only_other_store_seam_and_takes_it_by_injection() -> None:
     """``host_secrets`` may serve the credential store but never imports it.
 
-    It takes a live ``CredentialManager`` from its caller (the script that
-    also opened the store for the model client), so even the lazy import is
-    absent: importing the module pulls in nothing from the application.
+    It takes the config ROOT from its caller (the script that also opened the
+    store for the model client), so even the lazy import is absent: importing
+    the module pulls in nothing from the application.
     """
 
     imported = _fresh_import_modules("local_operator.evaluation.runner.host_secrets")

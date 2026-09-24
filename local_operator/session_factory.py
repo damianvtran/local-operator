@@ -30,9 +30,13 @@ import argparse
 import asyncio
 import functools
 import inspect
+import json
 import logging
 import os
 import sys
+import tempfile
+import threading
+import time
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -69,7 +73,6 @@ if TYPE_CHECKING:
     from local_operator.agents import AgentData, AgentRegistry
     from local_operator.compaction.api import CompactionSettings
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
     from local_operator.harness.types import AgentTool
     from local_operator.mcp.manager import McpManager
     from local_operator.model.configure import SessionStreamFn
@@ -1631,6 +1634,28 @@ def _registered_agent_hints(agent_registry: AgentRegistry) -> list[Skill]:
     return hints
 
 
+def _knowledge_credential(key: str, config_dir: Path) -> str | None:
+    """Resolve an embedder key for the session's semantic backend.
+
+    A provider-class ``LOP_PROVIDER_<key>`` STORE row, then an exported variable.
+    ``provider_secret_value`` is namespace-scoped, so an ordinary agent secret
+    under this name is simply not found here. The legacy ``credentials.env`` leg
+    is GONE (PR2a): an embedder key the operator never stored or exported
+    resolves to nothing.
+
+    A NAMED function rather than an inline closure so the plaintext sweep
+    (``tests/unit/secrets/test_no_reader_resolves_the_plaintext_file.py``) can
+    drive THIS resolver directly. A removed leg that no callable reaches is a
+    removal nothing exercises, which is the gap that sweep exists to close.
+    """
+    from local_operator.providers.registry import provider_secret_value
+
+    stored = provider_secret_value(key, base=config_dir)
+    if stored:
+        return stored
+    return os.environ.get(key) or None
+
+
 def _seed_mcp_routing(hooks: _KnowledgeHooks, cwd: str) -> None:
     """Expose configured names before deferred live connections can race turn one."""
     try:
@@ -1650,7 +1675,6 @@ def _seed_mcp_routing(hooks: _KnowledgeHooks, cwd: str) -> None:
 
 
 async def _setup_knowledge(
-    credential_manager: CredentialManager,
     config_dir: Path,
     agent_registry: AgentRegistry,
     warnings_out: list[str],
@@ -1662,6 +1686,13 @@ async def _setup_knowledge(
     only their short descriptions join the ordinary skill descriptions sent to
     the configured semantic backend. Agent hints always use ``LocalEmbedder``.
     Any layer can fail independently without making session startup fail.
+
+    No credential carrier is threaded in, deliberately: the embedder's
+    credential closure below reads a provider-class STORE row and the process
+    environment, and the store is reached by config ROOT through
+    ``provider_secret_value``. Carrying one was the shape the retired plaintext
+    leg needed (PR2a), and an unused parameter reads as a live dependency the
+    next reader would wire back up.
     """
     hooks = _KnowledgeHooks()
     try:
@@ -1699,13 +1730,10 @@ async def _setup_knowledge(
             ),
         )
 
-        def get_credential(key: str) -> str | None:
-            secret = credential_manager.get_credential(key)
-            value = secret.get_secret_value() if secret else ""
-            return value or None
-
         if resources:
-            backend = default_backend_from_env(get_credential)
+            backend = default_backend_from_env(
+                functools.partial(_knowledge_credential, config_dir=config_dir)
+            )
             try:
                 hooks.index = SkillIndex(resources, backend, cache_dir=config_dir / "cache")
                 await hooks.index.build()
@@ -1810,7 +1838,6 @@ def _classification_enabled(section: Mapping[str, Any]) -> bool:
 def _attach_classification(
     hooks: _KnowledgeHooks,
     config_manager: ConfigManager,
-    credential_manager: CredentialManager,
     warnings_out: list[str],
 ) -> None:
     """Build the classification seam when the layer is switched on (§7, §9).
@@ -1849,7 +1876,9 @@ def _attach_classification(
             shortlist,
         )
 
-        hooks.classifier = ClassificationService(manager=credential_manager, settings=values)
+        hooks.classifier = ClassificationService(
+            config_dir=config_manager.config_dir, settings=values
+        )
         # The message path's shortlist, captured HERE so that path never imports
         # the package (see ``_classification_request``).
         hooks.classification_shortlist = shortlist
@@ -2795,6 +2824,18 @@ def _make_system_blocks_provider(
     """
 
     environment = _env_details(cwd)
+    # The HOST capability answer, taken ONCE at construction and passed to every
+    # render (see ``prompts_api.host_capability_probes`` for the measured
+    # incident). It is read here for the same reason ``user_instructions`` and
+    # ``repo_guidance`` above are: it reaches block 0, and a block-0 change
+    # starts a NEW persisted prefix epoch for the live session — so a probe that
+    # moves with the desktop app's heartbeat would reprice every session on the
+    # machine from a timer no one asked for. Also published on the provider
+    # below, so ``Session._reconcile_tool_inventory`` renders the inventory
+    # note from the SAME answer instead of probing again.
+    from local_operator.prompts_api import host_capability_probes
+
+    host_has_browser, host_has_console = host_capability_probes()
     cached_key: tuple[Any, ...] | None = None
     cached_blocks: list[str] = []
 
@@ -2804,7 +2845,11 @@ def _make_system_blocks_provider(
         # a deliberate ``set_model`` or a failover fallback is reflected in the
         # env block at the next safe call boundary without rebuilding this
         # closure. The benchmark/preflight caller passes the spec label directly.
-        from local_operator.prompts_api import build_system_blocks
+        from local_operator.prompts_api import (
+            CHANNEL_ASK,
+            CHANNEL_NONE,
+            build_system_blocks,
+        )
 
         task = transcript.latest_user_entry() if hasattr(transcript, "latest_user_entry") else None
         task_id = task.id if task is not None else None
@@ -2840,7 +2885,23 @@ def _make_system_blocks_provider(
             if variable_store is not None and hasattr(variable_store, "credential_names")
             else []
         )
-        interactive = goal_state.is_interactive() if goal_state is not None else True
+        # BOTH halves are read LIVE, at turn start: the answers change when a
+        # viewer attaches or detaches and when a front end installs its ask hook,
+        # and reading them here is what keeps the cost O(1) in the number of those
+        # events (round 2, operator requirement 4). ``interactivity()`` is the
+        # TRI-STATE reading — ``None`` on a host that installed no runtime probe
+        # (an ``exec`` run, a scheduled run, a plain CLI), which renders no
+        # ``<interactivity>`` block at all rather than claiming an interface
+        # nobody measured (review round 1, MINOR 6 / Q3). The channel is the live
+        # ask-hook answer, which THIS closure cannot get from ``tools``: the hook
+        # is installed after construction, so the list below never gains ``ask``.
+        #
+        # ``CHANNEL_NONE`` — not ``CHANNEL_HUB`` — is the right answer for a
+        # top-level session with no hook: a session's own ``hub`` reaches its
+        # SUBAGENTS, so it is no route from here to the operator.
+        interactive = goal_state.interactivity() if goal_state is not None else None
+        can_ask = goal_state.can_ask() if goal_state is not None else None
+        channel = None if can_ask is None else (CHANNEL_ASK if can_ask else CHANNEL_NONE)
         key = (
             knowledge_block,
             date_str,
@@ -2850,6 +2911,7 @@ def _make_system_blocks_provider(
             tuple(names),
             model_label,
             interactive,
+            channel,
             tuple((tool.name, tool.description) for tool in tools),
         )
         if key == cached_key:
@@ -2866,12 +2928,14 @@ def _make_system_blocks_provider(
             team_brief=team_brief,
             agent_brief=agent_brief,
             model_label=model_label,
-            # Read LIVE, at turn start: the answer changes whenever a viewer
-            # attaches or detaches, and reading it here is what keeps the
-            # cost O(1) in the number of those events (round 2, operator
-            # requirement 4). Absent a probe this is True, so every host that
-            # is not a detached runtime is unaffected.
+            # Read LIVE, at turn start. Absent a runtime probe this is ``None``
+            # and the block is omitted, which is the byte-shape every host that
+            # never installed one had before the positive arm existed; see the
+            # tri-state note above and ``GoalState.interactivity``.
             interactive=interactive,
+            channel=channel,
+            host_has_browser=host_has_browser,
+            host_has_console=host_has_console,
         )
         cached_key = key
         return list(cached_blocks)
@@ -2882,6 +2946,12 @@ def _make_system_blocks_provider(
     setattr(provider, "append_only_state", True)
     setattr(provider, "repo_guidance", repo_guidance)
     setattr(provider, "knowledge_hooks", hooks)
+    # The frozen host answer, for the session's own re-render of block 1. Two
+    # renderers of one note must not be able to disagree, and the alternative
+    # (block 1 probing live while block 0 is pinned) would journal a state delta
+    # on every heartbeat flip with no authority behind it.
+    setattr(provider, "host_has_browser", host_has_browser)
+    setattr(provider, "host_has_console", host_has_console)
     return provider
 
 
@@ -2994,245 +3064,348 @@ def _transcript_dir_and_agent_id(
     return session_dir, "main", True
 
 
-#: The one store-maintenance pass this process will run, or ``None`` before the
-#: first session is constructed. Store maintenance is a property of the STORE,
-#: not of a session, so it is scoped to the process rather than to the call:
-#: ``/new`` and ``/resume`` go through ``create_session`` exactly as boot does,
-#: and re-sweeping a store this same process swept seconds earlier is pure
-#: latency. Holding the task (not just a bool) also keeps a reference to it, so
-#: the loop cannot garbage-collect a task nobody awaits.
-_STORE_MAINTENANCE_TASK: "asyncio.Task[None] | None" = None
+#: These passes describe the config-root store, not one session. Keep one
+#: daemon worker handle per process for /new and /resume, while the lock and
+#: short completion window also coalesce separate runtime processes.
+_STORE_MAINTENANCE_THREAD: threading.Thread | None = None
+_STORE_MAINTENANCE_STOP: threading.Event | None = None
+_STORE_MAINTENANCE_DONE: threading.Event | None = None
 
-#: Give session construction and the front end a bounded uncontended window
-#: before four whole-store walks enter the worker pool. A single ``sleep(0)``
-#: only yields to ``_prepare``'s next ``to_thread`` and lets both paths race on a
-#: cold filesystem cache; the elapsed delay is the contention barrier.
+#: Let session construction and first paint win the I/O race before the store
+#: walks begin. The delay is inside the daemon, not the default executor, whose
+#: shutdown can otherwise hold Runner.close for Python's 300-second bound.
 _STORE_MAINTENANCE_IDLE_DELAY_SECONDS = 0.75
+_STORE_MAINTENANCE_LOCK_RETRY_INITIAL_SECONDS = 0.05
+_STORE_MAINTENANCE_LOCK_RETRY_MAX_SECONDS = 1.0
+_STORE_MAINTENANCE_LOCK_NAME = ".store-maintenance.lock"
+_STORE_MAINTENANCE_STAMP_NAME = ".store-maintenance.json"
+_STORE_MAINTENANCE_STAMP_SCHEMA = 1
+_STORE_MAINTENANCE_STAMP_VERSION = 1
+_STORE_MAINTENANCE_STAMP_TTL_SECONDS = 60.0
+_STORE_MAINTENANCE_PASS_NAMES = (
+    "session cleanup policy",
+    "orphan process-group sweep",
+    "session origin backfill",
+    "session title backfill",
+    "analytics session-name backfill",
+    "analytics session-daily rollup backfill",
+)
 
 
-async def _wait_for_store_maintenance_idle_window() -> None:
-    """Wait until first paint can win the disk/thread-pool contention race."""
-    await asyncio.sleep(_STORE_MAINTENANCE_IDLE_DELAY_SECONDS)
+def _wait_for_store_maintenance_idle_window(stop_event: threading.Event) -> bool:
+    """Wait off-loop; return false when a test reset cancels the delayed run."""
+    return not stop_event.wait(_STORE_MAINTENANCE_IDLE_DELAY_SECONDS)
 
 
 def reset_store_maintenance_for_tests() -> None:
-    """Forget that maintenance ran, so every test starts un-swept.
+    """Stop a delayed test worker and forget its process-local dispatch handle.
 
-    The once-per-process guard is deliberate production behaviour, but in a
-    test interpreter it means the first test to call ``_prepare`` consumes the
-    process's single pass and every later one silently exercises a no-op.
-    Resetting around EACH test — the autouse fixture in ``tests/conftest.py``
-    calls this before and after — is what lets any test assert on the sweeps'
-    effects regardless of the order it happens to run in.
+    A running callback cannot be safely cancelled; tests that block one must
+    release it before reset. The daemon flag is the final process-exit boundary,
+    while this event prevents a not-yet-started test pass from entering a later
+    test's temporary store.
     """
-    global _STORE_MAINTENANCE_TASK
-    task = _STORE_MAINTENANCE_TASK
-    if task is not None and not task.done():
-        # Most session-factory tests return before the production idle window;
-        # do not let their delayed task enter a later test's temporary store.
-        task.cancel()
-    _STORE_MAINTENANCE_TASK = None
+    global _STORE_MAINTENANCE_THREAD, _STORE_MAINTENANCE_STOP, _STORE_MAINTENANCE_DONE
+    stop_event = _STORE_MAINTENANCE_STOP
+    if stop_event is not None:
+        stop_event.set()
+    _STORE_MAINTENANCE_THREAD = None
+    _STORE_MAINTENANCE_STOP = None
+    _STORE_MAINTENANCE_DONE = None
 
 
 async def await_store_maintenance_for_tests() -> None:
-    """Wait for this process's maintenance pass, if one was dispatched.
+    """Wait for this process's daemon pass without binding it to an event loop.
 
-    Production never waits — that is the entire point of the change — so this
-    exists for tests that assert on what the passes DID (a sidecar stamped, a
-    dead process group reaped). Without it such a test races the background task and
-    fails intermittently, which is a worse outcome than the latency it is
-    guarding. Swallows the task's failure because every pass is best-effort:
-    the caller is asserting on effects, not on the task's success.
+    Polling the thread-owned event is intentional: the worker may outlive the
+    loop that dispatched it, so no callback may be scheduled back onto that
+    loop. Tests use this only; production startup never waits for maintenance.
     """
-    task = _STORE_MAINTENANCE_TASK
-    if task is None:
+    done = _STORE_MAINTENANCE_DONE
+    if done is None:
         return
-    try:
-        await task
-    except Exception:  # noqa: BLE001 — best-effort, exactly as in production
-        pass
+    while not done.is_set():
+        await asyncio.sleep(0.01)
 
 
-async def _run_store_maintenance(
-    config_manager: ConfigManager, config_dir: Path, live_dir: Path | None
-) -> None:
-    """Run every whole-store maintenance pass, in a worker thread, in order.
+def _acquire_store_maintenance_lock(config_dir: Path) -> int | None:
+    """Try the config-root mutex once; return None for a live peer's lock.
 
-    The initial idle window is load-bearing rather than cosmetic. Merely putting
-    this coroutine in the background still lets it begin at ``_prepare``'s next
-    ``to_thread`` and contend with model/session construction on a cold
-    filesystem cache. Maintenance is unrelated to the current session, so it
-    yields a short, explicit window for ``create_session`` to return and its
-    caller to paint before the first disk walk reaches the worker pool.
-
-    Each pass is a disk walk over OTHER sessions' directories and none of them
-    has anything to do with the session being constructed; they are triggered by
-    a session starting only because that is when the store is known to be quiet.
-    They run sequentially rather than gathered because they share one disk and
-    the origin/title backfills walk the same directories — the win here came
-    from taking them OFF the critical path, not from overlapping them, and
-    serial keeps the I/O pattern (and the failure attribution) simple.
-
-    Every pass is best-effort in the strongest sense: this coroutine can fail in
-    any way at all and a session must neither fail nor be delayed by it, which
-    is why the caller never awaits it and why each pass carries its own guard.
+    The nonblocking primitive is shared with wake writes so platform-specific
+    flock/byte-range behavior stays consistent. The lockfile is deliberately
+    persistent: unlinking it could split holders across two different inodes.
     """
-    # Delay before imports and callback construction too: on a cold cache even
-    # loading maintenance-only modules can steal I/O from session construction.
-    # Exit during this best-effort window is harmless; the next process retries.
-    await _wait_for_store_maintenance_idle_window()
+    from local_operator.procstate import O_BINARY
+    from local_operator.wakes.lock import _try_lock
 
-    from local_operator.analytics.backfill import (
-        backfill_analytics_session_daily,
-        backfill_analytics_session_names,
-    )
-    from local_operator.resume import backfill_session_origins, backfill_session_titles
-    from local_operator.session.cleanup import cleanup_from_config
-    from local_operator.tools.group_reaper import sweep_orphan_groups
+    path = config_dir / _STORE_MAINTENANCE_LOCK_NAME
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | O_BINARY, 0o600)
+    try:
+        if _try_lock(fd):
+            return fd
+        os.close(fd)
+        return None
+    except BaseException:
+        os.close(fd)
+        raise
 
-    # NO pass here deletes a session directory on its own judgement. The
-    # "retention sweep" that used to lead this list — and the unused-session
-    # reaper it grew in #576 — removed 225 of an operator's 244 named sessions
-    # in one night, behind an opt-out toggle that wrote a key nothing read.
-    # The only thing that can remove a session directory now is the cleanup
-    # policy in ``session/cleanup.py``, which is OFF unless the user turned
-    # ``session.cleanup.enabled`` on in /settings; ``cleanup_from_config``
-    # returns without touching the disk otherwise. ``live_dir`` is passed so
-    # that even an enabled policy never considers the session being built.
-    passes: list[tuple[str, Callable[[], Any]]] = [
-        (
-            "session cleanup policy",
-            lambda: cleanup_from_config(config_manager, config_dir, live_dir=live_dir),
-        ),
-        # Hard-death process-group reaper (tools/group_reaper.py): reaps a bash
-        # process group only when the lop process that spawned it is provably
-        # dead — the one leak _kill() cannot cover, because a SIGKILLed owner
-        # runs no in-process cleanup and start_new_session already stripped the
-        # group's SIGHUP. Owner liveness is the ONLY signal, so a live session's
-        # long command (e.g. a 10h trainer) is never touched.
-        ("orphan process-group sweep", lambda: sweep_orphan_groups(config_dir)),
-        # Stamp session directories that predate the origin marker, so the
-        # ``/resume`` picker stops offering delegated runs on the FIRST launch
-        # after an upgrade rather than once natural churn has cleared the store.
-        ("session origin backfill", lambda: backfill_session_origins(config_dir)),
-        # Stamp the title sidecar alongside the origin marker, so a pre-existing
-        # session is findable by every name it has borne on the first launch
-        # after upgrade rather than only after its next rename.
-        ("session title backfill", lambda: backfill_session_titles(config_dir)),
-        # Name the analytics ledger's unnamed sessions from their transcripts,
-        # so ``/analytics`` stops rendering months of history as bare 12-hex
-        # ids. Ordered AFTER the title backfill on purpose: that pass writes the
-        # title sidecar this one reads through ``resume.session_name``, so a
-        # session whose title sits in the untouched middle of a large transcript
-        # is recovered on the same launch rather than the next one.
-        (
-            "analytics session-name backfill",
-            lambda: backfill_analytics_session_names(config_dir),
-        ),
-        # Re-derive the per-session day rollup ``aggregate()`` reads. It is
-        # created EMPTY on the release that ships it while the ledger already
-        # holds up to 90 days of calls, so without this pass the panel's first
-        # read after upgrading is still the ledger's 5-13 s scan. Bounded
-        # chunked transactions, newest-first, resumable, and off the event loop
-        # like every other pass here — see the pass's own docstring for what a
-        # user sees while it is incomplete (nothing: refused windows are
-        # answered by the ledger, never by a partial total).
-        (
-            "analytics session-daily rollup backfill",
-            lambda: backfill_analytics_session_daily(config_dir),
-        ),
-    ]
 
-    for label, work in passes:
+def _release_store_maintenance_lock(fd: int) -> None:
+    """Release the cross-process mutex; closing also drops it after errors."""
+    from local_operator.wakes.lock import _unlock
+
+    try:
+        _unlock(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _store_maintenance_stamp_is_fresh(config_dir: Path, pass_names: list[str]) -> bool:
+    """Recognize only a current pass-set stamp still inside the retry window."""
+    path = config_dir / _STORE_MAINTENANCE_STAMP_NAME
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        # A malformed record cannot prove completion; because the caller holds
+        # the exclusive root lock, a conservative rerun is safe.
+        return False
+    if not isinstance(payload, dict):
+        return False
+    completed_at = payload.get("completed_at")
+    if (
+        payload.get("schema") != _STORE_MAINTENANCE_STAMP_SCHEMA
+        or payload.get("version") != _STORE_MAINTENANCE_STAMP_VERSION
+        or payload.get("passes") != pass_names
+        or isinstance(completed_at, bool)
+        or not isinstance(completed_at, (int, float))
+    ):
+        return False
+    try:
+        age = time.time() - float(completed_at)
+    except (OverflowError, ValueError):
+        # JSON permits integers too large for float conversion; they cannot be
+        # a valid wall-clock completion time and must not suppress a safe retry.
+        return False
+    return 0 <= age <= _STORE_MAINTENANCE_STAMP_TTL_SECONDS
+
+
+def _write_store_maintenance_stamp(config_dir: Path, pass_names: list[str]) -> None:
+    """Atomically publish completion only after every pass has succeeded."""
+    path = config_dir / _STORE_MAINTENANCE_STAMP_NAME
+    payload = {
+        "schema": _STORE_MAINTENANCE_STAMP_SCHEMA,
+        "version": _STORE_MAINTENANCE_STAMP_VERSION,
+        "passes": pass_names,
+        "completed_at": time.time(),
+    }
+    fd, raw_tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=config_dir)
+    tmp_path = Path(raw_tmp)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
         try:
-            await asyncio.to_thread(work)
-        except asyncio.CancelledError:
-            # The process is shutting down mid-pass. Every pass is idempotent
-            # and re-runs on the next launch, so stopping here loses nothing.
-            raise
-        except Exception:  # noqa: BLE001 — best-effort; never disturb a session
-            # Debug, not warning: this is unattended housekeeping the user did
-            # not ask for, and a store that cannot be swept is not a problem the
-            # user can act on mid-session. Same level these carried when they
-            # ran inline.
-            logger.debug("%s failed", label, exc_info=True)
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _run_store_maintenance(
+    config_manager: ConfigManager,
+    config_dir: Path,
+    live_dir: Path | None,
+    *,
+    stop_event: threading.Event | None = None,
+) -> bool:
+    """Run the six idempotent store passes under one daemon-owned lock.
+
+    Separate runtime processes can start more than the 0.75-second idle delay
+    apart, so mutual exclusion alone does not suppress their duplicate walks.
+    A versioned 60-second completion stamp coalesces a launch burst; cleanup
+    and orphan-group reaping may consequently wait up to 60 seconds after a
+    completed sweep. A crash or any failed pass writes no fresh stamp, so the
+    next launch retries. The sidecar backfills use atomic/idempotent writes and
+    the analytics rollup advances only over committed days, making an
+    interrupted sequence safe to resume.
+
+    The lock is acquired after the idle window and before reading the stamp,
+    then held through all serial passes and the atomic stamp replace. No
+    ``to_thread`` call is used: this function runs in one dedicated daemon
+    thread so a blocked filesystem callback cannot become a default-executor
+    worker that ``Runner.close`` waits to join for up to five minutes.
+    """
+    stop = stop_event or threading.Event()
+    if stop.is_set():
+        return True
+    try:
+        lock_fd = _acquire_store_maintenance_lock(config_dir)
+    except OSError:
+        # A lock I/O error cannot establish mutual exclusion. Unlike a busy
+        # peer, it is not retryable evidence of an owner that may soon exit.
+        logger.debug("store maintenance lock unavailable; skipping", exc_info=True)
+        return True
+    if lock_fd is None:
+        # A competing runtime owns the persistent lock inode. Only that owner
+        # may inspect or publish the stamp; this one daemon returns a retry
+        # signal and will check after it acquires the same lock.
+        return False
+
+    try:
+        from local_operator.analytics.backfill import (
+            backfill_analytics_session_daily,
+            backfill_analytics_session_names,
+        )
+        from local_operator.resume import (
+            backfill_session_origins,
+            backfill_session_titles,
+        )
+        from local_operator.session.cleanup import cleanup_from_config
+        from local_operator.tools.group_reaper import sweep_orphan_groups
+
+        # NO pass here deletes a session directory on its own judgement. The
+        # cleanup pass is OFF unless the user enabled its explicit policy, and
+        # the group reaper acts only on a provably dead owner. The lock serializes
+        # those store-wide decisions with other runtime processes.
+        passes: list[tuple[str, Callable[[], Any]]] = [
+            (
+                "session cleanup policy",
+                lambda: cleanup_from_config(config_manager, config_dir, live_dir=live_dir),
+            ),
+            ("orphan process-group sweep", lambda: sweep_orphan_groups(config_dir)),
+            ("session origin backfill", lambda: backfill_session_origins(config_dir)),
+            ("session title backfill", lambda: backfill_session_titles(config_dir)),
+            (
+                "analytics session-name backfill",
+                lambda: backfill_analytics_session_names(config_dir),
+            ),
+            (
+                "analytics session-daily rollup backfill",
+                lambda: backfill_analytics_session_daily(config_dir),
+            ),
+        ]
+        pass_names = [label for label, _ in passes]
+        if tuple(pass_names) != _STORE_MAINTENANCE_PASS_NAMES:
+            raise RuntimeError("store maintenance pass names differ from the stamp schema")
+        try:
+            if _store_maintenance_stamp_is_fresh(config_dir, pass_names):
+                return True
+        except OSError:
+            # Malformed records are retried, but a real I/O failure leaves the
+            # completion state unknown, so fail closed without running passes.
+            logger.debug("store maintenance completion stamp unreadable; skipping", exc_info=True)
+            return True
+
+        all_passes_succeeded = True
+        for label, work in passes:
+            if stop.is_set():
+                all_passes_succeeded = False
+                break
+            try:
+                work()
+            except Exception:  # noqa: BLE001 — best-effort; never disturb a session
+                all_passes_succeeded = False
+                logger.debug("%s failed", label, exc_info=True)
+
+        if all_passes_succeeded and not stop.is_set():
+            try:
+                _write_store_maintenance_stamp(config_dir, pass_names)
+            except OSError:
+                # Fail closed: without a trustworthy completion record, do
+                # not let each later process repeat the six store-wide walks.
+                logger.debug(
+                    "store maintenance completion stamp write failed; skipping", exc_info=True
+                )
+        return True
+    finally:
+        _release_store_maintenance_lock(lock_fd)
+
+
+def _store_maintenance_thread_main(
+    config_manager: ConfigManager,
+    config_dir: Path,
+    live_dir: Path | None,
+    stop_event: threading.Event,
+    done_event: threading.Event,
+) -> None:
+    """Own one bounded retry loop without touching an event loop.
+
+    One process owns at most this single daemon thread. A lock loser waits with
+    capped exponential backoff, then retries. Once an owner completes, the next
+    successful acquire checks its fresh completion stamp under the same lock and
+    exits without another scan. Reset signals ``stop_event`` and wakes the waits.
+    """
+    try:
+        if not _wait_for_store_maintenance_idle_window(stop_event):
+            return
+        retry_delay = _STORE_MAINTENANCE_LOCK_RETRY_INITIAL_SECONDS
+        while not stop_event.is_set():
+            try:
+                acquired = _run_store_maintenance(
+                    config_manager, config_dir, live_dir, stop_event=stop_event
+                )
+            except Exception:  # noqa: BLE001 — housekeeping never fails session start
+                logger.debug("store maintenance worker failed", exc_info=True)
+                return
+            if acquired:
+                return
+            # Another process owns the lock. Back off rather than abandon retry
+            # or spin. The next successful acquire checks the stamp while
+            # holding the lock, and reset wakes this bounded wait immediately.
+            if stop_event.wait(retry_delay):
+                return
+            retry_delay = min(retry_delay * 2, _STORE_MAINTENANCE_LOCK_RETRY_MAX_SECONDS)
+    finally:
+        done_event.set()
 
 
 def _start_store_maintenance(
     config_manager: ConfigManager, config_dir: Path, live_dir: Path | None
 ) -> None:
-    """Dispatch store maintenance ONCE per process, without blocking the caller.
+    """Dispatch one daemon worker per process without blocking session startup.
 
-    The four passes were previously awaited inline in ``_prepare``. They were
-    already ``to_thread``'d, so the event loop was never blocked — but awaiting
-    them kept them on the session-construction CRITICAL PATH, where they cost
-    boot ~545 ms and, because ``/new`` and ``/resume`` re-enter the same
-    ``create_session``, cost EVERY ``/resume`` the same again on a store the
-    process had already swept. Measured on a 3574-session store, the sweeps were
-    77% of a boot's ``create_session`` and the dominant term of a ``/resume``.
-
-    Two changes, together:
-
-    - **Dispatched after construction, not awaited, and delayed.** Every
-      ``create_session`` path dispatches at its last synchronous point before
-      return, after deferred/eager MCP setup has reached its intended state. The
-      task therefore cannot execute until the completed coroutine gives control
-      back to its caller. It then waits through a short idle window before the
-      store walks, giving the TUI time to adopt the session and paint. Nothing in
-      maintenance is read by session construction, so there is nothing to wait
-      for. This is the same fire-and-track shape the deferred MCP wiring uses.
-    - **Once per process.** Maintenance answers a question about the STORE, and
-      the store does not become dirty again because the user pressed
-      ``/resume``. The first session in the process runs it; later ones find the
-      task already dispatched and return immediately.
-
-    ``live_dir`` is the FIRST session's directory, and that is correct rather
-    than incidental: it is the only ``live_dir`` the sweep will ever see in this
-    process, and every LATER session protects itself with its claim marker
-    (written synchronously before its directory exists — see ``_prepare``),
-    which is the belt that protects concurrent sessions in OTHER processes too.
-    The ``live_dir`` skip is a redundant second belt for the local case, not the
-    load-bearing one.
-
-    One window this opens, named rather than inherited by accident: the origin
-    backfill used to COMPLETE before ``_prepare`` returned, so the in-TUI
-    ``/resume`` picker could never offer a delegated run. It now races first
-    paint, and on the FIRST launch after the upgrade that introduced origin
-    markers the picker can briefly list subagent/reviewer sessions until the
-    background pass stamps them — 67 ms for the origin pass on a 3574-session
-    store, so the window is tens of milliseconds, once per upgrade, and it
-    self-heals within the same launch. Resuming such a run appends to its
-    transcript; nothing is destroyed. The CLI ``--resume`` path is unaffected:
-    ``cli.py`` still runs both backfills eagerly and synchronously before
-    resolving ``--resume``. If the picker ever grows a correctness dependency
-    on origin — filtering delegated runs out by default, say — stamp origins
-    eagerly here (it is the cheap pass) and background only the other three.
-
-    A crash before first paint means the passes do not run this launch. That is
-    acceptable by design: the cost is an unstamped sidecar, which is
-    bytes rather than correctness, and the next launch stamps it. Every pass is
-    idempotent for exactly this reason.
-
-    Silently does nothing when called with no running loop (a synchronous test
-    harness or a benchmark entry point): there is nowhere to schedule the work,
-    and maintenance must never be the reason such a caller fails.
+    The process-local thread guard avoids repeated dispatches on /new and
+    /resume. The cross-process file lock and bounded completion stamp arbitrate
+    separate runtime processes sharing this config root.
     """
-    global _STORE_MAINTENANCE_TASK
-    if _STORE_MAINTENANCE_TASK is not None:
+    global _STORE_MAINTENANCE_THREAD, _STORE_MAINTENANCE_STOP, _STORE_MAINTENANCE_DONE
+    if _STORE_MAINTENANCE_THREAD is not None:
         return
     try:
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
         return
-    _STORE_MAINTENANCE_TASK = loop.create_task(
-        _run_store_maintenance(config_manager, config_dir, live_dir)
+
+    stop_event = threading.Event()
+    done_event = threading.Event()
+    worker = threading.Thread(
+        target=_store_maintenance_thread_main,
+        args=(config_manager, config_dir, live_dir, stop_event, done_event),
+        name="store-maintenance",
+        daemon=True,
     )
+    _STORE_MAINTENANCE_STOP = stop_event
+    _STORE_MAINTENANCE_DONE = done_event
+    _STORE_MAINTENANCE_THREAD = worker
+    try:
+        worker.start()
+    except RuntimeError:
+        _STORE_MAINTENANCE_THREAD = None
+        _STORE_MAINTENANCE_STOP = None
+        _STORE_MAINTENANCE_DONE = None
+        logger.debug("store maintenance worker could not start", exc_info=True)
 
 
 async def _prepare(
     args: argparse.Namespace,
     config_manager: ConfigManager,
-    credential_manager: CredentialManager,
     agent_registry: AgentRegistry,
     *,
     has_ui: bool,
@@ -3380,7 +3553,7 @@ async def _prepare(
             configure_model,
             hosting=hosting,
             model_name=model_name,
-            credential_manager=credential_manager,
+            config_dir=config_manager.config_dir,
             env_config=get_env_config(),
             # The standing config effort, CLAMPED inside ``configure_model``
             # against this spec's own ladder. Carried unconditionally, even when
@@ -3395,7 +3568,7 @@ async def _prepare(
 
     from local_operator.providers.auth_store import AuthStore
 
-    auth_store = AuthStore(credential_manager=credential_manager)
+    auth_store = AuthStore(config_dir=config_manager.config_dir)
     # A fork inherits its PARENT's provider cache key. The fork's transcript is
     # a byte-identical copy, so its first request reproduces the parent's cached
     # prefix exactly and should be routed to it rather than opening a fresh one.
@@ -3418,9 +3591,7 @@ async def _prepare(
     config_dir = Path(agent_registry.config_dir)
     effective_cwd = cwd if cwd is not None else os.getcwd()
     knowledge_warnings: list[str] = []
-    hooks = await _setup_knowledge(
-        credential_manager, config_dir, agent_registry, knowledge_warnings, effective_cwd
-    )
+    hooks = await _setup_knowledge(config_dir, agent_registry, knowledge_warnings, effective_cwd)
     # Configuration discovery is local filesystem work and must precede the
     # first prompt. The TUI deliberately defers live MCP connections; deriving
     # names only from the eventual manager let the knowledge block freeze empty
@@ -3430,7 +3601,7 @@ async def _prepare(
     # not land inside a turn (see ``_attach_classification``). Built unless
     # values.classification.auto is explicitly off — the default is ON, so the
     # import happens for a stock install.
-    _attach_classification(hooks, config_manager, credential_manager, knowledge_warnings)
+    _attach_classification(hooks, config_manager, knowledge_warnings)
     for warning in knowledge_warnings:
         print(f"\033[1;33mWarning: {warning}\033[0m", file=sys.stderr)
 
@@ -3962,17 +4133,46 @@ async def wire_mcp_into_session(
                 selected.append(tool)
         return selected
 
-    def refresh_selected(source: list[AgentTool]) -> None:
+    def refresh_selected(source: list[AgentTool]) -> bool:
+        """Rebind the session's inventory to the currently selected MCP tools.
+
+        Returns whether the swap reaches the NEXT MODEL CALL, for the resolver's
+        reply (see ``Session.refresh_tools``): the tools array is published at
+        most ONCE per turn, so a grow or a shrink that lands after this turn's
+        first provider call is deferred to the next turn.
+
+        A REMOVAL THEREFORE NEVER MOVES THE PUBLISHED ARRAY MID-TURN, which is
+        the rule ``Session._reconcile_web_tools`` follows and a shrink through
+        here used to bypass. The reason is the cache prefix: the tools array
+        rides ahead of the conversation, so removing one tool from it reprices
+        every message behind it. What IS immediate is the inventory — this still
+        swaps the live set, so the removed tool stops resolving at once and the
+        prompt's inventory block reports the change through its usual delta.
+
+        THE MODEL THAT CALLS THE SCHEMA IT CAN STILL SEE GETS A TYPED REFUSAL,
+        ``Tool not found: <name>`` (``harness/loop.py``'s synthetic unknown-tool
+        fault), not the tool's own answer. The approval gate runs only after a
+        tool RESOLVES, and nothing here resolves — the top-level fallback
+        resolver serves names in ``_mcp_deferred_origins`` only. That refusal is
+        the accepted cost of holding the array still, and the transport is why
+        it is the right one: a server that dropped away cannot answer for
+        itself, so leaving it resolvable would buy a transport error where the
+        model could have had a planning refusal. ``_reconcile_web_tools``
+        reaches the opposite conclusion about the INVENTORY on the same class of
+        edit — it defers that change to the turn boundary — because a web tool
+        that is still resolvable has a per-call gate that answers "disabled";
+        see its docstring. The two policies differ on purpose.
+        """
         live = list(getattr(session, "_tools", None) or getattr(session, "tools", None) or ())
         base = [tool for tool in live if tool.name not in installed_mcp] or base_inventory
         selected = selected_tools(source)
         installed_mcp.clear()
         installed_mcp.update(tool.name for tool in selected)
-        session.refresh_tools(base + selected)
+        return session.refresh_tools(base + selected)
 
-    def activate(server_name: str, raw_tool_name: str) -> None:
+    def activate(server_name: str, raw_tool_name: str) -> bool:
         enabled_origins.add((server_name, raw_tool_name))
-        refresh_selected(manager.get_tools())
+        return refresh_selected(manager.get_tools())
 
     def preload_opted_in_tools(source: list[AgentTool]) -> bool:
         """Activate the whole inventory of every server that opted into it.
@@ -4395,7 +4595,6 @@ def _warm_mcp_wiring_imports() -> None:
 async def create_session(
     args: argparse.Namespace,
     config_manager: ConfigManager,
-    credential_manager: CredentialManager,
     agent_registry: AgentRegistry,
     *,
     has_ui: bool = False,
@@ -4516,7 +4715,6 @@ async def create_session(
                 return await create_session(
                     args,
                     config_manager,
-                    credential_manager,
                     agent_registry,
                     has_ui=True,
                     cwd=effective_cwd,
@@ -4533,7 +4731,6 @@ async def create_session(
     plan = await _prepare(
         args,
         config_manager,
-        credential_manager,
         agent_registry,
         has_ui=has_ui,
         cwd=effective_cwd,
@@ -4675,7 +4872,6 @@ async def create_session(
 async def build_initial_blocks(
     args: argparse.Namespace,
     config_manager: ConfigManager,
-    credential_manager: CredentialManager,
     agent_registry: AgentRegistry,
 ) -> list[str]:
     """Render the session's initial system blocks WITHOUT running a turn.
@@ -4685,7 +4881,7 @@ async def build_initial_blocks(
     (instructions + tools inventory + skills + env) against the <=30k start
     budget without instantiating the session facade.
     """
-    plan = await _prepare(args, config_manager, credential_manager, agent_registry, has_ui=False)
+    plan = await _prepare(args, config_manager, agent_registry, has_ui=False)
     # No session facade is built on this path, so the lease and store lifetimes
     # end here rather than waiting for a Session.dispose that cannot happen.
     if plan.session_lease is not None:

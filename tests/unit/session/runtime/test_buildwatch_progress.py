@@ -17,14 +17,20 @@ importantly — what it must NOT do:
 
 * it fires only after ``BUILD_DRAIN_PROGRESS_S`` with no movement at ANY of the
   layers ``_work_motion`` reads (turn footprint, subagent roster generation, job
-  rows, spool), so a hold that is moving is never cut, however long it runs;
+  rows, spool) — and, since the operator's own eight-hour incident, also after
+  ``BUILD_DRAIN_DWELL_S`` of HOLDING whatever the work reports, because a lane
+  that keeps stepping resets the movement clock forever and the drain then holds
+  for the runtime's whole life. The two bounds are ordered and asserted apart: a
+  moving hold past the staleness bound is still held (up to the dwell), and the
+  dwell is what ends it;
 * the clock is reset by WORK, never by liveness: a viewer attached, a
   ``is_streaming`` flag held True or a reaper tick that keeps ticking is not
   movement, and the incident's runtime reported all three for the two hours it
   was stuck;
-* the exit it takes is the SIGNAL drain's (announce with a phrase that names the
-  bound, deny a parked gate, hand the drain's wakes over, ``_clean_exit``), so a
-  successor reads a journal row that says a bound cut the turn.
+* the bound does NOT end the runtime: it abandons the handover, releases the
+  latch so the session takes work again, publishes the failure, and keeps serving
+  the work in flight — a build move never cuts a turn (the operator's rule, and
+  the behaviour this file was rewritten for).
 
 Fakes in the style of ``test_process_build_bound.py``, with the four motion
 signals on the session double so each can be moved on its own.
@@ -33,31 +39,31 @@ signals on the session double so each can be moved on its own.
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from local_operator import update as update_mod
 from local_operator.session.runtime import process as child_mod
-from local_operator.session.runtime.process import (
-    _BUILD_OVERDUE_EXIT_REASON,
-    _BUILD_OVERDUE_REASON,
-    _Drain,
-    _drain_detail_at_exit,
-    _drain_for,
-    _reaper,
-)
+from local_operator.session.runtime.process import _Drain, _drain_for, _reaper
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.runtime.types import (
-    BUILD_DRAIN_OVERDUE_CAUSE,
+    BUILD_DRAIN_DWELL_S,
     BUILD_DRAIN_PROGRESS_S,
     LEAVING_FOR_BUILD,
-    LEAVING_FOR_BUILD_OVERDUE,
 )
 from local_operator.update import BuildStamp
 
 BOUND = BUILD_DRAIN_PROGRESS_S
+
+#: The dwell (``types.BUILD_DRAIN_DWELL_S``): the bound that ends a handover whose
+#: work KEEPS reporting. Imported rather than re-typed, so the tests below move with
+#: the constant the runtime reads.
+DWELL = BUILD_DRAIN_DWELL_S
 
 #: The pair the reporting host's install spanned, as ``test_process_build_bound``
 #: uses: a runtime that booted on OLD while the install on disk is NEW.
@@ -151,6 +157,15 @@ class FakeHandle:
         self.disposed = False
         self.denials = 0
         self.drains = 0
+        self.releases = 0
+        # THE LATCH IS THE PRODUCTION HANDLE'S, under the names it writes itself
+        # (``_draining`` and the retiring cause it latches), because
+        # ``begin_drain``/``end_drain`` below call that handle's own methods.
+        self._draining = False
+        self._retiring_cause = ""
+        self._retiring_detail = ""
+        self._disposing = False
+        self.update_failed = ""
         self.drain_cause = ""
         self.retired = False
         self.retire_cause = ""
@@ -169,9 +184,40 @@ class FakeHandle:
         return self._viewers
 
     def begin_drain(self, cause: str, detail: str = "") -> bool:
-        self.drains += 1
-        self.drain_cause = cause
-        return True
+        """The PRODUCTION latch, called through, with this rig's own counters beside it.
+
+        ``ServingSessionHandle.begin_drain`` is what decides whether the latch closes
+        (``_disposing``, and the wake divert) and the only thing that writes the state
+        the arm consults, so it is CALLED rather than modelled: a double that
+        re-implemented it would keep these cells green while the production handle
+        stopped latching at all. ``drains`` and ``drain_cause`` are this rig's
+        bookkeeping, for cells that assert how many times the latch moved.
+        """
+        latched = ServingSessionHandle.begin_drain(
+            cast("ServingSessionHandle", self), cause, detail
+        )
+        if latched:
+            self.drains += 1
+            self.drain_cause = cause
+        return latched
+
+    def end_drain(self) -> bool:
+        """The PRODUCTION release, for :meth:`begin_drain`'s own reason — called, not
+        modelled, so ``releases`` counts productions releases rather than this
+        double's idea of one.
+        """
+        released = ServingSessionHandle.end_drain(cast("ServingSessionHandle", self))
+        if released:
+            self.releases += 1
+        return released
+
+    @property
+    def draining(self) -> bool:
+        """The production latch's own field, under the name this file's cells read."""
+        return self._draining
+
+    def note_update_failed(self, pair: str, bound: float = 0.0) -> None:
+        self.update_failed = pair
 
     def begin_retire(self, cause: str, detail: str = "") -> bool:
         if self.may_refresh():
@@ -193,11 +239,15 @@ class FakeRuntime:
         self._boot_build = boot
         self.closed = False
         self.retiring: list[tuple[str, str, bool, str]] = []
+        self.failures: list[tuple[str, float]] = []
 
     async def announce_retiring(
         self, reason: str, *, to: str = "", draining: bool = False, leaving: str = ""
     ) -> None:
         self.retiring.append((reason, to, draining, leaving))
+
+    async def note_update_failed(self, pair: str, bound: float = 0.0) -> None:
+        self.failures.append((pair, bound))
 
     async def aclose(self) -> None:
         self.closed = True
@@ -293,15 +343,35 @@ def disk(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_a_drain_whose_work_stops_moving_is_cut_at_the_progress_bound(rig) -> None:
-    """THE PINNING TEST. A busy runtime whose work reports nothing for the bound
-    is released BY FORCE, and the release says why.
+async def test_a_drain_whose_work_stops_moving_ABANDONS_the_move(
+    rig, caplog: pytest.LogCaptureFixture
+) -> None:
+    """THE PINNING TEST, and its subject is the operator's rule about build moves.
 
-    Red before this change, in the incident's own shape: the drain held at
-    every tick past the bound for as long as the test cared to tick, because
-    the only term that could release it was ``_idle_for_refresh`` and a lane
-    parked behind a bash child keeps ``is_busy()`` True forever.
+    A busy runtime whose work reports nothing for the bound used to be released BY
+    FORCE: the parked gates denied, the wakes handed to a successor, the record
+    re-published and the process gone with ``runtime-overdue`` as the cause — a turn
+    the operator was still running, cut so that a build could land. That is the
+    behaviour this cell now forbids, and every assertion below is one of its parts,
+    inverted deliberately:
+
+    * the tick does NOT retire (False), and nothing is disposed or stopped;
+    * the gate is NOT denied and the wakes are NOT handed over: the turn keeps its
+      tools and a successor is not coming;
+    * the LATCH IS RELEASED, so a runtime that keeps serving can take work again —
+      the property that makes "abandon" different from "hold forever";
+    * the failure is PUBLISHED, which is what turns a stuck handover from a silent
+      hold into something reportable (the operator's own requirement);
+    * the phrase the record carries stays the ordinary build one, because a departure
+      that did not happen may not wear a departure's words.
+
+    The bound is still honoured, which is the half that must NOT change: one second
+    short of it the drain is still holding.
     """
+    # The rig builds the drain object directly, so the production latch is taken here
+    # instead (``_commit_to_leaving`` does it): the abandon's subject is a LATCHED
+    # drain, and without this the release would have nothing to release.
+    rig.handle.begin_drain(rig.drain.cause, rig.drain.detail)
     assert await _tick(rig, T0) is False, "a fresh drain holds: its work may still be finishing"
     assert rig.runtime.retiring == []
     assert (
@@ -309,17 +379,40 @@ async def test_a_drain_whose_work_stops_moving_is_cut_at_the_progress_bound(rig)
     ), "one second short of the bound is not the bound"
     assert not rig.stop.is_set() and not rig.handle.disposed
 
-    assert await _tick(rig, T0 + BOUND) is True
-    assert rig.runtime.retiring == [
-        (_BUILD_OVERDUE_REASON, NEW.label(), True, LEAVING_FOR_BUILD_OVERDUE)
-    ], "the frame's reason and the record's phrase must BOTH name the bound"
-    assert rig.handle.disposed and rig.stop.is_set()
-    assert rig.handle.denials == 1, "a gate parked on a user must not hold the exit"
-    assert rig.session.handed_wakes == 1, "the drain's swallowed wakes belong to the successor"
-    assert rig.handle._turn_journal.exits == [_BUILD_OVERDUE_EXIT_REASON]
-    assert rig.drain.progress is not None and rig.drain.progress.overdue is True
-    assert rig.handle.drains == 0, "the latch is not re-taken (see the rung's docstring)"
-    assert rig.handle.drain_cause == "", "and the drain's own cause is left as the latch wrote it"
+    with caplog.at_level(logging.WARNING, logger="local_operator.session.runtime.process"):
+        assert (
+            await _tick(rig, T0 + BOUND) is False
+        ), "the bound retired a runtime whose turn was still in flight"
+    # THE ARM THAT FIRES FIRST CARRIES THE PID TOO (QA round 1, Q-5): the dwell line got
+    # it in round 1's fix, and a pid-filtered scan of a shared, rotated runtime log
+    # returned nothing for THIS arm — the one an operator meets most often, since it is
+    # the bound 15 minutes of silence reaches.
+    assert "no movement" in caplog.text and "ABANDONING the handover" in caplog.text, caplog.text
+    assert str(os.getpid()) in caplog.text, (
+        "the staleness abandon line has to name the process, like every other latch and "
+        "exit line in this module: " + caplog.text
+    )
+    assert rig.handle.releases == 1, "the drain latch was never released"
+    assert rig.handle.draining is False, "the handle still believes it is leaving"
+    assert not rig.stop.is_set(), "the process must keep serving, not stop"
+    assert rig.handle.disposed is False, "a runtime that keeps its build is never disposed"
+    assert rig.handle.denials == 0, "nothing is denied: the parked gate keeps its turn"
+    assert rig.session.handed_wakes == 0, "the wakes belong to no successor here"
+    assert rig.handle._turn_journal.exits == [], "no exit was journalled"
+    assert rig.drain.progress is not None and rig.drain.progress.abandoned is True
+    assert rig.runtime.failures, "the abandoned handover was never published"
+    assert rig.runtime.failures[0][0] == NEW.label()
+    assert rig.runtime.failures[0][1] == BOUND, (
+        "the failure was published without the bound it ran out of, so no surface can "
+        "say why the update did not happen"
+    )
+    assert rig.handle.update_failed == "", (
+        "the handle remembered the pair, which is the WINDOW rung's memo for not burning "
+        "its bound twice — here it would stop the retry the drain rung owes"
+    )
+    assert [
+        leaving for _r, _t, _d, leaving in rig.runtime.retiring
+    ] == [], "an abandoned handover announced a departure it did not take"
 
 
 @pytest.mark.asyncio
@@ -330,7 +423,26 @@ async def test_a_landed_tool_boundary_resets_the_clock(rig) -> None:
     _land_a_tool_boundary(rig, 2)
     assert await _tick(rig, T0 + BOUND - 1) is False
     assert rig.runtime.retiring == []
-    assert await _tick(rig, T0 + BOUND - 1 + BOUND) is True
+    # THE DISCRIMINATING ASSERTION (agent review round 1, MAJOR-1). A return value
+    # cannot carry this claim any more: without a reset the drain ABANDONS at the
+    # later tick just as surely as with one, so `is False` + `abandoned is True`
+    # there is satisfied by a clock that never moved. What this cell is about is the
+    # clock itself, so it asserts the clock: the movement was OBSERVED at this tick,
+    # i.e. this is the instant the bound is now measured from. Delete the reset and
+    # ``moved_at`` stays at the latch's ``T0`` and this fails.
+    assert rig.drain.progress is not None and rig.drain.progress.moved_at == pytest.approx(
+        T0 + BOUND - 1
+    ), (
+        "the movement was never observed, so the bound is being measured from the latch: "
+        "this cell would pass with a drain clock that never advances"
+    )
+    assert (
+        rig.drain.progress.abandoned is False
+    ), "the bound expired before the movement was observed, so nothing was reset"
+    assert await _tick(rig, T0 + BOUND - 1 + BOUND) is False
+    assert (
+        rig.drain.progress is not None and rig.drain.progress.abandoned is True
+    ), "the bound was never reached, so this cell says nothing about what resets it"
 
 
 @pytest.mark.asyncio
@@ -342,7 +454,26 @@ async def test_a_lane_step_resets_the_clock(rig) -> None:
     _bump_the_roster(rig)
     assert await _tick(rig, T0 + BOUND - 1) is False
     assert rig.runtime.retiring == []
-    assert await _tick(rig, T0 + BOUND - 1 + BOUND) is True
+    # THE DISCRIMINATING ASSERTION (agent review round 1, MAJOR-1). A return value
+    # cannot carry this claim any more: without a reset the drain ABANDONS at the
+    # later tick just as surely as with one, so `is False` + `abandoned is True`
+    # there is satisfied by a clock that never moved. What this cell is about is the
+    # clock itself, so it asserts the clock: the movement was OBSERVED at this tick,
+    # i.e. this is the instant the bound is now measured from. Delete the reset and
+    # ``moved_at`` stays at the latch's ``T0`` and this fails.
+    assert rig.drain.progress is not None and rig.drain.progress.moved_at == pytest.approx(
+        T0 + BOUND - 1
+    ), (
+        "the movement was never observed, so the bound is being measured from the latch: "
+        "this cell would pass with a drain clock that never advances"
+    )
+    assert (
+        rig.drain.progress.abandoned is False
+    ), "the bound expired before the movement was observed, so nothing was reset"
+    assert await _tick(rig, T0 + BOUND - 1 + BOUND) is False
+    assert (
+        rig.drain.progress is not None and rig.drain.progress.abandoned is True
+    ), "the bound was never reached, so this cell says nothing about what resets it"
 
 
 @pytest.mark.asyncio
@@ -354,7 +485,26 @@ async def test_a_settling_job_resets_the_clock(rig) -> None:
     _settle_a_job(rig)
     assert await _tick(rig, T0 + BOUND - 1) is False
     assert rig.runtime.retiring == []
-    assert await _tick(rig, T0 + BOUND - 1 + BOUND) is True
+    # THE DISCRIMINATING ASSERTION (agent review round 1, MAJOR-1). A return value
+    # cannot carry this claim any more: without a reset the drain ABANDONS at the
+    # later tick just as surely as with one, so `is False` + `abandoned is True`
+    # there is satisfied by a clock that never moved. What this cell is about is the
+    # clock itself, so it asserts the clock: the movement was OBSERVED at this tick,
+    # i.e. this is the instant the bound is now measured from. Delete the reset and
+    # ``moved_at`` stays at the latch's ``T0`` and this fails.
+    assert rig.drain.progress is not None and rig.drain.progress.moved_at == pytest.approx(
+        T0 + BOUND - 1
+    ), (
+        "the movement was never observed, so the bound is being measured from the latch: "
+        "this cell would pass with a drain clock that never advances"
+    )
+    assert (
+        rig.drain.progress.abandoned is False
+    ), "the bound expired before the movement was observed, so nothing was reset"
+    assert await _tick(rig, T0 + BOUND - 1 + BOUND) is False
+    assert (
+        rig.drain.progress is not None and rig.drain.progress.abandoned is True
+    ), "the bound was never reached, so this cell says nothing about what resets it"
 
 
 @pytest.mark.asyncio
@@ -376,7 +526,26 @@ async def test_a_job_that_is_printing_resets_the_clock(rig) -> None:
     # bound survives on printing alone, one tick at a time.
     assert await _tick(rig, T0 + BOUND - 1) is False
     assert rig.runtime.retiring == []
-    assert await _tick(rig, T0 + BOUND - 1 + BOUND) is True
+    # THE DISCRIMINATING ASSERTION (agent review round 1, MAJOR-1). A return value
+    # cannot carry this claim any more: without a reset the drain ABANDONS at the
+    # later tick just as surely as with one, so `is False` + `abandoned is True`
+    # there is satisfied by a clock that never moved. What this cell is about is the
+    # clock itself, so it asserts the clock: the movement was OBSERVED at this tick,
+    # i.e. this is the instant the bound is now measured from. Delete the reset and
+    # ``moved_at`` stays at the latch's ``T0`` and this fails.
+    assert rig.drain.progress is not None and rig.drain.progress.moved_at == pytest.approx(
+        T0 + BOUND - 1
+    ), (
+        "the movement was never observed, so the bound is being measured from the latch: "
+        "this cell would pass with a drain clock that never advances"
+    )
+    assert (
+        rig.drain.progress.abandoned is False
+    ), "the bound expired before the movement was observed, so nothing was reset"
+    assert await _tick(rig, T0 + BOUND - 1 + BOUND) is False
+    assert (
+        rig.drain.progress is not None and rig.drain.progress.abandoned is True
+    ), "the bound was never reached, so this cell says nothing about what resets it"
 
 
 @pytest.mark.asyncio
@@ -395,7 +564,26 @@ async def test_a_lane_reporting_activity_resets_the_clock(rig) -> None:
     _report_from_a_lane(rig)
     assert await _tick(rig, T0 + BOUND - 1) is False
     assert rig.runtime.retiring == []
-    assert await _tick(rig, T0 + BOUND - 1 + BOUND) is True
+    # THE DISCRIMINATING ASSERTION (agent review round 1, MAJOR-1). A return value
+    # cannot carry this claim any more: without a reset the drain ABANDONS at the
+    # later tick just as surely as with one, so `is False` + `abandoned is True`
+    # there is satisfied by a clock that never moved. What this cell is about is the
+    # clock itself, so it asserts the clock: the movement was OBSERVED at this tick,
+    # i.e. this is the instant the bound is now measured from. Delete the reset and
+    # ``moved_at`` stays at the latch's ``T0`` and this fails.
+    assert rig.drain.progress is not None and rig.drain.progress.moved_at == pytest.approx(
+        T0 + BOUND - 1
+    ), (
+        "the movement was never observed, so the bound is being measured from the latch: "
+        "this cell would pass with a drain clock that never advances"
+    )
+    assert (
+        rig.drain.progress.abandoned is False
+    ), "the bound expired before the movement was observed, so nothing was reset"
+    assert await _tick(rig, T0 + BOUND - 1 + BOUND) is False
+    assert (
+        rig.drain.progress is not None and rig.drain.progress.abandoned is True
+    ), "the bound was never reached, so this cell says nothing about what resets it"
 
 
 @pytest.mark.asyncio
@@ -413,9 +601,26 @@ async def test_a_job_row_that_never_changes_cannot_hold_the_drain_open(rig) -> N
     _print_from_a_job(rig)
     _report_from_a_lane(rig)
     assert await _tick(rig, T0 + 1) is False, "the whole footprint is seen here"
+    # THE DISCRIMINATING ASSERTION (agent review round 1, MAJOR-1). A return value
+    # cannot carry this claim any more: without a reset the drain ABANDONS at the
+    # later tick just as surely as with one, so `is False` + `abandoned is True`
+    # there is satisfied by a clock that never moved. What this cell is about is the
+    # clock itself, so it asserts the clock: the movement was OBSERVED at this tick,
+    # i.e. this is the instant the bound is now measured from. Delete the reset and
+    # ``moved_at`` stays at the latch's ``T0`` and this fails.
+    assert rig.drain.progress is not None and rig.drain.progress.moved_at == pytest.approx(
+        T0 + 1
+    ), (
+        "the footprint change was never observed, so the bound is being measured from the "
+        "latch: this cell would pass with a drain clock that never advances"
+    )
+    assert rig.drain.progress.abandoned is False
 
-    assert await _tick(rig, T0 + 1 + BOUND) is True
-    assert rig.handle.denials == 1
+    assert await _tick(rig, T0 + 1 + BOUND) is False
+    assert (
+        rig.drain.progress is not None and rig.drain.progress.abandoned is True
+    ), "a frozen job row held the drain past its bound"
+    assert rig.handle.denials == 0, "a frozen row is no reason to deny anyone's tool"
 
 
 @pytest.mark.asyncio
@@ -462,25 +667,28 @@ async def test_every_probe_reads_a_field_the_real_classes_still_have() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_exit_records_a_renderable_cause_and_a_fresh_why_now(rig) -> None:
-    """Q-2 and R2: what a successor can read about this departure afterwards.
+async def test_the_abandon_publishes_the_bound_and_brands_no_cut_off(rig) -> None:
+    """What a successor and a reader can learn about a handover that did not happen.
 
-    Two facts, both of which were wrong or absent in the first cut. The journal
-    gets the TOKEN (``types.BUILD_DRAIN_OVERDUE_CAUSE``) rather than a sentence,
-    because the row is all that outlives the process and a taxonomy can only
-    render a rung it knows — that is what makes a successor able to say the session
-    was handed over by a bound. And the cut-off note gets the why-now RE-READ at
-    this instant: this rung is only ever reached after hours, so the latch's pair
-    can name a build the install left long ago.
+    THIS CELL USED TO PIN THE EXIT'S PROVENANCE (a journal row carrying
+    ``BUILD_DRAIN_OVERDUE_CAUSE`` and a cut-off note carrying the why-now re-read at
+    the exit). Both are gone with the cut they described, and their absence is now
+    the assertion: a runtime that keeps serving must not hand a successor a cut-off
+    note for a turn nobody cut, and must not journal an exit it did not take. What
+    it owes instead is the FAILURE — the pair and the bound it ran out of — because
+    that is the fact a person acts on ("the update did not happen, and here is
+    why"), and it is published under ``UPDATE_FAILED_CAUSE`` by the runtime itself.
     """
+    rig.handle.begin_drain(rig.drain.cause, rig.drain.detail)
     assert await _tick(rig, T0) is False
-    assert await _tick(rig, T0 + BOUND) is True
-    assert rig.handle._turn_journal.exits == [BUILD_DRAIN_OVERDUE_CAUSE]
-    # The attribution the disposal's cut-off note is built from: the departure's own
-    # token, and the pair re-read at the exit rather than the latch's stale one.
-    assert rig.handle._retiring_cause == BUILD_DRAIN_OVERDUE_CAUSE
-    assert rig.handle._retiring_detail == _drain_detail_at_exit(rig.drain)
-    assert rig.handle._retiring_detail != rig.drain.detail
+    assert await _tick(rig, T0 + BOUND) is False
+    assert rig.runtime.failures == [
+        (NEW.label(), BOUND)
+    ], "the abandoned handover was not published with the pair and the bound"
+    assert rig.handle._turn_journal.exits == [], "a runtime that kept serving journalled an exit"
+    assert (
+        getattr(rig.handle, "_retiring_cause", "") == ""
+    ), "a cut-off note was branded for a turn that was never cut"
 
 
 @pytest.mark.asyncio
@@ -491,35 +699,239 @@ async def test_a_spooled_message_resets_the_clock(rig) -> None:
     _spool_a_message(rig)
     assert await _tick(rig, T0 + BOUND - 1) is False
     assert rig.runtime.retiring == []
-    assert await _tick(rig, T0 + BOUND - 1 + BOUND) is True
+    # THE DISCRIMINATING ASSERTION (agent review round 1, MAJOR-1). A return value
+    # cannot carry this claim any more: without a reset the drain ABANDONS at the
+    # later tick just as surely as with one, so `is False` + `abandoned is True`
+    # there is satisfied by a clock that never moved. What this cell is about is the
+    # clock itself, so it asserts the clock: the movement was OBSERVED at this tick,
+    # i.e. this is the instant the bound is now measured from. Delete the reset and
+    # ``moved_at`` stays at the latch's ``T0`` and this fails.
+    assert rig.drain.progress is not None and rig.drain.progress.moved_at == pytest.approx(
+        T0 + BOUND - 1
+    ), (
+        "the movement was never observed, so the bound is being measured from the latch: "
+        "this cell would pass with a drain clock that never advances"
+    )
+    assert (
+        rig.drain.progress.abandoned is False
+    ), "the bound expired before the movement was observed, so nothing was reset"
+    assert await _tick(rig, T0 + BOUND - 1 + BOUND) is False
+    assert (
+        rig.drain.progress is not None and rig.drain.progress.abandoned is True
+    ), "the bound was never reached, so this cell says nothing about what resets it"
 
 
 @pytest.mark.asyncio
-async def test_a_lane_stepping_keeps_a_long_hold_alive(rig) -> None:
-    """A hold that KEEPS MOVING is never cut, however long it runs.
+async def test_a_raising_readmission_still_leaves_the_failure_published(
+    rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE ORDER THE ABANDON OWES, pinned by the one failure it has to survive.
 
-    Measured here as three hours of holding — twelve times the bound — with one
-    lane step every five minutes, which is the shape of a long subagent lane
-    whose parent's own transcript never changes for the whole of it.
+    ``_keep_loaded_build`` publishes the failure BEFORE the spooled work comes back in
+    (QA round 1, Q-2), because the re-admission can run real turns for 27-37 s while the
+    reaper may exit a tick after they land — published second, the record's account of the
+    failure could be missed entirely. Round 2 measured that NOTHING pinned that order:
+    putting the two steps back left 86 cells green across the five abandon-rung files.
+
+    This cell is the pin, and it is shaped so the reverted order cannot pass it: the
+    re-admission RAISES, so on the reverted tree the publish is exactly what the raise
+    skips. Both claims are required — the failure is published with the bound the arm ran
+    out of, and the raise reaches the caller, which is what makes the first claim
+    discriminating rather than incidental. Nothing here argues the escape is desirable:
+    ``_drain_inbox_into`` swallows per-ROW failures and this is a step-level one, and the
+    cell records that shape so a later change which swallows it fails here instead of
+    quietly restoring the order that could lose the record's account.
+    """
+    rig.handle.begin_drain(rig.drain.cause, rig.drain.detail)
+    assert await _tick(rig, T0) is False, "the drain takes its clock here"
+
+    async def _raise_on_readmission(_handle: object) -> int:
+        raise RuntimeError("the spooled work could not be brought back in")
+
+    monkeypatch.setattr(child_mod, "_drain_inbox_into", _raise_on_readmission)
+
+    with pytest.raises(RuntimeError):
+        await _tick(rig, T0 + BOUND)
+
+    assert (
+        rig.drain.progress is not None and rig.drain.progress.abandoned is True
+    ), "the staleness arm never ran, so this cell measured nothing"
+    assert rig.runtime.failures, (
+        "the failure was never published: the publish runs AFTER the re-admission again, "
+        "so a re-admission that raises takes the record's account with it (QA round 1, "
+        "Q-2; agent review round 2, R2-MINOR-1)"
+    )
+    assert rig.runtime.failures[0][1] == BOUND, (
+        "the failure was published without the bound it ran out of, so no surface can "
+        "say why the update did not happen"
+    )
+    assert rig.handle.draining is False, (
+        "the latch is released before either step runs, which is what makes the failure "
+        "reportable rather than the state it was abandoned from"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_lane_stepping_holds_the_drain_past_the_staleness_bound(rig) -> None:
+    """A hold that KEEPS MOVING is not cut by the STALENESS clock, however long it runs.
+
+    Twenty-eight minutes of holding with one lane step every two minutes, which is the
+    shape of a long subagent lane whose parent's own transcript never changes for the
+    whole of it. That is past ``BOUND`` — a clock that never advanced would have given
+    up at ``T0+900`` — and comfortably inside ``DWELL``, which is the bound that DOES
+    end a moving hold and has its own cell one down from here.
+
+    THE CLAIM IS NARROWER THAN IT USED TO BE, and splitting it is what the dwell
+    forced: "never cut, however long it runs" stopped being true when the hold itself
+    got a bound, and asserting both here would have blurred which clock fired.
     """
     at = T0
-    for step in range(36):
-        at += 300.0
+    for step in range(14):
+        at += 120.0
         _bump_the_roster(rig)
         assert await _tick(rig, at) is False, f"cut a moving hold at step {step}"
+    assert at - T0 > BOUND, "the hold has to outlast the staleness bound to disprove it"
+    assert at - T0 < DWELL, "...and stay inside the dwell, which is a different bound"
     assert rig.runtime.retiring == []
     assert not rig.stop.is_set() and not rig.handle.disposed
-    assert rig.drain.progress is not None and rig.drain.progress.overdue is False
+    assert rig.drain.progress is not None and rig.drain.progress.abandoned is False
+
+
+@pytest.mark.asyncio
+async def test_a_lane_that_keeps_stepping_is_abandoned_at_the_dwell(
+    rig, caplog: pytest.LogCaptureFixture
+) -> None:
+    """THE OPERATOR'S OWN SHAPE: a drain held by work that keeps moving ends at DWELL.
+
+    The reproduction, at the clock. A lane steps every five minutes; the movement
+    clock is reset by every one of those steps and never expires — asserted on
+    ``moved_at`` and on a ``stalled_s`` of ZERO at the firing tick, so nothing here
+    is the staleness arm firing late — and before this bound the runtime held the
+    drain, and with it the session, for as long as the lane kept stepping (measured:
+    eight hours on the reporting host, until the lanes finally stopped).
+
+    What the dwell asserts is the whole arm: the latch is RELEASED (the double CALLS
+    the production ``end_drain`` — see ``FakeHandle`` — so a tree that kept refusing
+    admissions fails here), the failure is PUBLISHED with the bound it actually ran out
+    of, the turn in flight is NOT cut and the process is NOT ended, and the departure
+    still happens at the first idle instant afterwards — an abandoned handover is a
+    handover retried, never one given up for good.
+
+    The WARNING is asserted too, because it is the only account of WHICH bound fired
+    that a production log carries: it has to name the dwell, the build pair, and that
+    the work is still in flight and still being served.
+    """
+    # The latch is taken by hand, as the other cells in this file that assert the
+    # release do: this file drives ``_drain_for`` directly rather than through the
+    # reaper, so nothing has called ``begin_drain`` on the handle yet — and the
+    # ANNOUNCE is modelled too, because "the abandon wears the same phrase" is only
+    # assertion at all if the latch's own frame is on the wire already.
+    await rig.runtime.announce_retiring(
+        rig.drain.reason, to=rig.drain.to, draining=True, leaving=LEAVING_FOR_BUILD
+    )
+    rig.handle.begin_drain(rig.drain.cause, rig.drain.detail)
+    at = T0
+    assert await _tick(rig, at) is False, "the drain takes its clock here"
+    for _ in range(5):
+        at += 300.0
+        _bump_the_roster(rig)
+        assert await _tick(rig, at) is False, "the dwell fired before it was due"
+    assert rig.drain.progress is not None
+    assert rig.drain.progress.abandoned is False
+    assert rig.drain.progress.moved_at == pytest.approx(
+        at
+    ), "the premise is a clock the lane steps keep resetting, and it is not being reset"
+
+    at += 300.0
+    _bump_the_roster(rig)
+    with caplog.at_level(logging.WARNING, logger="local_operator.session.runtime.process"):
+        assert await _tick(rig, at) is False
+
+    assert rig.drain.progress.abandoned is True, "the dwell was never reached"
+    # THE DISCRIMINATOR, read off the same tick that abandoned: the movement clock was
+    # reset by the step this tick carried (``_drain_for`` samples before it decides),
+    # so stalled_s is zero AT the firing instant and the staleness arm cannot be what
+    # fired. Without this the cell would pass on a tree that only had the old bound.
+    assert rig.drain.progress.stalled_s(at) == pytest.approx(0.0), (
+        "the movement clock has to be quiet-fresh at the firing tick, or this cell is "
+        "the staleness arm wearing the dwell's name"
+    )
+    assert rig.handle.draining is False, "the latch was counted but never taken off"
+    assert rig.handle.releases == 1
+    assert rig.runtime.failures, "the abandoned handover was never published"
+    assert rig.runtime.failures[0][1] == pytest.approx(DWELL), (
+        "the incident row has to name the bound the runtime actually ran out of, and "
+        "this arm ran out of the dwell rather than the staleness bound"
+    )
+    assert rig.handle.update_failed == "", (
+        "the handle remembered the pair, which is the WINDOW rung's memo for not "
+        "burning its bound twice — here it would be the opposite of correct, because "
+        "the drain rung keeps asking"
+    )
+    assert (
+        not rig.stop.is_set() and not rig.handle.disposed
+    ), "an abandoned handover keeps serving; it never ends the process or its turn"
+    assert rig.handle.retired is False, "the moving hold is abandoned, not quietly retired"
+    assert [leaving for _reason, _to, _draining, leaving in rig.runtime.retiring] == [
+        LEAVING_FOR_BUILD
+    ], "the abandoned handover wears a phrase for a departure it did not take"
+    assert rig.handle.drains == 1, "the drain was latched a second time"
+    assert "dwell bound" in caplog.text and "ABANDONING the handover" in caplog.text, caplog.text
+    assert str(os.getpid()) in caplog.text, (
+        "the dwell line has to carry the pid like every other latch and exit line in "
+        "this module: it is the line an operator greps for in a shared, rotated runtime "
+        "log, where the session id alone does not identify the process (QA round 1, Q-3)"
+    )
+    assert NEW.label() in caplog.text, (
+        "the warning has to name the build pair the abandoned handover was for, or a "
+        "reader cannot match it to the update that did not happen"
+    )
+
+    # THE COMMITMENT SURVIVES THE ABANDON, which is the half a released latch makes
+    # easy to lose: the drain object stays, so the departure still happens at the
+    # first idle instant — the newer build is asked about again, not forgotten.
+    rig.handle._busy = False
+    assert await _tick(rig, at + 1.0) is True, (
+        "the work finished and the runtime never left, so the abandonment turned a "
+        "moving handover into a permanent one"
+    )
 
 
 @pytest.mark.asyncio
 async def test_the_bound_is_measured_from_the_last_movement_not_from_the_latch(rig) -> None:
-    """Movement at minute ten buys the hold a full bound from THEN, not from the
-    latch: the clock is a staleness clock, not a deadline."""
+    """Movement at minute ten buys the hold a full bound from THEN, not from the latch:
+    the clock is a staleness clock, not a deadline.
+
+    THE CELL NEEDED ITS FIRST TICK AT ``T0`` TO SAY THAT (agent review round 2,
+    MAJOR-1 — the eighth item of round 1's list, which the first remediation pass
+    missed). Without it the drain's clock was CREATED at ``T0+600``, so "the latch" and
+    "the last movement" were the same instant and no assertion here could tell the two
+    apart: under a clock that never advances the give-up landed one tick after the
+    latch's own bound had expired, which is every assertion the first draft made. The
+    latch is now taken at ``T0``, the movement is observed at ``T0+600``, and the
+    discriminating tick is the one ONE SECOND SHORT of the reset bound — a clock still
+    measured from the latch has already given up by then.
+    """
+    assert await _tick(rig, T0) is False, "the drain latches here, on a clock of its own"
     _land_a_tool_boundary(rig)
     assert await _tick(rig, T0 + 600) is False
-    assert await _tick(rig, T0 + 600 + BOUND - 1) is False
-    assert await _tick(rig, T0 + 600 + BOUND) is True
+    assert rig.drain.progress is not None and rig.drain.progress.moved_at == pytest.approx(
+        T0 + 600
+    ), (
+        "the movement at minute ten was never observed, so the bound is still being "
+        "measured from the latch"
+    )
+    assert (
+        rig.drain.progress.abandoned is False
+    ), "the latch's own bound had already expired, so nothing here is about the movement"
+
+    assert await _tick(rig, T0 + 600 + BOUND - 1) is False, "one second short is not the bound"
+    assert rig.drain.progress.abandoned is False, (
+        "the bound was measured from the LATCH: its own bound expired at T0+BOUND, long "
+        "before this tick, so a clock that never advances has already given up here"
+    )
+    assert await _tick(rig, T0 + 600 + BOUND) is False
+    assert rig.drain.progress.abandoned is True, "the reset bound was never reached"
 
 
 @pytest.mark.asyncio
@@ -531,7 +943,8 @@ async def test_a_streaming_session_is_not_movement(rig) -> None:
     bound exists for."""
     assert rig.session.is_streaming is True
     assert await _tick(rig, T0) is False
-    assert await _tick(rig, T0 + BOUND) is True
+    assert await _tick(rig, T0 + BOUND) is False
+    assert rig.drain.progress is not None and rig.drain.progress.abandoned is True
 
 
 # -- what must NOT change ----------------------------------------------------------
@@ -556,7 +969,8 @@ async def test_a_viewer_resets_no_clock(rig) -> None:
     rig.handle._viewers = 3
     assert await _tick(rig, T0) is False
     assert await _tick(rig, T0 + BOUND - 1) is False
-    assert await _tick(rig, T0 + BOUND) is True
+    assert await _tick(rig, T0 + BOUND) is False
+    assert rig.drain.progress is not None and rig.drain.progress.abandoned is True
 
 
 @pytest.mark.asyncio
@@ -581,14 +995,22 @@ async def test_an_idle_instant_still_wins_over_the_backstop(rig, disk) -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_forced_exit_is_taken_once(rig) -> None:
+async def test_the_abandon_is_taken_once_per_drain(rig) -> None:
     """A later tick (the signal drain's loop can ask in principle) is answered
-    without a second announcement, a second denial or a second disposal."""
+    without a second release, a second publish or a second announcement.
+
+    The guard is what keeps a runtime that cannot reach idle from reporting its
+    failure on every ``REAP_CHECK_S`` tick — four times a minute, forever, on a
+    surface a person reads. The retry belongs to the WATCH, which re-commits a
+    fresh drain on its own terms, not to the rung being re-entered.
+    """
+    rig.handle.begin_drain(rig.drain.cause, rig.drain.detail)
     assert await _tick(rig, T0) is False
-    assert await _tick(rig, T0 + BOUND) is True
-    assert await _tick(rig, T0 + BOUND + 1) is True
-    assert len(rig.runtime.retiring) == 1
-    assert rig.handle.denials == 1 and rig.session.handed_wakes == 1
+    assert await _tick(rig, T0 + BOUND) is False
+    assert await _tick(rig, T0 + BOUND + 1) is False
+    assert len(rig.runtime.failures) == 1, rig.runtime.failures
+    assert rig.handle.releases == 1, "the latch was released more than once"
+    assert rig.runtime.retiring == [], "the abandon announced a departure it did not take"
 
 
 @pytest.mark.asyncio
@@ -600,24 +1022,31 @@ async def test_the_clock_runs_on_monotonic_time_when_no_clock_is_injected(
     monkeypatch.setattr(child_mod, "BUILD_DRAIN_PROGRESS_S", 0.05)
     assert await _drain_for(rig.drain, rig.handle, rig.runtime, rig.stop) is False
     await asyncio.sleep(0.06)
-    assert await _drain_for(rig.drain, rig.handle, rig.runtime, rig.stop) is True
+    assert await _drain_for(rig.drain, rig.handle, rig.runtime, rig.stop) is False
+    assert (
+        rig.drain.progress is not None and rig.drain.progress.abandoned is True
+    ), "the real clock never reached the bound, so this cell proves nothing about it"
 
 
 # -- the ladder it lands on --------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_the_reaper_releases_a_stalled_drain_and_journals_the_bound(
+async def test_the_reaper_abandons_a_stalled_drain_and_retries_it(
     disk, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The whole ladder, on the real reaper: a permanently busy runtime declines
-    a newer build, latches the drain, and — with its work reporting nothing —
-    is released by the backstop instead of holding forever.
+    """The whole ladder, on the REAL reaper, with the operator's rule applied.
 
-    The two announcements are the point: the FIRST is the latch's
-    (``stale-build``, promising the turn finishes), and a session that never got
-    there used to publish only that one, for hours, while refusing every
-    message.
+    A permanently busy runtime declines a newer build, latches the drain, and its
+    work reports nothing for the bound. What must happen then is the change this
+    file is about: the handover is ABANDONED — the latch released, the failure
+    published, the process still serving — and the next check re-commits a fresh
+    drain, so a build that cannot land while the work is stuck keeps being asked
+    about instead of taking the turn with it.
+
+    The two announcements are still the shape of the record: the FIRST is the
+    latch's (``stale-build``, promising the turn finishes), and the assertion that
+    there is no SECOND is what separates this from the cut it replaced.
     """
     monkeypatch.setattr(child_mod, "REAP_CHECK_S", 0.01)
     monkeypatch.setattr(child_mod, "BUILD_CHECK_S", 0.02)
@@ -634,12 +1063,30 @@ async def test_the_reaper_releases_a_stalled_drain_and_journals_the_bound(
     assert runtime.retiring == [("stale-build", NEW.label(), True, LEAVING_FOR_BUILD)]
     assert not stop.is_set() and not handle.disposed, "in-flight work is not aborted on the latch"
 
-    assert await _wait_for(lambda: handle.disposed), "the stalled drain was never released"
-    assert runtime.retiring[-1] == (
-        _BUILD_OVERDUE_REASON,
-        NEW.label(),
-        True,
-        LEAVING_FOR_BUILD_OVERDUE,
+    assert await _wait_for(lambda: runtime.failures), (
+        "the stalled drain was never abandoned: the failed handover is what says why "
+        "this runtime is still serving the build it loaded"
     )
-    assert stop.is_set() and handle.retired is False, "the cut rung is not the quiet retire rung"
+    # ORDERED AFTER THE PUBLISH ON PURPOSE. ``_abandon_move`` releases the latch
+    # BEFORE it publishes, so waiting on the release and then reading ``failures``
+    # raced the publish on a loaded worker (measured: green in this file alone, red
+    # inside the runtime slice). Waiting on the publish proves both happened.
+    assert (
+        handle.releases == 1
+    ), "the latch was never released, so this runtime cannot take work again"
+    # THE COMMITMENT OUTLIVES THE ABANDON, and both halves are asserted because a
+    # re-latch would break the first without failing the second: the drain object
+    # stays (a second ``begin_drain`` re-runs ``Session.retire_wakes_to_inbox``,
+    # which starts a fresh list of one-shot wakes and discards the ones this drain
+    # already swallowed), and the departure still happens at the first idle instant.
+    assert handle.drains == 1, "the handover was latched a second time"
+    assert runtime.retiring == [
+        ("stale-build", NEW.label(), True, LEAVING_FOR_BUILD)
+    ], "the departure was announced a second time, so a viewer would go cold twice"
+    handle._busy = False  # the work finally ends
+    assert await _wait_for(lambda: handle.disposed), (
+        "the work finished and the runtime never left: the abandonment turned a stalled "
+        "handover into a permanent one"
+    )
+    assert stop.is_set(), "the clean idle exit is the one that ends this runtime"
     await task

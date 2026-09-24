@@ -59,7 +59,7 @@ sys.path.insert(0, str(REPO))
 
 import local_operator  # noqa: E402
 from local_operator.harness.types import AgentTool  # noqa: E402
-from local_operator.prompts_api import build_system_blocks  # noqa: E402
+from local_operator.prompts_api import CHANNEL_ASK, build_system_blocks  # noqa: E402
 from local_operator.tools.registry import DEFAULT_TOOL_NAMES  # noqa: E402
 from scripts.real_tool_surface import build_real_tools  # noqa: E402
 
@@ -240,7 +240,106 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: the ``secret`` (49), ``web_read`` (71) and ``scratchpad://`` (51) raises, so
 #: the ratchet stays tight; the tighten band below (1,200) is nowhere near
 #: tripped and the next context reduction tightens it.
-BUDGET_BILLED_TOKENS = 29_950
+#:
+#: RAISED 30,025 -> 30,150 for the per-command memory guard's ``memory_mb``
+#: field (2026-09-21), stated with the same arithmetic the guard exists to
+#: force. The base — ``origin/main`` 40544beb, the tree the PR diffs against —
+#: measures 83,336 chars = ~29,977 billed on THIS machine, i.e. 48 tokens of
+#: headroom; a ``BashParams`` field costs ~51 even with the shortest honest
+#: description, so the head with the shipped three-semantics description
+#: measures ~30,088 here. The alternative the ladder prefers — OFFSET the cost
+#: — was measured and is NOT available: no schema clause in the prefix is
+#: filler, and the field is not droppable because the tool-result text ("pass
+#: memory_mb on the bash call") and the escape from F7 both name it.
+#:
+#: THE CEILING CLEARS **CI**, NOT JUST THIS MACHINE, and that is why it sits
+#: ~60 above the local head rather than ~12 (remediation round 1, measured):
+#: there IS a local-vs-CI gap for this change, because `tool_schemas` is
+#: computed from the real pydantic models and one of them is platform-shaped.
+#: Local (macOS, py3.12.13) measured `tool_schemas` 49,353 chars / head 30,088;
+#: CI (ubuntu, py3.12) measured 49,420 chars / head **30,113** — 67 more
+#: schema chars, ~25 billed tokens — so a ceiling set 12 above the LOCAL head
+#: failed CI by exactly 13 tokens. The ceiling is therefore set with CI as the
+#: binding reading: 37 above CI's head and 62 above this machine's. Only the
+#: CI figure matters for the gate, so the 37 is the one to read; it sits just
+#: UNDER the 46-51 band this file's ``secret`` (49), ``web_read`` (71) and
+#: ``scratchpad://`` (51) raises chose, and the 62 above local is simply the
+#: same ceiling seen from the smaller reading. The band is descriptive of prior
+#: raises, not a constraint this one satisfies — the local-vs-CI gap, not the
+#: band, decides the number here, and the tighten band below (1,200) is nowhere
+#: near tripped. Earlier raises in this file found NO local-vs-CI gap; this one
+#: does, so it is recorded rather than carried as the assumption that the two
+#: always agree.
+#: RAISED 29,950 -> 30,025 for the scratchpad-salience change, stated here with
+#: the arithmetic because the guard exists to make this an explicit decision.
+#: The base — THIS BRANCH'S base, ``origin/main`` 0bc5fb3a, the tree the PR
+#: diffs against — measured by THIS script on this machine reads 83,185 chars =
+#: ~29,923 billed, i.e. 27 tokens of headroom — no room for any new surface —
+#: and the head measures 83,336 = ~29,977:
+#:
+#:   + the tool schemas                49,043 vs 48,920 = +123 chars = +44
+#:     (``read`` names ``scratchpad://`` in its scheme list, which it already
+#:      serves; ``write`` and ``edit`` each add a clause saying where the
+#:      agent's OWN scratch goes)
+#:   + the ``system.md`` paragraph      33,947 vs 33,919 =   +28 chars = +10
+#:     (it now names both traps — the working directory and ``/tmp`` — and is
+#:      scoped to TEXT scratch, which is what the store actually holds)
+#:   = measured on this head             83,336 chars = ~29,977 billed
+#:
+#: The 28 is AFTER the offsetting rewrite, and that is the point: the paragraph
+#: was rewritten to pay for its own clause where it could, not appended to.
+#: "It is this session's own folder and is deleted with the session" became "it
+#: dies with the session" (-42 chars), so the second trap is named for 23 net
+#: characters rather than the ~65 the clause itself costs; the review round's
+#: TEXT scoping added the other 5 ("Text "), and nothing else in the prompt or
+#: the schemas moved with it. Offsetting cuts elsewhere were NOT taken because
+#: the remaining candidates are not filler: the scheme list is what tells a
+#: model the scheme exists at all (``read`` already serves it, so the omission
+#: was a bug, not a saving), and the two write/edit clauses are the only place
+#: the scratch convention reaches the moment of a tool call. Where the cost is
+#: in doubt the ladder says measure it and justify it, and all three clauses
+#: ride a prefix that already carries those three schemas.
+#:
+#: The CEILING did not move in the remediation round, and that is a measurement
+#: rather than a stale figure left behind: the round-1 findings changed the
+#: nudge's runtime STRING (result text, which rides no request prefix) and added
+#: tests, so the only prefix bytes they touched are the 5 above. The
+#: re-measured head is 83,336 and the ceiling sits 48 above it — inside the
+#: 46-51 band this file's ``secret`` (49), ``web_read`` (71) and
+#: ``scratchpad://`` (51) raises hold to — so the ratchet stays as tight as it
+#: was, and the tighten band below (1,200) is nowhere near tripped.
+#:
+#: RAISED BY EXACTLY WHAT THE ATTACHED-INTERFACE BLOCK COSTS (2026-09-23).
+#: ``prompts_api.build_system_blocks`` now emits a POSITIVE ``<interactivity>``
+#: body for an attached session — the text that says a question WILL be
+#: presented — where it previously emitted no block at all, so this guard's
+#: default render (``interactive=True``) grew by it. Measured with the command
+#: below, same tree otherwise: 83,408 chars = 30,003 billed at the merge base
+#: ``1392324b`` (147 under the old 30,150), 84,005 chars = 30,218 billed with
+#: the block. The block therefore costs 215 billed tokens on EVERY request of
+#: an attached session (design:
+#: ``docs/design/attached-interface-signal.md`` §3.4, where it was estimated at
+#: ~90 — that gap is why this raise was not in the plan).
+#:
+#: RE-MEASURED IN ROUND 2 (2026-09-23, review remediation): 84,009 chars =
+#: 30,219 billed, 146 headroom. The block itself is UNCHANGED — the round-2 work
+#: channelled it (six bodies keyed on two measured facts) and left the attached
+#: ``ask`` body byte-identical, which is the shape this guard measures. The 4
+#: characters are the browser tool's own description: "NOTIFY the user" became
+#: "NOTIFY the operator", so one person is named one way across the access flow
+#: (round 1, D8). The ratchet therefore stays where the raise put it — headroom
+#: 146, and NOT re-raised to 147: an addition that costs tokens costs headroom.
+#:
+#: The raise is deliberate and is NOT a loosening: 30,365 restores exactly the
+#: 147-token headroom the tree had at the merge base, so the next addition finds
+#: the ratchet as tight as this one did. It is not paid for out of the block,
+#: because the block's sentences ARE the fix — the incident was a model told
+#: "nobody is watching a screen" while the operator was reading the session, and
+#: silence gave it nothing else to read. A future round that wants these tokens
+#: back should take them from the block's style hint ("Write for a reader who
+#: may answer minutes later…", ~51 tokens), not from the two sentences that
+#: state the fact.
+BUDGET_BILLED_TOKENS = 30_365
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
@@ -306,6 +405,16 @@ def measure_start_context(
         date_str="2026-01-01",
         user_instructions=user_instructions,
         repo_guidance=repo_guidance,
+        # THE WORST CASE, AND IT MUST BE STATED: ``interactive`` defaults to
+        # ``None``, which renders NO ``<interactivity>`` block at all (a host with
+        # no runtime probe — an ``exec`` run, a scheduled run, a plain CLI). The
+        # guard is here to hold the ceiling for the host that DOES carry the
+        # block, so it renders the attached session's shape explicitly:
+        # ``interactive=True`` and the channel whose body is the longest of the
+        # three (``CHANNEL_ASK``, the TUI/desktop/app case — see
+        # ``prompts_api.build_system_blocks``).
+        interactive=True,
+        channel=CHANNEL_ASK,
     )
     parts: dict[str, Any] = {
         "instructions": len(blocks[0]),

@@ -25,7 +25,7 @@ import inspect
 import logging
 import time
 import uuid
-from typing import Any, Awaitable, Callable, Literal
+from typing import Any, Awaitable, Callable, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -216,14 +216,21 @@ JobStatus = Literal["running", "completed", "failed", "cancelled", "interrupted"
 JobType = Literal["bash", "task"]
 
 # run(job_id, signal, report_progress) -> awaitable text result
-JobRunFn = Callable[[str, AbortSignal, Callable[[str], None]], Awaitable[str | None]]
+JobRunFn = Callable[
+    [str, AbortSignal, "Callable[[str | Mapping[str, Any]], None]"], Awaitable[str | None]
+]
 DeliverySink = Callable[[str, str, "AsyncJob | None"], Awaitable[None] | None]
 
 #: Custom-message type used by a session to deliver a settled job's result
 #: back into the conversation as a re-entering message (rendered as a user
 #: message). Lives here because the job manager owns the lifecycle.
 JOB_RESULT_MESSAGE_TYPE = "job_result"
-ProgressFn = Callable[[str], None]
+#: A runner's progress report. A plain string is the common case and lands in
+#: ``latest_details["progress"]``; a MAPPING merges structured fields into
+#: ``latest_details`` alongside it, which is how a runner records something a
+#: renderer or compaction wants by key (e.g. bash's memory-kill peak and ceiling)
+#: without smuggling it into the human-readable text.
+ProgressFn = Callable[["str | Mapping[str, Any]"], None]
 
 
 def _usage_components(usage: Usage | None, model_label: str | None) -> list[Usage]:
@@ -589,6 +596,25 @@ class AsyncJobManager:
             return None  # scoping: mismatch is not-found
         return job
 
+    def lookup_snapshot(self) -> Mapping[str, AsyncJob]:
+        """Copy the non-sweeping lookup table, including attempt aliases.
+
+        ``list()`` is intentionally not used here: it applies retention and may
+        mutate the ledger as a read. The mobile roster instead needs the same
+        point lookups as ``get()`` while walking many nodes, so this snapshot
+        preserves alias precedence without triggering an observable sweep.
+        """
+        rows = dict(self._jobs)
+        for alias, target in self._aliases.items():
+            job = self._jobs.get(target)
+            if job is None:
+                # ``get(alias)`` resolves aliases before direct row ids, so a
+                # swept target must not expose a colliding stale direct row.
+                rows.pop(alias, None)
+            else:
+                rows[alias] = job
+        return rows
+
     def list(self, *, registrant_id: str | None = None) -> list[AsyncJob]:
         """Every job row, oldest first, with retention applied AT READ TIME.
 
@@ -939,8 +965,11 @@ class AsyncJobManager:
         settle. A row that was still ``queued`` (parked behind the capacity
         gate, ``status == "running"`` with ``queued == True``) never ran and has
         no transcript, so it is NOT interrupted — it is simply gone; it is
-        dropped rather than restored, matching the comms side, which already
-        skips it in ``snapshot()`` because its record has no ``session_dir``.
+        dropped rather than restored. The comms side agrees, but for a narrower
+        reason than "no ``session_dir``": ``snapshot()`` now keeps a
+        no-transcript record that has a recorded terminal ``outcome`` (a child
+        that died DURING launch), and drops only a record with neither a
+        transcript nor an outcome — which is exactly this parked case.
         Every restored row is flagged ``restored`` and carries no runtime
         handles (an ``AsyncJob`` serializes none — the abort signal and asyncio
         task live in the manager's own ``_signals``/``_tasks`` maps, which the
@@ -991,9 +1020,13 @@ class AsyncJobManager:
                 continue
             if row.status == "running":
                 if row.queued:
-                    # Parked and never started, so it has no transcript to show
-                    # or resume; a ``⇥ interrupted`` row for it would invite a
-                    # resume that finds nothing. Drop it entirely.
+                    # Parked and never started (settled is False, no outcome
+                    # recorded), so it has no transcript to show or resume; a
+                    # ``⇥ interrupted`` row for it would invite a resume that
+                    # finds nothing. Drop it entirely. A queued child that DID
+                    # settle before attaching is ``status == "failed"`` rather
+                    # than "running", so it is not this branch and keeps its row
+                    # (and its comms record) for diagnosis.
                     continue
                 # No task backs it any more; a live-looking row would spin a
                 # spinner forever and invite a cancel that finds nothing.
@@ -1293,10 +1326,19 @@ class AsyncJobManager:
     # -- internals ----------------------------------------------------------
 
     def _progress_fn(self, job_id: str) -> ProgressFn:
-        def report(details: str) -> None:
+        def report(details: "str | Mapping[str, Any]") -> None:
             job = self._jobs.get(job_id)
             if job is not None:
-                job.latest_details = {"progress": details}
+                if isinstance(details, Mapping):
+                    # Structured field(s): merge onto whatever is there, keeping
+                    # any ``progress`` line already recorded. This is the channel
+                    # a runner uses to hand a renderer/compaction a keyed value
+                    # (bash's memory-kill peak/ceiling) rather than only text.
+                    merged = dict(job.latest_details or {})
+                    merged.update(details)
+                    job.latest_details = merged
+                else:
+                    job.latest_details = {"progress": details}
                 self._notify_transient_job_change()
 
         return report

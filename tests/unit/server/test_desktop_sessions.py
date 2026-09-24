@@ -32,7 +32,7 @@ from local_operator.server.utils.desktop_sessions import (
     DesktopSessions,
     SubagentChildUnavailable,
 )
-from local_operator.session.errors import SessionStoreUnavailable
+from local_operator.session.errors import RuntimeRetiring, SessionStoreUnavailable
 from local_operator.session.runtime import registry
 from local_operator.session.transcript import (
     ENTRY_MESSAGE,
@@ -6873,3 +6873,413 @@ async def test_a_refused_warm_open_leaves_no_reservation_behind(tmp_path):
 
     assert pool._handouts == {}, "the warm refusal stranded a reservation"
     assert pool._locate_flights == {}, "the refusal left a lookup flight behind"
+
+
+@pytest.mark.asyncio
+async def test_the_command_and_answer_routes_carry_the_authority_refusal(tmp_path, monkeypatch):
+    """The refusal reaches the desktop VERBATIM, on the route that refused.
+
+    QA could not drive this cell at all before: the refusal crossed as a bare
+    ``RuntimeError``, so the command route fell through the shared ladder to
+    ``503 runtime_unreachable`` ("reconnect and reconcile before retrying") and
+    the card route answered ``409 no longer pending`` — while the card was still
+    parked. Both describe a different problem than the operator has, and neither
+    carried the remedies the phone relay's 422 has always carried (agent review
+    round 1 R1-2 = design D1 = UX U4 = QA Q1).
+
+    The bridge's remote is a STUB here because this test is about the ROUTE's
+    arm: what the ladder does with the category, and what the card route says
+    about a card that is still parked. The refusal's real provenance — a live
+    runtime this backend did not spawn — is covered end to end by
+    ``tests/unit/session/runtime/test_approval_authority_seam.py``
+    (``..._desktop_route_cannot_loosen_a_runtime_this_backend_did_not_start``),
+    which drives these same two methods through a real ``AttachedSession``.
+    """
+    import os
+    from typing import Any, cast
+
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from local_operator.config import ConfigManager
+    from local_operator.harness.approval import OPERATOR_AUTHORITY_REQUIRED_NOTICE
+    from local_operator.server.routes import capabilities, desktop_sessions
+    from local_operator.server.utils.desktop_sessions import DesktopSessions
+    from local_operator.session.errors import OperatorAuthorityRequired
+
+    for name in list(os.environ):
+        if name.startswith("CMUX_"):
+            monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "authority-token")
+
+    app = FastAPI()
+    app.state.config_manager = ConfigManager(tmp_path)
+    pool = DesktopSessions(tmp_path)
+    app.state.desktop_sessions = pool
+    app.include_router(desktop_sessions.router)
+    app.include_router(capabilities.router)
+    sid = await pool.create(str(tmp_path))
+
+    async def refuse(*_args: object, **_kwargs: object) -> None:
+        raise OperatorAuthorityRequired()
+
+    async def noop(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    class RefusingRemote(SimpleNamespace):
+        """A remote that refuses the two authority-increasing methods.
+
+        Everything else it is asked for answers with an inert coroutine: the
+        bridge touches a long tail of its surface around a command (watch
+        leases, disposal, guarding), and listing that tail here would make this
+        test fail every time the bridge learns a new one. What is UNDER test is
+        the route's arm, so only the two methods that produce the refusal are
+        anything in particular.
+        """
+
+        def __getattr__(self, name: str) -> Any:
+            if name.startswith("_"):
+                raise AttributeError(name)
+
+            async def inert(*_args: object, **_kwargs: object) -> None:
+                return None
+
+            return inert
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://localhost",
+            headers={"Authorization": "Bearer authority-token"},
+        ) as client:
+            async with pool.session(sid) as bridge:
+                bridge.remote = cast(
+                    Any,
+                    RefusingRemote(
+                        is_cold=False,
+                        frontend_state=SimpleNamespace(epoch="epoch-1"),
+                        bind_runtime=noop,
+                        route_shared_slash=refuse,
+                        answer_gate=refuse,
+                    ),
+                )
+                command = await client.post(
+                    f"/v1/desktop/sessions/{sid}/commands",
+                    json={
+                        "request_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                        "command": "approvals",
+                        "args": "auto",
+                    },
+                )
+                assert command.status_code == 422, command.text
+                body = command.json()
+                assert body["detail"]["code"] == "operator_authority_required", body
+                assert body["detail"]["message"] == OPERATOR_AUTHORITY_REQUIRED_NOTICE, body
+
+                answer = await client.post(
+                    f"/v1/desktop/sessions/{sid}/answers",
+                    json={
+                        "request_id": "deadbeefdeadbeef",
+                        "approved": True,
+                        # The route compares the answer's epoch with the
+                        # session's, so the refusal is reached only for an answer
+                        # to the CURRENT owner.
+                        "epoch": "epoch-1",
+                    },
+                )
+                # BOTH halves in one request: the card route must not swallow the
+                # refusal as "no longer pending".
+                assert answer.status_code == 422, answer.text
+                detail = answer.json()["detail"]
+                assert detail["code"] == "operator_authority_required", detail
+                assert detail["message"] == OPERATOR_AUTHORITY_REQUIRED_NOTICE, detail
+                assert detail["still_pending"] is True, detail
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_a_served_warm_whose_runtime_exited_cleanly_does_not_pace_the_next(
+    tmp_path, monkeypatch
+):
+    """B-F1: a SUCCESSFUL warm must not charge the next cold period 30 s.
+
+    The idle drain reaps a warmed runtime seconds after the user looks away, and
+    switching back inside the pace used to wait out its remainder cold (26.2-26.8 s
+    p95 watch->live, reproduced over real ``serve``). The runtime that served the
+    last warm is gone and withdrew its boot record, which only a clean exit does,
+    so the next intent engages at once. The crash-loop pin above
+    (``test_a_runtime_that_boots_then_dies_is_paced_not_respawned_each_beat``) is
+    the other half: an unknown pid, a live pid, or a surviving boot record keeps
+    the pace.
+    """
+    attempts: list[bool] = []
+    now = 100.0
+    exited_cleanly = {"value": True}
+
+    def clock() -> float:
+        return now
+
+    class BoundClient:
+        connected = True
+
+        def close(self) -> None:
+            pass
+
+        async def desktop_watch(self, *, visible: bool, can_notify: bool) -> None:
+            pass
+
+    async def serve(*, foreground: bool = True) -> None:
+        attempts.append(foreground)
+        remote._client = BoundClient()  # type: ignore[assignment]
+        remote._ready_for_events = True
+        remote._runtime_pid = 424242
+
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=clock))
+    monkeypatch.setattr(module, "_LEASE_WARM_POLL_S", 0.01, raising=False)
+    monkeypatch.setattr(
+        module.DesktopSessionBridge,
+        "_served_runtime_exited_cleanly",
+        lambda self: self.warm_served_pid == 424242 and exited_cleanly["value"],
+    )
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        remote = bridge.remote
+        monkeypatch.setattr(remote, "_ensure_bound", serve)
+        watcher = bridge.subscribe()
+        await bridge.watch(watcher.id, visible=True, can_notify=True)
+        await _until(lambda: attempts == [False], why="the first warm never ran")
+        await _until(lambda: bridge.warm_served, why="the served warm was not recorded")
+        assert bridge.warm_served_pid == 424242
+
+        # The drain reaps it; the viewer is cold again with the lease still live
+        # and the clock still inside the 30 s pace.
+        remote._client = None
+        await bridge.watch(watcher.id, visible=True, can_notify=True)
+        await _until(
+            lambda: attempts == [False, False],
+            why="a clean exit still charged the next cold period its pace",
+        )
+
+        # The crash-shaped exit (boot record left behind) keeps the pace.
+        exited_cleanly["value"] = False
+        remote._client = None
+        for _ in range(3):
+            await bridge.watch(watcher.id, visible=True, can_notify=True)
+            await asyncio.sleep(0.05)
+        assert attempts == [False, False], "an unclean exit was re-spawned inside the pace"
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_the_snapshot_does_not_wait_on_a_contended_attention_store(tmp_path, monkeypatch):
+    """B-F6: a writer holding ``attention.db`` must not hold a conversation open.
+
+    The store is a rollback journal shared by every session on the machine, and
+    a read rides out up to ~10.8 s of lock. The snapshot answers from the last
+    known receipt state inside ``ATTENTION_SNAPSHOT_WAIT_S`` and the refresh
+    publishes an ``attention`` frame when it lands.
+    """
+    release = threading.Event()
+    real_state = module.AttentionStore.state
+
+    def slow_state(self, conversation):
+        release.wait(10)
+        return real_state(self, conversation)
+
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    monkeypatch.setattr(module.AttentionStore, "state", slow_state)
+    async with pool.session(sid, read=True) as bridge:
+        watcher = bridge.subscribe()
+        started = time.monotonic()
+        snapshot = await bridge.snapshot()
+        elapsed = time.monotonic() - started
+        assert elapsed < 0.3, f"the snapshot waited {elapsed:.2f}s on attention.db"
+        assert snapshot["payload"]["frontend"]["snapshot"]["session_id"] == sid
+
+        release.set()
+        await _until(
+            lambda: any(
+                item is not None and item[0]["type"] == "attention"
+                for item in list(watcher.queue._queue)  # type: ignore[attr-defined]
+            ),
+            why="the late attention read was never published",
+        )
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_the_served_runtime_probe_memoises_only_a_final_verdict(tmp_path, monkeypatch):
+    """N1 (review round 1): the exit probe is not re-run every pacing pass.
+
+    The probe sits inside ``_lease_warm_loop`` (a worker thread plus a ``ps``
+    fork), so a final verdict for a served pid, clean or not, is asked once.
+    A pid that is still ALIVE is not a verdict (``None``): that runtime can
+    still exit cleanly, which must then drop the pace, so it is re-asked.
+    """
+    attempts: list[bool] = []
+    verdicts: list[bool | None] = [None, None, False]
+    probes: list[int | None] = []
+
+    class BoundClient:
+        connected = True
+
+        def close(self) -> None:
+            pass
+
+        async def desktop_watch(self, *, visible: bool, can_notify: bool) -> None:
+            pass
+
+    async def serve(*, foreground: bool = True) -> None:
+        attempts.append(foreground)
+        remote._client = BoundClient()  # type: ignore[assignment]
+        remote._ready_for_events = True
+        remote._runtime_pid = 424242
+
+    def probe(self) -> bool | None:
+        probes.append(self.warm_served_pid)
+        return verdicts[min(len(probes), len(verdicts)) - 1]
+
+    monkeypatch.setattr(module, "_LEASE_WARM_POLL_S", 0.01, raising=False)
+    monkeypatch.setattr(module.DesktopSessionBridge, "_served_runtime_exited_cleanly", probe)
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        remote = bridge.remote
+        monkeypatch.setattr(remote, "_ensure_bound", serve)
+        watcher = bridge.subscribe()
+        await bridge.watch(watcher.id, visible=True, can_notify=True)
+        await _until(lambda: bridge.warm_served, why="the served warm was not recorded")
+
+        # Cold again inside the pace: the live answers are re-asked, and the
+        # final "not clean" one is asked once however many passes follow.
+        remote._client = None
+        await bridge.watch(watcher.id, visible=True, can_notify=True)
+        await _until(lambda: len(probes) >= 3, why="a live verdict was memoised")
+        for _ in range(10):
+            await asyncio.sleep(0.02)
+        assert probes == [424242, 424242, 424242], "a final verdict was probed again"
+        assert attempts == [False], "an unclean exit was re-spawned inside the pace"
+    await pool.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("trigger", "shipped"),
+    [
+        pytest.param(
+            RuntimeRetiring.BUILD,
+            "This session is switching to a newer build; the one it loaded is gone from "
+            "disk. The message was not admitted — send it again once the new build is up.",
+            id="build",
+        ),
+        pytest.param(
+            RuntimeRetiring.SIGNAL,
+            "This session was signalled to stop; it will not start a new turn. "
+            "The message was not admitted — send it again once the session is running "
+            "again.",
+            id="signal",
+        ),
+    ],
+)
+async def test_a_retiring_refusal_answers_its_code_on_the_message_route(
+    tmp_path, monkeypatch, trigger, shipped
+) -> None:
+    """The category a client has to be able to key on, over the REAL route.
+
+    ``RuntimeRetiring`` is a ``ValueError`` (``errors.py``), so it landed in the
+    409 arm of the shared ladder and — never having been listed there — fell to
+    its last line, ``HTTPException(409, str(error))``: a PLAIN STRING detail.
+    Every other refusal in that arm carries ``{code, message}``, and the design of
+    record read THIS one the same way (``docs/design-ownerless-session-attach.md``
+    §1.6/F5, §6 U1: *the routes already answer 409 with* ``{code, message}``), so a
+    renderer written against it could not fire: the app's ``runtime_retiring``
+    branch keys on ``detail.code``, which was nowhere in the body. The message was
+    provably NOT admitted, which is the whole reason the distinction matters — a
+    held draft in the composer rather than a retried id.
+
+    Driven through ``POST /messages`` with the bridge's remote a STUB that raises
+    the real category, because the subject is the ROUTE's arm: the refusal's real
+    provenance — a draining runtime raising it from ``_retiring_refusal`` — is
+    covered in ``tests/unit/session/runtime/test_serving_drain.py``. The trigger is
+    parametrised because the sentence is composed per departure and the route must
+    carry whichever one it was handed: ``shipped`` is that sentence, pinned
+    verbatim, since it is copy the two repositories share and the shipping app
+    paints it straight from this field.
+    """
+    for name in list(os.environ):
+        if name.startswith("CMUX_"):
+            monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "[redacted]")
+
+    app = FastAPI()
+    app.state.config_manager = ConfigManager(tmp_path)
+    pool = DesktopSessions(tmp_path)
+    app.state.desktop_sessions = pool
+    app.include_router(desktop_sessions.router)
+    app.include_router(capabilities.router)
+    sid = await pool.create(str(tmp_path))
+
+    refusal = RuntimeRetiring(trigger=trigger)
+
+    async def retire(*_args: object, **_kwargs: object) -> None:
+        raise refusal
+
+    class RetiringRemote(SimpleNamespace):
+        """A remote whose admission is refused by a session that is leaving.
+
+        Only ``admit_prompt`` is anything in particular — it is the method the
+        owner-side drain refuses — and everything else answers with an inert
+        coroutine, so this test does not have to be revisited every time the
+        bridge touches one more member of its remote's surface.
+        """
+
+        def __getattr__(self, name: str) -> Any:
+            if name.startswith("_"):
+                raise AttributeError(name)
+
+            async def inert(*_args: object, **_kwargs: object) -> None:
+                return None
+
+            return inert
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://localhost",
+            headers={"Authorization": "Bearer [redacted]"},
+        ) as client:
+            async with pool.session(sid) as bridge:
+                bridge.remote = cast(
+                    Any,
+                    RetiringRemote(
+                        is_cold=False,
+                        frontend_state=SimpleNamespace(epoch="epoch-1"),
+                        admit_prompt=retire,
+                    ),
+                )
+                response = await client.post(
+                    f"/v1/desktop/sessions/{sid}/messages",
+                    json={
+                        "request_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                        "text": "does this reach the successor?",
+                        "mode": "prompt",
+                    },
+                )
+    finally:
+        await pool.close()
+
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert isinstance(detail, dict), detail
+    assert detail["code"] == "runtime_retiring", detail
+    # The category's OWN sentence, never one this route composed, and
+    # character-for-character the text the bare-string arm answered with — which
+    # is what makes the object additive for a client that reads `detail` as a
+    # string: it loses nothing it was reading before.
+    assert detail["message"] == str(refusal), detail
+    assert detail["message"] == shipped, detail

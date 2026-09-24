@@ -226,6 +226,13 @@ function Outcome({ detail }: { detail: SubagentDetail }) {
 			</section>
 		);
 	}
+	if (detail.status === "queued") {
+		return (
+			<p className="mt-2 text-body-sm text-ink-muted">
+				Agent waiting for a free slot in this session&rsquo;s capacity.
+			</p>
+		);
+	}
 	if (detail.status === "cancelled" || detail.status === "parked") {
 		return (
 			<p className="mt-2 text-body-sm text-ink-muted">

@@ -17,13 +17,13 @@ the texts come from every provider's error envelope and no taxonomy covers
 them all. Unknown is a valid answer — the raw text always rides along.
 
 It also carries the formatters for the other model-visible session records
-that are NOT classified failures — a credential change, a model switch, and
-an MCP recovery. Each has its own custom type and its own formatter for the
-same reason: running them through :func:`classify_incident` would attach a
-failure category and a "this is why the previous turn ended" tail to a
-message that is not about a failure at all.
+that are NOT classified failures — a credential change, a model switch, an MCP
+recovery, and an MCP server becoming unavailable. Each has its own custom type
+and its own formatter for the same reason: running them through
+:func:`classify_incident` would attach a failure category and a "this is why the
+previous turn ended" tail to a message that is not about a failure at all.
 
-The MARKERS those four records carry are no longer defined here. They moved to
+The MARKERS those five records carry are no longer defined here. They moved to
 :mod:`local_operator.harness.message_types`, the one neutral home that a
 surface barred from importing this module can reach: the shared renderer
 (``harness/render.py``) has to recognise a ``session_incident`` to replay it,
@@ -259,7 +259,26 @@ _RULES: list[tuple[str, tuple[Marker, ...]]] = [
             "protocolerror",  # covers RemoteProtocolError and LocalProtocolError
         ),
     ),
-    ("mcp", ("mcp", "model context protocol", "tool bridge", "circuit breaker")),
+    # NO ``mcp`` RULE, deliberately, and its absence is the fix rather than an
+    # omission. An MCP server going unavailable is not a FAILURE of the turn —
+    # it is a missing capability — and the rule that used to sit here matched the
+    # bare substring "mcp", so it caught every MCP-mentioning failure and gave
+    # it ``_HINTS["mcp"]`` plus ``Incident.render``'s "This is why the previous
+    # turn ended." That last line was false: an MCP server failing to connect
+    # (or its OAuth grant expiring) never ends a turn. Measured live on
+    # 2026-09-20 against ``minerva-qa``, where the operator's session was told a
+    # turn had died that had not.
+    #
+    # Deleted rather than narrowed. A future rule for whatever MCP text really
+    # does describe a dead turn is welcome; what must not come back is a rule
+    # keyed on the substring shared by BOTH halves of the MCP story, which is
+    # also why removing the hint matters as much as removing the rule — a rule
+    # without a hint still stamps a failure category, and a hint without a rule
+    # is unreachable text the next reader has to check twice.
+    #
+    # The MCP-unavailable text lives in
+    # :func:`format_mcp_unavailable_message` instead, on the same dedicated-
+    # formatter argument as :func:`format_mcp_recovery_message`.
     ("content-filter", ("content policy", "content filter", "safety system", "flagged")),
 ]
 
@@ -310,8 +329,6 @@ _HINTS: dict[str, str] = {
     "answer — retrying or switching target is reasonable. If this machine could "
     "not reach the network at all, retrying is usually right, and a repeat means "
     "checking this machine's connectivity rather than switching provider.",
-    "mcp": "An MCP server is unavailable: its tools are gone until it reconnects. "
-    "Do not call its tools in a tight loop; say which server is down.",
     "content-filter": "The provider refused the content: change the approach "
     "rather than resending the same request.",
     # A cut-off is the harness's own verdict, not a provider's, and its advice is
@@ -365,9 +382,18 @@ DELIBERATE_CUT_OFF_CAUSES: frozenset[str] = frozenset({DELIBERATE_CUT_OFF_CAUSE}
 
 #: The sentence for :data:`CUT_OFF_CAUSES`' ``runtime-overdue`` rung, and the one
 #: place the bound's number is spelled for a reader — RENDERED from the constant
-#: that enforces it, never typed here: this sentence is repeated by every surface
+#: that enforces it, never typed here: the sentence is repeated by every surface
 #: that repeats a cut-off (the live notice, the durable outcome, the sidebar), and a
 #: second copy of "15 min" is a copy that drifts.
+#:
+#: WHICH RUNTIMES CAN STILL RECORD THIS TOKEN: only ones that ran a build BEFORE the
+#: force-cut was removed. No arm records it any more — ``process._abandon_move``
+#: keeps the build it loaded and publishes ``UPDATE_FAILED_CAUSE`` instead — and the
+#: sentence STAYS for the reason the phrase does (see
+#: ``types.LEAVING_FOR_BUILD_OVERDUE``): a row written by an older runtime is read by
+#: this one, and ``death_verdict`` rung 2 narrates whatever token a row carries.
+#: Deleting the key would quietly demote those rows to the unknown-cause sentence,
+#: which is a worse report than a historical one.
 #:
 #: The import is FUNCTION-LOCAL, not module scope: this table is a leaf every
 #: runtime module may import, and the runtime's own vocabulary module is the wrong
@@ -385,8 +411,138 @@ def _overdue_cause_sentence() -> str:
     )
 
 
+def _stall_bound_cause_sentence() -> str:
+    """The sentence for :data:`STALL_BOUND_CAUSE`, written in the same shape.
+
+    THE BOUND IS RENDERED FROM THE CONSTANT for the reason
+    ``_overdue_cause_sentence`` gives, with one qualification stated rather than
+    hidden: the bound an operator may override
+    (``LOP_RUNTIME_STALL_SECONDS``) is not knowable from here, so this names the
+    DEFAULT and says so. The exact figure the runtime was armed with is in its
+    own dump header, and the detail a reader adds names which leg fired — that is
+    where an operator who moved the number looks, rather than in a taxonomy
+    sentence shared by every runtime on every host.
+    """
+    from local_operator.session.runtime.stall_watchdog import DEFAULT_STALL_S
+    from local_operator.session.runtime.types import bound_text
+
+    return (
+        "the runtime ended ITSELF: its own stall bound fired after "
+        f"{bound_text(DEFAULT_STALL_S)} of no progress by default, and the dump it "
+        "left beside its log names what every thread was doing"
+    )
+
+
+def _update_failed_cause_sentence() -> str:
+    """The sentence for a bounded handover that gave up (``types.UPDATE_FAILED_CAUSE``).
+
+    A DIFFERENT EVENT from the rung above, said in the same shape, and the difference
+    is the one the operator acts on: the overdue handover LEFT (on the old build's
+    work, force-cut), while a failed update STAYED — the runtime is still here, on the
+    build it loaded, and it is the update that did not happen. Rendering the two with
+    one sentence would tell a reader to go looking for a handover that never occurred.
+
+    IT NAMES NO NUMBER, and that is a correction rather than an omission (design
+    review round 1, D2). THREE arms publish this token with THREE different bounds —
+    the bounded update WINDOW (``buildwatch.UPDATE_LOCK_S``, seconds), the build DRAIN
+    whose work went SILENT (``types.BUILD_DRAIN_PROGRESS_S``, fifteen minutes) and the
+    build drain that was HELD with work still in flight
+    (``types.BUILD_DRAIN_DWELL_S``, thirty minutes; ``process._abandon_move``'s dwell
+    arm, which is the second bound the drain can run out of) — so a sentence rendered
+    from any one constant is wrong for the other two by construction: an update that
+    spent half an hour in the dwell reported that it "did not finish within 5s". The
+    bound is known at the only place that can name it, so it rides the incident's
+    DETAIL (``RuntimeServer.note_update_failed`` renders it from the argument its
+    caller passed), and this sentence says the thing that is true of every arm.
+    """
+    return (
+        "the update to the build on disk did not finish within its bound; the runtime "
+        "kept the build it loaded"
+    )
+
+
+def update_failed_detail(pair: str, bound: float) -> str:
+    """The detail a failed handover's incident carries: the pair, and the bound spent.
+
+    A HELPER RATHER THAN AN INLINE JOIN, because the bound is the fact that was
+    silently wrong until design review round 1 (D2): the sentence names none (three
+    arms publish this token with three different bounds), so this is the ONLY place a
+    reader can learn which bound the runtime actually ran out of — 5 s for the bounded
+    update window, fifteen minutes for a drain whose work went silent, thirty minutes
+    for a drain held with work still in flight (``types.BUILD_DRAIN_DWELL_S``).
+    ``bound`` of 0 means the caller did not say, and then no number is claimed rather
+    than a default being invented.
+    """
+    from local_operator.session.runtime.types import bound_text
+
+    parts = [part for part in (pair, bound_text(bound) if bound else "") if part]
+    return "; ".join(parts)
+
+
+#: The cause token for a runtime that vanished with its turn still in flight —
+#: the verdict :func:`journal.death_verdict`'s unattributed arm RETURNS, and the
+#: one key of :data:`CUT_OFF_CAUSES` that is a reader's conclusion rather than a
+#: runtime's own last word.
+#:
+#: NAMED BECAUSE ONE READER HAS TO REFUSE IT (review round 4, MINOR 1).
+#: ``death_verdict``'s rung 2 narrates whatever token a row recorded, with no lead,
+#: and that is right for a token the runtime writes about ITSELF —
+#: ``runtime-overdue`` names its own mechanism and its bound. It is wrong for this
+#: one: its whole meaning is that the act was never recorded, so a row carrying it
+#: must reach the arm that says so rather than be answered by itself. Neither side
+#: may be re-spelt, because the two sides are a key of one dict and a return value a
+#: few lines apart, and a rename that moved only one of them would put a
+#: harness-caused death on the arm that cannot name its actor.
+KILL_CAUSE = "runtime-killed"
+
+#: The class a runtime's OWN stall bound leaves behind when it fires — the one
+#: death in this taxonomy whose author is the victim itself.
+#:
+#: WHY IT NEEDED A NAME, and what its absence cost. ``stall_watchdog`` arms a C
+#: timer that, past its bound, dumps every thread and ``_exit(1)s``; the dump
+#: names the pid and the arming time and nothing else, and until this token
+#: existed there was no class anywhere that said the bound had done it. Measured
+#: 2026-09-21: a peer session (pid 4698) died with its dump present and its death
+#: recorded as ``unattributed`` — not "we could not tell", which is what
+#: :data:`KILL_UNATTRIBUTED` is for, but **"the instrument knew and did not say
+#: so"**. A firing instrument that cannot name itself leaves a reader unable to
+#: tell a bound that fired from a bound that never fired, which is the whole
+#: value of having armed it.
+#:
+#: ONE TOKEN FOR BOTH LEGS, and the legs are told apart in the DETAIL rather than
+#: in the class. They are the same event to everyone downstream — the runtime
+#: ended itself, on purpose, and left a dump — and splitting them into two
+#: taxonomy keys would make every reader that branches on ``CUT_OFF_CAUSES``
+#: learn a distinction it does not act on. What a reader DOES act on ("was this
+#: a wait or a spin?") is the leg, and ``stall_watchdog.fired_leg`` names it.
+STALL_BOUND_CAUSE = "runtime-stall-bound"
+
+#: The LOOP'S own bound (``harness/loop.py``, the outer-loop continuation guard).
+#: Involuntary, and NOT an error the model made: the turn had more work queued
+#: than its producer's budget allows. Named rather than left as the bare
+#: ``AgentEndEvent`` it used to be, because a bare end reads as a COMPLETED
+#: ANSWER on every surface — a child cut off mid-list arrived at its parent
+#: saying it had finished, which is the silent half of the subagent-stall
+#: report. It is a token in this table rather than a private string so
+#: :func:`is_cut_off_cause` answers True and every existing renderer (the
+#: attention outcome, the subagent panel's "cut off" row, the roster) names it
+#: without being taught a new field.
+CONTINUATION_LIMIT_CAUSE = "continuation-limit"
+
 CUT_OFF_CAUSES: dict[str, str] = {
     DELIBERATE_CUT_OFF_CAUSE: "the session was stopped by the user",
+    # THE RUNTIME'S OWN BOUND ARMED AGAINST ITSELF. The sentence says who acted
+    # (the runtime, not the operator and not another process) because that is the
+    # fact this arm exists to state: every other involuntary arm here names an
+    # actor outside the victim, and a reader who found one of those would go
+    # looking for a reaper or a sweep that never ran.
+    STALL_BOUND_CAUSE: _stall_bound_cause_sentence(),
+    # Bounded on PURPOSE, unlike the arms above: the bound is a budget the loop
+    # chose to spend, so the sentence says what ran out rather than naming an
+    # actor — there is no reaper and no process to go looking for.
+    CONTINUATION_LIMIT_CAUSE: (
+        "the turn kept being asked to continue, so it was stopped and the pending message dropped"
+    ),
     "runtime-retired": "the runtime retired so the next engage would run a newer build",
     "runtime-shutdown": "the runtime was terminated while this turn was running",
     # The BOUNDED handover: a build drain that stopped waiting for its own work
@@ -400,17 +556,35 @@ CUT_OFF_CAUSES: dict[str, str] = {
     # exactly that: a successor narrated the generic retirement sentence, never the
     # bound.
     "runtime-overdue": _overdue_cause_sentence(),
-    "runtime-killed": (
+    # The BOUNDED UPDATE WINDOW (``process._abandon_update_window``): the idle
+    # handover ran out of its heartbeat bound, so the runtime ABANDONED the move and
+    # kept the build it loaded (``types.UPDATE_FAILED_CAUSE``). It is NOT
+    # ``runtime-retired``, which is what a handover that SUCCEEDED records — a failed
+    # update narrated as an ordinary retirement is invisible in exactly the durable
+    # account an operator opens to ask why a session is still on yesterday's build.
+    "runtime-update-failed": _update_failed_cause_sentence(),
+    KILL_CAUSE: (
         # The trailing clause is the POST-MARKER meaning of this token, and it
         # is decidable now in a way it was not before the durable marker
         # existed: "disappeared without exiting cleanly" describes what the
         # PROCESS did, and a reader one row under a deliberate stop needs the
-        # other half — that nothing recorded anyone asking for it. Without the
-        # clause the two rows differ only in the word above them, and "asked
-        # for" versus "never asked" is exactly the distinction this taxonomy
-        # was extended to draw (design round 1, D4).
+        # other half — that nobody ASKED for it. Without the clause the two rows
+        # differ only in the word above them, and "asked for" versus "never
+        # asked" is exactly the distinction this taxonomy was extended to draw
+        # (design round 1, D4).
+        #
+        # THE CLAUSE SAYS "ASKED FOR", NOT "RECORDED A STOP", and the change is
+        # the involuntary markers' doing: while the ladder was the only writer,
+        # "nothing recorded a stop" was true of every death on this arm. It stops
+        # being true the moment a party that merely ACTS on a runtime (a prune
+        # removing the install generation under it, an in-place install rewriting
+        # it) records what it is about to do — the artifact then says "nothing
+        # recorded a stop (its install generation was pruned by lop install prune)",
+        # which contradicts itself where the operator reads it. What is true of
+        # BOTH is the discriminator the clause exists for: no stop of this runtime
+        # was asked for. The attribution parenthetical says who acted instead.
         "the runtime disappeared without exiting cleanly while this turn was running, "
-        "and nothing recorded a stop"
+        "and no stop was asked for"
     ),
     "install-mid-update": (
         "a local-operator install was being replaced on disk while this turn was running"
@@ -429,6 +603,83 @@ CUT_OFF_CAUSES: dict[str, str] = {
 #: runtime's token reaching an older viewer. Naming the gap is honest; guessing
 #: a cause would not be, and a refusal to render would hide the cut-off.
 CUT_OFF_UNKNOWN = "the turn was cut off and the cause could not be determined"
+
+#: What a ``runtime-killed`` verdict says when NO actor was recorded for the act.
+#:
+#: WHY THE WORD EXISTS AT ALL, in the operator's own requirement: "nothing should
+#: kill runtimes en masse, ever; and if it does happen, it must be attributable."
+#: The 2026-09-18 event killed 25 runtimes in 13 seconds and the artifacts could
+#: not name a single process, because the only markers existed for stops the USER
+#: asked for. A death whose marker names its actor now renders that actor; a death
+#: whose evidence proves only that a turn was in flight and nobody recorded an act
+#: says ``unattributed`` — an affirmative statement about the GAP rather than the
+#: old shrug, and the one word that turns "we lost 25 runtimes and cannot say why"
+#: into "none of these 25 had a recorded actor", which is a fact an investigation
+#: can act on.
+KILL_UNATTRIBUTED = "unattributed"
+
+#: What an INVOLUNTARY act on a runtime is called, in the operator's words.
+#:
+#: Keyed by the ``mechanism`` token the writer stamps into the marker
+#: (``control.note_involuntary_stop``), which is why the labels are clauses rather
+#: than agentless nouns: they are rendered as ``<label> by <actor>``, the same shape
+#: :func:`render_stop_attribution` uses, so the two kinds of attribution read alike
+#: on the one surface that shows both.
+#:
+#: A mechanism this build does not know renders as the actor alone (see
+#: :func:`render_involuntary_attribution`) rather than leaking a raw token — the
+#: rule :data:`STOP_RUNG_UNKNOWN` already states for a future rung, for the same
+#: reason: the writer's spelling must not reach a surface that cannot explain it.
+INVOLUNTARY_MECHANISM_LABELS: dict[str, str] = {
+    "generation-prune": "its install generation was pruned",
+    "in-place-install": "its install was being replaced in place",
+}
+
+
+def render_involuntary_attribution(
+    *, mechanism: str = "", actor: str = "", killer_pid: object = None
+) -> str:
+    """The parenthetical an INVOLUNTARY kill's reason carries, or ``""``.
+
+    Scalar arguments rather than the marker dict, for the reason
+    :func:`render_stop_attribution` gives: the schema belongs to its writer, and a
+    field renamed on one side must not silently empty the sentence on the other.
+
+    Nothing named at all returns ``""`` — the caller then says
+    :data:`KILL_UNATTRIBUTED`, because "no actor recorded" is a different fact
+    from "an actor we cannot print" and only one of them is a gap.
+    """
+    label = INVOLUNTARY_MECHANISM_LABELS.get(mechanism, "") if mechanism else ""
+    who = actor or ""
+    if killer_pid is not None and str(killer_pid).strip():
+        who = f"{who}, {KILLER_PID_LABEL} {killer_pid}".lstrip(", ")
+    if label and who:
+        return f" ({label} by {who})"
+    if label:
+        return f" ({label})"
+    if who:
+        return f" (by {who})"
+    return ""
+
+
+def involuntary_kill_detail(
+    *, mechanism: str = "", actor: str = "", killer_pid: object = None
+) -> str:
+    """The detail a ``runtime-killed`` reason carries for an INVOLUNTARY act.
+
+    ONE decision point rather than the same ``or`` at each arm that needs it: the
+    reader's question is "who was recorded", and the answer is either an
+    attribution or :data:`KILL_UNATTRIBUTED` — never a blank where a reader
+    expects the sentence to say which of the two it is.
+
+    The parenthetical always OPENS with a space so
+    :func:`render_cut_off_reason` treats it as an aside (its separator rule) — the
+    shape ``attention._record_detail`` already hands over.
+    """
+    return (
+        render_involuntary_attribution(mechanism=mechanism, actor=actor, killer_pid=killer_pid)
+        or f" ({KILL_UNATTRIBUTED})"
+    )
 
 
 def is_cut_off_cause(cause: str) -> bool:
@@ -487,7 +738,7 @@ def _render_cut_off_detail(detail: str) -> str:
     return f" — {text}"
 
 
-def render_cut_off_reason(cause: str, *, detail: str = "") -> str:
+def render_cut_off_reason(cause: str, *, detail: str = "", clause: str = "") -> str:
     """One operator-facing sentence naming why a turn was cut off.
 
     This is the string the durable outcome stores as ``reason`` and every
@@ -497,9 +748,18 @@ def render_cut_off_reason(cause: str, *, detail: str = "") -> str:
     because the sidebar tooltip has one line and truncates the rest rather than
     wrapping it. The caller supplies the text of that clause and nothing else —
     its punctuation is added here (see :func:`_render_cut_off_detail`).
+
+    ``clause`` IS OUTSIDE THE PARENTHETICAL, and that placement is the whole point
+    (design review round 1, D3): a fact that belongs IN the sentence must not be
+    filed with the build/pid detail, because the LIST column that renders a reason
+    keeps only the first clause — ``outcome_summary`` splits at ``" ("`` — so a lead
+    put in there reaches no list a person reads. The held-fire lead is exactly that
+    kind of fact: it changes what the row MEANS (the runtime survived a bound and is
+    still stalled) rather than adding detail about a death it did not cause.
     """
     sentence = CUT_OFF_CAUSES.get(cause) or CUT_OFF_UNKNOWN
-    return f"{sentence}{_render_cut_off_detail(detail)}"
+    lead = f"; {clause}" if clause else ""
+    return f"{sentence}{lead}{_render_cut_off_detail(detail)}"
 
 
 #: How one rung of the stop ladder reads inside a deliberate stop's detail.
@@ -650,6 +910,14 @@ def outcome_summary(reason: str) -> str:
     first clause otherwise (dropping the parenthetical, which for an
     involuntary cause is build/pid/started-at detail the JSON row carries in
     full).
+
+    WHAT THE SPLIT KEEPS IS DELIBERATE, and it is why a fact that changes what the
+    row MEANS has to live outside the parenthetical: the held-fire lead rides in the
+    first clause (``render_cut_off_reason``'s ``clause``) precisely so that this
+    function does not drop the one sentence that tells a reader a runtime survived
+    its bound and is still stalled (design review round 1, D3 — with the lead inside
+    the brackets, a held-then-killed death and a no-dump death rendered
+    byte-identical here).
     """
     phrase = stop_rung_phrase(reason)
     if phrase:
@@ -795,66 +1063,219 @@ def format_credential_message(
     )
 
 
-def format_shape_incident_message(tool: str, labels: "list[str]", summary: str = "") -> str:
+def format_shape_incident_message(
+    tool: str,
+    labels: "list[str]",
+    summary: str = "",
+    *,
+    reached_model: bool = True,
+) -> str:
     """Render the credential-SHAPE notice injected into the model's context.
 
     The counterpart to the shape pass in :mod:`local_operator.redaction_shapes`,
     and the reason it is its own formatter rather than a
-    :func:`classify_incident` category: nothing FAILED. A tool returned a
-    credential in a shape the table recognises, the harness masked it before the
-    model could read it, and the only jobs this text has are to say so (so the
-    model does not reason about a value it cannot see, or re-run the command
-    hoping for a different result) and to make the event visible to the operator.
+    :func:`classify_incident` category: nothing FAILED. A tool carried a
+    credential in a shape the table recognises, the harness handled it, and the
+    jobs this text has are to say what happened (so the model does not reason
+    about a value it cannot see, or re-run the command hoping for a different
+    result) and to make the event visible to the operator.
+
+    **Two classifications, and only one of them is an emergency.**
+
+    A credential is COMPROMISED when a value reaches the model's context window:
+    that text is journaled in plaintext, replays into later requests, and may end
+    up in training data, and none of that can be undone by anyone here — so the
+    operator has to rotate the credential, and that is the escalated text. That
+    case is the one where readable credential material survives in the text the
+    model reads — which is NOT always a mask that fell short, because a rule can
+    preserve a run by design (the DSN rule keeps its userinfo username, so
+    ``amqp://guest:guest@…`` reads back the password as the username) — and it is
+    carried in by ``reached_model``.
+
+    Everything else is CONTAINED. A value that reached `bash` (in a command's
+    ``argv``, in a child's environment), that lived in this process's memory, or
+    that was written to a file in plaintext is NOT compromised: the model never
+    saw it, so there is nothing to rotate. What the contained wording asks for is
+    cleanup, not rotation: delete any plaintext copy, and do it WITHOUT reading
+    it, because reading it is what would turn the contained case into the
+    escalated one.
+
+    **That wording is not raised in-tree any more, and this docstring is where the
+    disposition is recorded rather than left implicit.** The operator asked for the
+    contained case to file nothing, and ``Session._queue_shape_incident`` is the
+    single gate that drops it, so today no caller reaches this branch (agent review
+    R1, finding 2). It is kept — not deleted — because it IS this formatter's
+    contract and because the obligation it carries has to exist somewhere:
+    *delete any plaintext copy a tool call may have written* is the only cleanup
+    instruction this system has ever stated, and with the contained case silenced
+    it now has no operator-facing surface anywhere in-tree. A caller that
+    deliberately has something to say about a contained hit (a write-side advisory,
+    say) can render the true words instead of inventing them; a reader looking for
+    where the cleanup obligation is surfaced will find this paragraph and know that
+    it is not.
+
+    The wording is deliberately SURFACE-NEUTRAL about where the
+    masking happened: the same notice serves a credential in a tool's OUTPUT, one
+    TYPED INTO a call's arguments — where the tool did run with the real value and
+    the containment is in the copy this session stores and replays — and one found
+    by the history-scrub path, and a claim that named the wrong surface would be
+    false in two of the three (agent review R1, finding 2).
+
+    Whether a plaintext copy exists at all is not knowable from here — the value can
+    reach this notice from a command's own text, which the history-scrub path masks
+    through the same formatter — so the cleanup obligation is stated conditionally
+    rather than dropped: it is the one action this path has.
 
     ``labels`` are shape NAMES, never values — a notice that carried the
     credential would be the leak it exists to report. The summary is the one the
     harness built, already scrubbed and bounded.
 
-    The last sentence is the point of the whole path: the operator has to rotate
-    the credential. Today a miss is discovered by accident, from a transcript,
-    weeks later; this row is what turns it into a ticket.
+    ``reached_model`` defaults to True — the escalated reading — because a caller
+    that cannot classify must not make the quieter claim.
+
+    An EMPTY ``labels`` on the escalated path is a real state, not a caller error:
+    a hit whose mask cannot be claimed (``complete=False``) is dropped from
+    ``ShapeReport.labels`` while it still escalates if any readable material
+    survived (``exposed=True``), so ``labels=()`` with ``reached_model=True``
+    reaches here — see the shape-clause note in the body.
     """
     shapes = ", ".join(labels) if labels else "credential-shaped content"
     tool_name = tool or "a tool"
     where = f" The call was: {summary}." if summary else ""
-    # "was about to reach you ... and was masked" rather than "the result
-    # carried": the same notice serves a credential in a tool's OUTPUT and one
-    # TYPED INTO a call's arguments, and only the first of those is a result.
-    # A notice that misnamed the surface would send an operator looking in the
-    # wrong place.
-    # The FIRST row carries the action. The row is six lines in the card and the
-    # head is all most readers take: it used to open with the mechanism (``a
-    # credential in a shape the harness recognises (dsn-password)``), which put
-    # "rotate it" in the fourth line. The bracketed head stays — the harness's
-    # notice-row rules key on it, and a row that paints as the user's own words
-    # would be worse than a jargon-first one.
+    # "reached you ... and was masked" rather than "the result carried": the same
+    # notice serves a credential in a tool's OUTPUT and one TYPED INTO a call's
+    # arguments, and only the first of those is a result. A notice that misnamed
+    # the surface would send an operator looking in the wrong place.
+    # The bracketed head stays in both texts — the harness's notice-row rules key
+    # on "[credential redaction] " (``harness/rows.py``), and a row that painted as
+    # the user's own words would be worse than a jargon-first one.
+    if reached_model:
+        # WHEN THE TABLE COULD NOT NAME THE SHAPE, SAY SO — do not assert a generic
+        # one. The reader's first question is "what matched?", and the ``shapes``
+        # fallback above ("credential-shaped content") reads as a shape the table
+        # DID identify, leaving an operator unable to tell an un-named hit from a
+        # named one. This state is reachable on the shipped path, measured this
+        # session on the corpus's own escalating case (the ``amqp`` DSN whose
+        # username is its password): its hit grades ``complete=False, exposed=True``,
+        # so ``shape_report`` yields ``labels=()`` with ``reached_model=True`` — an
+        # ESCALATION naming no shape. Only the provenance clause changes; what the
+        # guard MEASURED, and the rotate instruction below, are untouched.
+        if labels:
+            credential = f"a credential ({shapes})"
+        else:
+            credential = "a credential the shape table could not name"
+        # The CAUSE has to be true in both directions the escalation covers. The
+        # `amqp` DSN case masks its password whole and still escalates, because the
+        # DSN rule keeps the userinfo username by design and an operator who used
+        # one string for both leaves the value readable there — so "could not be
+        # fully masked" named a mechanism this notice cannot prove, and this
+        # module's doctrine is that an unprovable claim is worse than silence
+        # (agent review R2, finding 1). What the check measured is stated instead:
+        # the value is readable in the text the model gets, by either route, and
+        # the notice does not pick one it cannot distinguish. The rotate
+        # instruction is untouched — it is the reason the wording exists.
+        return (
+            f"[credential redaction] rotate it — {credential} reached "
+            f"{tool_name} and its value is readable in this session's context: "
+            f"either the mask did not cover it fully, or it survives in the text "
+            f"another way.{where} A value that reached the model may be in "
+            "training data, so treat it as compromised: the operator has to rotate "
+            "it. Do not re-run the command to read the value."
+        )
     return (
-        f"[credential redaction] rotate it — a credential ({shapes}) reached "
-        f"{tool_name} and was masked before you saw it.{where} Treat it as "
-        "compromised: the operator has to rotate it. Do not re-run the command to "
-        "read the value; it is contained for the rest of this session."
+        f"[credential redaction] a credential ({shapes}) reached {tool_name} and "
+        f"was masked before you saw it.{where} Nothing entered your context — the "
+        "value was masked before it reached you, so there is no exposure. If the "
+        "call wrote it to a file in plaintext, delete that file without reading it "
+        "(rm -f): reading it is not needed and is not to be done."
     )
+
+
+def format_mcp_unavailable_message(server: str, reason: str) -> str:
+    """Render the MCP-unavailability text injected into the model's context.
+
+    The counterpart to :func:`format_mcp_recovery_message`, and a dedicated
+    formatter for the same reason: neither row is about a FAILED turn, so
+    neither may go through :func:`classify_incident`. The classifier used to
+    catch this text on its ``mcp`` rule — the bare substring "mcp" — and hand
+    it ``_HINTS["mcp"]`` plus ``Incident.render``'s "This is why the previous
+    turn ended", the last of which was simply false: an MCP server going away
+    never ends a turn. Measured live on 2026-09-20 against ``minerva-qa``, whose
+    expired grant told the operator a turn had died that had not.
+
+    Present-tense STATE, like :func:`format_model_switch_message`, so the model
+    treats it as context for the turns that follow rather than an instruction
+    to acknowledge. The three lines carry three different jobs:
+
+    * the head states the CAPABILITY change — the server is unavailable and its
+      tools are gone — because that is what stops the model calling them;
+    * ``Reason:`` carries the operator's own remedy (``/mcp reauth <server>``,
+      a breaker that suspended auto-reconnect), which is what lets the model
+      tell the user what to do rather than only that something is wrong;
+    * the last line states the manual-recovery fact and keeps the model's
+      instruction not to hammer the tools.
+
+    **"for now", never "until it reconnects".** The first draft promised a
+    self-heal, and there is none for either family this row is written for: an
+    expired grant never heals by retrying (auto-reconnect is non-interactive by
+    design, so only ``/mcp reauth`` restores it) and a tripped breaker has
+    auto-reconnect SUSPENDED at the moment this row is written. "Until it
+    reconnects" also implied an action nobody had taken. Design review round 1
+    (D2): the promise has to be true for both families, which is why the head is
+    reason-agnostic and the last line says the user has to restore it.
+
+    The last line is read by TWO audiences — it rides the model's context and
+    the transcript row the operator sees — so it is phrased as a fact about the
+    agent rather than as an imperative addressed to whoever is reading (design
+    review round 1, D5). An imperative with no label in front of it reads, to
+    the human, as an instruction to them; the incident shape carried the same
+    instruction, but under a ``suggested action:`` label that marked whose it
+    was.
+
+    No failure category and no ``suggested action:`` line, both of which belong
+    to the incident shape this record is deliberately not. The reason is bounded
+    at 200 characters exactly as :func:`format_model_switch_message` bounds its
+    own, and is OMITTED when blank rather than printed empty: a dangling
+    ``Reason:`` reads as a truncation. It is shaped COMMAND-FIRST at the two
+    auth call sites (``mcp/manager.py``), so the one part a reader must not lose
+    lands at the front of the line rather than mid-line after a restatement
+    (design review round 1, D3). The breaker site is the third caller and names
+    no verb: its remedy is a reconnect rather than a typed command, so its reason
+    states the condition (``auto-reconnect suspended after >N attempts``) and the
+    row's last line defers the recovery to the user without naming one.
+    """
+    lines = [f"[session warning] MCP server '{server}' is unavailable: its tools are gone for now."]
+    if reason.strip():
+        lines.append(f"Reason: {reason.strip()[:200]}")
+    lines.append(
+        "Its tools are not callable until the user restores it, and the agent "
+        "should not retry them in a loop."
+    )
+    return "\n".join(lines)
 
 
 def format_mcp_recovery_message(server: str, tool_count: int) -> str:
     """Render the MCP-recovery text injected into the model's context.
 
-    The counterpart to the ``mcp`` incident category, and the reason it is a
-    dedicated formatter rather than another :func:`classify_incident` category:
-    the classifier matches the substring "mcp" and would append
-    ``_HINTS["mcp"]`` — "its tools are gone until it reconnects. Do not call
-    its tools in a tight loop" — plus ``Incident.render``'s "This is why the
-    previous turn ended", to a message announcing the exact opposite.
+    The counterpart to :func:`format_mcp_unavailable_message`, and the reason
+    it is a dedicated formatter rather than a :func:`classify_incident`
+    category: the recovery announces the exact opposite of a failure, so
+    classifying it would have appended a failure category plus
+    ``Incident.render``'s "This is why the previous turn ended". The ``mcp``
+    rule that used to be the live example of that mismatch — it matched the bare
+    substring "mcp", so it took both halves of this pair — is deleted; both
+    halves now have their own formatter instead.
 
     Present-tense STATE, like :func:`format_model_switch_message`, so the model
     treats it as context for the turns that follow rather than an instruction
     to acknowledge.
 
     The SUPERSEDE sentence is load-bearing and must not be trimmed to a bare
-    "reconnected": the model is holding an earlier ``session_incident`` for
-    this server whose hint explicitly says "do not call its tools", and two
-    live claims leave it free to defer to the older, more emphatic one. It must
-    be told the earlier notice no longer applies.
+    "reconnected": the model is holding an earlier
+    :func:`format_mcp_unavailable_message` row for this server that says its
+    tools are gone and not to call them, and two live claims leave it free to
+    defer to the older, more emphatic one. It must be told the earlier notice
+    no longer applies.
 
     ``tool_count`` is the REGISTERED tool count
     (``len(McpManager.get_server_tools(server))``), not ``len(conn.tools)``:
@@ -867,18 +1288,18 @@ def format_mcp_recovery_message(server: str, tool_count: int) -> str:
     the model its tools "are usable now, so call them normally" against an
     empty inventory is false in the one direction that costs a wasted turn:
     the model goes looking for tools that are not there. The connection is
-    still worth announcing, because it is what supersedes the incident and
+    still worth announcing, because it is what supersedes the warning and
     stops the model reporting the server as down.
     """
     if not tool_count:
         # Honest about the CONNECTION and silent about callable tools: no
         # "available again", no "call them normally". The supersede clause is
-        # still required — the model is holding an incident that says the
+        # still required — the model is holding a warning that says the
         # server is unreachable, which is no longer true.
         return (
             f"[mcp recovery] MCP server '{server}' is connected again, but it "
             "currently exposes no enabled tools. This supersedes the earlier "
-            "session incident about this server: the server itself is no "
+            "warning about this server: the server itself is no "
             "longer failing, so stop reporting it as unavailable — but do not "
             "expect callable tools from it until some are enabled."
         )
@@ -888,7 +1309,7 @@ def format_mcp_recovery_message(server: str, tool_count: int) -> str:
     tools = "1 tool is" if tool_count == 1 else f"{tool_count} tools are"
     return (
         f"[mcp recovery] MCP server '{server}' is connected again and {tools} "
-        "available again. This supersedes the earlier session incident about "
+        "available again. This supersedes the earlier warning about "
         "this server: its tools are usable now, so call them normally and stop "
         "reporting it as unavailable."
     )

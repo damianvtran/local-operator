@@ -351,8 +351,12 @@ def render_tool_inventory_block(
 
     ``host_has_browser`` carries the caller's already-computed host probe so
     the three-state diagnosis documented in :func:`build_system_blocks` is
-    decided identically here. Left as ``None`` (the session's re-render, which
-    has no cheaper source) it is probed once via
+    decided identically here, and the session's own re-render DOES pass it —
+    from the provider's construction-time pair, which
+    ``Session._reconcile_tool_inventory`` reads off the system-blocks provider —
+    so the block-1 note and the block-0 prose cannot disagree about an answer
+    that moves with a heartbeat. Left as ``None`` (a host's own provider, a
+    benchmark's fixed blocks, a bare ``lambda``) it is probed once via
     :func:`_host_browser_backend_available`; that probe is the only way to tell
     state 2 (the HOST has no backend, so the setup playbook applies) from
     state 3 (the host is fine and only this ROLE lacks the tool), and
@@ -546,6 +550,210 @@ def _host_console_available() -> bool:
         return False
 
 
+def host_capability_probes() -> tuple[bool, bool]:
+    """This HOST's capability answer, read ONCE per session: (browser, console).
+
+    The host half of the three-state browser/console diagnosis — the answer that
+    separates "this host has no backend" from "this role's allowlist omits the
+    tool" (see :func:`_host_browser_backend_available`). Both probes read the
+    desktop app's discovery record, which accepts a STALE-but-ALIVE heartbeat, so
+    the answer moves on a timer nobody in this process controls.
+
+    THAT is why callers take it at construction and pass it back in. Block 0 is
+    the one block whose change makes the session start a NEW persisted prefix
+    epoch (:meth:`local_operator.session.session.Session._prepare_system_blocks`),
+    and because the probes used to be re-read on every render, a heartbeat-age
+    flip bought every live session on the machine a cold cache: two sessions
+    flipped at 11:34:22/11:34:25 and reverted at 11:37:00/11:37:33, measured as
+    cache_read 47,616 -> 3,968 and 66,816 -> 50,304. The epoch path is reserved
+    for AUTHORITY — edited instructions, repo guidance, a newer packaged prompt —
+    and a liveness probe is not authority.
+
+    The accepted cost is one stale sentence inside a live session, and it has a
+    DIRECTION, which is the part a future reader needs: taking the answer once
+    at construction can go stale only in the ARRIVE-LATE case — a session built
+    while the desktop app was down keeps shipping the "no backend, do that setup
+    with the user" arm after the app appears. A capability that DEPARTS
+    mid-session is the other direction and is unaffected in substance: the tool
+    MEMBERSHIP half (``has_browser``/``has_console``) is derived per render, and
+    every call path re-probes and refuses (the console refuses per action when
+    the host's console bit is off). So the sentence can only ever be wrong about
+    the HOST, and never about what this session may do — which is what makes it
+    a sentence rather than a capability. QA round 1 measured that residue
+    directly (its scenario E, Q-1).
+    """
+    return (_host_browser_backend_available(), _host_console_available())
+
+
+#: The CHANNEL half of the ``<interactivity>`` block: how THIS session can put a
+#: question in front of a person.
+#:
+#: Stated by the CALLER, because only the caller knows it: ``ask`` is createIf-gated
+#: on the host's ask hook (``build_ask_tool``), and ``hub`` is not a discriminator —
+#: a top-level session holds its own ``hub`` (it is how ITS children reach it), so
+#: "the inventory lists hub" cannot tell a delegated child from a parent. What a
+#: child's ``hub`` reaches is the operator, one hop out; what a top-level session's
+#: ``hub`` reaches is its own subagents.
+#:
+#: Both values are STABLE for a session's life, so the chosen body cannot churn a
+#: block inside the persisted prefix. A reader must never be told to use a tool it
+#: does not have: the round-1 reviews found the positive body advising a SUBAGENT to
+#: use ``ask`` (absent from its inventory, and from every child's) and an
+#: ``exec``/scheduler reader to use a tool it never had either.
+CHANNEL_ASK = "ask"
+CHANNEL_HUB = "hub"
+CHANNEL_NONE = "none"
+
+#: Attached, and this session owns an ``ask`` hook (the TUI, the desktop app):
+#: the original positive body, unchanged. A supervised ``exec --control`` run has
+#: the hook too, but it installs no runtime probe (§3.1), so it renders NO block —
+#: the hook and the measurement are different facts.
+_INTERACTIVITY_ATTACHED_ASK = """<interactivity>
+An interface is attached to this session, so a question you ask WILL be
+presented to the operator: `ask` puts it on that surface and waits for the
+answer, parked for hours if necessary.
+
+- Ask when the answer is genuinely the operator's to give, and not otherwise.
+- The question is presented even if nobody is looking at this exact moment. It
+  waits; it is not lost. A slow answer is not a refusal, and it is not a reason
+  to decide on the operator's behalf.
+- Write for a reader who may answer minutes later: say what you need and what
+  you will do with it.
+</interactivity>"""
+
+#: Attached, no ``ask`` hook, but a parent channel (a SUBAGENT). The attachment is
+#: a fact about the PARENT's session — the surface the operator is attached to —
+#: and the child's route to it is ``hub``. Saying "attached to this session" here
+#: is a false statement of fact about the child, and it is the propagation mode the
+#: operator's report was made of (a child relaying the parent's claim into its own
+#: messages unchecked).
+_INTERACTIVITY_ATTACHED_HUB = """<interactivity>
+An interface is attached to the session this run was delegated from, so a
+question you cannot settle yourself belongs to the operator: `hub` to that
+session carries it there, and it waits for them — parked if necessary.
+
+- Raise it through `hub` when the answer is genuinely the operator's to give,
+  and not otherwise.
+- Your question reaches the operator even if nobody is looking at this exact
+  moment. It waits; it is not lost. A slow answer is not a refusal, and it is
+  not a reason to decide on the operator's behalf.
+- Write for a reader who may answer minutes later: say what you need and what
+  you will do with it.
+</interactivity>"""
+
+#: Attached, and NO channel from this process at all — neither ``ask`` nor ``hub``.
+#: The measured fact (something is attached) is still stated, because silence is
+#: read as "probably nobody there"; what changes is the consequence, which must not
+#: promise a presentation this process cannot perform. The wording matches the
+#: ``ask`` refusal's own diagnosis of a missing hook rather than asserting anything
+#: about the operator.
+_INTERACTIVITY_ATTACHED_NONE = """<interactivity>
+An interface is attached to the session this run belongs to, but this run has no
+way to put a question in front of the operator: no ask hook is wired into this
+session, and it holds no channel to one that is.
+
+- Say what you would have asked in your report — the question and the fact that
+  would change your answer — and proceed on the best reading you have.
+- Stating the question is not losing it: the operator reads this conversation
+  when they return.
+- Write for a reader who may answer minutes later: say what you need and what
+  you will do with it.
+</interactivity>"""
+
+#: Detached, with an ``ask`` hook: the original negative body, unchanged. It
+#: deliberately drops "nobody is watching a screen" — the exact false claim the
+#: incident turned on, on evidence that could not support it.
+_INTERACTIVITY_DETACHED_ASK = """<interactivity>
+No interface is attached to this session right now, so a question you ask cannot
+be presented to anyone until a surface attaches: it waits, unread, and the turn
+may block for hours.
+
+- Prefer to PROCEED with what you have, or finish the turn with a clear
+  statement of what you would have asked, over calling `ask`.
+- That statement is a decision you already took and the fact that would change
+  it, not a question left hanging.
+- Do not take an irreversible or destructive action to avoid asking; when the
+  choice genuinely needs a person, stop and say so — that is cheaper than a
+  wrong guess.
+- The operator will read this conversation when they return, so write for
+  someone catching up, not for someone watching live.
+</interactivity>"""
+
+#: Detached, no ``ask`` hook, but a parent channel (a SUBAGENT): the same fact about
+#: the PARENT's session, with the child's own route named. The bullets are shared
+#: with ``_INTERACTIVITY_DETACHED_NONE`` and name no tool, because the useful
+#: instruction for a reader with no ask hook is to state the question where the
+#: operator will read it — not to reach for one.
+_INTERACTIVITY_DETACHED_HUB = """<interactivity>
+No interface is attached to the session this run was delegated from right now,
+so a question raised through `hub` cannot be presented to the operator until a
+surface attaches: it waits, unread.
+
+- Prefer to PROCEED with what you have, or finish the turn with a clear
+  statement of what you would have asked, over stalling on a question.
+- That statement is a decision you already took and the fact that would change
+  it, not a question left hanging.
+- Do not take an irreversible or destructive action to avoid asking; when the
+  choice genuinely needs a person, stop and say so — that is cheaper than a
+  wrong guess.
+- The operator will read this conversation when they return, so write for
+  someone catching up, not for someone watching live.
+</interactivity>"""
+
+#: Detached, no ``ask`` hook and no parent channel: no surface to present on, and
+#: nothing here that could present one even if it attached.
+_INTERACTIVITY_DETACHED_NONE = """<interactivity>
+No interface is attached to the session this run belongs to right now, and this
+run has no way to put a question in front of the operator.
+
+- Prefer to PROCEED with what you have, or finish the turn with a clear
+  statement of what you would have asked, over stalling on a question.
+- That statement is a decision you already took and the fact that would change
+  it, not a question left hanging.
+- Do not take an irreversible or destructive action to avoid asking; when the
+  choice genuinely needs a person, stop and say so — that is cheaper than a
+  wrong guess.
+- The operator will read this conversation when they return, so write for
+  someone catching up, not for someone watching live.
+</interactivity>"""
+
+
+def _interactivity_channel(tools: Sequence[AgentTool], channel: str | None) -> str:
+    """How this session can put a question in front of a person.
+
+    ``channel is None`` means the caller stated nothing, and the fallback is tool
+    MEMBERSHIP — the same rule the inventory block below already follows: the ``ask``
+    tool exists exactly where the host wired the ask hook (``build_ask_tool``), so
+    "holds ``ask``" IS the answer. It can only ever answer "ask" or "nothing"; the
+    ``hub`` body is never inferred, for the reason on the constants above.
+    """
+    if channel is not None:
+        return channel
+    if any(tool.name == "ask" for tool in tools):
+        return CHANNEL_ASK
+    return CHANNEL_NONE
+
+
+def _interactivity_block(attached: bool, channel: str) -> str:
+    """The ``<interactivity>`` body for one measured (attachment, channel) pair.
+
+    SIX constants, keyed on two stable facts, and no interpolation of any kind:
+    the same pair always renders the same bytes, which is what lets the block ride
+    a persisted prompt prefix without ever moving it.
+    """
+    if attached:
+        return {
+            CHANNEL_ASK: _INTERACTIVITY_ATTACHED_ASK,
+            CHANNEL_HUB: _INTERACTIVITY_ATTACHED_HUB,
+            CHANNEL_NONE: _INTERACTIVITY_ATTACHED_NONE,
+        }[channel]
+    return {
+        CHANNEL_ASK: _INTERACTIVITY_DETACHED_ASK,
+        CHANNEL_HUB: _INTERACTIVITY_DETACHED_HUB,
+        CHANNEL_NONE: _INTERACTIVITY_DETACHED_NONE,
+    }[channel]
+
+
 def build_system_blocks(
     tools: Sequence[AgentTool],
     skills_block: str,
@@ -558,7 +766,10 @@ def build_system_blocks(
     team_brief: str = "",
     agent_brief: str = "",
     model_label: str = "",
-    interactive: bool = True,
+    interactive: bool | None = None,
+    channel: str | None = None,
+    host_has_browser: bool | None = None,
+    host_has_console: bool | None = None,
 ) -> list[str]:
     """Build the system prompt blocks; see the module docstring.
 
@@ -571,6 +782,16 @@ def build_system_blocks(
     bytes must never hide updated repository rules, custom instructions or a
     newer packaged prompt, including when an old conversation is resumed.
 
+    ``host_has_browser``/``host_has_console`` are the caller's ALREADY-COMPUTED
+    host probes, from :func:`host_capability_probes` at construction time. Pass
+    them: left ``None`` they are re-read here on every render, and because block
+    0 is the block whose change starts a new persisted prefix epoch for the live
+    session, a probe that flips with a heartbeat's age then costs every session
+    its cache (the measured incident is in :func:`host_capability_probes`). The
+    tool-MEMBERSHIP half of the decision is not frozen and must not be — it is
+    derived from ``tools`` on every render, so a tool this session gained is
+    described correctly whatever the host said at construction.
+
     ``user_instructions`` (the operator's standing customization, read once at
     session start from ``system_prompt.md``) rides the HEAD block instead,
     appended to the packaged persona. It belongs there because it is exactly
@@ -580,6 +801,39 @@ def build_system_blocks(
     not a per-turn instruction competing with the live conversation. Keeping
     it out of the tail also stops a long instructions file from being re-sent
     ahead of every volatile change.
+
+    ``interactive`` is TIER A — "an interface is attached that can PRESENT a
+    question" — and never "somebody is looking right now". The two are different
+    questions with different consumers, and this one is deliberately the weaker:
+    focus flaps with window z-order, and this value selects which
+    ``<interactivity>`` body rides the tail, so a focus-keyed answer would move a
+    block inside the persisted prefix every time a window was raised. The
+    runtime's attachment predicate is the source; see
+    ``RuntimeServer.attached_surfaces`` and
+    ``docs/design/attached-interface-signal.md``.
+
+    ``interactive is None`` — the DEFAULT, and the tri-state's third value —
+    means NOBODY MEASURED: no runtime probe was installed, so this host has no
+    attachment answer at all (a plain CLI, an ``exec`` run, a scheduled run, a
+    bare test). It renders NO ``<interactivity>`` block, which is the byte-shape
+    those hosts had before this block grew a positive arm, and it is what keeps
+    the block to statements that were measured. Reading ``None`` as attached (the
+    ``is_interactive()`` fail-open, which the PARK decision must keep) is wrong
+    HERE: a scheduled run shipping an ~597-char claim about an attached interface
+    it never probed is the same defect this block exists to remove.
+
+    ``channel`` states HOW this session can put a question in front of a person,
+    because the bodies name the channel and a reader must never be sent to a tool
+    it does not have. One of :data:`CHANNEL_ASK` (this session owns an ask hook),
+    :data:`CHANNEL_HUB` (a delegated child: its route to the operator is the
+    session that delegated it), or :data:`CHANNEL_NONE`. Left ``None`` it is
+    derived from tool MEMBERSHIP — exactly like the inventory block, and for the
+    same reason: ``build_ask_tool`` is gated on the hook, so the ``ask`` tool's
+    presence IS the answer for a caller that cannot read a live one. The session
+    facade, whose ``set_ask_handler`` installs the hook AFTER the provider closure
+    is built, passes the live answer instead: ``tools`` there is the
+    construction-time list and would have said "no ask hook" to every TUI and
+    desktop session.
     """
     # THREE states, not two, and conflating the last two ships a false claim.
     # Membership, not visibility: a hidden tool is still callable, and telling
@@ -599,7 +853,12 @@ def build_system_blocks(
     # connected... do that setup with the user". False, and actionably false.
     # The host probe is what separates 2 from 3.
     has_browser = any(tool.name == "browser" for tool in tools)
-    host_has_browser = has_browser or _host_browser_backend_available()
+    if host_has_browser is None:
+        host_has_browser = _host_browser_backend_available()
+    # MEMBERSHIP stays live; only the HOST's own answer is taken as given (see
+    # ``host_capability_probes``). ``has_browser`` ORed in first, so a session
+    # that has the tool is unaffected by what the host probe said.
+    host_has_browser = has_browser or host_has_browser
     # The console is the same three-state story with the same consequence for a
     # restricted child, and it is computed HERE rather than left to the template
     # so both capability pairs are decided by one function. Note the console's
@@ -608,7 +867,9 @@ def build_system_blocks(
     # and telling the model to arrange one would be the playwright mistake again
     # (design ui-console-tab §14.5).
     has_console = any(tool.name == "console" for tool in tools)
-    host_has_console = has_console or _host_console_available()
+    if host_has_console is None:
+        host_has_console = _host_console_available()
+    host_has_console = has_console or host_has_console
     # The browser prose is conditional rather than unconditional because it is
     # ~1,500 characters of instruction for a tool that is createIf-gated: a
     # host with no cmux and no extension paid for three paragraphs about a
@@ -707,33 +968,39 @@ def build_system_blocks(
         # the more recent, more specific instruction, and later placement is
         # how the model reads precedence when the two briefs disagree.
         tail = f"{tail}\n\n<agent>\n{agent_brief.strip()}\n</agent>"
-    if not interactive:
-        # WHO CAN ANSWER, stated once. A detached session has nobody at a
-        # screen, so a question costs a parked gate (holding the runtime
-        # resident) and gets no answer — the model needs to know that BEFORE
-        # it decides to ask, not after the gate times out.
+    if interactive is not None:
+        # WHO CAN ANSWER, stated in BOTH directions rather than only the negative
+        # one. A question asked now is answered when the operator LOOKS, not when
+        # they are looking — so an attached session has to be told its question
+        # WILL be presented. Rendering nothing there left silence to be read as
+        # "probably nobody is there", which is the default reading this block
+        # exists to displace.
         #
-        # A single recomputed statement, deliberately, not an event: a row
-        # per attach/detach would grow the transcript without bound for a
-        # user who reattaches often, which is exactly the token accumulation
-        # this is meant to avoid. This block is rebuilt at turn start, so N
-        # attach/detach cycles cost the same as zero.
+        # EVERY BODY IS A CONSTANT: no timestamp, no session id, no count, no
+        # surface kind, and no word about who is watching. That last omission is
+        # the fix, not a tidy-up: the block used to claim "nobody is watching a
+        # screen" on evidence that could not support it (a machine-wide record
+        # unable to NAME the conversation was read as evidence against the
+        # session), and it is the sentence models parroted into `hub` messages
+        # while the operator was reading the session. What the block may state is
+        # what was measured — whether a surface is attached — and its consequence.
+        #
+        # Focus is not an input either (see ``RuntimeServer.attached_surfaces``),
+        # which is what makes the bytes stable: fifty window focus changes produce
+        # the same block, so the persisted prefix does not move and no transcript
+        # row is written. This block is rebuilt at turn start, so N attach/detach
+        # cycles cost exactly what zero cost — a row per transition is the token
+        # accumulation this deliberately avoids.
+        #
+        # The CHANNEL half is the other measured fact, and it exists so no reader
+        # is sent to a tool it lacks: a subagent renders its PARENT's attachment
+        # answer, and telling that child "a question you ask WILL be presented:
+        # `ask` ..." names a tool absent from its inventory (``build_ask_tool``
+        # refuses without a hook) and a channel that does not exist — the failure
+        # this whole change removes, reintroduced for the population most
+        # sessions' turns are made of.
         tail = (
-            f"{tail}\n\n<interactivity>\n"
-            "No interactive surface is attached to this session right now: "
-            "nobody is watching a screen, so a question to the user cannot be "
-            "answered until someone reopens it.\n\n"
-            "- Prefer to PROCEED with what you have, or finish the turn with a "
-            "clear statement of what you would have asked, over calling `ask`.\n"
-            "- That statement is a decision you already took and the fact that "
-            "would change it, not a question left hanging: with nobody at a "
-            "screen a prose question is even less answerable than usual.\n"
-            "- Do not take an irreversible or destructive action to avoid "
-            "asking; when the choice genuinely needs a person, stop and say so "
-            "— that is cheaper than a wrong guess.\n"
-            "- The user will read this conversation when they return, so write "
-            "for someone catching up, not for someone watching live.\n"
-            "</interactivity>"
+            f"{tail}\n\n{_interactivity_block(interactive, _interactivity_channel(tools, channel))}"
         )
     names = [name for name in (credentials or ()) if name]
     if names:

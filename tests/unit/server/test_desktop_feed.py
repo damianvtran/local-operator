@@ -52,6 +52,7 @@ import pytest
 import local_operator.server.utils.desktop_feed as feed_module
 import local_operator.session.runtime.presence as presence_module
 from local_operator import procstate
+from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.notifications import notification_payload
 from local_operator.resume import mark_session_origin
 from local_operator.server.utils.desktop_feed import (
@@ -82,6 +83,7 @@ from local_operator.session.runtime.presence import (
     reset_cache,
 )
 from local_operator.session.runtime.types import HEARTBEAT_TIMEOUT_S, SessionRecord
+from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 from local_operator.tui.notify import BODY_BACKGROUND_DIGEST, background_digest_title
 from local_operator.wakes.store import write_entry
 from tests.notification_opt_in import notification_path_opt_in
@@ -1213,13 +1215,21 @@ def _statuses(frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 @contextlib.contextmanager
-def _io_watch(registry_dir: Path) -> Iterator[dict[str, Any]]:
+def _io_watch(registry_dir: Path, *, reads_under: Path | None = None) -> Iterator[dict[str, Any]]:
     """Count the filesystem calls one block makes, and which files it read.
 
     The counting pattern ``tests/unit/session/test_catalog_scan_cost.py`` uses for
     the same kind of claim: the property is "one stat and no record reads on a
     quiet tick", which a COUNT states exactly and a duration only approximates
     once machine load is in the picture.
+
+    ``reads_under`` widens the read counter from "files directly in
+    ``registry_dir``" (the discovery records' own shape) to "any file under this
+    subtree", for the one caller whose rows are a directory deeper — an
+    ``agents/<id>/agent.yml`` has the row's directory as its parent, so the
+    default counter would report a zero it could not have made non-zero. Both
+    callers pass it explicitly; there is no default scope that silently counts
+    nothing.
     """
     counts: dict[str, Any] = {
         "stat": 0,
@@ -1246,7 +1256,8 @@ def _io_watch(registry_dir: Path) -> Iterator[dict[str, Any]]:
     real_read_text = Path.read_text
 
     def read_text(self: Path, *args: Any, **kwargs: Any) -> Any:
-        if self.parent == registry_dir:
+        scope = reads_under if reads_under is not None else registry_dir
+        if self.parent == scope or (reads_under is not None and scope in self.parents):
             counts["record_reads"] += 1
         return real_read_text(self, *args, **kwargs)
 
@@ -1373,6 +1384,84 @@ def test_a_heartbeat_rewrite_publishes_nothing(tmp_path):
     asyncio.run(feed.close())
 
 
+def test_a_count_change_publishes_exactly_one_status_edge(tmp_path):
+    """U3: the count rides the LABEL, so a count change is an EDGE.
+
+    The requirement this pins is a latency one. The glyph reaches a client in
+    under a second, while the list it could instead read its count from is on a
+    30 s poll — so a count that travelled as a LIST field would be up to 30 s
+    stale beside a mark that was already correct. The channel's dedupe key is
+    ``(code, label)`` with the clock term removed, which is what makes the count
+    an edge only because it is spelled INTO the label.
+
+    Three claims, in order: ``0 -> 2`` publishes once and ``2 -> 1`` publishes
+    once (not twice, and not zero times); a heartbeat rewrite at an unchanged
+    count publishes nothing; and a record that reports NO count is neither a
+    zero nor a state — it republishes the rung it leaves behind.
+
+    The frame is asserted to be a ``{code, label, revision}`` TRIPLE. That is
+    not decoration either: a count carried as a fourth payload field would be a
+    shape change every client has to know about, and the design deliberately
+    keeps the count inside the label instead.
+    """
+    root = tmp_path
+    sid = "c1" * 6
+    _listable_session(root, sid)
+    feed = _feed(root)
+
+    def publish(**fields: Any) -> Path:
+        return _record_publish(root, sid, detached=True, **fields)
+
+    publish(subagents_running=0, subagents_queued=0)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+
+    # A reported ZERO is the idle row the client already has: no edge. This is
+    # the assertion that would fail if ``None``/0 were folded into the state.
+    _tick(feed)
+    assert _statuses(_queued(subscription)) == []
+
+    # 0 -> 2
+    publish(subagents_running=2)
+    _tick(feed)
+    frames = _statuses(_queued(subscription))
+    assert len(frames) == 1, frames
+    assert frames[0]["payload"]["code"] == "delegating"
+    assert frames[0]["payload"]["label"] == "2 subagents running"
+    assert set(frames[0]["payload"]) == {"code", "label", "revision"}, frames[0]["payload"]
+
+    # 2 -> 1: one edge, and it carries the SINGULAR.
+    publish(subagents_running=1)
+    _tick(feed)
+    frames = _statuses(_queued(subscription))
+    assert len(frames) == 1, frames
+    assert frames[0]["payload"]["label"] == "1 subagent running"
+
+    # A heartbeat rewrite of the same record changes nothing the pair is read
+    # from, so it must publish on NEITHER channel — the anti-aggressive-poll
+    # property, here at the one rung whose label is not a constant.
+    for _ in range(3):
+        publish(subagents_running=1)
+        assert _fingerprint(feed._registry_dir) != feed._registry_fingerprint
+        _tick(feed)
+        assert _queued(subscription) == []
+
+    # A record from a build that reports no count at all: an absent KEY, written
+    # straight to the file the way an older runtime's record looks. It must
+    # return the row to ``idle`` rather than publishing a zero — and it does
+    # publish, because the pair genuinely moved off the delegating rung.
+    path = publish(subagents_running=1)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    del payload["subagents_running"], payload["subagents_queued"]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    _tick(feed)
+    frames = _statuses(_queued(subscription))
+    assert [frame["payload"]["code"] for frame in frames] == ["idle"], frames
+    assert frames[0]["payload"]["label"] == "Ready"
+    assert "0" not in frames[0]["payload"]["label"]
+    asyncio.run(feed.close())
+
+
 def test_the_frame_and_the_list_derive_the_status_from_one_home(tmp_path):
     """PARITY: the frame is a second CALLER of the precedence, never a home.
 
@@ -1384,9 +1473,19 @@ def test_the_frame_and_the_list_derive_the_status_from_one_home(tmp_path):
     a disagreement instead of as a green suite.
     """
     root = tmp_path
-    gate, working, resident, armed, dormant, finished, failed, cold, wedged, dead = (
-        f"{index:012x}" for index in range(10)
-    )
+    (
+        gate,
+        working,
+        resident,
+        armed,
+        dormant,
+        finished,
+        failed,
+        cold,
+        wedged,
+        dead,
+        delegating,
+    ) = (f"{index:012x}" for index in range(11))
     for session_id in (
         gate,
         working,
@@ -1398,19 +1497,38 @@ def test_the_frame_and_the_list_derive_the_status_from_one_home(tmp_path):
         cold,
         wedged,
         dead,
+        delegating,
     ):
         _listable_session(root, session_id)
     feed = _feed(root)
     feed._take_baseline()
     subscription = feed.subscribe()
 
-    # Five live pids, because a record is keyed by one: this process, pid 1, and
-    # two spawned sleepers. Each session below gets its own, so no write can
+    # SIX live pids, because a record is keyed by one: this process, pid 1, and
+    # three spawned sleepers. Each session below gets its own, so no write can
     # clobber another's record.
-    with _extra_live_pid() as spare, _extra_live_pid() as aged:
+    with (
+        _extra_live_pid() as spare,
+        _extra_live_pid() as aged,
+        _extra_live_pid() as counting,
+    ):
         _record_publish(root, gate, pending="approval")
         _record_publish(root, working, pid=_FOREIGN_LIVE_PID, busy=True)
         _record_publish(root, resident, pid=spare, detached=True)
+        # THE ARM THAT CARRIES A COUNT. A parent whose own turn is idle while it
+        # owns running children — the state the whole channel change is for, and
+        # the one arm whose label is built from numbers rather than constants.
+        # `detached=True` so the row is genuinely `idle` and the rung under test
+        # is the one that owns it; a second live pid, because records are keyed
+        # by pid and reusing one would clobber another arm's record.
+        _record_publish(
+            root,
+            delegating,
+            pid=counting,
+            detached=True,
+            subagents_running=2,
+            subagents_queued=1,
+        )
         # THE ARM THAT CARRIES A CLOCK. A quiet beat is what makes the verdict
         # ``wedged``, and the label that comes with it embeds the age — so this
         # is the one arm where the two surfaces could disagree about a STRING
@@ -1436,7 +1554,17 @@ def test_the_frame_and_the_list_derive_the_status_from_one_home(tmp_path):
 
         listed = {entry.id: (entry.status_code, entry.status) for entry in load_catalog(root)}
     # Every state with an EVENT behind it is announced...
-    assert set(frames) == {gate, working, resident, armed, dormant, finished, failed, wedged}
+    assert set(frames) == {
+        gate,
+        working,
+        resident,
+        armed,
+        dormant,
+        finished,
+        failed,
+        wedged,
+        delegating,
+    }
     # ...and each frame carries exactly what the list derives for the same
     # on-disk state. Nothing else in this file needs to know what the vocabulary
     # is, which is the point: there is one precedence and both surfaces call it.
@@ -1668,11 +1796,13 @@ def test_a_quiet_tick_costs_four_stats_and_no_record_reads(tmp_path):
     _tick(feed)
     _queued(subscription)
 
-    # Both probes are gated shut, so what is measured is the DOORBELL's cost: the
-    # catalogue probe legitimately walks the sessions directory at 1 Hz, and
-    # including it would measure a different claim.
+    # All THREE probes are gated shut, so what is measured is the DOORBELL's cost:
+    # the catalogue probe legitimately walks the sessions directory at 1 Hz, the
+    # authoring probe stats the profile and team rows at 1 Hz, and including either
+    # would measure a different claim.
     feed._catalogue_probed_at = time.monotonic()
     feed._status_probed_at = time.monotonic()
+    feed._authoring_probed_at = time.monotonic()
     with _io_watch(feed._registry_dir) as counts:
         _tick(feed)
     assert _statuses(_queued(subscription)) == []
@@ -1706,6 +1836,7 @@ def test_the_status_probe_reads_only_the_records_and_never_walks_the_store(tmp_p
     _queued(subscription)
 
     feed._catalogue_probed_at = time.monotonic()  # see the note above
+    feed._authoring_probed_at = time.monotonic()
     feed._status_probed_at = 0.0
     with _io_watch(feed._registry_dir) as counts:
         _tick(feed)
@@ -1785,12 +1916,16 @@ def test_the_status_probe_forks_once_whatever_the_record_population(tmp_path, mo
         the FAILURE path, which falls back to probing per record by design (QA
         round 2, Q6), so a silent shim would measure the fallback instead of the
         batching this test is about. ``S`` is an ordinary sleeping process — the
-        answer a live pid gets.
+        answer a live pid gets — and the trailing start time is the second field
+        the probe reads beside the state: a shim that answers the OLD two-field
+        line is a batch that answers nothing, i.e. it measures the fallback.
         """
 
         def run(self, argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
             asks.append([str(item) for item in argv])
-            answered = "".join(f"{pid} S\n" for pid in str(argv[-1]).split(","))
+            answered = "".join(
+                f"{pid} S Mon Sep 21 09:53:01 2026\n" for pid in str(argv[-1]).split(",")
+            )
             return subprocess.CompletedProcess(argv, 0, stdout=answered)
 
     monkeypatch.setattr(procstate, "subprocess", _NoFork())
@@ -2930,3 +3065,618 @@ def test_a_session_with_no_recorded_hosting_is_still_announced(tmp_path) -> None
     _publish(root, sid)
 
     assert [frame["session_id"] for frame in _bannered(feed, subscription)] == [sid]
+
+
+# ----------------------------------------------------------------------------
+# The AUTHORING channel: the frame that keeps the sidebar's Teams/Agents lists
+# from waiting for a refresh or a tab switch.
+# ----------------------------------------------------------------------------
+
+
+def _edit_fields(**overrides: Any) -> AgentEditFields:
+    """``AgentEditFields`` with every field spelled out, ``None`` but the overrides.
+
+    Both halves are needed. ``AgentEditFields`` is validated in strict mode, so a
+    partial construction would silently CLEAR the fields it omits — the defect its
+    own docstring documents on the tool path — and pyright reads its model fields as
+    required parameters, so a partial one is a type error on top of that. This is
+    the same helper the rest of the suite carries (``tests/unit/test_agent_profiles.py``).
+    """
+    base: dict[str, Any] = dict(
+        name=None,
+        description=None,
+        tags=None,
+        categories=None,
+        security_prompt=None,
+        hosting=None,
+        model=None,
+        last_message=None,
+        temperature=None,
+        top_p=None,
+        top_k=None,
+        max_tokens=None,
+        stop=None,
+        frequency_penalty=None,
+        presence_penalty=None,
+        seed=None,
+        current_working_directory=None,
+    )
+    base.update(overrides)
+    return AgentEditFields(**base)
+
+
+def _team_fields(**overrides: Any) -> TeamEditFields:
+    """``TeamEditFields`` with every field spelled out, for the reason above."""
+    base: dict[str, Any] = dict(
+        name=None, description=None, manager=None, members=None, instructions=None, project=None
+    )
+    base.update(overrides)
+    return TeamEditFields(**base)
+
+
+def _profile(root: Path, name: str = "probe-role", description: str = "first") -> str:
+    """Create a real profile the way the ``agent`` tool does, and return its id.
+
+    Through ``AgentRegistry`` rather than by writing ``agent.yml`` by hand: the
+    thing under test is whether the REGISTRY's own writers move the feed's token,
+    and a hand-written fixture would let the writer and the probe drift apart with
+    both suites green.
+    """
+    agent = AgentRegistry(root).create_agent(_edit_fields(name=name, description=description))
+    return agent.id
+
+
+def _agent_yml(root: Path, agent_id: str) -> Path:
+    return root / "agents" / agent_id / "agent.yml"
+
+
+def _authoring(frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [frame for frame in frames if frame["type"] == "authoring"]
+
+
+def test_a_new_profile_publishes_exactly_one_authoring_frame(tmp_path):
+    """THE REPORTED DEFECT, at the first of its two surfaces.
+
+    A role authored from inside a session (the ``agent`` tool's ``write_profile``
+    reaches ``AgentRegistry.create_agent``, which mkdirs ``agents/<id>/`` and writes
+    ``agent.yml``) used to be invisible to the app: nothing in this feed mentioned
+    the authoring registries at all, so an open Teams/Agents list kept the rows it
+    was mounted with until a refresh or a tab switch. One frame, one refetch.
+    """
+    root = tmp_path
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+
+    _profile(root)
+    feed._authoring_probed_at = 0.0
+    _tick(feed)
+    frames = _queued(subscription)
+    asyncio.run(feed.close())
+
+    published = _authoring(frames)
+    assert len(published) == 1, frames
+    assert published[0]["payload"] == {"revision": 1}, published[0]
+    # The feed is not a session, and a fabricated id would make the client's
+    # `observe(sessionId, frame)` look like it had one to attribute this to.
+    assert "session_id" not in published[0], published[0]
+
+
+def test_an_edit_to_what_a_profile_says_publishes_one(tmp_path):
+    """The half the name set cannot express: the row was already there."""
+    root = tmp_path
+    registry = AgentRegistry(root)
+    agent = registry.create_agent(_edit_fields(name="probe-role", description="first"))
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+
+    registry.update_agent(agent.id, _edit_fields(description="second"))
+    feed._authoring_probed_at = 0.0
+    _tick(feed)
+    frames = _queued(subscription)
+    asyncio.run(feed.close())
+
+    assert len(_authoring(frames)) == 1, frames
+
+
+def test_an_agent_turn_that_rewrites_agent_yml_publishes_nothing(tmp_path):
+    """NEGATIVE PIN — the one a whole-file digest would fail.
+
+    ``update_agent_state`` is the ORDINARY per-turn persistence path: it funnels
+    into ``update_agent``, whose ``open("w")`` rewrites ``agent.yml`` in place with
+    a new ``mtime_ns`` on every turn. The frame's trigger is a projection over the
+    AUTHORED lines, so what a turn moves (``last_message``,
+    ``last_message_datetime``, and the ``current_working_directory``
+    ``update_agent_state`` threads through) is dropped before the digest. Digesting
+    the bytes instead would refetch the sidebar's profiles and teams once per turn
+    of every chat — the defect this channel exists to remove, reintroduced by its
+    own fix.
+
+    The message is MULTI-LINE and goes through the writer's own ``yaml.dump``: a
+    block scalar's continuation lines are the case a naive per-line filter gets
+    wrong, and it is the shape real turns carry.
+    """
+    root = tmp_path
+    registry = AgentRegistry(root)
+    agent = registry.create_agent(_edit_fields(name="probe-role", description="first"))
+    row = _agent_yml(root, agent.id)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+
+    before_stat = row.stat()
+    registry.update_agent(
+        agent.id,
+        _edit_fields(last_message="line one\nline two\n\nline three"),
+    )
+    after_stat = row.stat()
+    # CONTROL: the write really happened, so a quiet feed is the projection's
+    # restraint rather than a turn that never touched the file.
+    assert (after_stat.st_size, after_stat.st_mtime_ns) != (
+        before_stat.st_size,
+        before_stat.st_mtime_ns,
+    ), "the fixture did not rewrite agent.yml"
+    assert "last_message" in row.read_text()
+
+    feed._authoring_probed_at = 0.0
+    _tick(feed)
+    frames = _queued(subscription)
+    assert _authoring(frames) == [], frames
+
+    # ...and the same subscription DOES carry a frame for an authored edit, which
+    # is what makes the assertion above evidence rather than decoration.
+    registry.update_agent(agent.id, _edit_fields(description="second"))
+    feed._authoring_probed_at = 0.0
+    _tick(feed)
+    after = _queued(subscription)
+    asyncio.run(feed.close())
+    assert len(_authoring(after)) == 1, after
+
+
+def test_a_save_agent_state_with_identical_bytes_publishes_nothing(tmp_path):
+    """NEGATIVE PIN — the second writer that moves without an authored change.
+
+    ``save_agent_state`` rewrites ``system_prompt.md`` (and four jsonl files) with
+    identical bytes on every job and autosave save. Neither file is a term in the
+    token — the token is ``agent.yml`` alone — and this cell is what says so out
+    loud, because a future "completeness" instinct could add the directory.
+    """
+    root = tmp_path
+    registry = AgentRegistry(root)
+    agent = registry.create_agent(_edit_fields(name="probe-role", description="first"))
+    registry.set_agent_system_prompt(agent.id, "you are a probe")
+    prompt = root / "agents" / agent.id / "system_prompt.md"
+    before = prompt.stat()
+    state = registry.load_agent_state(agent.id)
+
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+
+    registry.save_agent_state(agent.id, state)
+    after = prompt.stat()
+    assert after.st_mtime_ns != before.st_mtime_ns, "the fixture did not rewrite system_prompt.md"
+    assert prompt.read_text() == "you are a probe"
+
+    feed._authoring_probed_at = 0.0
+    _tick(feed)
+    frames = _queued(subscription)
+    asyncio.run(feed.close())
+
+    assert _authoring(frames) == [], frames
+
+
+def test_a_quiet_window_publishes_no_authoring_frame(tmp_path):
+    """The probe RUNS on every tick of this window and still publishes nothing.
+
+    The two other probe clocks are gated shut, and the authoring clock is reset
+    before each tick rather than left to its own interval, so what this measures is
+    the probe's verdict on an unchanged tree — not the clock's restraint. A feed
+    that refetched the sidebar's two lists once a second would be worse than the
+    defect it fixed.
+    """
+    root = tmp_path
+    _profile(root)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+
+    for _ in range(3):
+        feed._catalogue_probed_at = time.monotonic()
+        feed._status_probed_at = time.monotonic()
+        feed._authoring_probed_at = 0.0
+        _tick(feed)
+    frames = _queued(subscription)
+    asyncio.run(feed.close())
+
+    assert frames == [], frames
+
+
+def test_a_new_team_row_publishes_exactly_one_authoring_frame(tmp_path):
+    """The second surface: the team the app (or an agent) just created."""
+    root = tmp_path
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+
+    teams = TeamRegistry(root)
+    teams.create_team(_team_fields(name="probe-team", members=[TeamMember(role="manager")]))
+    feed._authoring_probed_at = 0.0
+    _tick(feed)
+    frames = _queued(subscription)
+    asyncio.run(feed.close())
+
+    assert len(_authoring(frames)) == 1, frames
+
+
+def test_a_team_save_that_changes_nothing_publishes_nothing(tmp_path):
+    """NEGATIVE PIN, and the one the design note is about.
+
+    ``save_team`` publishes EVERY save as a directory swap — ``tempfile.mkdtemp``
+    plus two ``os.replace`` calls INSIDE ``teams/`` — so a stat of that directory
+    moves on a save that changed nothing at all, and a token carrying it would
+    publish once per save. The row's NAME and its PROJECTED CONTENT do not move,
+    and those are the terms. This is also why the token's name set skips
+    dot-prefixed entries: the swap's staging and backup directories are exactly
+    that shape, and counting them would report a change mid-save.
+    """
+    root = tmp_path
+    teams = TeamRegistry(root)
+    team = teams.create_team(_team_fields(name="probe-team", members=[TeamMember(role="manager")]))
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+
+    stored = teams.get_team(team.id)
+    teams.save_team(stored)
+    feed._authoring_probed_at = 0.0
+    _tick(feed)
+    frames = _queued(subscription)
+    assert _authoring(frames) == [], frames
+
+    # CONTROL: an authored team edit DOES publish, so the quiet above is the
+    # projection's verdict and not a probe that cannot see teams at all.
+    teams.update_team(team.id, _team_fields(description="second"))
+    feed._authoring_probed_at = 0.0
+    _tick(feed)
+    after = _queued(subscription)
+    asyncio.run(feed.close())
+    assert len(_authoring(after)) == 1, after
+
+
+def test_a_team_delete_publishes_one(tmp_path):
+    root = tmp_path
+    teams = TeamRegistry(root)
+    team = teams.create_team(_team_fields(name="probe-team", members=[TeamMember(role="manager")]))
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+
+    teams.delete_team(team.id)
+    feed._authoring_probed_at = 0.0
+    _tick(feed)
+    frames = _queued(subscription)
+    asyncio.run(feed.close())
+
+    assert len(_authoring(frames)) == 1, frames
+
+
+@pytest.mark.asyncio
+async def test_first_open_waits_for_authoring_baseline_and_keeps_no_replay(tmp_path, monkeypatch):
+    """A write during startup belongs to open, not a silent baseline gap.
+
+    Hold the real first baseline at a barrier, author a profile, and let the
+    connection try to build ``open``. The old ordering completed ``open`` before
+    the baseline adopted the new token, leaving the client with stale lists and
+    no later invalidation. The barrier makes that interleaving deterministic.
+    """
+    root = tmp_path
+    feed = _feed(root)
+    registry = AgentRegistry(root)
+    baseline_entered = threading.Event()
+    release_baseline = threading.Event()
+    baseline_finished = threading.Event()
+    snapshot_before_baseline: list[bool] = []
+    original_baseline = feed._take_baseline
+    original_snapshot = feed._snapshot
+
+    def held_baseline() -> None:
+        baseline_entered.set()
+        if not release_baseline.wait(timeout=5):
+            raise TimeoutError("test did not release the baseline barrier")
+        original_baseline()
+        baseline_finished.set()
+
+    def observed_snapshot():
+        snapshot_before_baseline.append(not baseline_finished.is_set())
+        return original_snapshot()
+
+    monkeypatch.setattr(feed, "_take_baseline", held_baseline)
+    monkeypatch.setattr(feed, "_snapshot", observed_snapshot)
+    subscription = feed.subscribe()
+    frames: list[dict[str, Any]] = []
+    opened = asyncio.Event()
+
+    async def pump() -> None:
+        async for frame in feed.events(subscription):
+            frames.append(frame)
+            if frame["type"] == "open":
+                opened.set()
+
+    reader = asyncio.create_task(pump())
+    try:
+        assert await asyncio.to_thread(baseline_entered.wait, 5), "poller never entered baseline"
+        # Let the open task run while the real baseline is deliberately held.
+        # It must remain blocked rather than build the stale pre-baseline frame.
+        await asyncio.sleep(0.05)
+        assert not opened.is_set(), "open escaped before the first baseline completed"
+        assert snapshot_before_baseline == [], snapshot_before_baseline
+        registry.create_agent(
+            _edit_fields(name="startup-role", description="authored during startup")
+        )
+        release_baseline.set()
+        await asyncio.wait_for(opened.wait(), timeout=5)
+        await asyncio.sleep(feed_module.DOORBELL_INTERVAL_S * 2)
+    finally:
+        release_baseline.set()
+        reader.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await reader
+        await feed.close()
+
+    assert snapshot_before_baseline == [False], snapshot_before_baseline
+    assert [frame["type"] for frame in frames] == ["open"], frames
+    assert feed._authoring_token == feed._authoring_probe()
+    assert feed._authoring_invalidated is False
+
+
+@pytest.mark.asyncio
+async def test_cancelling_one_open_waiter_does_not_cancel_shared_baseline(tmp_path, monkeypatch):
+    """One disconnect must not cancel the baseline other subscribers await."""
+    feed = _feed(tmp_path)
+    baseline_entered = threading.Event()
+    release_baseline = threading.Event()
+    original_baseline = feed._take_baseline
+
+    def held_baseline() -> None:
+        baseline_entered.set()
+        if not release_baseline.wait(timeout=5):
+            raise TimeoutError("test did not release the baseline barrier")
+        original_baseline()
+
+    monkeypatch.setattr(feed, "_take_baseline", held_baseline)
+    first = feed.subscribe()
+    first_events = feed.events(first)
+
+    async def next_open(events):
+        return await anext(events)
+
+    first_open = asyncio.create_task(next_open(first_events))
+    second_events = None
+    second_open = None
+    try:
+        assert await asyncio.to_thread(baseline_entered.wait, 5), "poller never entered baseline"
+        # Let the first connection park on the shared gate before cancelling it.
+        await asyncio.sleep(0.05)
+        first_open.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await first_open
+        assert feed._baseline_ready is not None
+        assert not feed._baseline_ready.cancelled(), "one subscriber cancelled the shared baseline"
+
+        second = feed.subscribe()
+        second_events = feed.events(second)
+        second_open = asyncio.create_task(next_open(second_events))
+        release_baseline.set()
+        opened = await asyncio.wait_for(second_open, timeout=5)
+        assert opened["type"] == "open", opened
+    finally:
+        release_baseline.set()
+        if second_open is not None and not second_open.done():
+            second_open.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await second_open
+        await feed.close()
+
+
+def test_an_authoring_invalidation_is_not_replayed_to_a_late_subscriber(tmp_path):
+    """A reconnecting client is told the COUNTER, never the old frame.
+
+    The frame is an invalidation and not an event: replaying one would make every
+    reconnect refetch two lists that have not moved since, and the ``open``
+    snapshot already carries the currency the client compares against.
+    """
+    root = tmp_path
+    feed = _feed(root)
+    feed._take_baseline()
+    early = feed.subscribe()
+
+    _profile(root)
+    feed._authoring_probed_at = 0.0
+    _tick(feed)
+    assert len(_authoring(_queued(early))) == 1
+
+    late = feed.subscribe()
+    frames = _collect(feed, late)
+    asyncio.run(feed.close())
+
+    assert [frame["type"] for frame in frames] == ["open"], frames
+    assert frames[0]["payload"]["authoring_revision"] == 1, frames[0]
+    assert "session_id" not in frames[0]["payload"], frames[0]
+
+
+def test_the_authoring_probe_reads_nothing_when_nothing_moved(tmp_path):
+    """THE COST BOUND: O(profiles) in STATS, and no reads at all when nothing moved.
+
+    A row's metadata file is read only when its own stat moved, so an idle probe
+    over a populated registry makes stats and no reads. That is the property a
+    future "simplification" (dropping the stat memory) would quietly take away, at
+    which point every profile is re-read once a second forever.
+
+    Both halves are stated here, because a zero from an instrument that cannot see
+    is not a reading: the block after the assertion pushes a DELIBERATE read of the
+    same tree through the same counter and requires it to land. The authoring clock
+    is left OPEN and the other two are gated shut, so what runs in the measured
+    block is this probe.
+    """
+    root = tmp_path
+    registry = AgentRegistry(root)
+    for index in range(4):
+        registry.create_agent(_edit_fields(name=f"probe-{index}", description="first"))
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    feed._catalogue_probed_at = time.monotonic()
+    feed._status_probed_at = time.monotonic()
+    # Warm the stat memory, which is what the measured block must NOT have to
+    # rewrite: a cold probe reads every row once, by design.
+    feed._authoring_probe()
+
+    with _io_watch(feed.agents_dir, reads_under=feed.agents_dir) as counts:
+        feed._authoring_probed_at = 0.0
+        _tick(feed)
+    assert _queued(subscription) == [], "nothing moved; nothing may be published"
+    assert counts["record_reads"] == 0, counts
+    assert counts["stat"] + counts["lstat"] + counts["scandir"] > 0, counts
+
+    # THE CANARY: the same instrument, the same tree, one deliberate read.
+    with _io_watch(feed.agents_dir, reads_under=feed.agents_dir) as canary:
+        next(feed.agents_dir.glob("*/agent.yml")).read_text()
+    asyncio.run(feed.close())
+    assert canary["record_reads"] == 1, canary
+
+
+def test_the_authoring_probe_creates_nothing(tmp_path):
+    """A READER in the strong sense: an absent registry directory stays absent.
+
+    ``AgentRegistry`` and ``TeamRegistry`` both mkdir on construction, so a probe
+    that reached for either — the obvious way to ask "are there profiles" — would
+    make the feed the process that creates ``agents/`` and ``teams/`` on a machine
+    that has never authored anything. This probe takes PATHS only.
+    """
+    root = tmp_path
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+
+    feed._authoring_probed_at = 0.0
+    _tick(feed)
+    feed._authoring_probed_at = 0.0
+    _tick(feed)
+    assert _queued(subscription) == []
+    assert not (root / "agents").exists(), "the probe created the agents registry"
+    assert not (root / "teams").exists(), "the probe created the teams registry"
+
+    # CANARY: this is the same call on a tree that DOES hold a row, so the absence
+    # above is the tree's state and not a probe that returns a constant.
+    before = feed._authoring_probe()
+    _profile(root)
+    asyncio.run(feed.close())
+    assert feed._authoring_probe() != before, "the probe did not look at the real tree"
+
+
+def test_the_authoring_projection_drops_the_turn_keys(tmp_path):
+    """The projection, alone: volatile keys ignored, authored keys move the digest."""
+    volatile = feed_module._AGENT_VOLATILE_KEYS
+    row = tmp_path / "agent.yml"
+    authored = (
+        "name: probe\n"
+        "description: first\n"
+        "last_message: ''\n"
+        "last_message_datetime: 2026-01-01 00:00:00+00:00\n"
+        "current_working_directory: /tmp\n"
+        "model: mock\n"
+    )
+    row.write_text(authored)
+    before = feed_module._authoring_digest(row, volatile)
+    assert feed_module._authoring_projection(authored, volatile).splitlines() == [
+        "name: probe",
+        "description: first",
+        "model: mock",
+    ]
+
+    # A turn: every volatile key moves, including a multi-line message, whose
+    # dumped form is a block scalar with indented continuation lines.
+    row.write_text(
+        authored.replace("last_message: ''", "last_message: 'one\n\n  two\n  three'")
+        .replace("2026-01-01 00:00:00+00:00", "2026-01-02 00:00:00+00:00")
+        .replace("/tmp", "/elsewhere")
+    )
+    assert feed_module._authoring_digest(row, volatile) == before
+
+    # An authored edit moves it.
+    row.write_text(authored.replace("first", "second"))
+    assert feed_module._authoring_digest(row, volatile) != before
+
+
+def test_the_authoring_frame_gains_no_capability_key():
+    """NO KEY, by the rule ``server/routes/capabilities.py`` states.
+
+    A key exists so an EXISTING surface keeps working against a backend that lacks
+    the new one. Nothing here is gated: the frame is a latency optimisation on a
+    path every client already has (both lists are fetched on mount), an older
+    renderer ignores an unknown ``type``, and a newer renderer against an older
+    backend keeps today's behaviour — a refresh or a tab switch. What WOULD force
+    a key is a client behaviour that DEPENDS on the backend publishing it
+    (relaxing a poll, dropping a refetch), and the design does none of those. This
+    pin is the cheap half of that argument: it refuses a key named for the frame,
+    which is what the comment in that file is there to re-check.
+    """
+    from local_operator.server.routes.capabilities import capabilities
+
+    result = asyncio.run(capabilities()).result
+    assert isinstance(result, dict), result
+    features = result["features"]
+    assert isinstance(features, dict), features
+    assert not [name for name in features if "authoring" in name], features
+
+
+def test_a_burst_of_authored_rows_costs_one_frame(tmp_path):
+    """One refetch per tick, not one per row: a plan that authors four profiles."""
+    root = tmp_path
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+
+    registry = AgentRegistry(root)
+    for index in range(4):
+        registry.create_agent(_edit_fields(name=f"probe-{index}", description="first"))
+    feed._authoring_probed_at = 0.0
+    _tick(feed)
+    frames = _queued(subscription)
+    asyncio.run(feed.close())
+
+    assert len(_authoring(frames)) == 1, frames
+
+
+def test_the_authoring_token_ignores_the_team_writers_staging_directories(tmp_path):
+    """The dot-prefix rule, pinned: the swap's own directories are not rows.
+
+    ``save_team`` stages each save as ``.<id>.<rand>`` and moves the live row
+    aside as ``.<id>.backup.<rand>`` — both INSIDE ``teams/`` — so a name set that
+    counted them would report a change for a save that changed nothing, and could
+    report one for a save already published. ``TeamRegistry._load`` skips them for
+    the same reason (R5-1), and this pins that the probe agrees with it.
+    """
+    root = tmp_path
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+
+    teams_dir = root / "teams"
+    teams_dir.mkdir()
+    feed._authoring_probed_at = 0.0
+    _tick(feed)
+    before = feed._authoring_token
+    assert before is not None
+
+    (teams_dir / ".3d288b16-0c0c-4521-98f9-639364ed5c02.abc123").mkdir()
+    (teams_dir / ".3d288b16-0c0c-4521-98f9-639364ed5c02.backup.zzz").mkdir()
+    feed._authoring_probed_at = 0.0
+    _tick(feed)
+    frames = _queued(subscription)
+    asyncio.run(feed.close())
+
+    assert feed._authoring_token == before, "the writer's staging directories moved the token"
+    assert _authoring(frames) == [], frames

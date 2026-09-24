@@ -64,8 +64,10 @@ from typing import Literal
 # dragging a session or a provider layer in behind it.
 from local_operator.redaction_shapes import (
     ShapeHit,
+    ShapeReport,
     is_registerable_component,
     scrub_secrets_with_hits,
+    shape_report,
 )
 
 #: Environment variables only surface to the agent when opted in with this
@@ -520,31 +522,54 @@ class VariableStore:
         scrubbed, _ = self.redact_with_hits(text)
         return scrubbed
 
-    def redact_with_hits(self, text: str) -> tuple[str, list[str]]:
-        """:meth:`redact`, plus the LABELS of the shapes that fired.
+    def redact_with_report(self, text: str) -> tuple[str, ShapeReport]:
+        """:meth:`redact`, plus the CLASSIFICATION of everything the shape pass found.
+
+        The richer sibling of :meth:`redact_with_hits`, and the reason it exists:
+        the session's incident path has to say whether the value reached the
+        model's context or was contained before it, and a bare list of labels
+        cannot express that — it names the shapes whose mask was whole, which is
+        precisely the CONTAINED set, while the compromise is the hit that left
+        readable material behind. Two views of one pass, so they cannot disagree:
+        the notice's wording comes from ``labels``, its severity from
+        ``reached_model``.
 
         Labels only, never values: the caller of this is the session's incident
         path, which puts what happened in the transcript, and a notice that
         carried the credential would be the leak it exists to report.
 
         Values are registered for containment here rather than by the caller, so
-        every path that masks also contains — including the live-text path that
-        never sees this return value.
+        every path that masks ALSO CONTAINS, in-tree: this one, the live-text path
+        that never sees this return value, and the bash pipe filter, which masks
+        before a result exists and therefore registers through
+        :meth:`register_shape_hits_for_containment` instead (it is handed text that
+        is already masked, so it could never match the credential here). A store
+        outside this tree that offers only the labels-only view keeps whatever
+        behaviour it has — ``tools/builtin._redact_tool_text`` reads that view as
+        the ESCALATED case, and says why in place.
         """
         scrubbed, hits = scrub_secrets_with_hits(text, self.redaction_values())
         if not hits:
-            return scrubbed, []
+            return scrubbed, ShapeReport()
         self._register_shape_hits(hits)
-        # Containment takes EVERY hit; the NOTICE takes only the complete ones.
-        # A hit whose credential is still partly readable is a rotation ticket the
-        # operator would act on by NOT rotating — the fault `_only_fully_masked`
-        # exists to prevent — while the value it matched is exactly what the
-        # session should still contain.
-        ordered: dict[str, None] = {}
-        for hit in hits:
-            if hit.complete:
-                ordered.setdefault(hit.label, None)
-        return scrubbed, list(ordered)
+        # Containment takes EVERY hit (above, unconditionally); the REPORT takes
+        # only the complete ones as nameable labels, plus the exposure flag that
+        # separates "masked whole" from "part of it is in the model's context".
+        # ``shape_report`` is the one place that judgement is made, so this view
+        # and the escalated one can never disagree about what fired.
+        return scrubbed, shape_report(hits)
+
+    def redact_with_hits(self, text: str) -> tuple[str, list[str]]:
+        """:meth:`redact`, plus the LABELS of the shapes that were contained whole.
+
+        The narrower view, kept for the surfaces that only need to name what was
+        masked — and for a store whose caller is older than
+        :meth:`redact_with_report`. A caller that has to classify the hit reads
+        that one instead: this list is exactly the contained set, so treating it
+        as "what was found" would silently drop the compromise case.
+        """
+        scrubbed, report = self.redact_with_report(text)
+        return scrubbed, list(report.labels)
 
     #: How many DETECTED components one session may register. A bound, not a
     #: budget: every registration is a value the exact-value pass scans for in
@@ -591,3 +616,23 @@ class VariableStore:
                 continue
             self._shape_registrations.add(hit.value)
             self.register_redaction(hit.value)
+
+    def register_shape_hits_for_containment(self, hits: Sequence[ShapeHit]) -> None:
+        """Contain hits a masking layer has ALREADY removed from the bytes.
+
+        The entry point for the one masking surface that does not hand this store
+        any text: the bash pipe filter masks a running command's bytes before a
+        tool result exists, so the text the result path later gives
+        :meth:`redact_with_report` contains this store's own marker instead of the
+        credential and that pass matches nothing to register. Measured on the
+        shape this feature exists for (a ``kubectl exec … env`` whose credential
+        is in the OUTPUT and nowhere in the command): ``registered values: 0``,
+        and a later ``cat`` of the bare value — no shape around it, which is the
+        form the table cannot know — came back in the clear.
+
+        Same registration as :meth:`redact_with_report`, deliberately: identity
+        floor, dedupe and cap all live in :meth:`_register_shape_hits`, so the two
+        callers cannot disagree about what containment means. Values only reach
+        the §6 sink, never ``read_variable``.
+        """
+        self._register_shape_hits(hits)

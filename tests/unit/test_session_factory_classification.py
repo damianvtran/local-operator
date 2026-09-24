@@ -29,7 +29,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -502,7 +502,7 @@ def test_auto_off_builds_no_seam_and_never_imports_the_package(
     hooks = session_factory._KnowledgeHooks()
     warnings: list[str] = []
 
-    session_factory._attach_classification(hooks, manager, cast(Any, None), warnings)
+    session_factory._attach_classification(hooks, manager, warnings)
 
     assert hooks.classifier is None
     assert warnings == []
@@ -516,7 +516,7 @@ def test_an_absent_key_builds_the_seam(tmp_path: Path) -> None:
     hooks = session_factory._KnowledgeHooks()
     warnings: list[str] = []
 
-    session_factory._attach_classification(hooks, manager, cast(Any, None), warnings)
+    session_factory._attach_classification(hooks, manager, warnings)
 
     assert warnings == []
     assert hooks.classifier is not None
@@ -530,7 +530,7 @@ def test_auto_on_builds_the_service_from_the_snapshot(tmp_path: Path) -> None:
     hooks = session_factory._KnowledgeHooks()
     warnings: list[str] = []
 
-    session_factory._attach_classification(hooks, manager, cast(Any, None), warnings)
+    session_factory._attach_classification(hooks, manager, warnings)
 
     assert warnings == []
     assert hooks.classifier is not None
@@ -749,7 +749,6 @@ async def test_the_breaker_counts_the_vendor_deadline_once_per_call(
     """
     from local_operator.classification.service import ClassificationService
     from local_operator.classification.vendors import VENDOR_CLASSES
-    from local_operator.credentials import CredentialManager
     from tests.unit.classification.support import LegBehaviour, leg_class
 
     behaviour = LegBehaviour(name="openrouter", delay_s=5.0)
@@ -759,7 +758,7 @@ async def test_the_breaker_counts_the_vendor_deadline_once_per_call(
         raising=True,
     )
     service = ClassificationService(
-        manager=CredentialManager(tmp_path),
+        config_dir=tmp_path,
         settings={"classification": {"auto": True, "vendor": "openrouter", "timeoutMs": 150}},
     )
     hooks = _hooks(_FakeIndex(picked=[_skill("alpha", "Alpha skill.")]), classifier=service)

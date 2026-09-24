@@ -61,6 +61,7 @@ from __future__ import annotations
 import logging
 import os
 import plistlib
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -341,6 +342,50 @@ def job_domain() -> str:
         ) from exc
 
 
+def job_running(*, label: str, path: Path, run: Callable[..., object]) -> bool:
+    """Whether launchd holds a LIVE PID for ``label`` right now.
+
+    The question a compare-then-skip has to answer before it declines to
+    reload: with the file already correct, a running job needs nothing, and a
+    DEAD one needs the reload the old unconditional rewrite was silently
+    providing. Getting this wrong is not cosmetic — skipping a needed reload
+    leaves the daemon down.
+
+    ``launchctl print`` and not a health probe, because only launchd knows
+    which process it is running: a leftover FOREGROUND daemon on the same port
+    answers every probe while the supervised one is dead (the trap
+    ``mobile.install._our_daemon_listening`` was written for). A label that is
+    not registered at all answers non-zero, which is also "not running" — and
+    the caller then reloads, which is what registers it.
+
+    TAKES THE PLIST PATH AND APPLIES :func:`is_own_plist`, exactly as
+    :func:`reload_job` does and for the same reason: the LABEL is a fixed
+    module constant in two of the three installers while the plist path moves
+    with ``$HOME``, so asking about ``gui/<uid>/<label>`` from a redirected home
+    is a question about the OPERATOR's job, not this run's. Round 1 (R-1)
+    reproduced the inverse of the incident ``AGENTS.md`` records: a sandboxed
+    install that found a loaded-but-stopped job issued
+    ``kickstart -k gui/501/<label>`` against the operator's live daemon. A
+    caller that forgot the guard cannot reach launchd through this function.
+
+    False on a refusal, which sends the caller to :func:`reload_job` — which
+    refuses too, and says so with its own sentence, so a sandboxed run declines
+    loudly rather than silently. Never raises: an unanswerable supervisor
+    returns False, and False means the caller does the work it did before.
+    """
+    if not is_own_plist(path, label):
+        return False
+    result, _ = _call(run, "print", f"{job_domain()}/{label}")
+    if result is None:
+        return False
+    if getattr(result, "returncode", 1) != 0:
+        return False
+    # `pid = 47545` is printed only while a process is alive behind the label
+    # (the same reading `wakes.install._parse_supervisor_state` makes).
+    live_pid = re.search(r"^\s*pid = \d+", _text(getattr(result, "stdout", "")), re.MULTILINE)
+    return live_pid is not None
+
+
 def _registration(target: str, run: Callable[..., object]) -> tuple[bool, str]:
     """``(registered, why)`` for one guarded ``launchctl print``.
 
@@ -411,6 +456,30 @@ def _await_registration(
             return False, why
         _sleep(backoff)
         backoff = min(backoff * 2, _BOOTSTRAP_BACKOFF_CAP_S)
+
+
+def kickstart(*, label: str, path: Path, run: Callable[..., object]) -> bool:
+    """Restart a job launchd already has LOADED, from its in-memory definition.
+
+    THE NARROW REPAIR for a stopped-but-loaded job: the plist is correct and the
+    process is not running, which is the one state a compare-then-skip has to
+    keep repairing rather than walk past (the unconditional
+    ``bootout``+``bootstrap`` used to fix it as a side effect of the rewrite).
+    ``kickstart -k`` does not briefly unregister the label, and it is what
+    ``wakes.install`` already chose for this exact case.
+
+    TAKES THE PLIST PATH AND APPLIES :func:`is_own_plist` — see
+    :func:`job_running` for the reproduction (round 1, R-1): a ``kickstart`` by
+    label ALONE is the destructive half of that finding, because it acts on the
+    operator's daemon from a sandbox. False means the caller must fall through
+    to :func:`reload_job`, which is right for the other reason a job is not
+    running: launchd has forgotten the label entirely, and only a bootstrap
+    registers it — and which refuses a foreign path in its own words.
+    """
+    if not is_own_plist(path, label):
+        return False
+    result, _ = _call(run, "kickstart", "-k", f"{job_domain()}/{label}")
+    return result is not None and getattr(result, "returncode", 1) == 0
 
 
 def reload_job(
@@ -634,6 +703,84 @@ def is_own_plist(path: Path, label: str) -> bool:
         return Path(path).resolve() == expected
     except (OSError, ValueError):
         return False
+
+
+class JobNotOurs(ValueError):
+    """A verb refused because the job it addresses belongs to another run.
+
+    A ``ValueError``, because every caller that already catches that keeps
+    working — a refusal is not a new failure mode for them — and a TYPE OF ITS
+    OWN, because one caller has to tell two very different things apart (review
+    round 3, QA Q-2): `lop tunnel stop` reads a ``ValueError`` from
+    ``install.action("stop")`` as "there is no supervised job, the connector is
+    running in the foreground" and prints "Stop requested …". That is right for
+    the foreground case and a false success for a refusal, where nothing was
+    called at all. Raised only through :func:`not_our_job_error`'s sentence, so
+    the message a user reads stays one spelling.
+    """
+
+
+def not_our_job_error(path: Path, label: str) -> str:
+    """Why a verb refused to address a job this run does not own.
+
+    ONE SPELLING, the way :func:`reload_failure` is one spelling for the
+    reload's failure: the identity test now guards four installers AND their
+    operator verbs, and a refusal each site worded for itself would drift into
+    as many accounts of one rule (review round 2, R-8).
+
+    Names the path and the label together, because the whole failure is that
+    they disagree: the label is a fixed module constant in ``mobile``/``tunnel``
+    while the path moves with ``$HOME``, so a redirected home addresses
+    ``gui/<uid>/<label>`` and reaches the OPERATOR's daemon.
+
+    :func:`reload_job`'s ``JobReload.detail`` keeps the bare identity sentence
+    (``is_own_plist``'s own wording) because that is the outcome record rather
+    than a refusal printed to an operator.
+    """
+    return (
+        f"{path} is not the LaunchAgent the real home owns for {label}; "
+        "not addressing launchd from a redirected home"
+    )
+
+
+def unknown_identity_error(path: Path, label: str) -> str:
+    """Why a verb cannot tell WHETHER ``path`` is this run's own LaunchAgent.
+
+    The public spelling of :func:`_no_real_home_detail`, for the sites that report
+    a message instead of raising. It has to say "cannot read the passwd entry",
+    not "this is a redirected home": an operator on a broken host would otherwise
+    go looking for a sandbox that does not exist (the doctrine
+    ``_no_real_home_detail`` already states).
+    """
+    return _no_real_home_detail(path, label)
+
+
+class IdentityUnverifiable(ValueError):
+    """A verb refused because it cannot TELL whether the job is this run's.
+
+    The third answer, and not the same case as :class:`JobNotOurs`: there the
+    answer is known and is "not ours", while here the host cannot answer at all —
+    :func:`is_own_plist` degrades to False when the passwd entry is unreadable.
+    A caller that reads "not ours" as "nothing of the operator's is at stake"
+    would unlink the REAL plist on such a host without booting its job out
+    (review round 4). The conservative direction for a destructive verb is to
+    decline and say which of the two cases it hit.
+    """
+
+
+def require_own_plist(path: Path, label: str) -> None:
+    """Raise unless ``path`` is the plist the real passwd home owns for ``label``.
+
+    ONE ENTRY POINT for the raising sites (``tunnels``' verbs), so the three-way
+    answer — ours, not ours, cannot tell — cannot be collapsed by a site that
+    remembers only two of them. The arms that return a message instead of raising
+    (``mobile``, ``browser_bridge``) read :func:`not_our_job_error` and
+    :func:`unknown_identity_error` themselves.
+    """
+    if real_home() is None:
+        raise IdentityUnverifiable(unknown_identity_error(path, label))
+    if not is_own_plist(path, label):
+        raise JobNotOurs(not_our_job_error(path, label))
 
 
 def config_lives_in_real_home(config_dir: Path) -> bool:

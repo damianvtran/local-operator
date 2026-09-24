@@ -68,7 +68,33 @@ SCHEMA_VERSION = 1
 #: Valid values of the ``kind`` column. ``file`` marks a secret whose plaintext
 #: is a file's contents — materialised to a private temporary path for the
 #: duration of one command by ``lop secret file`` (design §7).
+#:
+#: Deliberately NOT extended with a provider/agent marker: ``kind`` is bound
+#: into the record's authenticated data (``crypto.py`` AAD), so a new value is a
+#: new format for every writer that must produce it, while provenance is already
+#: unambiguous from the NAME (see :data:`PROVIDER_SECRET_PREFIX`). ``kind`` stays
+#: about the SHAPE of the plaintext, which is what ``lop secret file`` acts on.
 KINDS = ("string", "file")
+
+#: Reserved name prefix for rows a PROVIDER owns (a built-in API key the harness
+#: manages), as opposed to a secret the operator or an agent stored.
+#:
+#: Why a naming rule rather than a schema column: ``name_index`` is UNIQUE, so at
+#: most one row exists per name, and two disjoint name-sets therefore cannot
+#: shadow each other. EVERY agent-class verb refuses the prefix and every
+#: provider-class verb requires it (:func:`_validate_role` applies to set, update,
+#: get, describe and delete alike), so "an agent secret can hold a provider name"
+#: is structurally impossible rather than merely discouraged — and, equally, an
+#: agent surface cannot inspect or DESTROY a provider row it could not have made.
+#: The boundary matters because a shadowed provider key would silently
+#: authenticate against an attacker-supplied value.
+PROVIDER_SECRET_PREFIX = "LOP_PROVIDER_"
+
+#: Valid values of the ``role`` parameter on the store's write and value-read
+#: verbs. Not stored: the name prefix IS the provenance (see above), so this
+#: carries a caller's CLAIM about which namespace it is writing into and is
+#: checked against the name before anything is sealed.
+ROLES = ("agent", "provider")
 
 #: Descriptions are operator-written labels shown by ``list``; the ceiling only
 #: has to keep a pathological paste from bloating every record.
@@ -113,6 +139,67 @@ _RECORD_COLUMNS = (
     "id, name_index, key_generation, format_version, nonce, ciphertext, kind,"
     " created_at, updated_at, last_used_at"
 )
+
+
+def provider_secret_name(env_key: str) -> str:
+    """The store name a PROVIDER-owned row for ``env_key`` lives under.
+
+    Pure, so both the writers (a login persisting an API key) and the readers
+    (a resolution leg looking one up) derive the identical name and cannot
+    disagree about where a provider key lives.
+    """
+    key = env_key.strip()
+    if not key:
+        raise InvalidSecretName("a provider secret name needs a non-empty env key")
+    return PROVIDER_SECRET_PREFIX + key
+
+
+def is_provider_secret_name(name: str) -> bool:
+    """Whether ``name`` is in the provider-owned namespace.
+
+    The ONE predicate for the rule: every check (writes, reads, the display
+    class ``list`` prints) calls this rather than spelling the prefix again, so
+    a change to the reserved prefix cannot leave one surface behind.
+    """
+    return name.strip().startswith(PROVIDER_SECRET_PREFIX)
+
+
+def secret_class(name: str) -> str:
+    """A human-facing class for ``name``, for DISPLAY only — never stored.
+
+    Derived from the name rather than read from a column so the two can never
+    disagree: the record's stored ``kind`` says what SHAPE the plaintext is
+    (``string``/``file``) and is authenticated data that predates this rule,
+    so provenance lives in the name alone (design §3).
+    """
+    return "provider" if is_provider_secret_name(name) else "secret"
+
+
+def _validate_role(name: str, role: str) -> None:
+    """Refuse a write, a value read, a metadata read or a delete whose name does
+    not match its namespace.
+
+    Called on the CANONICAL name (after :func:`crypto.validate_name`), so a name
+    with leading whitespace cannot slip past the prefix test and then be
+    normalised into the reserved namespace. "Refuse" covers every verb that can
+    touch a record: the boundary is only a boundary if it holds on the WRITE of a
+    value, the READ of one, the read of a row's METADATA, and the irreversible
+    DELETE of it.
+    """
+    if role not in ROLES:
+        raise InvalidSecretName(f"role must be one of {', '.join(ROLES)}; got {role!r}.")
+    reserved = is_provider_secret_name(name)
+    if role == "provider" and not reserved:
+        raise InvalidSecretName(
+            f"A provider secret must be named {PROVIDER_SECRET_PREFIX}<ENV_KEY> "
+            f"(use `provider_secret_name`); got {name!r}."
+        )
+    if role == "agent" and reserved:
+        raise InvalidSecretName(
+            f"The {PROVIDER_SECRET_PREFIX} prefix is reserved for provider-owned rows, and "
+            f"agent surfaces may not create, read, describe or delete one; name "
+            f"{name!r} is not allowed here."
+        )
 
 
 @dataclass(frozen=True)
@@ -577,6 +664,7 @@ class SecretStore:
         *,
         description: str = "",
         kind: str = "string",
+        role: str = "agent",
         session_id: str | None = None,
     ) -> SecretRecord:
         """Store a NEW secret. Refuses to overwrite an existing name.
@@ -585,8 +673,15 @@ class SecretStore:
         the previous value is retained nowhere, so a ``set`` that silently
         replaced a live credential because of a mistyped name would be
         unrecoverable.
+
+        ``role`` names the namespace this write claims (see
+        :data:`PROVIDER_SECRET_PREFIX`); it defaults to ``"agent"`` because
+        that is the namespace every ordinary caller — an operator at the CLI,
+        an agent through the tool — is in, so the reserved prefix is refused
+        by default rather than only when someone remembers to ask.
         """
         canonical = validate_name(name)
+        _validate_role(canonical, role)
         description = _validate_description(description)
         if kind not in KINDS:
             raise InvalidSecretName(f"kind must be one of {', '.join(KINDS)}; got {kind!r}.")
@@ -662,6 +757,7 @@ class SecretStore:
         value: bytes,
         *,
         description: str | None = None,
+        role: str = "agent",
         session_id: str | None = None,
     ) -> SecretRecord:
         """Re-seal an existing secret with a new value under a FRESH nonce.
@@ -671,8 +767,13 @@ class SecretStore:
         would leak the XOR of the old and new values and the authentication
         key — the classic GCM misuse, and the reason no call site here is given
         the opportunity to supply a nonce.
+
+        ``role`` is checked against the name exactly as ``set`` checks it, so a
+        value cannot be RE-SEALED into the other namespace even if a caller
+        knows a name it could not have created.
         """
         canonical = validate_name(name)
+        _validate_role(canonical, role)
         now = time.time()
         with closing(self._open(for_write=True)) as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -722,18 +823,32 @@ class SecretStore:
             last_used_at=existing.last_used_at,
         )
 
-    def get(self, name: str, *, session_id: str | None = None) -> bytes:
+    def get(self, name: str, *, role: str = "agent", session_id: str | None = None) -> bytes:
         """Return the exact stored bytes, or raise.
 
         ``last_used_at`` and the audit row are written on the way out, which is
         why a read verb takes a write connection: a retrieval that leaves no
         trace is the one an attacker most wants.
+
+        **``role`` re-asserts the namespace rule on the READ path, and that is
+        the half that actually contains a value.** The write check stops an
+        agent from ever CREATING a ``LOP_PROVIDER_*`` row, but the value a
+        hostile caller wants is the one that already exists, so an unrestricted
+        read would hand a provider key to the very caller the prefix was meant
+        to keep it from. An agent-context reader (the CLI's ``get``, the eval
+        ``secrets`` mapping, the ``secret_ref`` resolver — every one of them the
+        default) therefore refuses the reserved namespace exactly as a write
+        does; only a provider-context reader, which passes ``role="provider"``,
+        can be served one. The same check protects ``update``, so a provider row
+        cannot be re-sealed or shadowed through the ordinary surface either.
         """
+        canonical = validate_name(name)
+        _validate_role(canonical, role)
         now = time.time()
         with closing(self._open(for_write=True)) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                record, value = self._decode(self._row_for(connection, name))
+                record, value = self._decode(self._row_for(connection, canonical))
                 connection.execute(
                     "UPDATE secrets SET last_used_at = ? WHERE id = ?", (now, record.record_id)
                 )
@@ -752,10 +867,20 @@ class SecretStore:
                 raise
         return value
 
-    def describe(self, name: str) -> SecretRecord:
-        """Metadata for one secret. Never returns the value."""
+    def describe(self, name: str, *, role: str = "agent") -> SecretRecord:
+        """Metadata for one secret. Never returns the value.
+
+        ``role`` re-asserts the namespace rule on the METADATA path for the
+        same reason :meth:`get` does on the value path: an agent surface that
+        could describe a ``LOP_PROVIDER_*`` row would learn which provider keys
+        exist (name, kind, timestamps) even though it could not read their
+        values — provenance an agent has no business enumerating. Provider-side
+        callers pass ``role="provider"``.
+        """
+        canonical = validate_name(name)
+        _validate_role(canonical, role)
         with closing(self._open(for_write=False)) as connection:
-            record, _ = self._decode(self._row_for(connection, name))
+            record, _ = self._decode(self._row_for(connection, canonical))
         return record
 
     def list(self) -> list[SecretRecord]:
@@ -792,10 +917,14 @@ class SecretStore:
         """Split every row into the records that open and the ids that do not.
 
         One pass, so ``list`` and ``status`` cannot disagree about which rows
-        are damaged. Only :class:`SecretCorrupt` and
+        are unreadable. Only :class:`SecretCorrupt` and
         :class:`IncompatibleStore` are caught per row: those mean "this record
-        is unreadable", which is precisely the condition to report and step
-        over. A failure to read the store at all still propagates.
+        could not be read", which is precisely the condition to report and step
+        over. The two are NOT the same fault (round-3 review, M2): a
+        ``SecretCorrupt`` row is genuine damage (a lost key, an altered byte),
+        while an ``IncompatibleStore`` row is intact and merely needs a newer
+        runtime — ``_warn_damaged`` names both remedies, because they differ. A
+        failure to read the store at all still propagates.
         """
         with closing(self._open(for_write=False)) as connection:
             rows = connection.execute(f"SELECT {_RECORD_COLUMNS} FROM secrets").fetchall()
@@ -808,14 +937,27 @@ class SecretStore:
                 damaged.append(str(row[0]))
         return sorted(records, key=lambda record: record.name), sorted(damaged)
 
-    def delete_record_id(self, record_id: str, *, session_id: str | None = None) -> bool:
-        """Remove a row by its id, without needing to decrypt it.
+    def delete_record_id(
+        self,
+        record_id: str,
+        *,
+        role: str = "agent",
+        session_id: str | None = None,
+    ) -> bool:
+        """Remove a row by its id, decoding only enough to enforce the boundary.
 
         The repair path for a damaged record. :meth:`delete` looks a row up by
         blind index and decodes it, so it cannot touch a record whose name is
         unreadable — the operator was left with a row that broke enumeration
         and that no command could remove. This deletes by primary key, which
         needs no key material for the row itself.
+
+        ``role`` re-asserts the namespace rule: the sealed name is decoded (when
+        it can be) before the delete, so an agent surface can no more remove a
+        ``LOP_PROVIDER_*`` row by id than by name. A row that will not open
+        (``SecretCorrupt``, i.e. genuine damage) carries no readable identity and
+        so is permitted; a row that merely needs a NEWER runtime
+        (``IncompatibleStore``) is intact and is refused rather than destroyed.
 
         Returns whether a row was removed. Still audited, and still guarded by
         the key epoch: removing a record is a write.
@@ -825,6 +967,40 @@ class SecretStore:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 self._guard_key_epoch(connection)
+                # THE BOUNDARY HOLDS ON THIS VERB TOO (round-2 review, R2). A row
+                # removed by primary key bypassed the name-keyed check `delete`
+                # applies, and `list --json` hands out ids — so the agent surface
+                # could destroy a `LOP_PROVIDER_*` credential without ever naming
+                # it. The row is DECODED here (the name is sealed in its ciphertext)
+                # so the same `_validate_role` predicate governs this path.
+                #
+                # A DAMAGED row is permitted: its name cannot be read, it carries
+                # no provider identity to protect, and it is already unusable —
+                # refusing it would break the repair path this verb exists for.
+                #
+                # ONLY ``SecretCorrupt`` COUNTS AS DAMAGED HERE, and the round-3
+                # review (R3-1) is why this is narrower than ``_enumerate``'s catch:
+                # ``IncompatibleStore`` is the RECORD-FORMAT skew (§13), raised at
+                # ``_decode``'s version check BEFORE the ciphertext is touched, so
+                # such a row is fully intact — its name and value both open on a
+                # runtime that understands them, and its remedy is ``lop update``,
+                # not deletion. Catching it here would let this verb irreversibly
+                # destroy a valid credential (measured: the same row is refused by
+                # ``delete(name)`` yet was deleted by ``delete_record_id``), which is
+                # the exact loss the namespace boundary exists to prevent. A row that
+                # cannot be DECODED is therefore refused rather than deleted blind.
+                row = connection.execute(
+                    f"SELECT {_RECORD_COLUMNS} FROM secrets WHERE id = ?", (record_id,)
+                ).fetchone()
+                if row is None:
+                    connection.execute("COMMIT")
+                    return False
+                try:
+                    decoded_name = self._decode(row)[0].name
+                except SecretCorrupt:
+                    decoded_name = None
+                if decoded_name is not None:
+                    _validate_role(decoded_name, role)
                 cursor = connection.execute("DELETE FROM secrets WHERE id = ?", (record_id,))
                 removed = cursor.rowcount > 0
                 if removed:
@@ -843,14 +1019,27 @@ class SecretStore:
                 raise
         return removed
 
-    def delete(self, name: str, *, session_id: str | None = None) -> SecretRecord:
-        """Remove a secret, returning what was removed."""
+    def delete(
+        self, name: str, *, role: str = "agent", session_id: str | None = None
+    ) -> SecretRecord:
+        """Remove a secret, returning what was removed.
+
+        ``role`` re-asserts the namespace rule here too, and this is the
+        destructive half of the boundary: a delete is unrecoverable (the
+        previous value is retained nowhere), so an agent surface that could
+        delete a ``LOP_PROVIDER_*`` row could silently remove the credential a
+        provider authenticates with — a denial-of-service the prefix check on
+        the write path alone does not close. Provider-side callers pass
+        ``role="provider"``.
+        """
+        canonical = validate_name(name)
+        _validate_role(canonical, role)
         now = time.time()
         with closing(self._open(for_write=True)) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 self._guard_key_epoch(connection)
-                record, _ = self._decode(self._row_for(connection, name))
+                record, _ = self._decode(self._row_for(connection, canonical))
                 connection.execute("DELETE FROM secrets WHERE id = ?", (record.record_id,))
                 audit.append(
                     connection,

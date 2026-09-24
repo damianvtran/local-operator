@@ -27,6 +27,7 @@ from local_operator.harness.loop import (
     _get_before_timeout,
     validate_tool_arguments,
 )
+from local_operator.harness.message_types import TODO_REMINDER_MESSAGE_TYPE
 from local_operator.harness.rows import (
     assistant_stop_notice,
     is_harness_chrome,
@@ -47,8 +48,10 @@ from local_operator.harness.types import (
     LoopConfig,
     Message,
     MessageStartEvent,
+    MessageUpdateEvent,
     ModelSpec,
     NoticeEvent,
+    ReasoningDeltaEvent,
     StreamEndEvent,
     StreamEvent,
     StreamReasoningDelta,
@@ -235,25 +238,38 @@ async def test_full_turn_text_tool_text():
 
 
 @pytest.mark.asyncio
-async def test_a_reasoning_delta_changes_nothing_a_consumer_can_see() -> None:
-    """The reasoning channel reaches no surface, and that claim is load-bearing.
+async def test_a_reasoning_delta_reaches_the_front_end_and_no_message() -> None:
+    """Reasoning is PUBLISHED as an event and stays out of every message.
+
+    Both halves are load-bearing, and they fail in opposite directions:
+
+    * a harness that drops ``StreamReasoningDelta`` leaves the model's whole
+      reasoning phase invisible (the operator's 3-5 s of nothing, measured at
+      455 ms of hidden wait on a 102-token prompt and 1,750 ms on a 142k-token
+      one), so the event must be yielded, as it arrives, attributed to the
+      message being streamed;
+    * a harness that treats it as content would append the model's private
+      thinking to the answer -- the loop is the one consumer that could do that
+      silently. What must never carry the fragment is any ``message`` field:
+      the transcript, the summariser and the next request are all built from
+      those, and deepseek refuses a request whose ``reasoning_content`` echo
+      does not match what it sent (``providers.clients._replay_chat_message``).
 
     ``stream_with_failover`` carves ``StreamReasoningDelta`` out of its "the
-    caller has seen output" gate on the strength of this property, and the
-    harness claims a consumer that ignores the event renders the old turn
-    unchanged. The loop is the one consumer that could regress silently, so the
-    same turn is run twice -- with and without a leading reasoning fragment --
-    and the two runs are compared: identical event types, identical assembled
-    text, and no emitted event (serialized in full) carrying the fragment.
+    caller has seen output" gate on the strength of the second property (the
+    first half is why it is now rendered, so a retry can re-emit thinking --
+    cosmetic, and the retry is worth more).
     """
+
+    fragment = "weighing the options"
 
     def turn(with_reasoning: bool) -> list[StreamEvent]:
         leading: list[StreamEvent] = (
-            [StreamReasoningDelta(delta="weighing the options")] if with_reasoning else []
+            [StreamReasoningDelta(delta=fragment)] if with_reasoning else []
         )
         return [*leading, StreamTextDelta(delta="Done"), StreamEndEvent(stop_reason="stop")]
 
-    async def run(with_reasoning: bool) -> list[Any]:
+    async def run(with_reasoning: bool, events: list[Any] | None = None) -> list[Any]:
         stream = ScriptedStream([turn(with_reasoning)])
         context = LoopContext(system_blocks=["sys"], tools=[])
         return [
@@ -266,12 +282,33 @@ async def test_a_reasoning_delta_changes_nothing_a_consumer_can_see() -> None:
     with_reasoning = await run(True)
     without = await run(False)
 
-    assert [event.type for event in with_reasoning] == [event.type for event in without]
+    # 1. The reasoning ARRIVES, before the text it preceded on the wire, and it
+    #    names the assistant message it belongs to (the same id message_start
+    #    and message_end announce, which is what lets a consumer retire the
+    #    phase when the answer starts).
+    reasoning_events = [e for e in with_reasoning if isinstance(e, ReasoningDeltaEvent)]
+    assert len(reasoning_events) == 1
+    assert reasoning_events[0].delta == fragment
+    assert reasoning_events[0].message_id == with_reasoning[-1].messages[0].id
+    assert with_reasoning.index(reasoning_events[0]) < next(
+        index for index, event in enumerate(with_reasoning) if isinstance(event, MessageUpdateEvent)
+    )
+
+    # 2. Nothing message-shaped carries it -- not the assembled message, not the
+    #    raw message on any event, not the model's own text.
     assert with_reasoning[-1].messages[0].text == "Done"
     assert without[-1].messages[0].text == "Done"
-    assert not any(
-        "weighing" in json.dumps(event.model_dump(mode="json")) for event in with_reasoning
-    )
+    for event in with_reasoning:
+        if isinstance(event, ReasoningDeltaEvent):
+            continue
+        dumped = json.dumps(event.model_dump(mode="json"))
+        assert fragment not in dumped, event.type
+
+    # 3. And the rest of the turn is untouched: the same event types, in the
+    #    same order, as the run without a reasoning fragment.
+    assert [
+        event.type for event in with_reasoning if not isinstance(event, ReasoningDeltaEvent)
+    ] == [event.type for event in without]
 
 
 @pytest.mark.asyncio
@@ -952,7 +989,6 @@ async def test_todo_reminder_follow_up_reenters_and_stays_invisible():
     user's screen. The real session renderer is pinned in
     ``tests/unit/session/test_todo_guardrail.py``; this stands in for it.
     """
-    from local_operator.harness.message_types import TODO_REMINDER_MESSAGE_TYPE
 
     reminder = CustomMessage(
         custom_type=TODO_REMINDER_MESSAGE_TYPE,
@@ -3048,6 +3084,60 @@ def _laddered_model() -> ModelSpec:
         reasoning_efforts=("low", "medium", "high"),
         reasoning_effort="high",
     )
+
+
+def test_lower_effort_declines_to_retreat_from_the_auto_sentinel():
+    """The Radient router's ``auto`` sits at index 0 of its ladder, so the
+    reader-safe retreat has nothing below it and returns ``None`` — the turn
+    ends with the loop's own notice rather than dropping to a real rung.
+
+    This is the DELIBERATE half of the unrankable-member audit (the ``auto``
+    sentinel is not in ``EFFORT_ORDER``): ``auto`` delegates the level to the
+    server, so inventing a rung below it would put a depth on the wire the user
+    never chose while the band still read ``auto``. Pinned on the DERIVED spec,
+    so it states the ladder production builds, and paired with the real-rung
+    retreat so a later edit that reorders the ladder fails here rather than
+    silently switching the behaviour.
+    """
+    from local_operator.harness.loop import _lower_effort
+    from local_operator.model.configure import build_model_spec
+
+    router = build_model_spec("radient", "auto")
+    assert router.reasoning_efforts == ("auto", "low", "medium", "high")
+    assert router.reasoning_efforts[0] == "auto"
+    assert _lower_effort(router) is None, "no rung below the sentinel: decline"
+
+    # Control: from a REAL rung on the same ladder the retreat still works, so
+    # the ``None`` above is the sentinel's placement and not a broken helper.
+    on_high = router.model_copy(update={"reasoning_effort": "high"})
+    assert _lower_effort(on_high) == "medium"
+
+
+def test_lower_effort_steps_onto_real_rungs_only():
+    """Walking the Radient router ladder from a REAL rung must land on the
+    nearest real rung below, never on the ``auto`` sentinel at index 0.
+
+    The predicate is ``is_effort_sentinel``: ``auto`` names no depth, so a
+    retreat that reads ``ladder[index - 1]`` picks the delegation while the
+    band still reads a rung — a level on the wire the user never chose. A
+    DIRECT-model ladder test holds vacuously here (no sentinel), so this is
+    pinned on the router ladder production builds.
+    """
+    from local_operator.harness.loop import _lower_effort
+    from local_operator.model.configure import build_model_spec
+
+    router = build_model_spec("radient", "auto")
+    assert router.reasoning_efforts == ("auto", "low", "medium", "high")
+
+    def at(level: str):
+        return router.model_copy(update={"reasoning_effort": level})
+
+    assert _lower_effort(at("high")) == "medium"
+    assert _lower_effort(at("medium")) == "low"
+    # The regression: ``low`` is the cheapest real rung, so below it is nothing
+    # — NOT the ``auto`` sentinel that merely sits at index 0.
+    assert _lower_effort(at("low")) is None
+    assert _lower_effort(at("auto")) is None
 
 
 @pytest.mark.asyncio
@@ -5174,3 +5264,321 @@ async def test_a_conversation_continued_on_an_aggregator_route_echoes_reasoning(
         if isinstance(event, TurnEndEvent) and isinstance(event.message, Message)
     ]
     assert "summarised" in replies
+
+
+@pytest.mark.asyncio
+async def test_a_parent_note_does_not_spend_the_todo_budget():
+    """Parent notes plus a still-moving todo list must not end the run.
+
+    RC1. The counter at the outer-loop yield boundary used to be RUN-SCOPED and
+    shared by three unrelated producers (steering, asides, follow-ups), so a
+    chatty parent spent a child's todo allowance: nine re-entries of ANY kind
+    ended the turn on a BARE ``AgentEndEvent`` that every reader takes as a
+    completed answer. Here a parent speaks five times while the child's todo
+    list keeps MOVING (a fresh reminder every call, which is what the real
+    ``Session._todo_continuation`` requires to fire at all), so the combined
+    re-entry count passes eight while neither producer is anywhere near its own
+    budget.
+
+    The producer split is the discriminating property: on the parent commit the
+    shared counter trips on the ninth re-entry and the run ends there; with
+    per-producer budgets the run continues while the list moves.
+    """
+    follow_calls = 0
+
+    async def get_follow_ups():
+        nonlocal follow_calls
+        follow_calls += 1
+        if follow_calls > 12:
+            return []
+        return [
+            CustomMessage(
+                custom_type=TODO_REMINDER_MESSAGE_TYPE,
+                attribution="system",
+                details={
+                    "text": f"<system-reminder>still open: item {follow_calls}</system-reminder>"
+                },
+            )
+        ]
+
+    # Fires at the YIELD boundary only. The inner loop's own inflight drain
+    # consumes asides too, so a producer that answers every call would never
+    # reach the outer guard at all — answering the even calls lands one note per
+    # outer pass, which is the boundary the counter lives on.
+    aside_calls = 0
+
+    async def get_asides():
+        nonlocal aside_calls
+        aside_calls += 1
+        if aside_calls % 2 == 0 and aside_calls <= 10:
+            return [Message.user(f"parent note {aside_calls // 2}")]
+        return []
+
+    turns: list[list[StreamEvent]] = [
+        [StreamTextDelta(delta=f"t{i}"), StreamEndEvent(stop_reason="stop")] for i in range(40)
+    ]
+    stream = ScriptedStream(turns)
+    context = LoopContext(tools=[])
+    config = make_config(
+        stream,
+        convert_to_llm=lambda messages: [m for m in messages if isinstance(m, Message)],
+        get_aside_messages=get_asides,
+        get_follow_up_messages=get_follow_ups,
+    )
+
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, config, None):
+        events.append(event)
+
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    # Not cut off, and not ended by an error...
+    assert end.cut_off_cause == "", f"run was cut off: {end.cut_off_cause!r}"
+    assert end.error is None, end.error
+    # ...and the run did the WHOLE job. The five parent notes plus the twelve
+    # moving todo reminders are thirteen re-entries, and the shared counter
+    # tripped on the ninth: the parent commit ends here at NINE requests on a
+    # BARE end, so this count is the discriminating assertion.
+    assert len(stream.requests) == 13, len(stream.requests)
+    assert follow_calls == 13, follow_calls  # the moving list ran to exhaustion
+
+
+@pytest.mark.asyncio
+async def test_the_aside_budget_still_bounds_a_runaway_parent():
+    """A parent that never stops must end the run NAMED, not bare.
+
+    The negative arm of the split: per-producer budgets are still budgets. A
+    parent speaking faster than the child consumes is the runaway the guard
+    exists for, and the end it produces must be involuntary AND named — the bare
+    ``AgentEndEvent`` it used to be reads as a completed answer, which is the
+    other half of the defect.
+    """
+    aside_calls = 0
+
+    async def get_asides():
+        nonlocal aside_calls
+        aside_calls += 1
+        # One note per outer pass; see the sibling test on why the even calls.
+        return [Message.user(f"note {aside_calls // 2}")] if aside_calls % 2 == 0 else []
+
+    turns: list[list[StreamEvent]] = [
+        [StreamTextDelta(delta=f"t{i}"), StreamEndEvent(stop_reason="stop")] for i in range(30)
+    ]
+    stream = ScriptedStream(turns)
+    context = LoopContext(tools=[])
+    config = make_config(stream, get_aside_messages=get_asides)
+
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, config, None):
+        events.append(event)
+
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.cut_off_cause == "continuation-limit", end.cut_off_cause
+    assert end.aborted is True
+    # The loop stamps the TOKEN and the involuntariness; the rendered sentence
+    # is the classifier's (``Session._classify_cut_off`` — see
+    # ``tests/unit/session/test_cut_off_turns.py``), which is the same
+    # one-writer-per-fact split every other cut-off arm uses.
+    assert end.cut_off == ""
+    # Exactly one increment past the budget: the guard fires on the (N+1)th.
+    assert len(stream.requests) == config.max_paused_turn_continuations + 1
+
+
+@pytest.mark.asyncio
+async def test_a_clean_completion_carries_no_cut_off():
+    """The other negative arm: a normal end must stay bare.
+
+    A fix that stamped a cause on every end would pass "a cause is present"
+    while making every completion read as a cut-off, so the clean path is
+    pinned here.
+    """
+    stream = ScriptedStream([[StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")]])
+    context = LoopContext(tools=[])
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, make_config(stream), None):
+        events.append(event)
+
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.cut_off_cause == ""
+    assert end.cut_off == ""
+    assert not end.aborted
+
+
+def test_the_continuation_limit_cause_is_a_named_involuntary_token():
+    """Why the loop's new end reads as a CUT-OFF everywhere for free.
+
+    The loop stamps a token; the VOCABULARY decides whether every existing
+    surface already renders it (the attention outcome, the roster, the panel
+    row). A token missing from ``CUT_OFF_CAUSES`` — or one that landed in the
+    deliberate half — would leave the new end invisible on the surfaces this
+    change exists to fix, so the classification is pinned rather than assumed.
+    """
+    from local_operator.incidents import (
+        CONTINUATION_LIMIT_CAUSE,
+        is_cut_off_cause,
+        is_deliberate_cause,
+        render_cut_off_reason,
+    )
+
+    assert CONTINUATION_LIMIT_CAUSE == "continuation-limit"
+    assert is_cut_off_cause(CONTINUATION_LIMIT_CAUSE)
+    assert not is_deliberate_cause(CONTINUATION_LIMIT_CAUSE)
+    assert render_cut_off_reason(CONTINUATION_LIMIT_CAUSE)
+
+
+@pytest.mark.asyncio
+async def test_a_mixed_batch_charges_the_follow_up_budget_not_the_aside_one():
+    """A note arriving WITH a still-moving todo list must not cut the run.
+
+    Reviewer MAJOR-1 (round 1), and the regression that made the first cut of
+    the fix wrong: the collector appends steering, then asides, then follow-ups,
+    so a boundary carrying an ASIDE *and* a follow-up was charged to whichever
+    producer was first — the bounded 8-budget — and a parent's hub note could
+    spend the allowance a child's own moving todo list needs. The charge must
+    follow the producer whose budget actually bounds the re-entry: a follow-up
+    in the batch WINS.
+
+    WHY THE NOTE IS DEPOSITED IN ``on_before_yield``. A round-2 review proved an
+    earlier version of this test was BLIND to the rule it claims to pin: an
+    aside returned directly by ``get_aside_messages`` is eaten by the INNER
+    loop's inflight drain (``_collect_inflight_injections``), so the run never
+    reaches the OUTER-loop yield boundary the charge rule lives on — the old
+    test passed with the charge reverted. ``on_before_yield`` runs at that
+    boundary (``loop.py``, between ``before_yield`` and the collector), which is
+    also where a real parent's hub note lands, so the note is charged to a
+    producer budget and the rule is actually exercised. Measured on the pre-fix
+    head this cut off on the aside budget; on this head it runs on.
+    """
+
+    class FreshReminder:
+        """A follow-up whose fingerprint changes every call, like a moving list."""
+
+        def __init__(self) -> None:
+            self.n = 0
+
+        async def __call__(self) -> list[Any]:
+            self.n += 1
+            return [
+                CustomMessage(
+                    custom_type=TODO_REMINDER_MESSAGE_TYPE,
+                    attribution="system",
+                    details={
+                        "text": f"<system-reminder>still open: step {self.n}</system-reminder>"
+                    },
+                )
+            ]
+
+    reminder = FreshReminder()
+    notes = {"n": 0}
+
+    pending_notes: list[Any] = []
+
+    def deposit_note() -> None:
+        # A parent's hub note, staged so the ASIDE producer returns it at the
+        # NEXT yield boundary. Depositing it into ``context.messages`` would not
+        # work (the collector reads the producers, not the context), and
+        # returning it from ``get_aside_messages`` on its own is eaten by the
+        # inner loop's inflight drain before the guard is reached — which is
+        # exactly why the first version of this test was blind to the rule.
+        notes["n"] += 1
+        pending_notes.append(lambda: Message.user(f"parent asks: how is it going? ({notes['n']})"))
+
+    async def get_asides():
+        items, pending_notes[:] = list(pending_notes), []
+        return items
+
+    def convert(messages):
+        out = []
+        for message in messages:
+            if isinstance(message, Message):
+                out.append(message)
+            elif getattr(message, "custom_type", None) == TODO_REMINDER_MESSAGE_TYPE:
+                out.append(Message.user(message.details["text"]))
+        return out
+
+    stream = ScriptedStream(
+        [[StreamTextDelta(delta="working"), StreamEndEvent(stop_reason="stop")] for _ in range(24)]
+    )
+    context = LoopContext(tools=[])
+    config = make_config(
+        stream,
+        convert_to_llm=convert,
+        on_before_yield=deposit_note,
+        get_aside_messages=get_asides,
+        get_follow_up_messages=reminder,
+    )
+
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, config, None):
+        events.append(event)
+
+    # The run went past the aside budget: the fix charged the follow-up budget.
+    assert notes["n"] > 8, "the note producer never fired at the yield boundary"
+    assert len(stream.requests) > 8
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert getattr(end, "cut_off_cause", "") != "continuation-limit"
+
+
+@pytest.mark.asyncio
+async def test_a_runaway_follow_up_still_ends_the_run_as_a_named_cut_off():
+    """The other arm: a producer that never stops is still bounded, and NAMED.
+
+    The anti-runaway guard is why the budget exists at all; per-producer budgets
+    must not remove it, and the follow-up producer now carries its OWN (larger)
+    budget, so its bound has to be pinned independently of the shared one
+    (review minor: the 8->64 change was verified by hand but had no test). A
+    follow-up that reports progress on EVERY yield — a fresh fingerprint, as a
+    genuinely moving todo list does — is bounded by
+    ``max_follow_up_continuations``, and the end is an involuntary, NAMED cut-off
+    (``aborted=True`` + ``CONTINUATION_LIMIT_CAUSE``), never the bare success it
+    used to be, which every surface read as a completed answer.
+    """
+    from local_operator.incidents import CONTINUATION_LIMIT_CAUSE
+
+    counter = {"n": 0}
+
+    async def get_follow_ups():
+        counter["n"] += 1
+        return [
+            CustomMessage(
+                custom_type=TODO_REMINDER_MESSAGE_TYPE,
+                attribution="system",
+                details={
+                    "text": f"<system-reminder>still open: step {counter['n']}</system-reminder>"
+                },
+            )
+        ]
+
+    def convert(messages):
+        out = []
+        for message in messages:
+            if isinstance(message, Message):
+                out.append(message)
+            elif getattr(message, "custom_type", None) == TODO_REMINDER_MESSAGE_TYPE:
+                out.append(Message.user(message.details["text"]))
+        return out
+
+    stream = ScriptedStream(
+        [[StreamTextDelta(delta="working"), StreamEndEvent(stop_reason="stop")] for _ in range(30)]
+    )
+    context = LoopContext(tools=[])
+    config = make_config(
+        stream,
+        convert_to_llm=convert,
+        get_follow_up_messages=get_follow_ups,
+        max_follow_up_continuations=3,
+    )
+
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, config, None):
+        events.append(event)
+
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.cut_off_cause == CONTINUATION_LIMIT_CAUSE
+    assert end.aborted is True
+    # Bounded: the guard fired rather than the pipeline spinning to the cap.
+    assert len(stream.requests) <= 6

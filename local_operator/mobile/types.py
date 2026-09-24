@@ -49,6 +49,11 @@ from typing import Any, Literal
 # stack — daemon, web layer, attach client, peer send — keeps importing them
 # from the path it always has. See local_operator/session/runtime/types.py for
 # why that package is neutral and why RUN_DIRNAME keeps its mobile-era name.
+from local_operator.harness.approval import (
+    OPERATOR_CAP_BYTES,
+    is_operator_key_id,
+    is_wire_hex,
+)
 from local_operator.session.runtime.types import (  # noqa: F401  (re-exported)
     ATTACH_MAX_CLIENTS,
     HEARTBEAT_INTERVAL_S,
@@ -59,6 +64,14 @@ from local_operator.session.runtime.types import (  # noqa: F401  (re-exported)
     ClientKind,
     SessionRecord,
 )
+
+#: The wire form of a handshake nonce, salt or proof (issue #1310): 32 bytes,
+#: hex-encoded, which is what ``operator_nonce`` mints and what an HMAC-SHA256
+#: proof renders as. Derived from the byte count rather than spelled as 64, so
+#: the validator cannot accept a length the mint cannot produce. The SHAPE check
+#: itself is ``harness.approval.is_wire_hex`` — one definition, shared with the
+#: runtime's auth reader and the attach client's handshake verification.
+OPERATOR_CAP_HEX_CHARS = OPERATOR_CAP_BYTES * 2
 
 
 @dataclass(frozen=True)
@@ -153,6 +166,66 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
     op = frame.get("op")
     if not isinstance(op, str) or not op:
         raise ValueError("op must be a non-empty string")
+    if "operator_cap" in frame:
+        # ONE OPTIONAL FIELD (issue #1310). It is validated wherever it appears —
+        # the shape check is cheap and a field that reaches the seam untyped is
+        # a field the seam has to defend against — and READ only on the three ops
+        # that can carry an authority-increasing request (see
+        # ``harness/approval.frame_authority``). Typed here for the reason
+        # ``credential`` is: this is a CREDENTIAL's wire form, and a non-string or
+        # an ill-shaped value must be refused rather than coerced into a
+        # comparison the far side would then fail in its own way. The check is on
+        # SHAPE only — this module never learns what the right value is, and must
+        # not, since the runtime is the only holder.
+        #
+        # Length plus hexdigits, matching what ``mint_operator_cap`` produces
+        # (``token_bytes(32).hex()``, always 64 lowercase hex characters). A
+        # value that fails this is refused as malformed rather than as
+        # unauthorised, so the two cases stay distinguishable in the logs.
+        if not is_wire_hex(frame.get("operator_cap")):
+            raise ValueError("operator_cap must be a hex string")
+    # THE SIGNATURE FIELDS (revision 2). Same treatment as ``operator_cap`` and for
+    # the same reason — a credential that reaches the seam untyped is a credential
+    # the seam has to defend against — but validated WHERE THEY APPEAR rather than
+    # only on the ops that read them, because these three travel together and a
+    # client that sends one without the others has a bug worth naming: the seam
+    # would otherwise answer with a generic authority refusal and hide it.
+    #
+    # SHAPE ONLY, and deliberately loose where the value's length is variable:
+    # an ES256 signature is DER, so its hex length moves with the leading bytes
+    # of each integer, and a validator that pinned it would refuse valid
+    # signatures from some signers. The bound that matters is enforced at the
+    # verifier (``verify.MAX_SIGNATURE_BYTES``), which is the only place that
+    # knows what a signature is.
+    if "operator_sig" in frame:
+        signature = frame.get("operator_sig")
+        if not isinstance(signature, str) or len(signature) > 160 or len(signature) % 2:
+            raise ValueError("operator_sig must be a hex string")
+        try:
+            bytes.fromhex(signature)
+        except ValueError as exc:
+            raise ValueError("operator_sig must be a hex string") from exc
+    if "operator_key_id" in frame:
+        # ``is_operator_key_id``, NOT the nonce's shape: the key id is a truncated
+        # digest (32 hex characters) while a nonce/salt/proof is a full 32-byte
+        # value (64). The nonce's rule here rejected every signature the relay
+        # carried before the runtime ever saw it (stage D, found by the phone
+        # e2e cell) — the raw-socket path does not run through this validator,
+        # which is why nothing caught it sooner.
+        if not is_operator_key_id(frame.get("operator_key_id")):
+            raise ValueError("operator_key_id must be a hex string")
+    if "operator_cert" in frame:
+        certificate = frame.get("operator_cert")
+        if not isinstance(certificate, str) or not certificate or len(certificate) > 4096:
+            raise ValueError("operator_cert must be a bounded string")
+    # ``operator_nonce`` is deliberately NOT validated here, and the reason is the
+    # one rule the two ends have to agree on (agent review round 2, R2-5/R2-6).
+    # The nonce is read on exactly one frame — the CONNECT frame, by the runtime's
+    # auth path — and an ill-shaped one there is demoted to "no handshake", which
+    # fails closed: no handshake, no authority, and the ordinary ops are untouched.
+    # On any OTHER frame it is inert, so shape-checking it there would refuse a
+    # frame for a field that has no meaning in it, and the previous check was the
+    # only place the two ends disagreed about what a malformed nonce meant.
     if op in ("prompt", "steer"):
         text = frame.get("text")
         if not isinstance(text, str) or (
@@ -378,11 +451,18 @@ EntryKind = Literal[
     # An inbound message from another local lop session (`lop send`). Rendered
     # as a distinct cross-session card, never as the user's own turn.
     "peer_message",
+    # The model's own PRIVATE reasoning, streamed while it thinks. Transient by
+    # construction: it never joins the durable transcript, so this row is gone
+    # after the next sync and must not be rendered as, or folded into, the
+    # assistant's answer. A client that does not know this kind renders it
+    # through its unknown-kind path, which is exactly what it rendered before
+    # the runtime emitted reasoning at all.
+    "reasoning",
 ]
 
 ToolState = Literal["composing", "queued", "running", "done", "failed", "interrupted"]
 
-SubagentStatus = Literal["running", "completed", "failed", "cancelled", "parked"]
+SubagentStatus = Literal["running", "completed", "failed", "cancelled", "parked", "queued"]
 
 TodoStatus = Literal["pending", "done", "blocked", "dropped"]
 
@@ -734,6 +814,18 @@ class SessionProjection:
         this is a property of THIS COPY, not of the projection.
         """
         self.activity_age_reference: tuple[float, float] | None = None
+        # The frame cap's re-cap memo — also deliberately NOT a field, for the
+        # same ``asdict`` reason: it is a cache over this object's rows, not a
+        # property of the projection, and a field would ship it down the wire.
+        # It lives HERE because the rows being re-capped are this object's, and
+        # the object is retained across repaints by both wire paths, which is
+        # the whole precondition for the memo (see
+        # ``projection._frame_capped``). ``projection._reconcile_frame_cap_memo``
+        # is what bounds it: to the roster, and to the shape each live row
+        # carries, of the last frame PUBLISHED — capped or under the cap, since
+        # the reconcile runs before the size check and the frame that shrinks a
+        # roster is the one that comes in under the cap.
+        self._frame_cap_memo: dict[str, dict[Any, tuple[str, int, Any, str]]] = {}
 
 
 def stamp_activity_age(projection: SessionProjection) -> None:

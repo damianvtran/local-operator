@@ -479,7 +479,14 @@ SECTIONS: tuple[Section, ...] = (
         "runtime",
         "Runtime",
         Scope.LIVE,
-        "How sessions behave when you leave them.",
+        # WHERE THE CAVEAT ON THE TWO WARM-RUNTIME KEYS BELONGS (review round 1,
+        # F6): the Scope enum is a statement about the KEYS, and a per-key
+        # exception stated only in a code comment is a claim the user cannot
+        # read. Both are read when a drain window is drawn, so an edit is
+        # picked up by the next window — a runtime already inside one keeps
+        # the window it drew.
+        "How sessions behave when you leave them. The warm-runtime knobs are "
+        "read when a runtime next draws its window.",
     ),
     # LIVE: the session re-coerces its ``CompactionSettings`` on every change,
     # and all three trigger checks read that attribute at check time.
@@ -540,6 +547,20 @@ SECTIONS: tuple[Section, ...] = (
         "Tools",
         Scope.LIVE,
         "How the built-in tools execute.",
+    ),
+    # LIVE, and its own section, for the reason ``tools`` is LIVE: ``execute_bash``
+    # reads these through a fresh ``ConfigManager(config_dir())`` per call, so an
+    # edit lands on the next command. Deliberately NOT in ``shell_environment``,
+    # whose members are NEW_LAUNCH because the agent's own shell can lower them:
+    # the memory ceiling is a resource policy the OPERATOR owns, and a loosening
+    # by the agent is no privilege escalation — the kill only ever stops the
+    # agent's own command, never the runtime.
+    Section(
+        "memory_guard",
+        "Command memory limit",
+        Scope.LIVE,
+        "A per-command RAM ceiling, so one oversized command is killed instead of "
+        "taking the whole device down.",
     ),
     # Split out of ``tools`` (review round 1, M2), for the reason the module's
     # own history gives for ``providers`` and ``web_tools``: scope is uniform
@@ -1568,6 +1589,30 @@ SETTINGS: tuple[Setting, ...] = (
         choices=_bool_choices("keep narration", "hide narration once tools run"),
     ),
     Setting(
+        key="display.reasoning",
+        path=("display.reasoning",),
+        section="appearance",
+        label="Live model reasoning",
+        kind=Kind.BOOL,
+        default=False,
+        # ONE sentence, sized to the field rather than to the argument: the help
+        # column paints 93 characters at 100 columns (133 at 140, 152 at 160) and
+        # elides the rest, so a longer string loses its tail silently — the
+        # previous revision's 178-character sentence had its whole `so nothing is
+        # left in the transcript` clause cut off screen (design review round 1,
+        # D1; `after-d1-reasoning-help-100x30.svg` paints this one whole). The
+        # `/resume` argument that was cut is recorded in `tui/settings.py`'s
+        # `_DEFAULT_NOTES` and in `tui/widgets/reasoning.py`'s module docstring,
+        # where it has room. The trigger says the thinking ENDS, not "the answer
+        # starts", because `reasoning_end` also drops the block on a turn that
+        # goes on to a tool call (round 1, D4).
+        help=(
+            "Show the model's private thinking while it streams; it vanishes "
+            "once the thinking ends."
+        ),
+        choices=_bool_choices("show live reasoning", "hide reasoning"),
+    ),
+    Setting(
         key="display.rail",
         path=("display.rail",),
         section="appearance",
@@ -1869,6 +1914,43 @@ SETTINGS: tuple[Setting, ...] = (
             "keep the turn running in the background",
             "stop the turn when you leave the session",
         ),
+    ),
+    Setting(
+        # The two residency knobs of the keep-alive (design-runtime-prewarm §5).
+        # LIVE by construction and by the section's own scope: the reaper reads
+        # both at the moment it draws a drain window
+        # (``session/runtime/process.py:_drain_window_s``), so an edit applies to
+        # the NEXT window — a runtime already inside one keeps the window it
+        # drew, which is the qualification the section description carries.
+        # Neither key is a "new sessions" setting, which is why they are here.
+        #
+        # The consumer reads them through ``get_nested_value`` on the tuples
+        # below, which is the accessor the registry's own path pairs with; the
+        # round-trip test is what keeps the two spellings from drifting.
+        key="runtime.keep_alive_seconds",
+        path=("runtime", "keep_alive_seconds"),
+        section="runtime",
+        label="Keep closed conversations warm (s)",
+        kind=Kind.INT,
+        default=300,
+        help="Re-opening inside this window attaches to the live runtime. 0 keeps nothing warm.",
+        minimum=0,
+        maximum=3600,
+    ),
+    Setting(
+        key="runtime.keep_alive_max",
+        path=("runtime", "keep_alive_max"),
+        section="runtime",
+        label="Max warm conversations",
+        kind=Kind.INT,
+        default=4,
+        # "THIS INSTALL", not "this machine" (QA round 1, Q-5): the cap is
+        # enforced over the registry of the runtime's OWN config root, so two
+        # installs on one host hold up to two caps between them. See
+        # ``process._keep_alive_candidates``.
+        help="Cap on warm runtimes in this install; the least recently closed exits first.",
+        minimum=1,
+        maximum=64,
     ),
     # -- session cleanup policy ---------------------------------------------
     # The ONE way a session directory can be removed automatically, and it is
@@ -2668,9 +2750,121 @@ SETTINGS: tuple[Setting, ...] = (
         help=_BASH_SHELL_HELP,
         empty_unsets=True,
     ),
+    # -- search_interception ------------------------------------------------
+    # ``path`` mirrors ``tools.builtin.SEARCH_INTERCEPTION_*_PATH`` (pinned
+    # together by ``test_search_interception_rows_share_the_consumer_paths``,
+    # the same split the bash.shell row uses).
+    #
+    # These live in ``tools`` rather than a section of their own because that
+    # section is already "how a tool executes" and its ``Scope`` is uniform
+    # (LIVE) — ``_search_interception_config`` reads a fresh ``ConfigManager``
+    # on every ``bash`` call, so an edit lands on the next command.
+    #
+    # Three rows rather than one: a guard that REFUSES a command the model wrote
+    # deserves a master switch, a warn-only arm so an operator can watch before
+    # enforcing, and a separate lever for the ripgrep default-prune.
+    Setting(
+        key="tools.search_interception.enabled",
+        path=("tools", "search_interception", "enabled"),
+        section="tools",
+        label="Block unbounded searches",
+        kind=Kind.BOOL,
+        default=True,
+        help=(
+            "Refuse a shell `grep`/`rg`/`find` that recurses from a repository root "
+            "or a vendor/build tree, and point the agent at the `grep` tool. "
+            "A scoped or single-file search is never touched. Off disables the check."
+        ),
+    ),
+    Setting(
+        key="tools.search_interception.block",
+        path=("tools", "search_interception", "block"),
+        label="...refuse rather than warn",
+        section="tools",
+        kind=Kind.BOOL,
+        default=True,
+        help=(
+            "On: the command is refused with a suggestion. Off: it runs anyway and "
+            "the interception is logged, so an operator can watch before enforcing."
+        ),
+    ),
+    Setting(
+        key="tools.search_interception.rg_excludes",
+        path=("tools", "search_interception", "rg_excludes"),
+        label="...prune vendor trees for ripgrep",
+        section="tools",
+        kind=Kind.BOOL,
+        default=True,
+        help=(
+            "Give ripgrep a generated config that skips node_modules/.git/out etc., so "
+            "an `rg` the guard does not block is still fast. Applies to ripgrep only."
+        ),
+    ),
+    # -- memory_guard -------------------------------------------------------
+    # ``path`` mirrors ``memory_guard.BASH_MEMORY_*_PATH``; the four are pinned
+    # together by ``test_memory_guard_rows_share_the_consumer_paths`` rather than
+    # imported, for the same reason the row above is not (this module must stay
+    # cheap for the CLI, ``tools.builtin``/``memory_guard`` must not be pulled in).
+    # LIVE: the reader is a fresh ConfigManager per command (see the section).
+    Setting(
+        key="bash.memory.enabled",
+        path=("bash", "memory", "enabled"),
+        section="memory_guard",
+        label="Command memory limit",
+        kind=Kind.BOOL,
+        default=True,
+        help=(
+            "Give every bash command a RAM ceiling. A command whose process group "
+            "crosses it is killed (its group only, never lop) so it cannot take "
+            "the device down; the model is told to use less memory."
+        ),
+        choices=_bool_choices("cap command memory", "no ceiling"),
+    ),
+    Setting(
+        key="bash.memory.mode",
+        path=("bash", "memory", "mode"),
+        section="memory_guard",
+        label="Ceiling source",
+        kind=Kind.ENUM,
+        default="auto",
+        help=(
+            "'auto' derives the ceiling from the memory this device has free right "
+            "now, so it tightens on its own when the machine is busy. 'manual' "
+            "pins it to the number below."
+        ),
+        choices=(
+            Choice("auto", "auto", "derive from available memory (default)"),
+            Choice("manual", "manual", "use the limit_mb below"),
+        ),
+    ),
+    Setting(
+        key="bash.memory.limit_mb",
+        path=("bash", "memory", "limit_mb"),
+        section="memory_guard",
+        label="Manual ceiling (MB)",
+        kind=Kind.INT,
+        default=0,
+        help=(
+            "The ceiling when 'manual' is selected above. 0 means use the auto "
+            "ceiling instead, so leaving this at 0 never disables the guard."
+        ),
+    ),
+    Setting(
+        key="bash.memory.soft_fraction",
+        path=("bash", "memory", "soft_fraction"),
+        section="memory_guard",
+        label="Advisory threshold",
+        kind=Kind.FLOAT,
+        default=0.8,
+        help=(
+            "Fraction of the ceiling at which one advisory line is emitted. It is "
+            "only an advisory — userspace cannot slow an allocation — so it warns "
+            "before the kill, it does not prevent it."
+        ),
+    ),
     # -- shell_environment ----------------------------------------------
-    # ``path`` mirrors ``tools.shell_env.MODE_PATH`` and friends, pinned the same
-    # way as the row above. The three rows are one policy and are read together
+    # ``path`` mirrors ``tools.shell_env.MODE_PATH`` and friends, pinned the
+    # same way as the rows above. The three rows are one policy and are read
     # by one reader, but they are three settings rather than a JSON blob because
     # each answers a different question and each has a shape the editor already
     # knows: a mode to pick, and two name lists to type.

@@ -41,6 +41,7 @@ import inspect
 import json
 import logging
 import os
+import string
 import tempfile
 import time
 import uuid
@@ -55,7 +56,7 @@ from collections.abc import (
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from local_operator.compaction.cutpoint import (
     ELISION_GENUINE_COUNT_KEY,
@@ -90,6 +91,7 @@ from local_operator.harness.message_types import (
     SESSION_CREDENTIAL_MESSAGE_TYPE,
     SESSION_INCIDENT_MESSAGE_TYPE,
     SESSION_MCP_RECOVERY_MESSAGE_TYPE,
+    SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
     SESSION_MODEL_SWITCH_MESSAGE_TYPE,
     TODO_REMINDER_MESSAGE_TYPE,
 )
@@ -167,10 +169,12 @@ from local_operator.incidents import (
     format_cut_off_raw,
     render_cut_off_reason,
 )
+from local_operator.model.effort import cheapest_real_rung
 from local_operator.prompts_api import (
     TOOL_INVENTORY_HEADING,
     render_tool_inventory_block,
 )
+from local_operator.redaction_shapes import ShapeReport
 from local_operator.references import expand_references
 from local_operator.session.goal import GoalState
 from local_operator.session.mcp_status import McpStartupOutcome
@@ -358,6 +362,30 @@ _NAME_PERSIST_MAX_PASSES = 3
 #: keeps. Five seconds is comfortably above any real append and still a pause a
 #: person will sit through once on ctrl+d.
 _NAME_FLUSH_TIMEOUT_S = 5.0
+
+#: How long the session waits between attempts to REPUBLISH a completion whose
+#: first publication lost to a contended ``attention.db``, in seconds.
+#:
+#: WHY AN IN-PROCESS RETRY EXISTS AT ALL. ``AttentionStore.publish`` rides out
+#: contention on a bounded budget and then raises ``AttentionWriteDeferred``: the
+#: outcome is durable in the transcript journal from before the publish, and the
+#: only remedy used to be the NEXT BOOT's ``bootstrap_transcript``. But a session
+#: that finishes a turn and then sits idle -- which is what a finished session IS
+#: -- never boots again, so the completion never reached the store, and the
+#: store row is what raises the OS notification and draws the sidebar's
+#: "completed, unread" checkmark (measured 2026-09-23 against two live sessions
+#: whose transcripts held a settled marker and whose store held no row).
+#:
+#: THE SHAPE IS A LADDER, NOT A POLL: four rungs, spread apart, so a burst that
+#: outlasts the store's own retry is ridden out without a timer per session and
+#: without a warning per tick. Exposure is bounded at ~86 s, after which the
+#: journal is left to the next boot -- the old remedy, which is now the FALLBACK
+#: rather than the only path.
+#:
+#: Module-level and a tuple, deliberately: a test shrinks it through
+#: ``monkeypatch.setattr(session, "ATTENTION_REPUBLISH_DELAYS_S", (0.0, 0.0))``
+#: rather than waiting out the shipped delays.
+ATTENTION_REPUBLISH_DELAYS_S: tuple[float, ...] = (1.0, 5.0, 20.0, 60.0)
 
 #: Self-prompt scheduled after a compaction pass that cleared the recovery
 #: band, so the model resumes where the summary left off.
@@ -775,6 +803,18 @@ _PERSISTABLE_CUSTOM_TYPES: frozenset[str] = frozenset(
         "session_state",
         SESSION_INCIDENT_MESSAGE_TYPE,
         SESSION_MODEL_SWITCH_MESSAGE_TYPE,
+        # SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE IS persisted, unlike the
+        # recovery record below: an MCP server going away is a historical fact
+        # about the session, and every surface already renders the row, so a
+        # resumed transcript that dropped it would narrate a conversation the
+        # operator can still see in the picker. The two stale directions are
+        # not symmetric — a resumed session that reconnected contradicts
+        # "unavailable" with a live tool inventory, which the operator can see
+        # and the recovery record clears, where a stale "its tools are usable"
+        # sends the model at tools that are not there. The accepted
+        # consequence is the one ``journal_mcp_recovery``'s docstring already
+        # documents: the un-superseded warning does still persist.
+        SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
         # SESSION_CREDENTIAL_MESSAGE_TYPE is deliberately absent: a credential
         # announcement asserts a LIVE capability ("$KEY is injected into every
         # bash command") against a store that is process-memory-only. A
@@ -833,11 +873,12 @@ def _pair_spliced_tool_results(messages: list[Message]) -> list[Message]:
 
     Relative order among several interlopers is preserved, and moving them is
     safe ONLY because everything that can land in that window is a
-    harness-authored notice (``session_model_switch``, ``session_incident``):
-    reordering advisory chrome against a tool batch changes nothing the user
-    wrote. **If a custom type is ever added that carries user-authored text,
-    this assumption needs revisiting** — moving a user's words past a tool
-    batch would silently reorder the conversation they see.
+    harness-authored notice (``session_model_switch``, ``session_incident``,
+    ``session_mcp_unavailable``): reordering advisory chrome against a tool
+    batch changes nothing the user wrote. **If a custom type is ever added that
+    carries user-authored text, this assumption needs revisiting** — moving a
+    user's words past a tool batch would silently reorder the conversation they
+    see.
 
     Linear in ``len(messages)``, and that has to stay true because this sits on
     every provider call. Each batch's inner scan stops at the next assistant
@@ -957,14 +998,14 @@ def _paired_prefix(messages: Sequence[AgentMessage], *, strict: bool = False) ->
     Only the TAIL is trimmed, and "tail" means *up to the last real answer*.
     A ``CustomMessage`` in the tail does NOT prove the list is legal: it is not
     a ``Message``, and one can land on the live context while a tool batch is
-    still in flight. ``journal_incident`` appends straight to
-    ``_context.messages``, and ``_on_mcp_incident`` fires it through
-    ``_spawn_background`` — so an MCP breaker tripping mid-batch leaves
-    ``[..., assistant(tool_calls), session_incident]``. A scan that stopped at
-    the first non-assistant entry would see the incident, declare the tail
-    clean, and persist the unanswered assistant beneath it — the very row this
-    function exists to refuse (review round 2, R5; reproduced as
-    ``DANGLING: ['c2']``).
+    still in flight. ``journal_incident`` and ``journal_mcp_unavailable``
+    append through ``_append_or_park_journal``, and ``_on_mcp_incident`` fires
+    the latter through ``_spawn_background`` — so an MCP breaker tripping
+    mid-batch can leave ``[..., assistant(tool_calls),
+    session_mcp_unavailable]`` in the tail. A scan that stopped at the first
+    non-assistant entry would see that row, declare the tail clean, and persist
+    the unanswered assistant beneath it — the very row this function exists to
+    refuse (review round 2, R5; reproduced as ``DANGLING: ['c2']``).
 
     Customs are stepped over and kept. Every call in a batch needs its own
     result: the first tool result alone does not make a multi-call tail legal.
@@ -1101,6 +1142,151 @@ IMAGE_DROPPED_NOTICE = "[image omitted: the provider rejected it and it has been
 #: images, and the notice must not claim they are gone for good.
 IMAGE_OMITTED_TEXT_ONLY_NOTICE = "[image omitted: the current model does not accept images]"
 
+#: Stands in for an image whose PAYLOAD is no longer anywhere to be found — the
+#: attachment store lost the bytes under a transcript that still references
+#: them. Distinct from both notices above, and the distinction is not cosmetic:
+#: nothing was refused by the provider and no model changed, so neither existing
+#: sentence describes this, and a notice that claimed either would send the user
+#: looking for a remedy that does not apply. Says where the media went, because
+#: the one thing that would help — restoring the store — is not something the
+#: user will guess from "image omitted".
+IMAGE_MISSING_MEDIA_NOTICE = "[image omitted: its data is no longer in the attachment store]"
+
+#: The characters a payload may contain and still be treated as base64 by
+#: :func:`_decode_tolerantly`, AFTER that function has translated ``-_`` to
+#: ``+/``. Deliberately only the standard alphabet plus ``=`` for padding, and
+#: deliberately exclusive of everything else — whitespace included. The lenient
+#: standard decode in :func:`_has_no_image_media` already recovers line-wrapped
+#: payloads (``validate=False`` discards whitespace), so a payload that reaches
+#: the tolerant path with a space in it is prose, not a wrapped image, and
+#: tolerating it is what put junk on the wire (QA round 2, Q-2).
+_BASE64_ALPHABET = frozenset(string.ascii_letters + string.digits + "+/=")
+
+
+def _has_no_image_media(block: ImageContent) -> bool:
+    """Whether ``block`` carries no image bytes AT ALL — nothing to send, ever.
+
+    Deliberately the NARROWEST possible question, and the docstring is the
+    boundary: this function answers ONLY "did any of the decodes below pull a
+    byte out of this payload", and refuses the block when NONE did — it does
+    NOT and cannot decide that the payload is corrupt, malformed, or
+    unrecognised, and it must not be read as saying so. Empty, whitespace-only
+    and padding-only payloads are the shapes that fall out of that test, and
+    so does anything else no decoder can recover; anything that yields bytes
+    under ANY of the three decodes is left alone, whether or not those bytes
+    are an image at all.
+
+    The KEPT side is deliberately WIDER than "looks like base64", and it is
+    worth knowing how wide: the tolerant decode recovers bytes from short
+    non-canonical payloads that are not images at all (``"qw"``),
+    so this function does not and must not be read as a format or validity
+    check. It answers one question — did any decode yield a byte — and the
+    tolerance it applies is bounded to the ALPHABET and the PADDING, nowhere
+    else: prose, markup, a bare ``data:`` URL prefix and anything else carrying
+    a character outside base64 is still refused (QA round 2, Q-2).
+    THREE decodes, not two, and the third is the one that matters most. The
+    strict/lenient pair are the SAME decoder parameterised on character
+    validation, and they enforce the same padding and quantum rules — so a
+    payload that is URL-safe-alphabet base64 (``qw``, ``El_8``, ``-_8=``) or
+    standard base64 with its padding stripped or truncated (``6sg``) raises
+    under BOTH while holding real bytes (review round 1, MAJOR 1). Refusing
+    readable bytes is the one error this function exists to avoid, so the
+    both-raise case asks a THIRD question: would a padding-tolerant,
+    alphabet-tolerant decode recover anything? If yes, the block is kept.
+
+    Nothing about the FORMAT is asked. A block whose header
+    :func:`~local_operator.media.sniff_image` cannot name is NOT refused:
+    :func:`_rebound_history_images` documents that such a block "may be
+    perfectly acceptable to the provider" (a HEIF, or a host without Pillow to
+    read the header), and dropping it would destroy context on a guess.
+
+    A block that DOES carry bytes is left to the two mechanisms that own it:
+    :func:`_rebound_history_images` for size, and the sticky provider degrade
+    (:func:`~local_operator.providers.failover.is_image_rejection`) for bytes a
+    provider refuses. This pass must not pre-empt either.
+
+    COST, stated because the seam is hot: this decodes each image payload up to
+    three times, where :func:`_rebound_history_images` decodes once and stops at
+    a header sniff. It is NOT free, and it runs on EVERY render, including the
+    ones below this call that deliberately do not decode (the ``_images_rejected``
+    strip and the text-only strip, which skip :func:`_rebound_history_images`
+    precisely to avoid it). That is accepted rather than avoided: a payload-less
+    block is UNSENDABLE on every one of those paths too, so a pass that skipped a
+    path would leave the original 400 live on it, which is the bug.
+
+    The figure is LOAD-DEPENDENT, so it is given as a range rather than as one
+    authoritative number (QA round 2, Q-1): ~540-950 ms for a 20-frame render at
+    2-4 MB of base64 per frame, on this host beside ~25 concurrent sessions
+    (review round 1 measured 694 ms at ~2.1 MB/frame; QA round 2 measured 544 ms
+    for 20 frames at ~3.0 MB each at load 124; the author measured 945 ms at
+    ~4.2 MB/frame). Against that, a render whose 20 payloads are empty costs
+    ~0.04 ms — the empty case short-circuits before any decode, so the cost falls
+    only on blocks that carry something.
+    """
+    data = block.data
+    if not isinstance(data, str) or not data.strip():
+        return True
+    if any(_decoded_bytes(data, validate=validate) for validate in (True, False)):
+        return False
+    # Both standard decodes refused it. Before calling that "no bytes", ask a
+    # padding- and alphabet-tolerant decoder — the shapes that would otherwise
+    # be dropped here while holding real image data (URL-safe base64, stripped
+    # or truncated padding).
+    return not _decode_tolerantly(data)
+
+
+def _decoded_bytes(data: str, *, validate: bool) -> bytes:
+    """``base64.b64decode`` as a total function: ``b""`` when it cannot decode.
+
+    ``b""`` is the right answer for a caller asking "did any bytes come out",
+    and it keeps the three probes in :func:`_has_no_image_media` one shape.
+    """
+    try:
+        return base64.b64decode(data, validate=validate)
+    except (ValueError, TypeError):
+        return b""
+
+
+def _decode_tolerantly(data: str) -> bytes:
+    """Last-resort decode: URL-safe alphabet and missing or surplus padding.
+
+    ALL-OR-NOTHING, and that is the whole contract (QA round 2, Q-2). It is
+    tolerant about the two things a real image payload is allowed to differ in
+    — the alphabet (``+/`` vs ``-_``) and the padding — and about NOTHING else:
+    if a single character is outside the base64 alphabet the answer is ``b""``,
+    never a partial recovery.
+
+    ``b64decode(validate=False)`` alone is NOT that function. It silently
+    ignores every stray character, so it recovers bytes out of prose and markup
+    (``"not an image at all"``, ``"<html>error</html>"``, a bare
+    ``"data:image/png;base64,"``), which flips OMIT to KEEP for junk that is
+    unambiguously unsendable and puts a malformed ``data:`` URL on the wire —
+    the exact class of thing this whole pass exists to stop, and QA proved it
+    with a real ``_message_to_openai`` call. Junk like that is part of the
+    externally-damaged population this seam defends against, so tolerating it
+    was a hole, not a kindness.
+
+    Whitespace is deliberately NOT tolerated here, for the same reason and with
+    the same discrimination: a line-wrapped payload is already recovered by the
+    lenient standard decode in :func:`_has_no_image_media` (``validate=False``
+    strips newlines and spaces), so this last resort is never the decoder that
+    has to see through it. A payload that reaches here with interior whitespace
+    is not line-wrapped base64 — it is prose, and prose is exactly what Q-2 is
+    about.
+
+    Only ever consulted after the two standard decodes both refused the input,
+    so its tolerance cannot widen the set the wire would have accepted.
+    """
+    translated = data.translate(str.maketrans("-_", "+/"))
+    if any(char not in _BASE64_ALPHABET for char in translated):
+        return b""
+    payload = translated.rstrip("=")
+    payload += "=" * (-len(payload) % 4)
+    try:
+        return base64.b64decode(payload, validate=False)
+    except (ValueError, TypeError):
+        return b""
+
 
 def _rebound_history_images(messages: list[Message]) -> list[Message]:
     """Shrink any image block in the rendered history that is over the cap.
@@ -1167,6 +1353,23 @@ FRAMES_SHED_NOTICE = (
     "just sent, it was large enough to be dropped too — send it again on its own."
 )
 
+#: The user-facing announcement for :data:`IMAGE_MISSING_MEDIA_NOTICE`, and it
+#: says something the render-level block deliberately does not: the media is
+#: GONE, and the session will keep working anyway. Both halves are needed. A
+#: notice that only reported the omission would leave the user re-attaching an
+#: image that cannot come back (the payload was deleted — re-sending a screenshot
+#: the model can no longer see is the right move for the size-shed case and the
+#: wrong one here), and one that only offered reassurance would not explain the
+#: hole. Names the store, because "the attachment store" is the phrase in
+#: ``/export`` and the config tree the user can go and look at.
+MISSING_MEDIA_NOTICE = (
+    "An image attached earlier in this conversation is missing: the file that "
+    "held it is no longer in the attachment store, so its contents cannot be "
+    "restored. The rest of the conversation is intact and the session will keep "
+    "working — the model will see a note in place of that image. Re-attach it if "
+    "you still have it."
+)
+
 
 #: How far the wire budget tightens each time the provider refuses a request
 #: as too large. Reaching that branch proves the configured budget was too
@@ -1214,6 +1417,79 @@ def _shed_frames_to_budget(messages: list[Message], *, budget: int) -> tuple[lis
     except ImportError:
         return messages, 0
     return shed_frames_to_wire_budget(messages, budget=budget)
+
+
+def _without_unresolvable_frames(messages: list[Message]) -> tuple[list[Message], int]:
+    """Replace every payload-less image block with a one-line notice.
+
+    One of the render degrades, and the one for a block that is not
+    unacceptable to anybody — it is EMPTY. A transcript references its media by
+    digest (:data:`~local_operator.session.transcript.ATTACHMENT_KEY`) rather
+    than carrying it inline, and the store behind that reference is not
+    guaranteed to still hold the bytes: a cleaner the user ran pruned them, or
+    the transcript was copied without the store. ``_resolve_attachments``
+    re-hydrates what it can and leaves ``data`` empty for what it cannot (see
+    :data:`~local_operator.session.transcript.ATTACHMENT_MISSING`), which is
+    correct — the archive degrades rather than raising — and the empty block
+    then reproduced a permanent 400 at the wire:
+
+        .messages[4].image[0]: You have uploaded an unsupported image. …
+
+    Every turn failed the same way, INCLUDING ``/compact``, which has to send
+    the history in order to summarise it, and the session's own in-memory
+    image degrade did not help a restarted process (that flag is not persisted).
+    The media is gone and nothing can restore it, so the only fix is to stop
+    sending a block that has no content to lose.
+
+    Applied to the RENDERED history and NEVER to the transcript, exactly like
+    :func:`_rebound_history_images` and :func:`_without_images`: this pass
+    cannot itself lose information, because it only ever replaces a block that
+    carries no bytes.
+
+    BUT the "the archive keeps its reference" premise has a shelf life, and the
+    docstrings here say so rather than assuming it forever (round 1 review,
+    MAJOR 3). ``_resolve_attachments`` replaces the digest with the empty
+    placeholder IN PLACE on the stored entry's payload — the same dict object
+    inside ``TranscriptEntry.payload`` — and :meth:`Transcript.compact_file`
+    re-serializes those entries, so as soon as a prune fold runs the digest is
+    gone from disk too (reproduced: ``"attachment" in file`` is ``True`` before
+    the fold and ``False`` after, the row left carrying the empty placeholder).
+    The fold is routine (``COMPACT_FILE_THRESHOLD_BYTES``) and is reached from a
+    journal prune. So the honest statement is: **the reference survives until
+    the next fold** — a restored store re-sends the image on a session that has
+    not folded since, and cannot on one that has. That is pre-existing and out
+    of scope here; the claim is scoped, not fixed. (No docstring can fix it —
+    the mutation is in ``transcript.py``.)
+
+    ``_has_no_image_media`` is the whole discriminator and is deliberately
+    narrow — see its docstring for why asking about the format here would cost
+    the user real context.
+
+    Consecutive drops collapse to ONE notice, like :func:`_without_images` and
+    for the same reason: a snapcompact archive replays as dozens of frames
+    between two text edges, and dozens of identical apology lines cost more
+    context than the summary they stand in for. Returns ``(messages, dropped)``
+    so the caller can announce the loss once per session.
+    """
+    out: list[Message] = []
+    dropped = 0
+    for message in messages:
+        if not any(isinstance(block, ImageContent) for block in message.content):
+            out.append(message)
+            continue
+        content: list[Content] = []
+        changed = False
+        for block in message.content:
+            if isinstance(block, ImageContent) and _has_no_image_media(block):
+                dropped += 1
+                changed = True
+                if content and getattr(content[-1], "text", None) == IMAGE_MISSING_MEDIA_NOTICE:
+                    continue
+                content.append(TextContent(text=IMAGE_MISSING_MEDIA_NOTICE))
+            else:
+                content.append(block)
+        out.append(message.model_copy(update={"content": content}) if changed else message)
+    return out, dropped
 
 
 def _without_images(messages: list[Message], *, model_incapable: bool = False) -> list[Message]:
@@ -1745,6 +2021,38 @@ class Session:
         #: the distinction that decides whether dispose has to publish one.
         self._attention_run_settled: bool = True
         self._attention_restored = False
+        #: SERIALISES THIS SESSION'S OWN PUBLICATION CRITICAL SECTIONS. Held by both
+        #: :meth:`_publish_attention_outcome` (journal append + store insert) and
+        #: :meth:`_republish_journalled_outcome` (journal read + store insert), and
+        #: it is load-bearing for ORDERING rather than for mutual exclusion of the
+        #: file: `completions.sequence` is AUTOINCREMENT, i.e. INSERT order, so a
+        #: rung that read the journal, then lost the store to a NEWER same-session
+        #: turn inside its `await`, would insert the OLDER completion second and
+        #: leave it as MAX(sequence) -- the sidebar mark, the Active ordering and
+        #: the newest-row pointer all moving to the older result, with the newer
+        #: one never unread again once a client acks the highest sequence. The
+        #: journal re-read bounds WHICH marker a rung picks, never what lands after
+        #: it; this lock is what makes the pair atomic against this process's own
+        #: turn-end publish. Cross-process ordering is unchanged (it never was
+        #: coordinated), and the cost is bounded: a turn's `finally` publish can
+        #: wait behind a rung already inside the store's own retry budget.
+        self._attention_publish_lock = asyncio.Lock()
+        #: Set while a DEFERRED attention publication is still only in the
+        #: transcript journal, so THIS process retries it instead of leaving the
+        #: completion to a boot that an idle session may never have. Armed only by
+        #: a real ``AttentionWriteDeferred`` (see
+        #: :meth:`_schedule_attention_republish`), which is what keeps it from
+        #: becoming a warning per tick, and cleared by a newer outcome, by a
+        #: successful republish, by a non-contention store failure, or when the
+        #: ladder is exhausted.
+        self._attention_republish_due: bool = False
+        #: The running republish ladder, so a second deferral joins the ladder in
+        #: flight rather than stacking a second one on the same store.
+        self._attention_republish_task: asyncio.Task[Any] | None = None
+        #: Fires a rung that is waiting out its delay, so a viewer's tick repairs
+        #: the completion within a tick WITHOUT the tick itself touching the store
+        #: (see :meth:`refresh_attention`).
+        self._attention_republish_wake = asyncio.Event()
         #: Set by the ``bootstrap_transcript`` call ABOVE (see the attention
         #: block) to the ``(kind, cause, reason, token)`` this boot classified
         #: and published for an ORPHANED run, and journaled from ``async_init``
@@ -1850,6 +2158,20 @@ class Session:
         #: just-removed tool would come back "Tool not found" mid-turn; the
         #: per-call gate inside the tools already refuses immediately.
         self._web_tools_dirty = False
+        #: The tools array this TURN published, or ``None`` while it has
+        #: published nothing yet. :meth:`_wire_tools` is the single reader and
+        #: captures the live inventory on its first call of a turn, then serves
+        #: that same array for the rest of it; the turn boundary clears it back
+        #: to ``None``. THE REASON IS THE CACHE PREFIX: the array rides ahead of
+        #: the conversation, so a tool published after this turn's first
+        #: provider call reprices every message behind it on a strict contiguous
+        #: prefix cache — measured at 38.77% of sent tokens re-sent (32 of 35
+        #: mid-turn leading-region changes were the tools array). Deferring the
+        #: PUBLISH is not a freeze of the session: :meth:`refresh_tools` still
+        #: swaps the inventory immediately, so the tool is resolvable and
+        #: callable, and the prompt's inventory block reports it through the
+        #: usual ``[session-state]`` delta.
+        self._published_tools: list[AgentTool] | None = None
         #: True while a mid-session model selection has not reached the
         #: transcript yet; the same dispose-flush contract as the title (the
         #: write is a background task, and dispose cancels background tasks,
@@ -1922,6 +2244,11 @@ class Session:
         #: Latch for the render seam's byte shed notice (see
         #: ``_announce_frames_shed_once``). Per session, not per render.
         self._frames_shed_announced = False
+        #: Latch for ``_announce_missing_media_once`` (a block whose payload the
+        #: attachment store no longer holds). Per session, not per render, for the
+        #: same reason as its two siblings — the render runs on every provider
+        #: call, and the loss is a fact about the archive, not about this turn.
+        self._missing_media_announced = False
         #: Session-local tightening of the configured wire budget, set only by
         #: an actual provider 413 (``_recover_if_request_too_large``). ``None``
         #: means "use the configured value"; it is never persisted, because it
@@ -1961,6 +2288,18 @@ class Session:
         # ``set_ask_handler`` after that front end has its session, and until
         # it does the ``ask`` tool is simply not advertised.
         self._ask_user: AskUserFn | None = None
+        # PUBLISH THE LIVE ANSWER on the goal holder, for the same reason the
+        # runtime publishes its attachment probe there: the system-prompt provider
+        # closure is built BEFORE this Session exists, so a shared holder is the
+        # only seam through which a fact this session learns LATER can reach the
+        # next turn's block. It has to: a front end that resolves its session in a
+        # worker installs the ask hook from ``set_ask_handler`` after
+        # construction, so the provider's own ``tools`` list (the factory's
+        # snapshot) never gains ``ask``.
+        #
+        # A PROBE, not a copied flag: the hook is installed and uninstalled
+        # mid-session, and the block must follow it in both directions.
+        self._goal_state.ask_probe = lambda: self._ask_user is not None
 
         self._loop = AgentLoop()
         replayed_messages = list(transcript.build_llm_history())
@@ -2393,7 +2732,7 @@ class Session:
         #: ``assistant(tool_use) -> user -> tool_result`` and brick the session
         #: (see ``_append_or_park_journal``). The flush is at the turn boundary,
         #: next to the other parked notices.
-        self._pending_shape_incidents: list[tuple[str, list[str], str]] = []
+        self._pending_shape_incidents: list[tuple[str, list[str], str, bool]] = []
         # The sink for shape hits observed by layers that mask BEFORE a result
         # exists — the live pipe filter and the live/peek/abort text path. The
         # production shape this feature exists for (``kubectl exec … env``) has
@@ -2406,18 +2745,19 @@ class Session:
         #: echoes the same credential ten times, or a poller that prints the
         #: same DSN every tick, is ONE fact about the session; reporting it per
         #: result would bury the transcript in identical rows.
-        self._reported_shape_incidents: set[tuple[str, tuple[str, ...]]] = set()
+        self._reported_shape_incidents: set[tuple[str, tuple[str, ...], bool]] = set()
         #: Serialises the ASYNC journal notices so they reach the live context in
         #: the order their hooks fired, not in the order they happen to finish.
         #:
         #: The two MCP notices do different amounts of work before their live
-        #: append — ``journal_incident`` awaits a transcript write,
+        #: append — ``journal_mcp_unavailable`` awaits a transcript write,
         #: ``journal_mcp_recovery`` persists nothing — and both are launched
         #: fire-and-forget through ``_spawn_background``. Without this lock the
         #: recovery completes on its FIRST scheduling step and overtakes the
-        #: incident it exists to supersede, leaving the model reading "its tools
-        #: are gone ... Do not call its tools" as the last word on a server that
-        #: is working (review round 1, R1; measured inverted at 0-5 loop ticks).
+        #: warning it exists to supersede, leaving the model reading "Its tools
+        #: are not callable until the user restores it, and the agent should not
+        #: retry them in a loop." as the last word on a server that is working
+        #: (review round 1, R1; measured inverted at 0-5 loop ticks).
         #:
         #: A LOCK rather than a delay because ordering must not depend on how
         #: many awaits either method happens to contain: ``asyncio.Lock``
@@ -2602,14 +2942,26 @@ class Session:
         model cannot be sent.
 
         Every path that builds wire history goes through here rather than
-        calling ``_convert_to_llm`` directly, because BOTH degrades have to
-        hold for ALL of them. Compaction is the one that matters most: it has
-        to send the history to summarise it, so a poisoned block makes even
-        the escape hatch fail (anthropics/claude-code#50708) — and the same
-        goes for a text-only model, whose refusal would otherwise brick the
-        session exactly the way a provider refusal did.
+        calling ``_convert_to_llm`` directly, because ALL of the degrades have
+        to hold for ALL of them. Compaction is the one that matters most: it has
+        to send the history to summarise it, so a poisoned block makes even the
+        escape hatch fail (anthropics/claude-code#50708) — and the same goes for
+        a text-only model, whose refusal would otherwise brick the session
+        exactly the way a provider refusal did.
 
-        Two independent reasons strip images, checked in order of stickiness:
+        FOUR independent reasons strip an image, and the ORDER is not the order
+        they were written in (round 1 review, MAJOR 2). The pass that runs FIRST
+        is the payload-less one, which is not about acceptability at all:
+
+        - ``_without_unresolvable_frames`` — the block carries NO BYTES, so it
+          is unsendable on every model, under every flag, and on every path
+          (a provider refusal, a text-only model, a compaction rebuild). It
+          runs first, ahead of the two early returns below, because there is no
+          state it could key on: an empty block never becomes sendable, so
+          leaving it to a later branch would leave the 400 live on every branch
+          that returns early. See ``_has_no_image_media`` for the boundary.
+
+        Then the two acceptability strips, checked in order of stickiness:
 
         - ``_images_rejected``: a provider REFUSED an image block, so the
           session never sends one again, whatever model it is on now.
@@ -2620,16 +2972,16 @@ class Session:
           history still carries screenshots. This one is NOT sticky: it reads
           the CURRENT spec, so switching back to a vision model restores the
           images on the very next render. ``keep_images=True`` suspends ONLY
-          this strip (compaction's kept-window rebuild, which must not bake
-          the omission into the live context); the sticky provider strip and
-          the announcement still apply.
+          this strip; it does NOT suspend the payload-less pass above, which has
+          nothing to restore.
 
-        A THIRD degrade runs last and is not about images being unacceptable:
-        the aggregate request can outgrow the provider's size cap even when
-        every block in it is individually fine (``_shed_frames_to_budget``).
-        It belongs here for the same reason the other two do — a 34 MB history
-        makes ``/compact`` fail too, so the escape hatch has to be covered —
-        and it is ordered after the rebound so it measures the real bytes.
+        A FOURTH degrade runs LAST, and it is not about images being
+        unacceptable either: the aggregate request can outgrow the provider's
+        size cap even when every block in it is individually fine
+        (``_shed_frames_to_budget``). It belongs here for the same reason the
+        acceptability strips do — a 34 MB history makes ``/compact`` fail too,
+        so the escape hatch has to be covered — and it is ordered after the
+        rebound so it measures the real bytes.
 
         Expired todo reminders are dropped here for the same reason: every path
         that reaches a provider has to be free of them.
@@ -2643,6 +2995,35 @@ class Session:
         # `function_call` and `function_call_output` and is rejected for the
         # same reason Anthropic rejects the coalesced form.
         rendered = _pair_spliced_tool_results(rendered)
+        # ...and immediately after THAT, before every condition below, because
+        # this pass has no condition to belong to: it is not about the model and
+        # not about the provider, so there is nothing it could key on and no
+        # state under which an empty block becomes sendable. Placement is the
+        # whole correctness argument — above the early returns it applies on all
+        # of them (the sticky ``_images_rejected`` strip already runs on the
+        # result, and ``_without_images`` leaves a text notice where this one
+        # puts it).
+        #
+        # Above the ``keep_images=True`` SUSPENSION too, and there the placement
+        # is the opposite of the acceptability strips: that flag means "do not
+        # bake THIS model's omission into the live context, because a later model
+        # may want the images" — but a payload-less block has nothing for any
+        # later model to want, and the kept-window render is what
+        # ``_run_compaction`` REBINDS ``_context.messages`` from. So this pass is
+        # exactly what stops the hole being persisted into the live context
+        # (round 1 review, MINOR 2); it is not merely allowed to run there.
+        #
+        # COST, accepted deliberately (round 1 review, MINOR 1): unlike the
+        # paths below, this one decodes payloads, so the ``_images_rejected``
+        # and text-only paths — which skip ``_rebound_history_images`` precisely
+        # to avoid decoding a block about to become a notice — pay a decode they
+        # did not before. A payload-less block is unsendable on those paths too,
+        # so a pass that skipped them would leave the original 400 live there;
+        # the empty case is short-circuited before any decode, so only blocks
+        # that carry something are decoded.
+        rendered, missing_media = _without_unresolvable_frames(rendered)
+        if missing_media:
+            self._announce_missing_media_once(missing_media)
         if self._images_rejected:
             # Nothing to rebound once images are being dropped outright, and
             # dropping first saves decoding a block that is about to become a
@@ -2723,6 +3104,41 @@ class Session:
             self._image_drop_diagnostic(),
         )
         self._spawn_background(self._emit(NoticeEvent(text=FRAMES_SHED_NOTICE, kind="warning")))
+
+    def _announce_missing_media_once(self, dropped: int) -> None:
+        """Say, once per session, that a screenshot left the context for good.
+
+        The third of the three render announces, and the only one whose news is
+        that the media is GONE. The other two report a loss the user can act on
+        — switch to a model that accepts images, and they come back; the frames
+        shed for size are still in the archive. Here nothing is recoverable: an
+        external cleaner deleted the payload the transcript points at, and the
+        notice exists so the user is told WHY the conversation is missing the
+        thing they remember attaching, rather than watching the model answer
+        around it.
+
+        Once per session, from a latch, for the reason its siblings are: the
+        render runs on every turn and every compaction, and the missing payload
+        is a standing fact about the transcript — a per-render notice would say
+        the same sentence on every request. Silent with no running loop, with
+        the latch left unset so a later render on the loop can still announce
+        (exactly ``_announce_frames_shed_once``); the omission has already been
+        applied either way, and the announcement is never what makes the request
+        legal.
+        """
+        if self._missing_media_announced:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._missing_media_announced = True
+        logger.warning(
+            "omitted %d image block(s) whose payload is no longer in the " "attachment store (%s)",
+            dropped,
+            self._missing_media_diagnostic(),
+        )
+        self._spawn_background(self._emit(NoticeEvent(text=MISSING_MEDIA_NOTICE, kind="warning")))
 
     def _announce_text_only_omission_once(self, rendered: list[Message] | None = None) -> None:
         """Say, once per session, that the active model is not seeing the
@@ -3242,6 +3658,39 @@ class Session:
             )
         )
 
+    def _missing_media_diagnostic(self) -> str:
+        """What the omitted payload-less block(s) look like, for the log.
+
+        Sibling of :meth:`_image_drop_diagnostic`, and it exists because the
+        logged shape here INVERTS that one's: a normal image block is worth
+        knowing by its magic (``89504e47`` is a PNG), while the whole point of
+        this degrade is that there is nothing to sniff — ``b64_len`` and the
+        ``mime_type`` sidecar are the entire evidence that the transcript once
+        pointed at real media. Reads the CONVERTED context rather than the
+        rendered history for the same reason its sibling does: the render no
+        longer carries the blocks being reported on by the time this runs.
+
+        Structure only — never message text, never a payload. The blocks here
+        are by definition empty, but the guard against a future loosening of
+        :func:`_has_no_image_media` printing bytes into a log stays.
+        """
+        try:
+            images = [
+                block
+                for message in self._convert_to_llm(list(self._context.messages))
+                for block in message.content
+                if isinstance(block, ImageContent) and _has_no_image_media(block)
+            ]
+            if not images:
+                return "no payload-less image blocks in the context"
+            first = images[0]
+            return (
+                f"{len(images)} payload-less image block(s); first: "
+                f"mime={first.mime_type} b64_len={len(first.data)}"
+            )
+        except Exception as exc:  # noqa: BLE001 — a diagnostic must never break the degrade
+            return f"diagnostic unavailable: {exc!r}"
+
     def _image_drop_diagnostic(self) -> str:
         """Structure of the images this degrade is about to drop, for the log.
 
@@ -3496,6 +3945,30 @@ class Session:
         narrative reason to reach for; one named but not offered is a promise
         it cannot keep.
 
+        RELAXED FOR THE REST OF A TURN, deliberately, by the array's one-publish
+        latch (``_wire_tools``): once this turn's array is on the wire, a tool
+        enabled mid-turn reaches this block immediately and the array only at
+        the next turn. Within the turn the DELTA IS AUTHORITATIVE — it names what
+        the session can actually resolve, and resolution reads the live
+        inventory — while the array lags by one turn because moving it costs the
+        whole conversation's cached prefix.
+
+        WHAT THE LAG COSTS, in both directions, because this paragraph is the
+        only place the trade is recorded. A GROW: during that window the delta
+        names a tool whose input schema is in neither the array nor this block
+        (the schema rides the array; the detail read carries the description
+        only), so a model that acts on the delta is guessing its arguments and
+        the validator answers with the problem. A REMOVAL: the inventory drops
+        the tool at once, so a call the model emitted against the schema it can
+        still see answers ``Tool not found: <name>`` — a typed refusal from
+        ``_plan_call``, not the tool's own, because the approval gate runs only
+        after a tool RESOLVES and nothing here resolves. That is the narrower of
+        the two available policies rather than an oversight:
+        ``_reconcile_web_tools`` defers the whole INVENTORY change for the same
+        class of edit, because a web tool that is still resolvable answers for
+        itself through its own per-call gate ("disabled"), and an MCP server
+        that dropped away has no transport left to answer with.
+
         This lives here, and not in the block providers, because the session is
         the only object that knows what the array will contain. Providers close
         over the inventory they were BUILT with, which is never the final one:
@@ -3518,7 +3991,20 @@ class Session:
         no inventory to reconcile and is passed through untouched rather than
         having block 1 overwritten with a section it never had.
         """
-        rendered = render_tool_inventory_block(self._tools)
+        rendered = render_tool_inventory_block(
+            self._tools,
+            # The SAME host probes the frozen head block was built with, when the
+            # provider can supply them. This render is the block's other arm —
+            # the note below the tool list — and it has the same two absence
+            # diagnoses, so probing it live would let a heartbeat-age flip move
+            # block 1 after block 0 was pinned: not a prefix loss (block 1 rides
+            # the ``[session-state]`` delta), but a journalled churn with no
+            # authority behind it, and two renderers of one note disagreeing.
+            # ``None`` (a host's own provider, a benchmark's fixed blocks) keeps
+            # the historical live probe.
+            host_has_browser=getattr(self._system_blocks_provider, "host_has_browser", None),
+            host_has_console=getattr(self._system_blocks_provider, "host_has_console", None),
+        )
         for index, block in enumerate(blocks):
             if block.startswith(TOOL_INVENTORY_HEADING):
                 if block == rendered:
@@ -4099,6 +4585,52 @@ class Session:
     def goal(self) -> str:
         """The session's standing objective ("" when unset)."""
         return self._goal_state.text
+
+    @property
+    def interactivity_probe(self) -> Callable[[], bool] | None:
+        """The live probe answering "can a question be PRESENTED to anyone".
+
+        Read-only view onto the same holder the prompt closure reads, exposed
+        because a SUBAGENT cannot answer this question itself: a child Session is
+        constructed in-process, holds no control socket and has no registrant, so
+        its only source is the parent's runtime. ``_build_child_session`` installs
+        this probe OBJECT on the child's holder rather than copying its value,
+        which keeps the child's answer live per turn exactly as ``goal=`` does —
+        and the holder itself is deliberately not shared, because it also carries
+        the team and agent briefs.
+
+        ``None`` for every host that never installed one (a plain CLI, a test),
+        which reads as attached: a person is in front of those by construction.
+        The runtime is the only writer, through
+        ``serving._install_interactivity_probe``.
+        """
+        return self._goal_state.interactive_probe
+
+    def is_interactive(self) -> bool:
+        """Whether a question can be PRESENTED to anyone (default True).
+
+        Tier A as a plain answer, for callers that want the fact rather than the
+        probe — ``_build_child_session`` asks its PARENT this, because a child has
+        no control socket and cannot answer it. Live per call: it forwards to the
+        holder, so two calls across an attach/detach get the two answers.
+
+        The FAIL-OPEN default is deliberate here (see ``GoalState.is_interactive``):
+        a decision that needs a direction must not resolve to "detached" on a host
+        that simply never installed a probe. The model-facing block asks
+        :meth:`interactivity` instead, where the unmeasured case is its own answer.
+        """
+        return self._goal_state.is_interactive()
+
+    def interactivity(self) -> bool | None:
+        """Tier A as MEASURED — attached, detached, or ``None`` for unmeasured.
+
+        The model-facing reading, and the one a provider must pass to
+        ``build_system_blocks``: ``None`` means no runtime probe was installed (a
+        plain CLI, an ``exec`` run, a scheduled run), so the block states nothing
+        rather than asserting an interface nobody checked for. A CHILD asks its
+        parent through this, because the attachment it renders is the parent's.
+        """
+        return self._goal_state.interactivity()
 
     @property
     def agent_brief(self) -> str:
@@ -5650,6 +6182,26 @@ class Session:
         )
 
     async def _drain_spooled_peer_inbox(self) -> None:
+        """``_drain_spooled_peer_inbox_rows``, plus the owed-turn bookkeeping.
+
+        The second of the two drains that consume a spool, and the one that runs
+        when the boot drain deliberately kept a peer row (no durable history yet).
+        Whichever drain empties the spool, the obligation the spooling runtime
+        placed in ``local_operator.wakes.spooled`` is retired by the SAME predicate —
+        see ``inbox.settle_owed_turn`` — so this wrapper exists for the same
+        reason its sibling in ``process`` does: the body returns early on several
+        paths, and every one of them is a state the settle has to be asked about.
+        """
+        try:
+            await self._drain_spooled_peer_inbox_rows()
+        finally:
+            directory = getattr(self._transcript, "directory", None)
+            if directory is not None:
+                from local_operator.session.runtime.inbox import settle_owed_turn
+
+                settle_owed_turn(directory)
+
+    async def _drain_spooled_peer_inbox_rows(self) -> None:
         """Deliver any inbox rows spooled for this session. Once per lifetime.
 
         Called by ``_run_turn_pipeline`` AFTER the turn's own messages are
@@ -6129,15 +6681,26 @@ class Session:
         """
         self._on_mcp_startup_settled = sink
 
-    def refresh_tools(self, tools: Sequence[AgentTool]) -> None:
+    def refresh_tools(self, tools: Sequence[AgentTool]) -> bool:
         """Replace the full tool inventory mid-session.
 
         THE committed hook for MCP ``set_on_tools_changed`` (orchestrator
         MCP-20): the caller passes the merged set (builtins + all currently
-        loaded MCP tools) and this swaps it in. The loop reads
-        ``context.tools`` fresh on every model call and every tool resolution,
-        so the new set is effective from the NEXT model call onward — and even
-        mid-turn at the next tool batch — with no restart.
+        loaded MCP tools) and this swaps it in. The swap is IMMEDIATE for what
+        the session can do — tool RESOLUTION reads ``context.tools``, so the new
+        set is effective from the very next tool batch, mid-turn, with no
+        restart — and the prompt's ``## Available tools`` inventory block
+        follows it at the next provider step (through ``_reconcile_tool_inventory``
+        and its ``[session-state]`` delta).
+
+        The provider's tools ARRAY is the exception, and the return value is how
+        a caller learns it: the array is published at most ONCE per turn
+        (:meth:`_wire_tools`), because it rides ahead of the conversation in the
+        prompt-cache prefix, so a mid-turn swap would reprice every message
+        behind it. Returns ``True`` when this swap can still reach the next
+        model call (nothing has been published this turn) and ``False`` when it
+        is deferred to the next turn — which is what an MCP enable's reply has
+        to say instead of promising "the next model call".
 
         A session with a declared inventory (:meth:`set_tool_inventory`) narrows
         the set it is handed here before swapping it in, so an MCP tool that
@@ -6150,6 +6713,49 @@ class Session:
         self._context.tools = self._tools
         if hasattr(self, "_frontend_state_store"):
             self.refresh_frontend_state()
+        return self._published_tools is None
+
+    def _wire_tools(self) -> list[AgentTool]:
+        """The tools array to advertise to the provider NOW — at most once a turn.
+
+        Wired into ``LoopConfig.get_tools``, so this is read immediately before
+        EVERY provider call in a turn, and every one of them after the first
+        gets the same array back. One publish per turn is the cache contract:
+        the array sits ahead of the conversation in the request prefix, and on a
+        strict contiguous prefix cache a tool appended at the END of the array
+        still invalidates every message after it.
+
+        The latch is keyed to the TURN, not to the session. A session-lifetime
+        freeze would be cheaper still and is deliberately not what this does: a
+        lazily enabled MCP tool has to enter the array on some turn, and the
+        enable reply says so. Clearing at the turn boundary is what makes the
+        next turn publish the live inventory — and makes :meth:`refresh_tools`'
+        return value meaningful, since it answers exactly the question this
+        latch decides.
+        """
+        if self._published_tools is None:
+            self._published_tools = list(self._tools)
+        return self._published_tools
+
+    def _side_channel_tools(self) -> list[AgentTool]:
+        """The array a SIDE CHANNEL must send to stay on the turn's cached prefix.
+
+        The aside and compaction-advisor requests are deliberately not turns: they
+        carry the conversation to the provider with ``tool_choice="none"`` and the
+        whole point of their shape is to reproduce the working turn's prefix byte
+        for byte — tools -> system -> messages on Anthropic, and the tools block is
+        the front of the request body on the OpenAI-compatible and Gemini wires.
+        So they read the SAME array the turn is publishing, not ``context.tools``,
+        which a mid-turn enable has already moved: sending the live array here
+        would change position 0 and force a full re-process at write price instead
+        of the cache READ these requests exist to be.
+
+        They do NOT latch an array of their own: publishing is the turn's job, and
+        a read-only side channel must not be what decides which array a turn
+        advertised. With nothing published yet this is the live inventory, which
+        is what the turn's first call will capture anyway.
+        """
+        return list(self._published_tools if self._published_tools is not None else self._tools)
 
     def _filter_declared(self, tools: Sequence[AgentTool]) -> list[AgentTool]:
         """Narrow a candidate inventory to this session's declared one.
@@ -7098,13 +7704,38 @@ class Session:
         the live row instead of naming a different failure.
         """
         cause = self._cut_off_cause
+        if not cause and not self._deliberate_stop_noted:
+            # A cause can also be STAMPED ON THE EVENT by the harness itself —
+            # the loop's own continuation guard is the first writer of that
+            # shape (``harness/loop.py``, ``CONTINUATION_LIMIT_CAUSE``). Nothing
+            # armed it: no process is going away and no rung noted it, so the
+            # event IS the only record. Without reading it here the stamped
+            # token would be dropped on the floor and the end would keep
+            # ``aborted=True, error=None`` — i.e. read as a DELIBERATE stop on
+            # every surface, which is the misclassification this taxonomy calls
+            # worse than the bug it fixes.
+            #
+            # The deliberate-stop guard is the same one ``note_cut_off`` applies:
+            # positive evidence of a user's own stop outranks anything.
+            cause = event.cut_off_cause
         if not cause:
             return event
         if not event.aborted:
             return event
         if event.error:
             return event
-        detail = self._cut_off_detail
+        # ADOPT a cause that only the event carried, so every downstream reader
+        # that consults the flag (``_publish_attention_outcome``'s durable
+        # reason, ``_last_turn_outcome``'s siblings) names the same cause this
+        # event does. Consumption on the end event is the established rule for
+        # this field.
+        #
+        # The DETAIL is deliberately not adopted: an event-carried cause has no
+        # parenthetical, and ``_cut_off_detail`` may still hold the process's own
+        # note for a cause that lost to this one.
+        if not self._cut_off_cause:
+            self._cut_off_cause = cause
+        detail = self._cut_off_detail if self._cut_off_cause == cause else ""
         return event.model_copy(
             update={
                 "aborted": False,
@@ -7195,7 +7826,7 @@ class Session:
     async def refresh_attention(self) -> dict[str, Any]:
         """Reconcile cross-process receipts without changing the read watermark."""
         from local_operator.session.attention import (
-            ATTENTION_CUSTOM_TYPE,
+            AttentionReadDeferred,
             AttentionStore,
             conversation_identity,
         )
@@ -7203,14 +7834,119 @@ class Session:
         store = AttentionStore()
         identity = conversation_identity(self._transcript.directory)
         if not self._attention_restored:
+            if not await self._republish_journalled_outcome():
+                logger.warning(
+                    "attention: restoring the journalled outcome for %s is deferred; "
+                    "the journal still holds it and the republish ladder will retry it",
+                    identity,
+                )
+                self._schedule_attention_republish()
+            # MARKED RESTORED EVEN WHEN THE PUBLISH FAILED (recorded here rather
+            # than cited: review round 1 of this PR lists this decision under
+            # "Accepted, not findings", which is exactly what it is -- a trade-off
+            # somebody chose, so this is where its reasoning lives). The one-shot
+            # import is not retried per tick. What retries it now is the republish
+            # LADDER armed just above, which is why leaving this flag unset would
+            # still buy nothing but a warning per poll -- precisely the spam the
+            # desktop poll documents against ("log the TRANSITION, not the tick").
+            # `publish` is idempotent by token, so a ladder rung or the boot path
+            # doing it again is free.
+            self._attention_restored = True
+        elif self._attention_republish_due:
+            # A VIEWER'S TICK IS THE CHEAPEST REPAIR POINT THERE IS -- and the way
+            # to spend it is to FIRE THE PARKED RUNG, never to publish here. The
+            # tick costs a boolean check and an `Event.set()`; the store write
+            # stays the ladder's, so the attempt count is the ladder's four rungs
+            # rather than one per second per client-attached session for the whole
+            # contention window. Publishing from the tick was measured at ~20x the
+            # ladder's load on the store this module calls the most contended on
+            # the machine, which is the opposite of the bounded exposure the ladder
+            # exists to provide.
+            self._attention_republish_wake.set()
+        # The in-process TUI never calls ``async_init``, so this is its only
+        # route to the restored cut-off notice. Deduped on the token, so the
+        # runtime path (which calls both) narrates exactly once.
+        await self._journal_restored_cut_off()
+        # The read that carries the reconcile answer, and the one the incident's
+        # log shows dying: 36 of its 60 `database is locked` occurrences, and all
+        # 36 of those are the daemon's scan records -- a scan record carries the
+        # phrase once, so the read class's RECORD and OCCURRENCE counts coincide
+        # here and the number alone does not say which unit it is in. It is retried
+        # inside the store (`AttentionStore._retry_read`), and a budget that still
+        # ran out degrades HERE rather than propagating, for the reason the write
+        # arm above does:
+        # this runs on request paths (the runtime's refresh op, the mobile handle,
+        # the desktop poll), and the caller asked for a receipt, not for a store
+        # read. The previous state stands and the next tick re-reads it, which is
+        # the same disposition `_publish_attention_outcome` gives a deferred
+        # publish -- logged, never silent, because a stale receipt is real.
+        try:
+            state = await asyncio.to_thread(store.state, identity)
+        except AttentionReadDeferred as deferred:
+            logger.warning(
+                "attention: could not read the store for %s; keeping the previous state: %s",
+                identity,
+                deferred,
+            )
+            return self._attention
+        if state != self._attention:
+            self._attention = state
+            self.refresh_frontend_state()
+        return state
+
+    async def _republish_journalled_outcome(self) -> bool:
+        """Publish the journal's LATEST completion marker; True when nothing is owed.
+
+        The one-shot boot-restore's body, extracted so the republish ladder and a
+        viewer's tick can both call it. It re-reads the journal EVERY time on
+        purpose: what must land is whatever marker the transcript holds *now*,
+        never the token that happened to be deferred. A later turn may have
+        superseded that token, and republishing the older one would be a revive.
+
+        THAT RE-READ IS NOT WHAT MAKES THE OUTCOME ORDERED, and the comment here
+        used to claim it was. `completions.sequence` is INSERT order, so the read
+        bounds only which marker this call PICKS; what protects the ordering is
+        `_attention_publish_lock`, held across this read AND the insert below, so a
+        newer turn of this session cannot slip between them and be outranked by the
+        older completion this call is republishing.
+
+        True means "nothing more is owed in this process": the store has the
+        marker, there was nothing to publish (no marker, another conversation's, or
+        one written ``eligible: False`` -- the product's own way of saying a turn
+        has no viewable result), or the store failed in a way that retrying will not
+        fix. Only ``AttentionWriteDeferred`` -- real contention -- comes back False,
+        and it comes back silently: the arming path logs the transition once, and
+        the ladder logs once if it is finally given up on.
+        """
+        from local_operator.session.attention import (
+            ATTENTION_CUSTOM_TYPE,
+            AttentionStore,
+            AttentionWriteDeferred,
+            conversation_identity,
+        )
+
+        async with self._attention_publish_lock:
+            identity = conversation_identity(self._transcript.directory)
             saved = self._transcript.latest_custom(ATTENTION_CUSTOM_TYPE)
-            if (
+            if not (
                 isinstance(saved, dict)
                 and saved.get("conversation_id") == identity
                 and saved.get("eligible", True)
             ):
+                self._attention_republish_due = False
+                return True
+            try:
+                # THE SAME RULE THE BOOT PATH STATES (see `bootstrap_transcript`),
+                # for the same reason: this runs on request paths (the runtime's
+                # refresh op, the mobile handle, the desktop poll) and from a
+                # background ladder that must never take the turn down, and the
+                # caller asked for a RECEIPT, not for a store write. A raise here
+                # failed the whole call -- `snapshot` already suppresses
+                # `sqlite3.Error` around exactly this call for exactly that reason.
+                # Logged rather than silent: the store row is what the sidebar
+                # reads, so a failure to write it is real.
                 await asyncio.to_thread(
-                    store.publish,
+                    AttentionStore().publish,
                     identity,
                     saved["token"],
                     saved["anchor"],
@@ -7218,16 +7954,163 @@ class Session:
                     reason=str(saved.get("reason") or ""),
                     cause=str(saved.get("cause") or ""),
                 )
-            self._attention_restored = True
-        # The in-process TUI never calls ``async_init``, so this is its only
-        # route to the restored cut-off notice. Deduped on the token, so the
-        # runtime path (which calls both) narrates exactly once.
-        await self._journal_restored_cut_off()
-        state = await asyncio.to_thread(store.state, identity)
-        if state != self._attention:
-            self._attention = state
-            self.refresh_frontend_state()
-        return state
+            except AttentionWriteDeferred:
+                # CONTENTION: the ladder's own case, and the latch stays armed for
+                # it.
+                return False
+            except Exception:  # noqa: BLE001 — attention is an observability nicety
+                # A BROKEN STORE IS NOT A BUSY ONE, so the latch goes with this
+                # arm. Returning True without clearing it (review round 1,
+                # MAJOR-2) meant every caller of `refresh_attention` -- the
+                # runtime's 1 Hz loop, the TUI's 1 Hz poll, the mobile handle --
+                # re-read the journal, re-attempted the write and logged an
+                # `exc_info` traceback EVERY SECOND for the life of the session,
+                # which is the per-tick cost this whole ladder exists to bound.
+                # One traceback, one attempt, then the next boot's import owns it.
+                self._attention_republish_due = False
+                logger.warning(
+                    "attention: could not republish the journalled outcome for %s",
+                    identity,
+                    exc_info=True,
+                )
+                return True
+            self._attention_republish_due = False
+            return True
+
+    def _schedule_attention_republish(self, attempt: int = 0) -> None:
+        """Arm the latch and put the republish ladder in flight.
+
+        ARMED ONLY BY A REAL DEFERRAL -- an ``AttentionWriteDeferred`` out of a
+        publish, or a boot-restore meeting one -- never by a tick and never by a
+        guess that the store might be busy. That is what makes the latch a
+        statement about a LOST publication rather than a poll, and what keeps it
+        from costing a warning per tick.
+
+        The ladder runs through ``_spawn_background``, so ``dispose`` cancels it
+        with the rest of the tracked tasks, and it never sleeps on the caller's
+        path: the caller is a turn's ``finally``, where a wait would delay the
+        whole teardown.
+        """
+        self._attention_republish_due = True
+        running = self._attention_republish_task
+        if running is not None and not running.done():
+            # A ladder is already in flight and its rung re-reads the journal, so
+            # it will publish the newest marker too. Stacking a second one would
+            # only double the load on the store this ladder exists to ride out.
+            #
+            # THE IN-FLIGHT LADDER IS NOT ALWAYS GOOD ENOUGH, which is why the
+            # last rung checks this latch again before it gives up: a deferral that
+            # lands while the final rung is publishing would otherwise inherit a
+            # spent budget and be cleared with the latch it just armed (review
+            # round 1, MINOR-2).
+            return
+        self._start_attention_republish(attempt)
+
+    def _start_attention_republish(self, attempt: int) -> None:
+        """Spawn rung ``attempt``, replacing the tracked handle.
+
+        Unconditional, unlike :meth:`_schedule_attention_republish`: a rung spawning
+        its successor is by definition running, so the "is one already in flight?"
+        guard would make every rung after the first a no-op.
+        """
+        task = self._spawn_background(
+            self._run_attention_republish(attempt, ATTENTION_REPUBLISH_DELAYS_S[attempt])
+        )
+        self._attention_republish_task = task
+        if task is not None:
+            task.add_done_callback(self._attention_republish_finished)
+
+    def _attention_republish_finished(self, task: asyncio.Task[Any]) -> None:
+        """Drop the handle when the ladder's last rung is gone (review NIT-1).
+
+        Guarded on identity rather than cleared blindly: a rung that spawned its
+        successor has already replaced the handle, and the successor is the ladder
+        now. Without this the session kept a completed Task -- and its coroutine
+        frame -- alive for its whole life, which is the opposite of how
+        ``_background_tasks`` is kept.
+        """
+        if self._attention_republish_task is task:
+            self._attention_republish_task = None
+
+    async def _run_attention_republish(self, attempt: int, delay: float) -> None:
+        """One rung: wait ``delay``, republish the journal's latest marker, re-arm.
+
+        ``delay`` is passed in rather than read here so that the rung which runs is
+        the one the SHIPPED tuple names -- a test that shrinks
+        ``ATTENTION_REPUBLISH_DELAYS_S`` changes how long the ladder waits, not how
+        many rungs it has.
+        """
+        from local_operator.session.attention import conversation_identity
+
+        # WAITING ON A FIREABLE EVENT, not on the clock alone: a viewer's tick sets
+        # it, so an attached frontend repairs the completion within a tick while the
+        # tick itself never touches the store (review round 1, MAJOR-3). The clear
+        # is deliberately AFTER the wait -- a tick that lands while this rung is
+        # publishing should hurry the NEXT rung along, not be discarded.
+        try:
+            await asyncio.wait_for(self._attention_republish_wake.wait(), timeout=delay)
+        except asyncio.TimeoutError:
+            pass
+        self._attention_republish_wake.clear()
+        # The latch is the whole guard: a newer outcome, a successful republish or
+        # an exhausted ladder clears it, and a rung that wakes to a clear latch
+        # stops rather than publishing a marker that is no longer owed.
+        if not self._attention_republish_due:
+            return
+        # The token this rung is ABOUT, captured before the insert: if the journal
+        # holds a different one when the budget runs out, a newer deferral arrived
+        # underneath this rung and it needs a budget of its own (MINOR-2 below).
+        attempted = self._journalled_attention_token()
+        if await self._republish_journalled_outcome():
+            return
+        delays = ATTENTION_REPUBLISH_DELAYS_S
+        if attempt + 1 < len(delays):
+            self._start_attention_republish(attempt + 1)
+            return
+        # EXHAUSTED -- unless something NEWER arrived while this rung was trying,
+        # in which case that is a fresh fact with a fresh budget and the ladder
+        # restarts rather than clearing the latch it just earned. This is the
+        # MINOR-2 case: a deferral landing inside the last rung used to inherit a
+        # spent budget, be cleared with it, and wait for the next boot while the log
+        # blamed "4 republish attempts". The restart cannot spin: it needs the
+        # journal to hold a DIFFERENT token, which only a real turn appends.
+        current = self._journalled_attention_token()
+        if self._attention_republish_due and current is not None and current != attempted:
+            self._start_attention_republish(0)
+            return
+        # SAID ONCE. The latch is cleared with this line rather than left armed,
+        # because an armed latch is what makes a viewer tick keep asking. What
+        # remains is the old remedy: the marker is durable in the transcript from
+        # before the first publish, so the next boot's `bootstrap_transcript`
+        # re-imports it.
+        self._attention_republish_due = False
+        logger.warning(
+            "attention: the journal still holds a completion outcome for %s after %d "
+            "republish attempts; only the next boot's import will publish it",
+            conversation_identity(self._transcript.directory),
+            len(delays),
+        )
+
+    def _journalled_attention_token(self) -> str | None:
+        """The token of THIS conversation's latest journalled marker, if any.
+
+        The ladder's own bookkeeping only -- which marker a rung is about, and
+        whether a newer one arrived underneath it. `_republish_journalled_outcome`
+        keeps its own read, because what it publishes must be the marker that is
+        latest at the moment of the insert.
+        """
+        from local_operator.session.attention import (
+            ATTENTION_CUSTOM_TYPE,
+            conversation_identity,
+        )
+
+        saved = self._transcript.latest_custom(ATTENTION_CUSTOM_TYPE)
+        if not isinstance(saved, dict):
+            return None
+        if saved.get("conversation_id") != conversation_identity(self._transcript.directory):
+            return None
+        token = saved.get("token")
+        return str(token) if token else None
 
     async def acknowledge_attention(self, token: str) -> dict[str, Any]:
         """Acknowledge the observed outcome, never whichever turn is newest now.
@@ -7254,6 +8137,7 @@ class Session:
         from local_operator.session.attention import (
             ATTENTION_CUSTOM_TYPE,
             AttentionStore,
+            AttentionWriteDeferred,
             conversation_identity,
             provisional_anchor,
         )
@@ -7263,6 +8147,16 @@ class Session:
         if outcome is None:
             return
         self._attention_run_settled = True
+        # A NEWER OUTCOME SUPERSEDES A PENDING REPUBLISH (ordering guard). The
+        # ladder's job is to publish the journal's LATEST marker, so an outcome
+        # arriving now is the newest thing there is; this line stops any rung in
+        # flight from republishing on behalf of the deferral it was armed for. It
+        # is cleared here rather than after the publish because the publish below
+        # re-arms it if the store defers THIS outcome -- the newest fact wins
+        # either way. What makes the ordering hold is the LOCK below, not this
+        # line: a rung that read the journal before this marker existed must not be
+        # able to insert the older completion after it (review round 1, MAJOR-1).
+        self._attention_republish_due = False
         # A delegating parent's first idle boundary is not a finished task.
         delegated = any(job.type == "task" and job.status == "running" for job in self.jobs.list())
         messages = [
@@ -7308,41 +8202,88 @@ class Session:
         else:
             cause = ""
             reason = outcome.error or ""
-        if kind == "complete" and (not messages or delegated):
+        # THE JOURNAL APPEND AND THE INSERT ARE ONE CRITICAL SECTION against this
+        # session's own republish rung (`_republish_journalled_outcome` takes the
+        # same lock). Without it a rung that had already read the journal could lose
+        # the store to THIS newer outcome and then insert the OLDER completion on
+        # top of it: `sequence` is INSERT order, so the older result would become
+        # `MAX(sequence)` -- the sidebar mark, the Active ordering and the
+        # newest-row pointer all moving to the older turn, with the newer one never
+        # unread again once a client acknowledges the highest sequence. That is the
+        # symptom this PR exists to remove, reachable through the window the ladder
+        # opens, so the pair is serialised rather than left to interleave
+        # (review round 1, MAJOR-1).
+        async with self._attention_publish_lock:
+            if kind == "complete" and (not messages or delegated):
+                await self._transcript.append_custom(
+                    ATTENTION_CUSTOM_TYPE,
+                    {
+                        "conversation_id": conversation_identity(self._transcript.directory),
+                        "token": token,
+                        "eligible": False,
+                    },
+                )
+                return
+            # Failure may precede the first assistant message. Its durable outcome
+            # marker, not an unrelated previous answer, is the viewable anchor.
+            anchor = messages[-1].id if kind == "complete" else provisional_anchor(token)
+            # The journal precedes publication: runtime death between these writes
+            # is repaired idempotently on resume, without fabricating a new token.
             await self._transcript.append_custom(
                 ATTENTION_CUSTOM_TYPE,
                 {
                     "conversation_id": conversation_identity(self._transcript.directory),
                     "token": token,
-                    "eligible": False,
+                    "anchor": anchor,
+                    "kind": kind,
+                    "cause": cause,
+                    "reason": reason,
                 },
             )
-            return
-        # Failure may precede the first assistant message. Its durable outcome
-        # marker, not an unrelated previous answer, is the viewable anchor.
-        anchor = messages[-1].id if kind == "complete" else provisional_anchor(token)
-        # The journal precedes publication: runtime death between these writes is
-        # repaired idempotently on resume, without fabricating a new token.
-        await self._transcript.append_custom(
-            ATTENTION_CUSTOM_TYPE,
-            {
-                "conversation_id": conversation_identity(self._transcript.directory),
-                "token": token,
-                "anchor": anchor,
-                "kind": kind,
-                "cause": cause,
-                "reason": reason,
-            },
-        )
-        self._attention = await asyncio.to_thread(
-            AttentionStore().publish,
-            conversation_identity(self._transcript.directory),
-            token,
-            anchor,
-            kind,
-            reason=reason,
-            cause=cause,
-        )
+            try:
+                self._attention = await asyncio.to_thread(
+                    AttentionStore().publish,
+                    conversation_identity(self._transcript.directory),
+                    token,
+                    anchor,
+                    kind,
+                    reason=reason,
+                    cause=cause,
+                )
+            except AttentionWriteDeferred as deferred:
+                # CONTENTION OUTLASTED THE STORE'S BOUNDED RETRY, and the completion
+                # is STILL not lost -- but "the next boot re-imports it" was never
+                # the whole of the remedy and is not the answer here (2026-09-23: a
+                # finished session is idle, an idle session does not boot again,
+                # and two live sessions ended up with a settled marker in the
+                # transcript and no row in the store -- hence no notification and no
+                # sidebar checkmark). The durable journal marker was appended just
+                # above, and the republish ladder armed below retries it AGAINST
+                # THE LIVE STORE from this process, where the operator is actually
+                # waiting. That ordering is what makes deferring honest here rather
+                # than a quiet drop -- and it is why this arm does not re-raise.
+                logger.warning(
+                    "attention: completion outcome for %s deferred; retrying it against "
+                    "the store in-process: %s",
+                    conversation_identity(self._transcript.directory),
+                    deferred,
+                )
+                self._schedule_attention_republish()
+            except Exception:  # noqa: BLE001 — attention is an observability nicety
+                # THE OUTAGE PATH. This runs in the turn's `finally`, on the runtime
+                # an ASGI request handler drives, so a raise here did not merely
+                # lose a receipt: it ended the response with "ASGI callable
+                # returned without completing response" and skipped the rest of the
+                # teardown with it (2026-09-20). Attention bookkeeping outranks a
+                # receipt, not the work the caller asked for -- the same rule, and
+                # the same broad guard, as `bootstrap_transcript` and
+                # `_journal_witnessed_cut_off`. `self._attention` keeps its previous
+                # value rather than being set to a state nothing wrote.
+                logger.warning(
+                    "attention: could not publish the outcome for %s",
+                    conversation_identity(self._transcript.directory),
+                    exc_info=True,
+                )
         # The model has to learn WHY even when this process survives the
         # cut-off (a graceful termination signal aborts the turn and then exits,
         # but a retirement that caught a live turn does not). Deduped on the
@@ -8322,6 +9263,12 @@ class Session:
             # turn, so the schema the model sees is consistent for the whole
             # turn (see ``_reconcile_web_tools`` for why not on the tick).
             self._reconcile_web_tools()
+            # This turn has published nothing yet, so the first provider call
+            # below captures the inventory as it stands NOW — with the web-tool
+            # reconcile above already applied — and every later call in the turn
+            # re-sends that array (see ``_wire_tools`` for why the array may
+            # move only here).
+            self._published_tools = None
             blocks = await self._prepare_system_blocks(commit_state=False)
             self._context.system_blocks = list(blocks)
             self._context.tool_context = self._build_tool_context()
@@ -8338,6 +9285,12 @@ class Session:
                 # waiting for another user message. The loop keeps the turn-start
                 # snapshot as a fallback if this host resolver ever fails.
                 get_system_blocks=self._prepare_system_blocks,
+                # The tools array, re-read per provider step and latched to one
+                # publish per turn; see ``_wire_tools``. The loop's tool
+                # RESOLUTION deliberately keeps reading the live
+                # ``context.tools``, so a tool enabled mid-turn is still
+                # executable on the very call that enabled it.
+                get_tools=self._wire_tools,
                 # Cross-turn seed for the prompt-cache TTL hint: the loop stamps
                 # it on the run's first request and then prefers the counts its
                 # own calls report. Lives here — not on the shared stream fn —
@@ -8780,10 +9733,21 @@ class Session:
         and forgotten on the way to the executor" — the drop the parity test
         exists to catch, avoided by never letting a host configure it at all.
 
-        Defensive about a transcript with no usable ``.directory``, matching
-        how the id derivation tolerates one: a host with no session has no
-        scratch area, and that is a ``None`` rather than an exception on the
-        path every turn walks. Cost is one join and one ``parent.name`` compare.
+        THE ROOT IS NOT CREATED HERE, deliberately, and the reason is a pinned
+        invariant next door: ``Transcript(defer_materialise=True)`` exists so a
+        speculative runtime — a viewer's first keystroke warms a session before
+        the user has committed to a message — leaves NOTHING on disk, and this
+        method runs during construction (``_build_tool_context``), so a mkdir
+        here would defeat it. ``test_birth_selection_is_durable_only_when_work_
+        is_admitted`` fails on exactly that assertion. The root is instead created
+        where the path is HANDED OVER — ``scratchpad.ensure_scratchpad_dir``, called
+        by the two spawn sites — which is the moment that matters: a session's own
+        ``write``/``edit`` create their parents anyway, and a shell cannot, so the
+        only channel that needed the directory to pre-exist is the one that now
+        gets it made before it is told the path.
+
+        Cost is one join and one ``parent.name`` compare; the write is the spawn
+        site's.
         """
         from local_operator.scratchpad import scratchpad_root
 
@@ -8832,6 +9796,14 @@ class Session:
             resolve_internal_url=self._skill_resolver,
             request_approval=self._tool_approval_gate(),
             ask_user=self._ask_user,
+            # The BOUND METHOD, not its value: this context is a snapshot taken
+            # once per turn, so a stored boolean would freeze the answer for the
+            # whole turn and a re-read per call is what the browser flow needs
+            # (``_bridge_access`` asks at TEXT-RENDER time: immediately after the
+            # ``request_access`` RPC, and at the END of an ``await_access`` wait,
+            # so a surface that attached while the model waited is reported as
+            # attached).
+            attached_probe=self._goal_state.is_interactive,
             wake_scheduler=self._wake,
             on_todos_changed=self.refresh_frontend_state,
             browser=self._browser,
@@ -9069,9 +10041,11 @@ class Session:
         reach the UI, but without this the MODEL never learned the
         difference between "quota exhausted" and "my own bug" — the next
         prompt (and a resumed session) resumed blind. The incident is
-        classified (rate-limit / auth / provider / network / context / MCP),
-        appended to the LIVE context so the very next turn sees it, and
-        persisted so ``--resume`` replays it.
+        classified (rate-limit / auth / provider / network / context), appended
+        to the LIVE context so the very next turn sees it, and persisted so
+        ``--resume`` replays it. NOT the place for a notice that is not about a
+        failed turn: an MCP server going unavailable is
+        :meth:`journal_mcp_unavailable`.
 
         ``rendered`` overrides the classifier's own text for the one caller
         whose incident is harness-authored rather than provider-derived: a
@@ -9089,10 +10063,13 @@ class Session:
         incident is bookkeeping ABOUT a session, never work done IN it. It is
         journalled at boot, or in the wake of a turn that failed or was cut off
         — never as work a turn carried. Every non-boot caller is that shape:
-        :meth:`_on_mcp_incident` fires from the MCP breaker at any point in a
-        session, the pending-incident flush in :meth:`_run_turn` reports a
-        provider failure during a turn, and :meth:`_journal_cut_off_once`
-        narrates a cut-off. A turn that DID carry work has already advanced the
+        :meth:`_journal_cut_off_once` narrates a cut-off and the
+        pending-incident flush in :meth:`_run_turn` reports a provider failure
+        during a turn. (The MCP breaker used to be the third, firing from any
+        point in a session; it now writes
+        :meth:`journal_mcp_unavailable`, whose record is bookkeeping for the
+        same reason and carries its own, mirrored clock note.) A turn that DID
+        carry work has already advanced the
         clock through its own persisted rows, so an incident landing after it
         can only restamp the transcript with a lie — telling the ``/resume``
         picker the session was just worked in when nothing was. Measured before
@@ -9305,18 +10282,22 @@ class Session:
     def _redact_tool_result_text(self, text: str) -> str:
         """``LoopConfig.redact_tool_result``. Mask, then REPORT what was masked.
 
-        The masking half is :meth:`VariableStore.redact_with_hits`: exact values
+        The masking half is :meth:`VariableStore.redact_with_report`: exact values
         first, then the credential-SHAPE pass, with every matched credential
         registered back as a value to scrub for the rest of the session.
 
-        The reporting half is the shape labels, and it exists because a shape
-        match is the ONLY signal that a credential the session never knew about
-        reached a tool result — a live production DSN was found in a transcript
-        with nothing anywhere saying it had happened, and every such miss today
-        is discovered by accident. One :data:`SESSION_INCIDENT_MESSAGE_TYPE` row
-        names the tool and the shapes, so it becomes a rotation ticket rather
-        than a footnote. Labels only: a notice carrying the credential would be
-        the leak it exists to report.
+        The reporting half is that report — the shape labels AND the
+        classification — and it exists because a shape match is the ONLY signal
+        that a credential the session never knew about reached a tool result: a
+        live production DSN was found in a transcript with nothing anywhere saying
+        it had happened, and every such miss today is discovered by accident. One
+        :data:`SESSION_INCIDENT_MESSAGE_TYPE` row names the tool and the shapes, so
+        it becomes a ticket rather than a footnote — but ONLY for the case that is
+        a ticket: readable material the model can see. A value the pass masked
+        whole is contained, nothing was leaked to the transcript, and it files
+        nothing at all (the operator's instruction: no incident indicated anywhere
+        unless something was actually leaked). Labels only, never values: a notice
+        carrying the credential would be the leak it exists to report.
 
         Called with text alone, so the tool identity rides
         :func:`local_operator.harness.redaction.current_tool_source` — published
@@ -9331,37 +10312,96 @@ class Session:
         if store is None:
             return text
         try:
-            scrubbed, labels = store.redact_with_hits(text)
+            # Cast rather than probed, like ``tools/builtin._redact_tool_text`` does
+            # for the same call: ``getattr`` yields ``object``, and this is the
+            # store's own public surface, so the Callable annotation is the honest
+            # description of what is being looked for.
+            report_aware = cast(
+                Callable[[str], tuple[str, ShapeReport]] | None,
+                getattr(store, "redact_with_report", None),
+            )
+            if callable(report_aware):
+                scrubbed, report = report_aware(text)
+                labels, reached_model = list(report.labels), report.reached_model
+            else:
+                # A store that predates the classification: labels only, so the
+                # escalated reading is the only one its report supports. Claiming
+                # containment from a list that cannot express exposure would be the
+                # silent downgrade this classification exists to prevent.
+                scrubbed, labels = store.redact_with_hits(text)
+                reached_model = bool(labels)
         except Exception:  # noqa: BLE001 — see the docstring's never-raises note
             logger.warning("credential shape pass failed; withholding this text", exc_info=True)
             return "[output withheld: this session's credential redaction sink could not be read]"
-        if labels:
-            self._queue_shape_incident(labels)
+        # The filing decision belongs to the SINK, not to either producer: it is the
+        # one place every surface funnels through (this result hook, the pipe filter
+        # and the live-text path, both of which report through
+        # :func:`local_operator.harness.redaction.report_shape_hits`), so "an incident
+        # means an exposure" cannot drift between them. Called with the report as it
+        # is: a contained hit is dropped inside, before the tool lookup or the dedupe
+        # set is touched.
+        self._queue_shape_incident(labels, reached_model)
         return scrubbed
 
-    def _queue_shape_incident(self, labels: list[str]) -> None:
-        """Record one shape-masked result for the boundary flush. Never raises."""
+    def _queue_shape_incident(self, labels: list[str], reached_model: bool) -> None:
+        """Record one EXPOSED shape hit for the boundary flush. Never raises.
+
+        AN INCIDENT IS AN EXPOSURE, and nothing else. A credential the shape pass
+        masked WHOLE never reached this session's context, so there is nothing to
+        rotate and nothing the model has to be told: it files nothing (the
+        operator's instruction — "as long as something wasn't actually leaked to
+        the transcript we shouldn't get a session incident indicated anywhere"), and
+        a notice shown for a non-event is the noise that teaches an operator to
+        skip the one that is real.
+
+        THIS IS THE ONLY GATE, deliberately. Every surface reports through this
+        method — the session installs it as the reporter
+        (``set_shape_hit_reporter``) and the pipe filter and live-text path reach it
+        via :func:`~local_operator.harness.redaction.report_shape_hits` — so one
+        predicate here covers all three and a fourth added later cannot forget it.
+        The PROTECTION is not here and must not become conditional, and it now
+        reaches every masking surface: ``VariableStore.redact_with_report``
+        registers each hit for containment before any of this runs, and the bash
+        pipe filter — which masks bytes before a result exists, so no later pass
+        over that result can match the value — registers the hits it holds through
+        ``VariableStore.register_shape_hits_for_containment`` as it masks them.
+        Agent review R1/E1: without that second registration path a credential the
+        pipe removed was left unregistered for the rest of the session, and a
+        later bare reuse of it printed it in the clear while this gate correctly
+        said nothing.
+        """
+        if not reached_model:
+            return
         try:
             tool, summary = current_tool_source()
-            key = (tool, tuple(labels))
+            # The classification is part of the identity: the first result of a
+            # turn can be contained and a later one from the same tool can carry
+            # readable material, and deduping on (tool, labels) alone would drop
+            # the rotation notice as a duplicate of the informational one —
+            # exactly the case where silence costs the most.
+            key = (tool, tuple(labels), reached_model)
             if key in self._reported_shape_incidents:
                 return
             self._reported_shape_incidents.add(key)
-            self._pending_shape_incidents.append((tool, labels, summary))
+            self._pending_shape_incidents.append((tool, labels, summary, reached_model))
         except Exception:  # noqa: BLE001 — reporting must not break the turn
             logger.debug("shape incident queue failed", exc_info=True)
 
     async def _flush_shape_incidents(self) -> None:
         """Journal the queued shape reports. Called at the turn boundary."""
         pending, self._pending_shape_incidents = self._pending_shape_incidents, []
-        for tool, labels, summary in pending:
+        for tool, labels, summary, reached_model in pending:
             try:
-                await self.journal_shape_incident(tool, labels, summary)
+                await self.journal_shape_incident(
+                    tool, labels, summary, reached_model=reached_model
+                )
             except Exception:  # noqa: BLE001 — a notice is not worth a turn
                 logger.warning("could not journal a credential-shape incident", exc_info=True)
 
-    async def journal_shape_incident(self, tool: str, labels: list[str], summary: str) -> None:
-        """Tell the model (and the transcript) that a result was masked.
+    async def journal_shape_incident(
+        self, tool: str, labels: list[str], summary: str, *, reached_model: bool = True
+    ) -> None:
+        """Tell the model (and the transcript) that READABLE material was masked.
 
         Rendered rather than classified: this is not a FAILURE, and running it
         through :func:`~local_operator.incidents.classify_incident` would attach
@@ -9369,20 +10409,41 @@ class Session:
         turn that ended for its own reasons — the same reason a credential
         change and a model switch carry their own formatter.
 
-        Persisted, unlike an MCP recovery: what it records (a credential reached
-        a tool result, it is contained for this session, and it must be rotated)
-        is still true in a resumed session, and the value stays contained
+        ``reached_model`` is the severity, and its default is the ESCALATED one so
+        that a caller which does not know cannot make the quieter claim. In-tree it
+        is now always True: both producers (the session result hook and
+        ``harness.redaction.report_shape_hits``, which every other surface goes
+        through) gate on it, because a credential masked WHOLE was never leaked to
+        the transcript and so is no incident at all. The quieter wording is kept in
+        the formatter rather than deleted — it is the formatter's own contract, and
+        a caller that deliberately has something to say about a contained hit
+        should not have to invent the words — and what the operator asked for is
+        silence on the contained case, not the deletion of the sentence.
+
+        Persisted, unlike an MCP recovery: what it records (a credential reached a
+        tool result, and either it was contained there or it is readable in this
+        context) is still true in a resumed session, and the value stays contained
         because the store re-registers it from the transcript's own redaction.
         """
         from local_operator.incidents import format_shape_incident_message
 
         if self._disposed:
             return
-        text = format_shape_incident_message(tool, labels, summary)
+        text = format_shape_incident_message(tool, labels, summary, reached_model=reached_model)
         message = CustomMessage(
             custom_type=SESSION_INCIDENT_MESSAGE_TYPE,
             attribution="system",
-            details={"text": text, "tool": tool, "shapes": list(labels), "summary": summary},
+            details={
+                "text": text,
+                "tool": tool,
+                "shapes": list(labels),
+                "summary": summary,
+                # Recorded, and NOTHING reads it today (agent review R1, nit): it
+                # is there so the classification is a field on the record rather
+                # than something a future reader has to re-derive by matching the
+                # prose, which is the fragile thing this change exists to remove.
+                "reached_model": reached_model,
+            },
         )
         try:
             async with self._journal_lock:
@@ -9393,28 +10454,125 @@ class Session:
             return
         # THE LIVE RECEIPT, and the reason this method exists in the shape it
         # does: a row written to the transcript and to the model's context is not
-        # a rotation ticket — the operator has to SEE it. Measured before this
+        # a ticket — the operator has to SEE it. Measured before this
         # emit: the row reached the model, persisted, and painted on no operator
         # surface at all, live or on replay.
         #
-        # `warning` ink: a credential that reached a tool result is a state the
-        # operator has to act on, not a receipt they can skim past.
+        # `warning` ink for whichever classification reaches this method, and
+        # in-tree today that is only the escalated one: the contained hit is
+        # dropped at `_queue_shape_incident`, the single gate, so this comment is
+        # about the INK of a severity this path still carries by text. The
+        # severity difference lives in the wording rather than in the ink, because
+        # a quieter ink for the contained case is a DESIGN decision on the notice
+        # row rather than something this change should make by the back door.
         try:
             await self._emit(NoticeEvent(text=text, kind="warning", headline="credential masked"))
         except Exception:  # noqa: BLE001 — a paint failure is not a turn failure
             logger.debug("could not emit the shape-incident receipt", exc_info=True)
 
-    async def journal_mcp_recovery(self, server: str, tool_count: int) -> None:
-        """Tell the MODEL an MCP server it was told was broken is usable again.
+    async def journal_mcp_unavailable(self, server: str, reason: str) -> None:
+        """Tell the MODEL an MCP server's tools are gone — a WARNING, not a failure.
 
-        The symmetric counterpart to :meth:`journal_incident`'s ``mcp``
-        category. Without it, an operator who fixed a server mid-session —
-        ``/mcp login minerva-qa``, or simply waiting for the backoff reconnect
-        the incident text itself promises — left the model holding a death
-        notice, and its hint "its tools are gone ... Do not call its tools",
-        for the rest of the session. The tools were genuinely back
-        (``refresh_tools`` swaps the inventory mid-turn) but the model had been
-        told not to use them and had no reason to re-check.
+        The record exists because the model keeps calling tools it believes are
+        there, and because the OPERATOR is the one who has to act: the reason
+        line carries the remedy (``/mcp reauth <server>``, a suspended
+        reconnect breaker), which is what lets the model name the server and
+        the fix instead of retrying in a tight loop.
+
+        NOT a ``session_incident``, and that is the whole point of the dedicated
+        type. An MCP server going away does not end a turn, and the incident
+        shape says it did — ``Incident.render`` tails every message with "This
+        is why the previous turn ended." Measured live on 2026-09-20 against
+        ``minerva-qa``, whose expired grant told the operator a turn had died
+        that had not. The text comes from
+        :func:`~local_operator.incidents.format_mcp_unavailable_message` for the
+        reason the credential, session-shape and model-switch records carry
+        their own formatter: a message that is not about a failure must not be
+        pushed through the classifier, which would also stamp it with a
+        ``suggested action:`` line written for a failed turn.
+
+        PERSISTED, unlike :meth:`journal_mcp_recovery`, and the asymmetry is
+        deliberate rather than an oversight. The row is a historical fact every
+        surface already renders, and the two stale directions do not cost the
+        same: a resumed session that reconnects contradicts "unavailable" with a
+        live tool inventory the operator can see, and the recovery record clears
+        it, where a stale "its tools are usable" sends the model at tools that
+        are not there. The accepted consequence — the un-superseded warning
+        replays with no recovery after it — is the one :meth:`journal_mcp_recovery`
+        already documents; it is not re-argued here.
+
+        ``preserve_mtime`` so an unavailable server does not restamp the
+        session's activity clock: this is bookkeeping ABOUT a session, never
+        work done in it, and the ON-DISK effect depends on the type being in
+        ``transcript.BOOKKEEPING_CUSTOM_TYPES`` — the writer honours the request
+        only for a batch of those (see ``Transcript._write_entries``). The
+        boot-time case is the one that was measured:
+        ``FINDING-resume-clock.md`` caught expired MCP grants moving a session's
+        displayed age by 5.1 h, and those grants arrive through this method now.
+
+        Parked, never spliced: ``_append_or_park_journal`` is what keeps a
+        notice arriving mid-tool-batch from producing
+        ``assistant(tool_use) -> user -> tool_result`` and bricking the session.
+        Delivery is therefore at the next tool boundary of the running turn.
+
+        Takes ``_journal_lock`` so a recovery fired straight after cannot
+        overtake this row: this method awaits a transcript write and
+        :meth:`journal_mcp_recovery` awaits nothing, so without the lock the
+        superseding notice lands FIRST and leaves the warning as the last word.
+
+        An empty ``server`` is DROPPED, and that is a deliberate divergence from
+        :meth:`journal_incident`, which journalled it (review round 1, R3). The
+        row's whole subject is the server: a record reading "MCP server '' is
+        unavailable" tells the model nothing it can act on and would be the only
+        journal entry in the transcript with a blank subject, so the writer
+        refuses it. The manager still arms ``_incident_announced`` off its own
+        ``sink(...)`` call, so an empty name would leave a recovery armed with no
+        warning behind it — unreachable because :meth:`journal_mcp_recovery`
+        carries the SAME ``not server`` guard, so an empty name drops BOTH rows
+        and nothing is ever announced for a warning that was not written. That
+        symmetry is the load-bearing fact, not the server table: ``mcp/config.py``
+        takes whatever keys the server map holds and enforces no non-empty name,
+        so an empty key is configurable. If a caller is ever added that can pass
+        one, that arming has to move rather than this guard being relaxed.
+        """
+        from local_operator.incidents import format_mcp_unavailable_message
+
+        if self._disposed or not server:
+            return
+        text = format_mcp_unavailable_message(server, reason)
+        message = CustomMessage(
+            custom_type=SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
+            attribution="system",
+            details={
+                "text": text,
+                "server": server,
+                # Bounded like :meth:`journal_incident`'s ``raw``: the RENDERED
+                # line is clipped to 200 characters, so an unbounded copy here
+                # would persist exactly what the reader is not shown — a whole
+                # provider error envelope, most of it a restatement (review
+                # round 1, R2).
+                "reason": reason[:1000],
+            },
+        )
+        try:
+            async with self._journal_lock:
+                await self._transcript.append_message(message, preserve_mtime=True)
+                self._append_or_park_journal(message)
+        except OSError:
+            logger.warning("could not journal MCP unavailability", exc_info=True)
+
+    async def journal_mcp_recovery(self, server: str, tool_count: int) -> None:
+        """Tell the MODEL an MCP server it was told was unavailable is usable again.
+
+        The symmetric counterpart to :meth:`journal_mcp_unavailable`. Without
+        it, an operator who fixed a server mid-session — ``/mcp login
+        minerva-qa``, which is now the ONLY thing that restores an expired
+        grant, or the backoff reconnect while it is still running — left the
+        model holding a death notice, and its advice "Its tools are not callable
+        until the user restores it, and the agent should not retry them in a
+        loop.", for the rest of the session. The tools were
+        genuinely back (``refresh_tools`` swaps the inventory mid-turn) but the
+        model had been told not to use them and had no reason to re-check.
 
         LIVE CONTEXT ONLY, deliberately: there is no
         ``_transcript.append_message`` here and the type is absent from
@@ -9425,11 +10583,13 @@ class Session:
         for servers whose grants expire. The comment at
         ``_PERSISTABLE_CUSTOM_TYPES`` carries the full argument.
 
-        Known and accepted consequence: the un-superseded INCIDENT does still
-        persist, so a resumed session replays "authorization failed" with no
-        recovery after it. That is today's behaviour, not a regression, and the
-        live tool inventory is the honest correction. Deleting the persisted
-        incident was rejected — the transcript is append-only by design.
+        Known and accepted consequence: the un-superseded WARNING does still
+        persist, so a resumed session replays "is unavailable: its tools are
+        gone" with no recovery after it. That is the same trade
+        :meth:`journal_mcp_unavailable` makes from the other side, and it is
+        deliberate rather than overlooked — the live tool inventory is the
+        honest correction. Deleting the persisted warning was rejected — the
+        transcript is append-only by design.
 
         Parked, never spliced: ``_append_or_park_journal`` is what keeps a
         notice arriving mid-tool-batch from producing
@@ -9459,9 +10619,21 @@ class Session:
             self._append_or_park_journal(message)
 
     def _on_mcp_incident(self, server: str, reason: str) -> None:
-        """MCP manager hook (breaker trips): journal without blocking the
-        manager's reconnect loop."""
-        self._spawn_background(self.journal_incident(f"MCP server '{server}': {reason}"))
+        """MCP manager hook (breaker trips, grant expires): journal without
+        blocking the manager's reconnect loop.
+
+        The NAME is kept even though what it journals is now a warning rather
+        than an incident: it is the ``on_incident`` hook the manager installs
+        (``session_factory.py``), and renaming the sink would be a change to the
+        manager's contract for a vocabulary fix.
+
+        Fire-and-forget, and that is the manager's requirement rather than a
+        preference: every call site fires this from inside the connect/reconnect
+        machinery (``_register_connection``'s settle path, the breaker, the
+        post-gate auth failure) and a raising sink there would stall the
+        reconnect loops. ``_spawn_background`` logs and drops instead.
+        """
+        self._spawn_background(self.journal_mcp_unavailable(server, reason))
 
     def _on_mcp_recovery(self, server: str, tool_count: int) -> None:
         """MCP manager hook (a previously-announced server reconnected).
@@ -9670,10 +10842,14 @@ class Session:
         Fires only while the list is MOVING. A model that yields twice with a
         byte-identical list is telling you it cannot proceed — usually it needs
         a decision only the user can make — and nudging it again would burn the
-        loop's ``max_paused_turn_continuations`` budget (default 8), end the turn
-        with a continuation-limit warning notice, and delay the user's answer by
-        up to eight model calls. Any progress earns another nudge; a fresh user
-        turn re-arms the latch (see ``_run_turn_pipeline``).
+        loop's ``max_follow_up_continuations`` budget (its own, and the larger
+        one: 64 against the 8 the steering/aside producers share), end the turn
+        with a continuation-limit notice, and delay the user's answer by up to
+        that many model calls. The larger budget is safe precisely because the
+        latch above is what really bounds this producer — a chatty parent can no
+        longer spend the allowance a still-moving list needs. Any progress earns
+        another nudge; a fresh user turn re-arms the latch (see
+        ``_run_turn_pipeline``).
 
         The nudge it returns is a point-in-time assertion and stops being sent
         the moment the list moves — see :meth:`_live_todo_reminders`, which
@@ -11776,11 +12952,16 @@ class Session:
 
     @staticmethod
     def _lowest_effort(spec: ModelSpec) -> ModelSpec:
-        """``spec`` on the bottom rung of its own effort ladder, if it has one."""
+        """``spec`` on the cheapest REAL rung of its own effort ladder, if it has one.
+
+        The ``auto`` sentinel is skipped: it is a delegation, not a depth, so
+        the "lowest" rung is the cheapest member that names a real level.
+        """
         efforts = spec.reasoning_efforts
-        if not efforts or spec.reasoning_effort == efforts[0]:
+        lowest = cheapest_real_rung(efforts)
+        if lowest is None or spec.reasoning_effort == lowest:
             return spec
-        return spec.model_copy(update={"reasoning_effort": efforts[0]})
+        return spec.model_copy(update={"reasoning_effort": lowest})
 
     async def _one_shot_complete(self, system: str, prompt: str) -> str:
         """One non-tool provider call used to produce the compaction summary.
@@ -11913,7 +13094,10 @@ class Session:
             # working turn builds. See the docstring for why this is a cache
             # read rather than a full re-process, and why Anthropic puts the
             # turn's own tool_choice on the wire rather than this "none".
-            tools=list(self._context.tools),
+            # ``_side_channel_tools``, not ``context.tools``: the turn's array is
+            # latched for its whole turn, so the LIVE inventory can be a step
+            # ahead of the last request the turn actually sent.
+            tools=self._side_channel_tools(),
             tool_choice="none",
             # Same prefix as the turn, so the same TTL: the session stamps its
             # own hint here because the shared stream fn holds none (a child
@@ -12036,10 +13220,12 @@ class Session:
             purpose="compaction_advisor",
             system_blocks=list(blocks),
             messages=messages,
-            # Live tools, same as an aside: the tools block is the FRONT of the
-            # provider cache prefix, so sending [] would change position 0 and
-            # force a full re-process at write price instead of a cache read.
-            tools=list(self._context.tools),
+            # Same array as the running turn (not []): the tools block is the
+            # FRONT of the provider cache prefix, so sending [] would change
+            # position 0 and force a full re-process at write price instead of a
+            # cache read. ``_side_channel_tools`` because the turn's array is
+            # latched for its turn — see that method.
+            tools=self._side_channel_tools(),
             tool_choice="none",
             replayable=True,
             isolated=False,
@@ -14040,9 +15226,16 @@ class Session:
         appended tool costs a prompt-cache prefix miss on every later call of
         the session (AGENTS.md, "the tool-surface footprint ladder").
 
-        Never mid-turn: the loop reads ``context.tools`` per model call, and a
-        tool removed between a model's call and its dispatch comes back "Tool
-        not found" — the per-call gate in the tool gives a better answer.
+        Never mid-turn: the loop RESOLVES against ``context.tools`` per model
+        call, and a tool removed between a model's call and its dispatch comes
+        back "Tool not found" — the per-call gate in the tool gives a better
+        answer. The MCP shrink path (``session_factory.refresh_selected``,
+        reached from ``activate`` and ``on_tools_changed``) ACCEPTS that same
+        refusal rather than deferring the inventory, and the two policies differ
+        because the transports do: a web tool that is still resolvable answers
+        for itself through its per-call gate, where a server that dropped away
+        has nothing left to answer with — see :meth:`_reconcile_tool_inventory`
+        and ``refresh_selected``'s own docstring.
 
         The dirty flag is cleared only once the reconcile has actually HAPPENED
         (review round 1, R5). Cleared up front, a pass that returned early

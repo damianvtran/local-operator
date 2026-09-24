@@ -1179,6 +1179,24 @@ class ToolContext(BaseModel):
     # was never shown the question. ``None`` means the tool is not advertised
     # at all (createIf), for the same reason ``wake_scheduler`` is.
     ask_user: AskUserFn | None = None
+    #: Live read of "an interface is attached to the SESSION this tool is running
+    #: in" — ``RuntimeServer.attached_surfaces`` seen through the session's own
+    #: goal-state probe, so it is re-read per call rather than snapshotted per
+    #: turn. The read SITE matters and is the contract's other half: the browser
+    #: flow calls it where the text is rendered, so an ``await_access`` that waited
+    #: reports the attachment at the end of the wait, not at the start (round 1,
+    #: MINOR 3 — it used to be read once before the wait while three comments
+    #: claimed otherwise). ``None`` means no session stands behind this context (a
+    #: bare tool test), which reads as attached: the pre-existing default, and the
+    #: direction every uncertain answer must fall (a wrong "attached" costs a
+    #: parked gate, a wrong "unattached" costs a question the operator was ready
+    #: to answer).
+    #:
+    #: NOT a synonym for :attr:`has_ui`, which says a host wired the tool surface
+    #: at all, and NOT evidence that anybody is looking right now: an attached
+    #: pane holds a question a person answers when they return. See
+    #: ``docs/design/attached-interface-signal.md``.
+    attached_probe: Callable[[], bool] | None = None
     # Optional host hook that makes a mid-session credential change VISIBLE to
     # the model (``Session.journal_credential_change``). The ``ask`` tool
     # stores secret answers through ``context.variables`` directly, so the
@@ -1471,6 +1489,53 @@ class MessageUpdateEvent(AgentEvent[Literal["message_update"]]):
 class MessageEndEvent(AgentEvent[Literal["message_end"]]):
     type: Literal["message_end"] = "message_end"
     message: AgentMessage
+
+
+class ReasoningDeltaEvent(AgentEvent[Literal["reasoning_delta"]]):
+    """A fragment of the model's PRIVATE reasoning channel reached the harness.
+
+    The wire clients have always emitted ``StreamReasoningDelta``
+    (``providers/clients.py``), but the loop had no case for it and dropped it:
+    nothing about the model's thinking reached any front end, so the whole
+    reasoning phase was a still screen. Measured, on the same question: the
+    first reasoning fragment arrives 455 ms before the first text token on a
+    102-token prompt, and 1,750 ms before it on a 142k-token cached prompt --
+    and 86.5% of deepseek-flash turns reason at all. This event is that channel
+    made visible, and nothing more.
+
+    DISPLAY-ONLY is the contract, and it is load-bearing in three places:
+
+    * it never enters an assistant message's content, so it never reaches the
+      transcript, the compaction summariser, or the next request's messages;
+    * it is never written back as ``reasoning_content`` on the wire -- the echo
+      deepseek 400s on, and the reason ``providers.clients._replay_chat_message``
+      validates provenance at all;
+    * ``Content`` (``TextContent | ImageContent``) is deliberately NOT extended
+      with a reasoning block. A content type would make reasoning legal
+      transcript state, which is exactly what the two points above forbid; the
+      event channel is the whole of its representation, so no consumer can
+      accidentally persist it by appending content.
+
+    ``message_id`` is the assistant message streaming when the fragment
+    arrived, so a consumer can group one model call's reasoning and retire it
+    when the answer starts. ``delta`` is the ONE fragment, never the accumulated
+    text: reasoning arrives token by token, and a re-dumped accumulation is what
+    made the desktop's frames oversize (``session/runtime/server.py``).
+
+    A consumer that does not know this event renders exactly what it rendered
+    before -- nothing.
+
+    The ``type`` token is deliberately the wire fragment's OWN name
+    (``StreamReasoningDelta``): this event is a 1:1 republication of that
+    channel, so the shared word reads as one thing. The two are never seen by
+    one dispatcher -- the wire union is consumed inside the harness's stream
+    branch and this union only downstream of it -- so the name is not an
+    ambiguity to resolve later.
+    """
+
+    type: Literal["reasoning_delta"] = "reasoning_delta"
+    message_id: str = ""
+    delta: str
 
 
 class HistoryDeltaEvent(AgentEvent[Literal["history_delta"]]):
@@ -1792,6 +1857,14 @@ class SubagentEndEvent(AgentEvent[Literal["subagent_end"]]):
     status: str  # completed | failed | cancelled
     result_text: str | None = None
     error_text: str | None = None
+    #: Why the child was CUT OFF, when it was: the machine token
+    #: (``incidents.CUT_OFF_CAUSES``) and its rendered operator sentence. Both
+    #: ``""`` for a clean completion or a deliberate stop, which is also what an
+    #: OLD child runtime produces — the same backwards-compatibility story
+    #: ``AgentEndEvent.cut_off`` states at length, and the reason an additive
+    #: field here needs no ``PROTOCOL_VERSION`` bump.
+    cut_off: str = ""
+    cut_off_cause: str = ""
 
 
 class CompactionStartEvent(AgentEvent[Literal["compaction_start"]]):
@@ -1948,6 +2021,25 @@ class LoopConfig(BaseModel):
         Field(default=None, exclude=True)
     )
 
+    # The tools array to send NOW, re-read immediately before every provider
+    # call. Supplying this does NOT re-read ``LoopContext.tools`` per call — it
+    # supersedes it, and the host is what decides how often the array may move.
+    # That is the whole point: the array rides AHEAD of the conversation in the
+    # same cache prefix, so on a strict contiguous prefix cache an appended tool
+    # reprices every message behind it, measured at 38.77% of sent tokens
+    # re-sent on live traffic where the leading region moved mid-turn (32 of 35
+    # such pairs were the tools array). A host with live tools wires this to a
+    # per-turn latch: one publish per turn, so an enable that lands while the
+    # turn is already running reaches the array at the NEXT turn.
+    #
+    # Tool RESOLUTION is deliberately not routed through here. It keeps reading
+    # the live ``LoopContext.tools``, which is what makes a tool enabled
+    # mid-turn still executable on the call that a mid-turn enable makes
+    # possible: the array is what the model was shown, not what it may run.
+    # ``None`` keeps the historical behaviour — the live context array, re-read
+    # on every call — for embedders that do not publish tools this way.
+    get_tools: Callable[[], Sequence["AgentTool"]] | None = Field(default=None, exclude=True)
+
     # Required: render transcript messages (incl. custom entries) into the
     # LLM-visible list sent to the provider.
     convert_to_llm: Callable[[list[AgentMessage]], list[Message]] = Field(exclude=True)
@@ -2086,7 +2178,19 @@ class LoopConfig(BaseModel):
     deadline: float | None = None
 
     # Guardrails.
+    # Steering + asides: parent/peer-driven re-entries at the outer-loop yield
+    # boundary. Each is a NEW instruction rather than a retry, so the budget is
+    # generous, but it stays BOUNDED — a producer that speaks faster than the
+    # child consumes is the runaway this exists for.
     max_paused_turn_continuations: int = 8
+    # Follow-ups (the todo reminder): self-limiting already, because the
+    # producer latches on a byte-identical list (``Session._todo_continuation``
+    # returns ``[]`` while the list does not move). This budget is a backstop
+    # against a model that keeps the latch open with trivial edits, not the main
+    # bound, so it is deliberately the larger one — and it is SEPARATE from the
+    # steering/aside budget so a chatty parent cannot spend a child's todo
+    # allowance (the defect the split exists to fix).
+    max_follow_up_continuations: int = 64
     # Bound live tool work even when the model emits a very wide batch.
     max_parallel_tools: int = Field(default=DEFAULT_MAX_PARALLEL_TOOLS, ge=1)
 
@@ -2799,11 +2903,17 @@ class StreamReasoningDelta(BaseModel):
     output" without it, and the two call for opposite responses (re-prompt the
     model / fix the client).
 
-    Emitted on the reasoning channel only. It is deliberately NOT reasoning
-    rendered anywhere user-visible: private reasoning never enters the
-    transcript or the model-visible context, and no consumer is required to
-    act on this event. It exists so a caller that wants to know whether the
-    model produced anything can ask.
+    Emitted on the reasoning channel only, and the harness turns every fragment
+    into an ``ReasoningDeltaEvent`` (the loop's stream dispatch), which is
+    DISPLAY-ONLY: it reaches the front ends -- the TUI's transient block, the
+    SSE ``reasoning.delta`` name, the desktop frames, the mobile projection and
+    exec's JSON channel -- and never enters the transcript, the model-visible
+    context, or the next request. So private reasoning stays private on the
+    wire while the user can watch the phase happen. No consumer is REQUIRED to
+    act on it: a consumer that does not simply renders what it rendered before,
+    and the two that know the event and still drop it (a subagent's bounded
+    trajectory, the record-keyed SSE channel) do so deliberately, because
+    neither surface has a row to put it in.
     """
 
     type: Literal["reasoning_delta"] = "reasoning_delta"

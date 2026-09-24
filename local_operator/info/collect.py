@@ -51,6 +51,7 @@ from local_operator.info.model import (
     SessionsInfo,
     SubagentLine,
 )
+from local_operator.session.runtime.types import reported_subagent_count
 
 logger = logging.getLogger(__name__)
 
@@ -258,54 +259,13 @@ def collect_process(
     )
 
 
-#: Above this, a published count is treated as corrupt rather than as a
-#: measurement. Deliberately far above anything this codebase can produce —
-#: ``DEFAULT_MAX_RUNNING_JOBS`` is 15 and the count is a ``len()`` over a
-#: bounded roster — so it can only reject a foreign or damaged record, never a
-#: real fleet. It is a RENDERING ceiling, not a belief about how many subagents
-#: can exist: six digits still fit the narrow rung.
-_ABSURD_COUNT = 999_999
-
-
-def _reported_count(value: Any) -> int | None:
-    """A published subagent count, or ``None`` when the record did not report one.
-
-    ``SessionRecord.from_json`` filters keys and calls the constructor — it does
-    no type validation — so every field on a record is whatever the writer put
-    in the file. That is fine for the strings and bools already read here, which
-    only ever get formatted, but these two are the first record fields this
-    module does ARITHMETIC on, and arithmetic is where a foreign value stops
-    being cosmetic:
-
-    * a ``str`` or ``list`` raises ``TypeError`` inside the roll-up. ``_safe``
-      guards whole SECTIONS, so one bad record cost the entire sessions block —
-      no table, no runtimes row, and no lower-bound caveat — on a screen whose
-      whole purpose is describing a host that is already broken. Before these
-      fields existed there was no arithmetic here and the same record listed
-      normally, so that was a regression rather than a new limitation.
-    * a merely-numeric wrong value does not raise at all, which is worse: a
-      float printed ``4.5 total — 1 sessions + 3.5 subagents`` and a negative
-      printed ``-1 subagents``, both as measured fact.
-
-    Anything that is not a non-negative ``int`` is therefore treated as NOT
-    REPORTED rather than sanitised into a number. That is this screen's own
-    contract applied one layer out: an unusable value is not a measurement, and
-    calling it ``None`` folds it into the lower-bound caveat, which already
-    exists to say the total is missing terms. ``bool`` is excluded explicitly —
-    it is an ``int`` subclass, so ``True`` would otherwise count as one subagent.
-
-    A count above ``_ABSURD_COUNT`` is refused the same way. It is not that the
-    number is wrong — it is that a 31-digit figure renders 81 cells wide and
-    overflows every frame, including the abbreviated rung that exists to serve
-    narrow ones, because the shed compresses the LABELS and not the FIGURE.
-    Treating it as unreported keeps a corrupt record from breaking the layout
-    of the screen you open when something is already broken.
-    """
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        return None
-    if value > _ABSURD_COUNT:
-        return None
-    return value
+#: The count rule itself lives with the fields it validates —
+#: ``session.runtime.types.reported_subagent_count`` — because three readers apply
+#: it (this module's fleet tally, the sidebar's ``resume._counted``, and the
+#: desktop listing's response model) and they must agree about which values are
+#: believable (review round 1, R4). Its docstring carries this screen's own case
+#: for refusing a value rather than sanitising it: one corrupt record cost the
+#: entire sessions block here, because ``_safe`` guards whole sections.
 
 
 def collect_sessions(
@@ -360,6 +320,15 @@ def collect_sessions(
     stamp = time.time() if now is None else now
     live_pids = [rec.pid for rec, state in scanned if state == "live"]
     measured = usage_fn(live_pids)
+    # Read ONCE for the whole listing, beside the usage measurement and for the same
+    # reason: the set answers a per-row question and a per-row file scan would be the
+    # cost ``session_rows`` already pays once (``fired_pids``/``held_pids`` each read
+    # every dump's text). The row builder below derives the same bit from the same
+    # reader, and the two must agree — ``session_rows`` is ``stall_held``'s published
+    # form and this field is what the panel paints from.
+    from local_operator.session.runtime import stall_watchdog
+
+    held_pids = stall_watchdog.held_pids()
 
     lines: list[SessionLine] = []
     for rec, state in scanned:
@@ -388,19 +357,48 @@ def collect_sessions(
                 # mid-table — `lop sessions` is the surface a host mid-upgrade
                 # is inspected WITH.
                 leaving=getattr(rec, "leaving", "") or "",
+                # The same getattr defaulting, for the same mid-upgrade reason: a
+                # record written by an OLDER runtime has no window field, and
+                # ``lop sessions`` is the surface a host mid-upgrade is inspected
+                # WITH. The pair is printed in the row's own column and is what a
+                # rotation script reads to tell "which of these is moving".
+                updating=getattr(rec, "updating", "") or "",
+                # The failed half of the same window, defaulted identically. A record
+                # written by a runtime that stayed after its bound expired carries it,
+                # and the reader must be able to see that the session is still on the
+                # build it loaded (design review round 1, D1).
+                update_failed=getattr(rec, "update_failed", "") or "",
+                # WHAT THE LAST BEAT MEASURED, defaulted through getattr for the
+                # same mid-upgrade reason as every live-state field above: a record
+                # written by an OLDER runtime has no such field, and ``None`` there
+                # means "this build does not report" rather than a zero reading.
+                beat_lag_s=getattr(rec, "beat_lag_s", None),
+                cpu_since_beat_s=getattr(rec, "cpu_since_beat_s", None),
                 detached=bool(getattr(rec, "detached", False)),
+                # THE THIRD STATE, carried onto the LINE so a rendered surface can show
+                # it (design review round 1, D1): the row dict has had it since this
+                # branch, and until the panel read it the only place it existed was the
+                # JSON.
+                # FENCED ON LIVENESS (design review round 2, D8): ``held_pids`` is a
+                # scan of the dump files and says nothing about whether the process is
+                # still there, so a held runtime that a person later stopped kept the
+                # phrase "still running, needs you" on a row whose pid is gone — the
+                # panel rendered ``bound held`` beside ``stale``. A held dump is a
+                # live-state fact, so it is published only for a pid the registry does
+                # not call stale.
+                stall_held=rec.pid in held_pids and state != "stale",
                 # Which build each runtime is running, for diagnosing skew
                 # across a host that replaces its install several times a day.
                 # Same getattr defaulting as the live-state fields above.
                 version=getattr(rec, "version", "") or "",
                 source_ref=getattr(rec, "source_ref", "") or "",
-                # NOT coerced to 0 — see ``_reported_count``. The default is
+                # NOT coerced to 0 — see ``reported_subagent_count``. The default is
                 # ``None`` and stays ``None``: a runtime predating these fields
                 # has not told us it has no subagents, and ``or 0`` here would
                 # silently turn every older peer into a confident zero in the
                 # fleet total.
-                subagents_running=_reported_count(getattr(rec, "subagents_running", None)),
-                subagents_queued=_reported_count(getattr(rec, "subagents_queued", None)),
+                subagents_running=reported_subagent_count(getattr(rec, "subagents_running", None)),
+                subagents_queued=reported_subagent_count(getattr(rec, "subagents_queued", None)),
                 is_self=self_pid is not None and rec.pid == self_pid,
             )
         )
@@ -616,6 +614,14 @@ def session_rows(
     this order, so the expectation is updated in the same change.
     """
     info = collect_sessions(root, include_stored=include_stored, stored_limit=stored_limit)
+    # THE FLEET'S OWN STALL BOUND, and what it left behind. ONE scan of the log
+    # directory for the whole listing rather than one per row: the marker has to
+    # be read out of each candidate file, so a per-row call would re-glob and
+    # re-read the same directory once per session.
+    from local_operator.session.runtime import stall_watchdog
+
+    fired = stall_watchdog.fired_pids()
+    held = stall_watchdog.held_pids()
     return [
         {
             "state": line.state,
@@ -673,6 +679,53 @@ def session_rows(
             # root per session. ``lop sessions`` also prints it (its own LEAVING
             # column, present only when some row carries one).
             "leaving": line.leaving,
+            # WHETHER THIS RUNTIME IS MOVING TO THE BUILD ON DISK RIGHT NOW, and to
+            # which one: appended at the END for the same reason the two keys above
+            # are — the established key order is a published contract and this
+            # EXTENDS it. Empty string, never ``None``, matching its neighbours so
+            # no consumer branches on key existence per row.
+            #
+            # It rides here rather than only on the record for the reason the
+            # ``leaving`` key spells out: the record is the runtime's own file, and
+            # a consumer diagnosing a fleet reads this table or its JSON.
+            "updating": line.updating,
+            # THE FAILED WINDOW, appended after the field above for the same
+            # append-only reason. ``lop sessions`` renders the cell from the pair of
+            # these two through ``types.update_phase``, so a row whose only news is a
+            # failed update lists as such instead of as an ordinary idle session — the
+            # gap design review round 1 (D1) measured against the real renderer.
+            "update_failed": line.update_failed,
+            # WHAT THE LAST BEAT MEASURED: seconds of no progress, and this
+            # process's own CPU time over the same gap. Appended at the END for the
+            # same append-only reason as the keys above — the established key order
+            # is a published contract and this EXTENDS it. They ride here because
+            # ``wedged`` alone is one ambiguous word for three situations (starved
+            # by its own work / starved by the host / not running), and these are the
+            # two readings that tell them apart; ``None`` means a runtime that does
+            # not report them, exactly as ``subagents_queued``'s ``None`` does.
+            "beat_lag_s": line.beat_lag_s,
+            "cpu_since_beat_s": line.cpu_since_beat_s,
+            # WHERE THIS SESSION'S OWN STALL DUMP IS, when its bound fired: the
+            # path, or ``None`` for every row whose runtime never tripped it.
+            # Appended at the END for the same append-only reason as the keys
+            # above. It rides here because the dump is the ONE artifact a reader
+            # needs after a freeze and the runtime that wrote it is gone by
+            # definition — a listing is where they arrive (``stall_watchdog``
+            # owns the naming, so the path is never composed twice).
+            "stall_dump": str(stall_watchdog.dump_path(line.pid)) if line.pid in fired else None,
+            # THE THIRD STATE, on the surface a person looks at first. A row whose
+            # bound fired is two different situations now, and this is what tells
+            # them apart: WITHOUT it the runtime is gone and the dump is a
+            # post-mortem; WITH it the runtime SURVIVED the fire, is still holding
+            # whatever it was doing, and the way out is ``lop stop`` — so a reader
+            # who cannot see this would take a stalled-but-alive session for a dead
+            # one, which is the operator's question answered backwards. Appended
+            # after ``stall_dump`` for the append-only reason every key above it
+            # states, and ``False`` rather than ``None`` when no bound fired: this
+            # is a question with a yes/no answer on every row.
+            # ...and fenced the same way here, so the two surfaces cannot disagree
+            # about a dead pid's leftover dump (design review round 2, D8).
+            "stall_held": line.pid in held and line.state != "stale",
         }
         for line in info.lines
     ]
@@ -883,12 +936,14 @@ def collect_env(live: "LiveState", errors: list[tuple[str, str]]) -> EnvInfo:
     from local_operator.paths import config_dir
 
     # Same guard as `collect_agents`, for the same reason (review round 1, B1).
-    # The fallback is `_UNREADABLE_ROOT`, NOT `Path(".")`: `CredentialManager`
-    # CREATES its store on construction, so a relative fallback made this
-    # read-only diagnostic write a `credentials.env` into whatever directory the
-    # user happened to be in — observed for real while testing the B1 guard.
-    # A diagnostic that mutates the machine it is describing is the same class
-    # of fault as `check_latest()` rewriting the cache, which §2.1 bans.
+    # The fallback is `_UNREADABLE_ROOT`, NOT `Path(".")`: the retired
+    # `CredentialManager` CREATED a `credentials.env` on construction, so a
+    # relative fallback made this read-only diagnostic write one into whatever
+    # directory the user happened to be in — observed for real while testing the
+    # B1 guard. A diagnostic that mutates the machine it is describing is the
+    # same class of fault as `check_latest()` rewriting the cache, which §2.1
+    # bans, and the guard stays now that the recreator is deleted (PR2b): the
+    # equivalent future mistake is one line away in any path-rooted helper.
     root = _safe("env.config_dir", config_dir, _UNREADABLE_ROOT, errors)
 
     def browser() -> tuple[str, str, bool]:
@@ -945,11 +1000,10 @@ def collect_env(live: "LiveState", errors: list[tuple[str, str]]) -> EnvInfo:
         mobile_installed=installed,
         mobile_healthy=healthy,
         mobile_port=port,
-        # KEY NAMES ONLY. ``get_credentials`` returns SecretStr values and this
-        # screen is pasted into issues; a name answers the diagnostic question
-        # ("is it even set?") and a value answers nothing this screen asks.
-        # Read through ``_credential_key_names`` because constructing the manager
-        # CREATES its store — see that function.
+        # KEY NAMES ONLY. A name answers the diagnostic question ("is it even
+        # set?") and a value answers nothing this screen asks; this screen is
+        # pasted into issues. Read through ``_credential_key_names``, which opens
+        # the store read-only and creates nothing — see that function.
         credential_keys=_safe("env.credentials", lambda: _credential_key_names(root), (), errors),
         guides=_safe("env.guides", lambda: len(discover_guides()), 0, errors),
         skills=live.skills,
@@ -957,17 +1011,27 @@ def collect_env(live: "LiveState", errors: list[tuple[str, str]]) -> EnvInfo:
 
 
 def _credential_key_names(root: Path) -> tuple[str, ...]:
-    """Credential KEY NAMES from the store, read WITHOUT creating it.
+    """Credential KEY NAMES from the encrypted store, read WITHOUT creating it.
 
-    ``CredentialManager.__init__`` calls ``_ensure_config_exists()``, which makes
-    the config directory and an empty ``credentials.env`` (and tightens the mode
-    of a loose file it finds). On this path that is a WRITE on a read: ``/info``
-    exists to describe a host — including a broken one — and leaving new state
-    on it is the same fault class as ``check_latest()`` rewriting the cache,
-    which this module's docstring bans outright. The read-only construction and
-    the "only ``ENOENT`` means the store is absent, every other failure raises"
-    policy both live on the class now (``CredentialManager.read_key_names``);
-    what is left here is the collector's own policy about the ROOT.
+    The store is the consolidated home for credentials — an operator's agent
+    secrets and the provider-class rows a login or ``lop credential update``
+    writes — so this probe reads it directly (the same enumeration ``lop secret
+    list`` performs). Provider rows are reported in their env-key spelling
+    (``LOP_PROVIDER_OPENROUTER_API_KEY`` → ``OPENROUTER_API_KEY``), matching the
+    credentials route, so the name answers the diagnostic question directly.
+
+    The legacy ``credentials.env`` names were unioned here during the migration;
+    that union is GONE (PR2a) — the file is no longer a credential source, so a
+    name only the file holds would be one no reader could resolve.
+
+    Nothing here is created or rewritten. On this path a WRITE on a read would
+    be the fault: ``/info`` exists to describe a host — including a broken one —
+    and leaving new state on it is the same fault class as ``check_latest()``
+    rewriting the cache, which this module's docstring bans outright. So the
+    store is opened only when it already exists, and the plaintext
+    ``credentials.env`` reader this module used to reach is GONE (PR2a) — the
+    file is no longer a credential source at all, and PR2b deleted the module
+    that held its reader.
 
     ``_require_root`` FIRST, and it is load-bearing rather than defensive. The
     previous form short-circuited on ``is_file()``, which is False on the
@@ -977,20 +1041,50 @@ def _credential_key_names(root: Path) -> tuple[str, ...]:
     about a host it had never managed to look at (review round 2, F2). Raising
     here is the disclosure ``profiles`` and ``teams`` already get.
     """
-    from local_operator.credentials import CredentialManager
+    resolved = _require_root(root)
+    names: set[str] = set()
+    # The encrypted store, when there is one. An absent store is "no secrets
+    # recorded" and returns nothing rather than being created here.
+    from local_operator.secrets.access import open_store
+    from local_operator.secrets.errors import SecretStoreError
+    from local_operator.secrets.keys import store_path
+    from local_operator.secrets.store import PROVIDER_SECRET_PREFIX
 
-    return tuple(CredentialManager.read_key_names(_require_root(root)))
+    # An errno comparison rather than ``is_file()``/``exists()``, for a reason
+    # worth keeping in view: a path probe answers
+    # ``False`` for `ENOENT` AND for `ENOTDIR`, `ELOOP` and `EACCES`, so an
+    # untraversable root or a symlink loop would read as "no store" and this
+    # probe would state an authoritative empty list about a host it never looked
+    # at. ``ENOENT`` alone is "no store"; every other errno is raised so ``_safe``
+    # names the field in the degraded block.
+    store_file = store_path(resolved)
+    try:
+        store_file.stat()
+    except FileNotFoundError:
+        return ()
+    try:
+        for record in open_store(resolved).list():
+            name = record.name
+            if name.startswith(PROVIDER_SECRET_PREFIX):
+                name = name[len(PROVIDER_SECRET_PREFIX) :]
+            names.add(name)
+    except (SecretStoreError, OSError, ValueError):
+        # A damaged store is still a host that has one; reporting nothing rather
+        # than inventing names is the honest degraded answer.
+        pass
+    return tuple(sorted(names))
 
 
 #: Stand-in config root for when `config_dir()` itself cannot be resolved.
 #: Deliberately a path that cannot exist and cannot be created, so a probe whose
-#: constructor would otherwise MATERIALISE a store (``CredentialManager`` writes
-#: a ``credentials.env``) fails into `_safe` and is reported as degraded,
-#: instead of silently writing into the process's current directory.
+#: constructor would otherwise MATERIALISE a store fails into `_safe` and is
+#: reported as degraded, instead of silently writing into the process's current
+#: directory.
 #:
-#: What `/info` may leave behind on the host it describes is the credential
-#: store: it is neither created nor re-tightened, because the probe reads
-#: through ``CredentialManager.read_key_names`` (review round 2, F3). The
+#: What `/info` may leave behind on the host it describes is nothing
+#: credential-shaped: the credential store is neither created nor re-tightened,
+#: because the probe opens it only when it already exists (review round 2, F3),
+#: and the legacy ``credentials.env`` file is no longer read at all (PR2a). The
 #: registry scan this same snapshot runs is a different case and is accepted as
 #: it stands — ``registry.scan`` is the ONE implementation ``lop sessions`` also
 #: calls, and reading a shared registry means doing its housekeeping: it creates
@@ -998,8 +1092,8 @@ def _credential_key_names(root: Path) -> tuple[str, ...]:
 #: gone. The claim here is only that this read does not write the things it
 #: reads, not that an absolute no-touch of the host is achievable.
 #:
-#: The credential probe still needs this sentinel even though it can no longer
-#: CREATE a store: on an unresolvable root it must RAISE (see
+#: The credential probe still needs this sentinel even though it no longer
+#: reads the plaintext file: on an unresolvable root it must RAISE (see
 #: :func:`_credential_key_names`) so ``_safe`` names it in the degraded block,
 #: rather than reporting an authoritative empty list about a host it never
 #: looked at. ``AgentRegistry`` and the other probes still construct their

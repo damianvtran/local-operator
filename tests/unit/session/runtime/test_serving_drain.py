@@ -26,6 +26,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.buildwatch import UpdateLock
 from local_operator.harness.types import ImageContent
 from local_operator.harness.wake import WakeSchedule
 from local_operator.mobile.command_reservation import CommandReservations
@@ -84,6 +85,10 @@ class DrainHost:
     """
 
     begin_drain = ServingSessionHandle.begin_drain
+    # Bound for the same reason as the latch it undoes: the release is what makes the
+    # session take work again after an abandoned handover (``process._abandon_move``),
+    # and a rig that re-implemented it would pin nothing about the real latch.
+    end_drain = ServingSessionHandle.end_drain
     begin_retire = ServingSessionHandle.begin_retire
     # The EXIT rung that writes what the two latches recorded, bound here for
     # the same reason they are: the note's placement is the behaviour under
@@ -106,6 +111,16 @@ class DrainHost:
         self._draining = False
         self._exit_committed = False
         self._disposing = False
+        # The UPDATE WINDOW's state, which the production ``__init__`` owns and the
+        # admission paths read beside the drain latch above (``serving`` docstring,
+        # ``types.UPDATING``). Empty here: every cell in this file is about a drain,
+        # and the window's own cells live in ``test_update_window.py`` — but the
+        # attributes have to exist, because ``prompt``/``steer``/``receive_peer_message``
+        # are the REAL methods and a host that omits them is a host that raises.
+        self._updating = ""
+        self._update_failed = ""
+        self._update_lock = UpdateLock()
+        self._applied_update = ""
         self._fold = SimpleNamespace(note_peer_message=lambda *_a, **_k: None)
 
     def may_refresh(self) -> str:
@@ -824,6 +839,11 @@ class PromptHost(DrainHost):
     prompt = ServingSessionHandle.prompt
     steer = ServingSessionHandle.steer
     is_busy = ServingSessionHandle.is_busy
+    # The admitted path's own queue drain, bound for the same reason the latch is: a
+    # release that let a prompt through the refusal check but stalled in a re-implemented
+    # drain would pass a weaker assertion than the one this file is making.
+    _drain_prompt_queue = ServingSessionHandle._drain_prompt_queue
+    _observe_prompt_drain = ServingSessionHandle._observe_prompt_drain
 
     def __init__(self, session: PromptSession, *, busy: bool = True) -> None:
         super().__init__(session, busy=busy)
@@ -842,6 +862,12 @@ class PromptHost(DrainHost):
             note_user_message=lambda *_a, **_k: None,
         )
         self._projection = SimpleNamespace(queued_count=0)
+        # The auto-naming hop the ADMITTED path takes (``serving.prompt``), stubbed to a
+        # no-op rather than modelled: it titles the conversation from the first prompt,
+        # which is nothing this file asserts about, and the cells that get past the drain
+        # check are exactly the ones that need it to exist
+        # (``test_a_released_drain_admits_a_prompt_instead_of_spooling_it``).
+        self._maybe_name_conversation = lambda _text: None
 
 
 class PromptSession(FakeSession):
@@ -863,6 +889,16 @@ class PromptSession(FakeSession):
 
     def steer(self, text: str, images: Any = None, **kwargs: Any) -> None:
         self.steered.append(text)
+
+    def subscribe(self, handler: Any) -> Any:  # noqa: ANN401
+        """The turn pipeline's end-observer subscription, stubbed to a no-op.
+
+        This double has no event bus, and the cell that reaches here
+        (``test_a_released_drain_admits_a_prompt_instead_of_spooling_it``) asserts the
+        ADMISSION — ``prompt_calls`` — not the turn's outcome. Returning the unsubscribe
+        callable is the whole contract the pipeline reads.
+        """
+        return lambda: None
 
 
 def _prompt_host(tmp_path: Path, *, busy: bool = True) -> tuple[PromptHost, PromptSession]:
@@ -896,6 +932,38 @@ async def test_a_prompt_during_the_drain_is_spooled_for_the_successor(tmp_path: 
     assert rows[0].source == SOURCE_USER, "the successor must not deliver this as a peer's"
     assert rows[0].command_id == "p" * 8, "the admission identity has to survive the handover"
     assert rows[0].wake is True, "a user prompt asks for a turn"
+
+
+@pytest.mark.asyncio
+async def test_a_released_drain_admits_a_prompt_instead_of_spooling_it(tmp_path: Path) -> None:
+    """After ``end_drain`` a message is the RUNTIME'S OWN work again, not a successor's.
+
+    THE OTHER HALF OF THE ABANDON (``process._abandon_move`` calls ``end_drain``, then
+    keeps serving), and the half a released latch can quietly lose: a handle that
+    stopped draining but still spooled would tell the operator their message was
+    queued for a build that is not coming, while the runtime they are talking to is
+    perfectly able to run it. The durable admission is therefore asserted BOTH ways —
+    the turn starts here, and the inbox stays empty, so the successor cannot deliver a
+    second copy of the same row.
+    """
+    host, session = _prompt_host(tmp_path)
+    assert host.begin_drain("runtime-retired", "declined 3x") is True
+    assert host.end_drain() is True
+    assert host.end_drain() is False, "the release has to be idempotent for its caller"
+
+    await host.prompt("deploy the fix", command_id="p" * 8)
+    # The admission is a QUEUE drain on the handle's own loop, so the run has to be
+    # waited out rather than assumed: awaiting the handle's own task is the event this
+    # cell is about, not a sleep.
+    if host._prompt_drain_task is not None:
+        await asyncio.wait_for(asyncio.shield(host._prompt_drain_task), timeout=5)
+
+    assert session.prompt_calls == [
+        "deploy the fix"
+    ], "the released handle refused or spooled a message it should have run"
+    assert (
+        peek_inbox(session.transcript.directory) == []
+    ), "the released handle spooled the message for a successor that is not coming"
 
 
 @pytest.mark.asyncio
@@ -1048,3 +1116,152 @@ async def test_a_steer_during_the_drain_is_still_admitted(tmp_path: Path) -> Non
     assert detail == "steering queued", detail
     assert session.steered == ["actually, the other way"], "the session never saw it"
     assert peek_inbox(session.transcript.directory) == [], "a steer is not deferred"
+
+
+# -- the promise a spooled row carries, and who keeps it -------------------------
+#
+# THE CIRCUIT, and these cells are the writer half of it. The receipt a spooling
+# runtime hands back says the NEXT runtime runs the message, and this process
+# cannot start one: it holds the transcript lease until it exits. Measured
+# 2026-09-21: a session retired for a newer build with rows in its spool and no
+# successor came for them. So the writer records the turn as owed
+# (``wakes.spooled``), which is what makes the wake supervisor — the one
+# always-on process whose job is "make a runtime exist" — raise one.
+
+
+def _spooled_store(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Point the owed-turn store at this test's own config dir.
+
+    ``_spool_for_successor`` reads ``paths.config_dir()``, the same seam every
+    other store on this path uses, so the redirect is that one function and the
+    test never touches a real store.
+    """
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: config_dir)
+    return config_dir
+
+
+@pytest.mark.asyncio
+async def test_a_spooled_peer_wake_records_the_turn_the_successor_owes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.wakes.spooled import read_spooled_turn
+
+    host, session = _prompt_host(tmp_path)
+    config_dir = _spooled_store(monkeypatch, tmp_path)
+    assert host.begin_drain("runtime-retired", "declined 3x") is True
+
+    receipt = await host.receive_peer_message("run the census", wake=True)
+
+    assert receipt == SPOOL_RECEIPT_WAKE, receipt
+    record = read_spooled_turn(config_dir, session.transcript.directory.name)
+    assert record is not None, "the receipt promised a turn; nothing recorded it"
+    assert record["rows"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_spooled_quiet_note_records_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``wake=False`` asked for a deferral, not for a runtime to be raised.
+
+    The receipt says so ("read when it next opens"), and raising a 283 MB process
+    for a note nobody is waiting on is the trade ``deliver_peer_message`` argues
+    against. This cell pins that the obligation follows the SAME line as the
+    receipt, so the two can never disagree about what the sender bought.
+
+    IT MUST GO THROUGH THE SPOOLING WRITER, and the first revision of this cell
+    did not (QA round 1, Q-1): ``receive_peer_message(wake=False)`` in the default
+    ``mailbox`` mode delivers to the session rather than spooling, so the empty
+    store it asserted was empty for the wrong reason — a raising stub in
+    ``_spool_for_successor`` left it passing. ``mode="steer"`` is the reachable
+    shape that DOES reach the writer with ``wake=False``, which is what makes this
+    a test of the writer's condition rather than of the caller's.
+    """
+    from local_operator.session.runtime.inbox import peek_inbox
+    from local_operator.wakes.spooled import read_spooled
+
+    host, session = _prompt_host(tmp_path)
+    config_dir = _spooled_store(monkeypatch, tmp_path)
+    assert host.begin_drain("runtime-retired", "declined 3x") is True
+
+    receipt = await host.receive_peer_message("no rush", mode="steer", wake=False)
+
+    assert receipt != SPOOL_RECEIPT_WAKE
+    assert len(peek_inbox(session.transcript.directory)) == 1, "the row really was spooled"
+    assert read_spooled(config_dir) == {}, "a quiet note owes no turn"
+
+
+@pytest.mark.asyncio
+async def test_the_owners_own_prompt_records_the_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner's words are the strongest form of the claim: the receipt RUNS it."""
+    from local_operator.wakes.spooled import read_spooled_turn
+
+    host, session = _prompt_host(tmp_path)
+    config_dir = _spooled_store(monkeypatch, tmp_path)
+    assert host.begin_drain("runtime-retired", "declined 3x") is True
+
+    receipt = await host.prompt("deploy the fix", command_id="q" * 8)
+
+    assert receipt == SPOOL_RECEIPT_PROMPT, receipt
+    record = read_spooled_turn(config_dir, session.transcript.directory.name)
+    assert record is not None, "the receipt says the next runtime will run it"
+    assert record["rows"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_spooled_user_prompt_records_the_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner's own prompt owes a turn even though it carries no ``wake``.
+
+    ``SPOOL_RECEIPT_PROMPT`` promises the successor RUNS it, so the obligation
+    cannot follow ``wake`` alone: a ``SOURCE_USER`` row is turn-asking by its own
+    source, which is the second half of the writer's condition.
+    """
+    from local_operator.wakes.spooled import read_spooled_turn
+
+    host, session = _prompt_host(tmp_path)
+    config_dir = _spooled_store(monkeypatch, tmp_path)
+    assert host.begin_drain("runtime-retired", "declined 3x") is True
+
+    await host.prompt("deploy the fix", command_id="r" * 8)
+
+    record = read_spooled_turn(config_dir, session.transcript.directory.name)
+    assert record is not None
+    assert record["rows"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_spooled_turn_raises_the_process_that_can_run_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R5-1: recording an obligation is not enough — the READER has to exist.
+
+    The wake supervisor is normally DOWN (it exits 0 when nothing is fireable and
+    the LaunchAgent leaves it down), and every pre-existing call to
+    ``ensure_supervisor_installed`` is on the schedule-persist path, which a
+    spooled peer message never touches. So a spooled turn had to raise the one
+    process that can act on it, or the receipt still belonged to nobody on a quiet
+    store. Asserted at the call site, because ``install._config_lives_in_real_home``
+    refuses a sandbox store by design, so no isolated end-to-end cell can see it.
+    """
+    from local_operator.wakes import install
+    from local_operator.wakes import spooled as spooled_store
+
+    host, session = _prompt_host(tmp_path)
+    config_dir = _spooled_store(monkeypatch, tmp_path)
+    calls: list[Path] = []
+    monkeypatch.setattr(install, "ensure_supervisor_installed", lambda root: calls.append(root))
+    assert host.begin_drain("runtime-retired", "declined 3x") is True
+
+    assert await host.receive_peer_message("run the census", wake=True) == SPOOL_RECEIPT_WAKE
+    assert calls == [config_dir], "a spooled wake must raise its reader"
+
+    calls.clear()
+    await host.receive_peer_message("no rush", mode="steer", wake=False)
+    assert calls == [], "a quiet note raises nobody"
+    assert spooled_store.read_spooled(config_dir) != {}, "…and the wake record is still there"

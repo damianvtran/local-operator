@@ -100,9 +100,18 @@ def test_connected_rows_outrank_unconnected_ones():
 def test_substring_matches_beat_subsequence_ones():
     """``opus`` is a SUBSEQUENCE of ``claude-sonnet-4`` (o-p-u-s in anthropic/
     claude/sonnet), so ranking the fallback first led the list with a different
-    model than the one whose name the user typed."""
+    model than the one whose name the user typed.
+
+    SUBSTRING LEADS; the subsequence row is RETAINED below it. The old assertion
+    here was `== ["anthropic/claude-opus-5"]`, which passed because the base code
+    chose `pool = exact or fuzzy` and EVICTED every fuzzy row whenever one exact
+    match existed. That eviction is the R1-1 defect — it drops rows the user could
+    see from the answer entirely — so membership is now "matched anything at all"
+    and this test pins the ORDER (the substring match first), not the absence of
+    the subsequence row.
+    """
     rows = [_row("anthropic/claude-sonnet-4"), _row("anthropic/claude-opus-5")]
-    assert [row.selector for row in rank_rows(rows, "opus")] == ["anthropic/claude-opus-5"]
+    assert [row.selector for row in rank_rows(rows, "opus")][0] == "anthropic/claude-opus-5"
 
 
 def test_subsequence_fallback_still_resolves_typos_and_elisions():
@@ -162,6 +171,110 @@ def test_version_is_the_first_number_not_the_largest():
     assert [row.selector for row in rank_rows(rows, "gpt")][0] == "openai/gpt-4.1"
 
 
+def test_the_radient_auto_router_leads_the_auto_query_and_the_empty_one():
+    """The measured ordering the operator asked for, in both sort branches.
+
+    BEFORE this rule the picker led with the two OpenRouter rows on the query
+    ``auto``, because the ``-score`` rung put them there: ``openrouter/auto``
+    scores 7 to ``radient/auto``'s 6 (the OpenRouter id carries the query twice as
+    a contiguous run) and the version keys collide at ``(-0.0, -0.0, …)``. The
+    OpenRouter rows thus SCORE HIGHER, which is exactly why the preference rung
+    sits above ``-score``: a rung below it changes nothing here. Asserted with no
+    query as well, because ``/model`` opens on the empty sort and the two surfaces
+    must agree.
+    """
+    rows = [
+        _row("openrouter/openrouter/auto", aggregated=True),
+        _row("openrouter/openrouter/auto-beta", aggregated=True),
+        _row("radient/auto", aggregated=True),
+        _row("radient/openrouter/auto-beta", aggregated=True),
+    ]
+    for query in ("auto", ""):
+        assert rank_rows(rows, query)[0].selector == "radient/auto", query
+
+
+def test_the_preference_is_query_independent_not_scoped_to_the_literal_auto():
+    """The rung lifts the route for any query it matches, and that is the intent.
+
+    A partial query is the only place the width shows: ``aut`` scores
+    ``openrouter/openrouter/auto`` 5 to ``radient/auto``'s 4, so a rung that only
+    fired on the literal ``auto`` would rank the OpenRouter row first here. The
+    operator's reading ("Radient Auto comes first at the top") is that it lead
+    whenever it is offered, so this pins the wider behaviour rather than leaving it
+    as an undocumented consequence of the insertion point. See
+    ``_preferred_router_rank``.
+    """
+    rows = [
+        _row("openrouter/openrouter/auto", aggregated=True),
+        _row("radient/auto", aggregated=True),
+    ]
+    assert _score("openrouter/openrouter/auto", "aut") == 5
+    assert _score("radient/auto", "aut") == 4
+    assert [row.selector for row in rank_rows(rows, "aut")][0] == "radient/auto"
+
+
+def test_the_preference_lifts_only_the_radient_auto_route():
+    """``radient/openrouter/auto`` is a router id reached through Radient's namespace
+    and is deliberately NOT elevated: it stays below the OpenRouter rows.
+
+    This is why the rung names the ROUTE rather than reusing ``is_meta_route_id``,
+    which is true of this id too (see ``_preferred_router_rank``) — reusing it
+    would lift this row as well, a second behavioural change the preference did not
+    ask for.
+    """
+    rows = [
+        _row("openrouter/openrouter/auto", aggregated=True),
+        _row("radient/openrouter/auto", aggregated=True),
+        _row("radient/auto", aggregated=True),
+    ]
+    assert [row.selector for row in rank_rows(rows, "auto")] == [
+        "radient/auto",
+        "openrouter/openrouter/auto",
+        "radient/openrouter/auto",
+    ]
+
+
+def test_the_preference_is_provider_scoped_not_a_bare_id_test():
+    """``ollama/auto`` is a model a user can simply have and must not be lifted.
+
+    The same gate ``is_meta_route_id`` carries: the router id means something
+    only inside the Radient namespace, so a bare ``model_id == "auto"`` test would
+    silently reorder a local model the user named.
+    """
+    rows = [_row("ollama/auto"), _row("openai/gpt-5")]
+    assert [row.selector for row in rank_rows(rows, "auto")] == [
+        "ollama/auto",
+    ]
+    # And, with a same-tier neighbour that sorts before it alphabetically, it
+    # keeps the ordinary order rather than being raised.
+    rows = [_row("anthropic/auto"), _row("ollama/auto")]
+    assert [row.selector for row in rank_rows(rows, "auto")] == [
+        "anthropic/auto",
+        "ollama/auto",
+    ]
+
+
+def test_the_preference_does_not_resurrect_a_dropped_or_tiered_row():
+    """The preference is a sort rung, not a filter bypass.
+
+    It cannot lift a row the caller filtered out (ranking never sees it), and it
+    cannot lift an UNCONNECTED ``radient/auto`` above a connected row: the
+    connected tier stays first, so a login-required router does not lead a list
+    of models that run.
+    """
+    rows = [
+        _row("radient/auto", aggregated=True, connected=False),
+        _row("openai/auto"),
+    ]
+    assert [row.selector for row in rank_rows(rows, "auto")] == [
+        "openai/auto",
+        "radient/auto",
+    ]
+    # A decision-only row is dropped before any ordering, preference included —
+    # so even a query that matches nothing else leaves ``[]``, not the router.
+    assert [row.selector for row in rank_rows([_row("typesafe/auto")], "auto")] == []
+
+
 def test_a_query_matching_nothing_returns_nothing():
     """An empty result is a real answer; the picker says "no matching models"."""
     assert rank_rows([_row("openai/gpt-5")], "zzzz") == []
@@ -170,3 +283,213 @@ def test_a_query_matching_nothing_returns_nothing():
 def test_score_reports_none_for_a_non_subsequence():
     assert _score("anthropic/claude-opus-5", "zzz") is None
     assert _score("anthropic/claude-opus-5", "opus") is not None
+
+
+def test_the_listings_human_name_is_a_match_target():
+    """REPRODUCTION (D2): `grok 4.7` must resolve the row it names.
+
+    The operator typed the model's HUMAN name, which the listing publishes
+    (`SpaceXAI: Grok 4.7`) while the selector glues the same words differently
+    (`x-ai/grok-4.7`). Scoring the selector alone returned an EMPTY list for a
+    model that was demonstrably in the catalogue, and the same for
+    `GPT 6 Luna` / `openai/gpt-6-luna`.
+    """
+    rows = [
+        ModelRow(
+            provider="openrouter",
+            model_id="x-ai/grok-4.7",
+            listing_name="SpaceXAI: Grok 4.7",
+            aggregated=True,
+        ),
+        ModelRow(
+            provider="openrouter",
+            model_id="openai/gpt-6-luna",
+            listing_name="OpenAI: GPT-6 Luna",
+            aggregated=True,
+        ),
+    ]
+    assert [row.selector for row in rank_rows(rows, "grok 4.7")] == ["openrouter/x-ai/grok-4.7"]
+    assert [row.selector for row in rank_rows(rows, "gpt 6 luna")] == [
+        "openrouter/openai/gpt-6-luna"
+    ]
+    # Case and separator spelling of the HUMAN name both resolve, because both
+    # sides normalise the same way.
+    for query in ("Grok 4.7", "spacexai grok", "GPT-6 Luna", "openai gpt 6"):
+        assert rank_rows(rows, query), query
+
+
+def test_a_name_match_never_outranks_an_identical_selector_match():
+    """The new target joins the MATCH only; it must not disturb the ORDER.
+
+    Two rows whose selectors both contain the query keep the same relative
+    order they had before `listing_name` was consulted, so adding a name cannot
+    silently promote an aggregator's row over a direct provider's.
+    """
+    rows = [
+        _row("openrouter/x-ai/grok-4", aggregated=True),
+        _row("xai/grok-4"),
+    ]
+    assert [row.selector for row in rank_rows(rows, "grok")] == [
+        "xai/grok-4",
+        "openrouter/x-ai/grok-4",
+    ]
+
+
+def test_the_bare_selector_still_resolves_unchanged():
+    """The pre-existing spelling must not regress: `x-ai/grok-4.7` still lands."""
+    rows = [
+        ModelRow(
+            provider="openrouter",
+            model_id="x-ai/grok-4.7",
+            listing_name="SpaceXAI: Grok 4.7",
+            aggregated=True,
+        )
+    ]
+    assert rank_rows(rows, "x-ai/grok-4.7")
+    assert rank_rows(rows, "openrouter/x-ai/grok-4.7")
+
+
+def test_match_key_normalises_punctuation_and_case_to_words():
+    """One rule for both sides of the comparison, asserted directly.
+
+    A per-spelling special case is what this test exists to prevent: the query
+    and the row must go through the SAME function, or `grok 4.7` matches one
+    spelling and not the other.
+    """
+    from local_operator.model.ranking import _match_key
+
+    assert _match_key("SpaceXAI: Grok 4.7") == "spacexai grok 4 7"
+    assert _match_key("x-ai/grok-4.7") == "x ai grok 4 7"
+    assert _match_key("  grok   4.7 ") == "grok 4 7"
+    assert _match_key("GPT-6 Luna") == "gpt 6 luna"
+
+
+def test_adding_a_name_target_cannot_evict_a_row_the_selector_matched():
+    """R1-1/B1: widening a match target must never REMOVE a row.
+
+    The old code chose `pool = exact or fuzzy`, and `exact` was decided by "the
+    needle is a substring of ANY target". Adding ``listing_name`` widened
+    `exact`, so a row that matched only under the selector-only test was dropped
+    from the answer rather than demoted — measured on the live listing: query
+    `banana` lost five direct-provider rows, `older` lost eight of nine.
+
+    The minimal shape: a direct row that matches the needle only as a
+    SUBSEQUENCE of its selector, against an aggregator whose listing_name
+    contains the needle literally. The direct row must still be present.
+    """
+    rows = [
+        ModelRow("direct-prov", "banana-flash", "Banana Flash", 1000, 0.0, 0.0, True),
+        # `banana-flash` carries the needle only as a subsequence (b-a-n-a-n-a… no:
+        # as an actual substring) — use a real eviction shape: the needle is a
+        # substring of the NAME but only a subsequence of the selector.
+        ModelRow(
+            "openrouter",
+            "google/gemini-3.1-flash-image",
+            "google/gemini-3.1-flash-image",
+            1000,
+            0.0,
+            0.0,
+            True,
+            aggregated=True,
+            listing_name="Google: Nano Banana 2 (Gemini 3.1 Flash Image)",
+        ),
+    ]
+    # `banana` IS a substring of the direct row's selector here, so this is the
+    # TRUE eviction shape: a row that matches the selector must never vanish.
+    got = [row.selector for row in rank_rows(rows, "banana")]
+    assert "direct-prov/banana-flash" in got, got
+
+
+def test_a_subsequence_only_row_is_not_evicted_by_a_name_literal():
+    """R1-1's exact `older`/`banana` mechanism, reduced.
+
+    The direct row's selector matches `banana` only through the subsequence pass;
+    another row's NAME contains `banana` literally. Both belong in the answer —
+    membership is "matched anything at all", and QUALITY (not membership) decides
+    which leads.
+    """
+    rows = [
+        ModelRow("alibaba-token-plan", "deepseek-v4-flash-0731", "", 1000, 0.0, 0.0, True),
+        ModelRow(
+            "openrouter",
+            "google/gemini-3.1-flash-image",
+            "google/gemini-3.1-flash-image",
+            1000,
+            0.0,
+            0.0,
+            True,
+            aggregated=True,
+            listing_name="Google: Nano Banana 2 (Gemini 3.1 Flash Image)",
+        ),
+    ]
+    got = [row.selector for row in rank_rows(rows, "banana")]
+    assert "alibaba-token-plan/deepseek-v4-flash-0731" in got, got
+
+
+def test_a_punctuation_only_query_does_not_return_the_whole_catalogue():
+    """R1-2/B2: `.`/`...` must match nothing, not everything.
+
+    `_match_key` collapses non-alphanumerics to '', so a punctuation-only query
+    used to fall into the EMPTY-query branch — which lists the whole catalogue.
+    Measured at 574 rows: `'.'` went 257 -> 574, `'...'` 0 -> 1816. The picker
+    filters per keystroke, so that is one keystroke away.
+    """
+    rows = [_row("openai/gpt-5"), _row("anthropic/claude-opus-5")]
+    for query in (".", "!", "?", "*", "-", "...", "~", "@", ":"):
+        assert rank_rows(rows, query) == [], query
+    # The genuinely-empty cases still list the catalogue.
+    assert rank_rows(rows, "") != []
+    assert rank_rows(rows, "   ") != []
+
+
+def test_a_selector_match_outranks_a_name_only_sibling():
+    """R1-3/B4: `grok-4.7-fast` must not lead `grok-4.7` for `grok 4.7`.
+
+    The shorter sibling scores DENSER on the human name, so a score-only
+    comparison promoted it and pushed the operator's exact model to second. The
+    QUALITY rung fixes it: a hit in the SELECTOR leads a hit only in the name.
+    """
+    rows = [
+        ModelRow("xai", "grok-4.7", "Grok 4.7", 1000, 0.0, 0.0, True),
+        ModelRow("xai", "grok-4.7-fast", "Grok 4.7 Fast", 1000, 0.0, 0.0, True),
+    ]
+    assert [row.selector for row in rank_rows(rows, "grok 4.7")][0] == "xai/grok-4.7"
+
+
+def test_grok_47_resolves_through_the_subsequence_pass():
+    """R1-6: the docstring's own claim, pinned to what the code does.
+
+    `grok 47` is NOT an exact-substring match (`47` is a different token from
+    `4` then `7`) but the subsequence pass finds a `4` then a `7` in order, so it
+    DOES resolve. The docstring used to say the opposite.
+    """
+    rows = [
+        ModelRow(
+            "openrouter",
+            "x-ai/grok-4.7",
+            "openrouter/x-ai/grok-4.7",
+            1000,
+            0.0,
+            0.0,
+            True,
+            aggregated=True,
+            listing_name="SpaceXAI: Grok 4.7",
+        )
+    ]
+    assert [row.selector for row in rank_rows(rows, "grok 47")] == ["openrouter/x-ai/grok-4.7"]
+
+
+def test_match_key_is_memoised_so_repeated_keystrokes_do_not_renormalise():
+    """R1-7: the widget re-ranks per keystroke; `_match_key` is pure.
+
+    Measured ~9-10x the base cost uncached (0.9 -> 8.7 ms at 1,816 rows). The
+    cache is the fix; this pins that the identical call is a cache hit.
+    """
+    from local_operator.model.ranking import _match_key
+
+    _match_key.cache_clear()
+    _match_key("SpaceXAI: Grok 4.7")
+    before = _match_key.cache_info()
+    _match_key("SpaceXAI: Grok 4.7")
+    after = _match_key.cache_info()
+    assert after.hits == before.hits + 1

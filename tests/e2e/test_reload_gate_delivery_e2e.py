@@ -28,14 +28,24 @@ from tests.e2e.watchdog import bounded
 @pytest.mark.parametrize("kind", ["approval", "ask"])
 @pytest.mark.parametrize("timing", ["same-tick", "sending", "sidebar"])
 async def test_committed_gate_drains_before_viewer_disposal(
-    headless_tui_env: Path, workspace: Path, monkeypatch, kind: str, timing: str
+    headless_tui_env: Path,
+    workspace: Path,
+    monkeypatch,
+    kind: str,
+    timing: str,
+    operator_cap: bytes,
 ) -> None:
     config = headless_tui_env
     directory = config / "sessions" / "replyowner01"
     await seed_transcript(directory, [user_message("Preserve my answer")])
     owner = build_session(directory, ScriptedStream([]), cwd=workspace)
     handle = ServingSessionHandle(owner, asyncio.get_running_loop(), cwd=str(workspace))
-    server = RuntimeServer(handle, kind="daemon")
+    # ``operator_cap`` (issue #1310): this test builds the registrant IN THIS
+    # PROCESS, so it is that runtime's console — the assembled TUI below is a
+    # follower answering the card, and answering it is an authority-increasing
+    # request. Wire the capability the same way a real console would, or the
+    # gate can never be settled and the delivery assertion waits forever.
+    server = RuntimeServer(handle, kind="daemon", operator_cap=operator_cap)
     await server.start_in_process()
     viewer = await AttachedSession.connect(
         server._record, owner.session_id, config_dir=config, takeover_factory=_never_take_over

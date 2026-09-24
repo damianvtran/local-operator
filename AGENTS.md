@@ -12,8 +12,17 @@ cd ~/local-operator
 ISO=$(mktemp -d)   # every block in this file makes its own; see the note below
 env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" \
   PATH="$PATH" TERM=xterm-256color \
-  .venv/bin/python -m pytest tests/unit -q      # 22865 tests collected; a full run is minutes
+  .venv/bin/python -m pytest tests/unit -q      # 22865 tests collected; a full run is 40-55 min under fleet load
 ```
+
+**That comment's range is the point: a full local unit run is 40-55 minutes here,
+not "minutes".** The suite is about 108 test-minutes of serial weight — **82.3% of
+it under `tests/unit/tui`** — and it runs beside ~25 concurrent agent sessions on
+this host, so the same command lands anywhere in that range (and it is the reason
+`tests/durations.json` exists as the sharder's input). Do not treat the whole suite
+as a routine inner-loop step: run the targeted command for what you changed (see
+"Scoping the inner loop" below, and note which jobs still narrow), and let CI's
+five shards be the whole-tree run.
 
 **Every pytest invocation in this file is isolated, and that is not decoration.**
 Each block also carries its own `ISO=$(mktemp -d)`, because the variable lives in
@@ -369,6 +378,194 @@ edits are live. After a pull that changes dependencies:
 uv pip install -e ".[all,dev]" --python .venv/bin/python
 ```
 
+### Scoping the inner loop, and the whole-tree triggers that stop it
+
+`scripts/ci_scope.py --run` decides at JOB granularity; the fourth section of
+that module narrows the *local* commands of FOUR of those jobs — `lint`,
+`type-check`, `test`, `tui-e2e` — at FILE granularity. What each one becomes for a diff of one changed module:
+
+| job | whole tree | scoped |
+|---|---|---|
+| `lint` | `flake8 .`, `black --check .`, `isort --check .` | the same three tools over the changed files |
+| `type-check` | `pyright … .` | `pyright … <the changed files plus their transitive reverse dependents>` |
+| `test` | `pytest tests/unit -q` | `pytest <the test files that transitively import the change> -q` — **only when nothing below stops it**, which on this tree is never, today |
+| `tui-e2e` | `pytest tests/e2e -m e2e -n0 -q` | the same, over the e2e files that reach the change — and nothing at all when no e2e file does |
+
+`type-check` narrows because a file-list `pyright` reports diagnostics **only for
+the files it is given** (measured: an error in an imported but unlisted module is
+not reported, while a signature change in a listed file's *dependency* IS
+reported in the listed file). The list is therefore the changed files plus every
+file that transitively depends on them, which is complete for "what this change
+can break", and it is also what the run costs. Its protocol-sync step has no file
+list to narrow and runs unchanged, which the report says out loud.
+
+The selection comes from a STATIC import graph (the ASTs of `local_operator/`,
+`tests/` and `scripts/`; nothing is imported). It is an under-approximation of
+"what this change can break", so it is only allowed to run when the
+approximation is safe — **the rule is a whitelist, and everything it does not
+name runs the whole-tree command and prints the path that stopped it.** A path
+narrows a gate only if it is a `.py` the graph covers, or documentation no gate
+reads. Named barriers:
+
+* any `conftest.py`, at any level;
+* `pyproject.toml`, `uv.lock`, `Makefile`, `.flake8`, `setup.cfg`, `tox.ini`;
+* anything under `.github/`, `extension/` (the suite reads it by PATH — see
+  `tests/unit/browser_bridge/test_extension_version_skew.py` — so no import edge
+  exists), or the vendored
+  `benchmarks/osworld_v2_adapter/src/evaluation_examples/`;
+* any package `__init__.py` (module surface, and pytest's collection semantics);
+* `local_operator/cli.py` and `local_operator/__main__.py` — the entry points;
+* `tests/helpers/**` — a shared helper tree no import edge is a contract for;
+* package data and test data (a `.tcss`, a `.md`, a `.json` under
+  `local_operator/` or `tests/`): read at run time, importing nothing;
+* a `.py` the graph cannot place — deleted, outside those three trees, or inside
+  a tree the graph could not parse — and any `.pyi`;
+* **any changed file inside the app BOOT CLOSURE**: `local_operator/cli.py`,
+  `local_operator/tui/app.py`, `local_operator/session_factory.py` and everything
+  they transitively import — 452 of the 512 `local_operator/**` modules here. Every
+  test that imports the app reaches those files, which is not a reference-graph
+  question at all, so that job runs whole-tree whatever the selection would have
+  been;
+* **any unresolved reference the graph is carrying** (see below) — one is enough,
+  and it stops the `test`/`tui-e2e` jobs for the whole diff;
+* anything else that is neither such a `.py` nor a `.md` outside those two trees.
+* the trees the GRAPH parses are wider than the trees the suite imports: a gate reads
+  `benchmarks/osworld_v2_adapter/**`, so those files are parsed too (they are
+  `ANALYZED_TREES`, and a change inside the covered trees can break them). Leaving
+  them out made "complete for what this change can break" false for 20 files, 9 of
+  them importers of `local_operator.*` (9 files across 8 modules; #1322 QA round 1,
+  Q-1; re-derived here — the round-1 grep did not descend into `providers/`). The list is
+  literal, not derived from pyright's own file set, and one analyzer file is still
+  outside it (`extension/scripts/generate-icons.py`, which imports nothing of ours) —
+  a new top-level tree that imports `local_operator` reopens the class until it is
+  named in `ANALYZED_TREES`.
+* a selection over **25% of the suite's measured weight** or **50% of its test
+  files** (`tests/durations.json` supplies the weights; an unreadable manifest
+  holds the file arm to the weight fraction rather than loosening it), or a
+  `type-check` file list whose import closure would reach **more than 50% of the
+  program** — naming most of the tree is the whole-tree command with extra steps.
+
+**The figures in this section are a measurement, not a property of the tool:** they
+move as the tree moves, so they carry the date they were taken (2026-09-20) and the
+command that takes them again. Every round of this PR re-derived them, and every round
+found the previous round's numbers stale by a few files: 503 `local_operator` modules
+and 576 unresolved sites, then 508 and 597, then **512 and 607** here. Re-derive with
+`python -c "import sys; sys.path.insert(0, 'scripts'); import ci_scope; g = ci_scope.build_import_graph(__import__('pathlib').Path('.')); print(len(g.files), len(g.boot), len(g.unresolved_sites()))"`
+rather than quoting them forward.
+
+**Where it pays, and what the fail-closed rule costs — measured, not assumed.**
+This suite's tests import the assembled app, so **88% of `local_operator/**` is
+inside the boot closure** (452 of its 512 modules) and a change there is a barrier
+by construction. What is left, and what survives the unresolved-reference rule:
+
+| job | narrows for | whole-tree when |
+|---|---|---|
+| `lint` | any diff: the three tools over the changed files (per-file by construction, so no selection can be incomplete) | a barrier path stopped the plan, or the diff has no lint input |
+| `type-check` | the changed `.py` files plus every file that transitively depends on them, when the change is outside the boot closure and its import closure stays under 50% of the program | the change is inside the boot closure, the closure arm fires, or the diff touches a path the graph does not cover |
+| `test`, `tui-e2e` | **nothing on this tree today.** The classes are implemented — changed test files, `scripts/**`, modules outside the boot closure — and they narrow the moment nothing is unresolved; measured, the graph carries **607 unresolved references** (475 directory scans + 132 names), **423 of them in files inside the test universe**, so the rule fires for every diff |
+
+Two measurements, because the distinction is the whole design:
+
+| a change to | `lint` | `type-check` | `test` |
+|---|---|---|---|
+| `scripts/shard_tests.py` | 1 file | 4 files | whole tree — the tree's own readers scan for it |
+| `local_operator/agents.py` (inside the boot closure) | 1 file | whole tree | whole tree (boot closure) |
+
+**What this buys TODAY, stated plainly: the barrier and per-file lint/format
+scoping — not a narrower pytest run.** `test` and `tui-e2e` are whole-tree for every
+diff on this tree (607 unresolved sites arm them out), so the file-level pytest
+selection is a mechanism that is INERT until that count drops; the review round could
+not construct a diff that narrows either job. What is live is: the barrier itself
+(measured load-bearing — neutralising `unresolved_sites` lets a real green-while-red
+through, `test: commands=[]`, rc 0, while the probes are `1 failed, 1 error`), the
+`type-check` closure narrowing, and `lint` over the changed files, where the win is
+the whole gate's file count (measured on this fleet: flake8 49 s + black 137 s +
+isort 25 s whole-tree against 1 s + 14 s + 1 s over a two-file change). The realised
+`type-check` win is the large one and it is measured end to end: **838.5 s whole-tree
+against 16.0 s scoped** on a change whose file list is 14 files (QA round 1's
+measurement, on this fleet — load-affected, as every wall time here is: the host sat at
+200-373 during it, and the same round's whole-tree pyright read 269 s against the 508 s
+recorded elsewhere in this section). The graph build is the price of admission for any
+non-barrier diff — an envelope rather than a number, because the same tree reads
+**37.9 s** on one run and **52.7 s** on another here at load average 370, with earlier
+readings up to 93 s, which is why `lint` is decided
+before the graph is built at all and why the report prints the graph's own timing. Do
+not read the class table below as a claim that pytest narrows here.
+
+**The unresolved-reference rule is unconditional, and that is deliberate.** A
+reference the parser can see and cannot place — a computed name
+(`importlib.import_module(name)`), a scan whose directory the evaluator cannot
+resolve, whatever its pattern — could read the file you changed, and the tool has
+no sound way to decide that it could not. Trying to decide anyway is exactly what
+produced **four consecutive rounds of false greens on this feature**: a `.py`
+reached by path; the `/x.py`, `./x.py` and `../x.py` spellings; a variable-held
+scan receiver, then `iterdir()` and a multi-argument `Path()`; and the
+`.py`-only "arming" policy that each of those rounds came through. So the rule
+refuses to narrow rather than pricing the risk, and the barrier prints the sites
+that stopped it.
+
+**An edge is not always an import.** The suite also reaches files by NAME: a test
+runs `scripts/visual_gallery.py` through `sys.executable` + a path, and several
+modules are spawned as `-m local_operator.x`. No import statement records either,
+so an imports-only graph selected NOTHING for such a change and a local run
+printed `all selected gates passed` while CI's `test` job was red (the blocker on
+#1322). A string constant that resolves to a covered file — a path (`scripts/x.py`,
+`./x.py`, `../x.py`, `~/x.py`, an absolute path, or a bare basename, which is
+also what an f-string like `f"{ROOT}/scripts/x.py"` leaves behind) or a dotted
+module name — is therefore an edge in
+the REVERSE direction: when the named file changes, the file that NAMES it is
+selected, and so is anything that imports that namer. It is reverse-only on
+purpose — a name is not a static import, so it must not inflate the `type-check`
+cost estimate. Two tests guard the class rather than one instance of it:
+`test_a_repo_python_file_a_test_names_is_always_selected` walks the LITERALS the
+real tree's tests carry (not the resolver's output), and
+`test_every_spelling_of_a_repo_path_is_collected_and_resolved` asserts each
+spelling above — collection and resolution — so a narrower regex, a stricter
+resolver or a lost edge fails a test rather than a CI job.
+
+A conftest that NAMES a changed file is a namer pytest runs and nothing imports,
+so it is not in the test universe: seeding on it alone selected nothing. Its
+subtree is selected instead, which is the scope pytest itself gives it.
+
+**A glob is a reader, and reads have the same edge.**
+`tests/unit/tui/test_visual_gallery.py` iterates `(ROOT / "scripts").glob("*.py")`
+and `tests/unit/tui/test_visual_capture.py` the same directory through a
+variable, so in the REFERENCE MODEL a one-token change to any of the 201 covered
+`scripts/*.py` selects both — before the scan edge it selected NOTHING and the
+local run printed `all selected gates passed` while CI's `test` job failed (QA
+round 2, Q-1; the variable-held reader was round 3's blocker, printed but not
+armed). That is what the model does; the shipped plan runs the pytest jobs
+whole-tree here (the barrier row above), so today it is the model's completeness
+that this paragraph is about, not the command you get.
+`glob`/`rglob`/`iterdir`/`listdir`/`scandir`/`walk` are therefore read edges.
+The scanned directory is the one the receiver's expression denotes — path
+literals, `__file__`, `.parent`, `.parents[N]`, `.resolve()`, and up to four
+`name = <expr>` hops, so `SCRIPTS = ROOT / "scripts"` places — and the pattern is
+matched against the repo-relative path, so `*/*.py` is exactly one level and
+`**/*.py` any depth. Placement is all-or-nothing: a receiver whose WHOLE literal
+chain is not a directory (`scripts/diag`, never its `scripts` ancestor) is
+unplaced rather than resolved to the wrong directory, because a wrong edge is
+silent.
+**What a narrowed run is not.** The model reads imports, literal path and module
+names, directory scans and their arguments. It cannot see dynamic attribute access
+(`getattr`), `eval`/`exec`, or a path assembled from data at run time — a config
+value, an environment variable, a string built in a loop. The barrier above fires
+only on references the parser can *see*; the rest it cannot see at all. So a
+narrowed run is evidence about the files it ran and never about the tree: CI's full
+matrix is the authoritative run and is unchanged, and every narrowed plan prints
+that sentence on the run itself. A selected run also cannot see cross-test
+pollution outside the selection.
+
+Two guards hold the property rather than a list of shapes.
+`test_no_changed_file_can_be_narrowed_while_the_graph_has_unresolved_references`
+walks **every covered file in the real tree** and asserts the barrier refuses each
+one — the shape the previous guard got wrong, because it walked the resolver's own
+*output* and so was blind to a reference that never resolved.
+`test_the_barrier_is_a_barrier_and_not_a_constant` asserts the same helper returns
+*no* reason on a tree whose references all resolve, so "refuse everything" fails
+that too, and each unresolved class has its own row in
+`test_every_unresolved_reference_class_stops_the_test_selection`.
+
 ### The local `pyright` gate is bounded and process-group-reaped
 
 The local `type-check` command is spelled
@@ -686,9 +883,11 @@ Development and the global launcher deliberately use different installations:
 
 - `uv run local-operator` and `.venv/bin/local-operator` execute the current
   checkout. Use them while developing and validating source changes.
-- `lop` executes the non-editable uv tool installation under
-  `~/.local/share/uv/tools/local-operator`. It must remain independent of the
-  checkout so branch switches and uncommitted work cannot break the global TUI.
+- `lop` executes the non-editable generation install that the launcher resolves
+  to: `~/.local/bin/lop` goes through `~/.local/share/lop/current/bin/lop` into
+  `~/.local/share/lop/generations/<stamp>-<sha-or-version>/`. It must remain
+  independent of the checkout so branch switches and uncommitted work cannot
+  break the global TUI.
 
 A release here is a **combined release**: one version bump, one tag and one
 GitHub Release covering every PR merged since the previous tag, cut by one
@@ -916,49 +1115,90 @@ gh pr edit <claim-pr-number> --title 'chore(release): bump version to X.Y.Z'
 gh pr ready <claim-pr-number>
 # ... independent scope-check round, merge; then:
 
-# 3. Advance the local main ref to the merged bump WITHOUT checking it out.
+# 3. Advance the local main ref to the merged bump WITHOUT checking it out —
+#    after the compare, because nothing downstream refuses a stale ref. Both
+#    calls must print the SAME sha (`rev-parse --short` takes ONE revision, so
+#    the two refs cannot share the flag).
 git -C ~/local-operator fetch origin
+git -C ~/local-operator rev-parse --short main
+git -C ~/local-operator rev-parse --short origin/main
 git -C ~/local-operator update-ref refs/heads/main origin/main
-# If main IS the checked-out branch, use lop-update's own remedy instead:
+# If main IS the checked-out branch, use this instead:
 #   git -C ~/local-operator merge --ff-only origin/main
 
 # 4. Write the notes from the collected `Release:` lines, then tag + GitHub
 #    Release on the bump's merge commit. --target creates the tag on that
 #    exact SHA; the publish workflow triggers on the release.
-$EDITOR /tmp/lop-release-X.Y.Z-notes.md   # headline, ## Major/Minor/Fixes, ## Install, compare link
+$EDITOR "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/lop-release-X.Y.Z-notes.md"   # headline, ## Major/Minor/Fixes, ## Install, compare link
 gh release create vX.Y.Z --target "$(git -C ~/local-operator rev-parse origin/main)" \
-  --title 'X.Y.Z: <theme>' --notes-file /tmp/lop-release-X.Y.Z-notes.md
+  --title 'X.Y.Z: <theme>' --notes-file "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/lop-release-X.Y.Z-notes.md"
 
 # 5. Install and verify — with the fleet DRAINED: wait until no session
 #    reports `busy`, install, then re-engage what the swap displaced.
 #    See "Installing over a live fleet" below; a plain `lop-update` is only
 #    safe when nothing is running.
 <install>
-cat ~/.local/share/uv/tools/local-operator/.lop-source
+# The revision record lives INSIDE the installed generation, at `sys.prefix`:
+# a git build writes "<sha> <ref>"; a PyPI install writes "pypi <version>".
+cat "$(readlink ~/.local/share/lop/current)/tools/local-operator/.lop-source"
 # Smoke the built command from outside the repository, naming the uv-tool build
 # by path where the host has more than one `lop`: a bare `lop` can resolve to a
 # different install and report a version that is not this one.
 cd /tmp && ~/.local/bin/lop --version
+# Two checks, two different questions — do not use one to answer the other:
+#   * `.lop-source` (above) says WHICH BUILD is installed (ref, or `pypi <v>`);
+#   * a symbol check in the installed tree answers a DIFFERENT question — what
+#     code that build contains. The glob must stay OUTSIDE the quotes, or the
+#     shell passes it through literally and grep reports "No such file or
+#     directory":
+#     g=$(readlink ~/.local/share/lop/current)
+#     grep -c _SurvivalIndex "$g"/tools/local-operator/lib/python*/site-packages/local_operator/redaction_shapes.py
+#     A docstring can quote a removed line verbatim, so a grep for a code string
+#     is not evidence either way; the symbol is.
 
 # 6. Reclaim the worktree.
 git -C ~/local-operator worktree remove /tmp/lop-release-next
 ```
 
 `lop-update` archives the committed `main` ref, builds and installs that
-snapshot, and records the exact source revision in
-`~/.local/share/uv/tools/local-operator/.lop-source`. It never packages the
+snapshot, and records the exact source revision in the installed generation's
+`.lop-source` (at `sys.prefix` — see step 5). It never packages the
 currently checked-out branch or uncommitted files. A specific committed ref can
-be installed deliberately with `lop-update <git-ref>`. Before building it
-compares the ref against its remote counterpart and **refuses** a local `main`
-that is behind or diverged — that is why step 3 exists, and why it uses
-`update-ref` rather than a checkout: the root checkout is usually on another
-branch with uncommitted work, and `update-ref` moves the branch pointer without
-touching the working tree. The script's own refusal message says which form to
-use: `update-ref refs/heads/main origin/main` is "safe while another branch is
-checked out", and "if `main` is the checked-out branch, use
-`git -C ~/local-operator merge --ff-only origin/main` instead" — `update-ref`
-under a checked-out `main` moves the branch without touching the index, so
-`git status` would then show every merged change as a local modification.
+be installed deliberately with `lop-update <git-ref>`.
+
+**It does NOT compare that ref against a remote.** The compare-and-refuse gate
+belonged to the retired legacy installer; this build has no remote check at all
+(the compare is step 3's, and the wrong-build measurement is below), the refusal
+text survives only in
+`~/.local/bin/lop-update.legacy-uvtool.bak` **as history**, and
+`--skip-remote-check` is gone with it. So the fetch-and-compare is the release
+owner's own step, never a backstop — that is why step 3 exists. It uses
+`update-ref` rather than a checkout because the root checkout is usually on
+another branch with uncommitted work, and `update-ref` moves the branch pointer
+without touching the working tree: `update-ref refs/heads/main origin/main` is
+safe while another branch is checked out, and under a checked-out `main` it moves
+the branch without touching the index, so `git status` would then show every
+merged change as a local modification — use
+`git -C ~/local-operator merge --ff-only origin/main` in that case.
+
+**There is no remote check to rely on — the fetch IS the protection.** The
+current `lop-update` does not compare the ref against a remote at all: it takes
+its ref from its argument (defaulting to the local `main`) and delegates to
+`lop update --from-snapshot "$REF"`. The compare-and-refuse body that this step
+used to contain was retired with the legacy installer. It survives only in
+`~/.local/bin/lop-update.legacy-uvtool.bak` **as history**; its `REFUSING to
+release a stale ref` message lives there (`:154-170`), nothing runs the script,
+and the `--skip-remote-check` flag went with it. So nothing refuses a stale
+local `main`: measured on 2026-09-21,
+`lop-update` built **0.61.6 from `f6eaea3d`** while `origin/main` was several
+releases ahead, and the wrong build was installed before anyone noticed. The
+BEFORE-install check is therefore not a fallback to a gate; it is the only
+protection there is: `git fetch origin main`, confirm `git rev-parse --short
+main` equals `git rev-parse --short origin/main`, and when in doubt name the ref
+explicitly — `lop-update <sha>` installs exactly that commit. The generation
+directory name also carries the commit or version it was built from
+(`…/generations/<timestamp>-<sha-or-version>`), so every build is auditable
+after the fact, including when the marker is the `pypi <version>` form.
 
 ### Installing over a live fleet
 
@@ -991,12 +1231,14 @@ summary that resolves `lop` on `PATH` can describe a different install than
 the one it just wrote: measured on 2026-09-15, such a summary printed
 `v0.55.9` after installing `0.55.10`, because a bare `lop` had resolved to a
 desktop app's managed environment. Read
-`~/.local/share/uv/tools/local-operator/.lop-source` and smoke the built
+the installed generation's `.lop-source`
+(`$(readlink ~/.local/share/lop/current)/tools/local-operator/.lop-source`) and smoke the built
 command from outside the repository for the answer.
 
 It is still `lop-update` underneath, so the mechanics above about the committed
-`main` ref, the source revision record and the remote-check gate apply
-unchanged.
+`main` ref and the source revision record apply unchanged — but the
+remote-check gate does NOT exist in this build (see step 3): nothing compares
+your ref against a remote, so fetch and compare it yourself before installing.
 
 Warnings that still hold, each of which has already cost a release:
 
@@ -1064,7 +1306,8 @@ Warnings that still hold, each of which has already cost a release:
   rather than a stale local checkout — run it, do not read it:
 
   ```sh
-  python scripts/shard_tests.py --shard <I> --total 5 --out /tmp/shard_<I>.txt
+  python scripts/shard_tests.py --shard <I> --total 5 \
+    --out "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/shard_<I>.txt"
   ```
 
   Run it once at `origin/main` and once at your branch (a worktree each, or
@@ -1101,12 +1344,14 @@ Warnings that still hold, each of which has already cost a release:
   already points at — which is how a release once shipped the previous
   version's code under the new number. Let `gh release create --target`
   create the tag.
-- **Never pass `--skip-remote-check` to `lop-update` for a release.** The
-  gate exists because a stale local `main` was once installed and reported as
-  a successful release while `lop` silently downgraded from 0.18.1 to 0.17.5.
-  The flag is for deliberate offline or pre-push installs of a branch you are
-  developing, and its use is printed in the summary so it cannot be mistaken
-  for a release.
+- **There is no `--skip-remote-check` any more, and no gate for it to skip.**
+  The flag was retired with the legacy installer along with the compare-and-
+  refuse step, so `lop-update` installs whatever ref you name — including a
+  stale local `main`, which is how 0.61.6 was once built from an old commit
+  while main was several releases ahead. The protection is the fetch-and-compare
+  in step 3, not a flag; it exists because a stale local `main` was once
+  installed and reported as a successful release while `lop` silently downgraded
+  from 0.18.1 to 0.17.5.
 - **Never repoint `lop` at the editable `.venv`**; doing so couples the stable
   command back to in-progress work. Publication is always the separate final
   step: merge, bump, tag, the drained install, verify `.lop-source`, then smoke
@@ -1580,7 +1825,52 @@ to be inspected as a rendered frame before it is claimed to work. The recipe
 below is the one used for the usage-card spacing and the `/resume` picker; it
 takes about a minute.
 
+**When the app is available, the console is the first instrument, not the
+emulator.** If the Local Operator desktop app is running and its console host
+advertises, the `console` tool is present — `guide://console` is its playbook, and
+`docs/CONSOLE.md` is the operator's view of the same thing — and the frame should
+come from a console surface before the Textual compositor below is reached for.
+Textual emulation has small visual and spacing differences from what people
+actually see, and those differences are the size of the defects a still is taken
+to catch: a reconstructed frame can be exactly right about a layout that looks
+wrong on the user's screen. When the pane is displayed, the console photographs
+the **real** pty in the app's own terminal — its font, its theme, its own grid —
+and it always reports which
+of the two it gave you: `rendered: "displayed"` is the app photographing its own
+window cropped to the pane, while `"offscreen"` is a replay reconstruction from
+the surface's record, faithful to that record but not a photograph of a live
+screen. The tool's `keys` method sends named keys into the live program, so a
+state that only exists under interaction is driven rather than simulated.
+
+**Two of section 1's requirements move with the instrument, so carry them over.**
+Isolate `HOME` and the config root before the app imports — section 1's isolation
+step exists because a machine set to auto-capture otherwise yields a frame with
+no prompt at all, and a console surface runs under whatever `HOME` it is given,
+so that same silent emptiness would simply move onto the preferred path. And
+check the size the frame came back at rather than the size you asked for: a
+displayed surface is re-gridded from the pane's own rect (design §8.2) while an
+offscreen one keeps its create-time grid (§8.4), and the screenshot result names
+neither `cols` nor `rows`, so a published frame can be at neither the size you
+requested nor one the result reports.
+
+Sections 1-5 are **not replaced** by that. They remain the fallback when no app
+is running — the tool is offered only while the app's discovery record advertises
+a console, so a session built without the app has no tool at all, one that
+outlives the app is told its surfaces ended rather than being handed a frame, and
+a build that is neither displaying the surface nor carrying an offscreen capture
+view refuses the screenshot with `capture_unavailable` instead of returning a
+frame it does not have — and the instrument of record for what the console cannot
+reach: a widget state you construct by hand, a CSS-less unit-test host. What a
+frame can prove does not change either: a `read` is text and a `screenshot` is
+pixels, neither is a design judgement, and the principles of sections 3-5 apply
+to a console capture exactly as they do to an SVG — the procedures in them are
+written for the compositor, which the console does not drive.
+
 ### 1. Render the screen to an SVG still
+
+**This is the fallback path.** If the app is running with its console host
+advertised, take the frame from a console surface instead (see above); the
+helper below stays the instrument of record for what the console cannot reach.
 
 **Use the faithful developer capture helper**, not a default Rich presentation
 as a terminal-size measurement. All current shot scripts use
@@ -1637,7 +1927,9 @@ For anything else, Textual can export exactly what it painted. Drive the app
 with `run_test`, put it in the state you care about, and save a frame:
 
 ```python
-# /tmp/shot.py — env -u NO_COLOR TERM=xterm-256color .venv/bin/python /tmp/shot.py out.svg
+# ${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/shot.py — `guide://scratchpad` explains the variable;
+#   env -u NO_COLOR TERM=xterm-256color .venv/bin/python "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/shot.py" \
+#     "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/out.svg"
 import asyncio
 import sys
 
@@ -1670,10 +1962,10 @@ stylesheet change at all.
 
 ### 2. Look at the image
 
-An SVG is not something to eyeball as markup. Render it and view it — e.g.
-open `file:///tmp/out.svg` in a browser tool and screenshot it, or open it in
-any image viewer. The point is that a human or a vision-capable agent
-**sees the frame**.
+An SVG is not something to eyeball as markup, and the reader does not render one
+(it decodes raster images only). Render it and view it — open the `file://` URL of
+the printed path in a browser tool and screenshot it, or render it to a PNG in the
+scratchpad and read that back: a human or a vision-capable agent **sees the frame**.
 
 ### 3. Always capture before AND after
 
@@ -1682,9 +1974,11 @@ the cheapest artifact in this recipe and it only stays cheap while the tree is
 still clean — write the shot script, capture, then start editing:
 
 ```sh
-env -u NO_COLOR TERM=xterm-256color .venv/bin/python /tmp/shot.py /tmp/before.svg
+env -u NO_COLOR TERM=xterm-256color .venv/bin/python "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/shot.py" \
+  "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/before.svg"
 #   ... now make the change ...
-env -u NO_COLOR TERM=xterm-256color .venv/bin/python /tmp/shot.py /tmp/after.svg
+env -u NO_COLOR TERM=xterm-256color .venv/bin/python "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/shot.py" \
+  "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/after.svg"
 ```
 
 **Never `git stash` to get a before-frame.** Assume you are not alone in this
@@ -1701,7 +1995,8 @@ but yours:
 ```sh
 git worktree add --detach /tmp/lo-before HEAD
 ln -s ~/local-operator/.venv /tmp/lo-before/.venv
-cd /tmp/lo-before && env -u NO_COLOR TERM=xterm-256color .venv/bin/python /tmp/shot.py /tmp/before.svg
+cd /tmp/lo-before && env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
+  "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/shot.py" "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/before.svg"
 git worktree remove --force /tmp/lo-before
 ```
 
@@ -1898,7 +2193,15 @@ support extensions". Verified here: with `--load-extension=extension/dist` the
 only `chrome-extension://` targets were Chrome's own built-ins and our manifest
 name was absent; `Extensions.loadUnpacked` over CDP returned our id and the
 popup drove normally. `docs/design/browser-extension-e2e.md` records the same
-finding on Chrome 151.
+finding on Chrome 151, and it was re-confirmed on **Chrome 153.0.8010.53**
+(2026-09-20, PR #1335's E2E): `--load-extension` loaded nothing, with or without
+`--disable-extensions-except`, while `Extensions.loadUnpacked` worked first try.
+The failure is worth recognising because of its SHAPE rather than its silence: the
+extension's own pages still resolve at `chrome-extension://<id>/…`, so the harness
+gets a real-looking options page whose `chrome.runtime` and `chrome.storage` are
+both `undefined` — which reads as a broken manifest, not as an unloaded extension,
+and cost one round of debugging. Check `chrome.runtime.id` on any extension page
+before believing a manifest defect.
 
 **Size the viewport with `Emulation.setDeviceMetricsOverride`, not
 `--window-size`.** Headless inherits no real window, so it defaults to whatever
@@ -2467,12 +2770,41 @@ Full agent-facing guidance is `guide://credentials` (packaged at
 needs to know.
 
 **Four things are called credentials and they must stay distinct.** Provider API
-keys (`credentials.py`, plaintext, read by the model layer at boot); session
-credentials (`VariableStore._credentials`, memory-only, injected into `bash`,
-never readable by the agent); ordinary variables (denylist-filtered, not
-secret); and the encrypted long-term store (`local_operator/secrets/`, on disk,
-reachable by the agent through `lop secret get` and the eval library). A change
-that blurs two of them is a defect even when every test passes.
+keys (now rows in the encrypted store under the reserved provider namespace, read
+by the model layer at boot); session credentials (`VariableStore._credentials`,
+memory-only, injected into `bash`, never readable by the agent); ordinary
+variables (denylist-filtered, not secret); and the encrypted long-term store
+(`local_operator/secrets/`, on disk, reachable by the agent through `lop secret
+get` and the eval library). A change that blurs two of them is a defect even when
+every test passes.
+
+**The plaintext `credentials.env` is RETIRED and its module is DELETED.**
+`local_operator/credentials.py` is gone (PR2b): nothing reads the file as a
+credential source, nothing creates it, and no module may import the deleted
+module — `tests/unit/secrets/test_provider_namespace.py` and
+`tests/unit/secrets/test_no_reader_resolves_the_plaintext_file.py` read the
+package AST and fail on a writer or an import. Every writer (`lop credential
+update`, `lop search setup`, the credentials route's PATCH,
+`providers.key_prompt.prompt_for_provider_key`) files an encrypted store row
+instead. **One reader survives, deliberately**: `secrets/legacy_env.py`'s
+`read_credentials`, which exists for `lop secret migrate-env` alone and carries
+two policies paid for in review rounds — it must not CREATE the file it is
+emptying (`ENOENT` is `{}`, every other errno raises) and must not print a value
+(values come back as `SecretStr`). It goes away in PR2c with the file.
+
+**Provider keys live in a RESERVED NAMESPACE: `LOP_PROVIDER_<ENV_KEY>`.**
+Provider-owned rows (a built-in API key the harness manages) are named under the
+`LOP_PROVIDER_` prefix and carry `role="provider"`; an AGENT-class write or read
+(default everywhere else) REFUSES that prefix, and a provider-class write refuses
+a name outside it. The rule is enforced in the store on BOTH the write and the
+READ path — the read check is the half that actually contains a value, since a
+hostile caller wants a key that already exists — so an agent secret can never
+shadow a provider key. Derive the name with `provider_secret_name(env_key)` and
+never spell the prefix by hand. Resolution order for a provider key is store row,
+then `os.environ` (the legacy plaintext `credentials.env` file is no longer a
+rung — PR2a removed its reader legs): `provider_env_key(provider_id)` /
+`provider_secret_value(env_key)` in `providers/registry.py` are the ONE readers,
+imported lazily so the CLI startup path never pulls the crypto stack.
 
 **The agent uses a secret it cannot read — preserve that inversion.** No surface
 returns a value to the model. The `secret` tool's `retrieve` verb returns a

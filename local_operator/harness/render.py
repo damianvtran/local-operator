@@ -53,9 +53,11 @@ from local_operator.harness.message_types import (
     SESSION_CREDENTIAL_MESSAGE_TYPE,
     SESSION_INCIDENT_MESSAGE_TYPE,
     SESSION_MCP_RECOVERY_MESSAGE_TYPE,
+    SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
     SESSION_MODEL_SWITCH_MESSAGE_TYPE,
     TODO_REMINDER_MESSAGE_TYPE,
 )
+from local_operator.harness.rows import gate_waited_text
 from local_operator.harness.types import (
     AgentMessage,
     CustomMessage,
@@ -135,6 +137,7 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             SESSION_MODEL_SWITCH_MESSAGE_TYPE,
             SESSION_CREDENTIAL_MESSAGE_TYPE,
             SESSION_MCP_RECOVERY_MESSAGE_TYPE,
+            SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
             "session_state",
         ):
             # An incident rides the sender's preformatted text (the classifier
@@ -148,10 +151,12 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             # ``/credential`` is ANNOUNCED to the model rather than only
             # changing the prompt tail, which the model has no reason to
             # re-read (the failure behind session 835fbcafdc27).
-            # An MCP-recovery record rides it for the symmetric reason: the
-            # FAILURE reaches the model as a ``session_incident`` user turn, so
-            # the recovery that supersedes it has to arrive on the same surface
-            # or the model keeps believing the older, more emphatic claim.
+            # An MCP record rides it as a pair: the FAILURE reaches the model
+            # as a ``session_mcp_unavailable`` WARNING (a preformatted row, so
+            # it never touches the classifier), and the recovery that
+            # supersedes it has to arrive on the same surface or the model
+            # keeps believing the older, more emphatic claim that its tools are
+            # gone.
             out.append(_injected_user_message(message.details.get("text", ""), message.id))
         elif message.custom_type == GATE_TIMEOUT_CUSTOM_TYPE:
             # An unattended gate that expired is NOT a user decision, and the
@@ -161,10 +166,23 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             # like the branches below because the payload is structured (tool,
             # description, waited_s) — the picker and the transcript notice
             # each phrase it for their own audience, and this is the model's.
+            #
+            # IT REPORTS THE WAIT AND NOTHING ABOUT WHO WAS ATTACHED (round 1,
+            # D7). It used to read "nobody was attached to this session and it
+            # expired", and this PR's own change makes that reachable as a FALSE
+            # claim: attachment-first parking holds a gate for the configured
+            # ``unattended_gate_timeout`` (24h by default) when a pane IS
+            # attached, so a question the operator never got round to answering
+            # expires with a pane on it — and the model is then told nobody was
+            # there, which is the sentence class this whole change exists to
+            # stop. What was measured is the wait; ``gate_waited_text`` is the
+            # ONE formatter for it, shared with the human row so the two cannot
+            # disagree about the number.
             details = message.details or {}
             tool = str(details.get("tool") or "a tool")
             description = str(details.get("description") or "").strip()
             subject = f"{tool} ({description})" if description else tool
+            waited = gate_waited_text(details)
             # An `ask` is a QUESTION, and an unanswered question was not
             # "denied" — the approval gate's vocabulary describes a refusal
             # nobody issued, and a model told its question was denied re-plans
@@ -180,18 +198,22 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             # was refused.
             kind = str(details.get("kind") or "approval").strip().lower()
             if kind == "ask":
+                # "never answered: it expired unanswered after 1d" said the same
+                # thing twice, and "a choice by the user" named the person one way
+                # in a row this PR had already moved to "the operator" everywhere
+                # else (round 2, D8r).
                 text = (
-                    f"[system] The question for {subject} was never answered: nobody "
-                    "was attached to this session and it expired. No decision was "
-                    "made — this was a timeout, not a choice by the user. Decide "
-                    "yourself (take your recommended option where you gave one), then "
-                    "say in one line what you assumed and carry on."
+                    f"[system] The question for {subject} expired unanswered after "
+                    f"{waited}. No decision was made — this was a timeout, not a "
+                    "choice by the operator. Decide yourself (take your recommended "
+                    "option where you gave one), then say in one line what you "
+                    "assumed and carry on."
                 )
             else:
                 text = (
-                    f"[system] The approval request for {subject} expired with "
-                    "nobody attached to this session and was denied automatically. "
-                    "This was a timeout, not a decision by the user."
+                    f"[system] The approval request for {subject} expired unanswered "
+                    f"after {waited} and was denied automatically. This was a "
+                    "timeout, not a decision by the operator."
                 )
             out.append(_injected_user_message(text, message.id))
         elif message.custom_type in (

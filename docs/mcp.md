@@ -57,16 +57,14 @@ cannot resolve never spends one:
 ```
 
 **The store is the ENCRYPTED secret store** (`<config dir>/secrets/store.db`, the
-one `lop secret` and the MCP key popout write), read **first** and only for the
-IDs a config actually declares. A legacy `<config dir>/credentials.env` — the
-file the desktop Settings > API credentials screen and
-`local-operator credential update NAME` write — is read as a **read-only
-fallback, and only when the ID is definitively ABSENT from the encrypted store**.
-It is never consulted when the encrypted store refused, is locked, is corrupt,
-or holds an empty entry for that ID: those are not absence, and falling back to a
-plaintext copy of the very value the encrypted store would not hand over is the
-one direction this must never take. The legacy file is never written or migrated
-by this path, and unrelated provider credentials are untouched.
+one `lop secret` and the MCP key popout write), and it is the ONLY store read for
+the IDs a config actually declares. The legacy `<config dir>/credentials.env`
+fallback was REMOVED: that file has no writers left (`lop credential update` and
+`Settings > API credentials` now write `LOP_PROVIDER_*` rows in the encrypted
+store), so a fallback would serve a plaintext copy from a store nothing
+maintains. A ref is resolved from the encrypted store or reported missing — never
+downgraded to a plaintext file, which is the one direction this must never take.
+Unrelated provider credentials are untouched.
 
 It is deliberately **not** the process environment, in either tier: a
 project-scoped `.mcp.json` cannot use a reference to copy an unrelated variable

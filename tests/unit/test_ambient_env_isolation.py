@@ -126,8 +126,25 @@ _HARMLESS: dict[str, str] = {
     "LOP_SESSION_GRACE_S": "runtime residency grace; a duration",
     "LOP_BUILD_SETTLE_S": "runtime self-refresh settle; a duration",
     "LOP_BUILD_STAGGER_S": "runtime self-refresh stagger; a duration",
-    "LOP_RUNTIME_DEBUG_STACKS": "debug dump switch",
+    "LOP_RUNTIME_DEBUG_STACKS": "debug dump switch; on by default, 0 disables it",
+    "LOP_RUNTIME_STALL_SECONDS": (
+        "the runtime's own stall bound; a duration, not a resource a test can damage, and "
+        "the tests that spawn a real runtime strip every LOP_* variable before the spawn "
+        "(test_runtime_detachment._isolate), so a value from the operator's shell cannot "
+        "reach a child. An inherited SMALLER bound could only make a spawned runtime die "
+        "earlier — loudly, never a silent pass"
+    ),
+    "LOP_RUNTIME_BOOT_STALL_SECONDS": (
+        "the same bound's BOOT phase; a duration, and the same class as the steady knob "
+        "above (a real-runtime cell reads the value it armed with out of the child's own "
+        "dump header, and every LOP_* variable is stripped before a spawn). It can only "
+        "move the deadline a runtime fires at, never what a test asserts"
+    ),
     "LO_MOBILE_NO_DIAL": "disables the mobile dial-out; safer ON",
+    "LOP_TUNNEL_NO_REARM": (
+        "disables the re-arm on a credential write; it can only withhold starting a "
+        "parked connector, never cause one"
+    ),
     # -- evaluation adapter fds: only meaningful inside a spawned adapter ----
     "LO_ADAPTER_LAUNCH_IDENTITY": "adapter child handshake; unset outside the harness",
     "LO_ADAPTER_OWNER_FD": "adapter child fd; unset outside the harness",

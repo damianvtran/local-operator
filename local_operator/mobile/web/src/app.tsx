@@ -5,6 +5,7 @@
  */
 import { useRoute } from "./router";
 import { NewSessionScreen } from "./screens/new-session";
+import { PairScreen } from "./screens/pair";
 import { PastSessionsScreen } from "./screens/past-sessions";
 import { SessionListScreen } from "./screens/session-list";
 import { SessionScreen } from "./screens/session-view";
@@ -16,6 +17,8 @@ export function App() {
 			return <NewSessionScreen />;
 		case "past":
 			return <PastSessionsScreen />;
+		case "pair":
+			return <PairScreen />;
 		case "session":
 			return (
 				<SessionScreen

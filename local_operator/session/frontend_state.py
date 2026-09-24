@@ -11,9 +11,12 @@ from __future__ import annotations
 import copy
 import itertools
 import json
+import logging
 import os
+import threading
 import time
 import uuid
+import weakref
 from collections import deque
 from collections.abc import (
     Callable,
@@ -24,6 +27,7 @@ from collections.abc import (
     MutableSequence,
     MutableSet,
     Sequence,
+    Sized,
 )
 from dataclasses import dataclass
 from enum import StrEnum
@@ -46,6 +50,7 @@ from pydantic_core import PydanticSerializationError, to_jsonable_python
 
 from local_operator.harness.intent import ACTIVITY_RESPONDING, ACTIVITY_THINKING
 from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY as _TRAJECTORY_SEQ_KEY
+from local_operator.harness.jobs import roster_expired as _roster_expired
 from local_operator.harness.subagent import TRAJECTORY_CAP as _TRAJECTORY_CAP
 from local_operator.harness.types import (
     AgentEndEvent,
@@ -72,6 +77,16 @@ from local_operator.session.spend import (
     serving_identity,
     usage_prices_known,
 )
+
+logger = logging.getLogger(__name__)
+
+#: Whether the roster predicate has already reported an unreadable node list.
+#: One warning per FAILING STREAK, not per tick: ``_released_predicate`` is
+#: rebuilt on every roster refresh, so an intermittently unreadable graph would
+#: otherwise emit one warning per refresh (up to ~20/s on the 50 ms coalescer)
+#: for a single fault. Cleared on the next successful read, so a recovery
+#: re-arms it and the instrument stays live rather than firing once per process.
+_node_status_failure_reported = False
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     #: The duck-typed session members this store calls when a real session is
@@ -933,6 +948,33 @@ _FRONTEND_LOCAL_SLASHES = {
     # the point of stopping from here. Routing it to the runtime would stop the
     # RUNTIME's neighbours, not the viewer's.
     "stop",
+    # ARCHIVE AND DELETE ARE FACTS ABOUT THIS MACHINE'S SESSION STORE, and the
+    # store they write is `config_dir()/archived-sessions.json` — the very file
+    # THIS terminal's sidebar and picker read. Routed to the runtime they would
+    # land on the runtime's config root while the receipt promises "hidden from
+    # /resume, the sidebar and search" about the screen in front of the user:
+    # the wrong-machine split `/notifications` states above ("the store this
+    # frontend's own sidebar paints from"), with a durable file rather than a
+    # mark.
+    #
+    # AND THEY ARE THE TWO COMMANDS A VIEWER MUST BE ABLE TO RUN ON ITSELF.
+    # `/delete` acts on the conversation the viewer is standing in, and that
+    # conversation is — by construction — the one with a live owner: it holds
+    # both `.session.pid` and `.execution-lease`, so the owner-side delete is
+    # refused by the guard it shares with every other session ("open in a
+    # running session"). Answering it HERE is what makes the remedy real: the
+    # frontend answers `/delete` in the state a viewer reaches after `/stop`
+    # (a cold facade whose owner has exited and released both markers) instead
+    # of routing it into the stopped-facade pre-route answer, which exists for
+    # commands that genuinely need the owner and used to swallow this one.
+    #
+    # A follower on ANOTHER HOST keeps the same property in the other
+    # direction: the store and the session are this terminal's, so the delete
+    # removes the directory the sidebar is listing, and the archive hides the
+    # row the sidebar is painting.
+    "archive",
+    "unarchive",
+    "delete",
 }
 # Bare ``/mcp`` renders the canonical server list locally, but its grant
 # subcommands mutate OAuth state that lives on the authoritative runtime — the
@@ -1229,6 +1271,51 @@ def _trajectory_row_seq(row: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+def _last_trajectory_seq(rows: Any) -> int | None:
+    """One retained window's newest relay stamp, or ``None`` when it has none.
+
+    REDUNDANT WITH THE LENGTH FOR ANYTHING A RELEASED ROW PROJECTS, and kept
+    anyway as the defensive half of the pair (review round 2, R2). An earlier
+    revision of this docstring justified it with the at-cap rotation — an append
+    that evicts the front, leaving ``len()`` unmoved — which is :func:`_capped_overlap_tail`'s
+    problem, not this one: :func:`_released_row` sheds the window entirely and
+    keeps only ``trajectory_length``, a value that is invariant under
+    append-plus-evict by construction. So the element moves the mark on that
+    rotation, the memo rebuilds, and the rebuild is value-equal, so ``mutate``
+    discards it and installs the old row: no observable cost and no observable
+    benefit. It stays because a future projection of the window would need it
+    and because ``len()`` alone cannot, on its own, distinguish a rotation from
+    a no-op. O(1): a length and one index.
+    """
+    try:
+        return _trajectory_row_seq(rows[-1]) if len(rows) else None
+    except Exception:  # noqa: BLE001 — an unindexable window is "no stamp"
+        return None
+
+
+def _plan_shape(node: Any) -> tuple[bool, int] | None:
+    """The SHAPE of a child's plan, cheaply, for ``_ReleasedRows._fingerprint``.
+
+    ``todos`` is stamped onto the row by :func:`_with_lineage` out of
+    ``TODO_STORE``, not read off the node, so no node field covers it. The phase
+    count is what THIS keys; the contents are left to the row, because dumping
+    every phase per tick is the cost the memo exists to remove — and the
+    consequence is that a same-count edit to a plan does not move the mark
+    (review round 3, T1).
+    """
+    if node is None:
+        return None
+    session_id = getattr(node, "session_id", None)
+    if not session_id:
+        return None
+    try:
+        from local_operator.tools.builtin import TODO_STORE
+
+        return (bool(getattr(node, "live", False)), len(TODO_STORE.get(session_id) or ()))
+    except Exception:  # noqa: BLE001 — an unreadable store is "no plan"
+        return None
+
+
 def _freeze_row(row: Any) -> Any:
     """Freeze ONE retained trajectory row into canonical immutable containers.
 
@@ -1498,31 +1585,92 @@ def _elide_derivable_launch_id_in_place(job: dict[str, Any]) -> None:
         del job["launch_message_id"]
 
 
-def _drop_absent_row_facts_in_place(job: dict[str, Any]) -> None:
-    """Omit the per-row keys that are EMPTY from a row that has neither fact.
+def _elide_row_facts_in_place(job: dict[str, Any]) -> None:
+    """Drop the per-row keys that must not ride the wire.
 
-    An absent fact must not buy wire bytes. These two keys are empty on every
-    bash job and on every child that was never resumed, and at roster scale the
-    empty values alone were measured at ~9 KB of the 1 MiB line budget — enough
-    to push the ``ran all year`` class guard over the limit on their own, with
-    no information in them at all.
+    Two KINDS of drop live here, and they are different arguments that happen to
+    share a boundary. One is a byte saving on values that are EMPTY; the other is
+    a key the session keeps INTERNALLY and deliberately never publishes on the
+    wire. Both are applied at BOTH wire boundaries — the delta assembly in
+    ``mutate`` and the attach snapshot in :func:`sync_wire_payload` — because the
+    two serialize job rows by different routes and a saving in one does not reach
+    the other.
 
-    Omission is exactly equivalent to sending the empty values: ``JobState``
-    defaults both, a delta rebuilds each row by revalidating the raw dict rather
-    than merging it onto the prior row (``apply_update``), and a follower
-    reading neither key takes the same degrade path as one attached to a runtime
-    that predates the fields. So this is a pure byte saving, not a semantic one.
+    EMPTY-VALUED, because an absent fact must not buy wire bytes.
+    ``launch_message_id`` and ``launch_prompts`` are empty on every bash job and
+    on every child that was never resumed, and at roster scale the empty values
+    alone were measured at ~9 KB of the 1 MiB line budget — enough to push the
+    ``ran all year`` class guard over the limit on their own, with no information
+    in them at all. ``cut_off_cause`` joins them for the same reason, measured
+    the same way: it is empty on every row that was not restored from a roster
+    record, and one key's worth of JSON on each of 200 rows was enough to push
+    the same class guard 4 KB over the line on its own. Its non-empty value is a
+    single token from ``incidents.CUT_OFF_CAUSES``, so the field costs nothing at
+    rest and tens of bytes on the handful of rows that carry it.
 
-    ``cut_off_cause`` joins them for the same reason, measured the same way:
-    it is empty on every row that was not restored from a roster record, and one
-    key's worth of JSON on each of 200 rows was enough to push the same class
-    guard 4 KB over the line on its own. Its non-empty value is a single token
-    from ``incidents.CUT_OFF_CAUSES``, so the field costs nothing at rest and
-    tens of bytes on the handful of rows that carry it.
+    Omission is exactly equivalent to sending those empty values: ``JobState``
+    defaults all three, a delta rebuilds each row by revalidating the raw dict
+    rather than merging it onto the prior row (``apply_update``), and a follower
+    reading none of them takes the same degrade path as one attached to a runtime
+    that predates the fields. So that half is a pure byte saving, not a semantic
+    one.
 
-    Applied at BOTH wire boundaries — the delta assembly in ``mutate`` and the
-    attach snapshot in :func:`sync_wire_payload` — because the two serialize job
-    rows by different routes and a saving in one does not reach the other.
+    ``roster_released`` is NOT that shape, and this paragraph is the one to read
+    before touching it (QA round 1, Q1). Eliding only its ``false`` value was the
+    first idea and it does not fit: the key is 25 bytes on every row that
+    actually carries it (``"roster_released":true,`` plus its separator, measured
+    against the ``ran all year`` guard), and the certified worst case has 168
+    bytes of slack across a 200-row roster, so SEVEN released rows exhaust it.
+    An oversized ``frontend_sync`` is worse than a dropped line here rather than
+    merely large: it is the one frame family whose substitute is an ``error``
+    frame FOLLOWED BY A DISCONNECT. Which arm a frame lands on is NOT a single
+    rule (review round 5, W2), so by arm, in ``session/runtime/server.py``'s
+    ``_readable_frame``: it SUBSTITUTES the welcome (the identity-only projection
+    a connect sends) and the ``result``/any-``req`` replies (an ``error`` frame
+    carrying the request id); it RE-DEGRADES ``event``/``frontend_update``
+    (fitted already at ``_enqueue_client_frame``); and it DROPS, with no
+    substitute and no close, a ``projection`` repaint arriving after connect (the
+    phone-stops-updating-live case whose residual ``_readable_frame`` documents)
+    and any unknown op. It closes ONLY on an unsendable ``frontend_sync`` PUSH
+    (the no-``req`` form, where there is nobody to tell), because a viewer left on
+    a base that never comes applies no delta and reports the owner as
+    unresponsive. That push has no fit pass either: the
+    :func:`fit_frame_for_wire` chokepoint lives in ``_enqueue_client_frame``,
+    which only the two relay families reach. So it is answered with an ``error``
+    frame and then a disconnect, at ERROR, with no re-send.
+
+    So the key does not travel ON THE WIRE at all until something reads it there,
+    and NOTHING in the tree does: the only writer is :func:`_released_row`, the
+    only reader is ``_ReleasedRows.adopt_from``'s in-process gate, and outside
+    those two the name appears in this module and two test modules. The perf win
+    is entirely owner-side, no part of the memoisation consults the wire, and a
+    per-row key with no consumer is a per-row cost with nothing to pay for.
+
+    THE ONE ROUTE THAT KEEPS IT, named because the claim above is about the
+    SOCKET and "never serialized" would be false (review round 4, V1):
+    :meth:`FrontendStateStore.checkpoint` dumps the CANONICAL state — the one
+    that keeps the flag — into the session transcript
+    (``FRONTEND_CHECKPOINT_CUSTOM_TYPE``), once per turn end for any session with
+    a UI or an attach subscriber, and ``_restored_state`` reads it back in a
+    later process. That stays, deliberately. The checkpoint is the store's record
+    of its OWN canonical state rather than a frame for a peer; nothing on the
+    durable route reads the flag, and ``_jobs`` re-derives it on the first
+    refresh after a restore (``JobState.from_job`` never sets it,
+    :func:`_released_row` re-stamps it), so a ``True`` released by a previous
+    process is overwritten before anything can consult it. Both halves are pinned
+    by ``test_the_durable_checkpoint_carries_the_flag_and_a_restore_rederives_it``.
+    Eliding the durable copy too is a SEPARATE change with its own measurement —
+    it would save ~24 B/row per checkpoint, in a row the code rewrites IN FULL at
+    every turn end, and it is not this PR's certified attach ceiling.
+
+    WHEN A CONSUMER LANDS, the wire form is a STATE-LEVEL enumeration rather
+    than this per-row key, and the measured options are recorded here so nobody
+    re-derives them. At the guard's 200 released rows: a ``"1"``-per-row bit
+    string costs 221 B, the same string hex-packed 71 B, an id list 1,912 B
+    (9.6 B/ROW — a per-row cost wearing a state-level name, and a FAIL), and the
+    whole budget for any new cost is 1,208 B (the 168 bytes free plus four
+    catalogue rows of the residual bound's travel to
+    :data:`MODEL_CATALOGUE_FLOOR_ROWS`). The wire form returns with its reader.
     """
     if not job.get("launch_message_id"):
         job.pop("launch_message_id", None)
@@ -1530,6 +1678,436 @@ def _drop_absent_row_facts_in_place(job: dict[str, Any]) -> None:
         job.pop("launch_prompts", None)
     if not job.get("cut_off_cause"):
         job.pop("cut_off_cause", None)
+    # Unconditional, unlike the three above: an ABSENT fact is dropped to save
+    # bytes, this one is dropped because no reader exists for it. ``true`` is the
+    # informative value and it is exactly the value that costs 25 B/row, so
+    # keeping it and eliding only ``false`` buys nothing. See the docstring.
+    job.pop("roster_released", None)
+
+
+def _clear_node_status_failure() -> None:
+    """Re-arm the one-shot node-status warning after a successful read."""
+    global _node_status_failure_reported
+    _node_status_failure_reported = False
+
+
+def _released_predicate(manager: Any, comms: Any) -> Callable[[Any], bool]:
+    """ "Has the roster window released this row?", bound to the live manager.
+
+    Returns a callable rather than a bool so the window, the clock and the
+    paused set are read ONCE per tick instead of once per job — this runs on
+    the session loop under a 50 ms coalescer.
+
+    Reads its window from ``manager.retention_ms`` and its intent from the
+    comms records, the same two sources ``tui/app.py``'s owner-side filter
+    uses, and applies the shared :func:`roster_expired` predicate rather than
+    re-deriving one. ``bool`` is rejected the way that filter rejects it
+    (``isinstance(True, int)`` is true, and a stray ``True`` would impose a
+    1 ms window that released the whole roster).
+
+    Total and silent: an unreadable manager, a host that supplies no window, or
+    a row of an unexpected shape answers "not released". Failing closed here
+    only costs the old per-tick work; failing OPEN would stamp a live child as
+    released and stop publishing its trajectory, which is a correctness bug.
+
+    WHICH CLOCK, AND WHY THIS ONE. The rule is the dock's — it is the same
+    :func:`roster_expired` call — but the STAMP is not, and the difference is
+    deliberate rather than an oversight (review round 1, S2). ``tui/app.py``'s
+    ``_within_roster_window`` passes ``settled_at=_bucketed_stamp_of(job,
+    window)`` because it coalesces a display: rounding a stamp UP makes a batch
+    that settled together leave the dock in one repaint. This publisher applies
+    the TRUE stamp, which is the clock the execution ledger sweeps on, so the
+    canonical roster and the ledger agree and only the dock's presentation is
+    quantised. The observable consequence is bounded and one-directional: the
+    dock keeps a row for up to one bucket (15 s at the default window) after
+    this flag turns true, never the other way, so no consumer is shown a row
+    the dock has already dropped. A consumer that FILTERED on
+    ``roster_released`` would therefore hide such a row up to one bucket before
+    the owner's own dock does; that is the price of the publisher staying on the
+    exact clock, and adopting the reader's rounded one here would move the
+    canonical roster OFF the ledger's clock to fix a cosmetic disagreement. No
+    consumer filters on it today, and none can until a wire form exists: the
+    flag reaches no wire frame (see :func:`_elide_row_facts_in_place`).
+    """
+    retention_ms = getattr(manager, "retention_ms", None)
+    if isinstance(retention_ms, bool) or not isinstance(retention_ms, (int, float)):
+        return lambda _job: False
+    window = float(retention_ms)
+    now = time.time()
+    # Same projection ``paused_child_ids`` reads for the dock: a pause is
+    # recorded on ``_ChildRecord.paused`` and surfaces as ``node.status ==
+    # "paused"``. Read through the public ``nodes()`` view rather than the
+    # records, so this stays a consumer of that projection rather than a second
+    # interpretation of the record. (Not imported from the panel: that is a TUI
+    # widget, and the session layer must not depend on it.)
+    paused_ids: set[str] = set()
+    nodes = getattr(comms, "nodes", None)
+    try:
+        rows: Any = nodes() if callable(nodes) else ()
+        for node in rows if isinstance(rows, Iterable) else ():
+            if str(getattr(node, "status", "")) == "paused":
+                paused_ids.add(str(getattr(node, "job_id", "") or ""))
+    except Exception:  # noqa: BLE001 — see below; this arm must fail CLOSED
+        global _node_status_failure_reported
+        # NOT ``paused_ids = set()``, which is the OPEN direction and the
+        # opposite of what the docstring promises (review round 1, S5): an
+        # empty paused set removes ``roster_expired``'s pause exemption, so a
+        # child the user paused precisely to come back to — the row
+        # ``harness/jobs.py`` calls load-bearing — becomes releasable and stops
+        # publishing its trajectory. Releasing nothing this tick costs the old
+        # per-tick work and nothing else. Logged rather than silent: a
+        # permanent failure that says nothing is undiagnosable (the dock's own
+        # equivalent logs for the same reason).
+        if not _node_status_failure_reported:
+            _node_status_failure_reported = True
+            logger.warning("subagent roster: node statuses unreadable; releasing nothing this tick")
+        else:
+            logger.debug("subagent roster: node statuses still unreadable; releasing nothing")
+        return lambda _job: False
+
+    _clear_node_status_failure()
+
+    def released(job: Any) -> bool:
+        try:
+            return _roster_expired(
+                job,
+                window,
+                paused=str(getattr(job, "id", "") or "") in paused_ids,
+                now=now,
+            )
+        except Exception:  # noqa: BLE001 — see the docstring: fail closed
+            return False
+
+    return released
+
+
+#: Fields a RELEASED row keeps. Identity, lineage, terminal outcome and
+#: accounting — everything a viewer needs to resolve the child's page, price it
+#: and say how it ended.
+#:
+#: WHAT IS SHED, and each for its own reason (review round 1, S4 — the drop is
+#: named here rather than left implicit, because :attr:`JobState.roster_released`
+#: promises a viewer of THIS process's roster — the dock and the TUI read the
+#: store directly, not the socket — that it loses nothing it could see before):
+#:
+#: * ``trajectory`` — a released child is settled and its rows are on disk in
+#:   its own transcript, which is what the subagent page reads. The in-memory
+#:   window is the whole cost this projection exists to stop paying per tick.
+#: * ``output_tail`` / ``output_seq`` — the live-output window and its cursor,
+#:   the same class of per-tick cost as ``trajectory``.
+#: * ``cut_off_cause`` — unreachable on a released row rather than dropped: its
+#:   only writer stamps ``restored=True`` rows, and ``retention_expired``
+#:   exempts those permanently, so such a row is never released.
+#:
+#: ``latest_details`` is NOT shed, deliberately: the last progress payload has
+#: live consumers (``tui/widgets/subagent_panel.py``, ``tui/app.py``,
+#: ``mobile/projection.py``) and dropping it would be exactly the silent
+#: regression the docstring above rules out.
+#:
+#: ``registrant_id`` / ``agent_id`` were in an earlier revision and are gone:
+#: they are not declared on ``JobState``, so they landed in ``model_extra`` on
+#: released rows ONLY — a wire shape that differed by membership state, carrying
+#: an execution-ledger fact into a presentation DTO, at 61 bytes per row on the
+#: very rows whose saving this change is about, and read by nothing.
+_RELEASED_ROW_FIELDS = (
+    "id",
+    "type",
+    "status",
+    "queued",
+    "label",
+    "error_text",
+    "result_text",
+    "latest_details",
+    "model_label",
+    "context_window",
+    "start_time",
+    "started_at",
+    "settled_at",
+    "session_id",
+    "parent_job_id",
+    "agent_role",
+    "effort",
+    "prompt",
+    "restored",
+    "attempt_aliases",
+    "launch_message_id",
+)
+
+
+def _released_row(job: Any) -> "JobState":
+    """One roster row for a child the window has released — identity, no window.
+
+    Built field by field rather than through :meth:`JobState.from_job` because
+    ``from_job``'s cost IS the retained window, and skipping that is the point.
+    Usage travels through the same helpers a normal row uses so a released
+    child's spend still prices identically.
+
+    Callers on the tick path go through :class:`_ReleasedRows`, which memoises
+    the result — this function is the builder, not the hot path.
+    """
+    values: dict[str, Any] = {"roster_released": True}
+    for name in _RELEASED_ROW_FIELDS:
+        value = getattr(job, name, None)
+        if value is not None:
+            values[name] = value
+    # Stated explicitly BECAUSE the window is shed: ``_derive_trajectory_length``
+    # defaults the count from the rows present, which is zero here, and a page
+    # that reads zero says "no activity" for a child whose transcript is intact.
+    # The count is the one thing about the window a released row must keep.
+    retained = getattr(job, "trajectory", None)
+    values["trajectory_length"] = len(retained) if isinstance(retained, Sized) else 0
+    usage = getattr(job, "usage", None)
+    if isinstance(usage, dict):
+        usage = Usage.model_validate(usage)
+    if usage is not None:
+        values["usage"] = usage
+    descendants = []
+    for component in list(getattr(job, "descendant_usage", None) or []):
+        if isinstance(component, dict):
+            descendants.append(FrontendUsage.model_validate(component))
+        elif isinstance(component, Usage):
+            descendants.append(FrontendUsage.model_validate(component.model_dump(mode="json")))
+        elif isinstance(component, FrontendUsage):
+            descendants.append(component)
+    values["descendant_usage"] = descendants
+    direct_cost, unknown = cost_summary(
+        (usage.cost_components or [usage]) if usage is not None else [],
+        model_label=str(getattr(job, "model_label", None) or ""),
+    )
+    values["direct_cost"] = direct_cost
+    values["direct_cost_knowledge"] = _cost_knowledge(direct_cost, unknown)
+    return _freeze_job(JobState.model_validate(values))
+
+
+class _ReleasedRows:
+    """Per-job memo of a RELEASED child's row, so a tick stops rebuilding it.
+
+    WHY THIS EXISTS, and why it is the half that actually bounds the tick.
+    Dropping a released child's retained window (:func:`_released_row`) removes
+    the per-ROW cost, but the per-JOB cost remained: ``_jobs`` runs on a 50 ms
+    coalescer and was still validating and freezing a fresh ``JobState`` for
+    every settled child on every tick. Measured on a 100-row roster that is the
+    entire residual — ``_freeze_job`` plus ``model_copy`` plus
+    ``model_validate``, none of which the child can influence any more.
+
+    THE INVARIANT, and why the memo is sound rather than a bet. A released row
+    is one the roster window has let go: it is SETTLED (``retention_expired``
+    refuses a ``running`` row outright) and its window has already elapsed, so
+    no writer will touch it again — its status, outcome text and accounting are
+    final. Retention only ever moves forward, so a row cannot come BACK from
+    released; the one path that revives a child id is a resume, which registers
+    a NEW job whose identity the fingerprint below does not match.
+
+    The fingerprint is therefore not a guess about equality, it is a statement
+    of what a released row is made of: the fields :data:`_RELEASED_ROW_FIELDS`
+    projects that could differ between two rows sharing an id. A resumed
+    attempt changes ``start_time``/``settled_at``; a re-registered id changes
+    ``status`` or the terminal text. Any mismatch rebuilds rather than reuses.
+
+    Entries are dropped for jobs that leave the roster (:meth:`retain`) and on
+    an epoch change (:meth:`rebind`), for the same reasons
+    :class:`_TrajectoryWindows` does both: a memo that outlives its subject
+    pins it, and a new lineage may reuse an id.
+    """
+
+    __slots__ = ("_by_job", "_epoch")
+
+    def __init__(self, epoch: str) -> None:
+        self._by_job: dict[str, tuple[tuple[Any, ...], JobState]] = {}
+        self._epoch = epoch
+
+    def rebind(self, epoch: str) -> None:
+        """Bind to the store's current lineage, dropping the previous one's rows."""
+        if epoch != self._epoch:
+            self._epoch = epoch
+            self._by_job.clear()
+
+    def clear(self) -> None:
+        """Forget every row; the next tick rebuilds each released child once."""
+        self._by_job.clear()
+
+    def retain(self, job_ids: Iterable[str]) -> None:
+        """Drop every entry for a job no longer on the roster, so none is pinned."""
+        live = set(job_ids)
+        for job_id in [key for key in self._by_job if key not in live]:
+            del self._by_job[job_id]
+
+    @staticmethod
+    def _fingerprint(job: Any, comms: Any) -> tuple[Any, ...]:
+        """Every mutable input of a released row, so a change cannot be missed.
+
+        THE CLAIM IS "EVERY WRITER-REACHABLE INPUT", NOT "EVERY FIELD", and the
+        three boundaries below are the difference (review round 3, T1 and T2 —
+        earlier revisions of this docstring said "everything" in three separate
+        sentences while the body said otherwise two paragraphs down).
+
+        The job half is the terminal facts :data:`_RELEASED_ROW_FIELDS` projects
+        that HAVE A WRITER, plus a cheap change discriminator for each
+        projection the row DERIVES rather than copies. The comms half is what
+        :func:`_with_lineage` stamps on top — it reads the NODE, not the job, so
+        a fingerprint over the job alone would serve a stale row when the graph
+        moves (a resume folding attempts, a child's plan appearing).
+
+        WHY THE DERIVED PROJECTIONS ARE KEYED AT ALL (review round 1, S1). An
+        earlier revision keyed status/stamps/terminal text and the node half
+        only, and rested the rest on "a released row is settled, so no writer
+        will touch it again". That is an assumption about ANOTHER subsystem's
+        writers, and the guard that would have caught it going wrong was exactly
+        the one omitting the fields: :func:`_released_row` derives ``usage``,
+        ``descendant_usage``, ``direct_cost``, ``trajectory_length`` and
+        ``model_label``, so a tick after any of them moved served the SAME object
+        for ever — no later tick can repair it, because the mark never moves
+        again. Every element added below is O(1) (a ``len``, a tuple of counters,
+        a monotone stamp), so closing the gap does not put the per-tick cost
+        back.
+
+        WHAT IS STILL OUTSIDE THE KEY, named rather than implied, because an
+        earlier revision of this paragraph said "the one projection" and
+        "everything a writer can reach is keyed", and neither was true (review
+        round 2, R1 and R3):
+
+        * ``latest_details`` — its only writer is ``_progress_fn.report``, driven
+          by each runner's own ``report_progress``, which cannot fire once the
+          runner has returned. Keying a progress payload would mean hashing it
+          on every tick, the cost this class exists to remove.
+        * the plan's CONTENT — :func:`_plan_shape` keys its SHAPE (the phase
+          count, plus ``node.live``), because ``_with_lineage`` re-stamps
+          ``todos`` from ``TODO_STORE`` on every tick and a content fingerprint
+          is O(items) per tick. A same-count edit to a plan therefore does not
+          move the mark.
+
+        * the CONTENTS of three containers the row projects by value while the
+          key covers only their COUNT — ``descendant_usage`` components,
+          ``usage``'s sub-fields beyond the six counters above, and
+          ``launch_prompts`` text. A same-count replacement of a descendant list
+          (which is what ``detach_child_manager`` installs — a fresh deep copy,
+          so the count is not guaranteed to move) or a mutation of an unkeyed
+          ``Usage`` sub-field therefore does not move the mark. Keying them is
+          O(items) or O(fields) per released job per tick, which is the cost this
+          class exists to remove; the writers all run inside the child's own
+          run, so none lands after the window.
+
+        All three boundaries are content-blind on cost grounds, taken
+        deliberately AND STATED. Everything else a writer can reach after the
+        runner returns is keyed.
+        """
+        node = None
+        try:
+            node = comms.node(job_id) if (job_id := str(getattr(job, "id", "") or "")) else None
+        except Exception:  # noqa: BLE001 — a graph that cannot answer is "no lineage"
+            node = None
+        trajectory = getattr(job, "trajectory", None)
+        usage = getattr(job, "usage", None)
+        descendants = getattr(job, "descendant_usage", None)
+        return (
+            str(getattr(job, "status", "") or ""),
+            getattr(job, "settled_at", None),
+            getattr(job, "start_time", None),
+            getattr(job, "started_at", None),
+            str(getattr(job, "error_text", "") or ""),
+            str(getattr(job, "result_text", "") or ""),
+            bool(getattr(job, "restored", False)),
+            # BOTH of the fields the relay's ``ModelChangeEvent`` arm writes,
+            # not just the one that prices the row (review round 2, R1):
+            # ``subagent.py`` sets ``model_label`` and ``context_window`` on
+            # consecutive lines of the same block, so keying one and projecting
+            # both is exactly the asymmetry this key exists to prevent. The row
+            # reads ``context_window`` straight off the job.
+            getattr(job, "model_label", None),
+            getattr(job, "context_window", None),
+            # The retained window: ``len`` catches an append or a truncation, and
+            # the newest relay stamp catches the at-cap rotation where an append
+            # evicts the front and the length does not move.
+            len(trajectory) if isinstance(trajectory, Sized) else 0,
+            _last_trajectory_seq(trajectory),
+            # Accounting, as the counters the row prices from. ``usage`` is
+            # accumulated IN PLACE, so an identity check on it would never fire.
+            (
+                None
+                if usage is None
+                else (
+                    getattr(usage, "input_tokens", 0),
+                    getattr(usage, "output_tokens", 0),
+                    getattr(usage, "cache_read_tokens", 0),
+                    getattr(usage, "cache_write_tokens", 0),
+                    getattr(usage, "context_tokens", None),
+                    len(getattr(usage, "cost_components", ()) or ()),
+                )
+            ),
+            len(descendants) if isinstance(descendants, Sized) else 0,
+            getattr(node, "parent_job_id", None),
+            getattr(node, "session_id", None),
+            str(getattr(node, "session_dir", "") or ""),
+            str(getattr(node, "launch_message_id", "") or ""),
+            tuple(getattr(node, "attempt_aliases", ()) or ()),
+            bool(getattr(node, "live", False)),
+            len(getattr(node, "launch_prompts", ()) or ()),
+            # The plan rides onto the row from ``TODO_STORE`` inside
+            # ``_with_lineage``, so the node half above cannot cover it.
+            _plan_shape(node),
+        )
+
+    def adopt_from(self, jobs: Iterable[Any]) -> None:
+        """Point each entry at the row canonical state holds for that job.
+
+        The same move :meth:`_TrajectoryWindows.adopt_from` makes, for the same
+        reason. ``mutate`` does not necessarily install the object this memo
+        handed out: when ``_jobs_equal`` proves the roster unchanged it keeps
+        the STATE's existing rows, so the memo would go on serving an equal but
+        DISTINCT object and every downstream identity check would fail. Once
+        the reducer has decided, the state's row for a released job is provably
+        the current one, so adopting it makes the next tick's reuse an identity.
+
+        The adopted row is put through ``_freeze_job`` rather than merely
+        marked. Every row reaching canonical state on this path has already
+        been frozen, so in practice this is the early return — but MARKING an
+        unfrozen row would record it as frozen without doing the walk, and
+        ``_freeze_job``'s early return would then make that permanent. The
+        asymmetry matters: freezing something already frozen costs an identity
+        check, while marking something unfrozen is an invariant violation that
+        never heals. Take the cheap side.
+
+        Gated on the row still being released, so a row that went back to being
+        rebuilt in full is left alone rather than silently adopted.
+        """
+        for job in jobs:
+            entry = self._by_job.get(getattr(job, "id", ""))
+            if entry is None or entry[1] is job:
+                continue
+            if not getattr(job, "roster_released", False):
+                continue
+            self._by_job[job.id] = (entry[0], _freeze_job(job))
+
+    def row(self, job_id: str, job: Any, comms: Any = None) -> "JobState":
+        """The released row for ``job``, rebuilt only when its fingerprint moves.
+
+        Lineage is applied INSIDE the memo rather than by the caller: stamping it
+        afterwards would rebuild the row on every tick and give back exactly the
+        cost this class exists to remove.
+        """
+        mark = self._fingerprint(job, comms)
+        entry = self._by_job.get(job_id)
+        if entry is not None and entry[0] == mark:
+            return entry[1]
+        built = _released_row(job)
+        if comms is not None:
+            # FREEZE the result, never merely mark it. ``_with_lineage`` stamps
+            # through ``model_copy`` and the values it takes off the comms node
+            # are raw containers -- ``launch_prompts`` a ``dict``,
+            # ``attempt_aliases`` and ``todos`` ``list``s -- so the row it hands
+            # back is NOT frozen however frozen its input was. Marking it here
+            # (an earlier version of this line did) recorded it as frozen
+            # without doing the walk, and because ``_freeze_job`` early-returns
+            # on a marked row the under-frozen containers then survived every
+            # later tick: mutable state shared straight out of ``_public_job``,
+            # and a row that raises ``TypeError`` on ``hash()``.
+            #
+            # Re-freezing is cheap and self-marking: every value already frozen
+            # comes back by identity through ``_freeze_value``, so this costs
+            # the handful of fields lineage actually restamped.
+            built = _freeze_job(_with_lineage(built, comms))
+        self._by_job[job_id] = (mark, built)
+        return built
 
 
 def _jobs_equal(current: Sequence["JobState"], candidate: Sequence["JobState"]) -> bool:
@@ -1593,8 +2171,65 @@ def _capped_overlap_tail(old: Sequence[Any], trajectory: Sequence[Any]) -> list[
     return list(trajectory[overlap:])
 
 
+#: Job rows this module has already frozen, by object identity.
+#:
+#: ``_freeze_job`` is not identity-stable — it always returns a fresh
+#: ``model_copy`` — so a row that is already frozen is rebuilt every time it
+#: passes through. That is invisible for a row built once per tick, and it is
+#: the whole cost for a RELEASED row that :class:`_ReleasedRows` memoised
+#: precisely so it would NOT be rebuilt: ``mutate`` re-froze it on the way in
+#: and threw the memo's work away.
+#:
+#: Keyed by ``id()`` and held through a weak VALUE reference, for two reasons
+#: that both bite. ``JobState`` is ``frozen=True``, so pydantic gives it a
+#: value-based ``__hash__`` that raises ``TypeError`` on a row whose fields
+#: include a list (``trajectory``, ``descendant_usage``) — a ``WeakSet`` is not
+#: available at all. And identity is what this needs to answer anyway: the
+#: question is "is this the very object I froze", not "does it equal one".
+#:
+#: The weak reference is what makes ``id()`` safe. A raw id set would be a
+#: correctness bug, not just a leak: ids are reused after collection, so a
+#: fresh unfrozen row could land on a dead entry's id and be waved through
+#: unfrozen. Holding a weakref and comparing the REFERENT closes that — a
+#: recycled id finds a dead (or different) referent and rebuilds.
+#:
+#: Not a flag on the model: stamping one would need a real field (wire
+#: surface, follower compatibility) or a mutation ``frozen=True`` forbids.
+_FROZEN_JOBS: "dict[int, weakref.ReferenceType[JobState]]" = {}
+
+
+def _is_frozen_job(job: "JobState") -> bool:
+    """Whether THIS object is one :func:`_freeze_job` produced."""
+    reference = _FROZEN_JOBS.get(id(job))
+    return reference is not None and reference() is job
+
+
+def _mark_frozen_job(job: "JobState") -> None:
+    """Record ``job`` as frozen, and drop the entry when it is collected."""
+    key = id(job)
+
+    def _release(_reference: Any, key: int = key) -> None:
+        _FROZEN_JOBS.pop(key, None)
+
+    try:
+        _FROZEN_JOBS[key] = weakref.ref(job, _release)
+    except TypeError:  # pragma: no cover — a model that cannot be weak-referenced
+        pass
+
+
 def _freeze_job(job: "JobState") -> "JobState":
-    """Detach the owning model and freeze every nested canonical value."""
+    """Detach the owning model and freeze every nested canonical value.
+
+    Returns an already-frozen row UNCHANGED, by identity. Re-freezing one is a
+    no-op in effect — every nested value hits ``_freeze_value``'s
+    ``_FrozenSequence``/``_FrozenMapping`` arm and comes back as itself — so the
+    only thing the rebuild produced was a new shell and the garbage to collect
+    it. Skipping it is what lets a memoised released row survive ``mutate``
+    with its identity intact, which in turn is what makes ``_jobs_equal``
+    recognise an unchanged tick without walking the row.
+    """
+    if _is_frozen_job(job):
+        return job
     values = {
         name: _freeze_value(value)
         for name, value in job.__dict__.items()
@@ -1606,7 +2241,9 @@ def _freeze_job(job: "JobState") -> "JobState":
     )
     for name, value in (job.model_extra or {}).items():
         values[name] = _freeze_value(value)
-    return job.model_copy(update=values)
+    frozen = job.model_copy(update=values)
+    _mark_frozen_job(frozen)
+    return frozen
 
 
 #: Context key for the sync-frame dump, read by
@@ -1674,6 +2311,66 @@ class JobState(BaseModel):
     output_tail: str = ""
     output_seq: int = 0
     restored: bool = False
+    #: Whether the roster window has RELEASED this row — identity only, no
+    #: longer a current roster member.
+    #:
+    #: THE IDENTITY-VS-MEMBERSHIP SPLIT, deferred on PR #732 and closed here.
+    #: ``_jobs`` resolves rows through ``comms.job_rows()``, which hands back
+    #: ``_ChildRecord.job_ref`` for children the execution ledger already
+    #: swept. That is CORRECT and deliberate — the publish is a viewer's only
+    #: handle on a swept child, and simply filtering those rows out drops the
+    #: viewer to zero rows and breaks its transcript page (measured by QA on
+    #: #732, which is why the owner-side filter in ``tui/app.py`` was never
+    #: mirrored here).
+    #:
+    #: So the row keeps travelling and says what it is instead. A consumer that
+    #: needs MEMBERSHIP ("what is on the roster right now") reads this flag; a
+    #: consumer that needs IDENTITY ("resolve this child's page") ignores it and
+    #: still finds the row.
+    #:
+    #: NEVER ON THE WIRE: this flag is not serialized into any frame (QA round 1,
+    #: Q1 — see :func:`_elide_row_facts_in_place` for the measurement that decided
+    #: it, and for the state-level shapes to use when a wire consumer finally needs
+    #: it). The ONE writer is :func:`_released_row`; the ONE reader is
+    #: ``_ReleasedRows.adopt_from``'s reuse gate, and both are owner-side and
+    #: in-process. The perf win this flag was added for is entirely owner-side too
+    #: — nothing in the memoisation consults the wire — so a per-row wire key has
+    #: nothing to pay for and 25 bytes of a certified ceiling to pay with.
+    #:
+    #: "On the wire" is exact rather than a hedge, because the flag IS serialized
+    #: somewhere (review round 4, V1). :meth:`FrontendStateStore.checkpoint` writes
+    #: the canonical state — this flag included — to the session transcript at
+    #: every turn end, and ``_restored_state`` reads it back in a later process.
+    #: That route deliberately keeps it: it is the store's record of its own
+    #: canonical state, not a frame for a peer. Nothing reads the flag there, and
+    #: ``_jobs`` re-derives it from ``from_job``/``_released_row`` on the first
+    #: refresh after a restore, so a stale ``True`` carried across the process
+    #: boundary is overwritten before anything can consult it. Eliding the durable
+    #: copy as well is a separate change with its own measurement — see
+    #: :func:`_elide_row_facts_in_place`. Both facts are pinned by
+    #: ``test_the_durable_checkpoint_carries_the_flag_and_a_restore_rederives_it``.
+    #:
+    #: WHAT A VIEWER LOSES, exhaustively, because "nothing is hidden" would be
+    #: the easier sentence and it is not true (review round 1, S4). Identity,
+    #: lineage, terminal outcome, the last progress payload and the accounting
+    #: all still travel. What does NOT is the retained window itself
+    #: (``trajectory``, keeping only its ``trajectory_length``) and the
+    #: live-output tail and its cursor (``output_tail``/``output_seq``) — the
+    #: per-tick cost this projection exists to stop paying for a child that is
+    #: settled and whose rows are on disk in its own transcript. The signed
+    #: ``_RELEASED_ROW_FIELDS`` comment is the authoritative list.
+    #:
+    #: It is also what makes a long session's tick cost bounded: a released row
+    #: is settled and can never emit again, so ``_jobs`` stops rebuilding and
+    #: re-freezing it every tick (see ``_RELEASED_ROW_FIELDS``). Without that a
+    #: 42-hour session accumulated 48 rows whose retained windows were re-frozen
+    #: on a 50 ms coalescer until the loop could not keep up.
+    #:
+    #: The flag is absent from every WIRE frame — no runtime puts it on the socket
+    #: — so a reader looking for it there takes the ``False`` default: the same
+    #: path a follower of a runtime that predates it took (``extra='allow'``).
+    #: Nothing reads it, so nothing degrades.
+    roster_released: bool = False
     # Canonical lineage (U5): the runtime's subagent-comms tree is not itself
     # serializable, but its one fact — who launched whom — is. Stamping the
     # parent's job id (and the child's session/role for the page header) lets
@@ -2533,7 +3230,7 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
             _bound_launch_ids_across_jobs(jobs)
             for job in jobs:
                 if isinstance(job, dict):
-                    _drop_absent_row_facts_in_place(job)
+                    _elide_row_facts_in_place(job)
         # LAST, after every other field has been bounded: this budget is what
         # the socket line has LEFT, so it can only be measured once nothing
         # else will shrink. See MODEL_CATALOGUE_FLOOR_ROWS for why the
@@ -3901,8 +4598,40 @@ class FrontendStateStore:
     """
 
     def __init__(self, state: FrontendSessionState) -> None:
+        # The ONE assignment outside ``_install``: nothing else can see this
+        # store yet, so there is no race to take the lock against.
         self._state = _freeze_state_jobs(state.model_copy(deep=True))
         self._subscribers: list[Callable[[FrontendUpdate], None]] = []
+        #: Guards the ONE O(1) critical section that makes registration and
+        #: publication a single step across threads: a publish assigns ``_state``
+        #: and takes its subscriber list (``_install``); a subscribe appends
+        #: itself and takes the state reference (``_join``).
+        #:
+        #: EVERYTHING PROPORTIONAL TO THE STATE HAPPENS OUTSIDE IT — the deep
+        #: copy and freeze (``_freeze_for_install``), the caller-owned clone, the
+        #: fan-out. That is not tidiness: ``subscribe_threadsafe`` takes this lock
+        #: synchronously on the SERVING loop, so any state-sized work in the
+        #: section is the serving plane waiting on the session plane's state
+        #: size — the coupling the off-loop path exists to remove. A freeze in
+        #: here measured p50 24.7 ms / max 51.5 ms for one cold 20-job x 400-row
+        #: payload, with a joining thread waiting up to 65.7 ms behind it,
+        #: against p50 0.3 ms / max 0.6 ms for the same install holding only the
+        #: assign. (Review round 1 measured the same defect independently at
+        #: 45.6 ms held and 89.4 ms worst joiner wait, on its own fixture.)
+        #:
+        #: It does NOT make the store multi-writer, and the state a publish
+        #: installs is still built from a single read of ``_state``: one writer
+        #: per store is the contract (the session loop for the producer, the
+        #: follower's own loop for a viewer). What the lock closes is the JOIN
+        #: race, which is the only one a second thread introduces.
+        #:
+        #: It exists because a SUBSCRIBER no longer has to be on the session's
+        #: loop (``subscribe_threadsafe``): a viewer dialling a busy owner was
+        #: parked on the session loop for the length of whatever synchronous
+        #: step the turn was inside (measured: 15.0 s and a failed control
+        #: attach). The single loop used to BE the atomicity mechanism; this
+        #: lock is that mechanism now, and it is the only thing that changed.
+        self._publish_lock = threading.Lock()
         self._todo_sequences: dict[str, int] = {}
         self._todo_seed_floor = state.sequence
         #: The follower's per-job memo of the frozen retained windows it has
@@ -3937,14 +4666,33 @@ class FrontendStateStore:
         #: paths that invalidate it. Owned here rather than by the job manager
         #: because it is a property of what this store last froze.
         self._trajectory_windows = _TrajectoryWindows(self._state.epoch)
+        #: Memo of each RELEASED child's row -- see :class:`_ReleasedRows`. Kept
+        #: beside the window memo and invalidated on exactly the same paths,
+        #: because it answers the other half of one question: what a roster tick
+        #: must rebuild.
+        self._released_rows = _ReleasedRows(self._state.epoch)
 
     @property
     def state(self) -> FrontendSessionState:
-        # Never share an owning Pydantic instance. Clone the small state/job/usage
-        # shells while immutable retained payload wrappers remain shared.
-        snapshot = self._state.model_copy(deep=True)
+        return self._public_state(self._state)
+
+    def _public_state(self, state: FrontendSessionState) -> FrontendSessionState:
+        """A caller-owned clone of ONE canonical state object.
+
+        Takes the object rather than reading ``self._state`` twice, and that is
+        a correctness point rather than tidiness: with ``subscribe_threadsafe``
+        a publish can land between two reads of the attribute, and a snapshot
+        whose ``jobs`` came from a LATER state than its shells would describe a
+        roster that never existed. Reading one reference once also makes the
+        off-loop capture exact — the reference is taken under ``_publish_lock``
+        and this clone is built outside it.
+
+        Never share an owning Pydantic instance. Clone the small state/job/usage
+        shells while immutable retained payload wrappers remain shared.
+        """
+        snapshot = state.model_copy(deep=True)
         return snapshot.model_copy(
-            update={"jobs": _FrozenSequence(_public_job(job) for job in self._state.jobs)}
+            update={"jobs": _FrozenSequence(_public_job(job) for job in state.jobs)}
         )
 
     def read_field(self, name: str) -> Any:
@@ -4100,8 +4848,48 @@ class FrontendStateStore:
     def has_subscribers(self) -> bool:
         return bool(self._subscribers)
 
-    def replace(self, state: FrontendSessionState) -> None:
-        self._state = _freeze_state_jobs(state.model_copy(deep=True))
+    def _freeze_for_install(self, state: FrontendSessionState) -> FrontendSessionState:
+        """The frozen object an install publishes. Call OUTSIDE ``_publish_lock``.
+
+        WHY THE FREEZE IS NOT IN THE SECTION. ``model_copy(deep=True)`` plus
+        ``_freeze_state_jobs`` is proportional to the state — measured at p50
+        24.7 ms / max 51.5 ms for one cold 20-job x 400-row payload and p50
+        0.17 ms for re-installing a state that is already frozen — and the
+        object is private to the call that built it until ``_install`` assigns
+        it, so building it outside the lock costs nothing and keeps the serving
+        plane off the session plane's state size.
+
+        Sites whose install is deliberately SHALLOW (``_fold_live_event``, the
+        sequence-only arms) do not come through here: their whole point is to
+        share the frozen sub-objects rather than re-clone them per delta.
+        """
+        return _freeze_state_jobs(state.model_copy(deep=True))
+
+    def _install(self, state: FrontendSessionState) -> list[Callable[[FrontendUpdate], None]]:
+        """Make a FROZEN state canonical and take its audience: the only lock.
+
+        THE ONE THING ``_publish_lock`` GUARDS, and it is O(1) — an assignment
+        and a list copy, nothing proportional to the state. That is what the
+        ordering proof needs: "install this object" and "become visible to the
+        next publisher" have to be one step as seen by a joiner, so a callback is
+        in the returned list XOR after the sequence it captured, never both.
+
+        Returns the audience rather than notifying, so every notifying path takes
+        it from the same section that installed the state and fans out OUTSIDE
+        it. No subscriber callback ever runs holding this lock.
+        """
+        with self._publish_lock:
+            self._state = state
+            return list(self._subscribers)
+
+    def _rebuild_derived(self, state: FrontendSessionState) -> None:
+        """Drop every cache a re-seated state invalidates.
+
+        Call OUTSIDE ``_publish_lock``: these memos are read only by the thread
+        that writes them (the producer's on its session loop, the follower's on
+        its own), so they need no cross-thread exclusion, and the lock is
+        reserved for the one section a subscriber can race.
+        """
         self._todo_sequences.clear()
         self._todo_seed_floor = state.sequence
         # BOTH memos die here, and for the same reason from two directions.
@@ -4115,17 +4903,39 @@ class FrontendStateStore:
         # only ever one of the two, but `replace` is shared, so both are cleared
         # here rather than in two conditioned branches.
         self._trajectory_windows.clear()
+        self._released_rows.clear()
         self._follower_windows.reset(state.epoch)
 
+    def replace(self, state: FrontendSessionState) -> None:
+        self._install(self._freeze_for_install(state))
+        self._rebuild_derived(state)
+
     def replace_and_notify(self, state: FrontendSessionState) -> None:
-        """Install a proven wire snapshot without reaching into subscribers."""
-        self.replace(state)
+        """Install a proven wire snapshot without reaching into subscribers.
+
+        The install and the subscriber list are taken in ONE critical section,
+        and that is the ordering proof rather than symmetry with the other
+        publishes: a snapshot install can jump the sequence, so a joiner
+        admitted between the install and the fan-out would capture the installed
+        state as its own sync AND receive that same state as an update — which
+        its exact-``+1`` check reads as a gap. Admitted under the lock it is in
+        one list or the other, never both.
+
+        The state handed in is frozen BEFORE that section
+        (``_freeze_for_install``): a wire-snapshot install is the coldest one
+        there is — a restored 20-job payload measures tens of milliseconds to
+        freeze — and the section is taken on the serving loop by every joiner in
+        that window.
+        """
+        frozen = self._freeze_for_install(state)
+        subscribers = self._install(frozen)
+        self._rebuild_derived(state)
         update = FrontendUpdate(
             epoch=state.epoch,
             sequence=state.sequence,
             changes=state.model_dump(mode="json"),
         )
-        for subscriber in list(self._subscribers):
+        for subscriber in subscribers:
             subscriber(update.model_copy(deep=True))
 
     def apply_update(self, update: FrontendUpdate) -> FrontendSessionState:
@@ -4159,8 +4969,14 @@ class FrontendStateStore:
             # round trip buys the certainty that no window survives a lineage the
             # follower has just declared untrustworthy.
             self._follower_windows.reset(self._state.epoch)
-            self._state = self._state.model_copy(update={"sequence": update.sequence})
-            for subscriber in list(self._subscribers):
+            # Sequence-only install, and SHALLOW on purpose: the body was shed,
+            # so what this publish carries is unknown rather than unchanged, and
+            # the object it installs is the previous one with a new sequence
+            # number. Only the assign needs the section.
+            subscribers = self._install(
+                self._state.model_copy(update={"sequence": update.sequence})
+            )
+            for subscriber in subscribers:
                 subscriber(update.model_copy(deep=True))
             return self.state
         changes = copy.deepcopy(update.changes)
@@ -4276,7 +5092,7 @@ class FrontendStateStore:
         # the cost this change removes. The flag's remaining job is the OTHER
         # case — a delta that did not touch the roster, whose jobs are the ones
         # canonical state already holds.
-        self._state = _freeze_state_jobs(candidate, jobs_are_canonical=True)
+        subscribers = self._install(_freeze_state_jobs(candidate, jobs_are_canonical=True))
         # Record what canonical state now HOLDS, so the next delta can prove
         # those windows by identity. Done after the install rather than beside
         # the loop above: a delta that fails validation never reaches here, and a
@@ -4287,7 +5103,7 @@ class FrontendStateStore:
             for job, window in zip(self._state.jobs, windows, strict=True):
                 self._follower_windows.remember(job.id, window)
         self._todo_sequences = todo_sequences
-        for subscriber in list(self._subscribers):
+        for subscriber in subscribers:
             subscriber(update.model_copy(deep=True))
         return self.state
 
@@ -4317,8 +5133,14 @@ class FrontendStateStore:
             jobs[index] = job.model_copy(
                 update={"trajectory": list(rows), "trajectory_length": max(len(rows), 0)}
             )
-            self._state = _freeze_state_jobs(
-                self._state.model_copy(update={"jobs": jobs}), jobs_are_canonical=False
+            # Silent (no delta, no sequence move): this changes what THIS follower
+            # holds locally, so both the freeze and the assign are local work —
+            # and the freeze is proportional to the roster, which is exactly why
+            # it is not inside the section every joiner contends for.
+            self._install(
+                _freeze_state_jobs(
+                    self._state.model_copy(update={"jobs": jobs}), jobs_are_canonical=False
+                )
             )
             return True
         return False
@@ -4347,7 +5169,10 @@ class FrontendStateStore:
             if job.id != job_id or job.session_id != session_id:
                 continue
             jobs[index] = _freeze_job(job.model_copy(update={"todos": todos}))
-            self._state = self._state.model_copy(update={"jobs": _FrozenSequence(jobs)})
+            # Silent replacement, as in ``seed_job_trajectory``, and shallow for
+            # the same reason: the roster is already frozen and only this
+            # follower's local copy of it moves.
+            self._install(self._state.model_copy(update={"jobs": _FrozenSequence(jobs)}))
             self._todo_sequences[job_id] = sequence
             return True
         return False
@@ -4442,7 +5267,7 @@ class FrontendStateStore:
                 _elide_derivable_launch_id_in_place(summary)
             _bound_launch_ids_across_jobs(summaries)
             for summary in summaries:
-                _drop_absent_row_facts_in_place(summary)
+                _elide_row_facts_in_place(summary)
             wire_changes["jobs"] = summaries
         if not normalized:
             return None
@@ -4450,28 +5275,67 @@ class FrontendStateStore:
         # Re-validating a full model here deep-copied all job trajectories for
         # every small delta; each changed field was validated above instead.
         jobs_changed = "jobs" in normalized
-        self._state = _freeze_state_jobs(
-            self._state.model_copy(update={**normalized, "sequence": self._state.sequence + 1}),
+        # THE CANDIDATE IS BUILT BEFORE THE SECTION, from one read of ``_state``:
+        # its freeze is proportional to the roster, which is the cost the lock
+        # used to carry, and the store's one-writer contract is what makes that
+        # read sound outside the lock.
+        current = self._state
+        frozen = _freeze_state_jobs(
+            current.model_copy(update={**normalized, "sequence": current.sequence + 1}),
             jobs_are_canonical=not jobs_changed,
         )
+        subscribers = self._install(frozen)
         update = FrontendUpdate(
-            epoch=self._state.epoch,
-            sequence=self._state.sequence,
+            epoch=frozen.epoch,
+            sequence=frozen.sequence,
             changes=wire_changes,
             job_trajectory_appends=trajectory_appends,
             job_trajectory_replacements=trajectory_replacements,
             job_todo_updates=todo_updates,
         )
-        for subscriber in list(self._subscribers):
+        for subscriber in subscribers:
             subscriber(update.model_copy(deep=True))
         return update
 
     def subscribe(self, callback: Callable[[FrontendUpdate], None]) -> FrontendSubscription:
-        # Capture and register without yielding. Session mutations happen on one
-        # event loop, so this is the atomic boundary: no update can fit between
-        # the snapshot's sequence and the subscriber becoming visible.
-        self._subscribers.append(callback)
-        state = self.state
+        """Register a callback and capture the sequence it starts from.
+
+        Registration and the captured sequence happen in ONE critical section
+        of ``_publish_lock``, which is the atomic boundary: no update can fit
+        between the sequence a joiner captures and its becoming visible to
+        publishers. The caller-owned clone is built OUTSIDE that section — it is
+        milliseconds of work, and a publisher must never wait on it.
+        """
+        return self._join(callback)
+
+    def subscribe_threadsafe(
+        self, callback: Callable[[FrontendUpdate], None]
+    ) -> FrontendSubscription:
+        """``subscribe`` from a thread that is NOT the session's own loop.
+
+        WHY THIS EXISTS. ``ServingSessionHandle.subscribe_frontend`` marshals to
+        the loop that owns the session, and that is what makes a control attach
+        wait on the owner's own turn: a session inside a synchronous step holds
+        the loop, so the viewer's bind is parked for the length of the step
+        (measured: 15.0 s, then ``RuntimeUnresponsiveError``). Only a PUBLISHER
+        has to be on that loop; a subscriber can be admitted from anywhere,
+        which is exactly what ``_publish_lock`` makes true.
+
+        The snapshot returned is the state as of this instant and every published
+        update after it, each exactly once and in order — the callback and the
+        captured reference were admitted together, so this joiner is in the
+        publisher's list XOR after the sequence it captured, never both.
+
+        Same admit path as ``subscribe``; the two cannot disagree about what a
+        joiner sees.
+        """
+        return self._join(callback)
+
+    def _join(self, callback: Callable[[FrontendUpdate], None]) -> FrontendSubscription:
+        with self._publish_lock:
+            self._subscribers.append(callback)
+            state_ref = self._state
+        state = self._public_state(state_ref)
         sync = FrontendSync(
             epoch=state.epoch,
             sequence=state.sequence,
@@ -4480,10 +5344,11 @@ class FrontendStateStore:
         )
 
         def unsubscribe() -> None:
-            try:
-                self._subscribers.remove(callback)
-            except ValueError:
-                pass
+            with self._publish_lock:
+                try:
+                    self._subscribers.remove(callback)
+                except ValueError:
+                    pass
 
         return FrontendSubscription(sync=sync, unsubscribe=unsubscribe)
 
@@ -4578,6 +5443,7 @@ class FrontendStateStore:
             # starts from no memo at all. Cleared BEFORE the rows are read below,
             # or the payload it installs could be built from a reused window.
             self._trajectory_windows.clear()
+            self._released_rows.clear()
         selected = getattr(session, "model", None)
         effective = getattr(session, "effective_model", None) or selected
         last_usage = None
@@ -4587,7 +5453,7 @@ class FrontendStateStore:
                 last_usage = restore()
             except Exception:
                 last_usage = None
-        jobs = self._jobs(session, self._retained_windows())
+        jobs = self._jobs(session, self._retained_windows(), self._released_memo())
         child_costs: dict[str, float] = dict(current.child_costs)
         for job in jobs:
             cost = _job_subtree_cost(job, default_model_label=_label(selected))
@@ -4791,11 +5657,13 @@ class FrontendStateStore:
         if initial:
             payload = current.model_dump()
             payload.update(changes)
-            self._state = _freeze_state_jobs(FrontendSessionState.model_validate(payload))
+            self._install(_freeze_state_jobs(FrontendSessionState.model_validate(payload)))
             self._trajectory_windows.adopt_from(self._state.jobs)
+            self._released_rows.adopt_from(self._state.jobs)
         else:
             self.mutate(**changes)
             self._trajectory_windows.adopt_from(self._state.jobs)
+            self._released_rows.adopt_from(self._state.jobs)
         return self.state
 
     def _spend_of(self, session: Any) -> SessionSpend:
@@ -5019,7 +5887,7 @@ class FrontendStateStore:
         cadence the page that needs it already refreshes on, at a fraction of
         the cost.
         """
-        jobs = self._jobs(session, self._retained_windows())
+        jobs = self._jobs(session, self._retained_windows(), self._released_memo())
         child_costs = dict(self._state.child_costs)
         selected = getattr(session, "model", None)
         for job in jobs:
@@ -5030,6 +5898,7 @@ class FrontendStateStore:
         # After the reducer has decided, so the memo hands back the object the
         # state actually holds -- see :meth:`_TrajectoryWindows.adopt_from`.
         self._trajectory_windows.adopt_from(self._state.jobs)
+        self._released_rows.adopt_from(self._state.jobs)
         return update
 
     def refresh_model_catalogue(self, entries: Iterable[Any]) -> FrontendUpdate | None:
@@ -5464,7 +6333,10 @@ class FrontendStateStore:
         # loop, and a deep copy re-clones a 500-event trajectory each token.
         # ``live`` is freshly built above, and every other field is replaced
         # (never mutated in place) by ``mutate``/``apply_update``.
-        self._state = self._state.model_copy(update={"live_events": live})
+        #
+        # Silent replacement: no delta and no sequence move, so only the pointer
+        # needs installing against a reader.
+        self._install(self._state.model_copy(update={"live_events": live}))
 
     async def checkpoint(self, transcript: Any) -> None:
         state = self.state
@@ -5533,14 +6405,39 @@ class FrontendStateStore:
         self._trajectory_windows.rebind(self._state.epoch)
         return self._trajectory_windows
 
+    def _released_memo(self) -> _ReleasedRows:
+        """The released-row memo, bound to the store's CURRENT state lineage.
+
+        Rebound on the way out for the same reason as :meth:`_retained_windows`:
+        a new epoch may reuse a job id, and a row built for the previous lineage
+        must not be handed back for it.
+        """
+        self._released_rows.rebind(self._state.epoch)
+        return self._released_rows
+
     @staticmethod
-    def _jobs(session: Any, windows: _TrajectoryWindows | None = None) -> list[JobState]:
+    def _jobs(
+        session: Any,
+        windows: _TrajectoryWindows | None = None,
+        released: "_ReleasedRows | None" = None,
+    ) -> list[JobState]:
         """One roster row per job, reusing frozen retained windows when given a memo.
 
         ``windows`` is the caller's :class:`_TrajectoryWindows`; omitting it keeps
         the plain rebuild (every row copied and frozen) that a one-off reader
         wants. The two refresh paths pass it, which is what makes a roster tick
         cost the delta rather than the retained window.
+
+        Rows the roster window has RELEASED are stamped ``roster_released`` and
+        projected without their retained trajectory (:func:`_released_row`), so
+        a long session's tick cost stops growing with the children it has
+        already finished. They keep travelling — see
+        :attr:`JobState.roster_released` for why dropping them is not an option.
+        The stamp reaches no wire frame: it is elided at every wire boundary
+        (:func:`_elide_row_facts_in_place`). It DOES survive into the durable
+        checkpoint, which records this store's own canonical state rather than a
+        frame for a peer — see :attr:`JobState.roster_released` for why that route
+        keeps it and why nothing reads it there.
         """
         manager = getattr(session, "jobs", None)
         try:
@@ -5555,11 +6452,42 @@ class FrontendStateStore:
             graph_rows = graph_jobs()
             if isinstance(graph_rows, Sequence):
                 rows = graph_rows
+        # The window and the paused set come from the LIVE manager and the comms
+        # record, exactly as ``tui/app.py``'s owner-side filter reads them: one
+        # source for the rule, so the dock and the canonical roster cannot drift
+        # into two answers about the same child.
+        released_of = _released_predicate(manager, comms)
         values: list[JobState] = []
         seen: set[str] = set()
+        released_seen: set[str] = set()
         for job in rows:
             try:
                 job_id = str(getattr(job, "id", "") or "")
+                if released_of(job):
+                    # Settled and out of the window: it can never emit again, so
+                    # neither its retained rows nor its row itself are rebuilt.
+                    # Lineage is stamped INSIDE the memo, not skipped: a swept
+                    # child's ``session_id``/``session_dir`` are the only route
+                    # its page has to a transcript that outlives the process
+                    # (``test_a_swept_child_keeps_its_durable_identity_on_the_roster``).
+                    seen.add(job_id)
+                    released_seen.add(job_id)
+                    values.append(
+                        # FROZEN on both arms. ``_with_lineage`` re-stamps
+                        # ``launch_prompts``/``attempt_aliases``/``todos`` off
+                        # the comms node as RAW containers, so an unfrozen
+                        # result is a row whose containers are mutable and
+                        # unhashable (review round 1, N1). Both production
+                        # callers pass the memo, so the ``None`` arm is a
+                        # one-off reader — it still may not hand out a shape
+                        # the tick path is forbidden to.
+                        _freeze_job(
+                            released.row(job_id, job, comms)
+                            if released is not None
+                            else _with_lineage(_released_row(job), comms)
+                        )
+                    )
+                    continue
                 value = JobState.from_job(
                     job,
                     window=(
@@ -5579,6 +6507,10 @@ class FrontendStateStore:
                 continue
         if windows is not None:
             windows.retain(seen)
+        if released is not None:
+            # Only the RELEASED ids: a row that went back to being rebuilt in
+            # full (or left the roster) must not keep a memo entry pinning it.
+            released.retain(released_seen)
         nodes = getattr(comms, "nodes", None)
         if callable(nodes):
             known = {job.id for job in values}

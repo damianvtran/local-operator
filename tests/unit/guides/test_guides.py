@@ -11,6 +11,7 @@ import pytest
 
 from local_operator.guides import discover_guides, make_guide_resolver
 from local_operator.prompts_api import render_template
+from local_operator.scratchpad import SCRATCHPAD_PATH_ENV
 from local_operator.session_factory import (
     _KnowledgeHooks,
     _registered_agent_hints,
@@ -38,6 +39,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "peer-messaging",
         "qwencloud",
         "scratchpad",
+        "system-tools",
         "teams",
         "tunnel",
     ]
@@ -86,6 +88,14 @@ def test_guide_listing_never_contains_guide_body() -> None:
             "turn on the smart agent hints and check which vendor served the call",
             "classification",
         ),
+        # The lexical router is deliberately crude (a hashed n-gram embedder,
+        # not a model), so this row is the SHAPE it can actually see: the
+        # missing-command signal and the package-manager vocabulary. A task that
+        # merely needs a conversion ("convert this video to mp4") is NOT matched
+        # by this router and is not asserted here — the classification layer's
+        # LLM roster is the path that carries those, and overstating the router
+        # in a test would pin a claim it cannot keep.
+        ("ffmpeg: command not found, I need to install it", "system-tools"),
     ],
 )
 async def test_each_guide_routes_from_representative_task(
@@ -100,6 +110,105 @@ async def test_each_guide_routes_from_representative_task(
     selected = await index.select(query)
 
     assert expected in {guide.name for guide in selected}
+
+
+def test_every_guide_cross_reference_resolves() -> None:
+    """A `guide://<name>` that names no discovered guide is a silent dead end.
+
+    The corpus tells a model to go read another guide at the exact moment it is
+    stuck (a missing tool, a refused call), and nothing verified the name it is
+    sent to. Nothing in the read path can catch it either: ``read`` on an
+    unknown guide returns the available names as CONTENT, which is a recovery
+    for the model and invisible to a reviewer, so a one-word typo in a
+    cross-reference ships as a working-looking sentence.
+
+    Scoped to the packaged corpus, which is the only place a guide may be
+    referenced from — a guide in a user's own skill tree is not this catalog's
+    business, and the catalogue is what ships.
+    """
+    guides = discover_guides()
+    names = {guide.name for guide in guides}
+    assert names, "the packaged catalog discovered nothing to check"
+
+    unreachable: list[str] = []
+    self_refs: list[str] = []
+    for guide in guides:
+        body = guide.file_path.read_text(encoding="utf-8", errors="replace")
+        for target in set(re.findall(r"guide://([a-zA-Z0-9_-]+)", body)):
+            if target not in names:
+                unreachable.append(f"{guide.name} -> guide://{target}")
+            if target == guide.name:
+                self_refs.append(f"{guide.name} -> guide://{target}")
+
+    assert not unreachable, f"cross-reference names no discovered guide: {unreachable}"
+    assert not self_refs, f"a guide must not tell the model to read itself: {self_refs}"
+
+
+def test_every_guide_reference_in_the_code_resolves() -> None:
+    """The other half of the dead end, one directory over (review round 1, R1-8).
+
+    The corpus walk above cannot see the references the HARNESS itself prints:
+    the missing-tool advisory names `guide://system-tools` from `builtin.py`, and
+    a rename of that guide would leave the harness pointing at a name the
+    resolver reports as unknown — with nothing but the model's own recovery to
+    notice. The test that guards guide-to-guide links should guard
+    code-to-guide links with it, because the same rename breaks both and only
+    one of them was checked.
+
+    Scoped to the packaged `local_operator/` tree: that is the code that ships
+    beside the guides and therefore the only code whose references this catalog
+    can promise. A reference in a user's own script is theirs to get right.
+
+    BOTH `.py` and `.md`, the latter because the highest-traffic reference site in
+    the harness is the packaged system prompt: `prompts_md/system.md` carries four
+    `guide://` pointers and rides every session on every turn, so a rename there
+    is a dead end in front of every model — and a `.py`-only walk could not see it
+    (QA round 1, Q4, which demonstrated exactly that by breaking the prompt and
+    watching the test stay green).
+    """
+    root = Path(discover_guides()[0].file_path).resolve().parents[2]
+    assert (root / "guides").is_dir(), f"unexpected package layout at {root}"
+    names = {guide.name for guide in discover_guides()}
+
+    # `guide://<name>` placeholders are excluded by the pattern itself (the
+    # character class stops at `<`), which is why the protocol's own prose in
+    # `skills/index.py` and the prompts does not trip this.
+    dangling: list[str] = []
+    walked = 0
+    for pattern in ("*.py", "*.md"):
+        for path in sorted(root.rglob(pattern)):
+            walked += 1
+            for lineno, line in enumerate(
+                path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1
+            ):
+                for target in set(re.findall(r"guide://([a-zA-Z0-9_-]+)", line)):
+                    if target not in names:
+                        dangling.append(f"{path.relative_to(root)}:{lineno} -> guide://{target}")
+
+    assert walked > 100, f"the walk found only {walked} files, which is not this tree"
+    assert not dangling, f"code references a guide that does not exist: {dangling}"
+
+
+def test_system_tools_guide_agrees_with_the_console_guide_on_approval() -> None:
+    """The one rule two guides state, so the two texts cannot drift apart.
+
+    The console guide owns the rule that the harness gate authorises the CALL
+    while ``ask`` authorises the CHANGE to the user's machine. The install guide
+    is the situation where a model is most likely to compress the two into one,
+    so it has to send the model to that rule rather than paraphrase it into a
+    subtly weaker one of its own.
+    """
+    body = make_guide_resolver({guide.name: guide for guide in discover_guides()})(
+        "guide://system-tools"
+    )
+
+    assert body is not None
+    assert "console guide already carries that rule" in body
+    assert "Never install anything silently" in body
+    # The Windows elevation limit is the finding this guide exists to state
+    # rather than paper over: the surface cannot answer a UAC dialog.
+    assert "surface cannot" in body and "answer it" in body
+    assert "UAC" in body
 
 
 @pytest.mark.asyncio
@@ -212,7 +321,30 @@ def test_scratchpad_guide_states_the_rules_no_tool_schema_can() -> None:
     body = resolver("guide://scratchpad")
 
     assert body is not None
-    assert body.count("deleted with the session") == 1
+    # The lifetime, stated once and stated so it cannot be read as ephemeral. The
+    # earlier wording ("deleted with the session") was read by a measured session
+    # as meaning "like a temp directory", and it kept a duplicate copy of its state
+    # outside the pad for an hour rather than test that reading: the pad is
+    # session-DIR backed and rides out runtime restarts and rollovers.
+    assert body.count("survives runtime restarts") == 1
+    assert "deleted with the session" not in body
+    assert "dies with the session" not in body
+    # The shell channel's one limit, in the copy an agent reads BEFORE choosing
+    # where to write (round 1, R4): a relative redirect is not resolved. The home
+    # spellings are pinned beside it because the two sentences are one
+    # instruction — what the scan can see, and what it refuses — and the refusal
+    # half is what an agent has to know to spell a path it wants noticed.
+    #
+    # Asserted against a whitespace-flattened body: these are phrases, and a
+    # phrase re-wrapped in the source is the same sentence to the reader.
+    flat = " ".join(body.split())
+    assert "needs the path NAMED, not related" in flat
+    assert "`~/`, `$HOME/` or `${HOME}/` is expanded to the real home" in flat
+    assert "`~other/tmp/x.md` is another user's home" in flat
+    # The quoting clause is here because the tilde spelling makes a pre-existing
+    # class newly REACHABLE (`'~/x'` could not fire at all before the expansion),
+    # so the copy an agent reads has to say that a quoted token is read anyway.
+    assert "expanded here anyway" in flat
     assert "one-off script" in body
     assert "Data you are still shaping" in body
     assert "real extension" in body
@@ -242,6 +374,146 @@ def test_scratchpad_guide_prints_no_absolute_path_shaped_example() -> None:
     assert (
         re.search(r"(?<![\w./:-])/(Users|home|tmp|var|private|sessions|scratchpad)/", body) is None
     )
+
+
+def test_scratchpad_guide_says_where_binary_scratch_goes() -> None:
+    """The guide separates the two cases an earlier revision conflated, and the
+    separation is a MEASURED correction rather than a preference: a PNG written
+    into the pad by ``bash`` reads back through the scheme as a viewable image,
+    while a non-image binary has no text to return and is refused. Only the
+    second needs a real temp dir — the home this bullet names (the per-user temp
+    directory, NOT the one macOS reaps) plus where to record the path it made —
+    so the omission ``system.md`` leaves is answered where the reader lands
+    instead of being a gap to fall into.
+    """
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://scratchpad")
+    assert body is not None
+    section = body[body.index("## Use something else for") : body.index("## The protocol")]
+    assert "**A NON-image binary**" in section
+    assert "mktemp" in section
+    assert "$TMPDIR" in section
+    # The verified mechanism, named rather than gestured at, and the window it
+    # prunes on — the reason the guide gives for avoiding that one directory.
+    assert "com.apple.tmp_cleaner" in section
+    assert "three days" in section
+    # Where the made temp dir's path is recorded, so a later turn finds the files.
+    assert "scratchpad://" in section
+
+
+def test_scratchpad_guide_states_the_boundary_of_the_content_policy() -> None:
+    """The content policy is enforced at the TOOLS, and this guide is the
+    document read right next to the ``$LOCAL_OPERATOR_SCRATCHPAD`` recipe that
+    hands a shell the pad path.
+
+    Review round 1 (F1): the bullet said build output was "refused by name if you
+    try" beside that recipe, which reads as a property of the pad — while the
+    channel that produced the measured 34.8 GB (a compiler and a package manager
+    in a shell) is not policed at all, and the check has one call site either
+    way. The claim and its boundary are pinned TOGETHER, because the failure this
+    guards is a later revision keeping the rule and dropping the honest half —
+    which is exactly how the over-claim got written. The material is named as the
+    list the generality round asked for (build trees, dependency trees, compiled
+    artefacts, archives, anything the shell built) rather than as "build output"
+    alone: a dependency tree is the largest single shape in the audit and calling
+    it build output is what let it read as somebody else's problem.
+    """
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://scratchpad")
+    assert body is not None
+
+    section = body[body.index("## Use something else for") : body.index("## The protocol")]
+    # Whitespace-collapsed: the guide is PROSE and re-wraps as it is edited, so an
+    # assertion on the raw bytes would pin the line width rather than the claim.
+    collapsed = " ".join(section.split())
+
+    assert "build trees, dependency trees, compiled artefacts" in collapsed
+    assert "git worktree add" in collapsed
+    # The boundary: the tools are checked, a shell is not.
+    assert "enforced at the TOOLS and not in a shell" in collapsed
+    assert "NOT policed" in collapsed
+
+
+def test_scratchpad_guide_states_the_shapes_and_the_pad_total() -> None:
+    """The content policy is a SHAPE rule plus a backstop, and both halves are
+    what a reader has to be able to act on: the "do not put these here" list, the
+    shapes a list of names would miss (a build tree qualified by its toolchain, a
+    versioned shared library), and the pad's own 256 MiB total — the arm that
+    refuses material whose name no list has ever seen.
+    """
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://scratchpad")
+    assert body is not None
+
+    # Whitespace-collapsed: the guide is PROSE and re-wraps as it is edited, so an
+    # assertion on the raw bytes would pin the line width rather than the list.
+    collapsed = " ".join(body.split())
+
+    assert "Do not put these here: build trees, dependency trees, compiled artefacts" in collapsed
+    assert "anything the shell built" in collapsed
+    # Both ceilings, as the numbers a reader compares against: a per-write one and
+    # the pad's own.
+    assert "32 MiB (33,554,432 bytes)" in collapsed
+    assert "256 MiB (268,435,456 bytes)" in collapsed
+    # The third refusal condition (N1) — a pad of many small files, nowhere near
+    # the byte ceiling, that refuses every write — and the ONE exemption that gets
+    # a pad back under (M4), since nothing here deletes.
+    assert "over 20,000 entries" in collapsed
+    assert "replaced file is not counted twice" in collapsed
+    # The shapes, not only the names: the trees the list never held.
+    assert "cmake-build-*" in collapsed
+    assert "libfoo.so.1.2" in collapsed
+
+
+def test_scratchpad_guide_makes_a_rendered_frame_first_class_content() -> None:
+    """The correction this pin exists for. The guide used to say a binary put in
+    the pad "cannot be read back — the reader refuses it", and it named an image
+    FIRST, so the single most common scratch artifact this fleet makes (681 PNGs
+    sat in ``/tmp`` at the time of the audit) was sent away from the pad by the
+    document that is supposed to hold it. Measured 2026-09-21: a PNG written into
+    the pad by ``bash`` and read back through the scheme renders as an image, and
+    only a NON-image binary is refused — for having no text to return, which is a
+    different fact from being unreadable.
+
+    The stale claim and its replacement are pinned together, because the failure
+    this guards is a future revision restoring the blanket refusal: that reads as
+    a harmless simplification and would silently re-create the funnel.
+    """
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://scratchpad")
+    assert body is not None
+
+    assert "cannot be read back" not in body
+    assert "A rendered frame or a still" in body
+    # Whitespace-collapsed: the guide is PROSE and re-wraps as it is edited, so
+    # an assertion on the raw bytes pins the line width rather than the claim —
+    # it broke on a rewording that changed nothing else.
+    permitted = " ".join(
+        body[body.index("## Use it for") : body.index("## Use something else for")].split()
+    )
+    assert "VIEWABLE image" in permitted
+    # The distinction is stated where the reader decides, not only where the
+    # reader is told to go elsewhere.
+    assert "NON-image binary" in body
+
+
+def test_scratchpad_guide_names_the_exported_path_and_the_pad_local_mktemp() -> None:
+    """The path is what a shell actually needs, and the guide is where an agent
+    looks after being nudged. Both the variable and the idiom have to be here:
+    `mktemp -d` with no template is the sanctioned escape hatch, so an agent that
+    wants a private rig directory has to be shown the TEMPLATED form that keeps
+    the directory inside the pad — otherwise the nudge and the guide disagree and
+    the escape hatch wins.
+    """
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://scratchpad")
+    assert body is not None
+
+    assert f"${SCRATCHPAD_PATH_ENV}" in body
+    assert f'mktemp -d "${SCRATCHPAD_PATH_ENV}/rig.XXXXXX"' in body
+    # The unset case is stated, because the operator's own terminal does not
+    # have it and a recipe that assumes it is a recipe that fails there.
+    assert "unset in the user's terminal" in body
 
 
 def test_browser_and_agent_guides_require_terminal_surface_cleanup() -> None:

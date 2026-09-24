@@ -959,18 +959,15 @@ test("every wire method has a worker handler", async () => {
   );
 
   const missing = methods.filter((method) => !handlers.has(method));
-  // The documented exception, and it is READ from the generated protocol rather
-  // than listed here: `download` cannot be served by ANY build of this extension
-  // (Chrome refuses a tab-scoped `chrome.debugger` session the browser-level
-  // commands that would let it choose a destination — see the constant's own
-  // comment and docs/design/browser-file-transfer.md §17.1). Anything else
-  // missing is still a real gap, so the assertion keeps its teeth.
-  const impossible = [...generated.matchAll(/EXTENSION_CANNOT_SERVE: string\[\] = \[([^\]]*)\]/g)].flatMap(
-    (m) => [...m[1].matchAll(/'([^']+)'/g)].map((item) => item[1]),
-  );
-  assert.ok(impossible.length > 0, "the generated cannot-serve list must be parsed");
-  const gaps = missing.filter((method) => !impossible.includes(method));
-  assert.deepEqual(gaps, [], `wire methods with no handler: ${gaps}`);
+  // No exceptions, and the removal of the old one is the point: the escape hatch
+  // that used to sit here read Python's `EXTENSION_CANNOT_SERVE` because no
+  // build could serve `download` at all (Chrome refuses a tab-scoped
+  // `chrome.debugger` session the browser-level download commands — design
+  // §17.1). That constant is retired: the extension serves the method through
+  // `chrome.downloads`, gated by the operator's own switch. So every wire method
+  // must have a handler, and a method added to `METHODS` without one reads as the
+  // gap it is (review round 1, R4 — the check keeps its teeth either way).
+  assert.deepEqual(missing, [], `wire methods with no handler: ${missing}`);
 });
 
 // The daemon accepts a WINDOW of protocol versions (MIN_SUPPORTED_PROTO..

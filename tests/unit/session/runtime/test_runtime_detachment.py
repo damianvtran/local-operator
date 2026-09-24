@@ -37,8 +37,9 @@ WHY THE CELLS ARE SHAPED THIS WAY.
   The sibling precedent is ``tests/unit/test_exec_mode.py``'s SIGTERM worker
   test, whose comment records this exact failure ("the child took SIGTERM before
   installing the handler, died with rc=-15"). So this test waits for the child's
-  own ``SIGUSR1`` task dump (``LOP_RUNTIME_DEBUG_STACKS=1``, an existing opt-in
-  hook armed later in ``amain`` than the SIGHUP handler) before it sends
+  own ``SIGUSR1`` task dump (``LOP_RUNTIME_DEBUG_STACKS=1``, on by default
+  since 2026-09-20 and set explicitly here, armed later in ``amain`` than the
+  SIGHUP handler) before it sends
   anything.
   ``SIGUSR1``'s default disposition is fatal too, so the PROBE is made harmless
   at the source rather than in the product: this process sets ``SIGUSR1`` to
@@ -126,7 +127,10 @@ def _isolate(monkeypatch: pytest.MonkeyPatch, config_dir: Path) -> None:
     monkeypatch.setenv("LOP_SESSION_GRACE_S", "600")
     # The arming gate: this installs the SIGUSR1 task dump, which `amain` arms
     # after the SIGHUP handler (see the module docstring), so observing it is
-    # proof the disposition under test is installed too.
+    # proof the disposition under test is installed too. Set EXPLICITLY even
+    # though the dump is now on by default (it stopped being opt-in on
+    # 2026-09-20, see `process.amain`): this test's readiness gate must not
+    # depend on a default that another change could flip back.
     monkeypatch.setenv("LOP_RUNTIME_DEBUG_STACKS", "1")
     # Defence in depth for the WORKSPACE families the loop above already
     # removed: nothing in this module may address a real pane.

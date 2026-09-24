@@ -111,6 +111,28 @@ EXCLUSIVE_MOVE_CAPABILITY = "exclusive-move-v1"
 #: client gates the send on this string being present in the record).
 EVENT_MUTE_CAPABILITY = "event-mute-v1"
 
+#: Additive attach capability: this owner accepts the ``operator_challenge`` op
+#: and will admit an authority-increasing frame that carries a valid
+#: ``operator_sig`` (with ``operator_key_id``, and ``operator_cert`` for a
+#: device) against the operator anchor it has pinned.
+#:
+#: WHY A CAPABILITY AND NOT A PROTOCOL BUMP (revision 2, §2.3). The whole change
+#: is ADDITIVE: a new ordinary op that grants nothing, and three optional fields
+#: on frames that already exist. An older owner answers the new op with its
+#: generic unknown-op error frame, which the client reads as "this runtime
+#: predates the feature" and handles by... not being able to loosen, which is
+#: exactly what that runtime could do before. Bumping ``PROTOCOL_VERSION`` would
+#: instead refuse the CONNECTION, breaking ordinary control (a phone could not
+#: even read a session) for a capability it can live without — the OPPOSITE of
+#: what this revision is for.
+#:
+#: Advertised by every runtime that can verify a signature, which is every
+#: runtime of this build: verification needs only the anchor's public half, so an
+#: owner with no anchor installed is still a correct answer to "can you check
+#: one" (it checks and refuses). See the record's capability list for why it is
+#: not conditioned on the anchor's presence.
+OPERATOR_SIGNATURE_CAPABILITY = "operator-signature-v1"
+
 #: Event types a MUTED attach connection stops receiving: the wire half of
 #: ``EVENT_MUTE_CAPABILITY``, and deliberately THE SAME SET the parked
 #: ``EventController`` discards app-side (``tui/events.py`` assigns its
@@ -131,15 +153,29 @@ EVENT_MUTE_CAPABILITY = "event-mute-v1"
 #: and muting it would buy nothing while costing a compose preview on reveal.
 #: Do not "complete" this set by adding it.
 #:
+#: ``reasoning_delta`` is the one member that satisfies clauses one and three
+#: while being UNREBUILDABLE, and it is admitted on an explicit exception that is
+#: narrower than the rule reads: reasoning is display-only and never durable
+#: (``harness/types.ReasoningDeltaEvent``), so there is nothing downstream that a
+#: gap can leave WRONG — a revealed viewer simply sees the thinking from the
+#: reveal onward. Everything else in this module's contract is state a parked
+#: source must still have right; this is not state. It is admitted because it is
+#: emitted once per reasoning token, which makes it the largest single frame
+#: family a long-thinking turn produces: leaving it out is what would let a
+#: parked viewer's queue grow without bound, the exact cost this set exists to
+#: avoid.
+#:
 #: Also deliberately absent: ``message_start``/``message_end`` (row identity and
 #: the settled row the dedupe and card pairing key on), every turn/agent
 #: boundary, tool start/end, compaction, retry, model change, and every
 #: delivery notice — those change state a parked source is still expected to
-#: have right. These three ARE the volume: at 12 streaming sessions they were
-#: ~229 events/s of the traffic measured on the reporting machine.
+#: have right. These four ARE the volume: at 12 streaming sessions they were
+#: ~229 events/s of the traffic measured on the reporting machine, before
+#: ``reasoning_delta`` joined them.
 EVENT_MUTE_DROP_TYPES = frozenset(
     {
         "message_update",  # one per assistant token
+        "reasoning_delta",  # one per reasoning token; see the exception above
         "tool_execution_update",  # one per streamed tool-output chunk
         "subagent_progress",  # one per child progress beat
     }
@@ -279,6 +315,28 @@ SERVE_RUN_DIRNAME = "run/serve"
 #: same rule applied to a session record).
 HOST_RUN_DIRNAME = "run/host"
 
+#: The ``-m`` target of a session runtime process — THE SPAWN CONTRACT, and the
+#: one thing an external census may match a runtime on.
+#:
+#: ONE HOME, because the two halves of this contract live in different modules
+#: and nothing used to tie them together: three spawners write this string into
+#: an argv (``session/runtime/launch.py``, ``mobile/daemon.py``) and the
+#: residency sweep matches it (``session/runtime/reclaim.py``, which reads it
+#: from here). A drift between them is SILENT and one-directional — the sweep's
+#: census matches nothing, every root reads as having no runtimes, and the
+#: feature goes inert with no failing test anywhere. It sits here rather than in
+#: ``reclaim`` because ``launch`` must not import the sweep to write an argv:
+#: ``reclaim`` pulls in ``registry`` and ``viewers``, and this module is the
+#: runtime's shared vocabulary with no local imports of its own.
+#:
+#: Matched as a WHOLE ARGV WORD after a ``-m``, never as a substring, by the
+#: census that consumes it: a person running ``grep
+#: local_operator.session.runtime.process`` would otherwise be listed as a
+#: runtime, which is the single misidentification that could make a sweep signal
+#: a stranger.
+RUNTIME_MODULE = "local_operator.session.runtime.process"
+
+
 # SESSIONS_DIRNAME (imported above) is the name of the directory holding one
 # directory per conversation, and session_dir() names the join once for the
 # stop marker's writer and reader, so neither re-derives the layout.
@@ -388,16 +446,77 @@ SIGNAL_DRAIN_S = 120.0
 #: patience for "my session is locked", because the alternative to firing is what
 #: the incident measured: unbounded, and it ended in a wedge nobody could clear.
 #: 15 min clears the longest silent step evidenced here, tolerates a silent model
-#: stream of the same order, and hands a stuck session over a quarter of an hour
-#: after its work stopped rather than never. Force-cutting something that was
-#: merely slow is the residual risk, accepted deliberately: it costs the turn in
-#: flight, while not firing costs the whole session.
+#: stream of the same order, and reports a stuck session a quarter of an hour after
+#: its work stopped rather than never.
+#:
+#: WHAT THE BOUND DOES NOW, since the obvious reading of the paragraph above is the
+#: one that was removed: it does NOT cut the turn. Force-cutting something that was
+#: merely slow was the accepted residual risk — it cost the turn in flight — and the
+#: operator's rule for every build move is that a runtime is replaced when its turn
+#: is COMPLETE, never on a heuristic of inactivity. So the bound now ABANDONS the
+#: handover: the runtime keeps the build it loaded, the messages the drain queued
+#: come back in, and the failure is published under ``UPDATE_FAILED_CAUSE``
+#: (``process._abandon_move``). What the bound still buys is unchanged and is what
+#: its calibration was for: a session whose work has gone silent stops being a
+#: handover nobody can complete, and becomes a reported condition on a runtime that
+#: is still serving.
 #:
 #: HERE, beside ``SIGNAL_DRAIN_S``, for that constant's own reason: the phrase that
 #: NAMES this bound is published on the record two front ends read
 #: (:data:`LEAVING_FOR_BUILD_OVERDUE`), and a number rendered in one module from a
 #: constant in another is one rename away from describing a wait nobody waits.
 BUILD_DRAIN_PROGRESS_S = 15 * 60.0
+
+#: How long a BUILD drain may hold the handover at all — the DWELL bound — before
+#: the runtime stops waiting and gives the handover up (``process._drain_for``).
+#:
+#: WHY A SECOND BOUND, WHEN THE ONE ABOVE EXISTS. :data:`BUILD_DRAIN_PROGRESS_S`
+#: bounds STALENESS, and the clock that feeds it is reset by every observable sign
+#: that the work advanced (``process._work_motion``). That is exactly right for a
+#: hold that has gone quiet, and it is blind by construction to the shape that
+#: wedged this host: a hold whose work KEEPS MOVING. A subagent lane that steps,
+#: a job that keeps printing, or a parent whose transcript keeps gaining rows resets
+#: the staleness clock forever, so the latched drain never expires — and while it is
+#: latched nothing else in the process ends it: a draining runtime REFUSES admissions,
+#: it holds the transcript lease (``session/runtime/launch.py`` forbids a successor
+#: while a live pid holds it), so the session is unwritable and unhandover-able for
+#: as long as the lane keeps stepping. Measured on the reporting host: a runtime
+#: latched a stale-build drain and held it for EIGHT HOURS while its subagents kept
+#: stepping, and the staleness bound only fired once the lanes finally stopped. The
+#: dwell bounds the HOLD itself, which is the only thing left to bound once movement
+#: is no longer a signal of "this will finish soon".
+#:
+#: HOW LONG IS NOT A FREE CHOICE. 30 min, which is D7's own proposed ceiling for this
+#: state (``BUILD_DRAIN_MAX_S``, default 1800 s, in
+#: ``docs/design-ownerless-session-attach.md``), adopted here for the arm that keeps
+#: serving rather than exiting. From below it is pinned by the bound above: the dwell
+#: must sit strictly ABOVE 15 min, or the staleness arm could never fire and this one
+#: would become the only clock — abandoning holds that were merely silent at the
+#: 15-minute mark, which reports the weaker observation for the sharper state. It
+#: reads no work at all, so the residual it must tolerate is the opposite of the
+#: staleness arm's: a handover whose work is genuinely progressing and merely long.
+#: The measured long silent steps (up to 44.6 min in ``logs/exec-jobs.jsonl``) are
+#: NOT this arm's problem — a silent step is the arm above's, and it fires at 15 min
+#: — while a handover that is still REPORTING after half an hour is one an operator
+#: should be told about rather than made to wait out.
+#:
+#: WHAT FIRING COSTS, which is what makes a bound this short defensible where a
+#: force-cut was not. The departure is NOT lost: ``process._reaper`` keeps the drain
+#: object and the commitment it carries, so the runtime still leaves at the first idle
+#: instant it reaches and the newer build still gets the handover — firing only means
+#: the wait stops being one the operator is locked out of. Firing while work continues
+#: releases the latch, so the session takes work again, and publishes the failure under
+#: :data:`UPDATE_FAILED_CAUSE` so the state is reportable instead of silent. It does
+#: NOT exit the process and does NOT cut the turn in flight: a runtime is replaced
+#: when its turn is COMPLETE, never on a heuristic of inactivity (the operator's rule
+#: for every build move), and it is the reason the arm this bound drives abandons the
+#: handover rather than taking the signal drain's bounded exit.
+#:
+#: HERE, beside the two bounds it is measured against, for their own reason: an
+#: operator comparing what a runtime promises against what a bound can take away has
+#: to read all three in one place, and the failure this bound publishes carries its
+#: number onto the incident row from this constant rather than from a copy.
+BUILD_DRAIN_DWELL_S = 30 * 60.0
 
 
 def bound_text(seconds: float) -> str:
@@ -472,11 +591,16 @@ LEAVING_ON_SIGNAL = f"signalled; leaving when its turn ends (up to {bound_text(S
 #: on it and publishes the OVERDUE phrase instead.
 LEAVING_FOR_BUILD = "leaving for the build on disk when its turn ends"
 
-#: What a runtime publishes when its build drain has held with NO MOVEMENT
-#: REPORTED for the whole of ``BUILD_DRAIN_PROGRESS_S`` and has therefore stopped
-#: waiting (``process._leave_overdue``). The third phrase beside the two above,
-#: and the only one that reports a bound already SPENT rather than a wait still
-#: running.
+#: What a runtime USED TO publish when its build drain had held with NO MOVEMENT
+#: REPORTED for the whole of ``BUILD_DRAIN_PROGRESS_S``. NO ARM SENDS IT ANY MORE
+#: (``process._abandon_move`` abandons the handover instead of leaving, and keeps
+#: :data:`LEAVING_FOR_BUILD` on the record), and it stays in this module and in all
+#: four consumer tables for the reason a published vocabulary always outlives its
+#: publisher: the records that carry it are on disk, and this build still has to
+#: RENDER them. So it remains a member of :data:`PUBLISHED_LEAVING_PHRASES` — which
+#: is also what keeps ``cli.LEAVING_COLUMN_WIDTH`` sized for a row a reader may
+#: still meet — and what changed is only that nothing advertises it as a state this
+#: runtime can reach.
 #:
 #: WHY IT EXISTS SEPARATELY, AND WHY EVERY FRONT END KEYS ON IT.
 #: ``LEAVING_FOR_BUILD`` promises that the turn in flight finishes, and for the
@@ -514,6 +638,8 @@ LEAVING_FOR_BUILD = "leaving for the build on disk when its turn ends"
 #: ``/info`` card-67 budget of 53, which is where the wide rung draws. The
 #: explicit "reported" half lives on the prose surfaces
 #: (``tui.app.OVERDUE_DRAIN_NOTICE`` and the refusal), which are not width-bound.
+#: This phrase is the widest of the three, which is why the historical entry above
+#: keeps the column where it is rather than letting a re-derivation shrink it.
 LEAVING_FOR_BUILD_OVERDUE = (
     f"leaving for the build on disk; no movement ({bound_text(BUILD_DRAIN_PROGRESS_S)})"
 )
@@ -534,6 +660,159 @@ PUBLISHED_LEAVING_PHRASES: tuple[str, ...] = (
     LEAVING_FOR_BUILD,
     LEAVING_FOR_BUILD_OVERDUE,
 )
+
+#: The three phases of an UPDATE WINDOW, as stable tokens.
+#:
+#: WHAT A WINDOW IS. An IDLE runtime that decides to move to the build on disk
+#: (``process._refresh_for``) publishes one of these, holds them for the ~1 s the
+#: handover takes, and QUEUES admissions for its successor instead of refusing
+#: them. The incident this answers (2026-09-19): a fleet on a superseded build
+#: refusing the operator's own messages with "This session is leaving; it will not
+#: start a new turn. Your message is back in the composer — send it again once the
+#: session is running again", recoverable only with ``/stop`` + ``/resume``. The
+#: runtime was IDLE, so the refusal protected nothing: the successor would have run
+#: the message had anyone held it.
+#:
+#: WHY TOKENS AND NOT SENTENCES, which is the one structural difference from
+#: :data:`PUBLISHED_LEAVING_PHRASES`. Every updating sentence carries a BUILD PAIR
+#: ("0.59.9 → 0.59.11@ead71b6"), so a consumer table keyed by the full sentence —
+#: the shape the leaving vocabulary uses and pins — could not be written at all:
+#: the key would be different for every pair a host ever runs. So the tokens are
+#: the enumerable, test-keyed vocabulary, and the two renderers below are the only
+#: places a sentence is composed from them (``update_phrase`` for prose surfaces,
+#: ``update_short`` for the fleet cell), which is what keeps the copy from drifting
+#: now that it cannot be keyed.
+UPDATING = "updating"
+UPDATING_DONE = "updated"
+UPDATE_FAILED = "update-failed"
+
+#: Every phase of an update window, in the one place a test can enumerate them.
+#: The pin is ``tests/unit/session/runtime/test_updating_vocabulary.py``, which
+#: walks this tuple against every consumer table: a phase with no entry there
+#: paints that surface's FALLBACK, which is a sentence about a different phase —
+#: for the failed phase, the reassurance that the update is still coming.
+PUBLISHED_UPDATE_PHASES: tuple[str, ...] = (UPDATING, UPDATING_DONE, UPDATE_FAILED)
+
+#: The CAUSE token a window that ran out of its bound is recorded under: the
+#: runtime stays on the build it is running, releases the admission lock, and
+#: journals this token so the failure is reportable rather than silent.
+#:
+#: SAME CLASS AS :data:`BUILD_DRAIN_OVERDUE_CAUSE`, and for its reason: an
+#: ``incidents.CUT_OFF_CAUSES`` key, so every surface that repeats a cause can
+#: render it as a sentence. It is deliberately NOT ``runtime-retired``, which is
+#: what a handover that SUCCEEDED records — a failed update narrated as an
+#: ordinary retirement is the failure mode QA round 1 (Q-2) measured for the
+#: overdue bound.
+#:
+#: IT IS NOT A ``DELIBERATE_CUT_OFF_CAUSE`` either: nobody asked for the update to
+#: fail, and the deliberate set exists to keep an involuntary event from being
+#: narrated as a user's own stop.
+UPDATE_FAILED_CAUSE = "runtime-update-failed"
+
+#: What the pair-less rendering says: a runtime whose boot stamp is unreadable can
+#: still move to the build on disk (``buildwatch.proves_a_move`` is the guard on the
+#: ACT, not on the reading), and a window that said nothing about which build would
+#: leave the operator unable to tell a rebuild from a version bump.
+#:
+#: IT IS ALSO THE PUBLISHED FALLBACK, so a window is never opened with an empty
+#: pair: ``""`` is simultaneously the record's "no window" sentinel and the
+#: admission gate, so a window that stored it would be invisible AND would queue
+#: nothing while the sender got a receipt (agent review round 1, NIT 2).
+#: ``process._refresh_for`` substitutes this when ``buildwatch.update_pair_text``
+#: cannot name the pair, and ``begin_update`` refuses an empty one outright.
+UPDATE_UNNAMED_PAIR = "the build on disk"
+
+
+def update_phase(
+    updating: str = "", updated: str = "", update_failed: str = ""
+) -> "tuple[str, str]":
+    """``(phase, pair)`` for a record's three update fields: the ONE reading of them.
+
+    WHY A READER AND NOT THREE FIELDS ON EVERY SURFACE. The record keeps the three
+    facts apart because they are written at different times by different processes
+    (a window opens, a window fails, a successor boots having applied one), and each
+    has to survive the wire on its own. Every READER wants the same single answer —
+    which phase is this session in, and about which build — so the precedence lives
+    here rather than being re-derived (differently) by ``lop sessions``, the info
+    panel and the phone.
+
+    PRECEDENCE, and each step is a fact about time: an OPEN window is the live state
+    and outranks both terminal facts; a FAILED one is the newest terminal fact about
+    the last attempt (and the runtime that owns it is still serving, which is what a
+    reader must act on); ``updated`` is the oldest — it is true of this process's
+    whole life, so it loses to anything newer. An EMPTY pair is not a phase: all
+    three fields empty returns ``("", "")``, which is the ordinary idle row.
+    """
+    if updating:
+        return UPDATING, updating
+    if update_failed:
+        return UPDATE_FAILED, update_failed
+    if updated:
+        return UPDATING_DONE, updated
+    return "", ""
+
+
+def update_phrase(phase: str, pair: str = "") -> str:
+    """The sentence for one phase of an update window, from the ONE vocabulary.
+
+    The prose surfaces (the TUI notice, the info panel's note) render through
+    this and never compose their own copy — see :data:`UPDATING` for why the
+    sentence cannot be a table key.
+
+    WHAT EACH PHASE PROMISES, because the three are not degrees of one thing:
+    ``UPDATING`` says the message is HELD and arrives when the successor is up
+    (the promise the incident's refusal broke); ``UPDATING_DONE`` says the move
+    happened and the successor is running it; ``UPDATE_FAILED`` says the runtime
+    is still here, on the OLD build, and the update needs reporting. A reader
+    who cannot tell the last one from the first would keep waiting for a handover
+    that has already been abandoned.
+    """
+    where = pair or UPDATE_UNNAMED_PAIR
+    if phase == UPDATING:
+        return (
+            f"updating to {where} — messages are queued and will be sent when the new "
+            f"build is up"
+        )
+    if phase == UPDATING_DONE:
+        return f"updated to {where} — the new build is running this session"
+    if phase == UPDATE_FAILED:
+        return (
+            f"the update to {where} did not finish — this session is still running the "
+            f"build it loaded, and your messages are running on it"
+        )
+    return ""
+
+
+def update_short(phase: str, pair: str = "") -> str:
+    """The fleet cell for one phase: one row of ``lop sessions``, not a sentence.
+
+    The pair is the wide part, so the compact form names the NEW build only — the
+    question a rotation script asks of a row is "which of these is still on the
+    old build, and what is it moving to" (the same question
+    ``server._refresh_if_idle`` answers with ``retiring to <label>``). "" for a
+    phase this build cannot place, which renders as no cell at all rather than as
+    another phase's words.
+
+    A PAIR THIS BUILD CANNOT PARSE NAMES NO BUILD. The phase alone is the cell then,
+    for the reason the failed phase gives below and because the alternative —
+    ``"updating → the build on disk"`` — was 28 cells into a 26-cell column, i.e. a
+    silent cut of the one string whose job is to say the destination is unknown
+    (design review round 1, D3).
+    """
+    to = pair.split("→", 1)[1].strip() if "→" in pair else ""
+    if phase == UPDATING:
+        return f"updating → {to}" if to else "updating"
+    if phase == UPDATING_DONE:
+        return f"updated → {to}" if to else "updated"
+    if phase == UPDATE_FAILED:
+        # PHASE ONLY, and the missing pair is the point rather than an omission: the
+        # move this names did NOT happen, so the build pair belongs to the failure
+        # notice ("could not move to X"), never to a fleet cell that would read as
+        # "went to X". Which build the row is actually on is the neighbouring version
+        # column's job, and it is already there.
+        return "update failed"
+    return ""
+
 
 #: The CAUSE token the SIGNAL drain commits with: ``process._drain_for_signal``
 #: passes it to ``begin_drain``, ``_drain_for`` re-passes it to the exit rung that
@@ -708,6 +987,75 @@ class DiscoveryRecord(Protocol):
 RUNNING_SUBAGENT_STATUSES = frozenset({"running", "starting", "pausing"})
 
 
+#: The largest value a subagent count on a record may carry and still be read as
+#: a measurement.
+#:
+#: Lives here for the same reason the set above does: THREE readers refuse a value
+#: past this ceiling — ``info.collect`` when it tallies a fleet, ``resume._counted``
+#: when it asks whether a sidebar row is delegating, and the desktop listing's own
+#: response model when it serializes a row — and they must refuse at the SAME
+#: number, because the failure they guard is a display one: a 31-digit figure
+#: renders 81 cells wide and overflows every frame, including the abbreviated rung
+#: that exists to serve it. It is not that such a count is wrong; it is that nothing
+#: past this could be real, so refusing it is the honest reading, and the readers
+#: agreeing is what keeps one surface from printing a number another drops.
+#:
+#: DELIBERATELY FAR ABOVE ANYTHING THIS CODEBASE CAN PRODUCE —
+#: ``DEFAULT_MAX_RUNNING_JOBS`` is 15 and the count is a ``len()`` over a bounded
+#: roster — so it can only reject a foreign or damaged record, never a real fleet.
+#: Six digits still fit the narrow rung.
+#:
+#: ``SessionRecord.from_json`` does no type validation, so this is a bound on what
+#: a RECORD may say, not on what the runtime publishes (its own writer counts real
+#: children). This module stays stdlib-only, so neither the constant nor the reader
+#: below costs anything to import on the CLI startup path.
+MAX_REPORTED_SUBAGENT_COUNT = 999_999
+
+
+def reported_subagent_count(value: Any) -> int | None:
+    """A published subagent count, or ``None`` when the record did not report one.
+
+    THE ONE RULE, read by every consumer of these two fields: ``info.collect``'s
+    fleet tally, ``resume._counted`` (the sidebar's predicate), and the desktop
+    listing's response model at the wire edge. It lives beside the fields it
+    validates rather than in the first module that needed it, because the three
+    disagreeing about which values are believable is how one surface prints a
+    figure another drops.
+
+    ``SessionRecord.from_json`` filters keys and calls the constructor — it does
+    no type validation — so every field on a record is whatever the writer put in
+    the file. That is fine for the strings and bools read elsewhere, which only
+    ever get formatted, but these two are the first record fields its readers do
+    ARITHMETIC on, and arithmetic is where a foreign value stops being cosmetic:
+
+    * a ``str`` or ``list`` raises ``TypeError`` inside a roll-up. ``info``'s
+      ``_safe`` guards whole SECTIONS, so one bad record cost the entire sessions
+      block — no table, no runtimes row, and no lower-bound caveat — on a screen
+      whose whole purpose is describing a host that is already broken. Before
+      these fields existed there was no arithmetic there and the same record
+      listed normally, so that was a regression rather than a new limitation.
+    * a merely-numeric wrong value does not raise at all, which is worse: a float
+      printed ``4.5 total — 1 sessions + 3.5 subagents`` and a negative printed
+      ``-1 subagents``, both as measured fact.
+    * at the desktop listing's wire edge the same choice is between a degradation
+      and an outage, because a validation error on ONE row fails the WHOLE
+      response: a damaged record would take out the conversation list rather than
+      lose a count from it.
+
+    Anything that is not a non-negative ``int`` at or below
+    :data:`MAX_REPORTED_SUBAGENT_COUNT` is therefore treated as NOT REPORTED
+    rather than sanitised into a number: an unusable value is not a measurement,
+    and calling it ``None`` is what each reader's own contract already says to do
+    with a missing term. ``bool`` is excluded explicitly — it is an ``int``
+    subclass, so ``True`` would otherwise count as one subagent.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    if value > MAX_REPORTED_SUBAGENT_COUNT:
+        return None
+    return value
+
+
 @dataclass
 class SessionRecord:
     """The discovery record one ``lop`` process publishes for one session.
@@ -717,10 +1065,19 @@ class SessionRecord:
     pid is the natural uniqueness token and ``kill -9`` leaves exactly one
     stale file to reap.
 
-    ``control_key`` is the whole authorization story of the control socket:
-    the record is mode 0600 under a 0700 directory, so anything that can read
-    the key is already the owning account. The daemon never transmits it
-    further — the phone never learns it.
+    ``control_key`` is the whole authorization story of the control socket for
+    ORDINARY operations: the record is mode 0600 under a 0700 directory, so
+    anything that can read the key is already the owning account. The daemon
+    never transmits it further — the phone never learns it.
+
+    It is deliberately NOT the whole story for the operations that INCREASE
+    authority (issue #1310). ``/approvals auto`` and an approved card remove the
+    gate that constrains the caller, and a model-authored tool call runs as this
+    same uid — so it can read this very file. Those two classes therefore also
+    demand the per-session operator capability, which is held only in the memory
+    of the process that started the session (``harness/approval.py``). Nothing
+    about it belongs in this record: a field here is readable under the same uid
+    and would reinstate the defect. See ``docs/design/approval-authority.md``.
     """
 
     pid: int
@@ -767,6 +1124,44 @@ class SessionRecord:
     #: No front end is attached. A working session with nobody watching is
     #: exactly what this release makes possible, so it is worth naming.
     detached: bool = False
+    #: WHEN this session's last viewer left (``time.time()``), or ``None`` if no
+    #: viewer has ever been attached. Cleared back to ``None`` when one attaches.
+    #:
+    #: WHICH MOMENT, not merely that. The residency policy keeps a runtime a
+    #: viewer has left warm for ``runtime.keep_alive_seconds``, and bounds how
+    #: many such runtimes one machine holds by evicting the least recently
+    #: detached (``process._keep_alive_victim``). That bound needs an ORDER, and
+    #: this is the only field that carries one: ``heartbeat_at`` cannot, because
+    #: a detached idle runtime keeps beating, and ``detached`` is a boolean.
+    #: ``None`` is load-bearing rather than a missing value — it is what tells
+    #: the keep-alive that this runtime is one nobody has looked at, which is the
+    #: population the ordinary 3 s drain was written for.
+    #:
+    #: ADDITIVE AND KEYLESS ON AN OLDER READER, exactly like the block above:
+    #: ``from_json`` drops unknown keys, so a mixed-version fleet reads and
+    #: writes records with and without this field interchangeably, and
+    #: ``PROTOCOL_VERSION`` deliberately does not move for it. Nothing is
+    #: required to read it: a runtime without it keeps today's residency.
+    detached_at: float | None = None
+    #: At least one attach CLIENT is connected — the reaper's own term 3
+    #: (``RuntimeServer.attach_clients``), which is NOT the same fact as
+    #: ``detached`` directly above.
+    #:
+    #: WHY BOTH EXIST, because two fields that look alike invite exactly one
+    #: mistake (review round 1, F1). ``detached`` is VISIBILITY: it is true while
+    #: a multiplexing TUI has switched to another session and left this one's
+    #: terminal attached but not on screen (``viewer_watch displaying=False``),
+    #: and it is what a picker paints a row from. This one is ATTACHMENT, which
+    #: is what forbids an exit. A caller asking "may this runtime go?" needs
+    #: this one; a caller painting "nobody is watching" needs the other. The
+    #: keep-alive cap charged itself on ``detached`` until this field existed, so
+    #: a switched-away TUI's runtime — which can never enter a drain while its
+    #: viewer holds it — sat in a cap slot that could never be given back.
+    #:
+    #: ADDITIVE AND KEYLESS ON AN OLDER READER, like ``detached_at`` above:
+    #: ``from_json`` drops unknown keys, an older runtime's record defaults to
+    #: False, and ``PROTOCOL_VERSION`` deliberately does not move for it.
+    watching: bool = False
     #: This session is WAITING FOR A PERSON: ``"approval"``, ``"ask"``, or
     #: None. A parked gate holds the runtime resident for up to a day, so the
     #: cost has to be findable — this field is what puts it in `lop sessions`
@@ -788,6 +1183,72 @@ class SessionRecord:
     #: #1141). ``busy`` cannot carry it — that is the picker's spinner bit and is
     #: ``None`` of the fact that a signal has already been received and acted on.
     leaving: str = ""
+    #: An UPDATE WINDOW is open: this IDLE runtime has committed to moving to the
+    #: build on disk, holds the admission lock while it announces and exits, and is
+    #: QUEUEING admissions for the successor (``inbox.jsonl``, drained at boot)
+    #: rather than refusing them. The value is the build PAIR it is moving to —
+    #: ``"0.59.9 → 0.59.11@ead71b6"`` — and ``""`` means no window is open.
+    #:
+    #: WHY A PAIR AND NOT A SENTENCE, which is what :data:`UPDATING` explains at
+    #: length: the sentence carries a pair, so the field has to carry the data and
+    #: the surfaces compose their own copy (``types.update_phrase`` for prose,
+    #: ``types.update_short`` for the fleet cell). A field that held the sentence
+    #: could not be enumerated for the vocabulary pin and could not be compared by
+    #: a reader that wants "which build is it moving to".
+    #:
+    #: CLEARED WHEN THE WINDOW CLOSES, unlike :attr:`leaving`, and the asymmetry is
+    #: the point: a leave always ends in an exit (the field is a one-way door), while
+    #: a window can ABORT — the bound expired, the runtime kept the build it loaded,
+    #: and it is serving again. A window that stayed published after that would tell
+    #: every front end the session is mid-move when it is not.
+    updating: str = ""
+    #: The one-shot terminal facts of a window, each carrying the pair it is about.
+    #:
+    #: ``updated`` is written by the SUCCESSOR's record — the fact that this
+    #: process exists because an update applied, which is the only place it can be
+    #: known (the predecessor is gone by the time the spool is drained). Set once at
+    #: boot from the handover marker the outgoing runtime left, and never cleared:
+    #: it is true for the whole life of this process, and a surface that showed it
+    #: for a moment and then dropped it would be racing the reader it exists for.
+    #:
+    #: ``update_failed`` is written by a runtime that STAYED — its window ran out
+    #: of bound — and names the pair it failed to move to. Together the two make the
+    #: outcome of the move legible on every surface that reads a record, including
+    #: the ones that never saw the window itself (a fleet listing taken afterwards,
+    #: the phone's projection, the desktop feed).
+    updated: str = ""
+    update_failed: str = ""
+
+    # -- what the last beat measured ---------------------------------------
+    # Same additive contract as the blocks above, and PROTOCOL_VERSION again
+    # deliberately does not move: nothing is required to read these, and a
+    # reader that ignores them loses a distinction rather than a fact.
+    #
+    # WHY THEY EXIST. ``heartbeat_age_s`` says only HOW LONG the owner has been
+    # quiet, and that one number cannot tell three different situations apart:
+    # a runtime wedged in its own work, a runtime the host stopped scheduling,
+    # and a runtime that is simply gone. All three read as ``wedged`` at 45 s,
+    # and on 2026-09-20 five sessions sat in that single ambiguous word for
+    # 1.5-7.2 h before being reaped by hand. These two fields are in-process
+    # readings taken by the owner itself, so they cost no fork and remain true
+    # of the PROCESS rather than of the machine's average: a large lag with CPU
+    # that advanced says the runtime burned its own core (the measured shape —
+    # ~0.9 core against a stale beat), while a large lag with CPU that did NOT
+    # advance says it was descheduled (the host). ``None`` means this build does
+    # not report, never zero — a pre-field runtime has not told us either way.
+    #
+    #: Seconds since the PREVIOUS beat, measured by the beating loop. The gap is
+    #: what a stalled loop leaves behind: a healthy runtime owns up to
+    #: ``HEARTBEAT_INTERVAL_S`` (15 s) here, and this host has produced 105.8 s
+    #: and 205.8 s on sessions whose CPU was advancing. Note that a turn-boundary
+    #: republish rewrites ``heartbeat_at`` without re-measuring, so this can
+    #: exceed the age the record appears to have by up to one interval.
+    beat_lag_s: float | None = None
+    #: How much CPU time this PROCESS spent since the previous beat — all
+    #: threads, ``time.process_time()``, read in-process. Paired with the lag
+    #: above it separates "starved by its own work" (this advanced) from
+    #: "starved by the host" (this did not), which no other field can.
+    cpu_since_beat_s: float | None = None
 
     # -- build stamp --------------------------------------------------------
     # Same additive contract as the live-state block above, and for the same

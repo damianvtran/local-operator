@@ -12,6 +12,7 @@ from typing import Any, cast
 import pytest
 
 from local_operator.harness.comms import SubagentComms
+from local_operator.harness.jobs import AsyncJob, AsyncJobManager
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentMessage,
@@ -24,6 +25,7 @@ from local_operator.harness.types import (
     MessageUpdateEvent,
     ModelChangeEvent,
     NoticeEvent,
+    ReasoningDeltaEvent,
     SubagentEndEvent,
     SubagentProgressEvent,
     SubagentStartEvent,
@@ -93,6 +95,84 @@ def test_streaming_assistant_row_updates_in_place() -> None:
     assert rows[0].text == "Hello"
     assert rows[0].final is True
     assert fold.projection.streaming is False
+
+
+def test_reasoning_streams_onto_one_row_above_the_answer() -> None:
+    """Reasoning gets ONE row per model call, ordered above the answer.
+
+    Three properties, each of which a simpler fold would break: the fragments
+    accumulate onto a single row rather than one row per token (the phone
+    re-renders the whole projection on every repaint); the row sits ABOVE the
+    assistant row the same call opened at ``message_start`` (so the answer does
+    not materialise above the thinking that produced it); and the row is sealed
+    at message end so the NEXT call's phase opens its own.
+    """
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    message = Message.assistant()
+    fold.fold_event(MessageStartEvent(message=message))
+    fold.fold_event(ReasoningDeltaEvent(message_id=message.id, delta="weigh"))
+    fold.fold_event(ReasoningDeltaEvent(message_id=message.id, delta="ing"))
+    fold.fold_event(MessageUpdateEvent(message=message, delta="the answer"))
+
+    reasoning_rows = [e for e in fold.projection.transcript if e.kind == "reasoning"]
+    assert len(reasoning_rows) == 1
+    assert reasoning_rows[0].text == "weighing"
+    assert reasoning_rows[0].final is False
+    kinds = [e.kind for e in fold.projection.transcript]
+    assert kinds.index("reasoning") < kinds.index("assistant")
+
+    fold.fold_event(
+        MessageEndEvent(
+            message=message.model_copy(update={"content": [TextContent(text="the answer")]})
+        )
+    )
+    assert reasoning_rows[0].final is True
+
+    # A second model call in the same turn reasons on a row of its own.
+    second = Message.assistant()
+    fold.fold_event(MessageStartEvent(message=second))
+    fold.fold_event(ReasoningDeltaEvent(message_id=second.id, delta="again"))
+    assert [e.text for e in fold.projection.transcript if e.kind == "reasoning"] == [
+        "weighing",
+        "again",
+    ]
+
+
+def test_reasoning_row_keeps_the_newest_words_and_never_becomes_the_answer() -> None:
+    """Bounded to the TAIL, and it never touches the assistant row's text.
+
+    The bound is a wire cost, not taste: this row rides the whole projection on
+    every repaint, so an unbounded thinking phase would re-send its entire
+    thought per frame. The tail rather than the head because reasoning streams --
+    what a reader wants is what the model is thinking NOW. And the assistant row
+    must stay exactly the answer: folding the private reasoning into it is the
+    transcript corruption ``ReasoningDeltaEvent`` forbids.
+    """
+    from local_operator.mobile.projection import REASONING_PREVIEW_CHARS
+
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    message = Message.assistant()
+    fold.fold_event(MessageStartEvent(message=message))
+    fold.fold_event(ReasoningDeltaEvent(message_id=message.id, delta="HEAD" + "x" * 2000))
+    fold.fold_event(MessageUpdateEvent(message=message, delta="the answer"))
+    fold.fold_event(
+        MessageEndEvent(
+            message=message.model_copy(update={"content": [TextContent(text="the answer")]})
+        )
+    )
+
+    reasoning = next(e for e in fold.projection.transcript if e.kind == "reasoning")
+    assert len(reasoning.text) == REASONING_PREVIEW_CHARS
+    assert reasoning.text.startswith("…")
+    assert "HEAD" not in reasoning.text
+    # Not a transport truncation: the bound is this row's own, and there is no
+    # fuller row to page. ``text_complete`` keeps its documented meaning (a
+    # pageable PREFIX), so it stays true.
+    assert reasoning.text_complete is True
+    assistant = next(e for e in fold.projection.transcript if e.kind == "assistant")
+    assert assistant.text == "the answer"
 
 
 def test_tool_row_lifecycle_one_line_with_diff_counts() -> None:
@@ -246,6 +326,531 @@ def test_subagent_details_seed_nested_descendants_for_recursive_navigation() -> 
     fold.set_subagent_details(comms)
     refreshed = {row.job_id: row for row in fold.projection.subagents}
     assert refreshed["grandchild"].activity == "summarizing"
+
+
+def test_subagent_compaction_reuses_only_identical_sources_and_prunes_removed_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Memoize the O(L) normalization without changing any projection values."""
+    import local_operator.mobile.projection as projection_module
+
+    job = SimpleNamespace(
+        status="running",
+        agent_role="coder",
+        model_label="test/model",
+        latest_details={},
+        result_text=None,
+        error_text=None,
+    )
+    session = SimpleNamespace(jobs=SimpleNamespace(get=lambda job_id: job))
+    comms = SubagentComms(cast(Session, cast(Any, session)))
+    prompt = "  first line  \n\n second line\t"
+    comms.record_launch("child", "child", prompt=prompt)
+    fold = make_fold()
+
+    calls = {"flat": 0, "multiline": 0}
+    compact = projection_module._compact
+    compact_multiline = projection_module._compact_multiline
+
+    def count_flat(text: str, limit: int) -> str:
+        calls["flat"] += 1
+        return compact(text, limit)
+
+    def count_multiline(text: str, limit: int) -> str:
+        calls["multiline"] += 1
+        return compact_multiline(text, limit)
+
+    monkeypatch.setattr(projection_module, "_compact", count_flat)
+    monkeypatch.setattr(projection_module, "_compact_multiline", count_multiline)
+
+    fold.set_subagent_details(comms)
+    first = fold.projection.subagents[0]
+    prompt_value = first.prompt
+    assert first.result_text == first.error_text == ""
+    assert calls == {"flat": 1, "multiline": 2}
+
+    fold.set_subagent_details(comms)
+    assert calls == {"flat": 1, "multiline": 2}
+    assert fold.projection.subagents[0].prompt == prompt_value
+
+    # A distinct but equal string is a cache miss: equality/hash work must not be
+    # substituted for the intended identity check on potentially huge sources.
+    changed_prompt = ("!" + prompt)[1:]
+    assert changed_prompt == prompt and changed_prompt is not prompt
+    comms._records["child"].prompt = changed_prompt
+    # The prompt and result deliberately hold the same source object: their
+    # different normalizers must still produce different, uncached semantics.
+    result = prompt
+    job.status = "completed"
+    job.result_text = result
+    job.error_text = "provider failed\n  at call site"
+    comms.record_outcome("child", "completed", result_text=result, error_text=job.error_text)
+    fold.set_subagent_details(comms)
+    settled = fold.projection.subagents[0]
+    assert prompt_value == "first line second line"
+    assert settled.prompt == prompt_value
+    assert settled.result_text == "first line\n\nsecond line"
+    assert settled.error_text == "provider failed\nat call site"
+    assert calls == {"flat": 2, "multiline": 4}
+
+    fold.set_subagent_details(comms)
+    assert calls == {"flat": 2, "multiline": 4}
+
+    # Whitespace/empty normalizer inputs retain their exact source distinctions;
+    # a later source object, even if the compacted output is the same, is new work.
+    whitespace = " \n  "
+    comms._records["child"].prompt = whitespace
+    job.result_text = whitespace
+    job.error_text = ""
+    comms.record_outcome("child", "completed", result_text=whitespace, error_text="")
+    fold.set_subagent_details(comms)
+    whitespace_row = fold.projection.subagents[0]
+    assert whitespace_row.prompt == ""
+    assert whitespace_row.result_text == ""
+    assert whitespace_row.error_text == ""
+    assert calls == {"flat": 3, "multiline": 6}
+
+    # A node can outlive its lifecycle reader in compatibility facades. Clear
+    # only terminal payload slots (the row's existing values remain untouched).
+    real_roster_pass = comms.roster_pass
+    current_pass = real_roster_pass()
+
+    class MissingLifecyclePass:
+        def roster(self) -> list[Any]:
+            return []
+
+        def nodes(self) -> list[Any]:
+            return current_pass.nodes()
+
+        def job(self, job_id: str) -> Any:
+            return current_pass.job(job_id)
+
+    monkeypatch.setattr(comms, "roster_pass", lambda: MissingLifecyclePass())
+    fold.set_subagent_details(comms)
+    assert ("child", "prompt") in fold._subagent_compact_cache
+    assert ("child", "result_text") not in fold._subagent_compact_cache
+    assert ("child", "error_text") not in fold._subagent_compact_cache
+
+    # When lifecycle data becomes available again, terminal outputs equal the
+    # uncached normalizers and repopulate their slots.
+    monkeypatch.setattr(comms, "roster_pass", real_roster_pass)
+    fold.set_subagent_details(comms)
+    assert fold.projection.subagents[0].result_text == ""
+    assert fold.projection.subagents[0].error_text == ""
+    assert calls == {"flat": 3, "multiline": 8}
+
+    # Removing the registry record releases all field refs on the next pass.
+    comms._records.pop("child")
+    fold.set_subagent_details(comms)
+    assert fold._subagent_compact_cache == {}
+    assert len(fold.projection.subagents) == 1  # the row's legacy removal is unchanged
+
+
+def _roster_with_todos(count: int) -> tuple[ProjectionFold, SubagentComms]:
+    """A fold over ``count`` children: long prompts, one settled child, todos.
+
+    The shape the frame cap actually meets on a deep roster — previews worth
+    re-capping, and roster todos, which are the tier's real per-repaint work.
+    """
+    jobs = SimpleNamespace(rows={})
+
+    class Jobs:
+        def get(self, job_id: str) -> Any:
+            return jobs.rows.get(job_id)
+
+    comms = SubagentComms(cast(Session, cast(Any, SimpleNamespace(jobs=Jobs()))))
+    for index in range(count):
+        job_id = f"child-{index}"
+        comms.record_launch(job_id, job_id, prompt=("preview line 工作项\n" * 20) + f"#{index}")
+        jobs.rows[job_id] = SimpleNamespace(status="running", agent_role="coder", latest_details={})
+    jobs.rows["child-1"].status = "completed"
+    jobs.rows["child-1"].result_text = "settled result\nsecond line"
+    comms.record_outcome("child-1", "completed", result_text=jobs.rows["child-1"].result_text)
+    fold = make_fold()
+    fold.set_subagent_details(comms)
+    for index in range(count):
+        fold.set_subagent_hydrated_details(
+            f"child-{index}",
+            [],
+            [
+                {
+                    "name": "Verification",
+                    "items": [
+                        {
+                            "text": f"todo {item} of child {index} " + "detail " * 90,
+                            "status": "pending",
+                            "reason": "reason " + "x" * 200,
+                        }
+                        for item in range(6)
+                    ],
+                }
+            ],
+        )
+    return fold, comms
+
+
+def _counted_compaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, int]:
+    """Count both normalizers BEFORE any memo is filled — see the test below."""
+    import local_operator.mobile.projection as projection_module
+
+    calls = {"flat": 0, "multiline": 0}
+    compact = projection_module._compact
+    compact_multiline = projection_module._compact_multiline
+
+    def count_flat(text: str, limit: int) -> str:
+        calls["flat"] += 1
+        return compact(text, limit)
+
+    def count_multiline(text: str, limit: int) -> str:
+        calls["multiline"] += 1
+        return compact_multiline(text, limit)
+
+    monkeypatch.setattr(projection_module, "_compact", count_flat)
+    monkeypatch.setattr(projection_module, "_compact_multiline", count_multiline)
+    return calls
+
+
+def _frame_row(data: dict[str, Any], job_id: str) -> dict[str, Any]:
+    return next(row for row in data["subagents"] if row["job_id"] == job_id)
+
+
+def _over_cap(projection: SessionProjection) -> int:
+    """A cap the frame exceeds by roughly half, so the text tiers are reached.
+
+    Self-scaling rather than a literal: where the tiers land is a property of
+    the fixture's own size, and a literal would quietly stop exercising them the
+    day that fixture changes.
+    """
+    from local_operator.mobile.projection import cap_projection_frame
+
+    uncapped, degraded = cap_projection_frame(projection, cap_bytes=1_000_000_000)
+    assert degraded is False
+    return max(1, len(json.dumps(uncapped, sort_keys=True, ensure_ascii=False)) // 2)
+
+
+def test_frame_cap_recaps_only_changed_sources_and_repeats_byte_for_byte(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An over-cap repaint re-caps what CHANGED, not what the roster holds.
+
+    Tiers 1 and 1c run on every repaint that is over the soft cap (~30x/s while
+    a turn streams), and ``_compact`` walks the whole source even when the cap
+    keeps a fraction of it, so an unchanged roster used to re-derive every
+    preview and every roster todo on every frame — measured at N=256 with a
+    hydrated roster as 13,824 normalizer calls scanning 3.56 MB per frame.
+
+    The memo may only skip work it would reproduce exactly, so the frames are
+    compared as WHOLE dicts, not field by field.
+    """
+    from local_operator.mobile.projection import (
+        FRAME_CAP_PROMPT_CHARS,
+        _compact,
+        cap_projection_frame,
+    )
+
+    # Counters go in FIRST: an entry keys on the normalizer OBJECT, so a swap
+    # after a fold or a cap has run invalidates every entry it wrote by design.
+    calls = _counted_compaction(monkeypatch)
+    fold, comms = _roster_with_todos(8)
+    projection = fold.projection
+
+    # Cold, every source once. The fold compacts one prompt and two outcome
+    # fields per child as the fixture builds; the cap then re-caps a prompt and
+    # two outcome fields per row, plus three todo items x (text, reason).
+    cap = _over_cap(projection)
+    fold_flat, fold_multiline = 8, 8 * 2
+    cap_flat, cap_multiline = 8 + 8 * 12, 8 * 2
+    cold = {"flat": fold_flat + cap_flat, "multiline": fold_multiline + cap_multiline}
+
+    first, degraded = cap_projection_frame(projection, cap_bytes=cap)
+    assert degraded is True
+    assert calls == cold
+
+    second, degraded_again = cap_projection_frame(projection, cap_bytes=cap)
+    assert calls == cold, "nothing changed, nothing re-capped"
+    assert second == first
+    assert degraded_again is degraded
+
+    # ONE record's prompt replaced by a NEW object of a different length: two
+    # sources to re-derive — one in the fold's own memo, one in the cap's — and
+    # the published preview follows it.
+    rewritten = ("rewritten prompt 工作项\n" * 12).strip()
+    comms._records["child-2"].prompt = rewritten
+    fold.set_subagent_details(comms)
+    third, _ = cap_projection_frame(projection, cap_bytes=cap)
+    assert calls == {"flat": cold["flat"] + 2, "multiline": cold["multiline"]}
+    assert _frame_row(third, "child-2")["prompt"] == _compact(rewritten, FRAME_CAP_PROMPT_CHARS)
+    assert _frame_row(third, "child-2")["prompt"] != _frame_row(second, "child-2")["prompt"]
+
+    # Re-hydrating ONE row's todos replaces its item objects, so that row's
+    # items are new work (6 items x text/reason) and the other seven rows are
+    # not: the cost tracks the change, not the roster. The texts stay long
+    # enough that the cap still needs tier 1c to fit, or the row's items would
+    # simply not be reached.
+    fold.set_subagent_hydrated_details(
+        "child-3",
+        [],
+        [
+            {
+                "name": "Verification",
+                "items": [
+                    {
+                        "text": f"rehydrated {item} " + "detail " * 90,
+                        "status": "pending",
+                        "reason": "r" * 200,
+                    }
+                    for item in range(6)
+                ],
+            }
+        ],
+    )
+    before = dict(calls)
+    fourth, _ = cap_projection_frame(projection, cap_bytes=cap)
+    assert calls == {"flat": before["flat"] + 12, "multiline": before["multiline"]}
+    assert _frame_row(fourth, "child-3")["todos"][0]["items"][0]["text"].startswith("rehydrated 0 ")
+
+    # A gate that skipped the normalizer whenever the value was already SHORT
+    # would republish this raw double space: the cap still normalises it, and
+    # the reuse path must not turn that into a second frame's work either.
+    projection.subagents[0].prompt = "double  space\ttext"
+    fifth, _ = cap_projection_frame(projection, cap_bytes=cap)
+    short_row = _frame_row(fifth, projection.subagents[0].job_id)
+    assert short_row["prompt"] == "double space text"
+    before = dict(calls)
+    cap_projection_frame(projection, cap_bytes=cap)
+    assert calls == before
+
+
+def test_frame_cap_memo_is_slotted_per_row_and_releases_departed_rows() -> None:
+    """Bounded by the roster the frame publishes: one slot per row, and freed."""
+    from local_operator.mobile.projection import cap_projection_frame
+
+    fold, _comms = _roster_with_todos(4)
+    projection = fold.projection
+    cap = _over_cap(projection)
+    cap_projection_frame(projection, cap_bytes=cap)
+    memo = projection._frame_cap_memo
+
+    assert set(memo) == {row.job_id for row in projection.subagents}
+    # Per row: three text fields plus text/reason for each of its six items.
+    assert {len(slot) for slot in memo.values()} == {3 + 2 * 6}
+
+    # A projection that publishes a SHORTER roster than the last capped frame
+    # releases the departed row's slot, which is what keeps the cache bounded
+    # by the roster rather than by every child it has ever carried.
+    departed = projection.subagents.pop()
+    cap_projection_frame(projection, cap_bytes=cap)
+    assert departed.job_id not in memo
+    assert set(memo) == {row.job_id for row in projection.subagents}
+
+
+def _memo_source_bytes(memo: dict[str, dict[Any, Any]], live: set[str]) -> int:
+    """Bytes of source text the memo pins for rows the roster no longer carries.
+
+    Superseded SOURCES are the whole of what the memo holds — the entry keeps the
+    row's own preview/result/reason objects alive, not copies of any frame — so
+    this is the quantity review round 1 and QA round 1 both measured on their own
+    fixtures, quoted here in the bytes they measured (1,694,671 B for a 32 -> 3
+    row shrink, 18,409,240 B at 256 x 25).
+
+    ENCODED rather than ``len(str)``, and that is not cosmetic on this fixture:
+    ``len`` is CHARACTERS, every prompt here ends in CJK (``工作项``), and
+    measured with the memo filled at 32 rows the same 480 pinned sources are
+    **175,284 characters against 179,124 bytes** — 32 of the 480 carrying the
+    non-ASCII preview. The name, this docstring and the figures cited above are
+    all bytes, so the sum has to be too (review round 2 on this PR, R2-3).
+
+    Both callers assert ``== 0``, so no caller depends on the unit — only on the
+    release being total.
+    """
+    return sum(
+        len(entry[0].encode("utf-8"))
+        for row_id, row_memo in memo.items()
+        if row_id not in live
+        for entry in row_memo.values()
+    )
+
+
+def test_frame_cap_memo_is_released_by_a_frame_that_comes_in_under_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1-1: the release keys on the PUBLISHED ROSTER, never on a tier having run.
+
+    The frame that most needs the release is the one that just shrank a roster —
+    and that frame is the SMALLER one, so it can land under the cap and return
+    before a tier runs. That is exactly where the release used to live, which is
+    why the slots of every departed row stayed pinned: 1,694,671 B measured on a
+    32 -> 3 row shrink with the frame under the cap, and 18,409,240 B at 256 rows
+    x 25 todos (review round 1 R1-1; QA round 1 section 5, byte figures).
+    """
+    from local_operator.mobile.projection import (
+        PROJECTION_FRAME_SOFT_CAP_BYTES,
+        cap_projection_frame,
+    )
+
+    fold, _comms = _roster_with_todos(32)
+    projection = fold.projection
+    memo = projection._frame_cap_memo
+    calls = _counted_compaction(monkeypatch)
+    cap_projection_frame(projection, cap_bytes=_over_cap(projection))
+    assert len(memo) == 32
+    live = {row.job_id for row in projection.subagents}
+    assert _memo_source_bytes(memo, live) == 0
+
+    while len(projection.subagents) > 3:
+        projection.subagents.pop()
+    shrunk_live = {row.job_id for row in projection.subagents}
+    before = dict(calls)
+
+    frame, degraded = cap_projection_frame(projection, cap_bytes=PROJECTION_FRAME_SOFT_CAP_BYTES)
+
+    # The cell has to be the UNDER-cap one or it would not reproduce R1-1 at all:
+    # no tier ran on this push, which is precisely why the old release site —
+    # inside tier 1 — was never reached for it.
+    assert degraded is False
+    assert calls == before, "no tier ran on the shrunken frame"
+    assert len(frame["subagents"]) == 3
+    assert set(memo) == shrunk_live
+    assert _memo_source_bytes(memo, shrunk_live) == 0
+    assert sum(len(row_memo) for row_memo in memo.values()) < 32 * (3 + 2 * 6)
+
+
+def test_the_memo_source_figure_counts_bytes_and_not_characters() -> None:
+    """R2-3: the name, the docstring and the figures cited from it are all bytes.
+
+    ``len(str)`` is CHARACTERS, and this fixture's prompts carry CJK, so the two
+    units genuinely diverge: measured with the memo filled at 32 rows, the same
+    480 pinned sources are 175,284 characters against 179,124 bytes, 32 of the
+    480 being the non-ASCII preview. A helper that summed characters while
+    reporting a byte figure would be quoting a quantity it never measured.
+    """
+    source = "工作项" * 1000
+    entry = (source, 10, lambda text, limit: text, source)
+    memo: dict[str, dict[Any, Any]] = {"departed": {"prompt": entry}}
+
+    assert len(source.encode("utf-8")) > len(source)
+    assert _memo_source_bytes(memo, set()) == len(source.encode("utf-8"))
+
+
+def test_frame_cap_memo_is_reduced_to_the_shape_a_row_still_publishes() -> None:
+    """A LIVE row's superseded slots are released too, not only a departed row's.
+
+    Review round 1 measured a row grown to 40 items and then shrunk to 1 keeping
+    all 89 of its slots (``3 + 2 x 40``), because entries are replaced in place
+    and nothing dropped the ones the row had shed. What the memo holds per row is
+    now the shape that row publishes — its three previews plus two slots per todo
+    item it still carries — and nothing else.
+    """
+    from local_operator.mobile.projection import cap_projection_frame
+
+    fold, _comms = _roster_with_todos(2)
+    projection = fold.projection
+    memo = projection._frame_cap_memo
+    cap = _over_cap(projection)
+    cap_projection_frame(projection, cap_bytes=cap)
+    assert len(memo["child-0"]) == 3 + 2 * 6
+
+    def hydrate(items: int) -> None:
+        fold.set_subagent_hydrated_details(
+            "child-0",
+            [],
+            [
+                {
+                    "name": "Verification",
+                    "items": [
+                        {
+                            "text": f"grown {item} " + "detail " * 90,
+                            "status": "pending",
+                            "reason": "reason " + "x" * 200,
+                        }
+                        for item in range(items)
+                    ],
+                }
+            ],
+        )
+
+    hydrate(40)
+    cap_projection_frame(projection, cap_bytes=cap)
+    assert len(memo["child-0"]) == 3 + 2 * 40
+
+    hydrate(1)
+    cap_projection_frame(projection, cap_bytes=cap)
+    assert len(memo["child-0"]) == 3 + 2 * 1
+    # The other row is untouched: the release is per row, not a reset.
+    assert len(memo["child-1"]) == 3 + 2 * 6
+
+
+def test_a_phase_reshape_costs_the_frame_a_sweep_and_not_a_grown_memo() -> None:
+    """R2-2: the per-row bound is ``previews + 4 x``, and the envelope is ATTAINED.
+
+    The reconcile's sweep test is a ``len()`` comparison taken BEFORE the tiers,
+    against the shape the row is publishing. A row whose item COUNT is unchanged
+    and whose ``(phase, item)`` POSITIONS moved passes it and then adds the new
+    positions' keys, so the honest bound after any frame is ``previews + 4 x``
+    rather than the ``+ 2 x`` the docstring used to claim (review round 2 on this
+    PR, R2-2). Pinned here on this file's fixture, one row of six items, where
+    ``previews + 2 x`` is 15 and ``previews + 4 x`` is 27:
+
+    * ``[6] -> [6]`` — nothing moved, so nothing new: ``15 -> 15``.
+    * ``[6] -> [3, 3]`` — three items moved: ``15 -> 21``.
+    * ``[6] -> [0, 6]`` — no old position survives, because a leading empty phase
+      is published rather than merged away, so the bound is reached: ``15 -> 27``.
+
+    Each peak is one frame wide — the NEXT frame sweeps back to ``15`` — which is
+    why the wider bound is documented rather than enforced in the code.
+    """
+    from local_operator.mobile.projection import cap_projection_frame
+
+    def phases(shape: list[int]) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": f"Phase {index}",
+                "items": [
+                    {
+                        "text": f"todo {index}.{item} " + "detail " * 90,
+                        "status": "pending",
+                        "reason": "reason " + "x" * 200,
+                    }
+                    for item in range(count)
+                ],
+            }
+            for index, count in enumerate(shape)
+        ]
+
+    def reshape_frame(before: list[int], after: list[int]) -> tuple[int, int, int]:
+        """``(slots before the reshaping frame, its peak, the next frame)``.
+
+        A FRESH fixture per pair, because the peak depends on the positions the
+        row was holding when the frame began — the sweep the previous frame left
+        behind is what decides how many of this frame's keys are new.
+        """
+        fold, _comms = _roster_with_todos(2)
+        projection = fold.projection
+        memo = projection._frame_cap_memo
+        cap = _over_cap(projection)
+        cap_projection_frame(projection, cap_bytes=cap)
+        fold.set_subagent_hydrated_details("child-0", [], phases(before))
+        cap_projection_frame(projection, cap_bytes=cap)
+        before_slots = len(memo["child-0"])
+        fold.set_subagent_hydrated_details("child-0", [], phases(after))
+        cap_projection_frame(projection, cap_bytes=cap)
+        peak = len(memo["child-0"])
+        cap_projection_frame(projection, cap_bytes=cap)
+        # The sibling is never reshaped, so it stays on the settled shape.
+        assert len(memo["child-1"]) == 3 + 2 * 6
+        return before_slots, peak, len(memo["child-0"])
+
+    two_x = 3 + 2 * 6
+    # Nothing moved, so no key is added: the frame is a pure hit.
+    assert reshape_frame([6], [6]) == (two_x, two_x, two_x)
+    # Three items move to positions the row had nothing at. The count is
+    # unchanged, so the frame's own sweep test passes and the keys land on top.
+    assert reshape_frame([6], [3, 3]) == (two_x, two_x + 2 * 3, two_x)
+    # No old position survives — a leading empty phase is published rather than
+    # merged away — so this is the bound itself, not a step toward it.
+    assert reshape_frame([6], [0, 6]) == (two_x, 3 + 4 * 6, two_x)
 
 
 def test_nested_subagent_completion_refreshes_selected_detail() -> None:
@@ -651,6 +1256,61 @@ def test_live_fold_keeps_failed_child_error_text_generous() -> None:
     assert len(wire_row["error_text"]) > SUBAGENT_OUTCOME_CHARS
     assert len(wire_row["error_text"]) <= SUBAGENT_ERROR_CHARS
     assert "\n" in wire_row["error_text"]  # multi-line structure preserved
+
+
+def test_a_capacity_parked_child_is_not_drawn_as_running() -> None:
+    """UX round 3: the roster header COUNTS this field, so ``queued`` ≠ ``running``.
+
+    ``mobile/projection.py``'s mapping is what the session view's roster header
+    counts — it prints ``{running}/{direct.length} running`` over these rows — so
+    folding a capacity-parked child into ``running`` made the view claim a child
+    waiting for a slot was spending, one tap after a list chip that had just been
+    taught to keep the two apart (UX round 3's contradiction). The runtime keeps
+    them apart in ``RUNNING_SUBAGENT_STATUSES`` and the phone's summary does too;
+    only the fold disagreed.
+
+    ``starting`` is deliberately left in the running lane by the mapping (an
+    admitted child spinning up IS spending); this route cannot produce that
+    status from a job row, so it is stated in the mapping rather than asserted
+    here.
+    """
+
+    def job(*, queued: bool = False) -> SimpleNamespace:
+        return SimpleNamespace(
+            status="running",
+            queued=queued,
+            agent_role="coder",
+            model_label="test/model",
+            latest_details={},
+            result_text=None,
+            error_text=None,
+        )
+
+    jobs = {
+        "admitted": job(),
+        "waiting": job(queued=True),
+    }
+    session = SimpleNamespace(jobs=SimpleNamespace(get=lambda job_id: jobs[job_id]))
+    comms = SubagentComms(cast(Session, cast(Any, session)))
+    for job_id in jobs:
+        comms.record_launch(job_id, job_id)
+
+    fold = make_fold()
+    fold.set_subagent_details(comms)
+
+    statuses = {row.job_id: row.status for row in fold.projection.subagents}
+    assert statuses == {"admitted": "running", "waiting": "queued"}, statuses
+
+    # The roster header's own arithmetic, over the same rows: one of the two
+    # direct children is spending, so the view reads `1/2 running · 1 queued`
+    # rather than `2/2 running`.
+    direct = [row for row in fold.projection.subagents if row.parent_job_id is None]
+    assert sum(1 for row in direct if row.status == "running") == 1, [
+        (row.job_id, row.status) for row in direct
+    ]
+    assert sum(1 for row in direct if row.status == "queued") == 1, [
+        (row.job_id, row.status) for row in direct
+    ]
 
 
 def test_recorded_terminal_outcome_never_regresses_to_running_job_row() -> None:
@@ -2446,10 +3106,18 @@ def test_a_roster_row_with_no_age_publishes_no_age() -> None:
         )
 
     class Registry:
-        """The three members the roster fold reads, answering like the real one."""
+        """The members the roster fold reads, answering like the real one.
+
+        ``roster_pass`` returns ``self`` because the fold now reads one pass;
+        this fake IS the pass, so the same three members answer (see
+        ``SubagentComms.roster_pass``).
+        """
 
         def __init__(self, age_s: float | None) -> None:
             self._age = age_s
+
+        def roster_pass(self) -> "Registry":
+            return self
 
         def roster(self) -> list[Any]:
             return [lifecycle(self._age)]
@@ -2467,3 +3135,357 @@ def test_a_roster_row_with_no_age_publishes_no_age() -> None:
     dated = make_fold()
     dated.set_subagent_details(Registry(12.0))
     assert dated.projection.subagents[0].elapsed_s == pytest.approx(12.0)
+
+
+def test_set_subagent_details_reads_ONE_pass_and_publishes_the_same_fields() -> None:
+    """The fold must not walk the registry once per collection.
+
+    ``set_subagent_details`` runs on EVERY root event (``serving._refresh_state``),
+    and each walk is a synchronous read of a registry capped at 256 records, so
+    three walks per event — one of which was quadratic underneath, see
+    ``SubagentComms.RosterPass`` — was event-loop work paid on the turn's critical
+    path. The spy pins the shape: exactly one ``roster_pass()`` and no calls to
+    the single-walk methods at all.
+    """
+
+    class Jobs:
+        def __init__(self) -> None:
+            self.rows = {
+                "running": SimpleNamespace(
+                    status="running",
+                    start_time=1_000.0,
+                    agent_role="coder",
+                    model_label="test/child",
+                    latest_details={"progress": "reading"},
+                    result_text=None,
+                    error_text=None,
+                ),
+                "settled": SimpleNamespace(
+                    status="completed",
+                    start_time=900.0,
+                    agent_role="reviewer",
+                    model_label="test/child",
+                    latest_details={},
+                    result_text="review posted",
+                    error_text=None,
+                ),
+            }
+
+        def get(self, job_id: str) -> Any:
+            return self.rows.get(job_id)
+
+    class Spy(SubagentComms):
+        """Counts the walks, so "one pass" is asserted rather than assumed."""
+
+        def __init__(self, session: Any) -> None:
+            super().__init__(session)
+            self.calls: dict[str, int] = {"roster_pass": 0, "roster": 0, "nodes": 0, "job": 0}
+
+        def roster_pass(self, now: Any = None) -> Any:
+            self.calls["roster_pass"] += 1
+            return super().roster_pass(now)
+
+        def roster(self) -> Any:
+            self.calls["roster"] += 1
+            return super().roster()
+
+        def nodes(self) -> Any:
+            self.calls["nodes"] += 1
+            return super().nodes()
+
+        def job(self, job_id: str) -> Any:
+            self.calls["job"] += 1
+            return super().job(job_id)
+
+    session = SimpleNamespace(jobs=Jobs())
+    comms = Spy(cast(Session, cast(Any, session)))
+    comms.record_launch("running", "runner", prompt="go and read")
+    comms.record_launch("settled", "settler", prompt="review the diff")
+    # A live child, so one row lands as running and the other as completed. The
+    # cast is for the ``ChildSession`` protocol's shape, not for the value: the
+    # fold only reads ``session_id`` off it.
+    comms._records["running"].child = cast(Any, SimpleNamespace(session_id="child-session"))
+    comms._records["settled"].outcome = "completed"
+
+    fold = make_fold()
+    # The two ``record_launch`` calls above resolve a job row through the public
+    # ``job()``; the count below is about the FOLD, so it starts from here.
+    comms.calls = dict.fromkeys(comms.calls, 0)
+
+    fold.set_subagent_details(comms)
+
+    assert comms.calls == {"roster_pass": 1, "roster": 0, "nodes": 0, "job": 0}, (
+        "the fold must read one pass: a second walk here is per-event event-loop "
+        f"work, and this one runs on every root event. Got {comms.calls}"
+    )
+
+    rows = {row.job_id: row for row in fold.projection.subagents}
+    assert set(rows) == {"running", "settled"}
+    assert rows["running"].label == "runner"
+    assert rows["running"].status == "running"
+    assert rows["running"].activity == "reading"
+    assert rows["running"].prompt == "go and read"
+    assert rows["running"].agent == "coder"
+    assert rows["running"].model_label == "test/child"
+    # The child's age comes off the pass's ``ChildInfo``, not the row's default.
+    assert rows["running"].elapsed_s is not None
+    assert rows["settled"].label == "settler"
+    assert rows["settled"].status == "completed"
+    assert rows["settled"].result_text == "review posted"
+    assert rows["settled"].activity == ""
+    # A second refresh must publish the same rows rather than falling back to
+    # ``SubagentRow``'s running default for a settled child.
+    fold.set_subagent_details(comms)
+    again = {row.job_id: row for row in fold.projection.subagents}
+    assert again["settled"].status == "completed"
+    assert again["settled"].result_text == "review posted"
+
+
+@pytest.mark.parametrize("size", [1, 7, 20, 50, 100])
+@pytest.mark.parametrize("shape", ["siblings", "chain"])
+def test_roster_job_snapshot_and_graph_counts_are_deterministic(size: int, shape: str) -> None:
+    """Count real fold work without a timing threshold at representative shapes.
+
+    The indexed manager snapshot makes the per-node job lookup O(1) after one
+    O(N) pass. Peer and ancestor vectors remain intentionally complete because
+    the phone's Agents sheet consumes them; the counts make their unavoidable
+    quadratic wire representation explicit rather than pretending to remove it.
+    """
+
+    class CountingJobs:
+        def __init__(self) -> None:
+            self.rows: dict[str, Any] = {}
+            self.snapshots = 0
+            self.snapshot_rows = 0
+            self.gets = 0
+
+        def lookup_snapshot(self) -> dict[str, Any]:
+            self.snapshots += 1
+            self.snapshot_rows += len(self.rows)
+            return dict(self.rows)
+
+        def get(self, job_id: str) -> Any:
+            self.gets += 1
+            return self.rows.get(job_id)
+
+    manager = CountingJobs()
+    session = SimpleNamespace(jobs=manager)
+    comms = SubagentComms(cast(Session, cast(Any, session)))
+    for index in range(size):
+        job_id = f"job-{index:03d}"
+        parent_id = None if shape == "siblings" or index == 0 else f"job-{index - 1:03d}"
+        manager.rows[job_id] = SimpleNamespace(
+            status="running",
+            start_time=1_000.0,
+            agent_role="task",
+            model_label="",
+            latest_details={},
+            result_text=None,
+            error_text=None,
+        )
+        comms.record_launch(job_id, job_id, parent_job_id=parent_id)
+
+    # Ignore launch-time lookups: the measured operation is one projection fold.
+    manager.gets = 0
+    manager.snapshots = 0
+    manager.snapshot_rows = 0
+    fold = make_fold()
+    fold.set_subagent_details(comms)
+
+    assert manager.snapshots == 1
+    assert manager.snapshot_rows == size
+    # Existing lifecycle/node derivations use three direct gets per record;
+    # the indexed per-node resolution adds no N-by-N manager traversal.
+    assert manager.gets == 3 * size
+    assert len(fold.projection.subagents) == size
+    if shape == "siblings":
+        assert sum(len(row.peer_ids) for row in fold.projection.subagents) == size * (size - 1)
+        assert sum(len(row.ancestor_ids) for row in fold.projection.subagents) == 0
+    else:
+        assert sum(len(row.peer_ids) for row in fold.projection.subagents) == 0
+        assert sum(len(row.ancestor_ids) for row in fold.projection.subagents) == (
+            size * (size - 1) // 2
+        )
+
+
+def test_roster_index_canonicalizes_attempt_alias_before_manager_lookup() -> None:
+    """Resolve a stale attempt through the current id before probing managers."""
+    current = SimpleNamespace(
+        status="running",
+        start_time=1_000.0,
+        agent_role="root",
+        model_label="",
+        latest_details={},
+        result_text=None,
+        error_text=None,
+    )
+    later = SimpleNamespace(
+        status="running",
+        start_time=1_000.0,
+        agent_role="child",
+        model_label="",
+        latest_details={},
+        result_text=None,
+        error_text=None,
+    )
+
+    class DuckJobs:
+        """A legacy manager with only point lookup, as extension hosts may use."""
+
+        def __init__(self, rows: dict[str, Any]) -> None:
+            self.rows = rows
+
+        def get(self, job_id: str) -> Any:
+            return self.rows.get(job_id)
+
+    class IndexedJobs(DuckJobs):
+        def lookup_snapshot(self) -> dict[str, Any]:
+            return dict(self.rows)
+
+    root = DuckJobs({"current": current})
+    # A stale alias row in a later manager must not shadow the canonical root
+    # row; the legacy resolver looked up the canonical record id in both.
+    child = IndexedJobs({"previous": later})
+    comms = SubagentComms(cast(Session, cast(Any, SimpleNamespace(jobs=root))))
+    comms.record_launch("current", "current")
+    comms._aliases["previous"] = "current"
+    comms._records["current"].child = cast(
+        Any, SimpleNamespace(jobs=child, session_id="child-session")
+    )
+
+    read = comms.roster_pass()
+    # The root has only the canonical row. The later child has a stale row that
+    # would incorrectly win if the index probed the original alias first.
+    assert read.job("previous") is current
+
+
+def test_roster_index_probes_duck_typed_manager_once_for_missing_id() -> None:
+    """An unindexed miss visits each extension manager once, not twice."""
+
+    class DuckJobs:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get(self, job_id: str) -> Any:
+            self.calls += 1
+            return None
+
+    class IndexedJobs:
+        def __init__(self) -> None:
+            self.rows: dict[str, Any] = {}
+
+        def lookup_snapshot(self) -> dict[str, Any]:
+            return dict(self.rows)
+
+        def get(self, job_id: str) -> Any:
+            # RosterPass separately derives each record's running bit from the
+            # root manager; this lookup is not the fallback miss being measured.
+            return self.rows.get(job_id)
+
+    root = SimpleNamespace(jobs=IndexedJobs())
+    fallback = DuckJobs()
+    comms = SubagentComms(cast(Session, cast(Any, root)))
+    comms.record_launch("known", "known")
+    comms._records["known"].child = cast(
+        Any, SimpleNamespace(jobs=fallback, session_id="fallback-session")
+    )
+
+    read = comms.roster_pass()
+    fallback.calls = 0
+    assert read.job("missing") is None
+    assert fallback.calls == 1
+
+
+def test_roster_index_falls_back_after_a_raising_optional_manager() -> None:
+    """An extension manager failure remains isolated from later child ledgers."""
+    child_job = SimpleNamespace(
+        status="running",
+        start_time=1_000.0,
+        agent_role="child",
+        model_label="",
+        latest_details={},
+        result_text=None,
+        error_text=None,
+    )
+
+    class BrokenJobs:
+        calls = 0
+
+        def get(self, job_id: str) -> Any:
+            self.calls += 1
+            raise RuntimeError("optional host lookup failed")
+
+    class IndexedJobs:
+        def __init__(self, rows: dict[str, Any] | None = None) -> None:
+            self.rows = rows or {}
+
+        def lookup_snapshot(self) -> dict[str, Any]:
+            return dict(self.rows)
+
+        def get(self, job_id: str) -> Any:
+            return self.rows.get(job_id)
+
+    root = SimpleNamespace(jobs=IndexedJobs())
+    broken = BrokenJobs()
+    comms = SubagentComms(cast(Session, cast(Any, root)))
+    comms.record_launch("first", "first")
+    comms.record_launch("child", "child")
+    comms._records["first"].child = cast(
+        Any, SimpleNamespace(jobs=broken, session_id="broken-session")
+    )
+    comms._records["child"].child = cast(
+        Any, SimpleNamespace(jobs=IndexedJobs({"child": child_job}), session_id="child-session")
+    )
+    broken.calls = 0
+
+    assert comms.roster_pass().job("child") is child_job
+    assert broken.calls == 1
+
+
+def test_roster_index_agrees_with_get_and_the_ordered_resolver_on_a_swept_alias() -> None:
+    """Snapshot, ``get()`` and the manager-ordered resolver must agree (R1-1).
+
+    ``_sweep_due()`` drops an expired row but LEAVES the ``_aliases`` entry that
+    pointed at it, and a later row may reuse the swept alias's key. ``get()``
+    resolves aliases BEFORE direct row ids, so a direct row filed under that key
+    is unreachable; the index the roster pass builds from ``lookup_snapshot()``
+    must not resurrect it over the later manager's real row — the answer the
+    historical manager-ordered resolver gives — or a node would be described
+    from a row the sender's own ``get()`` cannot see.
+
+    Three-way agreement is the assertion, because each leg can be "right" alone:
+    the historical resolver, ``get()`` on the root manager, and the snapshot the
+    index is merged from are read by three different callers.
+    """
+
+    def row(label: str) -> AsyncJob:
+        # Same id as the key it is filed under, so the collision is between the
+        # two MANAGERS (and the alias) rather than between a key and a row id.
+        return AsyncJob(id="alias", type="task", status="running", start_time=1_000.0, label=label)
+
+    root = AsyncJobManager()
+    # The post-sweep state: the alias target is gone while the mapping and a
+    # stale direct row under the same key both remain.
+    root._aliases["alias"] = "already-swept-target"
+    root._jobs["alias"] = row("stale-direct-alias-key")
+    later = AsyncJobManager()
+    later_row = row("later-manager-current-row")
+    later._jobs["alias"] = later_row
+
+    # Leg 1: the alias's absent target wins over the colliding direct row.
+    assert root.get("alias") is None
+    snapshot = root.lookup_snapshot()
+    assert snapshot.get("alias") is root.get("alias")
+    assert "alias" not in snapshot
+
+    comms = SubagentComms(cast(Session, cast(Any, SimpleNamespace(jobs=root))))
+    comms.record_launch("alias", "alias")
+    comms._records["alias"].child = cast(
+        Any, SimpleNamespace(jobs=later, session_id="later-session")
+    )
+
+    # Leg 2: ``comms.job`` IS the historical manager-ordered resolver (root
+    # first, then each live child in insertion order) that the pass replaced.
+    assert comms.job("alias") is later_row
+    # Leg 3: the roster pass's indexed lookup must answer the same row.
+    assert comms.roster_pass().job("alias") is later_row

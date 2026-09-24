@@ -25,6 +25,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ModelSheet } from "../components/model-sheet";
 import { Composer } from "../components/composer";
+import { GateSheet } from "../components/gate-sheet";
 import { PendingCard } from "../components/pending-card";
 import { SubagentsPanel } from "../components/subagents-panel";
 import { TodosPanel } from "../components/todos-panel";
@@ -42,10 +43,36 @@ import type { SessionProjection } from "../types";
 
 function Header({
 	projection,
+	sessionId,
 }: {
 	projection: SessionProjection;
+	sessionId: string;
 }) {
+	const [gateOpen, setGateOpen] = useState(false);
+	/* THE LOOSENING RECEIPT, held HERE rather than in the sheet (design round 6,
+	   D2). The sheet unmounts the moment it closes, and a report set inside it was
+	   never painted — measured: panel gone, header still "needs you", the user told
+	   nothing. The header is the surface the sheet closes back onto, so the receipt
+	   belongs to it and survives.
+
+	   IT IS CLEARED BY THE NEXT GATE-CHANGING GESTURE ON THIS SCREEN: `onReceipt("")`
+	   comes from the sheet's tighten path, so a `keep asking` from the sheet leaves
+	   no header claiming the gate is auto (UX round 8, U8-3 — the flow the round-7
+	   comment below was wrong about: it asserted there was nothing stale to clear,
+	   and a tighten one tap away is exactly that). THE BOUND, stated rather than
+	   implied (agent review round 9, R9-5): the receipt is component state, not
+	   derived from the projection, so a gate tightened from ANOTHER surface — the
+	   machine's TUI, the desktop app — leaves this header asserting the old state
+	   until this screen's next gate-changing gesture. Deriving it from
+	   `projection.gate` would remove the staleness window entirely and is the
+	   obvious next change if this screen ever shows a gate the phone did not set;
+	   today every path that sets it runs through the sheet below. The
+	   round-7 design note is kept because it is the reason the receipt lives HERE:
+	   an earlier version set it inside the sheet, which unmounted before it could
+	   paint (design round 6, D2). */
+	const [gateReceipt, setGateReceipt] = useState("");
 	return (
+		<>
 		<header className="flex items-center gap-2 border-b border-hairline px-1 py-1 pt-[max(env(safe-area-inset-top),0.25rem)]">
 			<button
 				type="button"
@@ -58,7 +85,40 @@ function Header({
 			<span className="min-w-0 flex-1 truncate text-body-sm font-medium">
 				{projection.conversation_name || "untitled"}
 			</span>
+			{/* THE GATE CONTROL (stage D). On the phone this is the LOOSEN surface:
+			    `/approvals auto` is authority-increasing, so it asks the runtime for a
+			    per-action challenge and signs it with this phone's non-extractable key.
+			    Before the redesign a phone could not loosen in ANY session, and the
+			    refusal told the reader to find "the window that started this session" —
+			    a window a phone cannot become. The label says what the control is about
+			    (approvals) rather than naming the command; the sheet names the command. */}
+			<button
+				type="button"
+				onClick={() => setGateOpen(true)}
+				aria-label="approvals in this session"
+				className="flex min-h-8 items-center justify-center rounded-sm px-2 text-meta text-ink-muted active:bg-elevated"
+			>
+				{projection.pending ? "needs you" : "approvals"}
+			</button>
+			<GateSheet
+				open={gateOpen}
+				onClose={() => setGateOpen(false)}
+				sessionId={sessionId}
+				onReceipt={setGateReceipt}
+			/>
 		</header>
+		{gateReceipt ? (
+			/* Cleared by the next tightening/loosening gesture rather than on a timer:
+			   a receipt that vanishes while the user is looking at it is the defect
+			   this exists to fix. */
+			<p
+				role="status"
+				className="border-b border-hairline bg-elevated px-2 py-1 text-meta text-ink-muted"
+			>
+				{gateReceipt}
+			</p>
+		) : null}
+		</>
 	);
 }
 
@@ -153,7 +213,7 @@ export function SessionScreen({
 					connected={connected}
 				/>
 			) : <>
-			<Header projection={projection} />
+			<Header projection={projection} sessionId={sessionId} />
 
 			{projection.transcript.length === 0 && !projection.streaming ? (
 				/* A just-started session has no messages yet. An empty scroll

@@ -26,17 +26,22 @@ halves carry their reasons in ``credential_shape_corpus``.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import itertools
 import json
 import re
 import shlex
+import signal
 import tempfile
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, cast
 
 import pytest
 
+from local_operator import redaction_shapes
 from local_operator.harness.redaction import (
     current_tool_source,
     summarize_arguments,
@@ -44,6 +49,8 @@ from local_operator.harness.redaction import (
 )
 from local_operator.harness.types import (
     AbortSignal,
+    AgentTool,
+    LoopConfig,
     Message,
     ModelSpec,
     StreamEndEvent,
@@ -52,6 +59,7 @@ from local_operator.harness.types import (
     TextContent,
     ToolCall,
     ToolContext,
+    ToolResult,
 )
 from local_operator.redaction_shapes import (
     REDACTION_MARKER,
@@ -66,15 +74,41 @@ from local_operator.session.transcript import Transcript
 from local_operator.tools import builtin
 from local_operator.variables import VariableStore
 from tests.unit.secrets.credential_shape_corpus import (
+    COMPACT_TOKEN_PAIR,
+    COUNT_QUALIFIER_NAMES,
+    COUNT_TAIL_RELEASED_NAMES,
+    COUNTER_USAGE_LINE,
     DUMP_COMMAND_CASES,
+    FIXTURE_VALUE,
     NEGATIVE_CASES,
     POSITIVE_CASES,
+    PRE_ESCAPED_LINE,
     Case,
 )
 
 #: A synthetic credential. Never a real one, and never asserted into anything a
 #: human reads: the corpus carries the shapes, this carries the containment.
 SENTINEL = "mongodb+srv://svc_user:sh4pedSentinelPw@db.internal/app"
+
+
+#: The credential INSIDE ``SENTINEL`` — the part a mask has to remove. Derived
+#: from the sentinel rather than written again, so no test in this file has to
+#: spell a credential-shaped literal of its own.
+SENTINEL_FRAGMENT = SENTINEL.split(":", 1)[1].rsplit("@", 1)[0]
+
+
+def _exposed_text() -> str:
+    """The corpus's own ESCALATING case: a DSN with the username as its password.
+
+    The pair of fixtures this file needs is "masked whole" (``SENTINEL``) and
+    "readable material left behind", and only the corpus knows which spellings
+    grade as the second: the DSN rule deliberately keeps the userinfo username, so
+    ``amqp://guest:guest@…`` reads its own password back and the classification
+    escalates. Derived rather than written out, so this file still spells no
+    credential-shaped literal of its own, and so the day the corpus changes its
+    mind the tests follow it instead of disagreeing with it.
+    """
+    return next(case.text for case in POSITIVE_CASES if case.reason == "amqp DSN")
 
 
 def _store(text: str) -> str:
@@ -194,6 +228,53 @@ def test_ordinary_text_is_left_byte_identical_on_every_surface(
     assert SURFACES[surface](case.text) == case.text, f"{surface} rewrote {case.reason}"
 
 
+#: The corpus rows that make the MASK MARKER their own subject, named by REASON so
+#: that a rename or a removal fails loudly instead of quietly checking nothing.
+MASK_MARKER_NEGATIVE_REASONS: tuple[str, ...] = (
+    "the mask marker alone: the pass's own output is not its own input",
+    "the marker inside prose, in a credential position: a peer's evidence",
+    "the marker inside a JSON tool argument: the shape a bash call journals",
+)
+
+
+def test_the_mask_marker_neither_masks_nor_labels_nor_escalates() -> None:
+    """A message carrying the marker files no incident — the peer's report, pinned.
+
+    The third of three "credential reached X" reports was this claim: a message that
+    CONTAINS the mask marker re-fires a fresh incident, so "a detector whose output
+    is its own input cannot settle". It is measured false, and the corpus could not
+    settle it because the marker appeared in no row on either half; a claim that
+    travels as prose is a claim the next session re-litigates, so it takes rows.
+
+    What this test adds over the rows is the rest of the claim. The parametrised
+    negative test asserts the BYTE half — the marker survives every surface — and
+    the corpus digest pins the label and severity of what the table MATCHES, which
+    for these rows is nothing. The three assertions below are stated together
+    because they are one finding: no mask, no label, no escalation. ``reached_model``
+    is derived from the hit list (:func:`shape_report`), so the empty hit list is
+    what keeps the escalation half from being vacuously true — a rule that matched
+    would file a hit, and the ``.npmrc`` ``_authToken=`` spelling is one of this
+    table's own measured examples of a hit that files, labels, and still does not
+    escalate — eight labels over the 23 corpus rows that re-fire, enumerated where
+    the marker rows argue their own boundary in ``credential_shape_corpus``.
+    """
+    cases = [case for case in NEGATIVE_CASES if case.reason in MASK_MARKER_NEGATIVE_REASONS]
+    missing = set(MASK_MARKER_NEGATIVE_REASONS) - {case.reason for case in cases}
+    assert not missing, f"the marker rows were renamed or removed: {sorted(missing)}"
+
+    for case in cases:
+        # Anti-vacuity first: a row that no longer carries the marker would satisfy
+        # every assertion below while pinning nothing at all.
+        assert REDACTION_MARKER in case.text, f"{case.reason} no longer carries the marker"
+        changed = [name for name, surface in SURFACES.items() if surface(case.text) != case.text]
+        assert not changed, f"{case.reason} was rewritten on {changed}"
+        assert match_shape_names(case.text) == [], f"{case.reason} was labelled"
+        _, hits = scrub_shapes_with_hits(case.text)
+        assert not hits, f"{case.reason} filed a hit"
+        report = redaction_shapes.shape_report(hits)
+        assert report.reached_model is False, f"{case.reason} escalated"
+
+
 def test_the_corpus_is_big_enough_to_be_evidence() -> None:
     """A guard on the corpus itself, so it cannot be quietly trimmed.
 
@@ -223,6 +304,113 @@ def test_the_incidents_own_line_is_a_regression_case() -> None:
     assert "agent_runtime_model_worker" in scrubbed, "the user must stay readable"
     assert "mongodb-prod.example.net" in scrubbed, "the host must stay readable"
     assert scrubbed.startswith("MONGO_DSN=mongodb+srv://agent_runtime_model_worker:")
+
+
+def test_an_escape_is_neither_a_name_character_nor_a_line_the_value_may_cross() -> None:
+    """The rendering a tool call is JOURNALLED in is a surface, and it has escapes.
+
+    Four claims, each measured, all of them about the same incident — a ``write`` of
+    ordinary Python source whose file on disk holds no shape at all, whose arguments
+    are scrubbed in their JSON spelling where every newline is the two characters
+    ``\\`` and ``n``:
+
+    * the escape's own letter is not part of the NAME, so the count trap still
+      counts (the first block);
+    * the escape's letters are detached only when they ARE an escape's — in either
+      spelling of a literal backslash — so a literal backslash before a name does
+      not eat the name (the second);
+    * the escape is a line break for the JUDGEMENT, so an ordinary constant is not a
+      13-character value (the first block again) — and the MASK may only ever cover
+      more than the line the real spelling masks, never less (the third);
+    * and the MASK, unlike the judgement, keeps every byte the rendering gave it: a
+      value whose own bytes carry an escaped break is masked WHOLE, tail included
+      (the fourth) — the direction agent review R1-2 measured the other way round.
+
+    Kept as its own test rather than only corpus rows because the corpus pins the
+    SPELLINGS while this pins the INVARIANTS they rest on — a future edit can satisfy
+    every row by widening a rule somewhere else and still move this. Every assertion
+    here discriminates against at least ONE of the two revisions under review (agent
+    review R1-6, R2-F3), and which one it fails on is stated beside it: the count-trap
+    block fails on ``origin/main``, while the literal-backslash block, the tail and
+    the short-run assertions PASS there and fail only on ``5f757d9c``. Summing them
+    into "each one fails on ``origin/main``" was a claim the measurements do not
+    support.
+    """
+    # 1. The escape's letter is the newline's, not the name's: the count trap applies.
+    # The prefix matters and is not decoration: a name the count trap covers is spared
+    # by ``is_count_shaped``, which keys on the name's FIRST segment, so only a name
+    # with something glued to its front can be a false positive here — and the only
+    # thing that glues itself there is the escape letter of the line break before it.
+    escaped_constructions = (
+        PRE_ESCAPED_LINE
+        + "MAX"
+        + "_TOKENS = 4096"
+        + "\\n" * 3
+        + "def load_vendor_keys() -> dict[str, str]:",
+        PRE_ESCAPED_LINE + "context_tokens=12345678" + "\\n" * 3 + "def run() -> None:",
+        PRE_ESCAPED_LINE + "API" + "_KEY = PLACEHOLDER" + "\\n" * 3 + "def run() -> None:",
+        # The same trap in the spellings ``json.dumps`` writes for a break it cannot
+        # spell in two characters, which is what a payload carrying a raw U+2028
+        # arrives as (agent review R1-4).
+        PRE_ESCAPED_LINE.replace("\\n", "\\u2028")
+        + "MAX"
+        + "_TOKENS = 4096"
+        + "\\u2028" * 3
+        + "def load_vendor_keys() -> dict[str, str]:",
+    )
+    for text in escaped_constructions:
+        assert scrub_shapes(text) == text, f"an escaped break invented a credential in {text!r}"
+        assert match_shape_names(text) == []
+
+    # 2. Only an ESCAPE's letters may be detached from a name. A literal backslash is
+    # not one, and eating a letter made a credential name unreadable as a credential:
+    # the mask was lost where ``origin/main`` kept it (agent review R1-3).
+    literal_backslash = "\\" + "PASSWORD=" + "corr" + "ect_horse_bat" + "tery"
+    assert "corr" + "ect_horse_bat" + "tery" not in scrub_secrets(literal_backslash)
+    assert scrub_shapes(literal_backslash) != literal_backslash
+
+    # 2b. ...and the DOUBLED spelling of the same literal backslash, which is how a
+    # rendering writes one. The backslash before the name is itself escaped, so
+    # nothing may be detached: R1-3's answer checked only that SOMETHING backslashish
+    # preceded the name, and a name that IS a credential word lost its mask here with
+    # no hit and nothing registered (agent review R2-F2). This is the half that fails
+    # at the revision under review, where the block above passes there and fails on
+    # ``5f757d9c``.
+    escaped_literal_backslash = "\\\\" + "token=" + FIXTURE_VALUE
+    assert FIXTURE_VALUE not in scrub_secrets(escaped_literal_backslash)
+    assert scrub_shapes(escaped_literal_backslash) != escaped_literal_backslash
+
+    # 3. A rendered break is a break for the JUDGEMENT, and the MASK may only ever
+    # cover MORE than the line the real spelling masks — never less. The two
+    # directions on one value: on a REAL break the line after it is a line like any
+    # other and stays readable; in the rendering the same assignment is masked whole.
+    carried = (
+        "CLIENT" + "_SECRET=" + "alpha" + "_run" + "_body" + "\\n" + "more" + "_body" + "_material"
+    )
+    on_a_real_break = carried.replace("\\n", "\n")
+    real_line = "alpha" + "_run" + "_body"
+    tail = "more" + "_body" + "_material"
+    assert real_line not in scrub_shapes(on_a_real_break), "both surfaces mask the value"
+    assert tail in scrub_shapes(on_a_real_break), "the real spelling keeps the next line"
+
+    # 4. ...and it is NOT a break for the MASK: the rendering masks the WHOLE run,
+    # where the revision under review left the tail readable under a hit still graded
+    # ``complete=True``.
+    scrubbed = scrub_secrets(carried)
+    assert real_line not in scrubbed, "the key must still be masked"
+    assert tail not in scrubbed, "the tail stayed readable"
+    assert scrubbed == "CLIENT" + "_SECRET=[redacted]"
+
+    short_run = "CLIENT" + "_SECRET=" + "run" + ">" + "\\n" + "zip" + "tail" + "material"
+    scrubbed = scrub_secrets(short_run)
+    assert "zip" + "tail" + "material" not in scrubbed, "a short run still crosses the break"
+
+    # The escape is not the name's, so an assignment that begins right after one is
+    # still an assignment — judged on the name the escape actually belongs to.
+    after_an_escape = PRE_ESCAPED_LINE + "OPENROUTER_API_KEY=" + "QA-fixture-9c1f4a"
+    scrubbed = scrub_secrets(after_an_escape)
+    assert "QA-fixture-9c1f4a" not in scrubbed
+    assert scrubbed.startswith(PRE_ESCAPED_LINE), "the escaped rendering must round-trip"
 
 
 # --- the pattern pass alone --------------------------------------------------
@@ -405,6 +593,149 @@ def test_a_known_value_split_at_every_offset_is_still_masked() -> None:
         assert secret not in published.decode(), f"value leaked when split at {offset}"
 
 
+def test_a_shape_straddling_the_deferral_boundary_is_masked_and_registered() -> None:
+    """A cap-forced cut must not publish the two halves of a credential.
+
+    The release point has always refused to cut through a KNOWN value; the same
+    rule was missing for a SHAPE, and the cap is the one release chosen without
+    regard to the text around it. A DSN sitting on that boundary came out as an
+    unmasked head in one released slice and an unmasked tail in the next —
+    neither half carries the spelling the pattern needs — and nothing later can
+    repair it, because the live stream is the one surface no pass re-reads.
+
+    Swept rather than sampled: with 4 KiB reads the cap puts a slice boundary
+    every 4096 bytes, so the offsets below walk the credential across it. The
+    real store is the sink, because the second half of the property is that a
+    value the pipe masks is CONTAINED — masked later in a form no rule knows.
+    """
+    store = VariableStore(cwd=".")
+    # The mask removes the whole userinfo, but the value the shape REGISTERS is the
+    # password group — so the reuse below spells only that, which is the form no
+    # rule in the table has a spelling for.
+    password = SENTINEL_FRAGMENT.rsplit(":", 1)[-1]
+    for offset in range(4080, 4112):
+        body = "." * offset + SENTINEL + "." * 20000
+        redactor = builtin._PipeRedactor([], contain=store.register_shape_hits_for_containment)
+        raw = body.encode()
+        published = [redactor.feed(raw[i : i + 4096]) for i in range(0, len(raw), 4096)]
+        published.append(redactor.feed(b"", final=True))
+        text = b"".join(published).decode()
+        assert SENTINEL_FRAGMENT not in text, f"the password was published, cut at {offset}"
+        assert REDACTION_MARKER in text, f"the shape was not masked, cut at {offset}"
+    assert store.redact(f"prefix {password} suffix") == (
+        f"prefix {REDACTION_MARKER} suffix"
+    ), "the value the pipe masked was not registered for containment"
+
+
+def test_no_chunk_boundary_publishes_what_one_pass_would_mask() -> None:
+    """The invariant the boundary fix exists for, stated as the property itself.
+
+    Whatever the filter publishes, concatenated, must be what a single pass over
+    the same bytes produces. That is stronger than "the password is absent": it
+    also fails if a fix buys the mask by dropping, duplicating or reordering
+    output, which is the way this class of change usually goes wrong.
+
+    The filler is a character a DSN spelling follows: a WORD character runs into
+    the scheme and defeats the pattern's leading ``\\b``, so the table matches
+    neither release and the property is vacuous there. That spelling's own
+    behaviour — a slice boundary CREATING the boundary word the one-piece text
+    lacks, so the streamed pass masks MORE than the single pass — is pre-existing,
+    identical before and after this change, and in the safe direction; it is not
+    this fix's to move.
+    """
+    for offset in (4090, 4094, 4095, 4096, 4097, 8190, 8191, 8192):
+        body = "." * offset + SENTINEL + "." * 20000
+        for chunk in (7, 4096, 8192, 8193):
+            redactor = builtin._PipeRedactor([])
+            raw = body.encode()
+            published = [redactor.feed(raw[i : i + chunk]) for i in range(0, len(raw), chunk)]
+            published.append(redactor.feed(b"", final=True))
+            assert b"".join(published).decode() == scrub_secrets(body), (
+                f"streamed output diverged from the one-piece pass at offset {offset}, "
+                f"chunk {chunk}"
+            )
+
+
+def test_the_boundary_hold_is_bounded_and_still_streams() -> None:
+    """The fix holds bytes back, so the hold is asserted rather than implied.
+
+    Moving a cut out of a shape means publishing less per read, and the whole
+    reason the cap exists is that the held buffer must not be a function of what
+    the child prints. Both halves are asserted on the STRUCTURE (a peak and a
+    bound), never on a wall clock — see AGENTS.md, "Calibrate ceilings from CI".
+    The peak assertion is what keeps this test honest: it fails if the hold stops
+    being exercised, which is how the bound would go stale without anyone
+    noticing.
+
+    The credential assertion comes FIRST, and deliberately: on the pre-fix source
+    this row has to fail for the reason it exists — the value being published —
+    and not because ``_PIPE_HOLD_LIMIT`` does not exist there. A test whose only
+    pre-fix failure is a missing symbol pins the seam rather than the property.
+    """
+    line = "." * 4095 + SENTINEL + "." * (4 * 1024 * 1024)
+    redactor = builtin._PipeRedactor([])
+    peak = 0
+    published = 0
+    chunks: list[bytes] = []
+    for start in range(0, len(line), 4096):
+        chunk = redactor.feed(line[start : start + 4096].encode())
+        chunks.append(chunk)
+        published += len(chunk)
+        peak = max(peak, len(redactor.pending))
+    tail = redactor.feed(b"", final=True)
+    chunks.append(tail)
+    published += len(tail)
+    assert (
+        SENTINEL_FRAGMENT not in b"".join(chunks).decode()
+    ), "the credential straddling the boundary was published"
+    assert peak <= builtin._PIPE_HOLD_LIMIT, "the hold must not grow with the child's output"
+    assert peak > builtin._PIPE_DEFERRAL_LIMIT, "the boundary hold was never exercised"
+    assert redactor.pending == ""
+    assert published >= len(line) - builtin._PIPE_HOLD_LIMIT, "the line must still stream"
+
+
+def test_the_hold_is_the_max_of_two_rules_and_stays_bounded() -> None:
+    """``_PIPE_HOLD_LIMIT`` bounds the SHAPE rule, not the filter's whole hold.
+
+    The older KNOWN-value rule holds whatever a registered value needs, because a
+    registered value is a credential the session was told about and publishing it
+    in two halves is the leak that rule exists to prevent. So the filter's total
+    hold is ``max(_PIPE_HOLD_LIMIT, len(value) + _PIPE_DEFERRAL_LIMIT)`` — a bound
+    over what the SESSION knows, never over what the child prints, which is the
+    property the cap is for. Asserted with a NON-EMPTY secret on purpose: an empty
+    one exercises only the first term, which is how this limit came to be
+    documented as the whole bound in the first place.
+
+    ``getattr`` because this row is a guard on the filter as a whole rather than a
+    discriminator for this change — the rule it measures predates it and the
+    numbers are the same on the pre-fix source, so it must not fail there for a
+    missing symbol.
+    """
+    limit = getattr(builtin, "_PIPE_HOLD_LIMIT", builtin._PIPE_DEFERRAL_LIMIT)
+    worst = 0
+    for size, read in ((1_000, 4096), (5_000, 4096), (24_576, 65536), (30_000, 65536)):
+        secret = ("q7Xk2m" * (size // 6 + 1))[:size]
+        line = "." * 100_000 + secret + "." * 100_000
+        raw = line.encode()
+        redactor = builtin._PipeRedactor([secret])
+        published: list[bytes] = []
+        peak = 0
+        for start in range(0, len(raw), read):
+            published.append(redactor.feed(raw[start : start + read]))
+            peak = max(peak, len(redactor.pending))
+        published.append(redactor.feed(b"", final=True))
+        assert (
+            secret not in b"".join(published).decode()
+        ), f"a registered value of {size} B was published at {read} B reads"
+        assert peak <= max(
+            limit, size + builtin._PIPE_DEFERRAL_LIMIT
+        ), f"holding a {size} B value at {read} B reads took {peak} B"
+        worst = max(worst, peak)
+    assert (
+        worst > limit
+    ), "the second term must actually bind at some size, or this test measures the first one twice"
+
+
 def test_a_line_with_no_terminator_is_released_and_stays_bounded() -> None:
     """A 10 MB single line neither stalls nor grows the held buffer.
 
@@ -448,6 +779,1362 @@ def test_the_pipe_releases_at_a_carriage_return_too() -> None:
     assert redactor.feed(b"step 1/3\r") == b"step 1/3\r"
 
 
+# --- the pipe filter's PEM classifiers: gated, linear, and pinned -------------
+#
+# `_mask_open_key_block` runs the header, body and END classifiers over EVERY
+# 64 KiB read a child produces, and `_pump` calls them ON THE EVENT LOOP. Their
+# prefix grammar is the shared `LINE_PREFIX`, which is ambiguous by construction:
+# a unit's `\d+` may end in the middle of a digit run, so a line of numeric
+# columns has 2**k live partitions and `re`, which does not memoise, walks every
+# one of them before concluding that the line is not PEM. Every figure below
+# NAMES ITS POPULATION, because they differ by two orders of magnitude between
+# populations and an unqualified number is how the first version of this comment
+# came to understate the residual by ~300x (round 1's R1-2):
+#
+# * base (`origin/main`), ONE 65-character `%8d` row of FOUR-digit values: the
+#   header search does not return in 300 s (timed out). The same row of ONE-digit
+#   values: 1.357 s in that search, 1.828 s in the body match.
+# * head, the four-digit row: 3.9 s / 6.7 s. The whitespace rewrite of the prefix
+#   fragment (`redaction_shapes.LINE_PREFIX`) is what buys that difference, and
+#   reverting it puts both paths back over 150 s.
+# * head, the body classifier INSIDE AN OPEN BLOCK: 12.5 s for ONE rejected
+#   digit-dense line, 26.1 s for two — charged PER LINE OF THE RELEASED BUFFER
+#   and not per line of the block, because closing the state is what releases the
+#   rest of the read and the loop goes on classifying after it closes.
+#
+# Say precisely what the evidence is, because the frame and the frequency are
+# different claims. The frame is real: `~/.local-operator/logs/runtime-stall-
+# 85845.log` carries `_mask_open_key_block` -> `_feed_scrubbed` -> `feed` ->
+# `_pump` for a session that wedged with its transcript unchanged, burning 97%
+# of a core for 45 s. The instance is ONE: of the 31 bound dumps written on this
+# fleet that night, this routine appears in one, three more carry other
+# `local_operator` frames, 22 are the runtime's ordinary loops parked in stdlib
+# and five carry no `local_operator` frame at all. So this is a located spin,
+# NOT the freeze class of that night; the volume belongs to the liveness axis
+# (#1408/#1419).
+#
+# Nor is size what makes it burn: the `wait` it froze in was blocked over a
+# launch payload of 8-10 KB, and one numeric row inside a 10 KB payload costs
+# 56 s of CPU on its own, while an unclosed block and a block past the cap cost
+# nothing at the same size (measured, all three). The cost is a property of the
+# SHAPE of the bytes, which is why these tests are sized in tens of bytes.
+#
+# THE FIX HAS TWO HALVES. The gates close the ORDINARY read: a read carrying
+# neither literal never reaches a classifier, which is what makes ordinary output
+# free. They cannot close the rest, and the BODY classifier cannot be gated at all
+# — `10000000 10000001` is a line it MATCHES, so no necessary condition rejects it
+# cheaply. That half is the LINEAR DECIDERS: `pem_body_line`, `pem_end_line` and
+# `pem_header_line_end` in `redaction_shapes` decide the same three languages in
+# one pass each, with no backtracking to walk. The arms below hold them to the
+# patterns they replace — a sweep over character-kind sequences in BOTH
+# directions (a dropped line is a published key, an extra one masks prose), the
+# digit predicate against `\d` over the whole code space, and the cost of the
+# ungated path itself, which no gate-based arm could see (round 1's R1-1).
+#
+# THE THIRD HALF, and it was reachable through the PIPE rather than beside it: the
+# shape TABLE's `-open` rule embeds the same ambiguous fragment, and
+# `_PipeRedactor._release_point` runs that rule through `_shape_safe_spans` on any
+# read past the deferral cap — the fatal class by another door (QA round 2, Q3 on
+# #1427). It is also the road the scrub takes on the bytes that release hands it,
+# so the walk was measured on both: past a 60 s cap for a 9,152-byte read and past
+# a 60 s cap for a THREE-row one, because nothing on that path is gated by a
+# classifier — an anchored `private_key` spelling puts the header where the
+# line-anchored block loop cannot see it, and the rule's own walk is 2**(digits-1)
+# partitions per digit run of a dense line. What closes it is the SPELLING the rule
+# uses: `_PEM_DIGIT_MAX_PREFIX` requires each digit run to be maximal, which is the
+# same language (a split inside a contiguous run always has an equivalent one-unit
+# parse) and takes the walk from past 60 s to tens of milliseconds. The arms below
+# hold it: the fragment sweep and the rule-level differential in BOTH directions,
+# the rule's own answer and cost on the dense population, and masking parity
+# through the real pipe filter at four chunk policies. The rewrite arm below is
+# there because that path is where the whitespace rewrite is still the thing
+# keeping the cost at tens of milliseconds.
+
+#: The character KINDS these three languages are functions of. A sequence of kinds
+#: stands for every string built from the same kinds, which is what lets a bounded
+#: sweep below stand for an unbounded one. `\u0661` is an Arabic-Indic digit: `\d`
+#: takes it and `[0-9]` does not, so its presence here is what catches a machine
+#: that read the fragment's digit class as ASCII. `\r` is here for the same reason in
+#: the other direction, and it is the kind this sweep was MISSING: the armour tail is
+#: `[ \t]*(?=\r|\n|$)` and a `\r` is what tells a decider modelling the tail as `$`
+#: apart from the pattern (the merged-tree disagreement with #1445) — without this kind
+#: and the CR fixtures below, this arm passed under exactly the disagreement it exists
+#: to catch.
+_DECIDER_KINDS = ("1", "\u0661", " ", "[", "]", "\u2502", ".", "-", "a", ",", "\r")
+#: The terminators an armour line is actually written with, for the fixture loop below:
+#: LF, CRLF and a bare CR used as the line end, plus the whitespace an editor or a wiki
+#: leaves between the last dash and the terminator.
+_DECIDER_TERMINATORS = ("\n", "\r\n", "\r")
+_DECIDER_TAIL_WHITESPACE = ("", "  ", "\t")
+#: Tokens for the must-not-reject direction: eight characters is the body floor,
+#: and the shorter ones are what the short-line arm is for.
+_DECIDER_TOKENS = ("MIIEowIB", "MIIEowIB,", "MIIEowIB  ", "M")
+
+
+class _CountingDecider:
+    """A decider stand-in that records the CALL rather than the time.
+
+    `_PipeRedactor` reads the decider off the module at call time, so this is how
+    far "the classifier was not reached" can be asserted as a FACT: the call count
+    is zero or it is not, whatever the runner's load.
+    """
+
+    def __init__(self, decider: Callable[[str], object]) -> None:
+        self._decider = decider
+        self.calls = 0
+
+    def __call__(self, text: str) -> Any:
+        self.calls += 1
+        return self._decider(text)
+
+
+#: The dash run of a PEM banner, and a builder for the banner itself. The banner is
+#: ASSEMBLED rather than written down because the literal is the shape this file's own
+#: subject matter treats as a credential: tooling on the way in that redacts it would
+#: leave a broken line and a test that still passes while asserting nothing.
+#: `_PEM_SPELLINGS` and `_PEM_BODY` are the file's existing spellings and body, reused
+#: so a spelling a future round adds is covered here too.
+_DASHES = "-" * 5
+
+
+def _banner(spelling: str, kind: str = "BEGIN") -> str:
+    """A PEM banner line, without the literal appearing in this file."""
+    return f"{_DASHES}{kind} {spelling}{_DASHES}\n"
+
+
+def _numeric_rows(rows: int, columns: int = 3, start: int = 0) -> str:
+    """A numeric table row of `%8d`-padded columns: the shape that burns.
+
+    `start=0` so the fields are one or two digits wide unless a caller asks for
+    more, and that is not cosmetic: the partitions of a digit run are what the
+    engine walks, so a wider field multiplies a row's cost and turns a regression
+    from a slow test into a hang — which is a worse test than a fast one. The
+    deciders are linear, so a size that a released path could not finish is now
+    the cheapest way to show that nothing walks the partitions.
+    """
+    return "".join(
+        "".join(f"{start + row * columns + column:8d}" for column in range(columns)) + "\n"
+        for row in range(rows)
+    )
+
+
+def _decider_forms(sequence: str) -> tuple[str, ...]:
+    """The shapes one kind sequence is asked about, in BOTH directions.
+
+    A bare sequence is the must-not-accept direction (the pattern rejects it, so
+    the decider has to as well, or prose gets masked). Each token form is the
+    must-not-reject direction: the pattern takes it, and a decider that drops it
+    publishes a key. The newline forms put the short-line arm's lookahead in play.
+    """
+    forms = [sequence]
+    for token in _DECIDER_TOKENS:
+        forms.append(sequence + token)
+        forms.append(f"{sequence}{token}\n")
+        forms.append(f"{sequence}{token}\n{_PEM_BODY}\n")
+    return tuple(forms)
+
+
+def _decider_fixtures() -> list[str]:
+    """The shapes a caller actually sees, both directions, every spelling.
+
+    Assembled from the file's own constants so a spelling a future round adds is
+    covered here too, and including the two shapes that a per-line reading of the
+    body pattern gets wrong: a banner line is NOT a body line, and a numeric table
+    row after one is not the line the match is anchored to.
+    """
+    fixtures = []
+    prefixes = ("", "12|", "12:", "[12]", "\u2502 12 \u2502", "\t", "12| 34|")
+    for spelling in _PEM_SPELLINGS:
+        header = _banner(spelling)
+        for prefix in prefixes:
+            fixtures.append(prefix + _PEM_BODY)
+            fixtures.append(f"{prefix}{_PEM_BODY}\n{prefix}{_PEM_BODY}\n")
+            fixtures.append(prefix + "10000000 10000001")
+            fixtures.append(prefix + "[112345678")
+            fixtures.append(f"{_numeric_rows(1)}")
+            fixtures.append(f"{prefix}{_PEM_BODY}\n{prefix}")
+        fixtures.append(header.rstrip())
+        fixtures.append("the key at ./id_rsa:" + header.rstrip())
+        fixtures.append(header + _PEM_BODY + "\n")
+        fixtures.append(header + _PEM_BODY + "\n" + _banner(spelling, "END"))
+        fixtures.append(header + _numeric_rows(2))
+        fixtures.append("the key at ./id_rsa:" + header.rstrip() + "\n" + _numeric_rows(2))
+        # THE ARMOUR SPELLINGS, in every terminator x tail-whitespace combination: a
+        # CRLF file, a bare-CR one and a wiki/editor's trailing spaces all carry a line
+        # end the `$`-only model of the tail cannot see (the disagreement with #1445),
+        # and `_banner()` emits LF, so nothing above reaches them.
+        armour = header.rstrip("\n")
+        for terminator in _DECIDER_TERMINATORS:
+            for whitespace in _DECIDER_TAIL_WHITESPACE:
+                line = f"{armour}{whitespace}{terminator}"
+                fixtures.append(line)
+                fixtures.append(f"{line}{_PEM_BODY}{terminator}")
+                fixtures.append(f"{line}{_PEM_BODY}{terminator}{_PEM_BODY}{terminator}")
+                fixtures.append(f"12|{line}{_PEM_BODY}{terminator}")
+    return fixtures
+
+
+def _assert_deciders_agree(text: str) -> None:
+    """One input, all three deciders against all three patterns."""
+    body = redaction_shapes.PEM_BODY_LINE_RE.match(text) is not None
+    assert redaction_shapes.pem_body_line(text) == body, f"body decider differs on {text!r}"
+    end = redaction_shapes.PEM_END_LINE_RE.match(text) is not None
+    assert redaction_shapes.pem_end_line(text) == end, f"END decider differs on {text!r}"
+    match = redaction_shapes.PEM_HEADER_LINE_RE.search(text)
+    want = None if match is None else match.end()
+    assert redaction_shapes.pem_header_line_end(text) == want, f"header decider differs on {text!r}"
+
+
+def test_the_linear_deciders_agree_with_the_patterns_they_replace() -> None:
+    """The equivalence obligation: the patterns stay the DEFINITION, and the
+    deciders are only a cheaper way to decide them.
+
+    This is the arm that carries the risk of that trade, so it sweeps rather than
+    spot-checks: every character-KIND sequence up to length three, in both
+    directions, plus the shapes a caller actually sees. A sequence of kinds stands
+    for every string built from those kinds, which is why a bounded sweep is the
+    right shape here — and why the failure it guards against (a dropped line is a
+    published key) is worth the few thousand comparisons it costs.
+    """
+    for length in range(4):
+        for combo in itertools.product(_DECIDER_KINDS, repeat=length):
+            for text in _decider_forms("".join(combo)):
+                _assert_deciders_agree(text)
+    for text in _decider_fixtures():
+        _assert_deciders_agree(text)
+
+
+# --- the armour tail: one definition, two readers (the pattern and the decider) ----
+#
+# `pem_header_line_end` decides the same question `PEM_HEADER_LINE_RE` asks, and the two
+# drifted apart exactly once: #1445 widened the pattern's tail to `_PEM_ARMOUR_TAIL`
+# (`[ \t]*(?=\r|\n|$)`, so CRLF, bare-CR and trailing-whitespace armour lines match),
+# while this branch's decider still modelled the tail as `$` alone — and the pipe then
+# published the whole body of such a block (measured through the real filter with the
+# `$`-only decider: 3 of 3 body lines out, no marker). The arms below hold the two
+# together structurally (the decider reads the tail's own halves) and behaviourally (a
+# spelling differential, plus the pipe's own consequence).
+_ARMOUR_TERMINATORS = ("\n", "\r\n", "\r", "")
+_ARMOUR_TAIL_WHITESPACE = ("", " ", "\t", "  ", " \t")
+
+
+def _armour_texts() -> list[str]:
+    """Every armour spelling a real file, wiki or Windows editor produces."""
+    out: list[str] = []
+    prefixes = ("", "1\t", "12: ", "[12] ", "\u2502 12 \u2502 ", "1.", "  7) ")
+    spellings = ("PRIVATE KEY", "RSA PRIVATE KEY", "OPENSSH PRIVATE KEY", "EC PRIVATE KEY")
+    bodies = ("", _PEM_BODY, "MIIEow", "  1000    1008")
+    for terminator, whitespace, prefix, spelling, body in itertools.product(
+        _ARMOUR_TERMINATORS, _ARMOUR_TAIL_WHITESPACE, prefixes, spellings, bodies
+    ):
+        out.append(f"{prefix}{_DASHES}BEGIN {spelling}{_DASHES}{whitespace}{terminator}{body}")
+    return out
+
+
+def test_the_header_deciders_tail_is_the_patterns_tail() -> None:
+    """The STRUCTURAL half: the decider derives its tail from the pattern's own text.
+
+    A documentary obligation ("keep the decider's tail in step with the pattern's") is
+    what failed on the merge with #1445, so the link is made of constants instead: the
+    pattern embeds `_PEM_ARMOUR_TAIL`, and the decider's two halves are checked HERE to
+    compose exactly that string. Editing either half without the other reddens this arm;
+    editing both leaves the pattern and the decider still agreeing by construction, which
+    is the property that matters.
+    """
+    terminated = "|".join(list(redaction_shapes._PEM_ARMOUR_TAIL_TERMINATOR_TEXT) + ["$"])
+    assert redaction_shapes._PEM_ARMOUR_TAIL == (
+        "[" + redaction_shapes._PEM_ARMOUR_TAIL_RUN_TEXT + "]*(?=" + terminated + ")"
+    ), "the armour tail and the two halves the decider reads have drifted apart"
+    assert (
+        redaction_shapes._PEM_ARMOUR_TAIL in redaction_shapes.PEM_HEADER_LINE_RE.pattern
+    ), "the header pattern no longer embeds the shared armour tail"
+    # And the halves the DECIDER scans are the characters that text denotes, so the
+    # decider's model of the tail cannot describe a different line end than the pattern's.
+    assert redaction_shapes._PEM_ARMOUR_TAIL_RUN == " \t"
+    assert redaction_shapes._PEM_ARMOUR_TAIL_TERMINATORS == "\r\n"
+
+
+def test_the_header_decider_agrees_with_the_pattern_on_every_armour_spelling() -> None:
+    """The BEHAVIOURAL half, over the spellings the tail exists for, plus its sensitivity.
+
+    The decider is the pattern's answer in linear time, so the two must agree on `end()`
+    (not merely on yes/no) for every spelling: LF, CRLF, a bare CR used as the terminator,
+    trailing space or TAB, and every numbered/bracketed/boxed prefix in front of them.
+    The controls are the other direction — ordinary prose, a bare banner, a CERTIFICATE
+    line, a header with no terminator and one followed by extra text — which must stay
+    UNMATCHED by both, since the pipe opens its block state on this answer.
+
+    The last block is the sensitivity: a `$`-only tail — what the pattern carried before
+    #1445 and what a decider modelling it by hand would still carry — does NOT match a
+    CRLF armour line, so the sweep is shown to be able to see the widening it pins rather
+    than agreeing with itself.
+    """
+    pattern = redaction_shapes.PEM_HEADER_LINE_RE
+    texts = _armour_texts()
+    assert len(texts) > 500
+    for text in texts:
+        match = pattern.search(text)
+        want = None if match is None else match.end()
+        assert redaction_shapes.pem_header_line_end(text) == want, repr(text)
+
+    for control in (
+        "[redacted] CERTIFICATE-----",
+        "prose BEGIN PRIVATE KEY here",
+        "12| done",
+        "",
+        "[redacted] PRIVATE KEY---",
+        "[redacted] PRIVATE KEY-----.\n",
+        "[redacted] PRIVATE KEY----- extra\n",
+    ):
+        assert redaction_shapes.pem_header_line_end(control) is None, repr(control)
+        assert pattern.search(control) is None, repr(control)
+
+    crlf = f"{_DASHES}BEGIN PRIVATE KEY{_DASHES}\r\n{_PEM_BODY}\r\n"
+    dollar_only = re.compile(pattern.pattern.replace(redaction_shapes._PEM_ARMOUR_TAIL, r"$"))
+    assert dollar_only.search(crlf) is None, "the `$`-only tail already matches a CRLF armour line"
+    assert pattern.search(crlf) is not None, "the shipped pattern lost the CRLF spelling"
+
+
+def test_the_pipe_masks_a_crlf_armour_blocks_body() -> None:
+    """The arm that catches the disagreement where it HURTS: the CONSEQUENCE, through the pipe.
+
+    `pem_header_line_end` is what opens the pipe's block state, so a decider that answers
+    `None` for a CRLF or trailing-whitespace armour line is not a cosmetic disagreement —
+    for an unterminated (or cap-forced) block the pipe's own line loop is the ONLY layer
+    that can hide the body, and it never engages. Measured through the real filter with the
+    `$`-only decider (the previous head of this branch, and what a merger resolving the
+    tail in one place leaves behind): 3 of 3 body lines published and no marker, for both
+    spellings; measured with the shared tail: 0 of 3, one marker, for every terminator.
+    """
+    cases = {
+        "lf": f"{_DASHES}BEGIN PRIVATE KEY{_DASHES}\n{_PEM_BODY}\n{_PEM_BODY}\n{_PEM_BODY}\n",
+        "crlf": f"{_DASHES}BEGIN PRIVATE KEY{_DASHES}\r\n{_PEM_BODY}\r\n"
+        f"{_PEM_BODY}\r\n{_PEM_BODY}\r\n",
+        "bare_cr": f"{_DASHES}BEGIN PRIVATE KEY{_DASHES}\r{_PEM_BODY}\r{_PEM_BODY}\r",
+        "trailing_ws": f"{_DASHES}BEGIN PRIVATE KEY{_DASHES}  \n{_PEM_BODY}\n"
+        f"{_PEM_BODY}\n{_PEM_BODY}\n",
+    }
+    for name, text in cases.items():
+        settled = _pipe_settled(('"private_key": "' + text).encode(), 4096)
+        assert _PEM_BODY not in settled, f"the {name} armour block published its body"
+        assert REDACTION_MARKER in settled, f"the {name} armour block was not masked"
+        # AND THE FILTER DID NOT FAULT. `feed` fails closed by DRAINING, so an
+        # exception inside the mask is invisible in this output except as one marker
+        # line — which is exactly how a merge that swapped the header search for the
+        # decider and left `begin.end()` behind (an `int` has no `.end()`) passed the
+        # first two assertions while every one of these payloads was withheld. The
+        # withheld text is the only signal, so it is asserted here.
+        assert builtin._WITHHELD_LIVE_OUTPUT not in settled, f"the pipe faulted on the {name} block"
+
+
+# --- the `-open` rule's digit-maximal spelling -------------------------------
+#
+# `gcp-service-account-value-open` is the table's ONE rule that runs the prefix
+# fragment over text nobody shaped, and the fragment's digit-run ambiguity is what
+# made it exponential (Q3 on #1427). Its body therefore uses
+# `_PEM_DIGIT_MAX_PREFIX` / `_PEM_DIGIT_MAX_LINE_CONTENT` — the same fragments with
+# every digit run required to be maximal — which is a SECOND SPELLING of a language
+# that was already written once, so it carries the same obligation the deciders do:
+# a divergence in either direction is a released mask (over-accepting) or a
+# published body line (rejecting). The arms below enumerate both directions, and
+# they are pinned against the RELEASED spelling rather than against hand-written
+# expectations.
+
+#: Kinds for the fragment sweep: the fragment's own alphabet, BOTH digit predicates
+#: (`\d` takes `\u0661` and `[0-9]` does not — the fault the whole-code-space arm
+#: above guards), the separators with a longer spelling (`->`, `.]`), and the box
+#: glyph. A sequence of kinds stands for every string built from those kinds, which
+#: is what lets a bounded sweep stand for the digit runs a wider one would cover.
+_OPEN_RULE_KINDS = ("1", "\u0661", " ", "[", "]", "\u2502", ".", "-", "M", ",", "|", ":")
+
+#: The rule under test, by label — never by position, since the table's order is
+#: load-bearing for the guards and a reorder must not repoint these arms.
+_OPEN_RULE_LABEL = "gcp-service-account-value-open"
+
+
+def _open_rule_shape() -> Any:
+    return next(
+        shape for shape in redaction_shapes.CREDENTIAL_SHAPES if shape.label == _OPEN_RULE_LABEL
+    )
+
+
+#: `origin/main`'s LINE_PREFIX, as a LITERAL — the released fragment's own text, not this
+#: module's.
+#:
+#: WHY NOT THE MODULE'S FRAGMENT (agent review R3-4). This branch re-spells the
+#: whitespace around a unit's separator — the trailing `[ \t]*` moved inside the optional
+#: group, which is the same language and one whitespace consumer per unit instead of two
+#: — so `redaction_shapes.LINE_PREFIX` is "the fragment as it stands ON THIS BRANCH". A
+#: reference built from it is the branch's earlier spelling: a language change that the
+#: whitespace rewrite itself introduced would be invisible to every differential that
+#: used it, which is exactly the gap R3-4 measured. With the released text written out
+#: here, `_released_open_rule_pattern` means what it says, and
+#: `test_the_branchs_fragment_speaks_the_released_language` holds the branch's own
+#: spelling to it so the two references cannot drift apart silently either.
+_RELEASED_LINE_PREFIX = (
+    "[ \\t]*(?:(?:\\[?\\d+\\]?[ \\t]*(?:[.)\\]]|\\.\\]|->|[|:>-])?[ \\t]*"
+    "|\\u2502[ \\t]*\\d+[ \\t]*\\u2502[ \\t]*)+)?"
+)
+#: The released body-line fragment: the released floor spelled as the literals the released
+#: module holds (`{8,}` and `{1,7}`), NOT through `redaction_shapes.PEM_BODY_FLOOR` — this
+#: text is a recording of the other revision, so it reads the other revision's numbers.
+_RELEASED_PEM_LINE_CONTENT = (
+    r"[A-Za-z0-9+/=]{8,},?[ \t]*"
+    r"|[A-Za-z0-9+/=]{1,7},?[ \t]*(?="
+    + redaction_shapes.LINE_SEP
+    + _RELEASED_LINE_PREFIX
+    + r"[A-Za-z0-9+/=]{8,})"
+)
+
+
+def _released_open_rule_pattern() -> re.Pattern[str]:
+    """`origin/main`'s `-open` rule, built from the RELEASED fragments as LITERALS.
+
+    The reference the differential arms compare against, and the point of it is that it
+    is INDEPENDENT of what the shipped rule says: it is written out from the released
+    text (see `_RELEASED_LINE_PREFIX` for why a literal, R3-4), and
+    `_open_rule_source_is_the_shared_spelling` is the drift pin that holds the shipped
+    source to the BRANCH's fragments plus exactly the digit-maximal substitution — so an
+    unrelated edit to the rule (its header tail, its anchor, its lookahead) reddens there
+    instead of quietly redefining what this differential compares.
+    """
+    return re.compile(
+        r'(?i)("?private[_-]?key"?\s*:\s*")'
+        r"(-{1,4}[\x27\x22]?-{1,4}BE" + "GIN [A-Z0-9 ]*PRIV" + r"ATE KEY-{1,4}[\x27\x22]?-{1,4}"
+        r"(?:"
+        r"(?:\\r\\n|\\n|\r\n|\n|\r)"
+        r"(?:" + _RELEASED_LINE_PREFIX + r"(?:" + _RELEASED_PEM_LINE_CONTENT + r")[ \t]*)+"
+        r"(?=" + redaction_shapes.LINE_SEP + r"|[\x27\x22]|$)"
+        r")*)"
+    )
+
+
+def _shared_fragment_open_rule_pattern() -> re.Pattern[str]:
+    """The same rule built from the SHARED pieces — the branch's fragments, not released.
+
+    This is what the drift pin compares the shipped source against, because the pin's
+    question is "is the shipped source the branch's spelling plus the digit-maximal
+    substitution", and answering it with the released literal would fold two questions
+    ("did the substitution happen" and "did the fragment change") into one red.
+    """
+    return re.compile(
+        r'(?i)("?private[_-]?key"?\s*:\s*")'
+        r"(-{1,4}[\x27\x22]?-{1,4}BE" + "GIN [A-Z0-9 ]*PRIV" + r"ATE KEY-{1,4}[\x27\x22]?-{1,4}"
+        r"(?:"
+        r"(?:\\r\\n|\\n|\r\n|\n|\r)"
+        r"(?:"
+        + redaction_shapes.LINE_PREFIX
+        + r"(?:"
+        + redaction_shapes._PEM_LINE_CONTENT
+        + r")[ \t]*)+"
+        r"(?=" + redaction_shapes.LINE_SEP + r"|[\x27\x22]|$)"
+        r")*)"
+    )
+
+
+def _open_rule_source_is_the_shared_spelling() -> bool:
+    """The shipped rule, with the substitutions inverted, IS the branch's spelling."""
+    source = _open_rule_shape().pattern.pattern
+    inverted = source.replace(
+        redaction_shapes._PEM_DIGIT_MAX_LINE_CONTENT, redaction_shapes._PEM_LINE_CONTENT
+    ).replace(redaction_shapes._PEM_DIGIT_MAX_PREFIX, redaction_shapes.LINE_PREFIX)
+    return inverted == _shared_fragment_open_rule_pattern().pattern
+
+
+#: Bound for the arms that hand a DENSE payload to a rule or through the pipe.
+#:
+#: They assert costs in MILLISECONDS, and the regression they exist for — the ambiguous
+#: fragment back under the shipped rule — does not return at all: measured past a 420 s
+#: selection bound with the fix reverted, and each dense arm past 90 s on its own (agent
+#: review R3-2). WITHOUT a bound that regression does not redden anything; the suite has
+#: no `pytest-timeout`, so it wedges a CI shard until the job cap and the cause is
+#: unreadable.
+#:
+#: It is a CPU bound and not a wall bound, which is the same instrument choice this file's
+#: cost arms make (`time.process_time`): this fleet shares ~14 cores with ~25 agent
+#: sessions, so a probe gets 4-20% of a core and wall inflates 5-25x — measured here, the
+#: differential arm's own 1.1 s of CPU took 18 s of wall during this round. A wall bound
+#: tight enough to fire "in seconds" would therefore red an HONEST run on a loaded host,
+#: which is the worse failure; the CPU bound cannot. `signal.setitimer(ITIMER_PROF)`
+#: decrements only while the process runs (and it does interrupt CPython's regex engine —
+#: verified), so the bound means exactly what the arms measure.
+#:
+#: 15 s is 28x the heaviest honest reading in any bounded arm here (the released rule on
+#: the `dense_4col` fixture, 0.54 s of CPU; the shipped rule on every dense payload is
+#: under 1 ms) and the regressed walk is unbounded, so no reading sits near it.
+_DENSE_WALK_BOUND_SECONDS = 15.0
+
+
+@contextmanager
+def _bounded(seconds: float, what: str) -> Iterator[None]:
+    """Fail fast, and NAME the walk, when something that must be linear is not."""
+    if not hasattr(signal, "setitimer") or not hasattr(signal, "SIGPROF"):
+        yield
+        return
+
+    def _fired(signum: int, frame: Any) -> None:
+        raise AssertionError(
+            f"{what} did not return within {seconds:g}s of CPU: a walk this arm asserts is "
+            "linear is not (the BOUND is the arm's — see _DENSE_WALK_BOUND_SECONDS — so "
+            "this is a regression in the rule or the pipe, not a slow machine)"
+        )
+
+    previous = signal.signal(signal.SIGPROF, _fired)
+    signal.setitimer(signal.ITIMER_PROF, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_PROF, 0)
+        signal.signal(signal.SIGPROF, previous)
+
+
+def _open_rule_matches(pattern: re.Pattern[str], text: str) -> list[tuple[Any, ...]]:
+    """Every match as the MASK and the GUARD read it: span, anchor, and group 2.
+
+    Group 2 is the masked region and the group the guard tests, so a comparison
+    over `(start, end, group 1, group 2)` is a comparison over the bytes that reach
+    a surface, not over match counts.
+    """
+    return [
+        (match.start(), match.end(), match.group(1), match.group(2))
+        for match in pattern.finditer(text)
+    ]
+
+
+def _fragment_witnesses(left: re.Pattern[str], right: re.Pattern[str]) -> list[str]:
+    """Strings where the two PREFIX spellings' languages differ, over a bounded sweep.
+
+    Shared by the fragment arms so the sweep a new reference is held to is the same sweep
+    the existing one was: a whole-string kind sweep up to length three (a sequence of
+    KINDS stands for every string built from those kinds), the digit-run locus at widths
+    the kind sweep cannot reach, and the boundary spellings the unit's optional tail
+    exists for.
+    """
+    found: list[str] = []
+    strings = ["".join(combo) for combo in itertools.product(_OPEN_RULE_KINDS, repeat=3)]
+    for left_run, right_run in itertools.product(range(1, 5), repeat=2):
+        for separator in ("", " ", "|", ".", "-", "]", " [", "\t"):
+            strings.append("1" * left_run + separator + "1" * right_run)
+    strings += [
+        "12 34 MIIEowIBAAKCA",
+        "12 34",
+        "1234",
+        "[12]34",
+        "12]34",
+        "1]2",
+        "1.]2",
+        "1->2",
+        "\u2502 1 \u2502",
+        "10000000 10000001",
+        "   1000    1008    1016",
+    ]
+    for text in strings:
+        if bool(left.fullmatch(text)) != bool(right.fullmatch(text)):
+            found.append(text)
+    return found
+
+
+def test_the_digit_maximal_prefix_spells_the_released_fragment_language() -> None:
+    r"""The FREQUENT obligation, swept in both directions and not sampled.
+
+    The rewrite is `\d+` to `\d+(?!\d)` — a unit's digit run may no longer end in
+    the middle of a run — and the merging argument for that being the same language
+    is that a split inside a contiguous run always has an equivalent one-unit
+    parse, because the characters between the two chunks are the unit's own `]`,
+    whitespace and separator, all epsilon exactly when the next character is still
+    a digit. A restriction on the unit END is the change that DOES drop strings
+    (`12 34 MIIEowIBAAKCA` needs the first unit to end immediately before `34`), and
+    telling those two apart is what this arm is for.
+
+    BOTH SIDES ARE THIS BRANCH'S SPELLING — that is the right level for this arm, which
+    is about the maximalisation rather than about the release, and
+    `test_the_branchs_fragment_speaks_the_released_language` is the arm that holds the
+    branch's own spelling to `origin/main`'s (R3-4).
+
+    The last block is the arm's own SENSITIVITY check: the same sweep is run against
+    a spelling whose digit class is `[0-9]`, which differs from `\d` on the
+    Arabic-Indic digit in the alphabet, and a witness must be found. Without it a
+    sweep that had silently stopped seeing anything would pass.
+    """
+    released = re.compile("(?:" + redaction_shapes.LINE_PREFIX + ")")
+    maximal = re.compile("(?:" + redaction_shapes._PEM_DIGIT_MAX_PREFIX + ")")
+
+    assert not _fragment_witnesses(
+        released, maximal
+    ), "the digit-maximal prefix changed the language"
+    # SENSITIVITY: an ASCII digit class is a DIFFERENT language on this alphabet,
+    # so the sweep above is shown to be able to see a divergence at all.
+    ascii_class = re.compile(
+        "(?:" + redaction_shapes._PEM_DIGIT_MAX_PREFIX.replace("\\d", "[0-9]") + ")"
+    )
+    assert _fragment_witnesses(maximal, ascii_class), "the sweep cannot see a language difference"
+
+
+def test_the_branchs_fragment_speaks_the_released_language() -> None:
+    """R3-4's gap, closed IN the file rather than from outside it.
+
+    This branch re-spells the whitespace around a unit's separator: the trailing
+    `[ \t]*` moved inside the optional group, one whitespace consumer per unit instead
+    of two. Same language — but every reference built from
+    `redaction_shapes.LINE_PREFIX` is then the BRANCH's spelling, and before this arm
+    nothing in the suite compared the branch's fragment with `origin/main`'s at all:
+    the round-4 reviewer had to close that gap with an external 24,309-input run. The
+    rule-level differential now compares against the released text as a literal
+    (`_released_open_rule_pattern`), and this arm is the other half — the fragment the
+    OTHER rules in the table still embed (`PEM_BODY_LINE_RE`, `PEM_HEADER_LINE_RE`,
+    `_PEM_RUN`), held to the released fragment directly.
+
+    The sweep is `_fragment_witnesses`, the same one the maximalisation arm uses, and
+    the sensitivity check is that dropping the separator allowance from the released
+    spelling — a real language change, and the one the whitespace rewrite could have
+    made by accident — is found by it.
+    """
+    branch = re.compile("(?:" + redaction_shapes.LINE_PREFIX + ")")
+    released = re.compile("(?:" + _RELEASED_LINE_PREFIX + ")")
+
+    assert not _fragment_witnesses(
+        branch, released
+    ), "the branch's fragment spelling changed the released language"
+    # SENSITIVITY: a released spelling with its separator allowance removed is a
+    # DIFFERENT language (`1]2`, `1->2`, `1.]2`), so the sweep is shown to be able to
+    # see a whitespace/separator change rather than merely agreeing with itself.
+    no_separator = re.compile(
+        "(?:" + _RELEASED_LINE_PREFIX.replace(r"[.)\]]|\.\]|->|[|:>-]", "") + ")"
+    )
+    assert _fragment_witnesses(
+        released, no_separator
+    ), "the sweep cannot see a separator-allowance change"
+
+
+def test_the_open_rule_is_its_released_spelling_with_the_digits_maximal() -> None:
+    """The drift pin, and the structural half of Q3.
+
+    Two assertions, and the first is the one QA's Q3 asked for: the SHARED
+    fragment must not appear in this rule's source at all. A rule that keeps the
+    ambiguous fragment anywhere — the body unit, or the short arm's lookahead, which
+    carries the same ambiguity and is reached by the same walk — reaches
+    `_shape_safe_spans` and the scrubber with a walk that is exponential in the
+    digits of a dense line, which is the fatal class by another door.
+
+    The second is that the shipped source IS the BRANCH's spelling with exactly
+    those substitutions. That is the pin on the SUBSTITUTION, deliberately and not on
+    the release: the differential arms compare against `origin/main`'s own text
+    (`_released_open_rule_pattern`, R3-4), so holding this pin to the branch's
+    fragments keeps "did the substitution happen" and "did the fragment change" as
+    two questions with two reds instead of one.
+    """
+    source = _open_rule_shape().pattern.pattern
+
+    assert (
+        redaction_shapes.LINE_PREFIX not in source
+    ), "this rule still walks the ambiguous fragment"
+    assert (
+        source.count(redaction_shapes._PEM_DIGIT_MAX_PREFIX) == 2
+    ), "both the body unit and the short arm's lookahead must use the maximal fragment"
+    assert source.count(redaction_shapes._PEM_DIGIT_MAX_LINE_CONTENT) == 1
+    assert (
+        _shared_fragment_open_rule_pattern().pattern != source
+    ), "the shipped rule IS the branch's shared spelling; nothing to compare"
+    assert _open_rule_source_is_the_shared_spelling(), (
+        "the shipped rule is not the branch's spelling plus the digit-maximal substitution "
+        "(an edit to the rule that is not that substitution redefines what the drift pin "
+        "and the differential arms compare, so it has to redden here)"
+    )
+
+
+def _open_rule_fixtures() -> dict[str, str]:
+    """The shapes this rule exists for, plus the two families that burn.
+
+    The numbered/boxed/indented bodies are the LINE_PREFIX cases the rule is
+    written for (and the only ones where it is the deciding rule at all — measured,
+    removing it from `_MULTILINE_SHAPES` moves the settled output of these and no
+    others), and the `%8d` rows are the digit-dense population Q3 measured.
+    """
+    banner = _banner(_PEM_SPELLINGS[0]).rstrip("\n")
+    anchor = '"private_key": "'
+    cases = {
+        "body": f"{anchor}{banner}\n{_PEM_BODY}\n{_PEM_BODY}\n",
+        "indented": f"{anchor}{banner}\n   {_PEM_BODY}\n   {_PEM_BODY}\n",
+        "cat_n": f"{anchor}{banner}\n1\t{_PEM_BODY}\n2\t{_PEM_BODY}\n",
+        "boxed": f"{anchor}{banner}\n\u2502 1 \u2502 {_PEM_BODY}\n\u2502 2 \u2502 {_PEM_BODY}\n",
+        "short_mid": f"{anchor}{banner}\n3| Qw9z\n4| {_PEM_BODY}\n",
+        "short_final": f"{anchor}{banner}\n{_PEM_BODY}\n12| done\n",
+        "prose_after": f"{anchor}{banner}\n{_PEM_BODY}\n{_PEM_BODY}\nNOT A KEY, prose\n",
+        "header_only": f"{anchor}{banner}\n",
+        "escaped": anchor + banner + "\\n" + _PEM_BODY + "\\n" + _PEM_BODY,
+        "no_anchor": f"{banner}\n{_PEM_BODY}\n",
+        "unquoted": "private" + f"_key: {banner}\n{_PEM_BODY}\n",
+        "dense_4col": f"{anchor}{banner}\n{_numeric_rows(1, columns=4, start=1000)}",
+        # A read past the deferral CAP, which is the one state where this rule is the
+        # only masker in the pipe: the release point normally cuts AT the banner, so
+        # the pending piece starts with a header line and the pipe's own block loop
+        # masks the body itself (measured: removing this rule from the table moves no
+        # other fixture here). The cap cuts at `len - 8192` instead, which lands the
+        # anchored spelling MID-piece — where the line-anchored loop cannot see it and
+        # this rule is what stands between a numbered body and the model.
+        "numbered_capped": f"{anchor}{banner}\n" + f"1\t{_PEM_BODY}\n" * 400,
+    }
+    return cases
+
+
+def _open_rule_generated() -> list[str]:
+    """A generated sweep of the rule, in the shape a caller actually produces.
+
+    Every string is an anchored spelling and a header followed by ONE generated
+    line, which is where the per-line decision lives: the released rule does not
+    terminate on the dense members of this family, so a differential over them is
+    impossible (recorded, not glossed) and the sweep stays in the region BOTH rules
+    decide.
+    """
+    banner = _banner(_PEM_SPELLINGS[0]).rstrip("\n")
+    anchor = '"private_key": "'
+    out: list[str] = []
+    for length in range(4):
+        for combo in itertools.product(_OPEN_RULE_KINDS, repeat=length):
+            out.append(f"{anchor}{banner}\n{''.join(combo)}\n")
+    for left_run, right_run in itertools.product(range(1, 5), repeat=2):
+        for separator in (" ", "|", ".", "-", "]", " ["):
+            out.append(f"{anchor}{banner}\n{'1' * left_run}{separator}{'1' * right_run}\n")
+    return out
+
+
+def test_the_open_rule_matches_its_released_spelling_on_every_fixture() -> None:
+    """The rule-level differential, in both directions, over fixtures and a sweep.
+
+    The fragment arm above compares the two PREFIX languages; this one compares the
+    two RULES, which is the obligation that matters — the body unit, the short arm's
+    lookahead and the header tail interact, and a divergence in either direction is
+    a released mask or a published body line. The dense members are asserted by SPAN
+    instead of differentially, with the reason stated rather than papered over: the
+    released rule has no answer to compare against on them (that is the defect), so
+    the span it DOES give on the smallest member of the family is the reference, and
+    every denser member must give the same one — the empty-body match, anchored
+    spelling and header, which is what a `%8d` row leaves by construction.
+    """
+    shipped = _open_rule_shape().pattern
+    released = _released_open_rule_pattern()
+    assert (
+        released.pattern != shipped.pattern
+    ), "the reference IS the shipped rule; the differential compares nothing"
+    cases = _open_rule_fixtures()
+    for name, text in cases.items():
+        with _bounded(_DENSE_WALK_BOUND_SECONDS, f"the rule differential on the {name} fixture"):
+            assert _open_rule_matches(released, text) == _open_rule_matches(shipped, text), name
+    for text in _open_rule_generated():
+        with _bounded(_DENSE_WALK_BOUND_SECONDS, "the rule differential on the generated sweep"):
+            assert _open_rule_matches(released, text) == _open_rule_matches(shipped, text), repr(
+                text
+            )
+
+    banner = _banner(_PEM_SPELLINGS[0]).rstrip("\n")
+    anchor = '"private_key": "'
+    reference = _open_rule_matches(shipped, cases["dense_4col"])
+    assert _open_rule_matches(released, cases["dense_4col"]) == reference, (
+        "the released rule disagrees on the member of the family it CAN decide, so the "
+        "reference span for the dense payloads is wrong"
+    )
+    assert reference == [(0, len(anchor) + len(banner), anchor, banner)]
+    for text in (
+        f"{anchor}{banner}\n{_numeric_rows(1, columns=8, start=1000)}",
+        f"{anchor}{banner}\n{_numeric_rows(140, columns=8, start=1000)}",
+    ):
+        with _bounded(_DENSE_WALK_BOUND_SECONDS, "the shipped rule on a dense payload"):
+            assert (
+                _open_rule_matches(shipped, text) == reference
+            ), "the dense payload moved the rule's span"
+
+
+def _maximal_only_open_rule_pattern() -> re.Pattern[str]:
+    """The PREVIOUS head's spelling: every unit maximal, and no partial final unit.
+
+    It exists so the bracket arm below can show that it is able to see R3-1's class at
+    all: a family that the previous spelling no longer diverges on has gone vacuous, and
+    an arm over it would pass whatever the shipped rule said.
+    """
+    maximal_only = (
+        r"[ \t]*(?:(?:"
+        + redaction_shapes._PEM_PREFIX_UNIT_MAX
+        + r"|"
+        + redaction_shapes._PEM_PREFIX_BOX_UNIT_MAX
+        + r")+)?"
+    )
+    return re.compile(
+        _released_open_rule_pattern().pattern.replace(_RELEASED_LINE_PREFIX, maximal_only)
+    )
+
+
+#: The bracket family agent review R3-1 reproduced, re-derived here independently of the
+#: review's own matrix: prefix x run length x tail x template, where the class tail of the
+#: body line is reachable ONLY by stopping a digit run at a `[`-introduced unit. The
+#: released grammar allows that stop because the unit's `]`, whitespace and separator are
+#: all optional exactly when the next character is still a digit; a fully maximal
+#: spelling cannot, so it publishes a line the released rule masks.
+_OPEN_RULE_BRACKET_PREFIXES = ("", "[", "[1", "1 [", "[12] ", "12] ", "\u2502 12 \u2502 ")
+_OPEN_RULE_BRACKET_RUNS = (7, 8, 9, 10, 11, 12)
+_OPEN_RULE_BRACKET_TAILS = ("", "M", "MIIEowIBAAKCA", "=", "12", "MIIEowIBAAKCAQEA")
+
+
+def _open_rule_bracket_family() -> list[str]:
+    """The witness class and its neighbours, in the two spellings a caller produces.
+
+    Both templates are ANCHORED (the rule itself needs the `private_key` anchor) and the
+    second puts a full body line after the witness, which is the spelling under which the
+    short arm's lookahead is what has to see it.
+    """
+    banner = _banner(_PEM_SPELLINGS[0]).rstrip("\n")
+    anchor = '"private_key": "'
+    out: list[str] = []
+    for prefix, run, tail in itertools.product(
+        _OPEN_RULE_BRACKET_PREFIXES, _OPEN_RULE_BRACKET_RUNS, _OPEN_RULE_BRACKET_TAILS
+    ):
+        line = f"{prefix}{'1' * run}{tail}"
+        out.append(f"{anchor}{banner}\n{line}\n")
+        out.append(f"{anchor}{banner}\n{line}\n{_PEM_BODY}\n")
+    return out
+
+
+def test_the_open_rule_restores_the_released_rules_bracket_family() -> None:
+    """R3-1: the maximal spelling must not mask LESS than the released rule.
+
+    The fragment arms above are both green on the class this arm is about, and that is
+    the finding rather than an accident: they compare FRAGMENTS, and a fragment cannot
+    see a divergence whose cause is what the fragment's tail is serving. Here the
+    question is the RULE's, and the witness is a body line of `[` followed by nine `1`s
+    under an anchored header: the released parse is the unit `[1` plus the content
+    `11111111` and masks the line; a spelling that requires every digit run to be
+    maximal eats all nine digits as the unit's run, has no eight-character content left,
+    and PUBLISHES the line (`origin/main` `(0, 54)` against `(0, 43)`, measured).
+
+    Three assertions, and the middle one is what keeps it honest: the family must
+    DIVERGE under the previous spelling (else the arm is vacuous), every divergent input
+    must be one where the released rule masks MORE (never the other direction, which
+    would be a published line rather than a widened mask), and the shipped rule must
+    agree with the released one on all of them.
+    """
+    shipped = _open_rule_shape().pattern
+    released = _released_open_rule_pattern()
+    previous = _maximal_only_open_rule_pattern()
+    family = _open_rule_bracket_family()
+
+    with _bounded(_DENSE_WALK_BOUND_SECONDS, "the bracket family under the released rule"):
+        divergences = [
+            text
+            for text in family
+            if _open_rule_matches(previous, text) != _open_rule_matches(released, text)
+        ]
+    assert divergences, (
+        "the family went vacuous: the previous (fully maximal) spelling no longer diverges "
+        "from the released rule on it, so this arm could not see R3-1's class at all"
+    )
+    assert all("[" in text for text in divergences), "the class is bracket-introduced"
+    for text in divergences:
+        previous_spans = _open_rule_matches(previous, text)
+        released_spans = _open_rule_matches(released, text)
+        assert (
+            not previous_spans or previous_spans[0][1] < released_spans[0][1]
+        ), f"a divergent input where the previous spelling masks at least as much: {text!r}"
+    assert all(
+        _open_rule_matches(shipped, text) == _open_rule_matches(released, text) for text in family
+    ), "the shipped rule does not speak the released rule's language on the bracket family"
+
+    # The user-visible half of the same witness: what `scrub_shapes` PUBLISHES. The
+    # reviewer's finding was measured through the shape table (the path a tool result
+    # takes), where the previous head returned the body line verbatim.
+    published_line = "[" + "1" * 9
+    witness = '"private_key": "' + _banner(_PEM_SPELLINGS[0]) + published_line + "\n"
+    assert _open_rule_matches(released, witness) == _open_rule_matches(shipped, witness)
+    assert published_line not in redaction_shapes.scrub_shapes(
+        witness
+    ), "the bracket witness's body line is published by the shape table"
+
+
+def _pipe_settled(raw: bytes, chunk: int) -> str:
+    """One input through the real pipe filter, at one chunk policy."""
+    redactor = builtin._PipeRedactor([])
+    pieces = [redactor.feed(raw[offset : offset + chunk]) for offset in range(0, len(raw), chunk)]
+    pieces.append(redactor.feed(b"", final=True))
+    return b"".join(pieces).decode("utf-8", "replace")
+
+
+def test_the_open_rules_spelling_does_not_move_a_pipe_byte_at_any_chunk_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Masking parity through the real filter, and the arm is shown to discriminate.
+
+    The rule-level differential fixes what the rule MATCHES; this arm fixes what the
+    real pipe PAINTS with it — live and settled, at four chunk policies, since the
+    release point's partition is what a shape can be split by. And it carries its own
+    sensitivity check, because the first version of this corpus did not: measured,
+    the round's earlier corpus is masked by the OTHER rules (the assignment rule
+    masks the same values), so removing this rule from `_MULTILINE_SHAPES` moved no
+    cell and a parity arm over it would have compared the shipped rule with itself.
+    The fixtures above are the ones where this rule is the deciding rule, and the
+    last block asserts that dropping it moves at least one cell — so the arm cannot
+    silently go vacuous again.
+    """
+    original = redaction_shapes._MULTILINE_SHAPES
+    released = _released_open_rule_pattern()
+    cases = _open_rule_fixtures()
+    policies = (7, 64, 4096, 65536)
+
+    shipped_cells: dict[str, list[str]] = {}
+    for name, text in cases.items():
+        with _bounded(
+            _DENSE_WALK_BOUND_SECONDS, f"the shipped spelling through the pipe on {name}"
+        ):
+            shipped_cells[name] = [_pipe_settled(text.encode(), c) for c in policies]
+
+    monkeypatch.setattr(
+        redaction_shapes,
+        "_MULTILINE_SHAPES",
+        tuple(
+            (
+                redaction_shapes.Shape(
+                    shape.label, released, shape.replacement, shape.secret_group, shape.guard
+                )
+                if shape.label == _OPEN_RULE_LABEL
+                else shape
+            )
+            for shape in original
+        ),
+    )
+    for name, text in cases.items():
+        with _bounded(
+            _DENSE_WALK_BOUND_SECONDS, f"the released spelling through the pipe on {name}"
+        ):
+            assert [_pipe_settled(text.encode(), c) for c in policies] == shipped_cells[
+                name
+            ], f"the two spellings paint different bytes for {name}"
+
+    monkeypatch.setattr(
+        redaction_shapes,
+        "_MULTILINE_SHAPES",
+        tuple(shape for shape in original if shape.label != _OPEN_RULE_LABEL),
+    )
+    with _bounded(_DENSE_WALK_BOUND_SECONDS, "the pipe with the rule dropped, per fixture"):
+        moved = [
+            name
+            for name, text in cases.items()
+            if [_pipe_settled(text.encode(), c) for c in policies] != shipped_cells[name]
+        ]
+    assert moved, "dropping the rule moved nothing, so this arm compares nothing"
+
+
+def test_the_prefix_machine_reads_digits_the_way_the_pattern_does() -> None:
+    """`\\d` is Unicode-decimal and not `[0-9]`, and a machine that read it as
+    ASCII would reject a body line the pattern accepts.
+
+    Whole-code-space rather than sampled: `re.findall` gives the pattern's own set
+    in one pass and the comprehension gives the predicate's, so this compares two
+    sets of every character rather than a list of favourites — the same shape as
+    the sweep above, and cheap enough to be one pass of each.
+    """
+    code_space = "".join(chr(code) for code in range(0x110000))
+    assert set(re.findall(r"\d", code_space)) == {char for char in code_space if char.isdecimal()}
+
+
+def test_the_gates_are_necessary_conditions_of_the_patterns_they_guard() -> None:
+    """Nothing else ties a hint list to the pattern it guards (round 1's R1-4).
+
+    A `PEM_HEADER_LINE_RE` that stopped spelling one of `_PEM_HEADER_HINTS` — the
+    literals it needs, which the gate tests for with `in` — would silently turn
+    the gate into a filter that skips real matches, and no arm would redden. So
+    the implication is asserted directly, over candidates that are MUTATIONS of a
+    real banner (one deletion or one substitution), which is what a hand check
+    does and what a future change would break.
+    """
+    hints = builtin._PEM_HEADER_HINTS
+    candidates = []
+    for spelling in _PEM_SPELLINGS:
+        for kind in ("BEGIN", "END"):
+            line = _banner(spelling, kind).rstrip("\n")
+            candidates.append(line)
+            for index in range(len(line)):
+                candidates.append(line[:index] + line[index + 1 :])
+                for letter in ("A", " ", "x"):
+                    candidates.append(line[:index] + letter + line[index + 1 :])
+            for prefix in ("12|", "the key: ", "  ", "["):
+                candidates.append(prefix + line)
+    for text in candidates:
+        if redaction_shapes.PEM_HEADER_LINE_RE.search(text) is not None:
+            missing = [hint for hint in hints if hint not in text]
+            assert not missing, f"a header match without {missing}: {text!r}"
+        if redaction_shapes.PEM_END_LINE_RE.match(text) is not None:
+            assert builtin._PEM_END_HINT in text, f"an END match without the literal: {text!r}"
+
+
+def test_ordinary_output_reaches_no_pem_classifier_and_is_published_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shape, not the size: numeric table output must reach no scan at all.
+
+    A gate that skipped a scan it should have run would surface here as a masked
+    or dropped line, so the bytes are asserted too — a gate may avoid work, never
+    change an answer. Nothing is timed: the assertion is the call count.
+    """
+    spies = {
+        name: _CountingDecider(getattr(builtin, name))
+        for name in ("_pem_header_line_end", "_pem_body_line", "_pem_end_line")
+    }
+    for name, spy in spies.items():
+        monkeypatch.setattr(builtin, name, spy)
+    prose = "".join(
+        f"reading {index}: ordinary output, nothing credential shaped\n" for index in range(400)
+    )
+    raw = (prose + "\n" + _numeric_rows(20)).encode()
+    redactor = builtin._PipeRedactor([])
+    published = b"".join(
+        redactor.feed(raw[start : start + 64 * 1024]) for start in range(0, len(raw), 64 * 1024)
+    )
+    published += redactor.feed(b"", final=True)
+    reached = {name: spy.calls for name, spy in spies.items() if spy.calls}
+    assert not reached, f"ordinary output reached a PEM classifier: {reached}"
+    assert published == raw, "ordinary output must come out byte for byte"
+
+
+def test_a_numeric_row_does_not_cost_more_than_the_line_it_replaces() -> None:
+    """The GATED path's linearity, and what this arm does NOT cover.
+
+    A ratio rather than a laptop-calibrated ceiling, and no growing payload: the
+    40x allowance for a doubled line is the one the shape pass's own linearity
+    test uses, because exponential blowup is orders of magnitude rather than a
+    constant factor. This arm reads the ordinary-approval path, so it is blind to
+    the two paths the gates do not cover — round 1 measured the whole section
+    passing with the prefix fragment reverted. The arm named for the open block
+    below is the one that reaches them.
+    """
+
+    def feed_cpu(text: str) -> float:
+        raw = text.encode()
+        redactor = builtin._PipeRedactor([])
+        start = time.process_time()
+        for offset in range(0, len(raw), 64 * 1024):
+            redactor.feed(raw[offset : offset + 64 * 1024])
+        return time.process_time() - start
+
+    prose = "reading 1: ordinary output, nothing credential shaped\n\n"
+    # Sixteen and thirty-two columns: a ratio test has to be sized where the curve
+    # actually turns, and the fronts moved when the prefix grammar's whitespace
+    # handling did.
+    small = feed_cpu(prose + _numeric_rows(1, columns=16))
+    large = feed_cpu(prose + _numeric_rows(1, columns=32))
+    assert large <= max(small, 1e-4) * 40, f"a numeric row looks super-linear: {small} -> {large}"
+
+
+def test_a_numeric_row_inside_an_open_block_is_not_charged_per_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The path NO GATE can reach — round 1's R1-1, and the arm that was missing.
+
+    The gates close the ordinary read, so a cost regression on the paths they leave
+    open was invisible to every other arm here: with the prefix fragment reverted
+    this whole section still passed while these paths went from seconds to minutes.
+    So this drives the BODY classifier on a `%8d` row of four-digit values with the
+    state open, and asserts two things. First, that the row was CLASSIFIED — a call
+    count, so "it was fast" cannot mean "it was skipped". Second, that it is cheap:
+    the SAME row costs 6.7 s in the pattern's own hands and 12.5 s per rejected
+    line inside an open block at head, so the ceiling below sits three orders of
+    magnitude above the linear path and an order of magnitude under the pattern's
+    cost — a regression fails here in seconds rather than hanging the suite.
+    """
+    spy = _CountingDecider(builtin._pem_body_line)
+    monkeypatch.setattr(builtin, "_pem_body_line", spy)
+    row = _numeric_rows(1, columns=8, start=1000)
+    redactor = builtin._PipeRedactor([])
+    redactor._in_key_block = True
+    start = time.process_time()
+    redactor.feed(row.encode())
+    redactor.feed(b"", final=True)
+    cpu = time.process_time() - start
+    assert spy.calls >= 1, "the body classifier was skipped, so this proves nothing"
+    assert cpu < 0.5, f"one 65-character table row inside an open block cost {cpu:.3f} s of CPU"
+
+
+def test_a_header_candidate_line_is_not_charged_per_stop_or_per_begin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The two mechanisms that made a header candidate line quadratic, red first.
+
+    `_pem_header_piece_end` re-ran the whole BEGIN/KEY scan once per armour-tail stop,
+    and re-answered the prefix machine's conjunct once per KEY occurrence, so a line of
+    BEGIN literals or a line of CR terminators cost the two POPULATIONS MULTIPLIED.
+    Both families below are ~40-46 KB and return nothing: the shape a pipe read hands
+    the decider, and a shape no other arm in this file carries — the linearity arm
+    above is a numeric row.
+
+    Measured on this box with `time.process_time()`, one call each, at the head this
+    arm was written against (the PR's own `ed8f924f1`):
+
+    * `per BEGIN` (k=4000, 40019 bytes): 3337 ms before the correction, 2.1 ms after;
+    * `per stop` (k=2000, 46002 bytes): 2712 ms before the correction, 6.3 ms after;
+    * the armour line (29 bytes): an offset answer, microseconds on both trees.
+
+    The ceiling is `0.2` s of CPU: ~95x above the honest post-correction reading of the
+    first family and ~32x above the second, and ~17x / ~14x BELOW the two
+    pre-correction readings — so red and green are ~1600x and ~430x apart, with the
+    ceiling about a decade inside each end. That is a CATASTROPHE-shaped bound and not
+    a CI-derived sample: it is set so a regression fails here in seconds instead of
+    wedging a shard (the suite has no `pytest-timeout`), and the margin is what keeps a
+    loaded box from reddening an honest run. CPU rather than wall for the same reason —
+    this fleet shares ~14 cores with ~25 agent sessions, so wall inflates 5-25x while
+    CPU does not.
+
+    The spy is the NOT-SKIPPED arm and never the cost evidence: `spy.calls` is 1 per
+    case on BOTH trees, and it reddens only if the prefix machine is never reached (0:
+    the piece was not looked at) or is re-run per BEGIN (more than 1), so "it was fast"
+    cannot mean "it was skipped". The cost is asserted after the loop, which is what
+    makes one pre-fix run report both readings while every answer and spy assertion in
+    that same run is already green.
+
+    The `got == want` pins hold on the PRE-FIX tree too, and that is what makes this
+    arm evidence that the correction moves no answer while it is red on cost. The third
+    case is the only one whose answer is an offset, so a decider that got cheap by
+    stopping the scan early fails it.
+    """
+    spy = _CountingDecider(redaction_shapes._pem_prefix_end_flags)
+    monkeypatch.setattr(redaction_shapes, "_pem_prefix_end_flags", spy)
+    per_begin = (
+        "Z"
+        + redaction_shapes._PEM_BEGIN * 4000
+        + redaction_shapes._PEM_KEY
+        + "Y" * 16000
+        + _DASHES
+        + "\rZ"
+    )  # 40019 bytes, no match
+    per_stop = (
+        "Z"
+        + (redaction_shapes._PEM_BEGIN + redaction_shapes._PEM_KEY + _DASHES + "\r") * 2000
+        + "Z"
+    )  # 46002 bytes, no match
+    armour = _banner(redaction_shapes._PEM_KEY).rstrip("\n") + "\r\n"  # 29 bytes, answer 27
+    # _DASHES + "BEGIN " + "PRIVATE KEY" + _DASHES = 27, and 27 is the index of the "\r".
+    cases = (
+        ("per BEGIN", per_begin, None),
+        ("per stop", per_stop, None),
+        ("armour line", armour, 27),
+    )
+    readings: dict[str, float] = {}
+    for what, text, want in cases:
+        before = spy.calls
+        with _bounded(_DENSE_WALK_BOUND_SECONDS, f"the header decider on the {what} family"):
+            start = time.process_time()
+            got = redaction_shapes.pem_header_line_end(text)
+            cpu = time.process_time() - start
+        assert got == want, f"the header decider answered {got} on the {what} line, not {want}"
+        assert spy.calls - before == 1, (
+            f"the prefix machine ran {spy.calls - before} times for one piece on the {what} "
+            "line: it must run once for the piece, not once per stop and not once per BEGIN"
+        )
+        readings[what] = cpu
+    for what, cpu in readings.items():
+        assert cpu < 0.2, (
+            f"the {what} line cost {cpu:.3f} s of CPU (readings: {readings}): a header "
+            "candidate line is being charged per stop or per BEGIN again"
+        )
+
+
+def test_the_prefix_fragment_keeps_the_shape_tables_block_rule_cheap() -> None:
+    """The rewrite's OWN coverage, on the one path where it is still load-bearing.
+
+    Round 1's R1-1 is that the whitespace rewrite — the only thing between the
+    fragment's users and a multi-second burn before the deciders landed — had no
+    test that failed without it. The pipe's classifiers no longer run the fragment
+    (the deciders do), so the arm belongs where the fragment is still the thing
+    being measured: the shape TABLE's PEM block rules, which embed it verbatim.
+
+    Round 2's Q3 is that this arm measured the wrong POPULATION and said so in its
+    own docstring: five columns sat under the ceiling while the shape it is named
+    for was unbounded two columns away (a six-column row was 221 ms, eight past
+    45 s), so a green run here proved nothing about the shape. The fixtures are
+    therefore the ones the defect lives in — up to eight columns and the 140-row
+    payload that a real read past the deferral cap hands `_release_point` — and the
+    ceiling is set from the measured linear cost of that population (26 ms of CPU
+    for the 140-row payload) rather than from the smallest thing that passes.
+
+    The single-row ceiling is 50 ms and NOT the 0.5 s this file's other cost arms
+    use, and that is the whole finding: measured on the released spelling, a
+    six-column row is 222 ms of CPU — under a 0.5 s ceiling, which is how the arm
+    stayed green while the walk was exponential. The shipped cost of the same row is
+    0.7 ms, so 50 ms is a ~70x margin on CPU time (which load does not inflate the
+    way it inflates wall time) and still two orders under the released spelling.
+
+    The rule's ANSWER is asserted too, not only its time: a `%8d` row cannot
+    complete a body line, so what must come back is the empty-body match — the
+    anchored spelling and the header, masked — and a change that made the walk
+    cheap by dropping that match would publish a credential rather than burn.
+    """
+    header = '"private_key": "' + _banner(_PEM_SPELLINGS[0]).rstrip("\n")
+    for columns in (5, 6, 8):
+        rows = _numeric_rows(1, columns=columns, start=1000)
+        with _bounded(
+            _DENSE_WALK_BOUND_SECONDS, f"the table's block rule on a {columns}-column row"
+        ):
+            start = time.process_time()
+            scrubbed = redaction_shapes.scrub_shapes(f"{header}\n{rows}")
+            cpu = time.process_time() - start
+        assert cpu < 0.05, f"an anchored {columns}-column row cost {cpu:.3f} s of CPU in the table"
+        assert (
+            REDACTION_MARKER in scrubbed
+        ), f"the anchored spelling stopped being masked at {columns}"
+        assert rows in scrubbed, "only the header is a credential here; the row must survive"
+    payload = f"{header}\n{_numeric_rows(140, columns=8, start=1000)}"
+    with _bounded(_DENSE_WALK_BOUND_SECONDS, "the table's block rule on the 140-row payload"):
+        start = time.process_time()
+        scrubbed = redaction_shapes.scrub_shapes(payload)
+        cpu = time.process_time() - start
+    assert cpu < 0.5, f"the 140-row dense payload cost {cpu:.3f} s of CPU in the table"
+    assert (
+        REDACTION_MARKER in scrubbed
+    ), "the dense payload's anchored spelling stopped being masked"
+    assert "1056" in scrubbed, "the row content must survive; only the header is a credential here"
+
+
+def test_the_short_arms_lookahead_is_load_bearing_on_its_own_population() -> None:
+    """R3-5: the SECOND substitution has a population of its own, and it is measured.
+
+    Both fragments carry the ambiguity, and the arms above exercise the BODY unit's half
+    (a dense row, where the rule's own line walk is what costs). The short arm's LOOKAHEAD
+    is reached by a different input — a sub-floor line before a dense row, where the
+    lookahead is what has to parse the next line's prefix — and none of this file's
+    fixtures builds one: the `short_mid` case follows `3| Qw9z` with a 13-character body,
+    which the released lookahead answers immediately. So the comment beside the
+    substitution ("both are substituted because they carry the same ambiguity") had no
+    measurement behind it here, and the next reader simplifying the lookahead away would
+    have kept every arm green — the argument R3-1 already showed is insufficient on its
+    own, because what a split SERVES is what decides.
+
+    MEASURED (this round, on this spelling; `Qw9z` then a `%8d` row): the released
+    lookahead costs 0.005 / 0.302 / 2.216 / 18.578 s of CPU at 4 / 6 / 7 / 8 columns, and
+    the eight-column form is what agent review R3-5 measured as "past 100 s" through the
+    live pipe; the shipped spelling is 1 ms or under on every one of them, and 0.001 s on
+    the 106-byte seven-column payload the review used.
+
+    WHY THE ARM ASSERTS THE COST AND THE STRUCTURE RATHER THAN REPRODUCING THAT WALK:
+    demonstrating the released lookahead's non-return at eight columns costs 18.6 s of CPU
+    (341 s of wall on this loaded fleet) on EVERY run, and a smaller column count is core
+    speed-dependent — 0.302 s at six columns is not a bound that cannot fire on a faster
+    machine. So the load-bearing property is pinned two ways that are cheap and stable:
+    the shipped spelling's cost on exactly that population (with a CPU ceiling, under the
+    bound), and the substitution's SHAPE — the lookahead must carry the maximal fragment
+    and must not carry the shared one, which is what a "simplification" would change.
+    """
+    header = '"private_key": "' + _banner(_PEM_SPELLINGS[0]).rstrip("\n")
+    # One sub-floor line, then the dense row: `{1,7}` then a full line behind a prefix.
+    payload = f"{header}\nQw9z\n{_numeric_rows(1, columns=8, start=1000)}\n"
+
+    with _bounded(_DENSE_WALK_BOUND_SECONDS, "the shipped spelling on the short-mid payload"):
+        start = time.process_time()
+        scrubbed = redaction_shapes.scrub_shapes(payload)
+        cpu = time.process_time() - start
+    assert cpu < 0.05, f"the short-mid payload cost {cpu:.3f} s of CPU shipped"
+    assert REDACTION_MARKER in scrubbed, "the short-mid payload's header stopped being masked"
+
+    # The SHAPE half: the short arm's lookahead is the maximal spelling, and the shared
+    # (ambiguous) prefix is not inside it. `_PEM_DIGIT_MAX_LINE_CONTENT` is the fragment
+    # both the pipe's classifier and this rule read, so this is also the pin that keeps
+    # the two from drifting apart.
+    assert (
+        redaction_shapes._PEM_DIGIT_MAX_PREFIX in redaction_shapes._PEM_DIGIT_MAX_LINE_CONTENT
+    ), "the short arm's lookahead no longer carries the maximal prefix"
+    assert (
+        redaction_shapes.LINE_PREFIX not in redaction_shapes._PEM_DIGIT_MAX_LINE_CONTENT
+    ), "the short arm's lookahead still walks the ambiguous fragment"
+    assert (
+        redaction_shapes._PEM_DIGIT_MAX_LINE_CONTENT.count(redaction_shapes._PEM_DIGIT_MAX_PREFIX)
+        == 1
+    ), "the lookahead must carry the substitution exactly once"
+
+
+def test_an_unclosed_block_is_masked_and_the_text_before_it_is_released() -> None:
+    """The gate moved WHERE the search is called, so the offsets it keeps matter.
+
+    `end` is what releases everything ahead of the header. A version that lost that
+    offset would either swallow the leading output or publish the first body line,
+    and the second is the leak this whole layer exists to prevent.
+    """
+    header = _banner(_PEM_SPELLINGS[0])
+    raw = (f"before the key: nothing secret here\n{header}{_PEM_BODY}\n{_PEM_BODY}\n").encode()
+    redactor = builtin._PipeRedactor([])
+    text = (redactor.feed(raw) + redactor.feed(b"", final=True)).decode()
+    assert "before the key: nothing secret here" in text, "output ahead of the header was lost"
+    assert _PEM_BODY not in text, "an unclosed block's body was published"
+    assert REDACTION_MARKER in text, "an unclosed block must still be masked"
+
+
+def test_a_closed_block_is_masked_and_its_terminator_is_released() -> None:
+    """The other arm of the same contract, on the path that releases a PREFIX.
+
+    A closed block arrives in one read as prose + header + body + END, so the
+    release point hands the mask loop the header rather than holding it — which is
+    what makes `ready[:end]` the line that releases the prose. Losing that offset
+    would drop the leading line, and dropping output is the failure this arm is
+    here for.
+    """
+    header = _banner(_PEM_SPELLINGS[0])
+    terminator = _banner(_PEM_SPELLINGS[0], kind="END")
+    lead = "before the key: nothing secret here\n"
+    raw = (f"{lead}{header}{_PEM_BODY}\n{terminator}after the key: ordinary output\n").encode()
+    redactor = builtin._PipeRedactor([])
+    text = (redactor.feed(raw) + redactor.feed(b"", final=True)).decode()
+    assert _PEM_BODY not in text, "a closed block's body was published"
+    assert REDACTION_MARKER in text, "a closed block must still be masked"
+    assert lead.strip() in text, "the line ahead of the header was dropped"
+    assert "after the key: ordinary output" in text, "output after the block was lost"
+
+
+@pytest.mark.parametrize("hint_index", [0, 1])
+def test_a_read_missing_one_literal_reaches_no_classifier(
+    monkeypatch: pytest.MonkeyPatch, hint_index: int
+) -> None:
+    """The gate is a NECESSARY condition, so it needs EVERY literal, not one.
+
+    The header pattern cannot match without both of them, and the spellings are taken
+    from the constant itself rather than written here so this stays true if the
+    pattern's literals change. The failure this pins is a gate loosened to `any` —
+    the plausible simplification, since one literal looks like enough — which sends
+    ordinary reads back into the search for nothing.
+    """
+    hints = builtin._PEM_HEADER_HINTS
+    assert len(hints) >= 2, "the gate is only a gate while it needs more than one literal"
+    spy = _CountingDecider(builtin._pem_header_line_end)
+    monkeypatch.setattr(builtin, "_pem_header_line_end", spy)
+    others = [hint for index, hint in enumerate(hints) if index != hint_index]
+    # The absent literal is NOT written into the fixture text, or the fixture would
+    # carry both and assert nothing.
+    text = f"a read carrying the {hints[hint_index]!r} literal and none of the rest\n"
+    assert all(other not in text for other in others), "the fixture carries the other literal"
+    redactor = builtin._PipeRedactor([])
+    out = redactor.feed(text.encode()) + redactor.feed(b"", final=True)
+    assert spy.calls == 0, f"the gate admitted a read missing {others[0]!r}"
+    assert out.decode() == text, "a read that opens no block must be published unchanged"
+
+
+def test_an_open_block_consults_the_end_classifier_only_where_the_literal_is(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The END gate, on the line loop, which the arms above never enter.
+
+    The state is set DIRECTLY, and the reason is worth recording: the release point
+    holds a whole unterminated block in `pending` until its terminator arrives, so a
+    streamed block reaches this loop only when the deferral cap forces it — which is
+    a leak of its own (reported, not fixed here) and not a state to build a fixture
+    on. With the state set, the two classifiers are watched together: the body test
+    must RUN, or "the END test did not run" would be true of a loop that never ran at
+    all, and the END test must not, because no line here carries the literal the END
+    pattern requires.
+    """
+    end_spy = _CountingDecider(builtin._pem_end_line)
+    body_spy = _CountingDecider(builtin._pem_body_line)
+    monkeypatch.setattr(builtin, "_pem_end_line", end_spy)
+    monkeypatch.setattr(builtin, "_pem_body_line", body_spy)
+    redactor = builtin._PipeRedactor([])
+    redactor._in_key_block = True
+    lines = "reading an ordinary line, nothing credential shaped\n" * 20
+    redactor.feed(lines.encode())
+    assert body_spy.calls >= 20, "the line loop did not run, so this proves nothing"
+    assert end_spy.calls == 0, f"the END classifier was asked about {end_spy.calls} prose lines"
+
+
 # --- the store: containment, and the incident path ---------------------------
 
 
@@ -476,15 +2163,26 @@ def test_a_registered_shape_value_is_never_readable() -> None:
         store.read("sh4pedSentinelPw")
 
 
-def test_the_session_hook_reports_the_shapes_that_fired() -> None:
+def test_a_contained_hit_is_not_an_incident_and_is_still_contained() -> None:
+    """The operator's rule, both halves, in one test because they are one pair.
+
+    "As long as something wasn't actually leaked to the transcript we shouldn't get
+    a session incident indicated anywhere": a value masked WHOLE files nothing at
+    all. The second claim is the one that must NOT move with it — the hit is still
+    registered for containment, so the same secret in a spelling the table has no
+    rule for is masked later in the session. The incident is the INDICATOR; the
+    registration is the PROTECTION, and only the indicator was asked to go.
+    """
     session = _session()
     session._pending_shape_incidents.clear()
     session._reported_shape_incidents.clear()
     text = session._redact_tool_result_text(SENTINEL)
-    assert "sh4pedSentinelPw" not in text
-    assert [labels for _tool, labels, _summary in session._pending_shape_incidents] == [
-        ["dsn-password"]
-    ]
+    assert SENTINEL_FRAGMENT not in text, "the value stopped being masked"
+    assert session._pending_shape_incidents == [], "a contained hit filed an incident"
+    # The protection, exercised through the shipped hook rather than the store: the
+    # value comes back in a form the shape table has no rule for.
+    later = session._redact_tool_result_text(f"prefix {SENTINEL_FRAGMENT} suffix")
+    assert SENTINEL_FRAGMENT not in later, "the masked value was not registered"
 
 
 def test_the_incident_names_the_tool_and_carries_no_value() -> None:
@@ -498,23 +2196,29 @@ def test_the_incident_names_the_tool_and_carries_no_value() -> None:
     assert "sh4pedSentinelPw" not in text
 
 
-def test_one_incident_per_tool_and_shape_set() -> None:
-    """A command that echoes the same credential ten times is one fact."""
+def test_an_exposed_hit_still_files_one_incident_per_tool_and_shape_set() -> None:
+    """A command that echoes the same credential ten times is one fact.
+
+    Driven with the EXPOSED case, which is the only one that reaches the queue now:
+    the dedupe has to keep working for the event that is still filed.
+    """
     session = _session()
     session._pending_shape_incidents.clear()
     session._reported_shape_incidents.clear()
     for _ in range(5):
-        session._redact_tool_result_text(SENTINEL)
-    assert len(session._pending_shape_incidents) == 1
+        session._redact_tool_result_text(_exposed_text())
+    assert [flag for _t, _l, _s, flag in session._pending_shape_incidents] == [True]
 
 
 @pytest.mark.asyncio
 async def test_the_queued_incident_reaches_the_transcript(tmp_path: Path) -> None:
     """Flushed at the boundary, and PERSISTED: a resumed session still knows.
 
-    Persisted rather than live-only because what it records — a credential
-    reached a tool result and must be rotated — is still true tomorrow, which is
-    the opposite of the MCP-recovery record's reason for not persisting.
+    Persisted rather than live-only because what it records is still true
+    tomorrow, which is the opposite of the MCP-recovery record's reason for not
+    persisting. Driven with the EXPOSED case, which is the only one that files
+    now: a contained hit has nothing to persist, and its own end-to-end absence
+    test is below.
     """
     session = Session(
         model=ModelSpec(provider="test", model_id="unit-model", context_window=1000),
@@ -526,13 +2230,13 @@ async def test_the_queued_incident_reaches_the_transcript(tmp_path: Path) -> Non
         cwd=str(tmp_path),
         variables=VariableStore(cwd=str(tmp_path)),
     )
-    session._redact_tool_result_text(SENTINEL)
+    session._redact_tool_result_text(_exposed_text())
     await session._flush_shape_incidents()
 
     body = (tmp_path / "incident" / "transcript.jsonl").read_text()
     assert "session_incident" in body
-    assert "sh4pedSentinelPw" not in body
-    assert "dsn-password" in body
+    assert "rotate" in body
+    assert REDACTION_MARKER not in body
 
 
 def test_the_tool_identity_travels_with_the_redaction() -> None:
@@ -714,6 +2418,99 @@ def test_the_shape_pass_is_linear_in_the_size_of_the_text() -> None:
     assert large <= max(small, 1e-4) * 40, f"shape pass looks super-linear: {small} -> {large}"
 
 
+# --- the credential-printing detector: one bounded window, no unbounded run ------
+#
+# The dump table is a SECOND pattern table, on the same hot path, and the file rule
+# in it was quadratic in the length of the line: an unbounded lazy gap followed by an
+# unbounded ``[^\s]*`` makes the engine walk the rest of the line at every gap length.
+# Measured on ``"head " + "x" * 140000``: 114.4 s of CPU for ONE ``search``, against
+# 0.0009 s once both runs are bounded. Real commands reach 30,849 characters (p99
+# 4.9 KB over 39,111 harvested commands), so the blowup was latent rather than live —
+# and latent is not safe: the same class of unbounded run had frozen six sessions on
+# this fleet hours earlier. The three tests below pin the cost three ways, none of
+# them a stopwatch reading taken on this machine.
+
+
+def _dump_cpu(command: str) -> float:
+    """CPU seconds for one detection, best of three samples.
+
+    ``process_time`` and not wall time, and the minimum of three and not one
+    sample, for the reasons AGENTS.md records under "If you must measure, measure
+    CPU, not wall time": a wall reading on this host conflates "the engine worked"
+    with "the OS did not schedule this process" (measured there: 525-668 ms of
+    apparent stall with the loop idle), and the minimum is the sample that saw the
+    least of it. A single wall sample of a sub-millisecond call is noise — this test
+    WAS written that way first and failed once in a full-tier run while passing
+    alone, which is the flake the docstring above warns about.
+    """
+    best = float("inf")
+    for _ in range(3):
+        start = time.process_time()
+        credential_dump_notice(command)
+        best = min(best, time.process_time() - start)
+    return best
+
+
+#: Written to be the worst case for the OLD shape: a reading verb, then a long
+#: separator-free run, and NO match in it, so every gap length and every path length
+#: has to be tried before the search gives up. 8,000 characters is the size that
+#: makes the arithmetic work in both directions: the pre-fix rule needs 0.58 s here
+#: and 37 s at eight times the text (quadratic), while the fixed rule needs 14 ms and
+#: 110 ms (linear) — so the 40x allowance sits between two numbers it cannot confuse,
+#: and both are far above the clock's noise floor.
+_PATHOLOGICAL_LINE = "head " * 1_600
+
+
+def test_no_dump_rule_may_walk_a_long_line_super_linearly() -> None:
+    """The RATIO, for the reason the shape pass's twin test carries.
+
+    An absolute millisecond budget here would be a number off this host, and this
+    host runs ~25 sibling sessions (AGENTS.md records three PRs lost to exactly that
+    mistake). What holds anywhere is the ratio: eight times the text must not cost
+    eight times the time per character. The 40x allowance is enormous on purpose —
+    the regression it catches is quadratic, which is 64x at this size, and a constant
+    factor is not it.
+    """
+    small = _dump_cpu(_PATHOLOGICAL_LINE)
+    large = _dump_cpu(_PATHOLOGICAL_LINE * 8)
+    assert large <= max(small, 1e-4) * 40, f"the dump rule looks super-linear: {small} -> {large}"
+
+
+def test_the_file_rule_may_not_look_beyond_a_bounded_window() -> None:
+    """The gap bound, pinned from both sides as behaviour rather than as constants.
+
+    A credential filename has to be an argument OF the reading verb, which is what
+    bounds the rule: ~90 characters out still fires (a path built through a loop
+    variable, which is how one real harness command spelled it), while 5,000 does
+    not. The far probe is the one the OLD rule failed — with an unbounded gap it
+    matched a bare ``.pem`` five thousand characters away from the verb.
+    """
+    near = "head -c 200 " + "x" * 80 + "/key.pem"
+    far = "head -c 200 " + "x" * 5_000 + "/key.pem"
+    assert credential_dump_notice(near) is not None, "the window is too tight to be usable"
+    assert credential_dump_notice(far) is None, "the rule walked past its own window"
+
+
+def test_the_file_rule_is_written_without_an_unbounded_run() -> None:
+    r"""A STRUCTURAL pin on the cost, independent of any measurement.
+
+    The rule's own source is asserted to contain no unbounded quantifier, so the
+    property cannot come back by an edit that looks innocent and measures fine on a
+    short line: ``[^\n]*?`` and ``[^\s]*`` are exactly what made the search
+    quadratic, and both are fixed-width now. Every other rule in the table is checked
+    for the same reason it is cheap — its unbounded gap is followed by alternations
+    that are literal-anchored, so a failing position costs a constant — which is why
+    this pin is per-rule rather than over the table.
+    """
+    from local_operator.redaction_shapes import DUMP_SHAPES
+
+    rule = next(shape for shape in DUMP_SHAPES if shape.label == "credential-file-read")
+    source = rule.pattern.pattern
+    assert "*" not in source, f"an unbounded ``*`` run is back: {source}"
+    assert "+" not in source, f"an unbounded ``+`` run is back: {source}"
+    assert "{" in source, "the bounds were removed rather than expressed"
+
+
 # --- subagents ---------------------------------------------------------------
 #
 # The defect this module closes was found in a SUBAGENT's tool result, so the
@@ -798,11 +2595,13 @@ async def test_a_subagents_transcript_never_carries_the_credential(
     bodies = {path: path.read_text() for path in transcripts}
     for path, body in bodies.items():
         assert "sh4pedSentinelPw" not in body, f"the credential reached {path}"
-    assert any(
-        "session_incident" in body for body in bodies.values()
-    ), "the child's redaction was never reported"
-    # And the command really ran: the masked value is what the child wrote.
+    # And the command really ran: the masked value is what the child wrote. This is
+    # the liveness evidence now that a contained hit files nothing at all — an
+    # absence assertion alone could not tell "quiet" from "never exercised".
     assert any(REDACTION_MARKER in body for body in bodies.values())
+    assert not any(
+        "session_incident" in body for body in bodies.values()
+    ), "a contained hit was reported"
     await parent.dispose()
 
 
@@ -878,15 +2677,47 @@ def test_every_notice_fits_one_narrow_card_row() -> None:
         assert "`" in notice, f"{label} offers no copy-pasteable form"
 
 
-def test_the_advisory_survives_a_long_result_and_is_not_last() -> None:
-    """The notice must not be the first thing the 40-line head crop drops."""
-    from local_operator.tools import builtin
+@pytest.mark.asyncio
+async def test_the_advisory_survives_a_long_result_and_is_not_last(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The notice must not be the first thing the 40-line head crop drops.
 
-    # Read the MODULE, not ``inspect.getsource(execute_bash)``: the tool is
-    # wrapped by a decorator, so getsource returns the wrapper and the assertion
-    # sees none of the body it is meant to pin.
-    source = Path(builtin.__file__).read_text()
-    assert "parts.insert(1, notice)" in source, "the advisory went back to the tail"
+    This used to pin the INSERT SPELLING — ``"parts.insert(1, notice)" in the
+    module source`` — and round 2's Q5 fix broke it by computing the index from
+    the exit-code line instead (the TIMEOUT head is inserted at 0 before the
+    advisories, so a literal index put them ABOVE ``exit code:`` on that path).
+    A source-text pin cannot tell a repositioned notice from an equivalent one,
+    so it is a behavioural row now: a command that dumps a credential-shaped
+    line and then hundreds of lines of output must still carry the notice inside
+    the head window a card keeps, UNDER the exit code. That is the property the
+    old assertion stood in for, and it fails for the reason that matters — the
+    notice being at the tail — rather than on a rename.
+    """
+    from local_operator.harness.types import AbortSignal, ToolContext
+    from local_operator.tools import builtin
+    from local_operator.variables import VariableStore
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    context = ToolContext(
+        cwd=str(tmp_path),
+        variables=VariableStore(cwd=str(tmp_path)),
+        session_id="advisory-head",
+    )
+    # ``env`` is credential-shaped, and the loop puts the notice's position under
+    # the same crop a real 200-line result would.
+    command = 'env; for i in $(seq 1 200); do echo "line $i of the report"; done'
+    result = await builtin.execute_bash(
+        "cred-long", {"command": command}, AbortSignal(), None, context
+    )
+
+    lines = result.text.splitlines()
+    advisory = next((index for index, line in enumerate(lines) if "credential guard" in line), None)
+    assert advisory is not None, result.text[:400]
+    # Inside the head window, which is what "not the first thing dropped" means,
+    # and below the exit code, so the shape is the same on every path.
+    assert advisory < 5, lines[:8]
+    assert lines[0].startswith("exit code: "), lines[:3]
 
 
 def test_the_live_pending_text_matches_the_card() -> None:
@@ -903,13 +2734,18 @@ def test_the_live_pending_text_matches_the_card() -> None:
     assert builtin._LIVE_PENDING_TEXT == LIVE_HEADER_PENDING
 
 
-def test_a_hit_is_reported_only_when_the_whole_value_was_masked() -> None:
+def test_a_hit_is_graded_before_it_is_announced() -> None:
     """Never announce a masking that did not happen.
 
-    The row tells the operator a credential "was masked before you saw it", and
-    the operator acts on that by NOT rotating. A false all-clear is therefore
-    worse than silence. This was live: a DSN password containing ``@`` was masked
-    to the first ``@`` while the row promised the whole thing was gone.
+    The containment row tells the operator a credential "was masked before you saw
+    it", and the operator acts on that by NOT cleaning the copy up. A false
+    all-clear is therefore worse than silence. This was live: a DSN password
+    containing ``@`` was masked to the first ``@`` while the row promised the whole
+    thing was gone.
+
+    Under the current policy the surviving hit is not silent either: it is the one
+    case that escalates (readable material in the model's context), while the
+    withheld-claim-but-contained case — a truncated PEM — announces nothing at all.
     """
     from local_operator.redaction_shapes import ShapeHit, _only_fully_masked
 
@@ -934,9 +2770,14 @@ def test_a_hit_is_reported_only_when_the_whole_value_was_masked() -> None:
         assert fragment not in scrubbed, scrubbed
 
 
+@pytest.mark.parametrize(
+    ("reached_model", "marker"),
+    [(True, "rotate"), (False, "no exposure")],
+    ids=["reached-the-model", "contained"],
+)
 @pytest.mark.asyncio
 async def test_the_incident_row_reaches_the_operator_live_and_on_replay(
-    tmp_path: Path,
+    tmp_path: Path, reached_model: bool, marker: str
 ) -> None:
     """Both halves of "the operator sees it", which is the row's whole purpose.
 
@@ -944,6 +2785,10 @@ async def test_the_incident_row_reaches_the_operator_live_and_on_replay(
     Replay: the fold must have a branch for the record, or a resumed session
     shows nothing (a custom message falls through every role-based branch).
     Measured before this wiring: the row reached the model and painted nowhere.
+
+    Parametrised over the CLASSIFICATION, because the contained text is a second
+    new string on the same path and the failure mode this test exists for — a row
+    that paints nowhere — does not care which wording it is carrying.
     """
     from local_operator.harness.message_types import SESSION_INCIDENT_MESSAGE_TYPE
     from local_operator.harness.types import NoticeEvent
@@ -960,17 +2805,19 @@ async def test_the_incident_row_reaches_the_operator_live_and_on_replay(
     )
     events: list[Any] = []
     session.subscribe(events.append)
-    await session.journal_shape_incident("bash", ["dsn-password"], "kubectl exec api -- env")
+    await session.journal_shape_incident(
+        "bash", ["dsn-password"], "kubectl exec api -- env", reached_model=reached_model
+    )
 
     notices = [event for event in events if isinstance(event, NoticeEvent)]
     assert notices, "the incident emitted no live receipt"
     assert notices[0].kind == "warning"
-    assert "rotate" in notices[0].text
+    assert marker in notices[0].text
 
     # Replay: the same record, folded through the real settlement path.
     rows = _fold_incident_row(SESSION_INCIDENT_MESSAGE_TYPE, notices[0].text)
     assert rows, "the incident row folded to nothing"
-    assert any("rotate" in row for row in rows)
+    assert any(marker in row for row in rows)
 
 
 def _fold_incident_row(custom_type: str, text: str) -> list[str]:
@@ -1037,12 +2884,18 @@ def _fold_incident_row(custom_type: str, text: str) -> list[str]:
 #:   IS masked, and what survives is the host and path, which stay readable BY DESIGN
 #:   (the operator needs to see which endpoint was called). Not secret material.
 _PARTIAL_MASK_RESIDUAL = {
-    # All three of these are the SYNTHETIC case only, and the proof is the same one:
-    # the quote is injected INSIDE the fixed marker phrase (`-----B'EGIN RSA PRIVATE
-    # KEY-----`) or inside a PEM body, and NEITHER ALPHABET CONTAINS A QUOTE — a PEM
-    # header is dashes, spaces and capitals, and a body is base64 (`A-Za-z0-9+/=`). A
-    # quote cannot occur there in real output, which is why these counts are allowed
-    # to stand rather than fixed.
+    # The two PEM/body classes are the SYNTHETIC case only, and the proof is the
+    # same one: the quote is injected INSIDE the fixed marker phrase (`-----B'EGIN
+    # RSA PRIVATE KEY-----`) or inside a PEM body, and NEITHER ALPHABET CONTAINS A
+    # QUOTE — a PEM header is dashes, spaces and capitals, and a body is base64
+    # (`A-Za-z0-9+/=`). A quote cannot occur there in real output, which is why
+    # these counts are allowed to stand rather than fixed.
+    # `credential-url-value` is NOT this case — its value class is a whole URL and
+    # DOES contain a quote — and it has its own reason in the bullet above (the
+    # password inside it IS masked; the host and path stay readable BY DESIGN).
+    # Splitting the two was a correction: this comment used to claim all three
+    # classes rested on the alphabet argument we could not make for the third
+    # (agent review R2, finding 4).
     #
     # The numbers fall as real fixes land and must be updated in the SAME commit as
     # the fix that moves them (the ratchet asserts exact equality): `pem-private-key`
@@ -1399,6 +3252,580 @@ async def test_a_real_bash_command_never_publishes_an_open_key_body(
     assert "[redacted]" in text
 
 
+# --- the pipe's OPEN BLOCK: nothing inside it is published -------------------
+#
+# The three mechanisms that defeated this state, each measured at the revision
+# before this section existed, and each one a REGRESSION ARM below:
+#
+# 1. the header's own terminator was offered to the line loop, whose prose test
+#    read a bare separator as prose and CLOSED the block one line into itself —
+#    every later release then had no header to reopen it. Measured: 143 body
+#    lines (the whole 8 KiB ``pending``) from PR #1427's case, one call.
+# 2. a 512-line bound released the body verbatim past it — measured 1,488 body
+#    lines of a 2,000-line block.
+# 3. a cap-forced cut could land INSIDE a line, and the fragment is what the loop
+#    classified: a four-character fragment is below the body grammar's floor, so
+#    it read as prose and closed the block — measured 1,092 body lines published
+#    on the next release.
+#
+# The outcome all three reach is the same publish, and it is also reachable when
+# RETENTION drops one marker line from a >cap stream: the settled shape pass
+# cannot repair it because ``pem-private-key`` spans BEGIN to END. That route
+# measured 1,420 raw body lines in the call-site spill of a >4 MiB stream through
+# the real tool, served over ``read spill://``.
+#
+# The armour below is built from PARTS on purpose: these tests are about a
+# literal's LENGTH as much as its spelling, and a display filter that rewrote the
+# dashes would leave every arm here passing vacuously. ``_PEM_GRAMMAR_IS_LIVE``
+# is asserted first by every arm that depends on it.
+
+_PEM_DASHES = "-" * 5
+_PEM_HEADER = f"{_PEM_DASHES}BEGIN RSA PRIVATE KEY{_PEM_DASHES}\n"
+_PEM_END = f"{_PEM_DASHES}END RSA PRIVATE KEY{_PEM_DASHES}\n"
+#: A body line at a real PEM's width, and UNIQUE per line so a publish is
+#: countable and locatable rather than merely detectable.
+_PEM_BODY_STEM = "MIIEowIBAAKCAQEA" + "bKdFgHjLmNpQrStUvWxYzAbCdEfGhJkLmNoP"
+
+
+def _body_lines(count: int) -> str:
+    return "".join(f"{_PEM_BODY_STEM}{index:04d}\n" for index in range(count))
+
+
+def _published_body_lines(text: str) -> list[str]:
+    """Every body line still readable in ``text`` — the property under test."""
+    return [line for line in text.splitlines() if line.startswith(_PEM_BODY_STEM)]
+
+
+def _pem_grammar_is_live() -> None:
+    """Fail LOUDLY if an armour literal stopped matching the classifiers.
+
+    A rewritten header is not a masked one: it publishes the whole body, so an arm
+    whose header no longer matches would assert the wrong thing about the wrong text.
+    """
+    assert builtin._PEM_HEADER_LINE.match(_PEM_HEADER.rstrip("\n")), "header literal is not PEM"
+    assert builtin._PEM_END_LINE.match(_PEM_END.rstrip("\n")), "END literal is not PEM"
+    assert builtin._PEM_BODY_LINE.match(_PEM_BODY_STEM), "body line is not PEM-shaped"
+
+
+def test_an_unterminated_block_past_the_deferral_limit_publishes_no_body() -> None:
+    """PR #1427's case, through the pipe: header + 200 body lines and no END.
+
+    One call, and the whole 8 KiB ``pending`` used to go out verbatim — 143 body
+    lines of a 57-byte body, or 31-32 of a 256-byte one: the byte budget is what
+    is fixed, and the body width only chooses how many lines it buys.
+    """
+    _pem_grammar_is_live()
+    payload = _PEM_HEADER + _body_lines(200)
+    published = _pipe_whole(payload)
+
+    published_lines = _published_body_lines(published)
+    assert not published_lines, f"{len(published_lines)} body lines of an open block went out"
+    assert REDACTION_MARKER in published, "the block was not masked at all"
+
+
+def test_a_chunk_boundary_just_after_the_header_keeps_the_block_open() -> None:
+    """The header in one release and its body in the next: the block must stay open.
+
+    This is the separator bug at its narrowest. The header's own terminator used to
+    be the line loop's first element, where the prose test closed the block — so a
+    read boundary that lands after the header (any slow child that prints the
+    header first) published everything after it.
+    """
+    _pem_grammar_is_live()
+    redactor = builtin._PipeRedactor([])
+    published = redactor.feed(_PEM_HEADER.encode())
+    published += redactor.feed(_body_lines(200).encode())
+    published += redactor.feed(b"", final=True)
+    text = published.decode()
+
+    assert not _published_body_lines(
+        text
+    ), f"{len(_published_body_lines(text))} body lines were published across the boundary"
+    assert REDACTION_MARKER in text, "the block was not masked at all"
+
+
+def test_a_block_longer_than_the_old_line_bound_is_masked_to_its_end() -> None:
+    """The bound that released the body: 1,488 of these 2,000 lines used to go out raw.
+
+    An unterminated block cannot hold memory — a masked line is DROPPED, and
+    ``pending`` is capped separately — so the state is not bounded by lines any more.
+    """
+    _pem_grammar_is_live()
+    published = _pipe_whole(_PEM_HEADER + _body_lines(2000))
+
+    assert not _published_body_lines(
+        published
+    ), f"{len(_published_body_lines(published))} body lines past the old line bound"
+
+
+def test_a_forced_cut_inside_a_line_is_held_to_the_line_boundary() -> None:
+    """A fragment of a line cannot be classified, so it must not be classified.
+
+    The cap can cut mid-line, and a fragment shorter than the body grammar's floor
+    (``PEM_BODY_FLOOR``) is read as PROSE by the loop — which CLOSES an open block.
+    Measured: the four-character fragment ``MIIE`` closed one, and the next release
+    (all body, no header left) published 1,092 lines of a 2,000-line block.
+    """
+    _pem_grammar_is_live()
+    redactor = builtin._PipeRedactor([])
+    # 400 lines is past the deferral limit, so the cap decides the cut. The tail
+    # length is SEARCHED, not guessed: which byte the cap lands on depends on the
+    # line width, and the case only exists when the remainder is shorter than the
+    # grammar's floor. A guessed length that happens to land at a line boundary
+    # would assert nothing while looking like it did.
+    # The floor is the code's own name for it, with the historical value as the
+    # fallback: an arm run against a tree that predates the shared constant still
+    # tests the MECHANISM (where the cut lands) instead of failing on the lookup.
+    floor = getattr(builtin, "PEM_BODY_FLOOR", 8)
+    for tail in range(1, 60):
+        text = _PEM_HEADER + _body_lines(400) + "M" * tail
+        cap_cut = len(text) - builtin._PIPE_DEFERRAL_LIMIT
+        line_start = max(text.rfind("\n", 0, cap_cut), text.rfind("\r", 0, cap_cut)) + 1
+        fragment = cap_cut - line_start
+        if 0 < fragment < floor:
+            break
+    else:  # pragma: no cover - the fixture could not reach the case
+        pytest.fail("no tail length puts a sub-floor fragment at the cap's cut")
+
+    cut = redactor._release_point(text, final=False)
+
+    assert cut == line_start, (
+        f"the release ends {cut - line_start} bytes into a line, where the classifier "
+        "reads the fragment as prose (and closes the block)"
+    )
+
+
+def test_a_terminated_block_is_masked_whole_and_its_end_line_closes_the_state() -> None:
+    """The preservation arm: the fix must not start eating real key blocks.
+
+    Asserted at the MASK rather than on the pipe's whole output, and that is
+    deliberate: for a complete block the shape table ALSO masks the span from the
+    header to the terminator, so a product-level assertion here would be satisfied by
+    either layer and could not be reddened by breaking one of them. The mask's own
+    contract is the narrower, provable one — body gone, END line out, state closed —
+    and `pem-private-key` is already pinned elsewhere as the second layer.
+    """
+    _pem_grammar_is_live()
+    redactor = builtin._PipeRedactor([])
+    masked = redactor._mask_open_key_block(_PEM_HEADER + _body_lines(3) + _PEM_END)
+
+    assert not _published_body_lines(masked), "a complete block published its body"
+    assert _PEM_END.rstrip("\n") in masked, "the END line was eaten"
+    assert redactor._in_key_block is False, "the END line did not close the block"
+    # And the product-level outcome for the same text, which is the marker.
+    assert REDACTION_MARKER in _pipe_whole(_PEM_HEADER + _body_lines(400) + _PEM_END)
+
+
+def test_prose_after_a_stray_header_is_released_and_closes_the_block() -> None:
+    """The over-mask guard, unchanged by this fix: prose is not key material.
+
+    A header quoted in a doc or matched by ``grep`` opens the state, and the FIRST
+    ordinary line closes it — so the fixture text after it stays readable.
+    """
+    _pem_grammar_is_live()
+    published = _pipe_whole(_PEM_HEADER + "ordinary prose line\n" + _PEM_BODY_STEM + "0000\n")
+
+    assert "ordinary prose line" in published, "prose was eaten by a stray header"
+    # The one body-shaped line after the prose is masked: a close is not a licence
+    # to publish, and this arm pins the direction the layer must fail in.
+    assert not _published_body_lines(published)
+
+
+def test_a_numeric_table_without_a_header_is_left_alone() -> None:
+    """The negative half: a table of numbers is output a human has to read.
+
+    ``10000000 10000001`` IS body-shaped — the line grammar reads the first run as a
+    line-number prefix, which is how the old ambiguous ``LINE_PREFIX`` cost seconds
+    on exactly this row (PR #1427). What keeps such a table readable is that NO
+    HEADER is open: the state is the only thing that makes a body-shaped line a body
+    line. The plausible bug this pins is the one that masks body-shaped lines with no
+    header at all, which is a single mutation away in the loop below. (Inside an open
+    block these rows ARE masked: an over-mask is the direction this layer must fail
+    in, and it is recorded in the module comment.)
+    """
+    _pem_grammar_is_live()
+    table = "10000000 10000001\n" * 20
+    published = _pipe_whole(table)
+
+    assert published == table, "a table with no header was rewritten by the pipe filter"
+
+
+def _pipe_chunks(raw: bytes, chunk: int = 16384) -> str:
+    """The pipe filter over a WHOLE stream, in chunks, as ``_pump`` drives it."""
+    redactor = builtin._PipeRedactor([])
+    published = [
+        redactor.feed(raw[index : index + chunk]).decode() for index in range(0, len(raw), chunk)
+    ]
+    published.append(redactor.feed(b"", final=True).decode())
+    return "".join(published)
+
+
+def _retention_stream(cap: int, variant: str, block_lines: int) -> tuple[bytes, int]:
+    """A >cap stream whose retention window drops exactly ONE marker line.
+
+    Two things here are deliberate. The feed is CHUNKED, like the product's: a
+    single call would hand the shape pass a complete BEGIN … END and it would mask
+    the whole block, so there would be no fragment to measure and no case to test.
+    And the layout is SEARCHED against the pipe's own output rather than computed
+    from the raw bytes, because the masked length of the block is exactly what
+    differs between the revision that leaks and the revision that does not — a
+    layout derived from the raw stream would place the marker differently on each
+    and the arm would prove nothing. Returns the raw stream and the window size.
+    """
+    marker = "BEGIN" if variant == "begin" else "END"
+    marker_line = _PEM_HEADER if variant == "begin" else _PEM_END
+    pad_line = "filler " + "x" * 40 + "\n"
+    target = cap // 2
+    window = 512
+
+    def prose(total: int) -> str:
+        """At least ``total`` bytes, always ending on a line break (a glued header is
+        not the line-anchored spelling the mask looks for)."""
+        return pad_line * (-(-total // len(pad_line)))
+
+    def build(pre: int, post: int) -> bytes:
+        block = _PEM_HEADER + _body_lines(block_lines) + _PEM_END
+        return (prose(max(pre, 0)) + block + prose(max(post, 0))).encode()
+
+    pre = target + 64 if variant == "begin" else target - 64
+    for _ in range(30):
+        measured = _pipe_chunks(build(pre, window * 4))
+        at = measured.find(marker)
+        if at < 0:  # the layout put the block inside a masked run: shift and retry
+            pre += 4096
+            continue
+        line_start = measured.rfind("\n", 0, at) + 1
+        if target <= line_start < target + window - len(marker_line):
+            break
+        pre += max(min(target - line_start, 4096), -4096)
+    else:  # pragma: no cover - the search could not place the marker
+        pytest.fail("could not place the marker line inside the retention window")
+
+    # Size the tail so the omitted window is the width this arm needs. The tail
+    # moves in whole pad lines, so the window lands in [window, window + a line):
+    # the assertion is that band, and the ACTUAL width is what the arm compares
+    # against, rather than a number the fixture would have to hit exactly.
+    post = window * 4 + window - len(measured)
+    raw = build(pre, post)
+    omitted = len(measured) - cap
+    for _ in range(4):
+        raw = build(pre, post)
+        measured = _pipe_chunks(raw)
+        omitted = len(measured) - cap
+        if window <= omitted < window + len(pad_line):
+            break
+        post += window - omitted
+    assert window <= omitted < window + len(pad_line), f"the retention window is {omitted} bytes"
+    line_start = measured.rfind("\n", 0, measured.find(marker)) + 1
+    assert (
+        0 <= line_start - target < omitted - len(marker_line)
+    ), "the marker line is not inside the omitted window"
+    return raw, omitted
+
+
+@pytest.mark.parametrize("variant", ["begin", "end"])
+def test_a_retention_split_marker_still_publishes_no_body(variant: str) -> None:
+    """Retention drops ONE marker line; nothing in the body may reach any surface.
+
+    This is the route a reviewer found independently, from the retention side, and it
+    is the one the settled pass cannot repair: the operator's copy is built from the
+    retained text, and ``pem-private-key`` needs a complete BEGIN … END, so a fragment
+    matches no rule at all. Measured at the base: 1,420 raw body lines in the call-site
+    spill of a >4 MiB stream through the real tool, served over ``read spill://``.
+    """
+    _pem_grammar_is_live()
+    cap = 65536
+    raw, window = _retention_stream(cap, variant, 700)
+
+    sink = builtin._BashOutput(limit=cap)
+    redactor = builtin._PipeRedactor([])
+    live = []
+    for index in range(0, len(raw), 16384):
+        piece = redactor.feed(raw[index : index + 16384])
+        sink.append(piece)
+        live.append(piece.decode())
+    piece = redactor.feed(b"", final=True)
+    sink.append(piece)
+    live.append(piece.decode())
+
+    assert sink.omitted_bytes == window, "retention did not drop the marker line"
+    for surface, text in (
+        ("the live pipe", "".join(live)),
+        ("the retained copy", sink.decode()),
+        ("the settled pass", _live_text(sink.decode())),
+    ):
+        published = _published_body_lines(text)
+        assert not published, f"{surface} published {len(published)} body lines of a split block"
+
+
+def test_a_block_truncated_by_the_cap_still_publishes_no_body() -> None:
+    """A block whose body is cut off mid-line by the cap, with no END at all.
+
+    The cap is the mechanism that releases a block's middle, and the fragment it
+    leaves is the one the loop used to read as prose; this is that shape end to
+    end, through the pipe, at a small forced deferral.
+    """
+    _pem_grammar_is_live()
+    original = builtin._PIPE_DEFERRAL_LIMIT
+    try:
+        builtin._PIPE_DEFERRAL_LIMIT = 256
+        redactor = builtin._PipeRedactor([])
+        # Chunks of 100 bytes: the cut lands inside lines repeatedly, and the
+        # third line's remainder is a sub-floor fragment.
+        payload = (_PEM_HEADER + _body_lines(60)).encode()
+        published = b""
+        for index in range(0, len(payload), 100):
+            published += redactor.feed(payload[index : index + 100])
+        published += redactor.feed(b"", final=True)
+    finally:
+        builtin._PIPE_DEFERRAL_LIMIT = original
+
+    text = published.decode()
+    assert not _published_body_lines(
+        text
+    ), f"{len(_published_body_lines(text))} body lines escaped a cap-truncated block"
+
+
+def test_an_unterminated_block_with_a_second_block_present_publishes_no_body() -> None:
+    """An END dropped while ANOTHER block follows: the first must not leak either.
+
+    ``_release_point``'s hold looks for the NEXT terminator, so a second block's END
+    can satisfy the first block's search. Whatever that does to the deferral, the
+    body of the unterminated one must not reach the pipe's output.
+    """
+    _pem_grammar_is_live()
+    # 700 lines in the unterminated block, not 300: below the old 512-line bound
+    # this arm would have passed at the revision that published, which is how a
+    # boundary arm becomes a vacuous one.
+    payload = _PEM_HEADER + _body_lines(700) + _PEM_HEADER + _body_lines(200) + _PEM_END
+    # CHUNK-fed: in one call the shape pass would match BEGIN(1) … END(2) as a single
+    # span and mask the lot, so the arm would pass at the revision that published.
+    published = _pipe_chunks(payload.encode())
+
+    published_lines = _published_body_lines(published)
+    # The second block is terminated, so ITS body is masked by the settled pass as
+    # well; what this arm pins is that no body line survives the pipe.
+    assert not published_lines, f"{len(published_lines)} body lines were published"
+    assert REDACTION_MARKER in published
+
+
+# --- the round-2 remediation: the cap's OWN split, and the armour's spellings -----
+#
+# Three holes round 1 found in the section above, all measured on the revision before
+# these arms existed, and all three in the SAME publish direction:
+#
+# 1. the cap can land inside the ARMOUR LINE. The hold above finds a block by its
+#    opening marker, but the cap is applied after that hold and recomputes the cut
+#    from the buffer length, so the marker itself is what gets split: a bare marker
+#    fragment goes out, the rest of the marker stays in ``pending`` where its line no
+#    longer STARTS with it, and the classifier can never match it again. The state
+#    never opens, so the whole flush is body nothing masks — measured 138 raw body
+#    lines, and the alignment is fixed per stream (a repeated read leaks every time).
+# 2. an armour line ending in ``\r`` / ``\r\n`` / trailing whitespace never opened the
+#    block at all: ``$`` cannot match in front of a ``\r``, so an ORDINARY key file
+#    written on Windows (or quoted by a wiki, or left with a trailing space by an
+#    editor) published its body — measured 5 of 25 lines for ``head -n 6`` on a
+#    complete CRLF key, and 200 lines of an unterminated one on every surface.
+# 3. a second block's header arriving in the SAME read as the first block's END was
+#    released without re-opening the state, so the second block's body went out raw —
+#    measured 138 lines on the shape below.
+#
+# The armour literals in this section come from the shared ones above (``_PEM_HEADER``,
+# ``_PEM_END``, ``_PEM_DASHES``), which are assembled from parts for the same reason.
+
+#: The line-break spellings an armour line arrives with in the wild: LF, CRLF, a bare CR
+#: (a key that came off an old Mac, or through a filter that normalised to CR), and the
+#: two trailing-whitespace forms a copy-paste or an editor leaves behind.
+_ARMOUR_BREAKS = (
+    ("lf", "\n", "\n"),
+    ("crlf", "\r\n", "\r\n"),
+    ("cr", "\r", "\r"),
+    ("trailing-spaces-lf", "   \n", "\n"),
+    ("trailing-tab-crlf", "\t\r\n", "\r\n"),
+    ("trailing-space-cr", " \r", "\r"),
+)
+
+
+def test_a_cap_that_splits_the_armour_line_publishes_no_body() -> None:
+    """The cap's cut landing INSIDE the armour line is the one split the mask cannot survive.
+
+    The hold in ``_release_point`` defers a block by its opening marker, and the cap is
+    applied AFTER that hold and recomputes the cut from the buffer length — so an
+    alignment that puts the cap a few bytes into the armour line publishes a marker
+    FRAGMENT and leaves the rest of the marker in ``pending``, where the line no longer
+    starts with it. From then on the classifier cannot match it, the state never opens,
+    and every later release is body that nothing masks: 138 raw body lines measured at
+    this exact alignment, identical at the base tree.
+
+    WHAT DECIDES IT IS THE ALIGNMENT, NOT THE READ SIZE — which is why the sweep is over
+    both: the same payload fed whole, in 4 KiB reads, in 1 KiB reads and in 100 B reads
+    all published the body before the fix, and a session that runs the same truncated
+    read twice leaks twice, because the alignment is fixed per stream.
+    """
+    _pem_grammar_is_live()
+    # The sweep is DERIVED from the cap, not hard-coded: the cut lands ``limit`` bytes
+    # before the end, so a total that puts it 8-27 bytes into a 32-byte armour line is
+    # ``limit + 8`` to ``limit + 27``. Width-checked, because a wider armour literal
+    # would move the window and quietly turn this arm into one that sweeps nothing.
+    assert len(_PEM_HEADER) == 32, "the armour literal changed width; re-derive the sweep"
+    limit = builtin._PIPE_DEFERRAL_LIMIT
+    for size in (0, 100, 1024, 4096):  # 0 is one feed + the flush
+        for total in range(limit + 8, limit + 28):
+            raw = (_PEM_HEADER + _body_lines(300))[:total].encode()
+            published = _pipe_whole(raw.decode()) if size == 0 else _pipe_chunks(raw, size)
+            leaked = _published_body_lines(published)
+            assert not leaked, (
+                f"a {'whole-stream' if size == 0 else f'{size} B'} feed of {total} B "
+                f"published {len(leaked)} body lines of a block whose marker the cap split"
+            )
+
+
+def test_a_second_block_after_a_terminated_one_publishes_no_body() -> None:
+    """A terminated block AND a second header in ONE read: the state has to be RE-opened.
+
+    The second-header arm treats a header inside an open block as armour rather than
+    prose, but this loop reaches that arm with the state already CLOSED whenever the same
+    release carried the earlier block's END. Releasing the header without re-opening it
+    left the second block's body to go out raw on the next release — measured 138 raw
+    body lines at this shape (12,071 B, one read), the whole flush.
+    """
+    _pem_grammar_is_live()
+    payload = _PEM_HEADER + _body_lines(3) + _PEM_END + _PEM_HEADER + _body_lines(200)
+
+    redactor = builtin._PipeRedactor([])
+    redactor.feed(payload.encode())
+    assert redactor._in_key_block is True, "the second block's header did not re-open the state"
+
+    published = _pipe_whole(payload)
+    leaked = _published_body_lines(published)
+    assert not leaked, f"{len(leaked)} body lines of the second block were published"
+
+
+@pytest.mark.parametrize(
+    ("name", "armour_break", "body_break"),
+    _ARMOUR_BREAKS,
+    ids=[case[0] for case in _ARMOUR_BREAKS],
+)
+def test_an_armour_line_with_a_cr_or_a_trailing_space_is_still_armour(
+    name: str, armour_break: str, body_break: str
+) -> None:
+    """The armour line's own terminator spelling must not decide whether a key is masked.
+
+    ``$`` cannot match in front of a ``\\r``, so the classifier did not see
+    ``...KEY-----\\r\\n`` (or ``...\\r``, or the trailing-whitespace forms) as armour at
+    all, and an unterminated block then went out in the clear: 200 of 200 body lines on
+    the transcript, the raw spill file and ``read spill://``. Base and head were
+    identical there, so this is pre-existing — but it is the branch's own title claim
+    unmet for an ORDINARY spelling, and the pipe is the only layer that can hide an
+    unterminated view (``pem-private-key`` needs a complete BEGIN … END). Every surface
+    below is built from the pipe's bytes, so the pipe's output is the first thing to pin
+    and the store's copy and the settled pass follow it.
+    """
+    _pem_grammar_is_live()
+    armour = _PEM_HEADER.rstrip("\n") + armour_break
+    # (1) an UNTERMINATED block, 200 lines, which is the shape the retention route leaks.
+    unterminated = armour + _body_lines(200).replace("\n", body_break)
+    published = _pipe_whole(unterminated)
+    leaked = _published_body_lines(published)
+    assert not leaked, f"{name}: {len(leaked)} body lines of an unterminated block went out"
+
+    # (2) the same bytes through the retention route: the store's retained copy and the
+    # settled pass over it, neither of which can repair a headerless fragment.
+    sink = builtin._BashOutput(limit=65536)
+    redactor = builtin._PipeRedactor([])
+    raw = unterminated.encode()
+    for index in range(0, len(raw), 4096):
+        sink.append(redactor.feed(raw[index : index + 4096]))
+    sink.append(redactor.feed(b"", final=True))
+    for surface, text in (
+        ("the retained copy", sink.decode()),
+        ("the settled pass", _live_text(sink.decode())),
+    ):
+        leaked = _published_body_lines(text)
+        assert not leaked, f"{name}: {surface} published {len(leaked)} body lines"
+
+    # (3) ``head -n 6`` on a COMPLETE key of this spelling: five body lines, no END in the
+    # text at all, so nothing downstream can repair it. Measured 5 of 25 published before.
+    truncated = armour + _body_lines(5).replace("\n", body_break)
+    leaked = _published_body_lines(_pipe_whole(truncated))
+    assert not leaked, f"{name}: {len(leaked)} body lines of a truncated complete key went out"
+
+
+def test_a_complete_key_with_crlf_endings_is_masked_to_its_end() -> None:
+    """The whole block path for the CRLF spelling: body masked, END out, state closed.
+
+    Asserted at the MASK rather than on the pipe's whole output, because for a COMPLETE
+    block the shape table masks the span as well and a product-level assertion would be
+    satisfied by either layer (the same reason the LF arm above is written this way).
+    """
+    _pem_grammar_is_live()
+    block = _PEM_HEADER.rstrip("\n") + "\r\n" + _body_lines(3).replace("\n", "\r\n")
+    block += _PEM_END.rstrip("\n") + "\r\n"
+    redactor = builtin._PipeRedactor([])
+    masked = redactor._mask_open_key_block(block)
+
+    assert not _published_body_lines(masked), "a complete CRLF block published its body"
+    assert _PEM_END.rstrip("\n") in masked, "the END line was eaten"
+    assert redactor._in_key_block is False, "the END line did not close the state"
+
+
+def test_the_body_floor_is_one_definition_for_the_grammar_and_the_hold() -> None:
+    """The floor the grammar accepts and the floor the hold holds at are ONE number.
+
+    ``PEM_BODY_FLOOR`` is read twice: by the body grammar (through its two quantifier
+    spellings) and by the release hold, which keeps a cap-forced cut off a fragment
+    shorter than it — because the line loop reads such a fragment as PROSE, which CLOSES
+    an open block. The relationship is a BOUNDARY, so it is pinned from both sides here:
+    a merger who moves either side — including the linear deciders #1427 substitutes at
+    the pipe's call sites, which spell an ``8``/``7`` pair by hand — makes this arm
+    disagree with itself rather than let the hold under-hold, which is the leak
+    direction.
+    """
+    floor = redaction_shapes.PEM_BODY_FLOOR
+    # The grammar's side of the boundary.
+    assert builtin._PEM_BODY_LINE.match("M" * floor), "the grammar rejects a run at its own floor"
+    assert not builtin._PEM_BODY_LINE.match("M" * (floor - 1)), "a lone sub-floor line is prose"
+
+    # The hold's side, at the SAME boundary: build a text whose cap-forced cut leaves a
+    # fragment of exactly ``fragment`` bytes in an open block's last line, and read the
+    # cut back. Held iff the fragment is shorter than the floor.
+    original = builtin._PIPE_DEFERRAL_LIMIT
+    try:
+        builtin._PIPE_DEFERRAL_LIMIT = 256
+        for fragment in (floor - 1, floor):
+            text = _PEM_HEADER + _body_lines(20) + "M" * (256 + fragment)
+            line_start = len(text) - (256 + fragment)
+            cut = builtin._PipeRedactor([])._release_point(text, final=False)
+            held = cut == line_start
+            assert held is (fragment < floor), (
+                f"a {fragment}-byte fragment at the cut was "
+                f"{'held' if held else 'released'} against a floor of {floor}"
+            )
+    finally:
+        builtin._PIPE_DEFERRAL_LIMIT = original
+
+
+def test_a_certificate_banner_does_not_open_a_private_key_block() -> None:
+    """The widened armour tail must not open a block on a PUBLIC key's banner.
+
+    Tolerating ``\\r`` and trailing whitespace removed the whitespace as a discriminator,
+    so the phrase is now the only thing separating a private-key banner from any other
+    PEM banner — and this is the arm that pins it, including for the spellings the
+    widening was for: a certificate banner followed by base64-shaped lines stays readable
+    byte for byte, because ``PRIVATE KEY`` is missing.
+    """
+    _pem_grammar_is_live()
+    banner = _PEM_DASHES + "BEGIN CERTIFICATE" + _PEM_DASHES
+    for ending in ("\n", "\r\n", "  \r\n", " \r"):
+        body_break = "\n" if ending.endswith("\n") else "\r"
+        text = banner + ending + _body_lines(20).replace("\n", body_break)
+        published = _pipe_whole(text)
+        assert _published_body_lines(
+            published
+        ), f"a public banner ending {ending!r} opened a private-key block"
+        assert published == text, f"a public banner ending {ending!r} was rewritten by the pipe"
+
+
 def test_two_stores_in_one_process_are_independent() -> None:
     """The registration set and its cap are PER STORE, not per process.
 
@@ -1456,3 +3883,1947 @@ def test_a_fresh_store_does_not_inherit_another_stores_containment() -> None:
     # The boundary, stated as an assertion so it cannot drift into a claim: A's value is
     # not contained in B, because containment is per store by design.
     assert "storeASecret1234" not in b.redaction_values()
+
+
+# --- the classification: contained, or in the model's context -----------------
+
+
+def test_the_grading_separates_contained_from_exposed() -> None:
+    """``exposed`` is the severity, ``complete`` is the claim, and they differ.
+
+    Three outcomes are possible for one hit and the design needs all three: a value
+    masked whole (contained — the ordinary case), a value whose mask was withheld
+    because its extent cannot be proven (a truncated PEM: contained, unclaimable),
+    and a value with readable material still in the text (exposed — the one case
+    that is a compromise). Collapsing the first two into the third is what made
+    every masking event look like a compromise, and having no third at all is what
+    kept the real one silent.
+    """
+    import local_operator.redaction_shapes as rs
+
+    value = "regional-opensearch-admin-9"
+    hit = rs.ShapeHit(label="credential-assignment", value=value, window=value)
+
+    contained = rs._only_fully_masked([hit], "OPENSEARCH_PASSWORD=[redacted]")[0]
+    assert (contained.complete, contained.exposed) == (True, False)
+
+    exposed = rs._only_fully_masked([hit], f"OPENSEARCH_PASSWORD=x  # kept: {value}")[0]
+    assert (exposed.complete, exposed.exposed) == (False, True)
+
+    # The third outcome: a key whose extent is unknown. Everything visible is
+    # masked, so nothing reached the model, and the claim is still withheld.
+    truncated = f'{{"private_key": "-----BEGIN RSA PRIVATE KEY-----\n{_PEM_BODY}\n"}}'
+    _, pem_hits = rs.scrub_shapes_with_hits(truncated)
+    assert pem_hits, "the truncated block filed no hit"
+    assert not any(h.complete for h in pem_hits), "a truncated key claimed a whole mask"
+    assert not any(h.exposed for h in pem_hits), "a masked truncated key is not an exposure"
+
+
+#: The positives that ESCALATE, named by the case's own reason string.
+#:
+#: An EXACT set, in both directions, like the partial-mask ratchet further down: a
+#: case that joins it is a new false rotation demand, and one that leaves it without
+#: the code change being recorded in the same commit is a fix nobody can see.
+#:
+#: ``amqp DSN`` (``amqp://guest:guest@rabbit.internal:5672/``) is the one that must
+#: STAY. Its username and its password are the same five characters, and the DSN rule
+#: deliberately keeps ``amqp://user:`` readable — so the password's own characters
+#: genuinely sit in the text the model reads, ``value in text`` finds them, and the
+#: hit escalates. That is the CONSERVATIVE direction and it is the point of this
+#: change: base ``4a16dd62`` filed NOTHING here (the silent hole this PR closes), and
+#: a rotation demand on a conceivably-readable secret is recoverable where a missed
+#: leak is not.
+#:
+#: Do NOT silence it by excluding the marker or the mask-kept neighbours before
+#: testing. QA round 1 proposed exactly that, and it suppresses this genuine
+#: survivor along with the three false ones — the two ``.npmrc`` cases and the
+#: cookie-header case, which are the marker-identity false positives pinned below.
+_ESCALATING_POSITIVE_CASES = frozenset({"amqp DSN"})
+
+
+def test_only_the_documented_positive_case_escalates() -> None:
+    """The corpus is the referee: one escalation, NAMED, with 179/179 still masked.
+
+    QA round 1 (Q1) measured four positives escalating at head ``91d70791``, three of
+    them on nothing readable at all. Anchoring the check on the hit's own VALUE —
+    and stripping the redaction marker before taking the text's runs — takes those
+    three out and leaves the one survivor the frozen set above argues for.
+
+    A structural pin rather than three point tests, so a corpus case that starts
+    escalating cannot arrive silently: a rise fails HERE, and a fall fails too until
+    the frozen set is updated in the commit that caused it.
+    """
+    import local_operator.redaction_shapes as rs
+
+    escalating: set[str] = set()
+    unmasked: list[str] = []
+    for case in POSITIVE_CASES:
+        masked, hits = scrub_shapes_with_hits(case.text)
+        if REDACTION_MARKER not in masked:
+            unmasked.append(case.reason)
+        if rs.shape_report(hits).reached_model:
+            escalating.add(case.reason)
+
+    assert not unmasked, f"the mask stopped holding for: {unmasked[:5]}"
+    assert escalating == set(_ESCALATING_POSITIVE_CASES), (
+        f"the escalating positives changed: {sorted(escalating)} — a case that JOINED "
+        "is a new false rotation demand, and one that LEFT has to update this set in "
+        "the same commit as the fix that caused it"
+    )
+
+
+def test_a_marker_valued_hit_no_longer_escalates() -> None:
+    """The half of Q1 QA got right, driven through the shipped path.
+
+    Both ``.npmrc`` ``_authToken`` spellings and the cookie-header case are runs where
+    a SECOND rule matched the marker the first rule had just inserted, so the exposed
+    hit's own value IS (or contains) ``[redacted]``. The old check searched windows of
+    the matched REGION against the masked text, found the literal marker it had just
+    written, and filed a rotation demand for a value that was never readable.
+    """
+    import local_operator.redaction_shapes as rs
+
+    for reason in (
+        "the .npmrc auth token, bare name",
+        "the .npmrc auth token with a registry path",
+        "a cookie header inside a curl invocation",
+    ):
+        case = next(c for c in POSITIVE_CASES if c.reason == reason)
+        masked, hits = scrub_shapes_with_hits(case.text)
+        assert REDACTION_MARKER in masked, f"{reason} is no longer masked"
+        assert (
+            rs.shape_report(hits).reached_model is False
+        ), f"{reason} files a rotation demand again: {masked!r}"
+        # The mechanism the case exists for, pinned rather than inferred: without a
+        # hit whose own value carries the marker this case stops exercising anything.
+        assert any(
+            REDACTION_MARKER in hit.value for hit in hits
+        ), f"{reason} no longer produces a marker-valued hit"
+
+
+def test_a_password_equal_to_its_own_username_still_escalates() -> None:
+    """The ``amqp``/``postgres`` username==password class, which must NOT be silenced.
+
+    Escalating is the conservative direction and this is a real survivor, not a
+    misfire: the DSN mask keeps ``amqp://user:`` readable by design, so the
+    credential's own characters are in the model-visible text. The assertion below is
+    the measurement — the password's value read straight out of the masked output.
+    """
+    import local_operator.redaction_shapes as rs
+
+    case = next(c for c in POSITIVE_CASES if c.reason == "amqp DSN")
+    masked, hits = scrub_shapes_with_hits(case.text)
+    assert REDACTION_MARKER in masked, "the DSN password is no longer masked"
+    (hit,) = [h for h in hits if h.label == "dsn-password"]
+    assert hit.value and hit.value in masked, (
+        "the credential's own characters are no longer readable in the masked text, "
+        "so escalating would be a misfire and this case belongs in the frozen set "
+        "above as a documented false positive instead"
+    )
+    assert hit.exposed is True
+    assert rs.shape_report(hits).reached_model is True
+
+
+def test_a_marker_inside_the_credentials_own_value_is_a_recorded_limit() -> None:
+    """The limit recorded on ``_credential_fragments_survive``, pinned so it is seen.
+
+    A credential that itself contains ``[redacted]`` and survives only PARTIALLY is
+    ungradeable: the surviving fragment is spelled exactly like the marker a mask
+    writes, and no reading of the text can separate the two. That identity is why the
+    marker-identity cases above escalate wrongly under a region search AND why this
+    one cannot be graded by inspection. The wholly-surviving copy is still caught, so
+    only the partial case is given up — recorded here rather than paid for, because
+    reaching it needs an operator secret containing the harness's marker string.
+    """
+    import local_operator.redaction_shapes as rs
+
+    value = f"tok{REDACTION_MARKER}tail"  # an operator secret that contains the marker
+    whole = rs.ShapeHit(label="credential-assignment", value=value, window=value)
+    assert rs._only_fully_masked([whole], f"PASSWORD={value}")[0].exposed is True
+
+    partial = rs.ShapeHit(label="credential-assignment", value=value, window=value)
+    assert rs._only_fully_masked([partial], f"PASSWORD=tok{REDACTION_MARKER}")[0].exposed is False
+
+
+def test_a_duplicated_placeholder_reference_does_not_escalate() -> None:
+    """A DSN copy plus a SECOND, bare mention of the same ``$VAR`` is CONTAINED.
+
+    The DSN rule masks the copy inside the URL and deliberately leaves a bare
+    ``$VAR`` readable (``is_placeholder_component`` is what keeps it unmasked), so
+    the fragment test found that survivor under the hit's own value and read it as
+    a partial mask — the loud ``rotate it`` notice for a value that never was
+    credential material. The exposed decision site is now the third place the
+    predicate is consulted (the masking floor and the registration floor are the
+    others), which is the whole of the fix: no word-list change reaches it, because
+    the value is correctly a placeholder already.
+
+    Every literal is built by concatenation on purpose — a credential-shaped
+    literal written into a source file is exactly what the scrubber is for.
+    """
+    import local_operator.redaction_shapes as rs
+
+    scheme = "post" + "gres"
+    reference = "$" + "GITLAB_" + "TOKEN"
+    head = f"{scheme}://u:{reference}@gitlab.com/db"
+
+    # The second mention is the trigger; the first line alone is the control.
+    duplicated = f"{head}\n# token is {reference}"
+    masked, hits = scrub_shapes_with_hits(duplicated)
+    assert REDACTION_MARKER in masked, "the DSN copy must still be masked"
+    assert (
+        rs.shape_report(hits).reached_model is False
+    ), f"a duplicated placeholder files a rotation demand: {masked!r}"
+
+    _, single_hits = scrub_shapes_with_hits(head)
+    assert rs.shape_report(single_hits).reached_model is False
+
+
+def test_a_duplicated_real_secret_still_escalates() -> None:
+    """The conservative direction the fix must NOT trade away.
+
+    A genuinely half-masked real secret — the marker over the head of the value
+    and its own characters readable in a second, unmasked mention — is a real
+    survivor and must keep asking for a rotation. A JSON manifest would carry any
+    earlier victim of a placeholder check; the ticket expected this arm before merge.
+    """
+    import local_operator.redaction_shapes as rs
+
+    scheme = "post" + "gres"
+    secret = "qA2S3n7x9" + "Zk4Wm1B4dR6"  # noqa: S105 - fabricated, assembled here
+    text = f"{scheme}://u:{secret}@gitlab.com/db\n# pw is {secret}"
+
+    _, hits = scrub_shapes_with_hits(text)
+    (hit,) = [h for h in hits if h.label == "dsn-password"]
+    assert hit.exposed is True
+    assert rs.shape_report(hits).reached_model is True
+
+
+def test_a_degenerate_single_repeated_character_run_is_contained() -> None:
+    """A 64-character run of ONE repeated character is a placeholder, not a secret.
+
+    Zero entropy and a distinct-character count of 1; no real token is spelled
+    that way. The existing predicate already classes it a placeholder (the single
+    repeated character clause), so the fix covers it with no new discriminator —
+    recorded here because the ticket asked for its disposition to be read rather
+    than assumed.
+    """
+    import local_operator.redaction_shapes as rs
+
+    scheme = "post" + "gres"
+    degenerate = "b" * 64
+    assert rs.is_placeholder_component(degenerate) is True
+    text = f"{scheme}://u:{degenerate}@gitlab.com/db\n# token is {degenerate}"
+    _, hits = scrub_shapes_with_hits(text)
+    assert rs.shape_report(hits).reached_model is False
+
+
+def test_a_mask_that_stopped_inside_a_credential_is_an_exposure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A partial mask is an EXPOSURE, and only the window half can see it.
+
+    The shape this grading exists for is a mask that stopped INSIDE a credential:
+    the pattern captured less than the credential, so the marker was written over
+    the captured part and the rest stayed readable. The whole-value question cannot
+    see that — it reads the text as delivered, and the marker sits where the head of
+    the value would be — so the window half is the only thing between that mask and
+    a silent compromise, and a case that pins the whole-value half alone leaves it
+    deletable (agent review R1, F1: of the corpus's 183 graded hits, not one needs
+    this half).
+
+    The mirror is asserted with it, so the case cannot be satisfied by a guard that
+    escalates on any mask at all.
+    """
+    import local_operator.redaction_shapes as rs
+
+    # Both window arms must answer this case, so pin the OTHER one here: at this
+    # value's 15 windows the crossover picks the per-window search arm, which left
+    # `_present_windows` (the gated pass, and the arm the incident itself took)
+    # pinned by no test at all (agent review R2, C2).
+    monkeypatch.setattr(rs, "_searches_are_cheaper", lambda keys: False)
+
+    value = "p@ssw0rd-at-the-tail"
+    hit = rs.ShapeHit(label="dsn-password", value=value, window=value)
+    tail = value[6:]  # what a mask that stopped after six characters left readable
+
+    # Only a run of the value is readable, and the whole value is not in the text
+    # because the marker is where its head was: the seam is the whole test.
+    partial = rs._only_fully_masked([hit], f"PASSWORD={REDACTION_MARKER}{tail}")[0]
+    assert (partial.complete, partial.exposed) == (False, True)
+    # And the exposure is a compromise the session reports as one: this is the
+    # predicate behind the escalated notice, so the case cannot pass by grading a
+    # hurt hit that nothing acts on.
+    assert rs.shape_report([partial]).reached_model is True
+
+    # The mirror: the marker and nothing else of this value — contained, claimable.
+    contained = rs._only_fully_masked([hit], "PASSWORD=" + REDACTION_MARKER)[0]
+    assert (contained.complete, contained.exposed) == (True, False)
+
+
+def test_the_fragment_floor_is_pinned_from_both_sides() -> None:
+    """``_FRAGMENT_WINDOW`` is the floor this check is built on, and it is pinned.
+
+    It is the shortest run of a credential the pass will call readable material, so
+    the constant is load-bearing in both directions and nothing else in the suite
+    can see either end: the corpus contains no case whose grading depends on it
+    (agent review R1, F3 — the whole test file stays green at 7, and the predicate
+    restatement cannot disagree about a case the corpus does not hold). The pin is
+    therefore behavioural rather than an equality against the constant: a run of
+    exactly the floor survives a mask seam, and a run one character shorter does
+    not, so the pair fails if the floor moves either way.
+    """
+    import local_operator.redaction_shapes as rs
+
+    six = "abcdef"
+    # The value straddles the mask: the whole-value half cannot see it (the marker
+    # is between its halves) and the window half can (its characters are back
+    # together once the marker is stripped). At a floor of 7 the value has no window
+    # and this becomes contained.
+    hit = rs.ShapeHit(label="password", value=six, window=six)
+    assert rs._only_fully_masked([hit], f"k=abc{REDACTION_MARKER}def\n")[0].exposed is True
+
+    # One character below the floor: the same shape has no window at all, so nothing
+    # of it is readable material. At a floor of 5 this becomes an exposure.
+    five = "abcde"
+    shorter = rs.ShapeHit(label="password", value=five, window=five)
+    assert rs._only_fully_masked([shorter], f"k=ab{REDACTION_MARKER}cde\n")[0].exposed is False
+
+
+# --- what the classification COSTS --------------------------------------------
+#
+# The half of this pass that grades a hit used to ask the text one question per
+# hit — ``value in text`` — and the text is megabytes, so the price was
+# ``hits x bytes``: five session runtimes on this machine were found frozen for 1.5
+# to 7.2 hours with 100% of their event-loop thread sampled inside its C-level
+# search, heartbeats stale for hours, and every control call (``lop stop``,
+# ``steer``, ``cancel``) refusing, because they all marshal onto the busy loop. The
+# tests below are the structural half of the fix: they count the WORK, in bytes
+# walked, and assert that the hit count does not appear in it — never a stopwatch,
+# for the reason AGENTS.md records under "Prefer a structural invariant to a
+# numeric one".
+
+#: One credential row, repeated. A large tool result or transcript body carries the
+#: same command and the same result over and over, so this is the shape the pass is
+#: expensive on — and the one the old per-hit scan made quadratic, because the hits
+#: multiply while the text stays a single string. Built from ``SENTINEL`` so this
+#: file still spells no credential-shaped literal of its own.
+_HIT_ROW = "MONGO_DSN=" + SENTINEL + "\n"
+
+
+def _distinct_row(index: int) -> str:
+    """One row carrying a credential no other row carries.
+
+    The USERNAME is deliberately the same in every row and the VALUE's tail is what
+    varies: the credential the pass grades is the value, so distinct usernames would
+    still be one credential to grade and would never reach the key count this fixture
+    exists for.
+    """
+    tailed = SENTINEL.replace(SENTINEL_FRAGMENT, f"{SENTINEL_FRAGMENT}-{index:04d}")
+    return "MONGO_DSN=" + tailed + "\n"
+
+
+#: Filler with no anchor in it at all, so the credential rows are the only thing
+#: the pass has to grade.
+_PAD_ROW = "a line of ordinary text with nothing shaped in it whatsoever\n"
+
+
+def _rows_text(rows: int, size: int, *, distinct: bool = False) -> str:
+    """``rows`` credential rows inside about ``size`` bytes of text."""
+    body = "".join(_distinct_row(index) for index in range(rows)) if distinct else _HIT_ROW * rows
+    return body + _PAD_ROW * max(0, (size - len(body)) // len(_PAD_ROW))
+
+
+#: A credential long enough to carry many WINDOWS, which is the half of the check the
+#: cost tests could not see: the sentinel's own value asks 11 distinct windows of the
+#: text, the credential below asks 51, and the per-window search arm walks the text
+#: once for each. The tail is a counting sequence rather than a repeated character
+#: because the windows are what that arm searches for, and a run of one character
+#: collapses into a single key. Derived from ``SENTINEL`` again, so the file still
+#: spells no credential-shaped literal of its own.
+_LONG_VALUE = SENTINEL_FRAGMENT + "".join(f"{index:02d}" for index in range(20))
+_LONG_ROW = "MONGO_DSN=" + SENTINEL.replace(SENTINEL_FRAGMENT, _LONG_VALUE) + "\n"
+
+
+def _long_rows_text(rows: int, size: int) -> str:
+    """``rows`` copies of the LONG credential inside about ``size`` bytes of text."""
+    body = _LONG_ROW * rows
+    return body + _PAD_ROW * max(0, (size - len(body)) // len(_PAD_ROW))
+
+
+#: The real ``_SurvivalIndex._readable_text``, captured here so the wrapper
+#: :func:`_grading_work` installs can call it without chaining onto a wrapper an
+#: earlier call left on the class.
+_ORIGINAL_READABLE_TEXT = redaction_shapes._SurvivalIndex._readable_text
+
+
+class _CountingText(str):
+    """A str that counts the BYTES searched on it by the whole-text arms.
+
+    ``value in text`` is a C-level walk of the whole string, and that walk is the
+    cost this file measures — the same measure for the old code (one walk per hit)
+    and for the new one (one walk per key), which is what lets the before/after
+    claim be one number rather than two mechanisms.
+
+    A search can land on a DERIVED string rather than on the object the caller
+    holds: the window half reads the text with the marker stripped, which is a
+    different string whenever the text carries a marker — and every graded fixture
+    here does, because a mask is what put the marker there. Such a copy is built
+    with the caller's ``sink`` so its walks are counted with the caller's; a private
+    counter on the copy would be read by nobody, which is exactly how the window
+    half's searches went unmeasured (agent review R1, F2).
+    """
+
+    #: Declared on the CLASS, not set only per instance: the derived copies built in
+    #: ``__new__`` are typed from this annotation, and without it pyright reports
+    #: three errors on the sink reads below (agent review R2, C1).
+    _sink: list[int]
+
+    def __new__(cls, value: str, sink: list[int] | None = None) -> "_CountingText":
+        text = super().__new__(cls, value)
+        text._sink = sink if sink is not None else [0]
+        return text
+
+    @property
+    def scanned(self) -> int:
+        """The bytes searched on this object and on every copy sharing its sink."""
+        return self._sink[0]
+
+    def __contains__(self, key: str) -> bool:
+        self._sink[0] += len(self)
+        return super().__contains__(key)
+
+
+def _grading_work(text: str, monkeypatch: pytest.MonkeyPatch) -> tuple[int, int, int]:
+    """The work grading ``text`` costs: ``(searched, passed over, credentials)``.
+
+    Both arms are counted, so neither can hide from the assertion: the whole-text
+    searches through :class:`_CountingText` — including the ones the window half
+    makes on the marker-stripped copy of the text, which is where most of its cost
+    went unmeasured — and the one-pass arms by wrapping the two helpers that read the
+    text at once. The hits come from the real pass over the real fixture, so what is
+    measured is the shipped composition rather than a hand-built approximation of it.
+    The third number is how many DISTINCT credentials were graded, which is what
+    decides which arm runs.
+    """
+    from local_operator import redaction_shapes as rs
+
+    scrubbed, hits = scrub_shapes_with_hits(text)
+    assert hits, "the fixture graded no hits, so measuring it would prove nothing"
+    # The fixture has to reach BOTH halves: an EXPOSED hit is answered by the
+    # whole-value half alone, and the window half — where the quadratic term lived
+    # — would never be measured. Every hit this shape produces is contained, so the
+    # fixture is the shape the pass is expensive on rather than a special case.
+    assert not any(hit.exposed for hit in hits), "the fixture short-circuits the window half"
+    counted = _CountingText(scrubbed)
+
+    # The window half asks its questions of ``_readable_text()``, which is the text
+    # with the marker stripped — a COPY, when there is a marker to strip, and one the
+    # caller never holds. That lookup is the window half's whole cost, so the copy is
+    # given the sink of the text THIS call handed in: without it the long-credential
+    # fixture below reported 1.86 walks while its window half was asking 51 questions
+    # of the text (agent review R1, F2).
+    #
+    # The original is taken from the module rather than from the class: this helper is
+    # called several times per test with one monkeypatch, and a wrapper that captured
+    # the class attribute would chain onto the previous call's wrapper and hand its
+    # answer back — measuring the second fixture with the first fixture's meter, which
+    # is the same blindness one layer down.
+    def counted_readable(index: Any) -> str:
+        readable = _ORIGINAL_READABLE_TEXT(index)
+        if isinstance(readable, _CountingText):
+            # No marker to strip: the readable text IS the counted text the caller
+            # handed in, and counting it counts these searches with it.
+            return readable
+        sink = getattr(getattr(index, "_text", None), "_sink", None)
+        if sink is None:
+            # A text this meter did not hand in: the wrapper stays on the class for
+            # the rest of the test, and ``scrub_shapes_with_hits`` reads its own text
+            # before every measured call. Those searches are not the measurement, so
+            # the text is handed back untouched.
+            return readable
+        return _CountingText(readable, sink)
+
+    monkeypatch.setattr(rs._SurvivalIndex, "_readable_text", counted_readable)
+    passed = 0
+
+    def account(original: Callable[..., Any]) -> Callable[..., Any]:
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            nonlocal passed
+            passed += len(args[0])
+            return original(*args, **kwargs)
+
+        return wrapper
+
+    for name in ("_present_windows", "_present_heads"):
+        original = getattr(rs, name, None)
+        if original is None:
+            # A tree with no one-pass arm at all: its per-hit searches are then the
+            # whole measurement, which is exactly what this test exists to catch,
+            # and the assertion below still reports the bytes it walked.
+            continue
+        monkeypatch.setattr(rs, name, account(original), raising=False)
+    rs._only_fully_masked(hits, counted)
+    return counted.scanned, passed, len({hit.value for hit in hits})
+
+
+def test_grading_never_costs_a_walk_of_the_text_per_hit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Four times the hits over the same text must not cost four times the work.
+
+    This is the defect itself, measured the way the freeze measured it. The grading
+    half used to be one whole-text search per hit, so the same bytes walked four
+    times as far when the hits quadrupled — which is what turned a 50 s replay into
+    a runtime that had to be SIGKILLed by hand. The bound is on WORK (bytes walked
+    by a search or a pass), which is a fact about the code rather than about this
+    machine, so it cannot flake on a loaded runner.
+    """
+    size = 256_000
+    few_text = _rows_text(rows=200, size=size)
+    many_text = _rows_text(rows=800, size=size)
+    few = _grading_work(few_text, monkeypatch)
+    many = _grading_work(many_text, monkeypatch)
+    assert sum(many[:2]) <= sum(few[:2]) * 1.5, (
+        f"grading got more expensive with the hit count: {few} -> {many} bytes walked "
+        f"over {size} bytes of text"
+    )
+
+    # And at a FIXED hit density, four times the text costs about four times the
+    # work, not sixteen: cost per byte is what rose with size in the measurements
+    # this change came from (1.19 -> 2.63 us per byte from 64 KB to 512 KB), and it
+    # rose because the hits rose with the size.
+    quarter_text = _rows_text(rows=200, size=64_000)
+    whole_text = _rows_text(rows=800, size=256_000)
+    quarter = _grading_work(quarter_text, monkeypatch)
+    whole = _grading_work(whole_text, monkeypatch)
+    quarter_rate = sum(quarter[:2]) / len(quarter_text)
+    whole_rate = sum(whole[:2]) / len(whole_text)
+    assert whole_rate <= quarter_rate * 2, (
+        f"the cost per byte of grading rises with the size of the text: "
+        f"{quarter_rate} -> {whole_rate}"
+    )
+
+
+def test_grading_walks_a_text_at_most_its_keys_worth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The absolute bound, at both ends of the key count.
+
+    One credential repeated: the whole-value half is one search and the window half
+    is one search per window of that credential — the arm chosen for a small key
+    count, and at most ``(1 + windows)`` walks of the text for the fixture below.
+    Four hundred DISTINCT credentials: both halves are past the crossover, so each
+    reads the text once whatever the key count — the arm that keeps a text full of
+    credentials from costing a walk per credential.
+    """
+    repeated = _rows_text(rows=400, size=256_000)
+    searched, passed, distinct = _grading_work(repeated, monkeypatch)
+    assert distinct == 1, f"the repeated fixture graded {distinct} credentials"
+    assert passed == 0, "the one-credential fixture took the one-pass arm"
+    limit = 40 * len(repeated)
+    assert searched <= limit, f"{searched} bytes walked over {len(repeated)}, one credential"
+
+    many = _rows_text(rows=400, size=256_000, distinct=True)
+    searched, passed, distinct = _grading_work(many, monkeypatch)
+    assert distinct == 400, f"the distinct fixture graded {distinct} credentials"
+    # One walk of the text is the marker probe that decides whether the window half
+    # has anything to strip at all; the arms themselves are the one-pass ones.
+    assert searched <= len(many), f"{searched} bytes searched for {len(many)}"
+    assert passed <= 4 * len(many), (
+        f"the many-credential fixture walked {searched + passed} bytes over "
+        f"{len(many)}: the one-pass arms must not scale with the key count"
+    )
+
+
+def test_a_long_credential_is_measured_where_its_cost_is(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The window half's walks are counted, not just the whole-value half's.
+
+    The arm the window half takes while its key count is small is one C-level search
+    per WINDOW of the credential, and those searches run on the marker-stripped copy
+    of the text — so a meter that reads only the object the caller holds sees none of
+    them. The sentinel's own value carries 11 distinct windows; the long credential
+    below carries 51, and it is the one whose cost the meter has to show.
+
+    The floor asserted here is the window count itself, which is what makes this a
+    test of the instrument rather than of the code: the fixture below reported 1.86
+    walks on the old meter, and no such report can reach 51 windows' worth of walks
+    without counting those searches (agent review R1, F2).
+    """
+    import local_operator.redaction_shapes as rs
+
+    text = _long_rows_text(rows=400, size=256_000)
+    searched, passed, distinct = _grading_work(text, monkeypatch)
+    # The credential as the pass grades it — the value ON the hit, which is what the
+    # window half keys its windows on — rather than the literal the row was built
+    # from: the DSN rule hands over part of what the row carries.
+    (value,) = {hit.value for hit in scrub_shapes_with_hits(text)[1]}
+    windows = len(value) - rs._FRAGMENT_WINDOW + 1
+
+    assert distinct == 1, f"the long-credential fixture graded {distinct} credentials"
+    assert passed == 0, "the long-credential fixture took the one-pass arm"
+    # The floor is the window count, at half the fixture's length: not a byte-exact
+    # claim about which strings get walked, but one only a meter that counts the
+    # window half's searches can reach.
+    assert searched >= windows * len(text) // 2, (
+        f"{searched} bytes searched over {len(text)} for {windows} windows: the meter "
+        "is not counting the window half's walks"
+    )
+    # And it is still bounded by the windows, the whole-value search and the marker
+    # probe: the 400 hit rows do not appear in it.
+    assert searched <= (windows + 4) * len(
+        text
+    ), f"{searched} bytes walked for {windows} windows over {len(text)} bytes of text"
+
+
+def test_the_single_pass_arm_verifies_the_whole_value_it_claims() -> None:
+    """The one-pass arm's key is only a CANDIDATE: the value is checked in full.
+
+    ``_present_heads`` is the arm taken once the key count passes the crossover, and
+    it is keyed on each value's own first ``_FRAGMENT_WINDOW`` characters. A text can
+    carry that head without carrying the credential — a name that starts like a
+    token, a shorter value that prefixes a longer one — so every candidate is sliced
+    against the whole value before it enters the answer. Deleting that slice leaves
+    the whole suite green (agent review R1, F5), which is why it is pinned here
+    directly: through the composed pass the window half usually reaches the same
+    verdict by its own route, so the difference only shows on the narrow
+    marker-bearing shape that ``_credential_fragments_survive`` records as a limit.
+    """
+    import local_operator.redaction_shapes as rs
+
+    head = "verification-head-9"
+    # The head's six characters, and nothing after them: a candidate, not a hit.
+    assert rs._present_heads("text with verification-XXXX nothing else", [head]) == set()
+    # The same value in full IS a hit, and a value shorter than the window is looked
+    # up at its own length rather than by a window it does not have.
+    assert rs._present_heads(f"text with {head} in it", [head]) == {head}
+    assert rs._present_heads("PASSWORD=abcde tail", ["abcde"]) == {"abcde"}
+
+
+def test_the_single_pass_arm_is_total_over_an_empty_value() -> None:
+    """The empty value is skipped rather than raising ``IndexError``.
+
+    An empty value has no character to key on, so its key would be ``""`` and the
+    head lookup inside ``_present_heads`` would index it at 0. Both callers filter
+    it out today (``_SurvivalIndex`` drops it, and ``_credential_fragments_survive``
+    returns before the index), which is why this was latent instead of live — but a
+    helper whose declared input is a sequence of strings should not depend on two
+    callers to stay total (agent review R1, F4).
+    """
+    import local_operator.redaction_shapes as rs
+
+    assert rs._present_heads("aaa", [""]) == set()
+    assert rs._present_heads("aaa", ["", "aaa"]) == {"aaa"}
+
+
+def test_the_two_arms_of_the_index_are_interchangeable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The arm is a COST decision, so it may never move a mask or a grading.
+
+    Both arms are the same two predicates — one C-level search per key, or one
+    gated pass over the text — and which one runs is decided from two measured
+    per-byte costs. Forcing each arm over the whole corpus and over the incident's
+    own shape is what keeps that a fact about the code rather than an argument.
+    """
+    from local_operator import redaction_shapes as rs
+
+    texts = [
+        *(case.text for case in (*POSITIVE_CASES, *NEGATIVE_CASES)),
+        (_HIT_ROW + _PAD_ROW) * 40,
+        _HIT_ROW * 40 + _PAD_ROW * 400,
+        "".join(_distinct_row(index) for index in range(200)),
+    ]
+
+    def grading() -> list[Any]:
+        return [
+            (
+                scrub_shapes_with_hits(text)[0],
+                [
+                    (hit.label, hit.value, hit.window, hit.complete, hit.exposed)
+                    for hit in scrub_shapes_with_hits(text)[1]
+                ],
+            )
+            for text in texts
+        ]
+
+    monkeypatch.setattr(rs, "_searches_are_cheaper", lambda keys: True)
+    searches = grading()
+    monkeypatch.setattr(rs, "_searches_are_cheaper", lambda keys: False)
+    passes = grading()
+    assert searches == passes, "the arm chosen for cost changed a mask or a grading"
+
+
+def _corpus_grading() -> str:
+    """The corpus's masked text and full hit set, serialised as one digest."""
+    canonical = []
+    for case in (*POSITIVE_CASES, *NEGATIVE_CASES):
+        masked, hits = scrub_shapes_with_hits(case.text)
+        canonical.append(
+            [
+                case.reason,
+                masked,
+                [[hit.label, hit.value, hit.window, hit.complete, hit.exposed] for hit in hits],
+            ]
+        )
+    return hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+#: What the whole corpus produces TODAY, values included: every masked text, every
+#: hit and every grading. Regenerate by printing ``_corpus_grading()`` — and only in
+#: the commit that argues why the behaviour moved.
+#:
+#: Moved on 2026-09-21 by the false-positive fix, and the argument is short because
+#: the measurement is: **no pre-existing case moved at all.** The corpus as it stood
+#: at ``origin/main`` (308 cases) produces byte-identical masked text, labels, values,
+#: windows, ``complete`` and ``exposed`` under this module — measured case by case
+#: against ``git show origin/main:local_operator/redaction_shapes.py`` loaded beside
+#: it. The digest moves for one reason only: the corpus GREW, to 335 cases, and the
+#: added cases are the specification for the fix — 5 compact-JSON positives, 4 counter
+#: negatives, one positive per name in ``COUNT_QUALIFIER_NAMES`` (the credential names
+#: an any-segment count sweep released in the first version of this change: agent
+#: review R1-1, QA round 1 Q-1), and one negative per name in
+#: ``COUNT_TAIL_RELEASED_NAMES`` (the boundary the tail arm draws, pinned in the half
+#: it releases: QA round 2, Q2-1).
+#:
+#: MOVED ONCE MORE on 2026-09-21, in the commit that answers agent review R1-1, and
+#: the argument is again a measurement rather than a claim: no production code
+#: changed in that commit — the diff to ``redaction_shapes.py`` is comments only, so
+#: nothing could move — and the digest delta is exactly the one added row. Measured
+#: by recomputing this function over the corpus WITHOUT that row under the same
+#: module: 341 cases produce ``d76461eb…``, the constant this commit replaces, and
+#: 342 produce the value below. The row is ``glpat-lowercase-token-value``, the
+#: boundary agent review R1-1 named: an all-lowercase, separator-carrying tail is
+#: read as a NAME, and ``origin/main`` masked this one as ``vendor-prefixed-token``.
+#: It sits in the NEGATIVE half on purpose, so the accepted residual is a test that
+#: fails if a later rule narrows it, rather than a paragraph someone has to trust.
+#:
+#: Moved AGAIN on 2026-09-21, by the fix for a vendor-prefixed FALSE POSITIVE, and
+#: the argument is the same measurement rather than a claim: the 335-case corpus
+#: described just above produces a BYTE-IDENTICAL grading under the fixed module
+#: (``git show origin/main:local_operator/redaction_shapes.py`` loaded beside it, and
+#: ``_corpus_grading()`` computed for that corpus under both modules and compared),
+#: so nothing already in the table moved — not a masked text, not a label, not a
+#: value, not a window, not a severity. The digest moves because the corpus grew to
+#: 341: five negatives for the spellings an ordinary env-var NAME takes in prose
+#: (``<prefix>_<name>=<value>``, the dash-joined form, and a fixed-prefix name), and
+#: one positive for the npm token's own hex-and-dash spelling, which pins the
+#: boundary the new tail predicate must leave alone.
+#:
+#: Moved on 2026-09-21 a fourth time, by the commit that pinned the MASK MARKER as
+#: corpus negatives, and the argument is once again a measurement: this commit's diff
+#: to ``redaction_shapes.py`` is EMPTY (tests only), so nothing could move — and the
+#: digest delta is exactly the three added rows, measured the same way as the round
+#: before it: recomputing ``_corpus_grading()`` over the 342 rows the constant above
+#: covered, i.e. this corpus minus the three marker rows, produces that constant
+#: byte for byte, and 345 produce the value below. What the three rows change is
+#: coverage rather than behaviour: the marker appeared in no row on either half, and
+#: its claim — that a message CONTAINING the detector's own output re-fires an
+#: incident — now fails against a table instead of against a paragraph.
+#:
+#: Moved on 2026-09-21 a FIFTH time, by the commit answering agent review R1-1/R1-3 on the
+#: marker pin, and the argument is the same measurement rather than a claim:
+#: ``redaction_shapes.py`` is untouched in this commit as well (its diff against
+#: the merge base ``2a9a737a`` is empty — this is a tests-and-comments change), so
+#: nothing could move,
+#: and the digest delta is exactly the ONE added row. Measured the same way: recomputing the
+#: grading over the 345 rows the constant above covered, i.e. this corpus minus
+#: ``npm-config-manage-package-manager-versions=false``, reproduces that constant byte for
+#: byte, and 346 produce the value below. The row closes the combination agent review R1-3
+#: named — the reported family's dash join CARRYING a value, the one spelling #1399 moved,
+#: which the four rows beside it covered only by intersection.
+#:
+#: Moved on 2026-09-21 a SIXTH time, by the second-wave false-positive fix, and the
+#: argument is the same measurement rather than a claim. The 346 rows the constant
+#: above covered produce that digest BYTE FOR BYTE under the fixed module —
+#: recomputed through this very function with the eleven added rows filtered out, so
+#: not a masked text, not a label, not a value, not a window, not a severity moved;
+#: and a second, independent check agrees: origin/main's module and this branch's
+#: grade all 346 pre-existing rows identically, field for field. The digest moves
+#: because the corpus grew to 357, and the added rows are the specification of the
+#: fix. Eight negatives: the count trap one ESCAPED newline away (three spellings,
+#: the JSON rendering's own), an identifier assigned to another identifier (two
+#: rows verbatim from the file whose ``read`` reported them), the guide's
+#: two-part secret-renaming form, and a vendor-looking prefix in front of an
+#: org/repo PATH — the slash spelling of a string the ``_`` and ``-`` spellings
+#: already spared. Three positives, because a narrowing that also stopped masking
+#: the credentials arriving IN an escaped rendering would be a leak: a real key one
+#: escaped newline after its name, a real key whose line ends where the rendering
+#: says it does, and a slash-joined tail that is a token (case plus a digit).
+#: MOVED ONCE MORE on 2026-09-21, in the commit that answers agent review R1-1,
+#: R1-2, R1-3 and R1-4 — and this one moves for TWO reasons, not one.
+#:
+#: The corpus grew from 357 rows to 422: 59 positives and 6 negatives, every one of
+#: them on a class R1-1 named. ``IDENTIFIER_ARM_NAMES`` crossed with
+#: ``IDENTIFIER_ARM_SPELLINGS`` and the digit-free underscore alphabet IS the
+#: released class: each of those rows was MASKED at ``origin/main`` and came back
+#: with NO HIT AT ALL — nothing registered, so nothing the later exact-value pass
+#: could contain — at the revision under review. The hyphenated and digit-carrying
+#: neighbours are pinned beside them, on the surface that carries them most often.
+#: The six negatives pin what the narrowed arm releases on purpose (three names
+#: whose tail is a quantity noun), what the six-character escape spellings do (two),
+#: and the one value class the pre-escape judgement releases on the escaped surface
+#: BECAUSE it releases it on the real one (one: a type-name-looking first line).
+#:
+#: AND ONE PRE-EXISTING ROW MOVES, which is the part a digest argument has to name.
+#: It is the positive the previous commit added for "a real key whose line ends where
+#: the rendering says it does": it masked up to the escape then, and it masks the
+#: WHOLE run now, because R1-2 measured that stopping there left a credential's tail
+#: readable under a hit still graded ``complete=True`` — and left it readable with no
+#: hit and no registration at all when the run before the escape was shorter than the
+#: floor. Exactly ONE of the 357 rows the previous constant covered moves, measured
+#: by grading all 357 through that revision's module and this one, field for field;
+#: it moves in the direction that keeps a credential out of the context window.
+#:
+#: MOVED AGAIN on 2026-09-21, in the commit that answers agent review R2-F2, and this
+#: one has the shape of a measurement too: the corpus grew from 422 rows to 423 — ONE
+#: added positive, the doubled-backslash spelling of a literal backslash before a
+#: credential word — and the 422 rows the constant above covered produce THAT digest
+#: byte for byte under the fixed module, recomputed through this very function with
+#: the added row filtered out. So not a masked text, not a label, not a value, not a
+#: window, not a ``complete``, not an ``exposed`` moved for any pre-existing row. The
+#: added row is the specification of the fix and it is the only row whose grading
+#: moves: at the revision above it came back with NO hit and nothing registered (the
+#: value readable), and it now carries ``credential-assignment`` as complete and
+#: contained. The class is a credential that LOST its mask, which is why the row is
+#: pinned in the POSITIVE half rather than argued about in prose.
+#: MOVED ON 2026-09-22, in the commit that stops the pass masking a store NAME in a
+#: credential-flag position, and the argument is once again a measurement rather than a
+#: claim — with a particular shape this time, because the module change is INVISIBLE to
+#: the corpus that existed. Grading the 423 rows the constant above covered under the
+#: ``origin/main`` module and under this one, field for field, produces byte-identical
+#: digests (``2a29fe4c…`` both times, measured beside `git show
+#: origin/main:local_operator/redaction_shapes.py` loaded as a second module), and the
+#: digest moves for one reason only: the corpus GREW, 423 -> 438, and the 15 added rows
+#: are the specification for the fix. Five positives are the VALUE side the release must
+#: not reach — an issuer token, the two underscore-joined phrases of the identifier arm
+#: (the class R1-1 measured), a single unseparated token, and a padded base64 value — and
+#: ten negatives are a store NAME in that position: the guide's own publish command and
+#: its ``cat``/``grep`` renderings, the same name under four other flag spellings, the
+#: ``=`` spelling, and the two-part form whose right half is not a credential word
+#: either.
+#:
+#: **The behaviour change the digest is too coarse to see, stated here instead.** Twelve
+#: argument spellings stop being masked — the store NAME under each flag in the rule's
+#: vocabulary, both separators, the two-part form, and the ``--token ABC_123_XYZ``-shaped
+#: residual the corpus pins as a negative — and NO row anywhere gains a mask. The corpus
+#: could not see any of them because every flag-carrying row it already had was either a
+#: VALUE (which still masks) or a NAME whose tail was a credential word (which was
+#: already released), which is exactly why the rows were added rather than argued about.
+#:
+#: **The constant the recovered commit carried was STALE, and it is re-derived here
+#: rather than trusted.** That commit's module and corpus were recovered from a subagent
+#: killed mid-task, and no test had been run against them before it was committed. Graded
+#: as they stand, the corpus produces ``946670a4…``, not the ``4cc31872…`` the commit
+#: recorded — written before its last corpus edit, and invisible to the suite for exactly
+#: the reason this constant exists: the one arm that would have caught it is the arm the
+#: constant belongs to, and a wrong constant fails only when someone runs it.
+#: The ARGUMENT above is what makes the correction safe, and it survives re-derivation
+#: unchanged: replaying it through this same function with the base module loaded beside
+#: the head one reproduces ``2a29fe4c…`` for the 423 rows that existed at ``bf48ca47``
+#: under BOTH modules, field for field, so the move is the corpus's growth (423 -> 438)
+#: and not a behaviour change on any pre-existing row.
+#:
+#: MOVED ONCE MORE ON 2026-09-22, in the commit that refuses the EXPOSURE CLAIM for the
+#: flag rule's word-shaped over-mask, and the argument is the same shape: no pre-existing
+#: row moved — the 438 rows above produce ``946670a4…`` byte for byte under this module
+#: too, measured by grading every one of them field for field with
+#: ``git show 1e8d33e6:local_operator/redaction_shapes.py`` loaded as a second module —
+#: and the digest moves for the corpus's growth alone, 438 -> 439: one positive that puts
+#: the word TWICE in the line, so the whole-value half of the exposure question answers
+#: yes for reasons that have nothing to do with the mask. That row is the second specimen
+#: the operator reported — a 33 KB documentation read escalated to a "rotate it" demand
+#: for the word ``when`` — and ``test_only_the_documented_positive_case_escalates`` now
+#: referees it like every other positive.
+#:
+#: MOVED ONCE MORE ON 2026-09-23, in the round-1 remediation, and here the argument has
+#: TWO halves because two different things happened in one commit.
+#:
+#: 1. **The module change is INVISIBLE to the corpus, measured.** Narrowing the flag
+#:    rule's prose refusal from ``len < _ASSIGNED_VALUE_MIN_CHARS`` (eight) to
+#:    ``len <= _FLAG_PROSE_MAX_CHARS`` (four) restores the escalation for every
+#:    five-, six- and seven-character value, and the corpus's only flag-position
+#:    word is the FOUR-character ``when`` row — refused by both bounds. So: the 442
+#:    rows below graded with ``git show f6f58eb7:local_operator/redaction_shapes.py``
+#:    loaded as a second module produce this same ``a755ab0e…`` byte for byte, and the
+#:    bound is separately shown to be insensitive across the whole range — grading the
+#:    439-row corpus with the refusal refusing bare words up to 4, 5, 6, 7, 8, 11 and 15
+#:    characters all give ``ff40e831…``, while refusing only up to 3 gives ``96341322…``
+#:    (it stops refusing the ``when`` row). Four is the narrowest bound that keeps that
+#:    row contained, which is why the boundary is pinned by a test rather than by a row:
+#:    the rows that would separate five from nine have to ESCALATE, and the corpus holds
+#:    exactly one escalating case by construction.
+#:
+#: 2. **The corpus grew by three rows, which is what moves the constant.** Measured by
+#:    recomputing over the corpus WITHOUT them under this same module: the 439 rows it
+#:    had produce ``ff40e831…`` field for field, so nothing pre-existing moved. The new
+#:    rows are two negatives and one positive from agent review R1-3 and R1-4 — the
+#:    TWO-PART spelling of the accepted residual (once with a separator in each half and
+#:    once with none, because the two halves are read by shape alone and so need no
+#:    separator at all: wider than the one-part release, and it had no row), and the
+#:    ONE-WORD store name the release does NOT reach (``normalize_credential_key("prod")``
+#:    is ``PROD``, so the arm's separator requirement leaves it masked). Both were found
+#:    by a differential rather than stated by the table, which is the thing this constant
+#:    exists to stop.
+_CORPUS_GRADING_DIGEST = "a755ab0e8960419f719323ae343ef725e9f8662f278b1bfc66ba0eef58406f57"
+
+
+def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:
+    """A security control is not allowed to move one byte because it got faster.
+
+    The pass that decides whether a credential is masked, and how badly it leaked
+    if it was not, was re-expressed (one index over the text instead of one search
+    per hit). This is the corpus as the referee, in both directions: a mask that
+    weakened, a hit that stopped being filed, a severity that changed — any of
+    those moves the digest, and none of them may move it silently.
+    """
+    assert _corpus_grading() == _CORPUS_GRADING_DIGEST, (
+        "the corpus no longer produces the same masked text and hit set. That is a "
+        "BEHAVIOUR change on a credential control, not a fixture update: the change "
+        "that moves this constant has to say which case moved and why it is safe."
+    )
+
+
+def test_the_grading_of_every_corpus_hit_matches_the_predicate() -> None:
+    """``exposed`` restated in the test, so a case the digest cannot see still holds.
+
+    The digest pins the corpus; this pins the PREDICATE the corpus is evidence for:
+    readable material from the credential is in the text the model reads when the
+    whole value is in the text as delivered, or when the value is at least a window
+    long and one of its six-character windows is in the text with the redaction
+    marker stripped. Restating it is the point — a re-implementation that agrees
+    with the corpus for the wrong reason fails on the next case.
+
+    ONE EXCLUSION, and it is part of the predicate rather than an exception to it:
+    the flag rule's word-shaped over-mask (``--api-key [redacted] you need to``) is graded
+    CONTAINED whatever the text says, because a value that is a bare lowercase word of
+    FOUR characters or fewer answers both questions YES for reasons that have nothing to
+    do with the mask — every English word recurs in prose, which is how a 33 KB
+    documentation read filed an ESCALATED rotation demand for the word ``when``
+    (2026-09-22). It is restated here, not imported, so the exclusion cannot drift from
+    the implementation without failing this arm.
+
+    THE RESTATED BOUND IS THE IMPLEMENTATION'S OWN FOUR, and that is the correction agent
+    review R1-2 asked for. It was eight — the module's masked-VALUE floor, which answers a
+    different question — and a restatement at eight could not catch drift across 5..9,
+    because the corpus holds no row that separates those bounds: measured, the grading is
+    identical for every bound at or above four. The rows that WOULD separate them have to
+    escalate, and the corpus holds exactly one escalating case by construction (the
+    reason ``test_a_genuinely_exposed_compact_credential_still_files_an_incident`` gives),
+    so the boundary is pinned in ``test_the_flag_prose_refusal_stops_at_four_characters``
+    instead, in both directions.
+
+    WHAT THIS RESTATEMENT CAN AND CANNOT CATCH, stated rather than implied: it fails on
+    drift DOWNWARD. An implementation refusing three characters or fewer leaves the
+    four-character ``when`` row escalating, where this arm — restating a bound of four —
+    computes ``exposed`` False for it, and the mismatch reds on the assertion below. Drift
+    UPWARD across five to nine is invisible to the corpus (no row of that width is a bare
+    word), so it is not this arm's job: it is the boundary test's.
+    """
+    short_word_floor = 4
+    checked = 0
+    for case in (*POSITIVE_CASES, *NEGATIVE_CASES):
+        masked, hits = scrub_shapes_with_hits(case.text)
+        readable = masked.replace(REDACTION_MARKER, "")
+        for hit in hits:
+            value = hit.value
+            exposed = bool(value) and value != REDACTION_MARKER
+            word_shaped = (
+                len(value) <= short_word_floor
+                and value.isascii()
+                and value.isalpha()
+                and value.islower()
+            )
+            if hit.label == "cli-credential-flag" and word_shaped:
+                exposed = False
+            elif exposed:
+                exposed = value in masked or (
+                    len(value) >= 6
+                    and any(value[start : start + 6] in readable for start in range(len(value) - 5))
+                )
+            assert hit.exposed is exposed, (case.reason, hit.label)
+            checked += 1
+    assert checked > 150, f"the corpus graded only {checked} hits: it is not evidence"
+
+
+def test_the_flag_prose_refusal_stops_at_four_characters() -> None:
+    """The refusal's BOUNDARY, both ways, where the corpus cannot pin it.
+
+    ``_is_prose_after_a_flag`` refuses the exposure claim for a bare lowercase word in a
+    credential flag's argument position, and the bound is FOUR characters. Nothing in the
+    corpus separates a bound of five from one of nine (measured: the grading is identical
+    for every bound at or above four) and the rows that WOULD have to escalate, which the
+    corpus may not hold — so the boundary lives here, on the specimens the refusal was
+    written for and on the short values it must NOT swallow (agent review R1-2, measuring
+    R1-1).
+
+    An implementation whose bound drifted to five, six, seven, eight or nine fails the
+    second loop; one that drifted to three or less fails the first. Both directions are
+    the point: the narrowing exists to stop manufacturing rotation demands for English
+    words, and it may not buy that by giving up the escalation for a short credential
+    printed a second time in the clear.
+    """
+    import local_operator.redaction_shapes as rs
+
+    def escalates(text: str) -> bool:
+        return rs.shape_report(scrub_shapes_with_hits(text)[1]).reached_model
+
+    # Assembled from its segments, like every other flag/value pair in this file: the flag
+    # followed by a value is the exact shape the pass rewrites, so no literal here is one.
+    flag = "--" + "api-key" + " "
+
+    # The word case the refusal exists for — the 33 KB documentation line whose second
+    # ``when`` in free prose filed a rotation demand — and the shorter specimen the suite
+    # already pins. Both stay CONTAINED, and these are the only two words in this test
+    # that are read as prose rather than as a value.
+    for word in ("when", "was"):
+        prose = f"{flag}{word} you need it, and {word} the flag is set it wins"
+        assert REDACTION_MARKER in scrub_shapes_with_hits(prose)[0], "the over-mask stopped"
+        assert not escalates(prose), f"the prose word {word!r} demanded a rotation again"
+
+    # Three and four characters: still contained. This is the STATED LIMIT of the
+    # refusal, pinned so a later widening of the bound is a decision rather than a
+    # differential — at that width a word cannot be told from a credential anywhere in
+    # the text, which is the whole of the reason the claim is refused.
+    for word in ("was", "hunt"):
+        short = f"{flag}{word} and the {word} is set"
+        assert not escalates(short), f"{word!r} (len {len(word)}) stopped being refused"
+
+    # Five, six and seven characters: escalated AGAIN, which is the half agent review
+    # R1-1 measured as lost. ``hunter`` (six) and ``letmein`` (seven) are the canonical
+    # short weak passwords; ``grace`` is the five-character edge of the same class. The
+    # BOUND is what is pinned here rather than the spelling, so any bare lowercase run of
+    # that width would do — what matters is that a credential-shaped value printed twice
+    # in the text the model reads keeps its escalation.
+    for word in ("grace", "hunter", "letmein"):
+        repeated = f"{flag}{word} and the {word} is set"
+        assert (
+            REDACTION_MARKER in scrub_shapes_with_hits(repeated)[0]
+        ), f"{word!r} stopped being masked"
+        assert escalates(repeated), (
+            f"a {len(word)}-character value printed twice no longer escalates: the "
+            "refusal is wider than its four-character specimens"
+        )
+
+
+def test_the_count_judgement_sees_every_segment_of_a_name() -> None:
+    """The name half of the assignment rule, at the segment level.
+
+    A count word is the QUALIFIER, and it is not always the first segment:
+    ``ephemeral_5m_input_tokens`` is a counter whose first segment is a MODE. The
+    judgement read ``segments[0]`` only, so the tail ``tokens`` won it, a counter
+    was masked, and on the compact spelling — where the next field's key sits
+    inside the match — the grader then found a fragment of the swallowed text in
+    the unmasked first key and demanded a rotation for a NUMBER.
+
+    Both halves, and the second half is asserted over NAMES rather than over
+    spellings: an any-segment sweep released the ``COUNT_QUALIFIER_NAMES`` family
+    — ``REDIS_CACHE_PASSWORD``, ``FACEBOOK_PAGE_ACCESS_TOKEN`` — which share the
+    counters' segment-level shape and are credentials, not counts (agent review
+    R1-1, QA round 1 Q-1). The first version of this test asserted four one- and
+    two-segment names with no count word in them, which is exactly why it could
+    report "nothing loses a mask" while a real name did: a name has to be driven
+    through BOTH the judgement and the pass, so that is what happens here.
+    """
+    for counter in (
+        "ephemeral_5m_input_tokens",
+        "ephemeral_1h_input_tokens",
+        "max_tokens",
+        "context_tokens",
+        "num_tokens",
+    ):
+        assert redaction_shapes.is_credential_name(counter), counter
+        assert redaction_shapes.is_count_shaped(counter), counter
+    for credential in ("access_token", "refresh_token", "client_secret", "api_key"):
+        assert redaction_shapes.is_credential_name(credential), credential
+        assert not redaction_shapes.is_count_shaped(credential), credential
+    for name in COUNT_TAIL_RELEASED_NAMES:
+        # The boundary the tail arm draws, asserted in the OTHER direction: a
+        # qualified quantity tail is a count, so these stay readable — and the
+        # corpus carries the case for each, so neither direction can drift alone
+        # (QA round 2, Q2-1).
+        assert redaction_shapes.is_credential_name(name), name
+        assert redaction_shapes.is_count_shaped(name), name
+    for name in COUNT_QUALIFIER_NAMES:
+        # Both readings, because either one alone can pass for the wrong reason:
+        # the judgement must call it a credential, and the pass must mask it.
+        assert redaction_shapes.is_credential_name(name), name
+        assert not redaction_shapes.is_count_shaped(name), name
+        masked = scrub_shapes(f"{name}={FIXTURE_VALUE}")
+        assert REDACTION_MARKER in masked, f"{name} left its value readable"
+        assert FIXTURE_VALUE not in masked, name
+
+
+def test_a_compact_json_pair_keeps_its_neighbouring_key_and_files_nothing() -> None:
+    """The measured over-mask, pinned in both directions.
+
+    On a compact pair the greedy value crossed the closing quote into the NEXT
+    field: the mask replaced the neighbour's key and value, and the grader —
+    correctly, for that match — found a fragment of the swallowed text inside the
+    UNMASKED first key and filed a rotation demand for a credential that had been
+    covered whole. So this asserts the shape of the right answer, not a count:
+    both keys stay readable, both values go, and nothing escalates.
+    """
+    text = COMPACT_TOKEN_PAIR
+    masked, hits = scrub_shapes_with_hits(text)
+    assert "access_token" in masked, "the credential's own key was masked away"
+    assert "refresh_token" in masked, "the neighbouring KEY was masked away"
+    assert masked.count(REDACTION_MARKER) == 2, masked
+    report = redaction_shapes.shape_report(hits)
+    assert not report.reached_model, report
+
+
+def test_a_genuinely_exposed_compact_credential_still_files_an_incident() -> None:
+    """The OVER-REACH direction: narrowing the value grammar may not stop filing.
+
+    The fix stops a fragment of a SWALLOWED neighbouring field grading as exposed.
+    It must not stop the other case, which is the one the whole control exists for:
+    a credential whose own characters are readable in the text the model gets.
+
+    Built from the corpus's compact pair — the same value echoed back in the clear
+    beside it, which is the spelling a response that quotes its own token has — and
+    asserted in BOTH directions: the pair is masked, and the hit is graded as having
+    reached the model BECAUSE the echo is still readable (the echo is not under a
+    credential name, so the pass leaves it alone; that survivor is the exposure).
+    Kept out of the corpus rather than added to it because it legitimately
+    ESCALATES, and the corpus holds exactly one escalating case by construction
+    (``_ESCALATING_POSITIVE_CASES``); this is the test that pins the direction
+    without widening that set.
+    """
+    obj = json.loads(COMPACT_TOKEN_PAIR)
+    value = obj["access_token"]
+    text = COMPACT_TOKEN_PAIR[:-1] + f',"echo":"{value}"' + "}"
+    masked, hits = scrub_shapes_with_hits(text)
+    assert masked.count(REDACTION_MARKER) == 2, masked
+    assert f'"echo":"{value}"' in masked, "the readable copy is the exposure"
+    assert redaction_shapes.shape_report(hits).reached_model, hits
+
+
+def test_the_measured_counter_line_is_not_an_incident() -> None:
+    """The operator's Bedrock evidence line, driven end to end.
+
+    The false positive was a rotation demand for a usage COUNTER, filed from a
+    ``write`` of the Bedrock cost-tracking evidence file. The line is in the
+    negative corpus; this drives it through the pass and asserts the two things
+    the notice depends on — the text is untouched, and nothing is graded as
+    exposed — so a future widening that re-classifies a counter reds here even if
+    the corpus row is edited away.
+    """
+    text = COUNTER_USAGE_LINE
+    masked, hits = scrub_shapes_with_hits(text)
+    assert masked == text, masked
+    assert hits == [], hits
+    assert not redaction_shapes.shape_report(hits).reached_model
+
+
+def test_the_contained_notice_names_the_tool_and_carries_no_value() -> None:
+    """Contained: it happened, it was handled, there is no exposure, clean up.
+
+    This is the ordinary outcome — a credential reached a tool and was masked
+    before the model could read it — so the notice may not use the escalation's
+    words: no rotation demand, no "compromised". What it owes instead is the one
+    action this path has: delete any plaintext copy WITHOUT reading it, stated
+    explicitly because reading it is what would turn this case into the other one.
+    """
+    from local_operator.incidents import format_shape_incident_message
+
+    text = format_shape_incident_message(
+        "bash", ["dsn-password"], "kubectl exec api -- env", reached_model=False
+    )
+    assert "bash" in text
+    assert "dsn-password" in text
+    assert "no exposure" in text
+    assert "rm -f" in text and "not to be done" in text
+    assert "rotate" not in text
+    assert "compromised" not in text
+    assert "sh4pedSentinelPw" not in text
+
+
+def test_the_escalated_notice_still_demands_a_rotation() -> None:
+    """A value in the MODEL's context keeps the rotate-it severity, and says why.
+
+    The one exposure this design cannot undo: the text the model reads is journaled
+    in plain text, replays into later requests and may reach training data. The
+    notice names that fact rather than the masking, because the fact is what the
+    rotation decision turns on — and the default (no argument) is this case, so a
+    caller that cannot classify cannot quietly file the quieter notice.
+    """
+    from local_operator.incidents import format_shape_incident_message
+
+    text = format_shape_incident_message("bash", ["dsn-password"], "kubectl exec api -- env")
+    assert "rotate" in text
+    assert "context" in text
+    assert "compromised" in text
+    assert "sh4pedSentinelPw" not in text
+    # One action, not two: a cleanup line here would dilute the sentence that
+    # matters, and the copy on disk is the least of this case's problems.
+    assert "rm -f" not in text
+
+
+def test_an_escalation_the_table_could_not_name_says_so() -> None:
+    """An escalated hit with NO label must name the MISSING provenance.
+
+    The escalation and the labels are graded separately, so ``labels=()`` with
+    ``reached_model=True`` is a state the shipped path reaches: a hit whose mask
+    cannot be CLAIMED (``complete=False``) is dropped from ``ShapeReport.labels``
+    while it still escalates if readable material survived (``exposed=True``). The
+    corpus's own escalating case — the ``amqp`` DSN whose username is its password —
+    grades exactly that way, so the state is reached from real input and is asserted
+    here off the corpus rather than from a synthetic empty list.
+
+    What the escalated text may NOT do in that state is assert a generic shape
+    ("credential-shaped content"), which reads as a shape the table DID identify and
+    leaves the reader unable to tell an un-named hit from a named one. It must say
+    the shape table could not name it. Measured live this session: sessions stopped
+    work over notices in exactly this state.
+    """
+    import local_operator.redaction_shapes as rs
+
+    case = next(c for c in POSITIVE_CASES if c.reason == "amqp DSN")
+    _masked, hits = rs.scrub_shapes_with_hits(case.text)
+    report = rs.shape_report(hits)
+    # The state itself, proven rather than assumed: escalation with nothing named.
+    assert report.reached_model is True, "the corpus case stopped escalating"
+    assert report.labels == (), f"the escalation now names a shape: {report.labels}"
+
+    from local_operator.incidents import format_shape_incident_message
+
+    text = format_shape_incident_message("bash", list(report.labels), "cmd")
+    assert "could not name" in text, text
+    assert "credential-shaped content" not in text, text
+    # The load-bearing halves are untouched: the head the row rules key on, and the
+    # rotation instruction the escalation exists to deliver.
+    assert text.startswith("[credential redaction] ")
+    assert "rotate it" in text and "compromised" in text
+
+
+@pytest.mark.asyncio
+async def test_a_contained_result_files_nothing_anywhere(tmp_path: Path) -> None:
+    """End to end: masked whole means NO incident on any surface the operator sees.
+
+    The three artefacts have to agree, and they are the whole of "indicated": the
+    queued flag, the live receipt and the journaled row. Measured before this
+    change: all three fired, for a value the model never read, which is the
+    indicator the operator asked to be rid of. The masking itself is asserted in
+    the same breath — an absence test that cannot tell "quiet" from "not running"
+    is no evidence at all (AGENTS.md: a dead instrument returns a reading, not an
+    error).
+    """
+    from local_operator.harness.types import NoticeEvent
+
+    session = _session(tmp_path)
+    session._pending_shape_incidents.clear()
+    session._reported_shape_incidents.clear()
+    events: list[Any] = []
+    session.subscribe(events.append)
+
+    assert SENTINEL_FRAGMENT not in session._redact_tool_result_text(SENTINEL)
+    assert session._pending_shape_incidents == [], "a contained hit filed an incident"
+
+    await session._flush_shape_incidents()
+
+    assert not [
+        event for event in events if isinstance(event, NoticeEvent)
+    ], "a contained hit emitted a live receipt"
+    # The transcript is written lazily — on a turn, not by the redaction hook —
+    # so "no row" is asserted over whatever exists rather than over a file the
+    # harness was never asked to create.
+    transcript = tmp_path / "session" / "transcript.jsonl"
+    body = transcript.read_text() if transcript.exists() else ""
+    assert "session_incident" not in body, "a contained hit was journaled"
+    # The instrument is not dead: the mask really is what the hook returned, and
+    # that is what a reader of this session sees.
+    assert REDACTION_MARKER in session._redact_tool_result_text(SENTINEL)
+
+
+@pytest.mark.asyncio
+async def test_an_exposure_with_no_contained_label_still_files_the_rotation(tmp_path: Path) -> None:
+    """The case that used to be silent, and the one a labels-only gate would drop.
+
+    A hit that left readable material has ``complete=False``, so it contributes no
+    LABEL — the labels mean "masked whole". A notice gated on labels alone therefore
+    goes quiet on the single event that must be raised, which is why the
+    classification travels beside the labels and why ``report_shape_hits`` files an
+    empty label list when the exposure flag is set.
+    """
+    from local_operator.harness.redaction import (
+        report_shape_hits,
+        reset_shape_hit_reporter,
+        set_shape_hit_reporter,
+    )
+    from local_operator.harness.types import NoticeEvent
+
+    session = _session(tmp_path)
+    session._pending_shape_incidents.clear()
+    session._reported_shape_incidents.clear()
+    events: list[Any] = []
+    session.subscribe(events.append)
+    token = set_shape_hit_reporter(session._queue_shape_incident)
+    try:
+        report_shape_hits([], reached_model=True)
+    finally:
+        reset_shape_hit_reporter(token)
+    assert [flag for _t, _l, _s, flag in session._pending_shape_incidents] == [True]
+
+    await session._flush_shape_incidents()
+
+    notices = [event for event in events if isinstance(event, NoticeEvent)]
+    assert notices, "the exposure emitted no receipt"
+    assert "rotate" in notices[0].text
+
+
+def test_the_live_stream_files_only_an_exposure() -> None:
+    """The pipe filter is a producer, and the sink's gate covers it too.
+
+    It is the only layer that sees a credential existing ONLY in a command's
+    output — the production case this whole feature was written for — and it masks
+    the bytes before any result exists, so nothing later can report it. Its
+    ordinary hit is CONTAINED (the bytes are masked before publication) and files
+    nothing; an exposure inside the same stream still has to file, which is the
+    second half of the test because a gate that swallows both is indistinguishable
+    from a broken reporter.
+    """
+    from local_operator.harness.redaction import (
+        reset_shape_hit_reporter,
+        set_shape_hit_reporter,
+    )
+
+    def _feed(session: Any, payload: str) -> list[bool]:
+        session._pending_shape_incidents.clear()
+        session._reported_shape_incidents.clear()
+        token = set_shape_hit_reporter(session._queue_shape_incident)
+        try:
+            redactor = builtin._PipeRedactor([])
+            redactor.feed(payload.encode())
+            redactor.feed(b"", final=True)
+        finally:
+            reset_shape_hit_reporter(token)
+        return [flag for _t, _l, _s, flag in session._pending_shape_incidents]
+
+    session = _session()
+    assert _feed(session, SENTINEL) == [], "a contained stream hit filed an incident"
+    assert _feed(session, _exposed_text()) == [True], "an exposure stopped being filed"
+
+
+def test_a_value_the_pipe_masked_is_registered_for_the_rest_of_the_session() -> None:
+    """The pipe is the ONE masking surface the store never sees raw text from.
+
+    Agent review R1/E1. ``_PipeRedactor`` masks a running command's bytes, so the
+    text the result path later hands ``VariableStore.redact_with_report`` already
+    carries the marker: that pass matches nothing, which left the value contained
+    for exactly one result and a later bare reuse of it — a spelling the shape
+    table has no rule for — readable. Measured before the fix, on the shape this
+    feature exists for (a credential in the command's OUTPUT only and nowhere in
+    the command): ``registered values: 0`` and the reuse in the clear. The MASK
+    never moved — only the registration was missing — so this test pins the
+    registration and the reuse, not the mask.
+    """
+    # Assembled rather than written whole, so this file keeps spelling no
+    # credential-shaped literal of its own (the same convention as SENTINEL
+    # above). Fed in two halves so the pipe's release point is what completes the
+    # line: registration has to survive the chunk boundary, not just one read.
+    password = "unit" + "pipe" + "9x7"
+    payload = f"MONGO_DSN=mongodb+srv://svc:{password}@db.invalid/x\n".encode()
+    half = len(payload) // 2
+    store = VariableStore(cwd=".")
+    redactor = builtin._PipeRedactor([], contain=builtin._shape_containment_sink(store))
+    masked = redactor.feed(payload[:half]) + redactor.feed(payload[half:])
+    masked += redactor.feed(b"", final=True)
+    assert REDACTION_MARKER in masked.decode(), "the pipe stopped masking its own hit"
+    assert password in store.redaction_values(), "the pipe masked a value it did not contain"
+    assert store.redact(f"prefix-{password}-suffix") == f"prefix-{REDACTION_MARKER}-suffix"
+
+
+def test_a_pipe_redactor_with_no_store_still_masks_and_contains_nothing() -> None:
+    """The historic single-argument construction: masking unchanged, no sink.
+
+    ``contain`` is optional because a third-party embedder's store — and every
+    bare tool test — constructs this filter with values alone. Those callers get
+    exactly the behaviour they had before E1's fix: the bytes are masked and
+    nothing is registered, which is a masking-only contract rather than a fault.
+    """
+    payload = f"MONGO_DSN=mongodb+srv://svc:{'unit' + 'pipe' + '9x7'}@db.invalid/x\n".encode()
+    masked = builtin._PipeRedactor([]).feed(payload)
+    assert REDACTION_MARKER in masked.decode()
+    assert builtin._shape_containment_sink(object()) is None
+
+
+def test_a_contained_report_cannot_file_by_any_route() -> None:
+    """The gate is the SINK's, so every producer inherits it — including a new one.
+
+    The policy has to hold for the result hook (tested above), for the pipe filter
+    (tested above) and for anything that reports through
+    ``harness.redaction.report_shape_hits``, which is the shape every other surface
+    uses. Driving the sink directly is the point: a route that appears later cannot
+    file a contained hit by forgetting a gate, and an exposure from the same tool is
+    still filed exactly once.
+    """
+    from local_operator.harness.redaction import (
+        report_shape_hits,
+        reset_shape_hit_reporter,
+        set_shape_hit_reporter,
+    )
+
+    session = _session()
+    session._pending_shape_incidents.clear()
+    session._reported_shape_incidents.clear()
+    session._queue_shape_incident(["dsn-password"], False)
+    assert session._pending_shape_incidents == [], "the sink filed a contained hit"
+
+    token = set_shape_hit_reporter(session._queue_shape_incident)
+    try:
+        report_shape_hits(["dsn-password"], reached_model=False)
+        assert session._pending_shape_incidents == [], "the reporter filed a contained hit"
+        report_shape_hits([], reached_model=True)
+        report_shape_hits([], reached_model=True)
+    finally:
+        reset_shape_hit_reporter(token)
+    assert [flag for _t, _l, _s, flag in session._pending_shape_incidents] == [True]
+
+
+def test_a_store_without_the_report_view_keeps_the_escalated_reading() -> None:
+    """A store that cannot classify must not be read as a containment.
+
+    ``VariableStore`` always reports, but ``_redact_tool_text`` composes with any
+    store offering the older labels-only view (the broker work shipped separately).
+    Taking that list as "nothing was exposed" would silently downgrade a real
+    compromise to an informational notice, so the labels-only path keeps the
+    escalated text it filed before the classification existed.
+    """
+    from local_operator.harness.redaction import (
+        reset_shape_hit_reporter,
+        set_shape_hit_reporter,
+    )
+
+    class _LabelsOnly:
+        """The pre-classification surface: labels, and no way to say "exposed"."""
+
+        def redact(self, text: str) -> str:
+            return text.replace(SENTINEL_FRAGMENT, REDACTION_MARKER)
+
+        def redact_with_hits(self, text: str) -> tuple[str, list[str]]:
+            if SENTINEL_FRAGMENT not in text:
+                return text, []
+            return text.replace(SENTINEL_FRAGMENT, REDACTION_MARKER), ["dsn-password"]
+
+    session = _session()
+    session._pending_shape_incidents.clear()
+    session._reported_shape_incidents.clear()
+    # ``model_construct`` because ``ToolContext.variables`` is validated against the
+    # store PROTOCOL, and the point of this stub is that it is NOT a
+    # ``VariableStore``: it is the older surface, with the two methods the live path
+    # looks for by name.
+    context = ToolContext.model_construct(cwd=".", variables=_LabelsOnly())
+    token = set_shape_hit_reporter(session._queue_shape_incident)
+    try:
+        assert SENTINEL_FRAGMENT not in builtin._redact_tool_text(SENTINEL, context)
+    finally:
+        reset_shape_hit_reporter(token)
+    assert [flag for _t, _l, _s, flag in session._pending_shape_incidents] == [True]
+
+
+def test_prose_after_a_flag_can_match_but_may_never_demand_a_rotation() -> None:
+    """The other half of the measured misfire, pinned rather than declared away.
+
+    ``--token was masked`` reads as a flag with a value, and the word after the flag
+    is masked. That is an OVER-mask rather than an alarm, and it is left in place
+    deliberately: the value is contained before the model sees it, so all it can
+    produce is an informational notice — while a flag whose value really is a short
+    word (``--password swordfish``) is a leak if the rule stops firing on
+    word-shaped values. The asymmetry is what decides it: one masked English word
+    costs a reader nothing, and the opposite mistake is unrecoverable.
+
+    What it may never do is ask for a rotation, and that is asserted here because it
+    is the thing the operator acts on.
+    """
+    from local_operator.incidents import format_shape_incident_message
+
+    prose = "the " + "--" + "token" + " was masked before it reached bash"
+    assert "cli-credential-flag" in match_shape_names(prose)
+
+    notice = format_shape_incident_message(
+        "bash", ["cli-credential-flag"], "cat WATCH.md", reached_model=False
+    )
+    assert "rotate" not in notice
+    assert "no exposure" in notice
+
+    # ...and the GRADING has to say the same thing, because that wording is only reached
+    # when it does. The word occurs TWICE in this line, which is the shape of the
+    # 2026-09-22 documentation read: for a word, the whole-value half of the exposure
+    # question answers YES because the word is simply repeated in the prose around it, so
+    # a 33 KB read filed the ESCALATED notice ("rotate it") for the word ``when``. The
+    # withholding is what `_is_prose_after_a_flag` is for, and this is where it is pinned.
+    import local_operator.redaction_shapes as rs
+
+    repeated = prose + ", which was the whole of it"
+    masked, hits = scrub_shapes_with_hits(repeated)
+    assert REDACTION_MARKER in masked, "the over-mask stopped holding"
+    assert rs.shape_report(hits).reached_model is False, "a prose word demanded a rotation"
+
+
+def test_a_flag_whose_value_is_a_name_is_not_a_credential() -> None:
+    """The production misfire: a flag naming a stored secret.
+
+    ``lop secret run --secret [redacted] -- <command>`` is the documented way to hand a
+    stored secret to a child, and the token after that flag is the secret's NAME —
+    the one thing an operator needs to be able to read. On 2026-09-19 a watch-log
+    entry quoting that command was masked, and filed a rotation ticket in a
+    production transcript for a credential that was not in the text at all. A value
+    spelled as an environment variable AND ending in a credential word is now read
+    as the reference it is.
+    """
+    # Joined from its segments so the literal never exists as a flag value in this
+    # SOURCE: "flag followed by a value" is precisely the shape a redaction pass
+    # rewrites, and this test's own text would otherwise be a casualty of it.
+    name = "_".join(("OS", "PROD2", "ADMIN", "PASSWORD"))
+    quoted = (
+        "The correct mechanism was available and I did not use it: "
+        f"`lop secret run --secret {name} -- <command>` and "
+        "`lop secret file NAME -- <command>` keep the value inside the broker"
+    )
+    assert "cli-credential-flag" not in match_shape_names(quoted)
+    assert scrub_shapes(quoted) == quoted
+
+    # DRIVEN END TO END, not merely inspected. The ticket was filed by the session's
+    # result hook over the whole watch-log entry, so the regression this test exists
+    # for — an ESCALATED row for this text — can only be caught by driving that hook.
+    # Asserting that the table is silent is a different assertion.
+    entry = (
+        "## INCIDENT — 2026-09-19 23:0x UTC — CREDENTIAL EXPOSURE TO BASH,"
+        " ROTATION REQUIRED\n" + quoted + "\n"
+    )
+    session = _session()
+    session._pending_shape_incidents.clear()
+    session._reported_shape_incidents.clear()
+    assert session._redact_tool_result_text(entry) == entry, "the entry was rewritten"
+    assert session._pending_shape_incidents == [], "the entry filed an incident"
+
+    # ...and a value that could be a credential is still masked, which is what the
+    # corpus's own flag cases pin (they run over every surface above).
+    assert "cli-credential-flag" in match_shape_names("server --token=" + "Sup3rTokenValue91")
+
+
+def test_the_documented_publish_workflow_survives_every_surface() -> None:
+    """The operator's workflow, driven: a script authored from what was displayed.
+
+    Reported 2026-09-22. ``lop secret run --secret NAME -- npm publish`` is the way
+    ``guide://credentials`` teaches an agent to hand a stored secret to a child, and an
+    operator names an entry after the SYSTEM it belongs to: this one's tail is USERNAME,
+    which is not one of the credential words the guard required. So EVERY tool result
+    masked the name, and the script the agent then authored from the displayed text
+    asked the store for a secret literally named ``[redacted]`` — the command failed
+    against a name that does not exist, which is the failure the operator reported.
+
+    Nothing escalated it, and that is why this test drives the WORKFLOW rather than the
+    rule: a whole mask is the contained case, so it files no incident, and a unit
+    assertion that the table is silent would not have seen the ``cat`` either. What is
+    asserted here is the property that broke — the text survives byte for byte — on
+    every model-visible surface, and the next assertion is the other half of it: the
+    values that must still mask, so a widening cannot pass by releasing everything.
+    """
+    # Assembled from pieces so no literal in this SOURCE is a flag followed by a value:
+    # this file is read by agents through the very pass it asserts about.
+    store_name = "MINERVA_UI_NPROD_USERNAME"
+    command = "--" + "secret " + store_name + " --" + "secret " + store_name + " -- npm publish"
+    script = "#!/bin/sh" + chr(10) + "# release the UI package" + chr(10) + command
+
+    # The three renderings the agent reads back: the command as typed, the file it
+    # wrote, the ``cat`` of that file, and the ``grep`` of it with a line number.
+    renderings = (
+        command,
+        script,
+        "cat publish.sh" + chr(10) + command,
+        "grep -n secret publish.sh" + chr(10) + "4:" + command,
+    )
+    for surface, scrub in sorted(SURFACES.items()):
+        for text in renderings:
+            assert scrub(text) == text, f"{surface} rewrote the workflow text"
+
+    # ...and the session's own result hook, over the whole entry, files nothing: the
+    # mask this test forbids is the one that used to happen here.
+    session = _session()
+    session._pending_shape_incidents.clear()
+    entry = "## WATCH — 2026-09-22 — a script that publishes" + chr(10) + script
+    assert session._redact_tool_result_text(entry) == entry, "the entry was rewritten"
+    assert session._pending_shape_incidents == [], "the entry filed an incident"
+
+    # THE VALUE SIDE, beside it, because that is the regression this fix could have
+    # introduced: a release that widened one more step would eat all four of these.
+    issuer = "ghp" + "_AbCd1234EfGhIjKlMnOpQr"
+    lowercase_phrase = "_".join(("correct", "horse", "battery"))
+    caps_run = "DBPASSWORD"
+    armed = "Sup3rTokenValue91"
+    for value in (issuer, lowercase_phrase, caps_run, armed):
+        assert "cli-credential-flag" in match_shape_names(
+            "server --" + "token " + value
+        ), f"a value of the shape {value[:3]}… stopped being masked"
+    # ...and the DSN spelling, which no flag guard may swallow.
+    dsn = "mongodb://svc:" + "p" + chr(64) + "ssw0rd" + chr(64) + "db.example.net/app"
+    assert REDACTION_MARKER in scrub_shapes("tool --" + "password " + dsn)
+
+    # The instrument is alive: the control is a value under the SAME flag, in the same
+    # text, and it must still be masked.
+    mixed = "lop secret run --" + "secret " + store_name + " -- npm publish --" + "token "
+    assert REDACTION_MARKER in scrub_shapes(mixed + armed)
+    assert scrub_shapes(mixed + store_name) == mixed + store_name
+
+
+# ---------------------------------------------------------------------------
+# Step cost: the pass is handed ONE STEP, never the conversation
+# ---------------------------------------------------------------------------
+#
+# The requirement these pin: redaction must be step by step, with NOTHING whose
+# cost grows with how long the session has been running. That is a claim about
+# WHAT EACH PASS CALL IS HANDED, so it is measured at the single funnel every
+# redaction path shares — ``redaction_shapes.scrub_secrets_with_hits`` — rather
+# than argued from the call graph. A future path that handed the pass the whole
+# conversation would leave every other test in this file green, which is exactly
+# why these exist.
+
+#: What one settled tool result may be. The arms below use the PRODUCTION number
+#: rather than a test-sized one, so the shape measured is the shipped one while
+#: the whole test stays `steps x 8 KiB` of work.
+
+_STEP_RESULT_BYTES = builtin.TOOL_OUTPUT_LIMIT_CHARS
+
+
+def _record_funnel(monkeypatch) -> list[tuple[int, int]]:
+    """Record ``(bytes_in, hit_count)`` for every call into the ONE table entry.
+
+    ``scrub_shapes_with_hits`` is the single place the rule table runs: every
+    other view onto it (``scrub_secrets``, ``scrub_secrets_with_hits``,
+    ``scrub_shapes``, ``match_shape_names``) is a caller of it in the same
+    module, so every module-level ``from … import`` binding in the tree routes
+    here and ONE patch counts them all. An earlier revision instead patched the
+    ``scrub_secrets_with_hits`` binding in three modules, which is not the same
+    set: ``harness/redaction.summarize_arguments`` reaches the table through
+    ``scrub_shapes``, so the journaled tool-call argument summary was invisible
+    to the count while the docstring claimed every path was covered (R1-3).
+
+    What this therefore guarantees: a table call SOMEWHERE in the tree is
+    counted, whichever path made it. It does NOT say which path made it — a path
+    that stopped scrubbing altogether counts zero calls and reads as "nothing to
+    do" — so the arms below pair it with a growth assertion on the step count.
+    """
+    records: list[tuple[int, int]] = []
+    real = redaction_shapes.scrub_shapes_with_hits
+
+    def wrapper(text):
+        scrubbed, hits = real(text)
+        records.append((len(text), len(hits)))
+        return scrubbed, hits
+
+    monkeypatch.setattr(redaction_shapes, "scrub_shapes_with_hits", wrapper)
+    return records
+
+
+def _step_text() -> str:
+    """One settled tool result: ordinary, anchor-bearing log text.
+
+    The anchor is deliberate. A result with no anchor at all returns from the
+    funnel before the table runs, so a measurement over anchor-free text would
+    pin the gate rather than the pass.
+    """
+    line = "2026-09-21T00:00:00Z INFO build step completed, token budget nominal\n"
+    return (line * ((_STEP_RESULT_BYTES // len(line)) + 1))[:_STEP_RESULT_BYTES]
+
+
+def _step_tool() -> AgentTool:
+    async def execute(tool_call_id, args, signal, on_update, context):
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="emit",
+            content=[TextContent(text=_step_text())],
+        )
+
+    return AgentTool(
+        name="emit",
+        parameters={"type": "object", "properties": {}},
+        execute=execute,
+    )
+
+
+def _step_stream(steps: int):
+    """A provider that asks for ``steps`` tool calls and then stops."""
+    issued = [0]
+
+    def stream_fn(request, signal=None):
+        n = min(issued[0], steps)
+        issued[0] += 1
+
+        async def gen():
+            if n < steps:
+                yield StreamToolCallDelta(index=0, id=f"c{n}", name="emit", argument_delta="{}")
+                yield StreamEndEvent(stop_reason="toolUse")
+            else:
+                yield StreamTextDelta(delta="done")
+                yield StreamEndEvent(stop_reason="stop")
+
+        return gen()
+
+    return stream_fn
+
+
+async def _drive_steps(steps: int) -> None:
+    """Run the REAL loop for ``steps`` tool-calling turns."""
+    from local_operator.harness.loop import AgentLoop, LoopContext
+
+    store = VariableStore(cwd=".")
+    loop = AgentLoop()
+    context = LoopContext(system_blocks=["sys"], tools=[_step_tool()])
+    config = LoopConfig(
+        model=ModelSpec(provider="test", model_id="unit-model"),
+        convert_to_llm=lambda messages: [m for m in messages if isinstance(m, Message)],
+        stream_fn=_step_stream(steps),
+        # The production hook on the production wiring: ``Session`` hands
+        # ``_redact_tool_result_text`` here, which funnels to
+        # ``redact_with_report``. A bare ``redact`` would measure the same pass,
+        # but the report-carrying entry point is what ships.
+        redact_tool_result=lambda text: store.redact_with_report(text)[0],
+    )
+    async for _ in loop.run([Message.user("go")], context, config, None):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_the_pass_is_handed_one_step_and_the_largest_call_does_not_grow(monkeypatch):
+    """The structural statement of "step by step only".
+
+    The MAXIMUM is what a session-scoped scan would move: a pass handed the whole
+    history has a largest call that climbs with the session, while a per-step
+    pass is flat. The TOTAL is expected to climb — that is the step count, which
+    is the point — so only the maximum is asserted.
+    """
+    records = _record_funnel(monkeypatch)
+
+    records.clear()
+    await _drive_steps(3)
+    short = list(records)
+
+    records.clear()
+    await _drive_steps(30)
+    long = list(records)
+
+    assert short and long
+    assert max(b for b, _ in short) == _STEP_RESULT_BYTES
+    assert max(b for b, _ in long) == _STEP_RESULT_BYTES, (
+        "the largest single pass call grew with session length: some path is "
+        "handing the funnel more than one step"
+    )
+    # Growth is in CALLS and linear in steps, which is the shape asked for.
+    assert len(long) > len(short)
+    assert len(long) <= 4 * 30, "implausibly many calls per step"
+
+
+@pytest.mark.asyncio
+async def test_a_resume_replay_makes_no_pass_calls_at_all(monkeypatch, tmp_path):
+    """The replay is a PASSTHROUGH, and that is measured rather than argued.
+
+    A resumed child is built on the stopped child's directory: ``Transcript``
+    reads the file back and ``Session.__init__`` seeds its context from
+    ``build_llm_history()``. No scrub runs on that path — no module under
+    ``session/`` references the redaction table at all. Containment is a property
+    of the WRITE path (the journaled-arguments scrub and the result hook, both
+    upstream of the file), so a replay has nothing left to remove and costs
+    nothing. A figure like "49.7 s of scrub CPU across 22 child transcripts" is
+    arithmetic on the assumption that this path scrubs; it does not.
+    """
+    records = _record_funnel(monkeypatch)
+
+    # Written straight to disk, bypassing the write-path scrub on purpose: the
+    # replay's behaviour over credential-shaped bytes is the thing under test,
+    # so the bytes have to be there.
+    directory = tmp_path / "stopped-child"
+    transcript = Transcript(directory)
+    await transcript.append_message(
+        Message.assistant(
+            "calling the API",
+            tool_calls=[
+                ToolCall(
+                    name="bash",
+                    arguments={"command": "curl -u svc:hunter2swordfish https://example.test"},
+                )
+            ],
+        )
+    )
+    on_disk = list(Transcript(directory).build_llm_history())
+
+    records.clear()
+    resumed = Session(
+        model=ModelSpec(provider="test", model_id="unit-model", context_window=1000),
+        stream_fn=_never_streams,
+        tools=[],
+        transcript=Transcript(directory),
+        system_blocks_provider=lambda *_a: [],
+        yolo=True,
+        cwd=str(tmp_path),
+        variables=VariableStore(cwd=str(tmp_path)),
+    )
+    assert records == [], f"the replay called the pass {len(records)} time(s)"
+
+    # ...and it did not rewrite the bytes it replayed. Asserted on the message the
+    # new session seeded its context with, because "no funnel calls" alone would
+    # also be true of a replay that quietly dropped the history.
+    replayed = [m for m in resumed._context.messages if isinstance(m, Message)]
+    assert [m.model_dump() for m in replayed] == [m.model_dump() for m in on_disk]
+    assert "hunter2swordfish" in json.dumps([m.model_dump() for m in replayed])
+
+
+def _decoded_stream_whose_block_contains_the_cut(
+    cap: int, body_lines: int = 4
+) -> tuple[str, str, str]:
+    """The round-1 review's construction at ``cap``: ``(decoded, body_line, block)``.
+
+    A `bash` stream carrying a PEM-shaped block whose END line is the LAST line
+    of the retained head, so the cap's elision snaps to a body-line newline
+    INSIDE the block: the BEGIN line and body lines are kept, the END line falls
+    in the dropped middle. ``body_line`` is a line of the key body, and its
+    presence anywhere downstream is the leak these arms exist to catch.
+
+    The placement is arithmetic, not a lucky string: ``_clip_head_tail`` snaps
+    the head cut back to the last newline at or before ``(cap - marker) // 2``
+    and ``_BashOutput`` keeps exactly the first ``cap // 2`` bytes as its head,
+    so ending the block at ``cap // 2`` puts its 30-byte END line in the last 30
+    bytes of that head and the body newline before it exactly at the snap point.
+    The retention notice is what makes the elision fire at all: ``decode()`` is
+    ``cap + len(notice)`` characters whenever anything was omitted.
+    """
+    # The PEM header and footer are BUILT rather than written out, and asserted
+    # below, because a PEM written whole is itself a credential shape: the
+    # harness's own content filter rewrote an earlier spelling of them on the
+    # way into this file, which left the arm testing a block no rule matched.
+    dashes = "-" * 5
+    begin = dashes + "BEGIN RSA PRIVATE KEY" + dashes + "\n"
+    end = dashes + "END RSA PRIVATE KEY" + dashes + "\n"
+    body = "MIIEowIBAAKCAQEA" * 3
+    pad = "plain output line of the alignment run, no anchors in it\n"
+    block = begin + (body + "\n") * body_lines + end
+    start = cap // 2 - len(block)
+    total = cap + 4096
+    filler = (pad * ((start // len(pad)) + 2))[:start]
+    rest_len = total - start - len(block)
+    raw = filler + block + (pad * ((rest_len // len(pad)) + 2))[:rest_len]
+    assert scrub_shapes(block).count(REDACTION_MARKER) >= 1, "not a shape the table masks"
+    assert scrub_shapes(body) == body, "the body line is masked on its own"
+    chunks = builtin._BashOutput(limit=cap)
+    data = raw.encode()
+    for at in range(0, len(data), 65536):
+        chunks.append(data[at : at + 65536])
+    return chunks.decode(), body, block
+
+
+def _assert_the_cut_lands_inside(decoded: str, block: str, cap: int) -> None:
+    """The construction is non-vacuous: the snapped cut is strictly INSIDE it.
+
+    Without this the arms below could pass while testing nothing — a block the
+    elision keeps whole is masked under either order, and the leak only exists
+    when the cut falls between the block's first and last line.
+    """
+    snap = decoded[: (cap - len(builtin.BASH_TRUNCATION_MARKER)) // 2].rfind("\n") + 1
+    start = decoded.index(block)
+    assert start < snap < start + len(block), (
+        f"the cut at {snap} is not inside the block [{start}, {start + len(block)}): "
+        "this arm would test nothing"
+    )
+
+
+def test_a_cut_inside_a_multi_line_match_masks_the_kept_side(monkeypatch):
+    """R1-1: the pass sees the WHOLE stream, and the cut cannot hide a fragment.
+
+    Two assertions, one per half of the defect. First the ORDER: the text handed
+    to the pass is byte-for-byte the decoded stream, so an elision can never
+    remove bytes the mask has not seen. The round-1 revision elided first and
+    failed here — it handed the pass ``cap`` characters of a larger stream —
+    while every other arm in this file stayed green. Second the OUTCOME: the
+    block's kept side comes back masked, not raw, because the mask runs while
+    the block is still whole.
+
+    Capped at 4 KiB so the arm costs kilobytes; ``cap`` is the only input the
+    construction varies with, and the shipped number is exercised below.
+    """
+    cap = 4096
+    monkeypatch.setattr(builtin, "_REDACT_STREAM_LIMIT_CHARS", cap)
+    decoded, body, block = _decoded_stream_whose_block_contains_the_cut(cap)
+    assert len(decoded) > cap, "the elision must bite for this arm to mean anything"
+    _assert_the_cut_lands_inside(decoded, block, cap)
+
+    seen: list[int] = []
+    real = builtin._redact_tool_text
+
+    def spy(text, context):
+        seen.append(len(text))
+        return real(text, context)
+
+    monkeypatch.setattr(builtin, "_redact_tool_text", spy)
+    # A store, not ``ToolContext(cwd=".")``: with no ``variables`` the pass is a
+    # no-op (``_redact_tool_text`` returns its input untouched), so the OUTCOME
+    # assertion below would read a raw body line on a pass that never ran.
+    context = ToolContext(cwd=".", variables=VariableStore(cwd="."))
+    out = builtin._redact_settled_stream(decoded, context)
+
+    assert seen == [len(decoded)], (
+        f"the pass was handed {seen} of {len(decoded)} characters: an elision ran "
+        "before the mask, so a cut inside a multi-line match can publish the kept "
+        "side raw"
+    )
+    assert body not in out, "a raw key body line survived the settled pass"
+    assert "PRIVATE KEY" not in out, "the block's header survived the settled pass"
+    assert out.count(REDACTION_MARKER) >= 1, "the block was dropped, not masked"
+
+
+def test_the_shipped_cap_never_publishes_a_split_match(tmp_path):
+    """R1-1 at the SHIPPED cap, through the spill the model can `read` later.
+
+    The reviewer's exact case at ``_REDACT_STREAM_LIMIT_CHARS`` (4 MiB): a
+    multi-line block wholly retained, ending in the last bytes of the retained
+    head, with the snapped cut inside it. Checked on both surfaces a settled
+    `bash` call publishes — the text the call site spills, and the bytes
+    ``read spill://`` serves back out of that file. The elide-before-mask order
+    failed both: 2,000 raw body lines in the spill, ``BEGIN`` line present, and
+    the same fragment served to the model on `read`.
+    """
+    from local_operator.tools.spill import get_store
+
+    cap = builtin._REDACT_STREAM_LIMIT_CHARS
+    decoded, body, block = _decoded_stream_whose_block_contains_the_cut(cap)
+    _assert_the_cut_lands_inside(decoded, block, cap)
+    context = ToolContext(cwd=str(tmp_path), variables=VariableStore(cwd=str(tmp_path)))
+    masked = builtin._redact_settled_stream(decoded, context)
+    assert body not in masked, "the pass published a raw key body line"
+
+    budget = builtin.TOOL_OUTPUT_LIMIT_CHARS - 2 * len(builtin.BASH_TRUNCATION_MARKER)
+    out, _err, _footer, details = builtin._bash_oversized_streams(
+        masked, "", budget, False, context
+    )
+    assert body not in out
+    # ``details`` is optional on that return type and the spill payload is
+    # ``Any``; both are narrowed here rather than unwrapped with a default that
+    # pyright reads as an attribute access on ``None``.
+    assert details is not None, "a spilled tail must report its details"
+    spilled = details.get("spill")
+    handle = spilled["handle"] if isinstance(spilled, dict) else None
+    assert handle, "an over-budget settled stream must spill; without it this arm checks nothing"
+    stored = get_store().read_lines(handle, 1, 10**7)
+    assert stored is not None, "the handle must resolve in the store that wrote it"
+    served, total = stored
+    assert total > 1, "the spill is empty; the handle proves nothing"
+    assert body not in "\n".join(served), "the spill the model can `read` carries a raw key line"
+
+
+def test_the_settled_cap_bounds_what_is_published_not_the_pass():
+    """The cap is an OUTPUT bound; the mask is what it is applied to.
+
+    Pins the halves that need no fixture: the cap is the retention limit, so the
+    only text it can drop is the retention notice, and it is larger than the
+    display budget, so it cannot skip bytes the spill still publishes. What it is
+    NOT — a bound on the pass input — is measured by the arms above; the round-1
+    claim that an elision-first order "bounds the pass" is not in this file
+    anywhere.
+    """
+    from local_operator.tools.spill import SPILL_ENTRY_LIMIT_BYTES
+
+    assert builtin._REDACT_STREAM_LIMIT_CHARS == SPILL_ENTRY_LIMIT_BYTES
+    assert builtin._REDACT_STREAM_LIMIT_CHARS > builtin.TOOL_OUTPUT_LIMIT_CHARS

@@ -9,10 +9,11 @@ import logging
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import SecretStr
 
 from local_operator.clients.openrouter import OpenRouterClient
 from local_operator.clients.radient import RadientClient
-from local_operator.credentials import CredentialManager
+from local_operator.config import ConfigManager
 from local_operator.env import EnvConfig
 from local_operator.model.configure import info_from_discovered_model
 from local_operator.model.discovery import available_models
@@ -39,7 +40,7 @@ from local_operator.providers.local import (
     resolve_base_url,
 )
 from local_operator.server.dependencies import (
-    get_credential_manager,
+    get_config_manager,
     get_env_config,
     get_provider_auth_store,
 )
@@ -185,7 +186,7 @@ async def list_providers() -> CRUDResponse[ProviderListResponse]:
     },
 )
 async def list_models(
-    credential_manager: CredentialManager = Depends(get_credential_manager),
+    config_manager: ConfigManager = Depends(get_config_manager),
     provider_auth_store: AuthStore = Depends(get_provider_auth_store),
     query_params: ModelListQueryParams = Depends(),
     env_config: EnvConfig = Depends(get_env_config),
@@ -197,7 +198,7 @@ async def list_models(
     if the API key is configured. Results can be filtered by provider and sorted by field.
 
     Args:
-        credential_manager: Dependency for managing credentials
+        config_manager: Dependency for the config root the store readers resolve under
         query_params: Query parameters for filtering and sorting models
 
     Returns:
@@ -351,12 +352,17 @@ async def list_models(
                         )
                     )
             elif provider_detail.id == "openrouter":
-                # Then try to get OpenRouter models if API key is configured
-                api_key = credential_manager.get_credential("OPENROUTER_API_KEY")
-                if api_key:
+                # Then try to get OpenRouter models if API key is configured.
+                # provider_env_key is store-first, so a LOP_PROVIDER_OPENROUTER_API_KEY
+                # row saved by `lop credential update` wins over an ambient export.
+                from local_operator.providers.registry import provider_env_key
+
+                raw_key = provider_env_key("openrouter", base=config_manager.config_dir)
+                if raw_key:
                     try:
-                        # Create the OpenRouter client
-                        client = OpenRouterClient(api_key=api_key)
+                        # Create the OpenRouter client. The client takes a
+                        # SecretStr, so the resolved plaintext is wrapped here.
+                        client = OpenRouterClient(api_key=SecretStr(raw_key))
 
                         # Get the list of models
                         openrouter_models = client.list_models()
@@ -409,7 +415,9 @@ async def list_models(
                 )
 
                 api_key = await resolve_radient_credential(
-                    credential_manager, env_config.radient_api_base_url, store=provider_auth_store
+                    config_manager.config_dir,
+                    env_config.radient_api_base_url,
+                    store=provider_auth_store,
                 )
                 if api_key:
                     try:

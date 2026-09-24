@@ -33,17 +33,115 @@ import os
 import sqlite3
 import time
 import uuid
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from contextlib import closing
 from pathlib import Path
-from typing import Any, TypeGuard
+from typing import Any, TypeGuard, TypeVar
 
 from local_operator.paths import config_dir
+
+# THE CONTENTION SET IS SHARED, NOT RESTATED. `session/store_failures.py` decides
+# which SQLite verdicts mean "contended, retryable" for every surface's ladder,
+# and this module decides which of them are worth a second attempt. Those were
+# two hand-written lists, and they drifted: this file held two names while the
+# classifier held five, so `SQLITE_BUSY_SNAPSHOT`, `SQLITE_BUSY_RECOVERY` and
+# `SQLITE_LOCKED_SHAREDCACHE` escaped `publish` as the bare `OperationalError`
+# this fix exists to stop propagating -- while the ladder still called them 503
+# (review round 1, MINOR-1). Importing the classifier's own set is what makes
+# that drift unrepresentable rather than merely fixed.
+from local_operator.session.store_failures import BUSY_ERRONAMES
 
 logger = logging.getLogger(__name__)
 
 ATTENTION_CAPABILITY = "completion-ack-v1"
 ATTENTION_CUSTOM_TYPE = "completion_attention"
+
+#: How long SQLite itself waits for a competing writer before answering
+#: ``SQLITE_BUSY``, in milliseconds, and the driver's matching window.
+#:
+#: THE HOUSE RANGE, AND THIS STORE WAS THE OUTLIER. Every sibling store sets a
+#: busy timeout with a written rationale -- ``secrets/store.py`` 10000 ("covers
+#: the brief writer-lock contention concurrent sessions do still produce"),
+#: ``providers/usage_cache.py`` 5000, ``providers/auth_store.py`` 5000 -- and
+#: ``attention.db`` shipped a bare ``connect(timeout=2.0)`` with no PRAGMA at
+#: all, from when one process at a time wrote it. It is now the MOST contended
+#: store on the machine: ~25 concurrent ``lop`` sessions plus the mobile daemon,
+#: the tunnel connector and the browser bridge all publish completions into the
+#: one file, and every publish is a ``BEGIN IMMEDIATE`` that also runs the
+#: additive schema check. Two seconds expires first, the completion is lost, and
+#: the caller is handed ``OperationalError`` -- which for a daemon request
+#: handler is an outage rather than a late notification (2026-09-20,
+#: ``~/Library/Logs/local-operator/mobile.log``).
+_BUSY_TIMEOUT_MS = 5000
+
+#: The driver's own busy handler, set alongside the PRAGMA for the reason
+#: ``auth_store`` sets both: ``timeout`` covers the connection before the PRAGMA
+#: has run, and the PRAGMA is what a reader of this file looks for.
+_CONNECT_TIMEOUT_S = 5.0
+
+#: How many times a contended ACQUISITION is re-attempted, and how long to wait
+#: before the retry, in seconds -- ONE scalar, deliberately, not a tuple per
+#: attempt. The store owns the connection and the transaction, so it is where
+#: riding out a lock belongs: see :meth:`AttentionStore._retry_write` and
+#: :meth:`AttentionStore._retry_read`, which share this budget.
+#:
+#: THE COUPLING IS SAFE NOW. This used to be ``_WRITE_BACKOFF_S = (0.2,)``
+#: indexed by attempt, so the very variant the surrounding text discusses --
+#: three attempts -- raised ``IndexError`` on the third attempt instead of
+#: retrying (review round 1, MINOR-3). A scalar cannot be indexed out of range,
+#: and it says what is true: the wait is the same between attempts.
+#:
+#: ONE retry, and the bound is MEASURED rather than derived. THE METHOD, so the
+#: number can be reproduced and so a maintainer resizing this budget does not
+#: have to trust it: a sibling connection holds ``BEGIN EXCLUSIVE`` on a fresh
+#: copy of the store (proven to block both a reader and a writer before it is
+#: trusted), the blocked statement keeps SQLite's default busy handler, and the
+#: wait until it raises is timed -- three samples per window, this host, python
+#: 3.12.13 / sqlite 3.50.4. At the shipped 5 s window ONE acquisition point costs
+#: 5.31-5.37 s, i.e. **1.061-1.074x**, and the same holds at 2 s (1.069-1.082x)
+#: and 1 s (1.091-1.114x); a fixed handler/connect cost (~15-40 ms) is what makes
+#: small windows look worse (200 ms -> 1.21-1.25x, 50 ms -> 1.26-1.36x). It is the
+#: ratio at ONE acquisition point that the previous version of this comment got
+#: wrong -- it claimed ~1.8x ("50 ms -> 0.27 s, 2 s -> 3.8 s, 5 s -> 9.3 s"):
+#: those figures are not what a window costs, and reading them as a per-window
+#: cost is what produced the ~19 s budget this comment used to justify two
+#: attempts with (review round 1, MINOR-2; QA round 1, Q-1).
+#:
+#: WHERE THE HIGHER COST DOES COME FROM: an attempt can pay the window at TWO
+#: acquisition points, and the write's own COMMIT is the second one --
+#: ``BEGIN IMMEDIATE`` waits for a RESERVED holder, then the implicit COMMIT under
+#: ``with conn:`` waits for a SHARED reader. That is the innermost frame of the
+#: operator's incident traceback (`_connect`'s ``with conn:``), i.e. the 12
+#: publish failures died AFTER acquiring RESERVED, and it is why the budget must
+#: be sized from a measurement of the two-window shape rather than from a single
+#: window's ratio.
+#:
+#: SO THE BUDGETS, at the shipped 5 s window and two attempts, measured on the
+#: real store (``AttentionStore.publish`` / ``revision`` against a held lock):
+#:
+#: * a READ pays at one point (it takes SHARED and never writes): 10.80-10.84 s;
+#: * a WRITE pays at one point when only the COMMIT is blocked (10.80 s) and at
+#:   two when RESERVED is held as well (**12.09 s**, with a 1.2 s RESERVED hold).
+#:
+#: Two attempts is therefore the largest budget whose worst case still answers a
+#: turn's ``finally`` promptly -- ~12 s, against ~16-17 s for a third attempt --
+#: and the second window is what absorbs a burst that outlasts the first. A lock
+#: that outlasts both is what the journal beside the store is for: the outcome is
+#: durable in the transcript before it is published, and the owning session
+#: republishes it in-process on a bounded ladder (see
+#: ``Session._schedule_attention_republish``), with the next boot's import as the
+#: fallback rather than the only remedy.
+_CONTENTION_ATTEMPTS = 2
+_CONTENTION_BACKOFF_S = 0.2
+
+#: The contended-verdict codes, from the ONE place that classifies them.
+#: ``SQLITE_BUSY`` is the busy-timeout expiry ("database is locked") and
+#: ``SQLITE_LOCKED`` the same verdict from the other lock family ("database
+#: table is locked"); the family also carries the recovery and shared-cache
+#: verdicts, which is why this is an import rather than a two-name literal.
+_CONTENTION_ERRONAMES = BUSY_ERRONAMES
+
+_T = TypeVar("_T")
 
 #: The machine token a surface reads to tell "your token is stale, re-arm from
 #: your own state" apart from a failure worth backing off on. Part of the wire
@@ -85,6 +183,128 @@ class SupersededCompletionToken(ValueError):
             "completion token superseded by a newer completion; "
             "acknowledge the conversation's current token"
         )
+
+
+class _AttentionContentionDeferred(sqlite3.OperationalError):
+    """A store acquisition gave up on contention, still classified as contention.
+
+    THE CODE IS SET HERE, NOT BY THE CALLER (review round 1, MINOR-4). It used to
+    be attached afterwards by the factory that built the verdict, which meant the
+    type only carried its verdict when that helper had run: a direct construction
+    -- by a caller, a rig or a future test -- classified as 500
+    ``store_unavailable``, i.e. "check this machine", which is exactly the
+    downgrade the docstring below says the type exists to prevent. Defaulting to
+    ``SQLITE_BUSY`` in the constructor makes the type honest on its own.
+
+    ``error`` carries SQLite's OWN verdict through when there is one, because
+    the code -- not the sentence -- is what every surface ladder reads.
+    """
+
+    def __init__(self, message: str, *, error: sqlite3.OperationalError | None = None) -> None:
+        super().__init__(message)
+        # `or` rather than a None check: a certified code is never 0 (SQLITE_OK is
+        # not raised as an error), so a falsy code means "SQLite gave none" and
+        # SQLITE_BUSY is the right assertion -- this class is only ever built for
+        # a lock.
+        code = getattr(error, "sqlite_errorcode", None)
+        self.sqlite_errorcode = int(code) if code else sqlite3.SQLITE_BUSY
+        name = str(getattr(error, "sqlite_errorname", "") or "")
+        self.sqlite_errorname = name or "SQLITE_BUSY"
+
+
+class AttentionWriteDeferred(_AttentionContentionDeferred):
+    """A write gave up: SQLite called the store busy through every attempt.
+
+    SUBCLASSES ``sqlite3.OperationalError``, AND CARRIES ITS ``sqlite_errorname``,
+    for the reason :class:`SupersededCompletionToken` subclasses ``ValueError``:
+    every surface that already classifies a store failure keeps its mapping with
+    no per-surface change. That is load-bearing here rather than tidy --
+    ``session/store_failures.py`` chooses between 503-busy, 507-out-of-space and
+    500-unavailable from the certified ``sqlite_errorname``, so a NEW type that
+    dropped the code would downgrade a correctly-classified contention to
+    "the store is broken" and tell the operator to check the machine.
+
+    What the separate TYPE buys is the distinction the caller could not make
+    before: *contended, come back later* versus *broken, stop retrying*. A
+    caller that treats a store failure as fatal can now defer instead of
+    failing -- see ``Session._publish_attention_outcome``, which is the caller
+    whose raise took the mobile daemon's request handler down with it.
+
+    RAISED ONLY AFTER THE BOUNDED RETRY in :meth:`AttentionStore._retry_write`
+    is exhausted, so reaching it means contention outlasted ``_BUSY_TIMEOUT_MS``
+    times ``_CONTENTION_ATTEMPTS`` -- never SQLite's first refusal.
+
+    The name says DEFERRED rather than LOST because for the publish path it is:
+    the outcome is journalled to the transcript *before* it is published, and the
+    owning session retries the publication IN THIS PROCESS on a bounded republish
+    ladder (``Session._schedule_attention_republish``: four rungs, ~86 s), which is
+    the remedy that matters, because a finished session is idle and an idle session
+    never boots. The next boot's ``bootstrap_transcript`` re-imports the journal as
+    well, but as the FALLBACK for a ladder that ran out -- it is not on its own a
+    remedy, which is what the previous wording here claimed and what the operator
+    hit (2026-09-23: completions landed in the journal and never in the store, so
+    no notification and no sidebar mark). Callers that swallow this must say so out
+    loud, because a completion missing from the store until the ladder's next rung
+    is a real, user-visible delay.
+    """
+
+    def __init__(self, message: str, *, error: sqlite3.OperationalError | None = None) -> None:
+        super().__init__(message, error=error)
+
+
+class AttentionReadDeferred(_AttentionContentionDeferred):
+    """A READ gave up: SQLite called the store busy through every attempt.
+
+    ITS OWN TYPE BECAUSE THE CALLER'S REMEDY DIFFERS FROM A WRITE'S. A deferred
+    read has changed nothing -- the receipt, the revision and the watermark are
+    all exactly as they were -- so a surface may serve its last good frame, or
+    its empty value, and re-read on the next tick. A deferred write may have been
+    a completion the store does not have yet, which the owning session republishes
+    in-process and which the next boot's journal import would otherwise carry.
+    Both carry SQLITE_BUSY through the same base, so `store_failures` answers 503
+    "busy, retry" for either and no ladder needs a new branch.
+
+    RAISED ONLY AFTER :meth:`AttentionStore._retry_read` EXHAUSTS THE BUDGET
+    ``_CONTENTION_ATTEMPTS`` gives it, never on SQLite's first refusal.
+    """
+
+    def __init__(self, message: str, *, error: sqlite3.OperationalError | None = None) -> None:
+        super().__init__(message, error=error)
+
+
+def _is_contention(error: sqlite3.OperationalError) -> bool:
+    """Whether SQLite refused a statement for CONTENTION rather than for a cause.
+
+    The discriminator is the certified code, exactly as ``store_failures``
+    reasons: the message is localized prose that changes between releases. The
+    text is consulted only when there is no code at all -- an error re-wrapped by
+    an intermediate layer -- and even then only for SQLite's lock verdicts, so a
+    full disk or an unopenable store is never retried.
+
+    The set is ``store_failures``' own (``_CONTENTION_ERRONAMES`` is that import),
+    so retrying and classifying cannot disagree about a verdict.
+    """
+    errorname = str(getattr(error, "sqlite_errorname", "") or "")
+    if errorname:
+        return errorname in _CONTENTION_ERRONAMES
+    message = str(error).lower()
+    return "locked" in message or "busy" in message
+
+
+def _write_deferred(error: sqlite3.OperationalError) -> AttentionWriteDeferred:
+    """Name a contended WRITE's final refusal, keeping SQLite's own verdict."""
+    return AttentionWriteDeferred(
+        f"attention store stayed busy through {_CONTENTION_ATTEMPTS} attempts: {error}",
+        error=error,
+    )
+
+
+def _read_deferred(error: sqlite3.OperationalError) -> AttentionReadDeferred:
+    """Name a contended READ's final refusal, keeping SQLite's own verdict."""
+    return AttentionReadDeferred(
+        f"attention store stayed busy through {_CONTENTION_ATTEMPTS} attempts: {error}",
+        error=error,
+    )
 
 
 #: Named once because BOTH the minting side (`provisional_anchor`) and the
@@ -534,7 +754,7 @@ def _marker_postdates_run(marker: dict[str, Any], run_started_at: float | None) 
     return float(marker["at"]) >= float(run_started_at)
 
 
-def _record_detail(record: Any) -> str:
+def _record_detail(record: Any, *, lead: str = "") -> str:
     """A parenthetical naming the record that outlived its process, or ``""``.
 
     Kept to the record's own facts (build, pid, started-at) rather than prose,
@@ -542,6 +762,18 @@ def _record_detail(record: Any) -> str:
     from the log to answer "which runtime was this". The started-at is ONE
     token rather than two — see the note on its format below (design round 3,
     D7).
+
+    ``lead`` IS HOW THE VICTIM IS TOLD APART FROM AN ACTOR (QA round 1, Q4/Q5).
+    Every other ``runtime-killed`` reason on this arm carries a marker's
+    ATTRIBUTION in the same brackets (``(its install generation was pruned by lop
+    install prune, killer pid N)``), so a bare ``(pid N, started …)`` — which is
+    the DEAD runtime's own identity — reads one word away from naming the process
+    that did it. This rung has no actor to name, and ``incidents.KILL_UNATTRIBUTED``
+    is how a verdict says so: the same affirmative statement about the gap that
+    ``journal.death_verdict``'s open-row rung makes, so a marked death and an
+    unmarked one are not read as the same sentence. Comma-separated rather than a
+    second set of brackets, exactly as ``journal.row_detail`` takes its own
+    ``lead``.
     """
     build = str(getattr(record, "version", "") or "")
     ref = str(getattr(record, "source_ref", "") or "")
@@ -562,6 +794,8 @@ def _record_detail(record: Any) -> str:
     parts = [
         part for part in (stamp, f"pid {record.pid}", f"started {when}" if when else "") if part
     ]
+    if lead:
+        parts.insert(0, lead)
     return f" ({', '.join(parts)})" if parts else ""
 
 
@@ -594,8 +828,9 @@ def _classify_orphaned_run(
       marker is a killer's attestation that someone asked for this, and nothing
       about an unfinished turn may outrank a record that the stop was ordered;
     * a record on disk whose pid is dead → ``error`` / ``runtime-killed``, with
-      the record's build, pid and start time as the detail — the legacy path,
-      reached unchanged when no journal row survives;
+      the record's build, pid and start time as the detail, prefixed by
+      ``incidents.KILL_UNATTRIBUTED`` because the only party this rung can name is
+      the victim — the legacy path, reached unchanged when no journal row survives;
     * nothing at all → ``error`` / no cause, saying plainly that the cause could
       not be determined.
 
@@ -645,6 +880,8 @@ def _classify_orphaned_run(
     from local_operator.incidents import (
         CUT_OFF_UNKNOWN,
         DELIBERATE_CUT_OFF_CAUSE,
+        KILL_UNATTRIBUTED,
+        involuntary_kill_detail,
         render_cut_off_reason,
         render_stop_attribution,
     )
@@ -658,25 +895,62 @@ def _classify_orphaned_run(
     if dead is None:
         dead = reaped_owner
     marker = _durable_stop_marker(directory)
-    if (
-        marker is not None
-        and marker.get("deliberate")
-        and _stop_marker_covers_run(marker, directory, dead, run_started_at=run_started_at)
+    if marker is not None and _stop_marker_covers_run(
+        marker, directory, dead, run_started_at=run_started_at
     ):
         raw_killer = marker.get("killer")
         killer: dict[str, Any] = raw_killer if isinstance(raw_killer, dict) else {}
-        return (
-            "interrupted",
-            DELIBERATE_CUT_OFF_CAUSE,
-            render_cut_off_reason(
-                DELIBERATE_CUT_OFF_CAUSE,
-                detail=render_stop_attribution(
-                    rung=str(marker.get("rung") or ""),
-                    command=str(killer.get("command") or killer.get("argv0") or ""),
-                    killer_pid=killer.get("pid"),
+        # ``deliberate is False`` EXACTLY, rather than a falsy test: the arm below
+        # must not swallow a marker that predates the flag. A marker with no
+        # ``deliberate`` field at all is a deliberate stop from a build older than
+        # this one, and its refusal to claim otherwise is what keeps this change
+        # from re-labelling history.
+        if marker.get("deliberate") is False:
+            # AN INVOLUNTARY ACT, ATTRIBUTED BY ITS OWN MARKER. The harness
+            # recorded what it was about to do before it did it
+            # (``control.note_involuntary_stop``), so this death is NAMED rather
+            # than inferred — and it is emphatically not a ``user-stop``: the
+            # marker says ``deliberate: false``, which is what every caller asking
+            # "did someone ask for this" reads. A marker outranks the journal row
+            # below because it is an act's own attestation where the row is only
+            # the victim's last statement; the row is not consulted here, so the
+            # reason is the shared sentence plus the attribution (or
+            # ``(unattributed)`` when the marker named no actor).
+            return (
+                "error",
+                "runtime-killed",
+                render_cut_off_reason(
+                    "runtime-killed",
+                    detail=involuntary_kill_detail(
+                        mechanism=str(marker.get("mechanism") or ""),
+                        # The acting component's own name when the writer gave one, else
+                        # the same command-or-argv0 the deliberate arm falls back to —
+                        # because a marker ALWAYS knows which process staged it, and a
+                        # pid alone is the weakest form of the attribution this arm
+                        # exists to provide when its process is long gone.
+                        actor=str(
+                            marker.get("actor")
+                            or killer.get("command")
+                            or killer.get("argv0")
+                            or ""
+                        ),
+                        killer_pid=killer.get("pid"),
+                    ),
                 ),
-            ),
-        )
+            )
+        if marker.get("deliberate"):
+            return (
+                "interrupted",
+                DELIBERATE_CUT_OFF_CAUSE,
+                render_cut_off_reason(
+                    DELIBERATE_CUT_OFF_CAUSE,
+                    detail=render_stop_attribution(
+                        rung=str(marker.get("rung") or ""),
+                        command=str(killer.get("command") or killer.get("argv0") or ""),
+                        killer_pid=killer.get("pid"),
+                    ),
+                ),
+            )
     if _stopped_marker(directory):
         return (
             "interrupted",
@@ -696,10 +970,16 @@ def _classify_orphaned_run(
     except Exception:  # noqa: BLE001 — unreadable evidence is not a dead session
         logger.debug("turn journal evidence unreadable for %s", directory.name, exc_info=True)
     if dead is not None:
+        # ONLY THE VICTIM IS KNOWN HERE, so that is what the bracket says before it
+        # names anything: this rung is reached when no marker, no row and no wake
+        # index entry survives, and an aside that opens with a bare pid sits one
+        # word away from the marker arms' actor (QA round 1, Q4/Q5).
         return (
             "error",
             "runtime-killed",
-            render_cut_off_reason("runtime-killed", detail=_record_detail(dead)),
+            render_cut_off_reason(
+                "runtime-killed", detail=_record_detail(dead, lead=KILL_UNATTRIBUTED)
+            ),
         )
     return "error", "", CUT_OFF_UNKNOWN
 
@@ -900,9 +1180,22 @@ class AttentionStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # A new placeholder must be private before SQLite writes any contents.
         self.path.touch(mode=0o600, exist_ok=True)
-        conn = sqlite3.connect(self.path, timeout=2.0)
+        conn = sqlite3.connect(self.path, timeout=_CONNECT_TIMEOUT_S)
         conn.row_factory = sqlite3.Row
         try:
+            # The busy handler spelled where the lock policy is read from, next to
+            # the driver timeout for the reason the sibling stores set both. See
+            # `_BUSY_TIMEOUT_MS`: this store's write path is the one ~25 concurrent
+            # sessions, the mobile daemon, the tunnel connector and the browser
+            # bridge all reach, and the 2 s it used to allow is what expired first.
+            #
+            # INSIDE THE `try:` (review round 1, NIT-1). The pragma is a no-I/O
+            # statement today, so this closes a leak rather than a live bug -- but
+            # the rule this method already follows with its `except BaseException:
+            # conn.close()` at the end is that a connection is closed on EVERY
+            # failure between its creation and its return, not only on the ones
+            # somebody could demonstrate.
+            conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
             # Publish the complete schema in one transaction. Concurrent readers
             # can see the positively identified empty database or both tables,
             # never an intermediate schema with a missing receipt table.
@@ -1016,6 +1309,40 @@ class AttentionStore:
             conn.close()
             raise
 
+    def _connect_read_only(self) -> sqlite3.Connection:
+        """A ``mode=ro`` connection that waits as long as the write path does.
+
+        READS CONTEND FOR THE SAME LOCK, and this store's reads are on the hot
+        paths: the mobile daemon's scan (``revision``), every frontend list
+        (``state_many``), and the sidebar's deltas. This store keeps SQLite's
+        default rollback journal, so a writer holding the lock blocks a reader
+        at ``BEGIN`` exactly as it blocks another writer -- and the operator's
+        log shows the daemon's own scan losing that race 36 times
+        (`AttentionStore().revision` raising `database is locked` out of
+        `_uninitialized`). A read that raises costs the caller its whole tick or
+        its whole response, so it gets the same 5 s window rather than 2 -- and
+        the same bounded retry (:meth:`_retry_read`), which is the other half of
+        that answer: widening the window alone only buys a longer wait before the
+        same failure.
+
+        Deliberately NOT ``_connect``: the read paths must stay unable to create
+        the file or migrate the schema (``mode=ro`` is the mechanism, and
+        ``test_reads_do_not_create_or_mutate_storage`` pins it). Only the wait
+        is shared.
+        """
+        conn = sqlite3.connect(
+            f"{self.path.as_uri()}?mode=ro", uri=True, timeout=_CONNECT_TIMEOUT_S
+        )
+        conn.row_factory = sqlite3.Row
+        # Same ordering as `_connect`, and for the same reason (review round 1,
+        # NIT-1): a connection that fails before its return is closed here.
+        try:
+            conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+        except BaseException:
+            conn.close()
+            raise
+        return conn
+
     @staticmethod
     def _uninitialized(conn: sqlite3.Connection) -> bool:
         # A first publisher's private 0600 placeholder is a valid zero-schema
@@ -1057,6 +1384,12 @@ class AttentionStore:
         Call this in a worker, then merge/render the returned map on the UI loop.
         Chunking bounds SQL parameters, not connection count; empty/new stores
         remain genuinely read-only and return explicit no-completion states.
+
+        THE STORE TOUCH IS UNDER THE READ RETRY (:meth:`_retry_read`): this is the
+        read the phone's list route pays, and the graph the operator's log shows
+        losing the lock lives in this method's scan. The no-completion defaults
+        are merged OUTSIDE the retry, so a retried attempt reports the rows it
+        found and an empty conversation still gets this method's own answer.
         """
         identities = list(dict.fromkeys(conversations))
         states = {
@@ -1074,13 +1407,16 @@ class AttentionStore:
         }
         if not identities or not self.path.exists():
             return states
-        with closing(
-            sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=2.0)
-        ) as conn:
-            conn.row_factory = sqlite3.Row
+        states.update(self._retry_read(lambda: self._state_many_once(identities)))
+        return states
+
+    def _state_many_once(self, identities: list[str]) -> dict[str, dict[str, Any]]:
+        """One attempt at :meth:`state_many`'s snapshot, on its own connection."""
+        found: dict[str, dict[str, Any]] = {}
+        with closing(self._connect_read_only()) as conn:
             conn.execute("BEGIN")
             if self._uninitialized(conn):
-                return states
+                return found
             for offset in range(0, len(identities), 500):
                 chunk = identities[offset : offset + 500]
                 placeholders = ",".join("?" for _ in chunk)
@@ -1093,7 +1429,7 @@ class AttentionStore:
                     chunk,
                 )
                 for row in rows:
-                    states[row["conversation"]] = {
+                    found[row["conversation"]] = {
                         "conversation_id": row["conversation"],
                         "completion_token": row["token"],
                         "anchor_id": row["anchor"],
@@ -1103,7 +1439,7 @@ class AttentionStore:
                         "unseen": row["sequence"] > row["acknowledged"],
                         "revision": [row["sequence"], row["acknowledged"]],
                     }
-        return states
+        return found
 
     def state(self, conversation: str) -> dict[str, Any]:
         return self.state_many([conversation])[conversation]
@@ -1125,18 +1461,20 @@ class AttentionStore:
         afterwards for the wire shape — this read answers "which sessions
         moved", never "what does the card say".
 
-        Read-only and missing-store tolerant, exactly like its neighbours: a
-        store that does not exist yet has published nothing, and a poller that
+        Read-only, retried and missing-store tolerant, exactly like its
+        neighbours: a store that does not exist yet has published nothing, and a
+        poller that
         raised here would lose cross-process completion sync for the life of
         its loop. A pre-taxonomy database reads without ``reason``/``cause``
         because neither is selected.
         """
         if not self.path.exists():
             return []
-        with closing(
-            sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=2.0)
-        ) as conn:
-            conn.row_factory = sqlite3.Row
+        return self._retry_read(lambda: self._published_since_once(int(sequence)))
+
+    def _published_since_once(self, sequence: int) -> list[dict[str, Any]]:
+        """One attempt at :meth:`published_since`'s scan, on its own connection."""
+        with closing(self._connect_read_only()) as conn:
             conn.execute("BEGIN")
             if self._uninitialized(conn):
                 return []
@@ -1150,7 +1488,7 @@ class AttentionStore:
                 for row in conn.execute(
                     "SELECT conversation, sequence, token, kind FROM completions "
                     "WHERE sequence > ? ORDER BY sequence",
-                    (int(sequence),),
+                    (sequence,),
                 )
             ]
 
@@ -1166,18 +1504,19 @@ class AttentionStore:
         the stale outcome the heal had just corrected. This read is what turns
         "a heal happened" into "publish a corrected state for THIS session".
 
-        Read-only and missing-store/missing-table tolerant, exactly like its
-        neighbours: ``supersede_log`` is additive, so a database whose runtime
+        Read-only, retried and missing-store/missing-table tolerant, exactly like
+        its neighbours: ``supersede_log`` is additive, so a database whose runtime
         has not reconnected yet legitimately lacks it and must read as "nothing
         was healed" rather than raising. A reader that raised here would lose
         in-place corrections for the life of its loop.
         """
         if not self.path.exists():
             return []
-        with closing(
-            sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=2.0)
-        ) as conn:
-            conn.row_factory = sqlite3.Row
+        return self._retry_read(lambda: self._superseded_since_once(int(sequence)))
+
+    def _superseded_since_once(self, sequence: int) -> list[dict[str, Any]]:
+        """One attempt at :meth:`superseded_since`'s scan, on its own connection."""
+        with closing(self._connect_read_only()) as conn:
             conn.execute("BEGIN")
             if self._uninitialized(conn):
                 return []
@@ -1189,7 +1528,7 @@ class AttentionStore:
                 {"sequence": int(row["seq"]), "conversation": row["conversation"]}
                 for row in conn.execute(
                     "SELECT seq, conversation FROM supersede_log WHERE seq > ? ORDER BY seq",
-                    (int(sequence),),
+                    (sequence,),
                 )
             ]
 
@@ -1206,13 +1545,15 @@ class AttentionStore:
         Deliberately its own small read rather than a term of ``revision()``:
         ``SUM(acknowledged)`` is enough to know *something* moved but not
         *which*, and guessing the conversation is what would make a late frame
-        un-read a row.
+        un-read a row. Retried like every other read here (:meth:`_retry_read`).
         """
         if not self.path.exists():
             return {}
-        with closing(
-            sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=2.0)
-        ) as conn:
+        return self._retry_read(self._acknowledgement_map_once)
+
+    def _acknowledgement_map_once(self) -> dict[str, int]:
+        """One attempt at :meth:`acknowledgement_map`'s read, on its own connection."""
+        with closing(self._connect_read_only()) as conn:
             conn.execute("BEGIN")
             if self._uninitialized(conn):
                 return {}
@@ -1222,6 +1563,143 @@ class AttentionStore:
                     "SELECT conversation, MAX(acknowledged) FROM receipts GROUP BY conversation"
                 )
             }
+
+    def _retry_contention(
+        self,
+        operation: Callable[[], _T],
+        defer: Callable[[sqlite3.OperationalError], sqlite3.OperationalError],
+        *,
+        what: str,
+    ) -> _T:
+        """Run one store acquisition, riding out a contended lock before naming it.
+
+        THE ONE RETRY LOOP, shared by the write and the read paths so the two
+        cannot drift into different budgets or different classifications -- the
+        same reason ``_CONTENTION_ERRONAMES`` is imported rather than restated.
+        ``defer`` decides which typed verdict an exhausted budget raises.
+
+        BOUNDED, and stated: ``_CONTENTION_ATTEMPTS`` attempts, each with
+        SQLite's own ``_BUSY_TIMEOUT_MS`` window, plus ``_CONTENTION_BACKOFF_S``
+        between them. The worst case that buys is measured at the constants --
+        10.8 s for a read (one acquisition point per attempt) and 12.1 s for a
+        write (it can pay twice in one attempt: ``BEGIN IMMEDIATE`` then the
+        implicit COMMIT). A turn's ``finally`` is the caller that feels it.
+
+        ONLY CONTENTION IS RETRIED (:func:`_is_contention`, on SQLite's certified
+        code, over the set ``store_failures`` classifies with). A full disk, an
+        unopenable store and a corrupt schema are not races; re-running those
+        would only delay the report, and the surface ladders have different,
+        better sentences for each.
+
+        THE WAIT HAPPENS ON THE CALLER'S THREAD, and most callers here give it a
+        worker: `asyncio.to_thread` from the session's publish path and from the
+        mobile daemon, the desktop feed's own thread, the TUI's `collect` worker.
+        NOT ALL OF THEM, and this is named rather than assumed:
+        `SessionReader.list` (`server/utils/desktop_sessions.py`) reads
+        `state_many` straight out of an `async def` with no `to_thread`, so a lock
+        that outlasts the window blocks that route's event loop for the attempt
+        -- 2 s on `main`, up to ~10.8 s on this budget. The blocking read is the
+        call site's, not the store's (it predates this change), and it is listed
+        under the PR's "Deliberately not done"; moving those reads off-loop is
+        its own change.
+        """
+        last: sqlite3.OperationalError | None = None
+        for attempt in range(_CONTENTION_ATTEMPTS):
+            try:
+                return operation()
+            except sqlite3.OperationalError as error:
+                if not _is_contention(error):
+                    raise
+                last = error
+                if attempt + 1 >= _CONTENTION_ATTEMPTS:
+                    break
+                logger.debug(
+                    "attention: %s attempt %d/%d met a locked store; retrying in %s s",
+                    what,
+                    attempt + 1,
+                    _CONTENTION_ATTEMPTS,
+                    _CONTENTION_BACKOFF_S,
+                )
+                time.sleep(_CONTENTION_BACKOFF_S)
+        if last is None:  # pragma: no cover -- the loop runs at least once
+            raise AssertionError("unreachable: _CONTENTION_ATTEMPTS >= 1")
+        raise defer(last) from last
+
+    def _retry_write(self, operation: Callable[[], _T]) -> _T:
+        """Run one write, riding out a contended lock before giving it a name.
+
+        WHY THE RETRY IS IN THE STORE AND NOT AT THE CALL SITES. A lock is a
+        statement about OTHER writers, not about the caller's request, so a
+        transient one must not become the caller's failure. The store owns the
+        connection and the transaction, so this is where the second attempt --
+        and the eventual classification -- belongs; a caller cannot retry a
+        transaction it cannot see.
+
+        WHY IT EXISTS AT ALL. Publish sits on paths with no failure ladder to
+        catch it: the turn's own ``finally`` (``Session._publish_attention_outcome``,
+        which is what a runtime's ASGI request handler runs) and the mobile
+        daemon's boot sweep. A raise there is not a late notification, it is a
+        request that never completes -- the operator's 2026-09-20 outage, where
+        one expiring lock answered the phone with an ASGI abort.
+
+        BOUNDED, and stated: ``_CONTENTION_ATTEMPTS`` attempts, each with SQLite's
+        own ``_BUSY_TIMEOUT_MS`` window, plus ``_CONTENTION_BACKOFF_S`` between
+        them. A pathological wait is the price of not dropping a completion on the
+        floor. The measured worst case -- and the acquisition points it is paid
+        at, which is what the deleted "about 19 s" figure got wrong -- is at the
+        constants: 12.1 s for this path's two attempts, on the caller's thread
+        (see :meth:`_retry_contention` for which callers give it a worker).
+
+        ONLY CONTENTION IS RETRIED (:func:`_is_contention`, on SQLite's certified
+        code). A full disk, an unopenable store and a corrupt schema are not
+        races; re-running those would only delay the report, and the surface
+        ladders have different, better sentences for each.
+
+        The failure that does escape is :class:`AttentionWriteDeferred`, which
+        keeps SQLite's own code so the existing ladders classify it as
+        contention rather than as a broken store.
+        """
+        return self._retry_contention(operation, _write_deferred, what="write")
+
+    def _retry_read(self, operation: Callable[[], _T]) -> _T:
+        """Run one read, riding out a contended lock before giving it a name.
+
+        WHY THE READ CLASS NEEDED THIS TOO. Reads contend for the same lock as
+        writes in this store's default rollback journal, and they are the
+        MAJORITY of the incident: 36 RECORDS of the daemon's own scan dying
+        inside `revision -> _uninitialized`, against 12 records on the publish
+        path, over the 60 `database is locked` text OCCURRENCES in the
+        operator's log -- two units, not one. Each scan record carries the
+        phrase once and each publish record twice (its own header plus the last
+        line of its traceback), so the same log reads (36/12/1 records,
+        36/24/0 occurrences): the ASGI record carries the phrase zero times,
+        which is why the records sum to 49 and the occurrences to 60. Round-3
+        review MINOR-1 and round-3 QA Q-3 are the reason those two splits are
+        spelled out instead of asserted: the 38/21/1 this paragraph used to
+        print contradicted its own `12 x 2` and had no record behind the "1".
+        Closing the exposed window to 5 s (what this PR did first) left those 36
+        exactly as they were -- they were merely given a larger window before
+        failing, with the phone's read routes still answering 500 on a lock the
+        window could not outlast (review round 1, Q-2). A read that raises costs
+        the caller its whole tick or its whole response, so it is ridden out like
+        a write, not just widened.
+
+        WHY A RETRY IS SAFE HERE, where `publish` needs an idempotency argument.
+        The operation runs on a ``mode=ro`` connection: it holds SHARED, writes
+        nothing, and re-running it cannot double-apply a change. There is no
+        transaction to resume and no half-finished state to leave behind.
+
+        WHAT ESCAPES IS CLASSIFIED, NOT BARE. An exhausted budget raises
+        :class:`AttentionReadDeferred`, which carries ``SQLITE_BUSY`` through the
+        same base the write verdict uses -- so the desktop ladder, and the TUI's
+        `/notifications` probe, answer 503 "busy, retry" for a read exactly as
+        they do for a write, and never 500 "the store is broken".
+
+        The budget is shared with the write path (:meth:`_retry_contention`),
+        and a read pays it at ONE acquisition point per attempt: measured 10.8 s
+        worst case for the shipped two attempts, against the write's 12.1 s.
+        """
+        return self._retry_contention(operation, _read_deferred, what="read")
 
     def publish(
         self,
@@ -1288,12 +1766,48 @@ class AttentionStore:
         detector WITHOUT moving the watermark, and an acknowledged turn stays
         read. Detectable and flood-free are not in tension once they are
         separate counters.
+
+        CONTENTION IS RIDDEN OUT HERE, NOT HANDED TO THE CALLER. The transaction
+        runs under the bounded retry below (:meth:`_retry_write`), and only if
+        every attempt meets SQLite's busy verdict does it raise
+        :class:`AttentionWriteDeferred` -- never the bare ``OperationalError``
+        this method used to give a daemon request handler, which answered the
+        phone with an ASGI abort (2026-09-20, see ``_BUSY_TIMEOUT_MS``).
         """
         if kind not in {"complete", "error", "interrupted"} or not anchor:
             raise ValueError("invalid completion")
         reason = str(reason or "")[:REASON_WIRE_CHARS]
         if str(uuid.UUID(token)) != token:
             raise ValueError("invalid completion token")
+        # Split from the transaction so the retry has something to call: the
+        # statements below are unchanged, and re-running them is safe because a
+        # replay is idempotent by token (``INSERT OR IGNORE``, plus a supersede an
+        # identical replay cannot re-apply) and every attempt builds its own
+        # connection, so no half-finished transaction is ever resumed.
+        return self._retry_write(
+            lambda: self._publish_outcome(
+                conversation,
+                token,
+                anchor,
+                kind,
+                baseline_seen=baseline_seen,
+                reason=reason,
+                cause=cause,
+            )
+        )
+
+    def _publish_outcome(
+        self,
+        conversation: str,
+        token: str,
+        anchor: str,
+        kind: str,
+        *,
+        baseline_seen: bool | None,
+        reason: str,
+        cause: str,
+    ) -> dict[str, Any]:
+        """One attempt at :meth:`publish`'s transaction, on its own connection."""
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             if (
@@ -1350,12 +1864,20 @@ class AttentionStore:
         it is safe for them; the per-conversation ``state()["revision"]`` pair is
         a separate, unchanged wire contract (``AttentionState.revision``, mirrored
         by the mobile client) and deliberately does not grow a third element.
+
+        THIS IS THE READ THE INCIDENT'S LOG SHOWS DYING (36 records of it, over
+        the 60 `database is locked` text occurrences, out of ``_uninitialized``),
+        so it runs under the bounded read retry
+        (:meth:`_retry_read`) and gives a classified :class:`AttentionReadDeferred`
+        rather than a bare ``OperationalError`` if every attempt meets the lock.
         """
         if not self.path.exists():
             return (0, 0, 0)
-        with closing(
-            sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=2.0)
-        ) as conn:
+        return self._retry_read(self._revision_once)
+
+    def _revision_once(self) -> tuple[int, int, int]:
+        """One attempt at :meth:`revision`'s counters, on its own connection."""
+        with closing(self._connect_read_only()) as conn:
             conn.execute("BEGIN")
             if self._uninitialized(conn):
                 return (0, 0, 0)

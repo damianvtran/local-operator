@@ -128,13 +128,15 @@ from local_operator.model.effort import (
     next_effort,
     resolve_effort_in,
 )
-from local_operator.providers.catalogue import picker_rows
 
-# The `@path` resolver. Module scope here, unlike in `command_picker.py` where
-# it is reached through a lazy seam: this module already imports the session
-# layer directly (`session.naming`, `session.goal_loop`, …), so the layering
-# objection that applies to a Textual WIDGET does not apply to the app.
-from local_operator.references import expand_references, scan_directory_report
+# NOT imported here: `providers.catalogue` (the model picker's shared ranking)
+# and `references` (the `@path` resolver). Both are reached only after the user
+# acts -- opening `/model`, typing `@`, submitting a message with a reference --
+# and together they were ~460 ms of this module's 1.8-2.8 s import, because
+# `providers.catalogue` pulls the whole provider layer (httpx) and `references`
+# pulls `tools.builtin`. Every `lop` launch paid that before first paint
+# (backend load report B-F10). They are imported at their call sites instead;
+# `tests/unit/test_import_graph.py` pins them off this module's import graph.
 from local_operator.session import naming
 from local_operator.session.errors import RuntimeRetiring
 from local_operator.session.frontend_state import (
@@ -165,7 +167,9 @@ from local_operator.session.runtime.types import (
     LEAVING_FOR_BUILD,
     LEAVING_FOR_BUILD_OVERDUE,
     LEAVING_ON_SIGNAL,
+    UPDATING,
     bound_text,
+    update_phrase,
 )
 from local_operator.slash_commands import (
     PERSIST_HINT,
@@ -176,7 +180,7 @@ from local_operator.slash_commands import (
 )
 from local_operator.tui import images as images_mod
 from local_operator.tui import theme as theme_mod
-from local_operator.tui.autocomplete import ArgumentChoice
+from local_operator.tui.autocomplete import ArgumentChoice, SlashCommand
 from local_operator.tui.composer_focus import return_focus_to_composer
 from local_operator.tui.copy_targets import CopyTarget, build_copy_targets
 from local_operator.tui.costs import (
@@ -200,6 +204,8 @@ from local_operator.tui.events import (
     HistoryRowsSettled,
     NoticePosted,
     PeerMessageDelivered,
+    ReasoningDelta,
+    ReasoningEnd,
     RetryEnded,
     RetryStarted,
     SessionEvent,
@@ -304,6 +310,7 @@ from local_operator.tui.widgets.org_chart_view import (
     OrgChartView,
     OrgChartViewDismissed,
 )
+from local_operator.tui.widgets.reasoning import DEFAULT_REASONING, ReasoningBlock
 from local_operator.tui.widgets.session_picker import (
     RESUME_EMPTY_NOTICE,
     SessionPickerScreen,
@@ -325,6 +332,7 @@ from local_operator.tui.widgets.settings_view import (
     SettingsViewDismissed,
 )
 from local_operator.tui.widgets.status_line import (
+    ICON_APPROVALS,
     ICON_MCP,
     McpStatus,
     StatusLine,
@@ -714,17 +722,19 @@ SIGNAL_DRAIN_NOTICE = (
 )
 
 #: The notice for a runtime that gave up WAITING for the work in flight
-#: (``LEAVING_FOR_BUILD_OVERDUE``): a build handover that was forced rather than
-#: waited out, which is a different departure from :data:`DRAIN_NOTICE` in its
-#: second clause and the same one in its first.
+#: (``LEAVING_FOR_BUILD_OVERDUE``): a departure no arm sends any more
+#: (``process._abandon_move`` abandons the handover and keeps serving), kept
+#: because the RECORDS that carry the phrase outlive the runtime that wrote them
+#: and this app still has to paint them. It stays a different sentence from
+#: :data:`DRAIN_NOTICE` in its second clause and the same one in its first.
 #:
 #: WHY IT MAY NOT REUSE THE ORDINARY BUILD SENTENCE. That sentence's promise —
-#: "it is finishing in-flight work first" — is exactly what this runtime has
-#: stopped doing: it denies the parked gates, hands the wakes over and cuts the
-#: turn. Painting it at that instant would reassure the operator about the one
-#: thing that is not true, in the sentence people act on when they decide the
-#: session is safe to leave alone (design round 1, D1; QA round 1, Q-1, which
-#: measured the frame rendering byte-identical to the unplaceable-phrase
+#: "it is finishing in-flight work first" — is exactly what a runtime that armed
+#: this phrase had stopped doing: it denied the parked gates, handed the wakes
+#: over and cut the turn. Painting it at that instant would reassure the operator
+#: about the one thing that was not true, in the sentence people act on when they
+#: decide the session is safe to leave alone (design round 1, D1; QA round 1,
+#: Q-1, which measured the frame rendering byte-identical to the unplaceable-phrase
 #: fallback).
 #:
 #: THE SENTENCE SAYS WHAT WAS OBSERVED, NOT WHY. "no movement has been reported"
@@ -782,6 +792,26 @@ QUEUED_PROMPT_DECLINE_NOTICE = "queued message kept — clear the composer, esc 
 #: disagree about what has been said here (UX round 1, U2).
 QUEUED_ELSEWHERE_NOTICE = "a message is queued for the next runtime — it runs when the session does"
 
+#: THE UPDATE WINDOW'S SENTENCE IS NOT COMPOSED HERE, and that is a correction rather
+#: than a relocation (design review round 1, D5). This module used to hold its own
+#: copy — "updating to the newer build; your message is queued … " — while
+#: ``types.update_phrase`` composed a different one, so the sentence the operator read
+#: was not the sentence under test, and the notice was the one surface that could have
+#: named WHICH build was arriving while ``lop sessions`` and the phone already did.
+#: The vocabulary lives in ``types`` and the frame's own pair is passed through, so
+#: the notice, the fleet cell and the incident row are one sentence with three
+#: renderings (the phase tables the pin walks, ``_UPDATING_SHORT`` and
+#: ``update_short``, all read the same three tokens).
+#:
+#: THE OTHER TWO PHASES ARE NOT PAINTED HERE, and the pin asserts reachability rather
+#: than the presence of table entries it walks (agent review round 1, MINOR 3): only
+#: ``UPDATING`` ever arrives on a frame — an applied update is announced one method
+#: over by :meth:`OperatorApp._announce_refresh_completed`, and a failed one leaves the
+#: runtime SERVING, so there is no frame to carry it and the record plus the incident
+#: row are where it is read (design review round 1, D1 fixed that on the fleet and
+#: info surfaces). A table of sentences nothing can reach is what the reviewer
+#: measured; a call site that renders the phase it is given is what replaced it.
+
 #: Which sentence a draining frame earns, keyed by the TRIGGER'S OWN WORDS — the
 #: ``leaving`` phrase the runtime publishes on its record and now sends in the
 #: frame, so the app and the fleet surfaces quote one vocabulary instead of two
@@ -793,6 +823,39 @@ _DRAIN_NOTICES: dict[str, str] = {
     LEAVING_ON_SIGNAL: SIGNAL_DRAIN_NOTICE,
     LEAVING_FOR_BUILD_OVERDUE: OVERDUE_DRAIN_NOTICE,
 }
+
+#: NO SENTENCE FOR THE ABANDONED HANDOVER, and that is the round-2 correction rather
+#: than an omission (agent review round 1, MAJOR-1; QA round 1, Q-1, which measured it
+#: independently at wire level).
+#:
+#: WHAT WAS TRIED. `process._abandon_move` keeps `LEAVING_FOR_BUILD` on the record when
+#: it gives the handover up — the drain object stays latched and the departure still
+#: lands at the first idle instant — so the phrase alone earned :data:`DRAIN_NOTICE`,
+#: whose second clause ("a new message will not start a turn until the new build is
+#: up") is false from the instant the latch is released. A sentence keyed on the record
+#: PAIR (`leaving` plus a non-empty `update_failed`) was added for that state, and the
+#: selection for the pair was correct — but NOTHING COULD PAINT IT: the only producer
+#: of `retiring` frames composes them at the latch, before any failure exists, and a
+#: viewer that arrives after the abandon receives no frame at all. A sentence table
+#: with no reachable painter is the same class of defect this module deleted once
+#: already (see the round-1 MINOR-3 note above), so the sentence and its key are gone
+#: rather than kept for a wire addition that has not happened.
+#:
+#: WHAT THE ABANDONED STATE IS TOLD, TODAY. The record and the incident row carry it,
+#: where every other fleet surface already reads it: `lop sessions` prints the phrase
+#: (true — the commitment survives) beside `update failed` in its own column, and the
+#: incident row names the bound the runtime actually spent. The viewer's row is the
+#: IMPERFECT half and is recorded as such: a viewer attached at the latch keeps the
+#: drain sentence after the abandon, and **nothing takes that row down** — it is painted
+#: once, through `_notice_for`, which appends a block to the transcript, and the only
+#: retraction in this app is `_retire_unsent_runtime_notice`, for the unsent-runtime row
+#: (matched by its own private text). So the claim is not corrected on screen: the
+#: operator's next message starts a turn, and the row's second clause is contradicted by
+#: what they see rather than reworded (agent review round 2, R2-NIT-2). Repainting it
+#: truthfully needs a frame the renderer acts on at the moment the latch comes off —
+#: either `draining=True`, which would be false, or a NEW "the departure ended" op —
+#: i.e. a two-repo wire addition with its own design round, deferred in the PR thread
+#: rather than half-built here.
 
 
 #: Rows a `.band-slot` spends on itself beyond its content: the rhythm row it
@@ -1174,6 +1237,95 @@ def _retiring_notice_text(error: BaseException) -> str:
 #: dozen rows is the cheaper of those two costs. The band is only repainted
 #: when the count actually CHANGES.
 JOB_POLL_INTERVAL_S = 1.0
+
+#: How often the terminal asks whether this machine's connector parked itself.
+#:
+#: A small local file, not HTTP and not a poll of a gateway that is not running
+#: (`tunnels/state.py` — the park is exactly the state where nothing is
+#: listening). The condition changes when the operator signs in, which is a
+#: human timescale, so the interval is set by how long a stale notice may linger
+#: on screen rather than by how fast the read is: five seconds is short enough
+#: that a sign-in completed in another window withdraws the card while the user
+#: is still looking at the app.
+TUNNEL_PARK_POLL_S = 5.0
+
+#: Owner tag for the parked-connector notice.
+#:
+#: The toast slot is shared, and `Toast.withdraw` retires by OWNER, so this is
+#: what keeps the mention of remote access from pulling an MCP failure out from
+#: under the user (see the rationale on `Toast.withdraw`).
+TUNNEL_PARK_NOTICE = object()
+
+#: The in-app spelling of the remedies the park file carries, as a shell command
+#: would be un-runnable here.
+#:
+#: ONE table, and the only place the mapping exists, because this is exactly the
+#: defect review round 1 opened with (D1/M2): the park's sentence used to name
+#: `/login radient` — a slash command — and that sentence is ALSO written into
+#: `state.json` and forwarded to the desktop as `connector.detail`. A surface
+#: cannot name a command the others cannot run, so the sentence now names none
+#: (`gateway.TERMINAL_DETAIL`) and every surface appends the one it can: the CLI
+#: prints `TERMINAL_REMEDY` verbatim, and this card maps it through here.
+#: Anything not in the table is shown as it stands — a shell command in a
+#: terminal the user is already sitting in front of is runnable — so a new park
+#: reason needs no entry to be told to the user honestly.
+TUNNEL_CARD_COMMANDS = {"lop login radient": "/login radient"}
+
+#: What the card calls each parked reason, as the TAIL of the line.
+#:
+#: The card leads with the COMMAND and puts the reason after it, which is the
+#: repo's own failure-line rule (`toast._FAILURE_REASON_SEP`): the card is
+#: clamped to the terminal, so whatever is lost to a clamp has to be the
+#: explanation, never the instruction — a half-printed `/logi…` is an instruction
+#: the user cannot follow (review round 1, D3).
+#:
+#: Two of the three tails are D3's own words and replace a reason LABEL that was
+#: the wrong reading out of context ("needs re-enrolment" says nothing about what
+#: the user just lost); `login_required` takes the house vocabulary this product
+#: already uses for an expired sign-in (`usage_panel`: `sign-in expired — /login
+#: {provider}`), which is D6's ask. A reason with no entry falls back to its
+#: `REASON_LABEL`, so a code from a newer connector still reads as something.
+TUNNEL_CARD_REASONS = {
+    "login_required": "Radient sign-in expired",
+    "reenrolment_required": "remote access is off",
+    "local_prerequisite": "a prerequisite is missing",
+}
+
+
+def tunnel_park_card(reason: str, command: str) -> str:
+    """The one line the parked-connector card shows: ``<command> — <reason>``.
+
+    Every branch is under 50 cells with the glyph, which is the width the toast
+    can hold on a narrow terminal without clamping (58 cells of content at the
+    ordinary cap, less as the terminal narrows) — measured in the tests against
+    `cell_len`, not eyeballed. "Run" is not spelled: the command is what the
+    clause leads with, and the verb was 4 cells of the 66- and 68-cell lines that
+    wrapped mid-command before (D3), with D6 dropping the same redundancy from
+    the card's other wording.
+
+    The GLYPH leads it (D9): every other actionable card in this app does
+    (`f"{ICON_MCP} MCP {message}"`), and the splash's warning rows lead with the
+    same mark, which is what makes the card findable at a glance rather than only
+    readable once it has been found.
+    """
+    mapped = TUNNEL_CARD_COMMANDS.get(command, command)
+    tail = TUNNEL_CARD_REASONS.get(reason) or _park_reason_label(reason)
+    if not mapped:
+        return f"{ICON_APPROVALS} {tail}"
+    return f"{ICON_APPROVALS} {mapped} — {tail}"
+
+
+def _park_reason_label(reason: str) -> str:
+    """`gateway.reason_label` for a code this app has no card wording for.
+
+    A lazy import for the reason the poll's own import is lazy: `tunnels.gateway`
+    drags httpx and starlette, and this module is on the boot path of every
+    session — including the ones that will never see a park.
+    """
+    from local_operator.tunnels import gateway
+
+    return gateway.reason_label(reason)
+
 
 #: Bucket the dock's expiry clock to this many seconds. Rows whose settle
 #: stamps fall in the same bucket therefore cross the window on the SAME
@@ -3641,6 +3793,15 @@ class OperatorApp(App[None]):
         self._session: SessionProtocol | None = None
         self._controller: EventController | None = None
         self._status: StatusLine | None = None
+        #: The park reason this app has already announced, so a 5-second poll
+        #: raises one card per episode rather than holding the toast slot
+        #: forever (see `_poll_tunnel_park`).
+        self._tunnel_park_notice: str | None = None
+        #: Whether the band is carrying the parked-connector rung. Tracked beside
+        #: the episode above because the two answer different questions — the
+        #: card's is "has this park been announced?", the rung's is "is remote
+        #: access off right now?" — and only the second must survive a dismissal.
+        self._tunnel_parked = False
         #: Unsubscribes this app from the process config watcher (see
         #: :meth:`_watch_config`). ``None`` until the first session is adopted.
         self._unsubscribe_config_watch: Callable[[], None] | None = None
@@ -3770,6 +3931,11 @@ class OperatorApp(App[None]):
         #: site that resets ``_turn_open`` resets this too.
         self._turn_notified = False
         self._streaming_block: AssistantBlock | None = None
+        #: The live reasoning phase's block, mounted on the first reasoning
+        #: fragment and retired when the answer starts (see
+        #: ``widgets/reasoning.py``). One per model call: a tool-loop turn can
+        #: reason before each of its calls, and each phase is its own block.
+        self._reasoning_block: ReasoningBlock | None = None
         self._tool_cards: dict[str, ToolCard] = {}
         # Rows for calls the model is still dictating. Separate from
         # `_tool_cards`, which holds calls that are RUNNING: a composing row has
@@ -7313,7 +7479,7 @@ class OperatorApp(App[None]):
             editor.placeholder = (
                 SHELL_PLACEHOLDER if editor.shell_mode else editor.resting_placeholder
             )
-            editor.set_commands(SLASH_COMMANDS)
+            editor.set_commands(self._offered_commands())
             editor.set_records_history(True)
 
     def _park_switched_away_source(self, outgoing: SessionInteraction) -> None:
@@ -9022,7 +9188,7 @@ class OperatorApp(App[None]):
                         yield self._todo_panel
                     with ComposerDock(id="input-shell"):
                         yield Band(id="status-band")
-                        editor = Editor(commands=SLASH_COMMANDS)
+                        editor = Editor(commands=self._offered_commands())
                         with Horizontal(id="input-row"):
                             yield Chrome(PROMPT_CHEVRON, id="prompt-chevron")
                             yield editor
@@ -9156,6 +9322,12 @@ class OperatorApp(App[None]):
         # Keep the active provider's quota warm in the shared cache so `/usage`
         # answers from disk (see USAGE_WARM_INTERVAL_S).
         self.set_interval(USAGE_WARM_INTERVAL_S, self._warm_usage_background)
+        # Remote access is off for a reason only a FILE on this machine knows
+        # (see TUNNEL_PARK_POLL_S). Registered with the other always-on polls
+        # rather than on a panel's timer: nothing else in the app is watching
+        # for this, and the notice and the band rung are the only places the
+        # terminal admits it.
+        self.set_interval(TUNNEL_PARK_POLL_S, self._poll_tunnel_park)
         # ALWAYS ON, deliberately not on `_sidebar_timer`. That timer is
         # registered with `pause=True` and is paused whenever the sidebar is
         # closed, so hanging the reap off it would mean a user who closes the
@@ -9415,6 +9587,18 @@ class OperatorApp(App[None]):
             set_recall_resolution = getattr(session, "set_recall_resolution", None)
             if callable(set_recall_resolution):
                 set_recall_resolution(partial(self._on_recall_rejected, session))
+            # THE PROMPT'S OWN COPY, on the surface that has a human at it (UX
+            # round 6, U3 = design round 6, D3). `AttachClient` fires `effect_copy`
+            # — "Authorise the operator key to LOOSEN the approval gate of
+            # <session>" — the instant before it signs, and nothing in production
+            # was listening, so the sentence that makes a presence prompt
+            # answerable existed only as a log line. Armed HERE, bound to this
+            # session for the same reason the recall handler is: the prompt can
+            # outlive an adopt, and a copy about one conversation must not paint on
+            # another the user has since opened.
+            set_operator_prompt_notice = getattr(session, "set_operator_prompt_notice", None)
+            if callable(set_operator_prompt_notice):
+                set_operator_prompt_notice(partial(self._on_operator_prompt, session))
             # THE THIRD ASYNCHRONOUS REFUSAL, and the one with no sender to
             # report it: a queued steer whose bind was refused after the give-up
             # released it. `steer_message` spawns a task nobody awaits, so before
@@ -9469,6 +9653,17 @@ class OperatorApp(App[None]):
         )
         # Installing this hook is what makes the ask tool exist for a UI host.
         session.set_ask_handler(partial(self._request_user_choice_on_app_loop, source=source))
+        # A gate reply the OWNER refuses (issue #1310) is not a race and must not
+        # vanish: this pane pressed the key and is owed the reason (design round
+        # 2, D9). The copy is the owner's own sentence, rendered as a notice so
+        # it does not look like a command the user typed.
+        #
+        # Optional hook, like ``detach_viewer_gates`` above: the channel only
+        # exists on a session that can have a reply refused — an attached one —
+        # and a session that answers its own gates has no owner to be refused by.
+        _watch_refusals = getattr(session, "set_gate_refusal_handler", None)
+        if callable(_watch_refusals):
+            _watch_refusals(partial(self._note_gate_refusal_on_app_loop, source=source))
         if reuse_controller and source.controller is not None:
             self._controller = source.controller
         else:
@@ -9857,6 +10052,9 @@ class OperatorApp(App[None]):
             partial(self._request_tool_approval_on_app_loop, source=source)
         )
         session.set_ask_handler(partial(self._request_user_choice_on_app_loop, source=source))
+        _watch_refusals = getattr(session, "set_gate_refusal_handler", None)
+        if callable(_watch_refusals):
+            _watch_refusals(partial(self._note_gate_refusal_on_app_loop, source=source))
         source.controller = EventController(session, self)
         self._event_sources[source.controller] = source
         source.controller.subscribe()
@@ -9989,6 +10187,44 @@ class OperatorApp(App[None]):
                 )
             )
         )
+
+    def _note_gate_refusal_on_app_loop(
+        self, error: BaseException, *, source: SessionInteraction | None = None
+    ) -> None:
+        """Report an owner-refused gate reply to the operator (issue #1310).
+
+        Synchronous, and deliberately not a gate: this is the answer to a key
+        the operator already pressed, arriving after the widget has been
+        resolved. It goes through ``call_later`` like the gate paths do, so the
+        notice is composed inside Textual's active-app context rather than from
+        the socket task that delivered the refusal.
+
+        ``source`` is accepted for symmetry with the two handlers beside it and
+        guards against reporting a refusal that belongs to a session the user has
+        since left: a notice about another conversation's card is noise.
+        """
+        source = source or self._interaction
+
+        def show() -> None:
+            if not self._is_current(source):
+                return
+            # A REFUSED CARD'S OWN KEYSTROKE ALREADY WROTE A RECEIPT. The dock
+            # card resolves on the keypress, so "✓ allowed  bash  rm -rf build/"
+            # is on the row above this notice, and the tick is the strongest
+            # "it worked" affordance the transcript has (UX review round 3, U13).
+            # The correction belongs in the notice's first words, because the
+            # receipt cannot be revised once the widget has settled.
+            prefix = ""
+            if getattr(error, "trigger", "") in getattr(type(error), "CARD_OPS", frozenset()):
+                prefix = "not applied — "
+            self._system_notice(prefix + str(error), "warning")
+
+        try:
+            self.call_later(show)
+        except RuntimeError:
+            # No running app (a pilot's shutdown, an embed). The refusal is
+            # already logged by the session, which is the fallback channel.
+            logger.debug("gate refusal notice could not be scheduled", exc_info=True)
 
     async def _request_user_choice_on_app_loop(
         self, questions: list[AskQuestion], *, source: SessionInteraction | None = None
@@ -10417,6 +10653,17 @@ class OperatorApp(App[None]):
         """
         self._session = session
         self._attention_input_receipt = None
+        # THE COMMAND LIST IS A FUNCTION OF THE BOUND SESSION, so it is refreshed
+        # here — the ONE writer of ``self._session`` — rather than at each of the
+        # many routes that reach it (adopt, takeover, the boot-built handoff, the
+        # shared teardown unbind). `/unarchive` is offered only while the
+        # conversation in front of the user is archived, so a resume onto an
+        # archived session must offer it and a `/new` must not; auditing every
+        # present and future binding route is the same fragile per-callsite
+        # reasoning the binding epoch above rejects. A no-op before the composer
+        # exists (``_refresh_offered_commands`` stands down when there is no
+        # editor).
+        self._refresh_offered_commands()
         self._attention_rendered_receipt = None
         intent = getattr(self, "_attention_navigation_receipt", None)
         if session is not None and intent and intent[0] == session.session_id:
@@ -13635,7 +13882,13 @@ class OperatorApp(App[None]):
             # nothing, and "uncapped" was true only in the comment above. The
             # argument is now visible at the call site, so the claim and the
             # code can be checked against each other in one place.
-            rows = recent_session_rows(config_dir(), limit=None)
+            # ``include_archived=True``: the PICKER is the one surface with a
+            # reveal toggle, so it needs the archived rows in hand and the
+            # ``archived`` flag on each one to know which rows the toggle is
+            # revealing. They are hidden until it is used — the picker's own
+            # ``_pool`` drops them while it is off — so the default list a user
+            # sees here is the same list every other surface offers.
+            rows = recent_session_rows(config_dir(), limit=None, include_archived=True)
             # NOT enriched with creation dates here, and that is a measured
             # decision rather than an omission. ``recent_session_rows`` leaves
             # ``created_at`` at 0.0 because it is on the CLI startup path and
@@ -13678,7 +13931,15 @@ class OperatorApp(App[None]):
             # re-read) and best-effort: a store whose cache cannot be written
             # still gets the name-and-id filter the picker had before.
             try:
-                digests = build_index(config_dir(), [row.id for row in rows])
+                # ARCHIVED IDS ARE NOT HANDED TO THE INDEX, which is what makes
+                # "an archived conversation is not found by the standard search"
+                # true without an index change: the index is built from exactly
+                # the ids it is given, and a row the toggle has not revealed
+                # must not be reachable through a body match. When the toggle IS
+                # on, those rows are matched by name and id like any other row
+                # (``_digests`` simply has no entry for them), which is the
+                # documented shape of searching a revealed archive.
+                digests = build_index(config_dir(), [row.id for row in rows if not row.archived])
             except Exception:
                 digests = {}
 
@@ -14691,6 +14952,213 @@ class OperatorApp(App[None]):
             await self._preflight_usage(remote)
         finally:
             self._swapping_session = False
+
+    # -- archive and delete --------------------------------------------------
+
+    def _archived_ids(self) -> frozenset[str]:
+        """The archived ids for this app's config root, read FRESH per command.
+
+        Not cached on the app: a second frontend (the desktop app, another
+        terminal, a peer session) writes the same file, and a cached set would
+        make `/unarchive` refuse a conversation the store already holds it for —
+        the user's own two windows disagreeing about a file one of them wrote.
+        The read is one small file, only on a command that names the state.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.session.archived import archived_ids
+
+        return archived_ids(config_dir())
+
+    def _offered_commands(self) -> list[SlashCommand]:
+        """The registry minus the commands THIS session's state does not offer.
+
+        ONE conditional command today, and the mechanism is deliberately the
+        smallest one that works: the registry stays static (the honest place for
+        what a command IS), while the list handed to the composer is filtered,
+        which is the seam ``command_suggestions``' caller-supplied list already
+        provides for the phone's sheet.
+
+        ``/unarchive`` is offered only while the conversation in front of the
+        user is archived. The alternative — offering it always and refusing on
+        use — teaches a command that cannot do anything, and the whole value of
+        the archive is that it is quiet. Typing the word anyway still dispatches
+        (the registry is unchanged, and the dispatch chain is literal): it
+        answers with a sentence rather than silence, so a user who learned the
+        word in another window is never left guessing.
+
+        A session with NO id (a fresh, unsaved conversation) is not archived by
+        definition, so it offers nothing extra.
+        """
+        session_id = self._resumable_session_id()
+        archived = session_id in self._archived_ids() if session_id else False
+        return [entry for entry in SLASH_COMMANDS if entry.name != "unarchive" or archived]
+
+    def _refresh_offered_commands(self) -> None:
+        """Re-hand the composer the filtered list. Silent when there is no editor."""
+        try:
+            editor = self._editor()
+        except NoMatches:
+            return
+        editor.set_commands(self._offered_commands())
+
+    def _cmd_archive(self, notice: NoticeFn) -> None:
+        """``/archive`` — hide the current conversation from every listing."""
+        self._set_current_archived(True, notice)
+
+    def _cmd_unarchive(self, notice: NoticeFn) -> None:
+        """``/unarchive`` — put the current conversation back in the lists.
+
+        OFFERED ONLY WHILE THIS SESSION IS ARCHIVED (``_slash_suggestions``
+        filters it out otherwise). Typed when it does not apply, it answers with
+        a sentence rather than silence, which is the half a static registry
+        cannot do for itself: a user who learned the word in another window must
+        not read the no-op as a broken command.
+        """
+        self._set_current_archived(False, notice)
+
+    def _set_current_archived(self, archived: bool, notice: NoticeFn) -> None:
+        """Put the CURRENT conversation into the requested archive state.
+
+        The receipt names the way back, because that is the whole difference
+        between this and `/delete` and the one thing a user who has just watched
+        a conversation leave every list needs to be told. It carries the id as
+        well, because that is the spelling that still resolves an archived
+        session: nothing lists it, so a user who did not copy the id has only
+        `/resume` and the picker's Archived toggle to find it again.
+        """
+        session_id = self._resumable_session_id()
+        if not session_id:
+            # No transcript yet, so no id any resume path would accept. Saying
+            # "archived" here would be a claim about a conversation that does
+            # not exist on disk.
+            notice("this conversation has nothing saved yet — nothing to archive", "warning")
+            return
+        from local_operator.paths import config_dir
+        from local_operator.session.archived import archive_change, eviction_clause
+
+        current = self._archived_ids()
+        if archived and session_id in current:
+            notice(f"{session_id} is already archived — /unarchive brings it back", "info")
+            return
+        if not archived and session_id not in current:
+            notice("this conversation is not archived — /archive hides it from the lists", "info")
+            return
+        _, evicted = archive_change(config_dir(), session_id, archived)
+        if archived:
+            notice(
+                # NO BACKTICKS: this is a terminal, and the receipt was the only
+                # sentence in the family that printed markdown (design round 1,
+                # D4 / UX U3) — a reader met two cells of punctuation that mean
+                # nothing here. The command reads as a command without them,
+                # exactly as "Run /delete yes to confirm." does.
+                #
+                # THE CHORD IS NAMED (UX U5): the picker's own first line has
+                # always said "ctrl+a", so a keyboard user can go back without
+                # opening the picker to learn the key — which is the one thing
+                # this receipt exists to make discoverable.
+                f"archived {session_id} — it is hidden from /resume, the sidebar and "
+                "search; /unarchive brings it back, and the picker's Archived toggle "
+                "(ctrl+a) still opens it." + eviction_clause(evicted),
+                "info",
+            )
+        else:
+            notice(f"unarchived {session_id} — it is listed again", "info")
+        # The list is a function of the state this write just changed: archiving
+        # adds `/unarchive` to the composer, un-archiving takes it away.
+        self._refresh_offered_commands()
+
+    def _cmd_delete(self, arg: str, notice: NoticeFn) -> None:
+        """``/delete [yes]`` — remove the current conversation for good.
+
+        A TYPED CONFIRMATION, and the two-step shape is the point. Bare
+        `/delete` runs the whole thing as a REHEARSAL (``dry_run=True``) and
+        prints exactly what the real one would remove, including any refusal the
+        guards would give — so a user is never told "deleted" by a call that
+        took a different branch than the one they were shown. `/delete yes` runs
+        it for real.
+
+        The confirmation is a word the user TYPES rather than a row they pick,
+        which is the CLI's existing precedent (`lop sessions cleanup` asks for a
+        typed `yes`). The picker still paints the command as dangerous — see
+        ``Editor.DESTRUCTIVE_COMMANDS`` and the single ``alert`` row that fills
+        the word — but the authority to delete is the submission carrying `yes`,
+        not a keystroke on a row.
+
+        THE REMOVAL RUNS OFF THE UI THREAD (review round 2, R2-3). A confirmed
+        delete can now ASK a warm runtime to leave and wait up to
+        ``cleanup.KEEP_ALIVE_PREEMPT_WAIT_S`` for it, so calling it inline froze
+        the interface for ~2.4 s on a keypress — the one shape a delete must not
+        have. It goes through a worker exactly as the slash host below does
+        (``asyncio.to_thread``), which is also why the outcome handling lives in
+        here rather than after the dispatch: the notices are the caller's.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.session.cleanup import delete_session
+
+        session_id = self._resumable_session_id()
+        if not session_id:
+            notice(
+                "this conversation has nothing saved yet — there is nothing to delete", "warning"
+            )
+            return
+        confirmed = arg.strip().casefold() == "yes"
+
+        async def delete() -> None:
+            try:
+                outcome = await asyncio.to_thread(
+                    delete_session, config_dir(), session_id, actor="tui", dry_run=not confirmed
+                )
+            except Exception:
+                # A DELETED COMMAND MUST NOT TAKE THE APP DOWN, and a silent one
+                # must not let the user believe it happened: the worker is
+                # dispatched with ``exit_on_error=False`` and this is the notice
+                # that stands in for the receipt.
+                logger.debug("delete failed", exc_info=True)
+                notice("that conversation could not be deleted", "warning")
+                return
+            if not outcome.found:
+                # Reachable when the directory is already gone (another window
+                # deleted it, or the id came from a stopped session's record).
+                notice(f"{session_id} is not on disk — nothing to delete", "warning")
+                return
+            if outcome.refusal:
+                notice(outcome.refusal, "warning")
+                return
+            if not confirmed:
+                # ONE SOURCE FOR THE SENTENCE (review round 3, R3-2): it lives on
+                # the outcome, so this host, the attached/slash host below and
+                # the detached runtime cannot drift apart on the wording of a
+                # confirmation for an irreversible act. The target is named the
+                # way the lists name it (design round 1, D2) for the same reason.
+                notice(outcome.rehearsal(), "warning")
+                return
+            # THE WINDOW MUST LAND SOMEWHERE SANE, and `/new` is where: the
+            # session it was standing in no longer exists, so leaving the user on
+            # it strands them on a dead conversation. It runs only AFTER the
+            # removal is confirmed, so a refused or rehearsed delete never moves
+            # them off their work.
+            #
+            # THE RECEIPT CROSSES THE TRANSITION BOUNDARY. `/new` rebuilds the
+            # ledger from the session that boots — an empty screen for a fresh
+            # conversation — so a notice written before it is erased with the
+            # outgoing one. ``_pending_fork_outcome`` is that mechanism (the
+            # fork's own receipts publish through it for the same reason), and it
+            # is used directly rather than re-spelled. A host that cannot start a
+            # new session at all never runs the transition, so there is no reset
+            # for the notice to survive and it is emitted directly after the
+            # refusal it accompanies.
+            if self._resume_factory is not None:
+                kept_clause = (
+                    f"; {outcome.children} subagent run(s) it started were kept"
+                    if outcome.children
+                    else ""
+                )
+                self._pending_fork_outcome = (f"deleted {session_id}{kept_clause}", "info")
+            else:
+                notice(f"deleted {session_id}", "info")
+            self._cmd_new(notice)
+
+        self.run_worker(delete(), group="session-delete", exit_on_error=False)
 
     def _cmd_new(self, notice: NoticeFn) -> None:
         """``/new`` — start a fresh conversation without leaving the app.
@@ -17471,6 +17939,40 @@ class OperatorApp(App[None]):
 
         self.push_screen(LinkPickerScreen(targets), _open_choice)
 
+    def open_transcript_link(self, url: str) -> None:
+        """Open a URL the user CLICKED in the transcript.
+
+        The click route's entry point, called by
+        :meth:`~local_operator.tui.widgets.transcript.TranscriptBlock.on_click`
+        once it has resolved which URL the pointer was over. The block is
+        deliberately left knowing nothing about schemes or browsers: it reports
+        a cell's link, and everything that decides whether a string may reach a
+        browser lives here, beside ``/links``.
+
+        It funnels into the SAME :meth:`_open_link` the picker uses, so the two
+        routes cannot drift — one guard, one opener, one receipt. That is the
+        property that makes the scheme check honest: a second opener spelled
+        out here would be a second place to forget it.
+
+        A worker rather than an await for :meth:`_open_link`'s own reason: the
+        launcher waits on a child process, and this is called from inside
+        Textual's event dispatch, which must not block on one.
+
+        ``LinkTarget`` is constructed rather than looked up. Its ``sender`` and
+        ``rank`` describe a ROW IN THE PICKER — which message a URL came from,
+        so two same-host links can be told apart — and a click has already
+        answered that question by pointing at one. The fields are filled with
+        what is true of this route rather than left to imply a provenance
+        nobody read.
+        """
+        source = self._interaction
+
+        def notice(body: str, kind: NoticeKind = "info") -> None:
+            self._notice_for(source, body, kind)
+
+        target = LinkTarget(url=url, sender="agent", rank=0)
+        self.run_worker(self._open_link(target, notice), group="open-link")
+
     async def _open_link(self, target: LinkTarget, notice: NoticeFn) -> None:
         """Hand ONE url to the browser, and say what happened.
 
@@ -18163,8 +18665,16 @@ class OperatorApp(App[None]):
         self._warm_engage_started = False
         self._start_runtime_engage(reason="refresh")
 
-    def _on_runtime_draining(self, leaving: str = "") -> None:
+    def _on_runtime_draining(self, leaving: str = "", updating: str = "") -> None:
         """A runtime has committed to leaving while it still has work: say so.
+
+        TWO DEPARTURES REACH THIS, AND THEY NEED OPPOSITE SENTENCES. ``leaving`` is
+        the drain's phrase, whose promise is that a new message will NOT start a
+        turn; ``updating`` is an update window, whose promise is that the message is
+        ALREADY queued and runs when the successor boots. Painting the drain's
+        sentence over a window sends the operator to re-send a message that is held
+        — which is why the window has its own table, its own frame key and this
+        argument, rather than a fourth value of ``leaving`` (``types.UPDATING``).
 
         Fired from the ``retiring`` FRAME (``AttachedSession.set_drain_callback``),
         which the runtime sends immediately before it latches — so this lands
@@ -18193,7 +18703,14 @@ class OperatorApp(App[None]):
         """
         if self._interaction is None:
             return
-        notice = _DRAIN_NOTICES.get(leaving, DRAIN_NOTICE_OTHER)
+        # THE WINDOW FIRST, and the ordering is the contract: a runtime that opened a
+        # window and then latched a drain sends both, and only the window's sentence
+        # is true of the message the operator just sent (it is queued, not refused).
+        notice = (
+            update_phrase(UPDATING, updating)
+            if updating
+            else _DRAIN_NOTICES.get(leaving, DRAIN_NOTICE_OTHER)
+        )
         self._notice_for(self._interaction, notice, "note")
         self._announce_queued_elsewhere(self._interaction)
 
@@ -21666,8 +22183,72 @@ class OperatorApp(App[None]):
             return
         notice(
             f"tool approvals: {live} (this session) — {effect}; "
-            f"config.yml says {saved} — /approvals {saved} adopts it in this session",
+            f"config.yml says {saved} — "
+            f"{self._adopt_remedy(saved, may_loosen=self._may_loosen_gate_here())}",
             "warning" if self._approve_all else "info",
+        )
+
+    def _adopt_remedy(self, saved: str, *, may_loosen: bool | None = None) -> str:
+        """The command that matches ``config.yml``, and WHERE it has to be typed.
+
+        Every remedy printed has to work where it is printed (design round 1 D3,
+        UX round 1 U1/U2). ``config.yml`` is read by every window, but the two
+        directions do not have the same reach: a TIGHTENING word takes effect
+        from anywhere, while a loosening word is refused unless the window
+        typing it started this session's runtime (``harness.approval``,
+        issue #1310) — so naming ``/approvals auto`` without saying that sent a
+        user to a command that would answer with a refusal, from the very report
+        that recommended it.
+
+        The classification is the SAME predicate the refusals and the seam use,
+        read through one call rather than a second word list.
+
+        ``may_loosen`` is WHO THE SENTENCE IS FOR, and it is passed rather than
+        inferred when the sentence is built for a FOLLOWER: ``_may_loosen_gate_here``
+        describes THIS pane, and a routed report is rendered in someone else's
+        (issue #1310; design round 2 D10, UX round 2 U9). ``None`` is the ROUTED
+        "it did not prove it may loosen" (agent review round 3, R3-1) — the
+        conservative branch — and the local call sites pass their own answer
+        explicitly rather than letting that question and this one share a value.
+        """
+        from local_operator.harness.approval import transition_authority
+
+        here = may_loosen
+        remedy = f"/approvals {saved} adopts it in this session"
+        loosens = transition_authority("approvals", saved) == "authority-increasing"
+        if loosens and not here:
+            # THE SPAWNER CLAUSE IS GONE, and it is the same deletion the runtime's
+            # handle makes (revision 2 §5; agent review round 6 R6-3 = design round 6
+            # D1 = UX round 6 U4). "typed in the terminal or app window that started
+            # this session" described spawner authority; §3 instead gives this pane,
+            # the desktop app for any session, and the phone the same
+            # one-presence-gesture loosening, so the sentence withheld a capability
+            # the same build ships while naming a window a background-started
+            # runtime does not have.
+            return (
+                f"/approvals {saved} adopts it with the operator's own consent — authorise it "
+                "from this machine (Touch ID) or from a paired phone"
+            )
+        return remedy
+
+    @staticmethod
+    def _uninstalled_anchor_clause() -> str:
+        """The missing-anchor remedy, or ``""`` when this host has an anchor.
+
+        The mirror of ``ServingSessionHandle._uninstalled_anchor_clause``, in the
+        same words, for the reason the two reports are written to match: one
+        reader must not meet two rules. It replaces the deleted "retire and reopen
+        the session here" clause with the state that made that clause look
+        necessary — on a host with no usable anchor, the two levers the report
+        names cannot run yet (UX round 6, U1/U2).
+        """
+        from local_operator.operator import operator_authority_unusable
+
+        if not operator_authority_unusable():
+            return ""
+        return (
+            "; but operator authority is not installed on this machine yet: neither can run "
+            "until `lop operator install` has run there (one privileged step)"
         )
 
     def _configured_approvals_mode(self) -> str | None:
@@ -21836,6 +22417,12 @@ class OperatorApp(App[None]):
         self._stop_all_listing = None
         self._stop_all_armed_at = None
         self._streaming_block = None
+        # The reasoning phase goes with the streaming block and for the same
+        # reason: `clear_blocks` has just removed the widget, so keeping the
+        # reference would leave `retire()`'s claim that "the OWNER removes the
+        # widget" untrue for this path, and the next fragment mounts a fresh
+        # phase anyway (mount-on-demand, exactly like `_streaming_block`).
+        self._reasoning_block = None
         self._tool_cards = {}
         self._composing_cards = {}
         # An empty transcript is the welcome view's whole precondition, so the
@@ -24106,7 +24693,25 @@ class OperatorApp(App[None]):
                 from local_operator.session.runtime.server import RuntimeServer
 
                 self._mobile_handle = TuiSessionHandle(self)
-                self._mobile_registrant = RuntimeServer(self._mobile_handle, kind="tui")
+                # THE APP OWNS THIS GATE, so the app mints the capability its
+                # own registered runtime demands and keeps it in this process's
+                # memory (issue #1310). Nothing presents it here: the app's own
+                # `/approvals auto` never crosses this socket — it calls
+                # `_set_approve_all` directly, which is the operator's own
+                # keyboard and is not routed — while a follower, the desktop
+                # app and the phone relay all arrive through this runtime and
+                # are therefore refused an authority-increasing op. That is the
+                # intended surface: a TUI-hosted session's gate can only be
+                # loosened at the terminal hosting it.
+                #
+                # Minted per registrant rather than per app, so a `takeover`
+                # that rebuilds the registrant does not leave the old value
+                # honoured anywhere.
+                from local_operator.harness.approval import mint_operator_cap
+
+                self._mobile_registrant = RuntimeServer(
+                    self._mobile_handle, kind="tui", operator_cap=mint_operator_cap()
+                )
                 self._mobile_registrant.start()
             except Exception:
                 logger.debug("mobile registrant failed to start", exc_info=True)
@@ -24415,11 +25020,14 @@ class OperatorApp(App[None]):
 
         def on_update(update: AgentToolUpdate) -> None:
             detail = _partial_text(update)
-            if detail:
-                source.shell.progress = detail[-4096:]
-                current_card = card_ref()
-                if self._is_current(source) and current_card is not None:
+            current_card = card_ref()
+            if self._is_current(source) and current_card is not None:
+                if detail:
+                    source.shell.progress = detail[-4096:]
                     current_card.set_partial_detail(detail)
+                # The advisory rides every update (it is not output), so it is set
+                # even when `detail` is empty — mirroring `on_tool_updated`.
+                current_card.set_live_advisory(_partial_advisory(update))
 
         async def persist(result: ToolResult) -> None:
             """One persistence hop; a spawn failure is still a completed
@@ -26322,6 +26930,83 @@ class OperatorApp(App[None]):
         # down (see the panels' own docstrings).
         self._refresh_band()
 
+    def _poll_tunnel_park(self) -> None:
+        """Tell the user once when this machine's remote access needs a person.
+
+        The connector cannot report it itself: parking means it exited
+        SUCCESSFULLY (the only exit a supervisor reads as "do not retry me"),
+        so no process is left to say anything, and the state file is the only
+        thing that knows. Read from disk, never over the network — when the
+        login is dead the tunnel is the last route that could carry an answer,
+        and a probe of the gateway would report "nothing is listening" for a
+        cause it cannot name.
+
+        One card per EPISODE, not per tick: ``show`` re-arms its dismissal timer
+        on every call, so re-raising on a five-second tick would hold a
+        ten-second card on screen forever — a worse nag than the one it
+        replaced. A user who dismisses it is not chased again until the
+        condition clears and comes back, and `lop tunnel status` remains the
+        place that answers the question on demand.
+
+        The BAND is told the same fact in the same read, because a card cannot
+        outlive its ten seconds and a park outlives the session that found it: on
+        the next start the card is re-raised and the band rung is already there,
+        and in between the band is the only thing still saying remote access is
+        off (review round 1, D4). This is the MCP alarm's own treatment — a toast
+        AND a standing segment — rather than a second mechanism. It is a separate
+        gate from the card's `_tunnel_park_notice`, which tracks the EPISODE;
+        this one tracks the FACT, so a re-raise after a dismissal re-asserts a
+        rung that never went away.
+
+        Never fires for a machine with no tunnel, or one the operator stopped:
+        `state.nag` owns that gate, because it is a fact about the state file
+        rather than about this widget.
+        """
+        from local_operator.tunnels import state
+
+        notice = state.nag()
+        reason = str(notice.get("reason") or "") if notice else ""
+        self._assert_tunnel_band(bool(reason))
+        if not reason:
+            if self._tunnel_park_notice is not None:
+                # WITHDRAWN, not merely left to stop re-showing: a card still on
+                # screen after the condition cleared would contradict the
+                # recovery the user just performed. `withdraw` refuses any card
+                # that is not this owner's, so an unrelated notice in the shared
+                # slot is safe.
+                self.query_one(Toast).withdraw(TUNNEL_PARK_NOTICE)
+                self._tunnel_park_notice = None
+            return
+        if reason == self._tunnel_park_notice:
+            return
+        self._tunnel_park_notice = reason
+        remedy = notice.get("remedy") if notice else None
+        command = str(remedy.get("command") or "") if isinstance(remedy, dict) else ""
+        # A FAILURE-length card (`TOAST_FAILURE_MS`), which is this app's one
+        # marker for "the user has to act on this": it claims the shared slot
+        # against courtesy receipts instead of being evicted by one.
+        self.query_one(Toast).show(
+            tunnel_park_card(reason, command),
+            duration_ms=TOAST_FAILURE_MS,
+            owner=TUNNEL_PARK_NOTICE,
+        )
+
+    def _assert_tunnel_band(self, parked: bool) -> None:
+        """Keep the band's parked rung in step with the park file.
+
+        Repainted only on a CHANGE: this runs every `TUNNEL_PARK_POLL_S` and the
+        band shares the dock with the transcript the user is reading, so a
+        needless repaint per tick is a cost with no reader. `update` leaves a
+        segment alone for a caller that passes `None`, so `False` here is a real
+        assertion — the rung is withdrawn, not merely untouched.
+        """
+        if parked == self._tunnel_parked:
+            return
+        self._tunnel_parked = parked
+        status = self._status
+        if status is not None:
+            status.update(tunnel_parked=parked)
+
     def _sync_band_inset(self) -> None:
         """Give the band its top inset only while it actually holds a slot.
 
@@ -26444,10 +27129,22 @@ class OperatorApp(App[None]):
                 wake_rows = 0
         return rows + wake_rows + _SUBAGENT_DOCK_ROWS < screen_height
 
-    def _subagent_job(self, job_id: str) -> Any:
+    def _subagent_job(self, job_id: str, read: Any = None) -> Any:
+        """One node's execution row, through the roster's own resolvers.
+
+        ``read`` is a prebuilt :meth:`SubagentComms.roster_pass` when the caller
+        already has one. Its ``job`` is the SAME search ``comms.job`` performs
+        (root, then each live child in insertion order, then the record's
+        retained row), but the session list it searches was built once for the
+        whole pass instead of once per call — so a dock tick that resolves a row
+        per node stops being O(N^2) at the ``MAX_RECORDS`` cap. Callers with no
+        pass (the follower's snapshot facade, an older host) keep the per-call
+        lookup, which is what they have always done.
+        """
         session = self._session
         comms = getattr(session, "_subagent_comms", None)
-        lookup = getattr(comms, "job", None)
+        source = read if read is not None else comms
+        lookup = getattr(source, "job", None)
         job = lookup(job_id) if callable(lookup) else None
         manager = getattr(session, "jobs", None)
         if job is None and manager is not None:
@@ -26457,6 +27154,80 @@ class OperatorApp(App[None]):
             frontend = getattr(session, "frontend_state", None)
             job = next((row for row in getattr(frontend, "jobs", ()) if row.id == job_id), None)
         return job
+
+    def _roster_read(self, comms: Any) -> Any:
+        """A linear pass over the comms graph for this resolver, or the graph
+        itself where there is no pass to build.
+
+        WHY THE RESOLVERS TAKE ONE. Every dock path resolves a job row per node
+        it shows, and ``comms.job`` rebuilds the live-child session list by
+        scanning all N records on every call — so N lookups cost O(N^2) at the
+        cap, once per tick and once per ``Subagent*`` handler. One pass answers
+        all of them from the single scan it had to make anyway.
+
+        NOT ONE PASS PER TICK, one per resolver call: each of the two resolvers
+        builds its own here, and ``paused_child_ids(comms)`` builds a third
+        through ``comms.nodes()``, so a tick pays four linear walks where it
+        used to pay two quadratic sweeps. The complexity claim is about the
+        walks being linear and is unchanged by the count; the count is stated so
+        a reader counting them is not surprised.
+
+        TOTAL FOR THE BUILD ONLY, not for the readers that use it. A graph that
+        cannot build a pass is the graph, not an exception — but the pass is a
+        convenience, not the only route back into the registry: ``read.children``
+        and ``read.nodes`` on a class without them still reach
+        ``comms.children``/``comms.nodes``, whose own ``roster_pass()`` may raise
+        outside this guard. Every step in either caller that CAN raise is inside a
+        guard, so a raising reader blanks the dock rather than escaping into a
+        Textual handler. What each caller leaves outside one is ENUMERATED rather
+        than generalised, because the general form was wrong three times: "both
+        callers wrap their whole body" held for the outcome and not the syntax
+        (review round 3, N3-1), and so did "``getattr``/attribute reads, which
+        cannot raise" (review round 1 on this PR, R1-2) and then the same claim
+        one read over, about the SESSION reads (review round 2 on this PR, R2-1).
+
+        * :meth:`_subagent_roster` leaves, before its ``try``, ``self._session``
+          and the ``_subagent_view`` read. Both are plain attributes of the APP,
+          declared on it and never delegated, so neither can raise.
+        * :meth:`_subagent_child_counts` leaves, before its ``try``, only
+          ``self._session``; and after it, ``paused``, ``counts = {}`` and the
+          loop header ``for job in jobs:``.
+        * The session capability reads (``_subagent_comms``, then ``jobs``) are
+          INSIDE the guard in both callers, as is the ``callable`` test on
+          ``nodes`` and the row identity read. What is true of all of them is not
+          that they are total READS but that a guard bounds them: ``getattr``
+          swallows only the ``AttributeError`` it would have raised itself and
+          propagates whatever a property or an ``__getattr__`` raises, which is
+          how the identity read escaped first (round 1, R1-2) and how the two
+          session reads escaped one read over (round 2, R2-1). Each guard
+          degrades to what its own column needs: no marks at all, no roster, and
+          no mark for the row that cannot name itself.
+        * The ``for job in jobs:`` header is left outside deliberately: it walks
+          the roster the caller just built, and a guard there could only convert a
+          caller's own type error into a silently blank band. Its residual risk is
+          that the argument is not a sequence at all, which is the caller's type
+          to get right.
+        * ``paused_child_ids`` guards its own body and degrades to an empty set.
+
+        That is the behavior this must keep, and why the capability check is a
+        ``getattr`` rather than a cast.
+
+        The follower's ``SnapshotSubagentComms`` is the case that has no
+        ``roster_pass``: its ``job`` is a documented stub returning ``None``, and
+        what makes the follower cheap is that ``_subagent_job`` then falls
+        through to ``SnapshotJobs.get``, a dict lookup (its own comment records
+        the last time a linear lookup there made a paint quadratic). Returning
+        the facade unchanged is what keeps a follower and an owner reading the
+        same members, and it is load-bearing: an unconditional build raises
+        ``AttributeError`` out of the follower path and blanks the dock.
+        """
+        build = getattr(comms, "roster_pass", None)
+        if callable(build):
+            try:
+                return build()
+            except Exception:  # noqa: BLE001 — a tick may not cost the band
+                logger.debug("could not build the roster pass", exc_info=True)
+        return comms
 
     @staticmethod
     def _within_roster_window(jobs: list[Any], manager: Any, paused_ids: set[str]) -> list[Any]:
@@ -26551,22 +27322,36 @@ class OperatorApp(App[None]):
         resumed session's rehydrated children are untouched.
         """
         session = self._session
-        comms = getattr(session, "_subagent_comms", None)
-        manager = getattr(session, "jobs", None)
         view = self._subagent_view
         try:
-            job_for = self._subagent_job
+            # The two capability reads are INSIDE the guard, not before it.
+            # ``getattr`` is not a guarantee — it propagates whatever a property
+            # or an ``__getattr__`` raises — so out here either one escaped into
+            # the Textual handler that called this (``RuntimeError: comms
+            # exploded`` / ``RuntimeError: jobs exploded``) instead of resolving
+            # to the empty roster below (review round 2 on this PR, R2-1).
+            comms = getattr(session, "_subagent_comms", None)
+            manager = getattr(session, "jobs", None)
+            # This resolver's own pass: the child list, every node's job row and
+            # the ``children()`` scan below all come off it. ``paused_child_ids``
+            # builds one of its own (through ``comms.nodes()``), so the tick pays
+            # two linear walks here rather than one — see ``_roster_read``.
+            read = self._roster_read(comms)
 
             if comms is not None and callable(getattr(comms, "children", None)):
-                nodes = comms.children(view.job_id if view is not None else None)
-                jobs = [job for node in nodes if (job := job_for(node.job_id)) is not None]
+                nodes = read.children(view.job_id if view is not None else None)
+                jobs = [
+                    job
+                    for node in nodes
+                    if (job := self._subagent_job(node.job_id, read)) is not None
+                ]
                 jobs = self._within_roster_window(jobs, manager, paused_child_ids(comms))
-                return jobs, job_for(view.job_id) if view is not None else None
+                return jobs, self._subagent_job(view.job_id, read) if view is not None else None
             # Old/local hosts without lineage can still show their root ledger,
             # but a child must never inherit its parent's roster by default.
             return (
                 manager.list() if manager is not None and view is None else [],
-                self._subagent_job(view.job_id) if view is not None else None,
+                self._subagent_job(view.job_id, read) if view is not None else None,
             )
         except Exception:
             return [], None
@@ -26606,6 +27391,16 @@ class OperatorApp(App[None]):
         roster row, and only to the children of rows actually listed: a page
         deep in a large tree reads its own children, never the whole graph.
 
+        AND the per-row resolver reads that same pass (review round 1, M1).
+        Resolving each child through ``comms.job`` rebuilt the live-child
+        session list by scanning every registry record per call, so the
+        per-row half of this method was STILL quadratic in the record count —
+        66,816 registry touches at ``MAX_RECORDS`` on the reviewer's rig,
+        against 1,280 for the fold's shape. ``_roster_read`` builds one pass for
+        the tick and every lookup below comes off it, so the grouping and the
+        resolutions are two reads of one scan rather than one scan plus a
+        quadratic sweep.
+
         Total and silent by design, because this runs from the 1 Hz poll and
         from every ``Subagent*`` handler: a host with no comms graph, or one
         whose ``nodes`` is not callable, answers ``{}`` — i.e. no marks — and a
@@ -26613,34 +27408,64 @@ class OperatorApp(App[None]):
         a leaf does. The alternative here is not a better mark but an exception
         in a Textual message handler, for a decoration.
         """
-        comms = getattr(self._session, "_subagent_comms", None)
-        nodes = getattr(comms, "nodes", None)
-        if not callable(nodes):
-            return {}
         try:
+            # Built INSIDE the try, like the roster resolver's: ``_roster_read``
+            # cannot raise today, but a build moved back out would be a raising
+            # step outside the guard, and it would escape into a Textual message
+            # handler instead of blanking the marks. The guard covers every step
+            # that CAN raise; what sits outside it is enumerated in
+            # ``_roster_read``'s docstring, which is the single place that list
+            # lives (review round 3, N3-1; review round 1 on this PR, R1-2).
+            #
+            # The two SESSION reads belong in here with it, and for the same
+            # reason: they are ``getattr``, which propagates whatever a property
+            # or an ``__getattr__`` raises, so outside the guard both escaped
+            # into the handler as ``RuntimeError: comms exploded`` / ``RuntimeError:
+            # jobs exploded`` rather than blanking the marks (review round 2 on
+            # this PR, R2-1). Nothing here is total because of how it is READ;
+            # it is total because every step that can raise is inside a guard.
+            comms = getattr(self._session, "_subagent_comms", None)
+            nodes = getattr(comms, "nodes", None)
+            if not callable(nodes):
+                return {}
+            read = self._roster_read(comms)
             buckets: dict[str, list[Any]] = {}
-            for node in cast(Sequence[Any], nodes()):
+            for node in cast(Sequence[Any], read.nodes()):
                 parent_id = str(getattr(node, "parent_job_id", "") or "")
                 if parent_id:
                     buckets.setdefault(parent_id, []).append(node)
+            manager = getattr(self._session, "jobs", None)
         except Exception:  # noqa: BLE001 — a mark may not cost the band
             return {}
-        manager = getattr(self._session, "jobs", None)
         paused = paused_child_ids(comms)
         counts: dict[str, int] = {}
         for job in jobs:
-            job_id = str(getattr(job, "id", "") or "")
+            try:
+                # Identified INSIDE a guard of its own: ``getattr`` is not a
+                # guarantee — it swallows the ``AttributeError`` it would have
+                # raised itself and propagates whatever a property or an
+                # ``__getattr__`` raises. Executed against an ``id`` that raises,
+                # the unguarded form escaped this method's totality contract into
+                # a Textual message handler (``RuntimeError: id exploded``; review
+                # round 1 on this PR, R1-2). A row that cannot name itself cannot
+                # be counted, so it earns the same mark a row outside the window
+                # does: none.
+                job_id = str(getattr(job, "id", "") or "")
+            except Exception:  # noqa: BLE001 — a mark may not cost the band
+                continue
             if not job_id:
                 continue
             try:
                 # Resolved LAZILY, per roster row rather than per node in the
                 # graph: a page deep in a large tree reads its own children
                 # only, and `_subagent_job` is the roster's own resolver, whose
-                # follower form detaches a public job per call.
+                # follower form detaches a public job per call. Each lookup is
+                # answered by the tick's shared pass (`read`), not by a fresh
+                # session scan.
                 children = [
                     child
                     for node in buckets.get(job_id, ())
-                    if (child := self._subagent_job(str(getattr(node, "job_id", "") or "")))
+                    if (child := self._subagent_job(str(getattr(node, "job_id", "") or ""), read))
                     is not None
                 ]
                 counts[job_id] = len(self._within_roster_window(children, manager, paused))
@@ -29205,6 +30030,30 @@ class OperatorApp(App[None]):
             _FRONTEND_LOCAL_SLASHES as _FOLLOWER_LOCAL_SLASHES,
         )
 
+        # Commands whose WORK belongs to this machine even when an owner's stale
+        # capability snapshot still advertises them `authoritative_session`.
+        #
+        # NOT THE WHOLE `_FOLLOWER_LOCAL_SLASHES` SET, and the difference is
+        # what the set means: a membership there says "this frontend paints the
+        # interaction and the owner need not be told about it", which for `/btw`
+        # and `/loop` is true of the OVERLAY while the work still crosses the
+        # authoritative seam (`/btw`'s question rides `complete_aside`, and every
+        # `/loop` iteration submits through the source's own owner). Pulling
+        # those two back would break both — pinned by
+        # `test_every_authoritative_slash_routes_to_owner_with_supported_images`,
+        # which is why they keep their own pullbacks below.
+        #
+        # The three here are different: the store they write is
+        # `config_dir()/archived-sessions.json`, the directory they remove is in
+        # this `config_dir()/sessions/`, and the sidebar and picker that render
+        # the result are this terminal's. Routed to an owner — which is what
+        # happened for `/delete` in the state a user is actually in, and what the
+        # wrong-machine split would do to `/archive` on a cross-host attach —
+        # they would act on another machine's store, and `/delete` would be
+        # refused by the owner's own guard because the conversation a viewer is
+        # standing in always holds a live claim (review round 1, MAJOR-1).
+        _LOCAL_WORK_SLASHES = frozenset({"/archive", "/unarchive", "/delete"})
+
         if command == "/model" and arg.strip().casefold() == "saved":
             # Saved belongs to the invoking terminal, not the owner's config.
             # Resolve now, at commitment, and route the concrete selection so
@@ -29224,6 +30073,14 @@ class OperatorApp(App[None]):
             # The invoking TUI owns scheduling/interaction, even when a legacy
             # owner advertises the older authoritative classification. Each
             # loop iteration still uses the source's real owner prompt route.
+            remote_capability = None
+        if command in _LOCAL_WORK_SLASHES:
+            # ...and the same pullback for the commands whose WORK is here: an
+            # owner running older code still advertises these from the snapshot
+            # it took when the socket opened, and that advertisement must not be
+            # allowed to send the write or the removal to another machine. See
+            # `_LOCAL_WORK_SLASHES` above for why the whole frontend-local set is
+            # the wrong test.
             remote_capability = None
         # Bare ``/mcp`` is argument-dependent: its LISTING is canonical and
         # renders locally from the follower's own snapshot facade, while its
@@ -29282,7 +30139,11 @@ class OperatorApp(App[None]):
             if command == "/model" and not arg:
                 self._open_model_picker()
                 return
-            if self._stopped_session_id and bool(getattr(self._session, "is_cold", False)):
+            if (
+                self._stopped_session_id
+                and bool(getattr(self._session, "is_cold", False))
+                and (entry is None or "/" + entry.name not in _LOCAL_WORK_SLASHES)
+            ):
                 # A viewer that `/stop` ended keeps the owner's LAST capability
                 # list (the sync that would clear it is never coming), so a
                 # routed command reaches `route_shared_slash` and is refused
@@ -29321,6 +30182,19 @@ class OperatorApp(App[None]):
                 # True for exactly those three argument-bearing forms and False
                 # for `/model`, `/goal`, `/rename`, `/effort`, bare `/team`,
                 # `/team chart`, bare `/agent` and bare `/mcp`.
+                #
+                # A FOURTH EXEMPTION SITS IN THE CONDITION ITSELF: a command
+                # whose WORK is local (`_LOCAL_WORK_SLASHES` — archive,
+                # unarchive, delete) is never intercepted here, no matter what
+                # the stale snapshot advertises. The old owner's capability list
+                # is frozen at the moment the socket closed, so those three are
+                # still advertised `authoritative_session` by it, and reading
+                # the advertisement as the routing decision would answer "this
+                # session was stopped; /resume …" for commands that need no
+                # owner at all — which for `/delete` is exactly the state it must
+                # work in, since the conversation the viewer is standing in is
+                # the one whose owner just exited and released the claim this
+                # command's guard checks.
                 #
                 # The LOCAL pullbacks above are untouched by that breadth:
                 # `/model default`, bare `/mcp` and `/team chart` set
@@ -29429,6 +30303,14 @@ class OperatorApp(App[None]):
             self._cmd_move(arg, notice)
         elif command == "/rename":
             self._cmd_rename(arg, notice)
+        elif command == "/archive":
+            # Acts on the CURRENT session; see the registry entry for why it
+            # takes no argument.
+            self._cmd_archive(notice)
+        elif command == "/unarchive":
+            self._cmd_unarchive(notice)
+        elif command == "/delete":
+            self._cmd_delete(arg, notice)
         elif command == "/model":
             self._cmd_model(arg, notice)
         elif command == "/effort":
@@ -31762,7 +32644,7 @@ class OperatorApp(App[None]):
         ``/model``: that command's listing volunteers that a pick persists, so
         this one has to volunteer that a level does not.
         """
-        rungs = ("auto", *levels)
+        rungs = levels if "auto" in levels else ("auto", *levels)
         marked = current or "auto"
         rendered = " ".join(
             f"{self.EFFORT_MARK}{name}" if name == marked else name for name in rungs
@@ -32917,6 +33799,8 @@ class OperatorApp(App[None]):
         # order and cannot import a textual widget to get it. Everything below
         # this call is session-shaped and stays here: a daemon has no sticky
         # serving spec and no runtime catalogue to merge.
+        from local_operator.providers.catalogue import picker_rows
+
         rows, _hidden = picker_rows(
             entries,
             usable=usable,
@@ -33625,7 +34509,6 @@ class OperatorApp(App[None]):
         clear text and hand it to the model on the next turn.
         """
         from local_operator.config import ConfigManager
-        from local_operator.credentials import CredentialManager
         from local_operator.paths import config_dir
         from local_operator.web_search.models import (
             PROVIDER_IDS,
@@ -33647,12 +34530,12 @@ class OperatorApp(App[None]):
         )
 
         manager = ConfigManager(config_dir())
-        credentials = CredentialManager(config_dir())
+        config_dir_path = config_dir()
         words = arg.split()
         try:
             if not words:
                 settings = load_search_settings(manager)
-                statuses = provider_statuses(settings, credentials)
+                statuses = provider_statuses(settings, config_dir_path)
                 labels = {status.id: status.label for status in statuses}
                 strategy = settings.strategy.replace("_", " ").title()
                 order = " → ".join(labels[value] for value in settings.providers)
@@ -33752,7 +34635,7 @@ class OperatorApp(App[None]):
                     row = next(
                         (
                             status
-                            for status in provider_statuses(settings, credentials)
+                            for status in provider_statuses(settings, config_dir_path)
                             if status.id == provider
                         ),
                         None,
@@ -33796,7 +34679,7 @@ class OperatorApp(App[None]):
                     "search order: "
                     + ", ".join(providers)
                     + " "
-                    + provider_order_note(providers, settings, credentials)
+                    + provider_order_note(providers, settings, config_dir_path)
                 )
                 return
             if command == "setup" and len(words) == 2:
@@ -35304,7 +36187,15 @@ class OperatorApp(App[None]):
         # AFTER `load_text`: adoption re-keys onto the markers now in the
         # buffer, so the text has to be there first.
         editor.adopt_attachments(images)
-        editor.set_commands(SLASH_COMMANDS)
+        # THE INVOKER'S OWN LIST, not the raw registry (review round 1, MINOR-1).
+        # The other restore path — the boot/unbind one — was updated with the
+        # conditional offer and this one was missed, so opening and closing an
+        # aside on any session re-offered `/unarchive` for a conversation that is
+        # not archived: the one command whose whole contract is that it appears
+        # only in the state it can act on. `/unarchive` typed anyway still
+        # answers with a sentence, so nothing was ever wrong on screen — the list
+        # simply promised a verb the session could not use.
+        editor.set_commands(self._offered_commands())
         editor.set_records_history(True)
         self.screen.remove_class(ASIDE_LAYOUT_CLASS)
         editor.focus()
@@ -35682,6 +36573,8 @@ class OperatorApp(App[None]):
         """
         message.stop()
         picker = self._editor().picker
+        from local_operator.references import scan_directory_report
+
         choices, unlisted = scan_directory_report(message.directory, self.session_cwd())
         if not choices:
             picker.set_choices([])
@@ -35718,6 +36611,40 @@ class OperatorApp(App[None]):
             return
         if message.command == "approvals":
             picker.set_choices(self._approval_choices())
+            picker.set_notice("")
+            return
+        if message.command == "delete":
+            # ONE row, and it is the word the user would otherwise type. The
+            # confirmation is that the SUBMISSION carries `yes` — this row
+            # exists so the picker can PAINT the command as dangerous (the
+            # `alert` flag) and so `delete`'s membership in
+            # ``Editor.DESTRUCTIVE_COMMANDS`` has something to gate: one Enter
+            # on the row FILLS the word, and the second Enter is the
+            # confirmation. A row that chose-and-ran on one keystroke would be
+            # the exact one-keystroke deletion this confirmation exists to
+            # prevent.
+            #
+            # The row is offered even when the guards would refuse (a running
+            # conversation): the refusal is `/delete`'s own answer, and hiding
+            # the row would leave a user who can see the command with no way to
+            # learn why it will not act.
+            picker.set_choices(
+                [
+                    ArgumentChoice(
+                        name="yes",
+                        # FITS WHOLE (design round 1, D6): the previous text
+                        # truncated to "delete this conversation and its tran…",
+                        # cutting the OPERATIVE noun — the thing being destroyed
+                        # is the transcript — so the row that exists to slow a
+                        # finger down read as a half-sentence. "for good" keeps
+                        # the register of the rehearsal sentence it confirms; the
+                        # transcript itself is named there, where there is room.
+                        description="removes this conversation for good",
+                        detail="cannot be undone",
+                        alert=True,
+                    )
+                ]
+            )
             picker.set_notice("")
             return
         if message.command == "stop":
@@ -36125,6 +37052,45 @@ class OperatorApp(App[None]):
             for name, description in self._ANALYTICS_VIEWS.items()
         ]
 
+    def _slash_routes_to_owner(self, command: str) -> bool:
+        """Whether ``command`` typed here would be carried to the owner's runtime.
+
+        Mirrors the advertisement read in ``_run_slash_command``'s routing
+        branch (which is the authority for the decision): a remote route exists
+        only when this session HAS ``route_shared_slash`` and the owner's
+        frontend state advertises the command as shared. Kept beside the option
+        list rather than inline because the LIST needs the same answer before
+        the keystroke that would make the decision (design round 1 D2, UX round
+        1 U5).
+        """
+        if not callable(getattr(self._session, "route_shared_slash", None)):
+            return False
+        advertised = {
+            f"/{cap.command}"
+            for cap in getattr(
+                getattr(self._session, "frontend_state", None), "slash_capabilities", []
+            )
+        }
+        return command in advertised
+
+    def _may_loosen_gate_here(self) -> bool:
+        """Whether ``/approvals auto`` typed HERE will be accepted (issue #1310).
+
+        The pane resolves the capability per dial, so it can answer this before
+        offering the choice rather than after refusing it. Three cases:
+
+        * the command is handled in this process (the app owns the gate, or the
+          session is cold and the local worker drives it) — yes;
+        * it routes to a remote owner whose connection PROVED it holds the
+          session's capability (this pane started that runtime) — yes;
+        * it routes to a remote owner that proved nothing — no, and the copy
+          says where it has to be typed instead.
+        """
+        if not self._slash_routes_to_owner("/approvals"):
+            return True
+        client = getattr(self._session, "_client", None)
+        return bool(getattr(client, "_authority_bearing", False))
+
     def _approval_choices(self) -> list[ArgumentChoice]:
         """The four rows ``/approvals`` offers: two modes × two scopes.
 
@@ -36151,6 +37117,22 @@ class OperatorApp(App[None]):
         saved_auto = self._approvals_default_auto
         session_mark = " · current"
         saved_mark = " · saved"
+        # A ROW THAT WILL BE REFUSED IS MARKED — WITHOUT MOVING ANY COLUMN
+        # (design round 1 D2, UX round 1 U5; design round 2 D7). The loosening
+        # half of this list removes a gate, and only the window that started the
+        # session's runtime may do that, so on any other surface the row was
+        # offered, chosen, and refused afterwards.
+        #
+        # The first attempt said so in WORDS, appended to the row's ``detail``.
+        # That re-flowed the whole set: the picker sizes its columns from the
+        # widest cell, so the mark took the detail column from 22 cells to 47 —
+        # invisible at 44 columns, and at 60 it dropped the scope column for ALL
+        # FOUR rows. ``alert`` is the per-row mark that costs nothing: it paints
+        # the existing ``detail`` in the danger tint, so no width loses a column
+        # and the owner pane is unchanged. WHAT is refused is still said —
+        # in the refusal copy, which names the remedies, rather than in a list
+        # that has no room to explain (measured at 100/80/60/44 columns).
+        may_loosen = self._may_loosen_gate_here()
         return [
             ArgumentChoice(
                 "ask",
@@ -36163,6 +37145,9 @@ class OperatorApp(App[None]):
                 "Run every tool without asking",
                 aliases=("off", "yolo"),
                 detail="this session" + (session_mark if live_auto else ""),
+                # Not available from this pane: the same question the seam and
+                # ``_may_loosen_gate_here`` answer.
+                alert=not may_loosen,
             ),
             ArgumentChoice(
                 "default ask",
@@ -36190,7 +37175,7 @@ class OperatorApp(App[None]):
         the user is scanning for one they already understand.
         """
         current = getattr(_model_spec(self._session), "reasoning_effort", None) or "auto"
-        rungs = ("auto", *levels)
+        rungs = levels if "auto" in levels else ("auto", *levels)
         return [
             ArgumentChoice(
                 name,
@@ -37724,7 +38709,7 @@ class OperatorApp(App[None]):
         # user picks between them. 67 composed cells against the 74 ceiling.
         lines.append(_key_row("ctrl+r", "copy the open aside; ctrl+f folds it in instead"))
         lines.append(_key_row("esc", "stop the agent; leave a mode"))
-        lines.append(_key_row("ctrl+d", "quit, on an empty composer"))
+        lines.append(_key_row("ctrl/cmd+d", "empty: quit; draft: delete forward"))
         # Where the logs went. Console logging is off while the TUI owns the
         # terminal (see `local_operator.logger.file_logging`), so without this
         # line the file is unfindable without reading the source. `/help` and
@@ -37905,6 +38890,8 @@ class OperatorApp(App[None]):
         async def _decline(tool_name: str, description: str) -> bool:
             """Refuse without asking — see the chain above for why."""
             return False
+
+        from local_operator.references import expand_references
 
         result = await expand_references(text, self.session_cwd(), request_approval=_decline)
         for notice in result.notices:
@@ -38092,6 +39079,10 @@ class OperatorApp(App[None]):
         *,
         locality: str = "local",
         consumers: Iterable[str] | None = None,
+        # ``None`` = "not said", read conservatively: only the LOCAL path omits
+        # it, and that path is a pane that owns its gate, whose answer the local
+        # call sites pass explicitly (agent review round 4, R4-3).
+        may_loosen: bool | None = None,
     ) -> dict[str, Any]:
         """Run one shared slash command and return its typed outcome as data.
 
@@ -38117,7 +39108,7 @@ class OperatorApp(App[None]):
         ``consumers`` is which action-carrying receipts the invoking client
         renders itself; see :meth:`_complete_unconsumed_action`.
         """
-        result = await self._slash_result(command, args, images, locality)
+        result = await self._slash_result(command, args, images, locality, may_loosen)
         result = self._complete_unconsumed_action(result, images, consumers)
         return result.model_dump(mode="json")
 
@@ -38189,7 +39180,12 @@ class OperatorApp(App[None]):
         return result
 
     async def _slash_result(
-        self, command: str, args: str, images: list[Any] | None, locality: str = "local"
+        self,
+        command: str,
+        args: str,
+        images: list[Any] | None,
+        locality: str = "local",
+        may_loosen: bool | None = None,
     ) -> Any:
         from local_operator.session.frontend_state import SlashResult
 
@@ -38232,7 +39228,17 @@ class OperatorApp(App[None]):
         if command == "compact":
             return self._compact_slash_result(SlashResult)
         if command == "approvals":
-            return self._approvals_slash_result(args, SlashResult)
+            # This line is the live one and the ``may_loosen`` argument is the point:
+            # the plain form the fold left unreachable below it would drop the
+            # permission branch for connections that CAN loosen (#1310), and no gate
+            # catches the swap — see the twin in ``session/runtime/serving.py``.
+            return self._approvals_slash_result(args, SlashResult, may_loosen=may_loosen)
+        if command == "archive":
+            return self._archive_slash_result(True, SlashResult)
+        if command == "unarchive":
+            return self._archive_slash_result(False, SlashResult)
+        if command == "delete":
+            return await self._delete_slash_result(args, SlashResult)
         # Every authoritative capability must land on a producer ABOVE: a
         # success-shaped receipt for an operation that never ran is the round-2
         # MAJOR-1 defect, so an unhandled command answers with an honest
@@ -38244,6 +39250,120 @@ class OperatorApp(App[None]):
                 "run it in the session's own terminal"
             ),
             style="warning",
+        )
+
+    def _archive_slash_result(self, archived: bool, SlashResult: Any) -> Any:
+        """``/archive`` and ``/unarchive`` for a viewer attached to THIS owner.
+
+        The state lives in a config-root file, so a follower could write it
+        itself. It is written here instead because the receipt has to be about
+        the session BOTH surfaces are looking at, and the owner is the only
+        party that knows which that is: a viewer's idea of the current session
+        lags a ``/move``, and a receipt naming the wrong id is worse than the
+        round trip it saves.
+
+        Returns a notice rather than a block: the invoker prints it through its
+        own notice path, so an attached terminal and a local one read the same
+        sentence (see ``ServingSessionHandle._slash_result``'s twin).
+        """
+        from local_operator.paths import config_dir
+        from local_operator.session.archived import (
+            archive_change,
+            archived_ids,
+            eviction_clause,
+        )
+
+        session_id = self._resumable_session_id()
+        if not session_id:
+            return SlashResult(
+                kind="notice",
+                text="this conversation has nothing saved yet — nothing to archive",
+                style="warning",
+            )
+        current = archived_ids(config_dir())
+        if archived and session_id in current:
+            return SlashResult(
+                kind="notice",
+                text=f"{session_id} is already archived — /unarchive brings it back",
+                style="info",
+            )
+        if not archived and session_id not in current:
+            return SlashResult(
+                kind="notice",
+                text="this conversation is not archived — /archive hides it from the lists",
+                style="info",
+            )
+        _, evicted = archive_change(config_dir(), session_id, archived)
+        if archived:
+            return SlashResult(
+                kind="notice",
+                text=(
+                    # Plain text and the chord, for the reasons the local handler
+                    # states (D4 / U3, U5).
+                    f"archived {session_id} — hidden from /resume, the sidebar and search; "
+                    "/unarchive brings it back, and the picker's Archived toggle (ctrl+a) "
+                    "still opens it." + eviction_clause(evicted)
+                ),
+                style="info",
+            )
+        return SlashResult(
+            kind="notice", text=f"unarchived {session_id} — it is listed again", style="info"
+        )
+
+    async def _delete_slash_result(self, args: str, SlashResult: Any) -> Any:
+        """``/delete`` for a viewer attached to THIS owner.
+
+        The same two steps the local handler takes — an unconfirmed call is a
+        REHEARSAL that reports what the real one would do, including any refusal
+        — so a user confirms against exactly what they were shown.
+
+        IN PRACTICE THIS PATH ANSWERS THE REFUSAL, and that is the designed
+        outcome rather than a gap: the owner of a routed command is a LIVE
+        session by definition, a live session is a hard guard, and the guard
+        sentence names the remedy. The success branch is kept because it is
+        reachable (an owner between sessions, a viewer racing a shutdown) and
+        because leaving it out would make the receipt shape depend on which
+        caller asked. It lands the owner on a fresh conversation, exactly as the
+        local path does: a deleted conversation is not one anyone can stay on.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.session.cleanup import delete_session
+
+        session_id = self._resumable_session_id()
+        if not session_id:
+            return SlashResult(
+                kind="notice",
+                text="this conversation has nothing saved yet — there is nothing to delete",
+                style="warning",
+            )
+        confirmed = args.strip().casefold() == "yes"
+        outcome = await asyncio.to_thread(
+            delete_session, config_dir(), session_id, actor="tui", dry_run=not confirmed
+        )
+        if not outcome.found:
+            return SlashResult(
+                kind="notice",
+                text=f"{session_id} is not on disk — nothing to delete",
+                style="warning",
+            )
+        if outcome.refusal:
+            return SlashResult(kind="notice", text=outcome.refusal, style="warning")
+        if not confirmed:
+            # Same single source as the local host above (review round 3, R3-2).
+            return SlashResult(kind="notice", text=outcome.rehearsal(), style="warning")
+        self._cmd_new(self._notice)
+        return SlashResult(
+            kind="notice",
+            text=f"deleted {session_id}",
+            # A NOTICE rather than a `block` payload with its own type, because a
+            # routed payload type is a RENDERER CONTRACT: a producer that emits a
+            # `(kind, data["type"])` pair the viewer has no arm for is a command
+            # that runs on the owner and then evaporates on the screen — no
+            # output, no error. The receipt IS the whole answer here, so it rides
+            # as text like every other routed receipt, and the machine-readable
+            # half is a plain data key (invisible to that contract test by
+            # construction, since the key it enumerates is `type`).
+            data={"deleted": True, "session_id": session_id},
         )
 
     def _context_slash_result(self, SlashResult: Any) -> Any:
@@ -39027,7 +40147,9 @@ class OperatorApp(App[None]):
         )
         return SlashResult(kind="notice", text="compacting context…", style="info")
 
-    def _approvals_slash_result(self, arg: str, SlashResult: Any) -> Any:
+    def _approvals_slash_result(
+        self, arg: str, SlashResult: Any, *, may_loosen: bool | None = None
+    ) -> Any:
         """The routed ``/approvals``: report or switch the OWNER's gate.
 
         The approval gate the engine consults is the owner process's — a
@@ -39040,11 +40162,19 @@ class OperatorApp(App[None]):
         persist = argument == "default" or argument.startswith("default ")
         mode = argument[len("default ") :].strip() if persist else argument
         if persist:
+            # The same two-truths split the runtime makes, in the SAME WORDS:
+            # the sentence is shared so the two hosts cannot drift, and it names
+            # the machine the session runs on rather than "this machine", which
+            # reads as the reader's own filesystem from a phone (design round 2
+            # D10 = UX round 2 U7; design round 3, D16).
+            from local_operator.harness.approval import approvals_default_notice
+            from local_operator.operator import operator_authority_unusable
+
             return SlashResult(
                 kind="notice",
-                text="/approvals default persists to the local machine's config — run it "
-                "on the terminal whose launches it should govern; /approvals ask|auto "
-                "switches the shared session now",
+                text=approvals_default_notice(
+                    may_loosen=may_loosen, anchor_unusable=operator_authority_unusable()
+                ),
                 style="warning",
             )
         if mode in ("ask", "on", "prompt"):
@@ -39077,10 +40207,23 @@ class OperatorApp(App[None]):
                     text=f"tool approvals: {live} — {effect}; new sessions open the same way",
                     style="warning" if self._approve_all else "info",
                 )
+            from local_operator.harness.approval import transition_authority
+
+            here = may_loosen
+            remedy = self._adopt_remedy(saved, may_loosen=here)
+            if transition_authority("approvals", saved) == "authority-increasing" and not here:
+                # The route that DOES work belongs in the report too, not only in
+                # the refusal that arrives after the operator has tried and failed
+                # (UX round 2, U9). WHAT IT NAMES changed with the authority model
+                # (revision 2 §5; agent review round 6 R6-3 = design round 6 D1 =
+                # UX round 6 U4): the clause here was "or let this session's runtime
+                # retire and reopen the session here", which is the deleted remedy
+                # on the surface a reader consults BEFORE being refused.
+                remedy += self._uninstalled_anchor_clause()
             return SlashResult(
                 kind="notice",
                 text=f"tool approvals: {live} (this session) — {effect}; "
-                f"config.yml says {saved} — /approvals {saved} adopts it in this session",
+                f"config.yml says {saved} — {remedy}",
                 style="warning" if self._approve_all else "info",
             )
         if wanted_auto:
@@ -40218,6 +41361,14 @@ class OperatorApp(App[None]):
         # "Still owes an outcome" covers both, where either flag alone does not.
         owes_outcome = was_open or not self._turn_notified
         self._dismiss_working_block()
+        # The thinking goes with the working line. This is the ONE exit for
+        # every way a turn can finish (completed, failed, aborted), so retiring
+        # here is what covers the terminal paths the answer's own delta never
+        # reaches: an abort mid-reasoning, a turn that reasoned and then died,
+        # and the ``TurnAbandoned`` fallback posted when the worker returns
+        # without a terminal end. A phase left mounted through any of them is
+        # the leftover row the operator reported, one per model call.
+        self._retire_reasoning_block()
         if self._status is not None:
             # ONE `update` carrying BOTH facts, which is what makes the ordering
             # STRUCTURAL rather than race-won. An earlier revision called
@@ -41178,14 +42329,97 @@ class OperatorApp(App[None]):
             self._refresh_working_activity()
         return block
 
+    def _ensure_reasoning_block(self) -> ReasoningBlock:
+        """The block for the reasoning being streamed, mounted on first use.
+
+        Mounted on the FIRST fragment rather than at ``message_start``, and for
+        the reason :meth:`on_assistant_message_start` records: a call that never
+        reasons must not open a row it will never fill. Most turns do reason
+        (86.5% of deepseek-flash turns in the operator's ledger), so this is the
+        common path rather than the exception -- the deferral costs nothing and
+        the alternative spends a header row on every non-reasoning model.
+        """
+        block = self._reasoning_block
+        if block is None:
+            block = ReasoningBlock()
+            self._reasoning_block = block
+            self._append_block(block)
+            self._refresh_working_activity()
+        return block
+
+    def _retire_reasoning_block(self) -> None:
+        """Close the live reasoning phase, if any, and REMOVE it from the transcript.
+
+        Called when the answer starts and on every terminal path. The block is
+        closed and then removed WHOLE, following ``display.narration``'s
+        precedent in :meth:`on_assistant_message_end`.
+
+        Removal rather than the collapsed header row an earlier revision kept
+        (UX review round 1, U1): a turn makes several model calls, so one row
+        per call accumulated for the life of the session, and the operator
+        reported the residue as pollution. The block is removed AFTER its own
+        ``retire()`` freezes it — the same order and the same reason as the
+        narration removal, and removing a block whole does not violate the
+        FINALIZED-BLOCK protocol, which governs mutation of a block's committed
+        rows, not its existence. ``ReasoningBlock.SPACING_TRANSIENT`` is what
+        lets ``remove_block`` re-decide the gap on whatever fell into its place
+        without leaving one behind.
+
+        Letting go of the reference is what lets the NEXT model call of the same
+        turn open a fresh phase. ``ReasoningBlock.retire`` records the measured
+        scroll cost of the removal (a reader above the block sees nothing move;
+        a reader at the tail has the window slide back by the rows removed) —
+        the argument the collapsed header row was defended with is answered
+        there, not here.
+        """
+        block = self._reasoning_block
+        if block is None:
+            return
+        self._reasoning_block = None
+        block.retire()
+        self._transcript_view().remove_block(block)
+        self._refresh_working_activity()
+
+    def on_reasoning_delta(self, message: ReasoningDelta) -> None:
+        """The model's private reasoning, streamed dim above the answer it will write."""
+        # Whitespace-only text is not reasoning either: mounting on it paints a
+        # labelled header with nothing under it, which design round 1 caught as
+        # a frame (D5). `on_assistant_delta`'s guard is the same shape.
+        if not message.text.strip():
+            return
+        # `display.reasoning` gates this channel, read at MOUNT rather than
+        # cached on the app so a write from `/settings` applies to the next
+        # phase. It ships OFF: ON is the opt-in for a reader who wants to watch
+        # the model think, not an escape hatch from a default that shows it
+        # (the polarity flipped with the default — see `DEFAULT_REASONING`).
+        # A mid-session flip is forward-only, like `display.narration`, because
+        # re-projecting mounted blocks in one synchronous pass is what paints a
+        # blank frame.
+        if not settings_get("display.reasoning", DEFAULT_REASONING):
+            return
+        self._ensure_reasoning_block().update_text(message.text)
+
+    def on_reasoning_end(self, message: ReasoningEnd) -> None:
+        """The phase is over -- the model stopped thinking for this call."""
+        self._retire_reasoning_block()
+
     def on_assistant_delta(self, message: AssistantDelta) -> None:
         # Empty deltas are not text: flushing one would mount a block that then
         # sits blank until real content lands, which is the hole this avoids.
         if not message.text:
             return
+        # The answer has started, so the thinking is over: retire the reasoning
+        # phase before the assistant block mounts, so the two rows are ordered
+        # thinking-then-answer in the transcript even when both updates land in
+        # the same frame.
+        self._retire_reasoning_block()
         self._ensure_streaming_block().update_text(message.text)
 
     def on_assistant_message_end(self, message: AssistantMessageEnd) -> None:
+        # A tool-only call ends its message with no prose at all, so this is the
+        # path that retires a reasoning phase for a turn that reasoned and then
+        # called a tool. Idempotent: a `reasoning_end` already retired it.
+        self._retire_reasoning_block()
         # An empty authoritative text is not an instruction to erase what
         # streamed. Adopting it unconditionally destroyed the prose the deltas
         # had already painted and left an empty block mounted in its place; the
@@ -41307,6 +42541,11 @@ class OperatorApp(App[None]):
             self._composing_cards = {}
             self._streaming_block = None
             self._working_block = None
+            # The reasoning block is cleared here for the reason
+            # `_on_transcript_cleared` records: `clear_blocks` has removed the
+            # widget, and a reference to it would be a phase the app no longer
+            # owns.
+            self._reasoning_block = None
             self._shell_card = None
             self._project_settled_rows(message.messages, bound=RESUME_RENDER_MESSAGES)
             view.follow_tail()
@@ -41551,6 +42790,12 @@ class OperatorApp(App[None]):
         detail = _partial_text(message.event.partial_result)
         if detail:
             card.set_partial_detail(detail)
+        # The advisory rides the SAME event as the output but is not output: it
+        # goes to the card's persistent state line (design review D1). Set even
+        # when the text is empty, so a card whose advisory arrived on a snapshot
+        # with no new output still paints it — and cleared when the producer stops
+        # sending it, so the line does not outlive the condition.
+        card.set_live_advisory(_partial_advisory(message.event.partial_result))
 
     def on_tool_ended(self, message: ToolEnded) -> None:
         event = message.event
@@ -42280,6 +43525,26 @@ class OperatorApp(App[None]):
         logger.debug("session runtime refused the recall of steer %s", command_id)
         self._append_block(NoticeBlock(RECALL_UNCONFIRMED_NOTICE, "warning"))
 
+    def _on_operator_prompt(self, session: Any, copy: str) -> None:
+        """Paint what a signature is about to authorise, while the prompt is up.
+
+        A ``NoticeBlock`` in the transcript rather than a transient banner: the
+        prompt it accompanies is answered by a human some seconds later, and the
+        sentence has to survive the wait — the same reason the recall-refusal
+        warning is appended rather than slotted (see `_on_recall_rejected`).
+
+        Scoped to the session that asked, and dropped when it is no longer current:
+        the prompt is raised by THIS machine's key for THIS session, so a copy
+        landing on the conversation the user has since switched to would describe a
+        gesture they are not about to make.
+        """
+        if session is not self._session:
+            logger.debug(
+                "dropped an operator-prompt notice for a session that is no longer current"
+            )
+            return
+        self._append_block(NoticeBlock(copy, "warning"))
+
     def _on_steer_undeliverable(self, session: Any, command_id: str) -> None:
         """A queued steer's bind was refused, so give the text back and say so.
 
@@ -42743,7 +44008,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 124
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 126
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own
@@ -43288,6 +44553,23 @@ def _partial_text(partial_result) -> str:
         if text:
             return text
     return ""
+
+
+def _partial_advisory(partial_result) -> str | None:
+    """The memory advisory carried on a streaming update, or ``None``.
+
+    A sibling of :func:`_partial_text` because the advisory is not output: it
+    travels in the update's ``details`` (never in the text), so the card can
+    paint it as a persistent state line instead of as a line the command printed
+    (design review D1/D2). Absent details, or a non-string value, read as "no
+    advisory" rather than raising — a card must never fail to render because a
+    producer sent a shape it did not expect.
+    """
+    details = getattr(partial_result, "details", None)
+    if not isinstance(details, dict):
+        return None
+    value = details.get("memory_advisory")
+    return value if isinstance(value, str) and value else None
 
 
 class _TreeRow(Text):

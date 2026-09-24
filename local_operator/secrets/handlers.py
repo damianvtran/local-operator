@@ -32,7 +32,7 @@ from local_operator.procstate import O_BINARY
 from local_operator.secrets.access import open_store, retrieve_secret, session_id
 from local_operator.secrets.errors import BrokerIncompatible, SecretStoreError
 from local_operator.secrets.keys import DIR_MODE, FILE_MODE, key_mode, secrets_dir
-from local_operator.secrets.store import SecretRecord
+from local_operator.secrets.store import SecretRecord, secret_class
 
 #: How long `broker stop`/`restart` waits for the daemon's socket to go away.
 #: Generous: the broker drains in-flight requests before exiting (§13), and a
@@ -60,7 +60,10 @@ def dispatch(args: argparse.Namespace) -> int:
     """
     command = getattr(args, "secret_command", None)
     if command is None:
-        _err("usage: lop secret {get,set,update,list,describe,rm,rotate,status,audit,file,run}")
+        _err(
+            "usage: lop secret "
+            "{get,set,update,list,describe,rm,rotate,status,audit,file,run,migrate-env}"
+        )
         return 2
 
     handlers = {
@@ -78,6 +81,7 @@ def dispatch(args: argparse.Namespace) -> int:
         "run": _run,
         "harden": _harden,
         "unlock": _unlock,
+        "migrate-env": _migrate_env,
         "broker": _broker,
     }
     try:
@@ -226,6 +230,10 @@ def _record_dict(record: SecretRecord) -> dict[str, Any]:
         "name": record.name,
         "description": record.description,
         "kind": record.kind,
+        # Derived from the name, never stored: see store.secret_class. Carried in
+        # the JSON too so a scripted consumer sees the same provider/agent split
+        # the human listing prints, rather than having to re-derive the rule.
+        "class": secret_class(record.name),
         "key_generation": record.key_generation,
         "created_at": record.created_at,
         "updated_at": record.updated_at,
@@ -310,30 +318,54 @@ def _list(args: argparse.Namespace) -> int:
     width = max(len(record.name) for record in records)
     for record in records:
         suffix = f"  {record.description}" if record.description else ""
-        print(f"{record.name:<{width}}  {record.kind:<6}{suffix}")
+        # The CLASS is derived from the name (store.secret_class), not from the
+        # stored kind: a ``LOP_PROVIDER_*`` row is a built-in API key the
+        # harness manages, an unprefixed one is the operator's own secret, and
+        # that distinction is what tells an operator which rows they can safely
+        # delete. Printed beside ``kind`` (the plaintext's shape) because both
+        # matter and neither replaces the other.
+        print(f"{record.name:<{width}}  {record.kind:<6} {secret_class(record.name):<9}{suffix}")
     _warn_damaged(damaged)
     return 0
 
 
 def _warn_damaged(damaged: list[str]) -> None:
-    """Tell the operator about unreadable rows, and how to remove one.
+    """Tell the operator about unreadable rows, and how to deal with one.
 
-    On stderr with the id and the exact command, because a damaged record is
+    On stderr with the id and the exact command, because an unreadable record is
     actionable but only if the operator is given the one thing `rm NAME` cannot
     give them: the name is inside the ciphertext they cannot open.
+
+    TWO KINDS OF UNREADABLE ARE NAMED, because they have OPPOSITE remedies and
+    the list cannot tell them apart (round-3/round-4 review, M1/Q-6). A row that
+    was sealed under a lost key or altered is genuinely damaged and IS removable
+    with ``rm --id``; a row that merely needs a NEWER runtime
+    (``IncompatibleStore``, the record-format skew) is intact, and ``rm --id``
+    now REFUSES it — so the hint must send that case to ``lop update`` rather
+    than to a command that exits 2.
     """
     if not damaged:
         return
     _err(
-        f"warning: {len(damaged)} record(s) in this store cannot be decrypted and are not "
-        "listed above. They were sealed under a key that no longer exists, or they have "
-        "been altered."
+        f"warning: {len(damaged)} record(s) in this store could not be read and are not "
+        "listed above. One that no longer opens under any key, or that has been altered, "
+        "can be removed; one that was written by a NEWER version of this runtime is intact "
+        "and is fixed by upgrading, not by deleting."
     )
     for record_id in damaged:
-        _err(f"  {record_id}  (remove with: lop secret rm --id {record_id} --yes)")
+        _err(
+            f"  {record_id}  (damaged -> remove with: lop secret rm --id {record_id} --yes; "
+            "needs a newer runtime -> lop update)"
+        )
 
 
 def _describe(args: argparse.Namespace) -> int:
+    # Default `role="agent"`: this is the operator's ordinary CLI surface, and a
+    # provider-class row (`LOP_PROVIDER_*`) is refused here exactly as the agent
+    # tool's `describe` refuses it — an agent or a misdirected script must not be
+    # able to enumerate which provider keys a host holds. The provider-side
+    # readers (`registry.provider_secret_value`, the qwencloud ticket) pass
+    # `role="provider"` and are unaffected.
     record = open_store().describe(args.name)
     if args.json:
         print(json.dumps(_record_dict(record), indent=2))
@@ -379,12 +411,20 @@ def _remove(args: argparse.Namespace) -> int:
         # ciphertext will not open has no readable name and no valid blind
         # index, so deleting by primary key is the only way out short of
         # hand-editing SQLite.
-        if not open_store().delete_record_id(args.id, session_id=session_id()):
+        # `role="agent"` by default: an id read off `list --json` must not let the
+        # agent surface remove a provider row, the same boundary the name-keyed
+        # `delete` below enforces. Provider-class repair is a provider-side call.
+        if not open_store().delete_record_id(args.id, role="agent", session_id=session_id()):
             _err(f"no record with id {args.id} in this store")
             return 2
         _err(f"deleted record {args.id}")
         return 0
 
+    # `role="agent"` by default, so this irreversible verb cannot remove a
+    # provider-owned row: the value is kept nowhere else, which makes an
+    # unguarded delete the destructive half of the namespace boundary rather
+    # than a read leak. Provider-class deletion is `lop credential delete`,
+    # which passes `role="provider"`.
     record = open_store().delete(args.name, session_id=session_id())
     _err(f"deleted {record.name}")
     return 0
@@ -831,6 +871,193 @@ def _run(args: argparse.Namespace) -> int:
         # audit trail record them individually.
         environment[variable or name] = retrieve_secret(name).decode("utf-8", errors="strict")
     return subprocess.run(command, env=environment, check=False).returncode
+
+
+def _web_search_env_keys() -> set[str]:
+    """Every env var NAME the built-in web-search transports read, as a set.
+
+    **These keys are NOT in ``PROVIDER_REGISTRY``, and that is why they need
+    their own source (R3).** ``lop search setup`` writes each of them through
+    ``store_provider_key`` (a ``LOP_PROVIDER_<KEY>`` row with
+    ``role="provider"``), and ``web_search/providers.py``'s ``_credential``
+    reads them back through ``provider_secret_value`` — so the search readers
+    resolve them from the PROVIDER namespace even though the registry does not
+    know them. A migration that classified only by the registry filed them as
+    bare agent secrets, where ``provider_secret_value`` will never look, so the
+    key silently stopped resolving after a migration that appeared to succeed.
+
+    Derived from BOTH the writer and the readers in ``web_search`` rather than a
+    second hand-maintained list, for the same reason
+    ``_migrate_provider_env_keys`` derives from the registry: a list beside the
+    writer is free to drift from the name the writer actually stores.
+    ``_API_KEY_NAMES`` is what ``lop search setup`` writes a key UNDER, and
+    ``PROVIDERS[...].credential_keys`` is what the transports LOOK it up as —
+    the two differ by the ``SERP_API_KEY`` alias, which is read through
+    ``provider_secret_value`` and must therefore be migrated into the provider
+    namespace too.
+    """
+    from local_operator.web_search.cli import _API_KEY_NAMES
+    from local_operator.web_search.providers import PROVIDERS
+
+    names = set(_API_KEY_NAMES.values())
+    for definition in PROVIDERS.values():
+        names.update(definition.credential_keys)
+    return names
+
+
+def _migrate_provider_env_keys() -> set[str]:
+    """Every env var NAME any registry provider OR web-search transport reads.
+
+    Derived rather than hard-coded, and from all three readers: ``env_key_names``
+    is the provider's own env-var name (including the tuple names a provider may
+    be configured under), ``credential_file_names`` adds the names the provider's
+    login writes into the legacy file plus its alias rows (``xai-oauth`` ⇒
+    ``xai``), and ``_web_search_env_keys`` adds the search keys that live in the
+    provider namespace without being registry providers. A hard-coded list beside
+    them is free to drift from the name a login or ``lop search setup`` actually
+    writes, and the failure would be silent: the key would be filed as an
+    ordinary agent secret and then never found by the provider reader looking it
+    up under ``LOP_PROVIDER_*``.
+
+    A provider whose ``env_keys`` is a callable (:func:`_anthropic_env_key`)
+    contributes no NAME — the callable answers only with a VALUE, so there is
+    nothing to key a store row on. That is the same limit ``env_key_names``
+    documents; ``credential_file_names`` is what supplies the fixed
+    ``ANTHROPIC_API_KEY`` spelling for that provider.
+    """
+    from local_operator.providers.registry import (
+        PROVIDER_REGISTRY,
+        credential_file_names,
+        env_key_names,
+    )
+
+    names: set[str] = _web_search_env_keys()
+    for definition in PROVIDER_REGISTRY:
+        names.update(env_key_names(definition.id))
+        names.update(credential_file_names(definition.id))
+    return names
+
+
+def _migrate_env(args: argparse.Namespace) -> int:
+    """Move ``<config>/credentials.env`` into the encrypted store, name by name.
+
+    The plaintext ``KEY=VALUE`` file is no longer the primary credential store
+    but real keys still sit in it, greppable, so this verb relieves it: provider
+    keys become provider-class rows under ``LOP_PROVIDER_<KEY>`` and every other
+    key becomes an ordinary agent secret under its literal name (design §5).
+
+    Four properties, each deliberate:
+
+    - **It never CREATES the source file.** The read goes through
+      :func:`local_operator.secrets.legacy_env.read_credentials`, which only
+      opens the file for reading — the deleted ``CredentialManager`` used to
+      CREATE an empty ``credentials.env`` as a side effect of construction, and a
+      migration that recreated the file it is retiring would silently undo itself
+      on a host that had already been cleaned up. That property is exactly why
+      the reader was extracted out of that module rather than deleted with it
+      (PR2b).
+    - **It never prints a value, and never its own source.** Names, classes and
+      counts only. This command runs right after an operator has decided their
+      secrets should stop being readable off the disk; printing them into a
+      terminal, a scrollback buffer or a shell history entry would put them
+      straight back.
+    - **It is idempotent.** A name already present in the store is reported and
+      skipped rather than overwritten, so re-running after a partial migration
+      (or after adding a key to the file) converges. It never clobbers a value
+      the store already holds — ``set`` refuses a duplicate name, and the
+      pre-check is what turns that refusal into a clear report instead of the
+      first row aborting the run.
+    - **It never deletes the source file.** Deleting the last copy of a
+      credential is irreversible and is the operator's call, made after they
+      have verified the store holds everything (design §4 step 6).
+
+    ``--dry-run`` writes nothing and opens no store; it prints the same lines
+    with ``[dry-run]`` and is safe to run as often as wanted before committing.
+    """
+    from local_operator.paths import config_dir
+    from local_operator.secrets.keys import store_path
+    from local_operator.secrets.legacy_env import (
+        CREDENTIALS_FILE_NAME,
+        read_credentials,
+    )
+    from local_operator.secrets.store import provider_secret_name
+
+    root = config_dir()
+    source = root / CREDENTIALS_FILE_NAME
+
+    # Read WITHOUT creating it: ``read_credentials`` opens the file read-only
+    # and returns ``{}`` for an absent one, so a host that has already migrated
+    # stays migrated.
+    values = read_credentials(root)
+    if not values:
+        # Two distinct situations with one honest sentence. An absent file is the
+        # expected END state of this whole exercise, so it is not an error.
+        _err(
+            f"no credentials to migrate from {source}"
+            + ("" if source.exists() else " (the file is not present)")
+        )
+        return 0
+
+    provider_keys = _migrate_provider_env_keys()
+
+    existing: set[str] = set()
+    store = None
+    if not args.dry_run and store_path().exists():
+        store = open_store()
+        existing = {record.name for record in store.list()}
+
+    counts = {"stored": 0, "already present": 0, "dry-run": 0, "failed": 0}
+    for key, secret in values.items():
+        if key in provider_keys:
+            name = provider_secret_name(key)
+            role = "provider"
+            description = "Provider API key migrated from the plaintext credentials.env"
+        else:
+            name = key
+            role = "agent"
+            description = "Secret migrated from the plaintext credentials.env"
+        # The class is the one the store will DERIVE from the name, and it is
+        # computed the same way here so a dry run cannot report a destination the
+        # real run would file differently.
+        status = secret_class(name)
+        if args.dry_run:
+            counts["dry-run"] += 1
+            print(f"{key} -> {name} ({status}) [dry-run]")
+            continue
+        if name in existing:
+            counts["already present"] += 1
+            print(f"{key} -> {name} ({status}) [already present]")
+            continue
+        # One store handle across the loop, and `session_id()` so the audit chain
+        # attributes each row to the session that ran the migration. `create=True`
+        # only on this branch: it is the verb that legitimately creates a store.
+        store = store or open_store(create=True)
+        try:
+            store.set(
+                name,
+                secret.get_secret_value().encode("utf-8"),
+                description=description,
+                role=role,
+                session_id=session_id(),
+            )
+        except SecretStoreError as exc:
+            counts["failed"] += 1
+            # Per-key, so one unwritable row does not abandon the rest of the
+            # file half-migrated with no record of where it stopped.
+            _err(f"{key} -> {name} FAILED: {exc}")
+            continue
+        counts["stored"] += 1
+        existing.add(name)
+        print(f"{key} -> {name} ({status}) [stored]")
+
+    summary = ", ".join(f"{count} {label}" for label, count in counts.items() if count)
+    _err(f"migrate-env: {len(values)} key(s) read from {source.name}; {summary or 'nothing to do'}")
+    if not args.dry_run:
+        _err(
+            f"the plaintext file was left in place; delete {source} once `lop secret list` "
+            "shows every name."
+        )
+    return 0
 
 
 def _read_passphrase(prompt: str) -> str:

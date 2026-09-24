@@ -18,7 +18,7 @@ BORDERLESS block resting on the input card:
 
     /         command picker
     /help     all commands
-    ctrl+d    quit
+    ctrl/cmd+d quit
 
     · /resume picks up a recent session where you left off
 
@@ -252,12 +252,13 @@ MODEL_SETUP = "setup"
 #: loses. Trading the logo for a key reference is the wrong trade for a key
 #: most users never need to learn: the native ``Cmd+V`` now works wherever the
 #: terminal forwards it, and ``/help`` names ``ctrl+v`` as the fallback for the
-#: terminals that do not (Terminal.app). The composer placeholder carried this
-#: hint for one release and no longer does.
+#: terminals that do not (Terminal.app). ``Cmd+D`` uses Textual's ``super+d``
+#: kitty-protocol spelling; terminal apps may still intercept it before the TUI.
+#: The composer placeholder carried this hint for one release and no longer does.
 HINTS: tuple[tuple[str, str], ...] = (
     ("/", "command picker"),
     ("/help", "all commands"),
-    ("ctrl+d", "quit"),
+    ("ctrl/cmd+d", "quit"),
 )
 
 #: The affordance table in the first-run SETUP state. `/login` leads because it
@@ -270,7 +271,7 @@ HINTS_SETUP: tuple[tuple[str, str], ...] = (
     ("/login", "set up a provider"),
     ("/", "command picker"),
     ("/help", "all commands"),
-    ("ctrl+d", "quit"),
+    ("ctrl/cmd+d", "quit"),
 )
 
 #: Key column width for the hint rows: the roomy default, and the squeezed
@@ -891,8 +892,14 @@ def _hint_lines(width: int, *, setup: bool = False) -> list[Text]:
     key_style = Style(color=theme_mod.semantic_color("fg"))
     desc_style = Style(color=theme_mod.semantic_color("muted"))
 
+    longest_key = max(cell_len(key) for key, _ in hints)
+    tight_column = max(HINT_KEY_WIDTH_TIGHT, longest_key + 1)
     key_column = 0
-    for candidate in (HINT_KEY_WIDTH, HINT_KEY_WIDTH_TIGHT):
+    for candidate in (HINT_KEY_WIDTH, tight_column):
+        # ``ljust`` adds no separator when a key already fills the column. Skip
+        # that tier rather than painting its description directly after the key.
+        if candidate <= longest_key:
+            continue
         block = max(candidate + cell_len(desc) for _, desc in hints)
         if block <= width:
             key_column = candidate
@@ -1257,7 +1264,7 @@ class WelcomeView(Static):
         :meth:`set_visible` covers the ordinary retirement (the first transcript
         block), but it is not the only exit — every ``run_test`` that never
         sends a prompt tears the app down with the splash still up, and so does
-        ``ctrl+d`` on the boot screen.
+        ``ctrl+d`` or ``super+d`` on the boot screen.
         """
         self._stop_timer()
         self._stop_pulse_timer()
