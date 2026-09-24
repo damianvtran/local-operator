@@ -375,6 +375,59 @@ describe("a refused pin reports where the reader is looking (D12/D14, R8-2, Q4)"
 		expect(errorBox().className).toContain("grid-rows-[1fr]");
 	});
 
+	it("pays the band's height out of scrollTop so a scrolled list does not move", () => {
+		/* The rows-hold-still half of D14 / Q4: the band sits ABOVE the scroller, so
+		   its growth would push every visible row down (+42.8px at 100% root font,
+		   measured) unless the list scrolls by the same amount. happy-dom has no
+		   layout and no ResizeObserver, so the observer is stubbed and fed the
+		   heights the band's animated track reports, fractions included, and the
+		   test asserts the scroll offset the screen writes back. */
+		type Resized = (entries: Array<{ contentRect: { height: number } }>) => void;
+		/* Only an OBSERVED element is reported, and to whom, so the test cannot pass
+		   on a callback that was built but never pointed at the band. */
+		const observed = new Map<Element, Resized>();
+		vi.stubGlobal(
+			"ResizeObserver",
+			class {
+				constructor(private readonly callback: Resized) {}
+				observe(target: Element) {
+					observed.set(target, this.callback);
+				}
+				disconnect() {}
+			},
+		);
+		try {
+			sessionList = longList();
+			render(<SessionListScreen />);
+			const list = scroller();
+			/* Chrome's own scroll anchoring would correct the same offset on its own
+			   schedule, which measured as a 127px drift at 200%, so the list opts out. */
+			expect(list.className).toContain("[overflow-anchor:none]");
+			const onBandResize = observed.get(errorBox());
+			expect(onBandResize).toBeDefined();
+			const feed = (height: number) => act(() => onBandResize?.([{ contentRect: { height } }]));
+
+			list.scrollTop = 900;
+			/* Sub-pixel frames first, as the track's first frames are: truncating each
+			   one alone would pay 0 for all four and lose 3.6px. */
+			for (const height of [0.9, 1.8, 2.7, 3.6, 34.8]) feed(height);
+			/* Every whole pixel the band took, and none dropped to truncation: 34, the
+			   carried 0.8 still owed. */
+			expect(list.scrollTop).toBe(900 + 34);
+			feed(0);
+			/* The collapse pays it back, so the rows hold still in both directions. */
+			expect(list.scrollTop).toBe(900);
+
+			/* At the top there is nothing above the rows to spend: they ride the
+			   band's animated track instead, and the offset is left alone. */
+			list.scrollTop = 0;
+			feed(34.8);
+			expect(list.scrollTop).toBe(0);
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
+
 	it("keeps the band collapsed and empty until a refusal arrives", () => {
 		sessionList = longList();
 		render(<SessionListScreen />);
