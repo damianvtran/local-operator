@@ -159,7 +159,10 @@ def test_a_real_process_reports_the_generation_it_was_executed_from(
     monkeypatch.setenv("COLUMNS", "80")
 
     read_fd, write_fd = os.pipe()
-    child: subprocess.Popen[str] | None = None
+    # ``Popen[bytes]``: no ``text=`` here, and the annotation is what pyright needs to
+    # stay quiet about the generic; ``None`` is the pre-spawn state the ``finally``
+    # below has to tolerate (a failure inside ``Popen`` leaves nothing to reap).
+    child: subprocess.Popen[bytes] | None = None
     try:
         code = f"import os, time; os.write({write_fd}, b'1'); time.sleep(60)"
         child = subprocess.Popen(  # noqa: S603 — a fixed argv, and this test's own child
@@ -169,6 +172,7 @@ def test_a_real_process_reports_the_generation_it_was_executed_from(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        assert child is not None, "unreachable: Popen returns or raises"
         readable, _, _ = select.select([read_fd], [], [], _EXEC_ANNOUNCEMENT_DEADLINE_S)
         assert readable, "the child never announced that its exec landed"
         assert os.read(read_fd, 1) == b"1"
