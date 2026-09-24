@@ -9663,7 +9663,17 @@ async def execute_grep(
         return refusal
 
     cwd = _safe_cwd(context)
-    target, inside, resolvable = _resolve_workspace_path(params.path, cwd)
+    # The path is STRIPPED before resolving, exactly as ``execute_read`` does one
+    # call above (``target = params.path.strip()``). Both are seam-critical: the
+    # credential guard exempts a call by resolving its ``path`` argument with
+    # THIS resolver (``harness/guard_area.py``), so a reader that resolves a
+    # differently-normalised string than the guard does opens a file the guard
+    # never exempted — or misses the one it did. ``grep`` handed the raw argument
+    # on while ``read`` handed a stripped one, so ``path = "<exempt spelling> "``
+    # matched the guard's stripped spelling and opened the whitespace-bearing
+    # name in EXEMPT_SOURCES' place: an agent-authored file, rotation demand
+    # suppressed. Measured, PR #1502 review round 2 (R2-1).
+    target, inside, resolvable = _resolve_workspace_path(params.path.strip(), cwd)
     if not target.exists():
         # Deliberately NOT a model fault: a well-formed path that does not
         # exist is unsatisfiable, not malformed, and the file may have vanished
