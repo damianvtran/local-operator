@@ -158,6 +158,7 @@ from local_operator.scratchpad import (
     scratchpad_dir_of,
     scratchpad_env_injection,
 )
+from local_operator.text_bounds import OUTPUT_TRUNCATION_MARKER, clip_head_tail
 from local_operator.tools import group_reaper, search_guard, shell_env
 from local_operator.tools.spill import (
     SPILL_ENTRY_LIMIT_BYTES,
@@ -482,10 +483,12 @@ NON_INTERACTIVE_ENV: dict[str, str] = {
 }
 
 
-#: Marker written where the middle of an output was removed. Kept as a public
-#: name because tests and the browser paths reference it; the text now names
-#: the recovery route instead of just announcing a loss.
-BASH_TRUNCATION_MARKER = "\n\n... [output truncated] ...\n\n"
+#: Marker written where the middle of an output was removed. Now a re-export of
+#: the shared text bound (``local_operator.text_bounds``) rather than a literal,
+#: because the harness imposes the same elision on replay and two literals are
+#: two ways to spell one scar. The name stays: tests and the browser paths
+#: reference it.
+BASH_TRUNCATION_MARKER = OUTPUT_TRUNCATION_MARKER
 
 # The key the harness marks elided content with, inside a JSON payload. It is
 # deliberately NOT `_truncated`: that key belongs to the Minerva toolproxy, whose
@@ -497,30 +500,11 @@ BASH_TRUNCATION_MARKER = "\n\n... [output truncated] ...\n\n"
 ELISION_MARKER_KEY = "_elided"
 
 
-def _clip_head_tail(text: str, limit: int) -> tuple[str, str]:
-    """``(head, tail)`` slices of ``text`` totalling at most ``limit`` chars.
-
-    Both cuts snap INWARD to a line boundary, so neither end shows half a
-    line. Half a line is not a cosmetic problem: a truncated ``File "x.py",
-    line 12`` reads as a different path, and a model that acts on it edits the
-    wrong file. When snapping would empty a side — one enormous line with no
-    newline to snap to — the raw character slice is kept, because a fragment
-    of the answer still beats none of it.
-    """
-    head_budget = limit // 2
-    tail_budget = limit - head_budget
-
-    head = text[:head_budget]
-    cut = head.rfind("\n")
-    if cut > 0:
-        head = head[: cut + 1]
-
-    tail = text[len(text) - tail_budget :]
-    cut = tail.find("\n")
-    if 0 <= cut < len(tail) - 1:
-        tail = tail[cut + 1 :]
-
-    return head, tail
+#: The tools layer's name for the shared clipper. Aliased rather than imported
+#: at the call sites so every existing caller — and the tests that reach for the
+#: private name — keeps working, while the harness gets the same implementation
+#: instead of a second copy of it.
+_clip_head_tail = clip_head_tail
 
 
 def truncate_output(text: str, limit: int = TOOL_OUTPUT_LIMIT_CHARS) -> str:
