@@ -498,12 +498,84 @@ def test_the_credential_verbs_parse() -> None:
     assert parser.parse_args(["network", "credentials", "--json"]).json is True
 
 
+def _attributes_read(function: Any) -> set[str]:
+    """Every ``args.<name>`` a handler reads — directly or via ``getattr(args, "…")``."""
+    import ast
+    import inspect
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            if node.value.id == "args":
+                names.add(node.attr)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id == "args"
+            and isinstance(node.args[1], ast.Constant)
+        ):
+            names.add(str(node.args[1].value))
+    return names
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        # ``share`` reads the SUPERSET of what ``_cmd_credential`` reads (its one bare
+        # read that ``revoke`` lacks, ``args.scope``, sits under ``verb == "share"``).
+        # ``revoke`` is executed through this same parser, end to end, in
+        # ``test_credentials_real_link.py``, which is the stronger check for it.
+        ["credential", "share", "openai", "--with", "peer-b"],
+        ["credentials"],
+    ],
+)
+def test_every_argument_the_credential_handlers_read_is_one_the_parser_defines(
+    argv: list[str],
+) -> None:
+    """THE CLASS OF GAP BEHIND Q1, checked for every credential verb at once.
+
+    ``_cmd_credential`` read ``args.network`` and no parser defined it, so the only
+    share/revoke surface raised ``AttributeError`` for every input; the test that should
+    have caught it set the attribute by hand. Here the handler's own source says which
+    attributes it reads, and the namespace the SHIPPED parser produces must carry each
+    one — so the next field a handler starts reading without a flag fails here, whatever
+    a test elsewhere sets by hand.
+    """
+    from local_operator.network import cli as network_cli
+
+    namespace = vars(_parser().parse_args(["network", *argv]))
+    handlers = (
+        network_cli._cmd_credential,  # noqa: SLF001
+        network_cli._guard_credential_subcommand,  # noqa: SLF001
+    )
+    if argv[0] == "credentials":
+        handlers = (network_cli._cmd_credentials,)  # noqa: SLF001
+    for handler in handlers:
+        # ``getattr(args, …)`` with a default is a deliberate optional read; only a
+        # bare ``args.<name>`` crashes when the parser never defined it.
+        missing = {
+            name
+            for name in _attributes_read(handler)
+            if name not in namespace and f"args.{name}" in _source(handler)
+        }
+        assert not missing, f"{handler.__name__} reads {sorted(missing)} but {argv} defines none"
+
+
+def _source(function: Any) -> str:
+    import inspect
+
+    return inspect.getsource(function)
+
+
 def test_a_bare_credential_verb_is_a_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
     """Neither verb is safe as a default: one widens authority, one cuts a device off."""
     from local_operator.network import cli as network_cli
 
     args = _parser().parse_args(["network", "credential"])
-    args.json = False
     assert network_cli.main(args) == 2
     captured = capsys.readouterr()
     assert "usage: lop network credential share" in captured.err
@@ -567,14 +639,53 @@ def test_sharing_something_this_device_does_not_hold_is_refused(
         SecretState(network_id=NETWORK, epoch=1, secret=wire.b64u(b"0" * 32)), root
     )
 
+    # EXACTLY AS TYPED, with nothing set on the namespace by hand: the first version
+    # of this test set ``args.network`` itself, which is how a parser that never
+    # defined ``--network`` crashed every real share while CI stayed green (QA round
+    # 1, Q1). One network here, so no ``--network`` is needed — the common case.
     args = _parser().parse_args(["network", "credential", "share", "openai", "--with", "peer-b"])
-    args.network = "testnet"
-    args.json = False
     assert network_cli.main(args) == 1
     captured = capsys.readouterr()
     assert "no credential for 'openai'" in captured.err
     # Nothing was written: a refused share must not leave a placement row behind.
     assert not placement_mod.has_any_placement(root)
+
+
+def test_one_contended_merge_does_not_stop_the_other_members_being_merged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 2, m3: the lock's timeout is a ``MeshRefusal``, not an ``OSError``.
+
+    ``pull_placement`` caught only ``OSError``, so one member whose merge hit the 10 s
+    lock timeout ended the loop and every later member's document went unmerged. The
+    first member's merge is made to time out here; the second must still land.
+    """
+    from local_operator.network.credentials import client as client_mod
+
+    asked: list[str] = []
+    merged: list[str] = []
+
+    def _merge(network_id: str, document: dict[str, Any], *, from_device: str, **_: Any) -> list:
+        if from_device == OWNER:
+            raise MeshRefusal("busy", "another writer is changing who may borrow")
+        merged.append(from_device)
+        return ["deepseek"]
+
+    client = client_mod.MeshCredentialClient(
+        root=tmp_path, self_device=THIRD, network_id=NETWORK, placement=_document(tmp_path)
+    )
+    monkeypatch.setattr(client_mod, "merge_from_peer", _merge)
+    monkeypatch.setattr(client, "_other_active_members", lambda: [OWNER, OTHER])
+
+    def _ask(device: str, frame: dict[str, Any]) -> dict[str, Any]:
+        asked.append(device)
+        return {"op": "ack", "detail": {"kind": "placement", "document": {"credentials": []}}}
+
+    monkeypatch.setattr(client, "_ask_owner_directly", _ask)
+    result = client.pull_placement()
+    assert asked == [OWNER, OTHER]
+    assert merged == [OTHER], "the contended merge stopped the loop"
+    assert result["changed"] == ["deepseek"] and result["owners"] == 2
 
 
 def test_forgetting_a_network_removes_its_placement_and_state(tmp_path: Path) -> None:
@@ -756,6 +867,76 @@ def test_a_brokered_turn_leaves_the_borrowers_database_logically_unchanged(
         wrapper.close()
 
 
+def test_an_offline_owner_reaches_the_user_in_the_brokers_words(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 1, Q6: the turn said "rate limit or quota exceeded" for an offline owner.
+
+    The synthetic row this store lists for a borrowable key made the failover driver's
+    diagnosis read "rate limited, a token refresh failed…". The broker's own sentence
+    names the owner and the local remedy, and is what the user must see.
+    """
+    from local_operator.providers.failover import _no_credential_error
+
+    root = tmp_path / "borrower"
+    root.mkdir()
+    wrapper, _document, _db = _borrower_wrapper(root, monkeypatch)
+    sentence = (
+        "No credential for 'openai' is reachable: owner-laptop owns it and was last seen "
+        "4 min ago. Reconnect that device, or run 'lop login openai' here to use your own "
+        "account."
+    )
+
+    async def _offline(key: str, **_: Any) -> BrokerError:
+        return BrokerError(code="owner_offline", key=key, owner_device=OWNER, message=sentence)
+
+    wrapper._mesh.grant_async = _offline  # type: ignore[union-attr]  # noqa: SLF001
+    try:
+        assert asyncio.run(wrapper.get_api_key("openai", "sess-1")) is None
+        error = _no_credential_error(wrapper, "openai")
+        assert str(error) == sentence
+        assert "rate limit" not in str(error)
+        # A plain store, and the same wrapper before any refusal, keep the old wording.
+        assert wrapper.no_credential_reason("deepseek") is None
+    finally:
+        wrapper.close()
+
+
+def test_foreground_exec_preflight_accepts_a_credential_this_device_borrows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """QA round 1, Q3: ``lop exec`` on a borrower refused to start.
+
+    ``_preflight_api_key`` built a plain ``AuthStore`` and saw no row, so a foreground
+    exec said "OPENAI_API_KEY is required" on a device the owner lends to, while
+    ``exec --background`` and the TUI — which build the session's store — ran. The
+    preflight is a presence check and must stay one: no borrow is attempted here, so a
+    POST, a dial or a relay is not needed to pass it.
+    """
+    from local_operator import cli
+
+    root = tmp_path / "borrower"
+    root.mkdir()
+    _point_config_at(monkeypatch, root)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    from local_operator.network.identity import mint
+
+    identity = mint(root, name="borrower")
+    document = placement_mod.PlacementDocument(NETWORK, root=root, written_by=OWNER)
+    document.declare("openai", owner_device=OWNER, provider="openai", by=OWNER)
+    document.grant("openai", identity.device_id, scope="session", by=OWNER)
+    document.save()
+    assert cli._preflight_api_key("openai", root) is None  # noqa: SLF001
+    assert capsys.readouterr().err == ""
+
+    # THE CONTROL: the same device with the share revoked is refused as before, so
+    # the pass above is the borrow and not a preflight that stopped checking.
+    with placement_mod.mutate(NETWORK, root, self_device=OWNER) as current:
+        current.revoke("openai", identity.device_id, by=OWNER)
+    assert cli._preflight_api_key("openai", root) == 1  # noqa: SLF001
+    assert "OPENAI_API_KEY" in capsys.readouterr().err
+
+
 def test_a_local_login_still_wins_over_a_borrow(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -916,8 +1097,6 @@ def test_the_credentials_listing_names_the_owner_and_who_may_borrow(
     state.save()
 
     args = _parser().parse_args(["network", "credentials"])
-    args.network = ""
-    args.json = False
     assert network_cli.main(args) == 0
     out = capsys.readouterr().out
     assert "owner: damian-mbp (damian@example.test)" in out

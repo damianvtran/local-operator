@@ -343,6 +343,14 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         default="session",
         help="'session' bounds the grant to the session that asks (the default)",
     )
+    # ``--network`` ON BOTH VERBS, because the handler resolves one (QA round 1, Q1):
+    # it read ``args.network`` and the parser never defined it, so every share and
+    # revoke typed at a shell died with ``AttributeError`` — the only test set the
+    # attribute by hand. Empty resolves the one network this device is in, exactly
+    # like ``invite``/``log``; with several, ``_resolve`` asks for the name.
+    cred_share.add_argument(
+        "--network", default="", help="Network name or id (default: the only one)"
+    )
     cred_share.add_argument("--json", action="store_true")
     cred_revoke = credential_actions.add_parser(
         "revoke", help="Stop letting a device borrow a credential"
@@ -353,6 +361,9 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         required=True,
         dest="device",
         help="The device that may no longer borrow it (name or device id)",
+    )
+    cred_revoke.add_argument(
+        "--network", default="", help="Network name or id (default: the only one)"
     )
     cred_revoke.add_argument("--json", action="store_true")
 
@@ -1150,6 +1161,30 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         f"borrowers now: {', '.join(holders) or 'none'}",
         f"broker_credential on {name}: {capability or 'unchanged'}",
     ]
+    if verb == "revoke":
+        # THE TRUE REVOCATION LATENCY, said where the operator acts (QA round 1, Q5;
+        # design §3.7). A revoke stops NEW grants at once, but no provider offers a
+        # per-bearer revoke: an access token already lent keeps working AT THE
+        # PROVIDER until it expires. This build's borrower drops it at the grant's
+        # expiry (``grant_ttl_s``); a copy taken out of that process lives until the
+        # token's own expiry. An incident response that believed "revoked" meant
+        # "dead" would stop looking too early, so the payload and the lines say both.
+        from local_operator.network.credentials import grant_ttl_s
+
+        ttl_s = int(grant_ttl_s())
+        payload["revocation"] = {
+            "new_grants": "refused now",
+            "lent_grant_max_s": ttl_s,
+            "copied_bearer": "valid at the provider until the token expires",
+        }
+        lines.append(
+            f"new borrows by {name}: refused now; a grant already lent is dropped by "
+            f"{name} within {ttl_s} s"
+        )
+        lines.append(
+            "a bearer copied out of that device stays valid at the provider until the "
+            f"token expires: to end it now, sign out of {key!r} at the provider"
+        )
     return _emit(args, payload, lines)
 
 

@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -306,17 +307,29 @@ class MeshCredentialClient:
         """
         if not device:
             return None
+        # THE LAST GRANT THIS DEVICE WAS SERVED BY THE OWNER COUNTS AS A SIGHTING
+        # (QA round 1, Q6). ``member.last_seen_at`` is only stamped by a rotation, so on
+        # every real row it was ``None`` and an owner that had lent a grant minutes
+        # earlier was reported "last seen never". A served grant is the strongest
+        # evidence this module has that the owner was up, and it is already durable
+        # (``PlacementState.last_grant_at``), so the newer of the two is the answer.
+        stamps: list[float] = []
+        with suppress(Exception):
+            granted = self.state.last_grant_from(device)
+            if granted:
+                stamps.append(granted)
         try:
             from local_operator.network import store
 
             for record in store.list_networks(self.root):
                 member = record.member(device)
-                if member is None or not member.last_seen_at:
-                    continue
-                return max(0.0, time.time() - float(member.last_seen_at))
+                if member is not None and member.last_seen_at:
+                    stamps.append(float(member.last_seen_at))
         except Exception:  # noqa: BLE001 — a missing observation is not a failure
+            pass
+        if not stamps:
             return None
-        return None
+        return max(0.0, time.time() - max(stamps))
 
     # -- refusal cache ------------------------------------------------------
 
@@ -510,7 +523,8 @@ class MeshCredentialClient:
         # answered ``internal``, including the owner-unreachable case that must
         # answer ``owner_offline`` (found building the running-relay test F7 asked for).
         ensure = getattr(self._relay, "_ensure_link_with_reason", None)
-        if ensure is None:
+        next_req = getattr(self._relay, "_next_relay_req", None)
+        if ensure is None or next_req is None:
             # The relay's one implementation of "reach this peer, dialling if
             # needed" — with its own endpoint probe, its own budget and its own
             # audit records. Re-implementing a dialer here would be a second
@@ -535,6 +549,16 @@ class MeshCredentialClient:
             }
         if link is None:
             return None
+        # EVERY LEG-2 FRAME CARRIES A ``req`` MINTED FROM THE RELAY'S OWN COUNTER (QA
+        # round 1, Q2). ``PeerLink.request`` registers a waiter only for a frame that
+        # has one; without it the frame is SENT, the call returns ``None`` at once, and
+        # the owner's answer arrives as a stray reply nobody is waiting for. That is
+        # how every borrow, pull and report on the shipped build read as "owner
+        # offline" while the owner really did refresh and serve the grant. The
+        # relay's counter, not a private one, because the waiter table is keyed by
+        # ``(link, req)`` and a second counter on the same link could collide with the
+        # relay's own requests (``mobility``/``sync`` mint theirs the same way).
+        frame = {**frame, "req": next_req()}
         try:
             reply = link.request(frame)
         except Exception:  # noqa: BLE001 — the own-link refusal is a bug, not a state
@@ -600,7 +624,14 @@ class MeshCredentialClient:
             "from_device_name": self._self_label(),
             "key": key,
             "failure": kind,
-            **{k: v for k, v in fields.items() if v not in (None, "")},
+            # ``session_id`` NEVER TRAVELS ON THE PEER FRAME (QA round 1, Q7). The
+            # transport's chokepoint reads a top-level ``session_id`` as a claim that
+            # the op acts on a session THE OWNER owns (``authorizer._session_scope``)
+            # and refuses it before the broker runs, so every real report was
+            # dropped at the owner's door. The borrower's session is carried as
+            # ``for_session`` — the same name the grant frame uses, and the one the
+            # owner's report arm audits.
+            **{k: v for k, v in fields.items() if v not in (None, "") and k != "session_id"},
         }
         self.grants.drop(key)
         reply = self._ask_owner_directly(owner, frame)
@@ -626,6 +657,8 @@ class MeshCredentialClient:
         """
         if self.placement is None or not self.network_id:
             return {"kind": "ack", "key": "", "changed": [], "owners": 0}
+        from local_operator.network.types import MeshRefusal
+
         changed: list[str] = []
         asked = 0
         for device in self._other_active_members():
@@ -658,8 +691,14 @@ class MeshCredentialClient:
                             root=self.root,
                         )
                     )
-                except OSError:
-                    pass
+                except (OSError, MeshRefusal):
+                    # ``MeshRefusal`` is the placement lock's bounded timeout (another
+                    # writer held it for 10 s). It is NOT an ``OSError``, and letting it
+                    # out aborted the loop, so one contended merge left every later
+                    # member's document unmerged (review round 2, m3). Skipping the
+                    # member is the honest outcome: its document is merged on the next
+                    # pull, and nothing was written for it this time.
+                    continue
         return {
             "kind": "ack",
             "key": "",
@@ -751,18 +790,21 @@ class MeshCredentialClient:
     def _detail_from_owner(self, reply: dict[str, Any], key: str, label: str) -> dict[str, Any]:
         """A leg-2 reply as a detail object, with the cache updated.
 
-        The transport's own refusal (``{"op": "error", ...}``) has no code and is
-        mapped to ``unsupported``: it is what an older peer answers to an unknown
-        op, and the design's requester behaviour for that is to degrade to today's
-        no-credential path for the session rather than retry.
+        The transport's own refusal (``{"op": "error", ...}``) carries no code, only
+        the owner relay's sentence, so it is classified by :func:`_transport_refusal_code`.
         """
         if reply.get("op") == "error":
+            sentence = str(reply.get("message") or "")
+            code = _transport_refusal_code(sentence)
             error = BrokerError(
-                code="unsupported",
+                code=code,
                 key=key,
                 owner_device=self.owner_of(key),
                 owner_device_name=self.owner_label(key),
-                message=str(reply.get("message") or ""),
+                # Only a refusal this module has no sentence for keeps the owner's own
+                # words (rendered through ``messages._generic``); every classified one is
+                # rendered here, so the operator reads the remedy, not the relay's code.
+                message=sentence if code == "internal" else "",
             )
             self._remember(key, error)
             return self._detail_error(self._render(error, key, label))
@@ -812,6 +854,41 @@ class MeshCredentialClient:
 def key_for(*, provider: str = "", mcp_url: str = "") -> str:
     """The placement key for a provider or an MCP server URL. One spelling."""
     return credential_key_for_mcp(mcp_url) if mcp_url else credential_key_for_provider(provider)
+
+
+def _transport_refusal_code(sentence: str) -> str:
+    """The broker code for the owner relay's own refusal of a ``net_broker`` frame.
+
+    WHY A CLASSIFIER AND NOT ONE CODE (QA round 1, Q4). Every transport refusal used to
+    read as ``unsupported`` ("runs a build that cannot lend credentials"), cached for
+    five minutes. The commonest one is not that at all: ``credential revoke`` also
+    takes ``broker_credential`` off the device's member row, so the owner's
+    chokepoint refuses a revoked borrower before the broker's by-name
+    ``not_a_holder`` can run — and the borrower was told the owner's build was too old.
+
+    The transport deliberately sends a SENTENCE and no code (``wire.refusal_frame``),
+    so the sentence is what there is. Each marker below is a fixed phrase from this
+    package's own relay (``authorizer.check``, ``relay.dispatch``,
+    ``relay._dispatch_slow``, ``relay.not_implemented_peer_op``), and
+    ``tests/unit/network/test_credentials_real_link.py`` drives the revoked case over
+    a real link so a reworded refusal fails there rather than here. Anything
+    unrecognised is ``internal``: the operator reads the owner's own words, and it is
+    re-asked after a minute rather than written off for five.
+    """
+    from local_operator.network.credentials.types import BROKER_CAPABILITY
+
+    lowered = sentence.lower()
+    if f"{BROKER_CAPABILITY!r}" in sentence or BROKER_CAPABILITY in sentence:
+        # The owner holds no share for this device any more (or never did): the
+        # same answer, by name, the broker itself gives a device that is not a holder.
+        return "not_a_holder"
+    if "not implemented" in lowered or "not an operation this build dispatches" in lowered:
+        return "unsupported"
+    if "already running" in lowered:
+        return "rate_limited"
+    if "did not finish within" in lowered:
+        return "refresh_failed"
+    return "internal"
 
 
 def _empty_document_for_member(root: Path | None) -> tuple[str, PlacementDocument | None]:

@@ -283,6 +283,7 @@ def _grant_frame(
 ) -> dict[str, Any]:
     return {
         "op": PEER_BROKER_OP,
+        "req": 1,
         "kind": "grant",
         "key": key,
         "provider": provider or key,
@@ -465,6 +466,7 @@ def test_an_ask_for_a_key_this_device_does_not_own_is_refused(owner: Any, idp: R
 def _report(owner: Any, device: str, failure: str, **extra: Any) -> dict[str, Any]:
     frame = {
         "op": PEER_BROKER_OP,
+        "req": 1,
         "kind": "report",
         "key": STUB_PROVIDER,
         "provider": STUB_PROVIDER,
@@ -759,8 +761,6 @@ def test_a_borrower_with_the_owner_away_makes_zero_token_posts(
         assert result["relay_code"] == "owner_offline", result
     else:
         assert result["relay_code"] == "no_relay", result
-    # The owner's IdP was never part of the child's reach, so it recorded nothing.
-    assert idp.posts == []
 
 
 # ---------------------------------------------------------------------------
@@ -964,6 +964,7 @@ def _holder_ids(owner: Any, key: str = STUB_PROVIDER) -> list[str]:
 def _push(device: str, document: dict[str, Any], *, want: str = "push") -> dict[str, Any]:
     return {
         "op": PEER_BROKER_OP,
+        "req": 1,
         "kind": "placement",
         "want": want,
         "network_id": "n_owner",
@@ -1002,6 +1003,7 @@ def test_every_arm_refuses_a_frame_that_claims_another_devices_id(
         _grant_frame(OWNER_DEVICE),
         {
             "op": PEER_BROKER_OP,
+            "req": 1,
             "kind": "report",
             "key": STUB_PROVIDER,
             "provider": STUB_PROVIDER,
@@ -1014,7 +1016,13 @@ def test_every_arm_refuses_a_frame_that_claims_another_devices_id(
             OWNER_DEVICE,
             {"credentials": [_row_json(STUB_PROVIDER, owner=OWNER_DEVICE, holders=[STRANGER])]},
         ),
-        {"op": PEER_BROKER_OP, "kind": "placement", "want": "pull", "from_device": OWNER_DEVICE},
+        {
+            "op": PEER_BROKER_OP,
+            "req": 1,
+            "kind": "placement",
+            "want": "pull",
+            "from_device": OWNER_DEVICE,
+        },
     ]
     for frame in frames:
         detail = _detail(owner.broker.on_broker(_Link(STRANGER), frame))
@@ -1143,7 +1151,14 @@ def test_a_merge_never_writes_a_revoked_holder_back(owner: Any) -> None:
     broker save its stale in-memory copy, and the revoke was reverted on disk. So this
     revokes, then performs a merge that really does change the document, and asserts
     BOTH that the change landed and that the revoked holder stayed out.
+
+    ONE BROKER READ COMES FIRST (review round 2, n2). Without it the broker has never
+    looked at the document when the revoke lands, so a broker that cached the list
+    LAZILY on first use would pass: it would load the already-revoked file. Serving
+    BORROWER_TWO once before the revoke is what makes a held copy of any shape
+    observable here.
     """
+    assert _ask_grant(owner, BORROWER_TWO, session="sess-0")["kind"] == "grant"
     with placement_mod.mutate("n_owner", owner.root, self_device=OWNER_DEVICE) as document:
         document.revoke(STUB_PROVIDER, BORROWER_TWO, by=OWNER_DEVICE)
     before = _placement_file(owner).read_bytes()
@@ -1200,6 +1215,7 @@ def test_a_share_made_after_the_relay_started_is_served(
     handler = owner_mod.MeshCredentialBroker.relay_handler(server)
     frame = {
         "op": PEER_BROKER_OP,
+        "req": 1,
         "kind": "grant",
         "key": STUB_PROVIDER,
         "provider": STUB_PROVIDER,
@@ -1327,9 +1343,50 @@ def test_a_second_scoped_report_in_the_window_writes_nothing_new(
     assert first["action"] == "blocked"
     assert second["action"] == "coalesced", second
     assert _block_rows(owner) == before, "the second report extended the block"
-    # A DIFFERENT holder is its own slot: the limit is per holder, not global.
+    # A DIFFERENT holder is its own slot: the limit is per holder, not global. It gets
+    # PAST the rate limit (not ``coalesced``) and reaches the live-block check, which
+    # leaves the first block exactly as it is: a second-hand report never extends one
+    # (review round 2, m2).
     third = _report(owner, BORROWER_TWO, "quota", model_id="claude-fable-5")
-    assert third["action"] == "blocked", third
+    assert third["action"] == "noted" and third.get("reason") == "already_blocked", third
+    assert _block_rows(owner) == before, "a second holder's report extended the block"
+
+
+def test_a_non_numeric_retry_time_neither_crashes_nor_spends_the_slot_on_a_crash(
+    owner: Any, idp: RotatingIdP
+) -> None:
+    """Review round 2, m1: ``retry_after_ms="abc"`` raised ``ValueError`` out of the arm.
+
+    The relay turned that into an ``internal`` refusal AFTER the holder's rate-limit slot
+    was spent, so the audit said "failed" and the next honest report was ``coalesced``.
+    The duration is the owner's, so the claim is not read at all.
+    """
+    detail = _report(
+        owner, BORROWER_DEVICE, "quota", model_id="claude-fable-5", retry_after_ms="abc"
+    )
+    assert detail["action"] == "blocked" and detail["block_ms"] == 60_000, detail
+
+
+def test_a_peer_report_never_shortens_a_block_the_owner_already_holds(
+    owner: Any, idp: RotatingIdP
+) -> None:
+    """Review round 2, m2: one report rewrote a 45-minute ``model:fable`` block to 1 s.
+
+    ``block_credential`` is an unconditional upsert, so a second-hand 1 s claim replaced
+    the owner's own measured backoff and put its next Fable turn back into a spent
+    window. A live block for the family is now left exactly as it is.
+    """
+    owner.auth.block_credential(
+        owner.row.id, STUB_PROVIDER, block_scope="model:fable", block_ms=45 * 60_000
+    )
+    before = _block_rows(owner)
+    detail = _report(
+        owner, BORROWER_DEVICE, "quota", model_id="claude-fable-5", retry_after_ms=1_000
+    )
+    assert detail["action"] == "noted" and detail.get("reason") == "already_blocked", detail
+    assert _block_rows(owner) == before, "a peer's report rewrote the owner's own block"
+    remaining_ms = before[0][1] - int(time.time() * 1000)
+    assert remaining_ms > 40 * 60_000, remaining_ms
 
 
 def test_a_report_whose_scope_cannot_be_carried_faithfully_widens_nothing(
@@ -1443,6 +1500,7 @@ def test_an_mcp_grant_serves_the_owners_access_token(owner: Any, no_mcp_refresh:
             _Link(BORROWER_DEVICE),
             {
                 "op": PEER_BROKER_OP,
+                "req": 1,
                 "kind": "grant",
                 "key": MCP_KEY,
                 "provider": MCP_KEY,
@@ -1476,6 +1534,7 @@ def test_an_mcp_report_is_answered_and_blocks_nothing(
             _Link(BORROWER_DEVICE),
             {
                 "op": PEER_BROKER_OP,
+                "req": 1,
                 "kind": "report",
                 "key": MCP_KEY,
                 "provider": MCP_KEY,

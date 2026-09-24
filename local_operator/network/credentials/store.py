@@ -143,6 +143,9 @@ class MeshAwareAuthStore:
         #: session_id)``, so a later failure can be attributed to the BORROW rather
         #: than to a local row with a coincidentally similar id.
         self._brokered: dict[tuple[str, str], int] = {}
+        #: The broker's last refusal per key, so a turn that ends with no bearer can
+        #: say WHY in the broker's own sentence (see :meth:`no_credential_reason`).
+        self._refusals: dict[str, BrokerError] = {}
 
     # -- the two resolution entry points the providers use ------------------
 
@@ -255,6 +258,9 @@ class MeshAwareAuthStore:
             raise
         if isinstance(grant, Grant):
             self._brokered[pair] = self._credential_id(key, grant)
+            self._refusals.pop(key, None)
+        elif isinstance(grant, BrokerError):
+            self._refusals[key] = grant
         slot.set_result(grant)
         return grant
 
@@ -301,6 +307,23 @@ class MeshAwareAuthStore:
             if value == credential_id:
                 return pair
         return None
+
+    def no_credential_reason(self, provider: str) -> str | None:
+        """The broker's sentence for why ``provider`` has no bearer, or ``None``.
+
+        READ BY THE FAILOVER DRIVER when a resolve came back empty (QA round 1, Q6).
+        The synthetic row :meth:`list_credentials` adds for a borrowable key makes the
+        driver's generic diagnosis say "rate limited, a token refresh failed…", which
+        is false for an owner that is simply offline — and the broker had already
+        written the true sentence ("…owns it and was last seen 4 min ago. Reconnect
+        that device, or run 'lop login …' here"). Only a refusal from THIS process's
+        last borrow is returned, and a later grant clears it, so a stale "offline"
+        can never outlive the owner coming back.
+        """
+        refusal = self._refusals.get(key_for(provider=provider))
+        if refusal is None or not refusal.message:
+            return None
+        return refusal.message
 
     # -- the failure-accounting rung ---------------------------------------
 
