@@ -1112,6 +1112,15 @@ a single monotone state the owner answers.
 **Reconcile** runs (a) at relay start, (b) after any handoff outcome the relay
 cannot classify, and (c) on demand (`lop network doctor`). It reads
 `network/pending-move.json` and applies exactly the table above, then clears the entry.
+
+**RECONCILE IS INSTANCE-SCOPED, AND THAT IS NOT AN OPTIMISATION.** Every entry
+records the `instance_id` of the relay that wrote it, and a relay reconciles only the
+entries a DIFFERENT instance left behind. Without that rule the table above is
+applied to a handoff that is still running: `prepared` is the normal state of a move
+whose copy is being pulled right now, so a relay that treated it as a leftover would
+roll back its own live handoff — and did, on every `ready`, because a targeted
+reconcile runs before each peer frame. An entry from another instance is a different
+animal: that relay is gone, so the table applies to it exactly as written here.
 It is the analogue of `_settle_unconfirmed_move` (`server/utils/desktop_sessions.py:525`),
 with a journal instead of a marker file, because the counterpart device is not
 reachable by a `stat`.
@@ -1727,16 +1736,28 @@ sidebar peer group and the desktop sidebar's group heading + locality mark.
    evidence: whether an operator finds a stuck row confusing enough to want an
    explicit "take it" button — which needs the owner to be unrecoverable *and* the
    operator's judgement, so it must be a deliberate act.
-7. **`lop exec --peer --background`.**
+7. **A synced replica of a session whose owner is gone comes back as a NEW
+   session, never under the original id.** *Implemented deviation from the first
+   draft of §6.5, and the reason is INV-1 at rest rather than a permission question:*
+   a peer that spun down can come back, and a same-id restore would then have two
+   devices believing they hold the id — the state the tombstone, the epoch and the
+   promote acknowledgement exist to make impossible, but which nothing can resolve
+   once both copies are established and neither device is reachable from the other.
+   So the restore is a fork: a fresh id, `origin.kind: "fork"` naming the source
+   device and session, a `fork-boundary.json` and a transcript that ends where the
+   replica's last sync ended. The cost is that the recovered conversation is a new
+   row and the model is told it is a fork, which is the honest description of what
+   it is: a copy that may be missing the owner's last turns.
+8. **`lop exec --peer --background`.**
    *Recommendation:* refused in v1 (the background-job ledger and its log file are
    local to the spawning device; making them device-aware is a job-ledger change, not
    a mesh change). Settling evidence: demand from the agent path (R19) — a scheduled
    wake that wants its one-shot to run on a peer.
-8. **Where does `mesh.json`'s `stamp_revision` get bumped?**
+9. **Where does `mesh.json`'s `stamp_revision` get bumped?**
    *Recommendation:* on any rewrite of the stamp (placement change, policy change);
    NOT on every turn. Settling evidence: whether cache invalidation needs a finer
    grain (it does not, if the catalogue revision also moves on row-relevant changes).
-9. **Should `stream_open` put the connection into a pass-through mode (R-IF-1)?**
+10. **Should `stream_open` put the connection into a pass-through mode (R-IF-1)?**
    *Recommendation:* yes — after `stream_open`, session frames flow in both directions
    with no wrapper, and `stream_send {stream, frame}` stays the multiplexed form for a
    client that wants several sessions on one socket (§3.2). Settling evidence: whether
@@ -1745,7 +1766,7 @@ sidebar peer group and the desktop sidebar's group heading + locality mark.
    daemon already multiplexes at its own layer). If the transport prefers wrappers
    everywhere, the cost is a second frame-shaped parser in `RemoteSessionClient`'s
    transport half — measured, not assumed, before that trade is taken.
-10. **`/mcp login` on a remote session: accept the repair path for v1?** (Q-CRED)
+11. **`/mcp login` on a remote session: accept the repair path for v1?** (Q-CRED)
    *Recommendation:* yes, for v1 — it is the credentials design's area
    (`mesh-credentials.md` §4.7), it does not depend on a fixed local port being
    bindable on a device we do not control, and it keeps one refusal sentence
@@ -1754,14 +1775,14 @@ sidebar peer group and the desktop sidebar's group heading + locality mark.
    member device is one the operator is physically at when the login is needed — if
    the common case is a *pod* (no human, no browser), the repair path is the only
    coherent answer and the callback is not worth building.
-11. **Is a pushed catalogue delta needed?** (Q-CAT)
+12. **Is a pushed catalogue delta needed?** (Q-CAT)
     *Recommendation:* not in v1 — the transport's 2 s cache over a 60 s peer
     refresh is enough for a group heading, a count and a status glyph, and a pushed
     delta is a new op with its own capability and its own event-rate budget (§3.6).
     Settling evidence: measured staleness of a *completion* mark on a remote row in
     real use; if a peer finishing a turn is noticed late enough to matter, the delta
     is the fix and this document's row fields are already its payload.
-12. **Does an idle remote session keep its runtime warm?**
+13. **Does an idle remote session keep its runtime warm?**
    *Recommendation:* no — the residency drain is the owner's business and unchanged
    (`process.py:645` `_should_exit`); a remote viewer's arrival engages on demand
    (`net_session_engage`). Settling evidence: measured attach latency over the link if
