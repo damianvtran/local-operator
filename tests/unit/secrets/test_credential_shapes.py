@@ -2481,6 +2481,32 @@ def test_a_value_whose_spelling_carries_a_line_terminator_is_not_released_a_line
             assert value not in completed, f"{where}: the completed stream published the value"
 
 
+@pytest.mark.parametrize("chunk", [7, 64, 333, 4096])
+def test_the_spelling_window_floor_does_not_close_an_open_key_block(chunk: int) -> None:
+    """The floor above composed with the PEM line loop: a registered value must not
+    make an unrelated key block publish its body.
+
+    ``len(text) - hold`` is an arbitrary offset, so a floor applied as-is cut
+    mid-line in the ordinary case, where every release used to end on a line. The
+    short fragment it left at the START of the next release (``+Q\\n``) is a line
+    ``_mask_open_key_block`` reads as prose, so the block CLOSED on it and the rest
+    of the body went out raw — measured when this change was folded onto the
+    linear-PEM and unterminated-block work: 8 of 34 streams leaked, up to 1,873 of
+    2,000 body lines, with one 26-character value registered, against 0 without
+    one. The floor now retreats to a line boundary. Uses the PEM section's
+    armour helpers below (built from parts; see ``_pem_grammar_is_live``).
+    """
+    _pem_grammar_is_live()
+    stream = ("preamble line\n" + _PEM_HEADER + _body_lines(400) + _PEM_END + "after\n").encode()
+    redactor = builtin._PipeRedactor(["SYNTH-" + "q" * 20])
+    assert redactor.hold > 0, "no window is held, so this proves nothing"
+    published = b"".join(
+        redactor.feed(stream[i : i + chunk]) for i in range(0, len(stream), chunk)
+    ) + redactor.feed(b"", final=True)
+    leaked = _published_body_lines(published.decode())
+    assert leaked == [], f"{len(leaked)} body lines published at {chunk}-byte reads"
+
+
 # --- the store: containment, and the incident path ---------------------------
 
 

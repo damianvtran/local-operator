@@ -2880,7 +2880,30 @@ class _PipeRedactor:
         # compose with the three rules there: every one of them only ever moves the
         # cut LEFT, so none can undo the floor, and the floor can land inside a value
         # or a short line fragment that those rules then get the last word on.
-        cut = min(cut, max(len(text) - self.hold, 0))
+        #
+        # THE FLOOR RETREATS TO A LINE BOUNDARY, and that is what keeps it from
+        # undoing the PEM line loop. `len(text) - hold` is an arbitrary offset, so
+        # taken as-is it lands mid-line in the ordinary (non-cap) case — the one case
+        # where, before the floor, every release ended on a line. The fragment rule in
+        # the loop below only guards a short fragment at the END of a release; a
+        # floor cut a few bytes before a terminator leaves the short fragment at the
+        # START of the next one instead (`+Q\n`), which `_mask_open_key_block` reads as
+        # PROSE and CLOSES the block on — measured on the fold of this change onto
+        # #1427/#1445, with one 26-char value registered: 8 of 34 PEM streams
+        # published body lines raw, up to 1,873 of 2,000, against 0 on main and 0
+        # with the floor removed. Moving back to the line start keeps the floor's own
+        # guarantee (it only moves the cut further LEFT, so the last `hold`
+        # characters are still never published) and restores the line-aligned
+        # release the PEM classifiers were written against, including a header line
+        # the floor would otherwise have split.
+        #
+        # BOUNDED by `_PIPE_DEFERRAL_LIMIT`, because a line has no length limit and
+        # this hold must not become the unbounded one: a line longer than that is not
+        # a PEM body line, and the floor stands where it fell rather than holding it.
+        floor = max(len(text) - self.hold, 0)
+        if floor < cut:
+            line_start = max(text.rfind("\n", 0, floor), text.rfind("\r", 0, floor)) + 1
+            cut = line_start if floor - line_start <= _PIPE_DEFERRAL_LIMIT else floor
         # ONE fixed point over ALL THREE rules, not a sequence of them: moving the cut
         # for a shape can put it inside a value, a value move can put it inside a line,
         # and the line hold can expose a value — so each is re-checked against the
