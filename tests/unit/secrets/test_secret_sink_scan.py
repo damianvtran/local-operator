@@ -1777,8 +1777,9 @@ def _result_sections(result: object) -> tuple[str, str]:
         ("lop secret get NAME >|/dev/stderr", "shell.source-to-stderr"),
         ("lop secret get NAME 1>&2", "shell.source-to-stderr"),
         ("lop secret get NAME >&2", "shell.source-to-stderr"),
-        # `>&WORD` is bash's older `&>WORD`: both streams to the word, so the
-        # word decides — a fd-2 device is stderr, `/dev/null` is nothing.
+        # `>&WORD` is bash's older `&>WORD`: both streams to the word. Only two
+        # words are absorbed (a fd-2 device is stderr; a plain literal file path
+        # is a contained write) — every other word is refused, see R7-2 below.
         ("lop secret get NAME >& /dev/stderr", "shell.source-to-stderr"),
         ("lop secret get NAME &>/dev/stderr", "shell.source-to-stderr"),
         # A redirect BEFORE the command word, and after the consumer word.
@@ -1858,9 +1859,11 @@ def test_r6_a_group_or_exec_redirect_refuses_rather_than_being_worked_out(comman
         # to /dev/null makes this target name /dev/null: bash discards the value
         # (verified against bash itself) and so does the scan.
         "lop secret get NAME 2>/dev/null >/dev/stderr",
-        "lop secret get NAME >&-",
-        "lop secret get NAME >& /dev/null",
-        "lop secret get NAME >&- 2>&1",
+        # A `>`-spelled target that IS `/dev/null` after normalisation is
+        # discarded, including the spellings that are not the exact string
+        # (R7-3's normalisation reaches every device lookup, both ways round).
+        "lop secret get NAME > /dev//null",
+        "lop secret get NAME > /dev/./null",
         "lop secret get NAME >& /tmp/r6-both",
         "lop secret get NAME &> /tmp/r6-both2",
         "lop secret get NAME > /tmp/r6-c 2>&1",
@@ -1889,6 +1892,107 @@ def test_r6_a_group_or_exec_redirect_refuses_rather_than_being_worked_out(comman
 def test_r6_the_ordered_walk_keeps_the_sanctioned_forms(command: str) -> None:
     result = scan_command(command)
     assert not result.refused, (command, result)
+
+
+@pytest.mark.parametrize(
+    ("command", "rule"),
+    [
+        # R7-1: a CLOSED descriptor is not a DISCARDED one. On the shell this
+        # tool resolves for itself (`resolve_bash_shell(None)` → `/bin/bash`
+        # 3.2.57) a BUILTIN keeps writing to the shell's stream while it reports
+        # the close — `bash -c 'echo AAA >&-' | wc -c` is 4 and `printf BBB >&-`
+        # is 3, while the external `/bin/echo CCC >&-` is 0 — so the five builtin
+        # rows printed the raw value in `--- stdout ---` at `0e5c3c573` while the
+        # scan read the fd as discarded. fd 1 goes back to base's refusal, and the
+        # external rows go with it: the family gets ONE verdict rather than a
+        # split that depends on which emitter the writer happens to be.
+        ("lop secret get NAME >&-", "shell.bare-source-in-command-position"),
+        ("lop secret get NAME >& /dev/null", "shell.bare-source-in-command-position"),
+        ("lop secret get NAME >&- 2>&1", "shell.bare-source-in-command-position"),
+        ('v=$(lop secret get NAME); echo "$v" >&-', "shell.print-of-source"),
+        ('v=$(lop secret get NAME); printf "%s" "$v" >&-', "shell.print-of-source"),
+        ('v=$(lop secret get NAME); echo "$v" 1>&- >&1', "shell.print-of-source"),
+        ('v=$(lop secret get NAME); echo "$v" >& -', "shell.print-of-source"),
+        ('v=$(lop secret get NAME); echo "$v" >&- 2>&2', "shell.print-of-source"),
+        # The `2>&-` dups: a closed descriptor is not a discard for fd 2 either,
+        # so these refuse rather than resting on the premise this round retired.
+        # They cost nothing real — bash aborts them (`echo AAA 2>&- 1>&2` →
+        # `bash: 2: Bad file descriptor`, rc=1, nothing on either stream).
+        ("lop secret get NAME 2>&- 1>&2", "shell.source-to-stderr"),
+        ("lop secret get NAME 2>&- >&2", "shell.source-to-stderr"),
+        ('v=$(lop secret get NAME); echo "$v" 2>&- >&2', "shell.source-to-stderr"),
+    ],
+)
+def test_r7_1_a_closed_descriptor_is_not_a_discarded_one(command: str, rule: str) -> None:
+    """The five rows that put the raw value in stdout, and their family.
+
+    A false refusal costs a user one workaround; a false allow publishes a
+    secret into the tool result, which is the whole harm this scan exists to
+    prevent — so an unrecognised spelling is REFUSED, not allowed.
+    """
+    result = scan_command(command)
+    assert result.refused, (command, result)
+    assert rule in result.labels, (command, result.labels)
+
+
+@pytest.mark.parametrize(
+    ("command", "rule"),
+    [
+        # R7-2: a `>&WORD` / `&>WORD` target the guard cannot read — an
+        # expansion, a glob, or a device word it has no rule for — is REFUSED
+        # rather than resolved as an ordinary file. `>& $LOG` with
+        # `LOG=/dev/stderr` was the leak: `_resolve_destination` answered
+        # `("path", "$LOG")`, so an unresolved variable was registered as a
+        # contained file and the raw value landed in `--- stderr ---`.
+        ("lop secret get NAME >& $LOG", "shell.bare-source-in-command-position"),
+        ("lop secret get NAME &> $LOG", "shell.bare-source-in-command-position"),
+        ('lop secret get NAME >& "$LOG"', "shell.bare-source-in-command-position"),
+        ("lop secret get NAME >& /tmp/*.f", "shell.bare-source-in-command-position"),
+        # A device word earns no device resolution under the LEGACY spelling:
+        # the modern `&>` keeps it (`&> /dev/null` still discards, below), but
+        # this overload of the `>&` duplication operator only earned the fd-2
+        # device and the plain literal file path, each with driven evidence.
+        ("lop secret get NAME >& /dev/tty", "shell.bare-source-in-command-position"),
+        ("lop secret get NAME >& /dev/null", "shell.bare-source-in-command-position"),
+        ("lop secret get NAME &> /dev/tty", "shell.bare-source-in-command-position"),
+        ("lop secret get NAME &> /dev/fd/3", "shell.bare-source-in-command-position"),
+    ],
+)
+def test_r7_2_an_unreadable_both_streams_target_is_refused(command: str, rule: str) -> None:
+    """`>&WORD` is not resolved when the word is not a word the guard can read."""
+    result = scan_command(command)
+    assert result.refused, (command, result)
+    assert rule in result.labels, (command, result.labels)
+
+
+@pytest.mark.parametrize(
+    ("command", "rule"),
+    [
+        # R7-3: device recognition is an exact-string lookup, so a non-canonical
+        # spelling of the device was read as an ordinary contained file and the
+        # raw value landed in the very section it named. `.` and empty segments
+        # are collapsed before the lookup; `..` is NOT, because resolving it
+        # lexically would be a guess about symlinks.
+        ("lop secret get NAME > /dev//stderr", "shell.source-to-stderr"),
+        ("lop secret get NAME > /dev/./stderr", "shell.source-to-stderr"),
+        ("lop secret get NAME > //dev/stderr", "shell.source-to-stderr"),
+        ("lop secret get NAME > /dev//fd/2", "shell.source-to-stderr"),
+        ("lop secret get NAME > /dev//stdout", "shell.bare-source-in-command-position"),
+        ("lop secret get NAME | tee /dev//stderr >/dev/null", "shell.source-to-stderr"),
+        ("lop secret get NAME | tee /dev/./stderr >/dev/null", "shell.source-to-stderr"),
+    ],
+)
+def test_r7_3_a_non_canonical_device_spelling_is_the_device_it_names(
+    command: str, rule: str
+) -> None:
+    """`/dev//stderr` and `/dev/./stderr` are `/dev/stderr`, and now read so.
+
+    Pre-existing at both heads and reachable only by writing the spelling
+    deliberately — but the close is two lines and a leak's cost is not.
+    """
+    result = scan_command(command)
+    assert result.refused, (command, result)
+    assert rule in result.labels, (command, result.labels)
 
 
 @pytest.mark.asyncio
@@ -1927,3 +2031,85 @@ async def test_r6_1_a_redirect_to_stderr_is_refused_before_the_child_runs(
         assert not marker.exists(), f"the child ran anyway: {command}"
         _assert_no_value(stdout)
         _assert_no_value(stderr)
+
+
+@pytest.mark.asyncio
+async def test_r7_a_closed_fd_or_an_unreadable_both_streams_word_never_reaches_the_result(
+    tmp_path: Path, config_root: Path, stored_secret: str, shimmed_path: None
+) -> None:
+    """R7-1, R7-2 and R7-3 through the REAL tool, with the positive half beside.
+
+    The refusal half is the builtin `>&-` rows, the external `>&-` rows, the
+    unresolved `>& $LOG` / `&> $LOG` rows and the non-canonical device
+    spellings: at `0e5c3c573` these ran and returned the raw value in one of the
+    two sections scanned below. The positive half is why the two absorbed shapes
+    stay allowed — the literal file a both-streams word opens HOLDS the value,
+    and `&> /dev/null` still discards it — so "no value in the result" is a
+    measurement rather than a vacuous pass.
+    """
+    refused = [
+        f"lop secret get {stored_secret} >&-",
+        f"lop secret get {stored_secret} >& -",
+        f"lop secret get {stored_secret} 1>&-",
+        f"lop secret get {stored_secret} >& /dev/null",
+        f"lop secret get {stored_secret} >&- 2>&1",
+        f"lop secret get {stored_secret} 2>&- 1>&2",
+        f"lop secret get {stored_secret} 2>&- >&2",
+        f'v=$(lop secret get {stored_secret}); echo "$v" >&-',
+        f'v=$(lop secret get {stored_secret}); printf "%s" "$v" >&-',
+        f'v=$(lop secret get {stored_secret}); echo "$v" 1>&- >&1',
+        f'v=$(lop secret get {stored_secret}); echo "$v" >&- 2>&2',
+        f"lop secret get {stored_secret} >& $LOG",
+        f"lop secret get {stored_secret} &> $LOG",
+        f"lop secret get {stored_secret} >& /dev/tty",
+        f"lop secret get {stored_secret} > /dev//stderr",
+        f"lop secret get {stored_secret} > /dev/./stderr",
+        f"lop secret get {stored_secret} > /dev//stdout",
+        f"lop secret get {stored_secret} | tee /dev//stderr >/dev/null",
+    ]
+    for command in refused:
+        marker = tmp_path / "ran-r7"
+        if marker.exists():
+            marker.unlink()
+        result = await builtin.execute_bash(
+            "bash-r7",
+            {"command": f"touch {marker}; {command}"},
+            AbortSignal(),
+            None,
+            _context(tmp_path),
+        )
+        stdout, stderr = _result_sections(result)
+        assert result.is_error, (command, _result_text(result))
+        assert not marker.exists(), f"the child ran anyway: {command}"
+        _assert_no_value(stdout)
+        _assert_no_value(stderr)
+
+    positives = [
+        (f"lop secret get {stored_secret} >& {tmp_path}/r7-both", tmp_path / "r7-both"),
+        (f"lop secret get {stored_secret} &> {tmp_path}/r7-modern", tmp_path / "r7-modern"),
+        (
+            f'v=$(lop secret get {stored_secret}); echo "$v" > {tmp_path}/r7-echo',
+            tmp_path / "r7-echo",
+        ),
+        (f"lop secret get {stored_secret} &> /dev/null", None),
+    ]
+    for command, written in positives:
+        marker = tmp_path / "ran-r7-ok"
+        if marker.exists():
+            marker.unlink()
+        result = await builtin.execute_bash(
+            "bash-r7-ok",
+            {"command": f"touch {marker}; {command}"},
+            AbortSignal(),
+            None,
+            _context(tmp_path),
+        )
+        stdout, stderr = _result_sections(result)
+        assert not result.is_error, (command, _result_text(result))
+        assert marker.exists(), f"the child did not run: {command}"
+        _assert_no_value(stdout)
+        _assert_no_value(stderr)
+        if written is not None:
+            assert (
+                _SYNTHETIC in written.read_text()
+            ), f"the contained write is not where the verdict says it is: {command}"
