@@ -756,3 +756,64 @@ async def test_tui_hop_names_itself_on_all_three_expiry_paths(monkeypatch) -> No
     assert messages[0], "the third expiry path reported an empty message"
     assert "did not answer within" in messages[0]
     assert handle._late_hop_tasks, "the in-flight hop is not held by the handle"
+
+
+@pytest.mark.asyncio
+async def test_a_relayed_slash_op_cannot_run_a_delete_scoped_verb_in_the_owners_terminal() -> None:
+    """V2 on the TUI host's OTHER carrier: this command runs in the OWNER's terminal.
+
+    ``TuiSessionHandle.slash_images`` answers no typed result — it runs the line
+    through ``OperatorApp._run_slash_command`` and returns a ``ran /…`` receipt.
+    On this host ``/archive`` and ``/delete`` therefore reach this machine's OWN
+    local handlers: ``archive_change`` on this config root, and
+    ``delete_session`` against this machine's session directory. That is the
+    effect the mesh vocabulary reserves for ``delete``, while the ``slash`` op
+    that carries the command is authorised on ``slash`` — which a ``drive`` role
+    holds with no ``delete`` in it.
+
+    Measured over two real relays on round 1's head, through the runtime host:
+    ``{"op": "slash", "command": "archive"}`` with one image attached reached the
+    owner's dispatcher with no connection facts at all, so the archive ran and
+    the owner's index recorded it. The TUI host needed its own gate because its
+    carrier never reaches the dispatcher at all.
+    """
+    ran: list[str] = []
+
+    class App:
+        def __init__(self) -> None:
+            self._session = FakeSession()
+
+        def call_from_thread(self, callback) -> None:  # noqa: ANN001
+            callback()
+
+        def _run_slash_command(self, line, attachments=None) -> None:  # noqa: ANN001
+            ran.append(line)
+
+    handle = TuiSessionHandle(App())  # type: ignore[arg-type]
+    # The projection push is not what this test is about, and a fake app has no
+    # runtime to fold.
+    handle._refresh_state = lambda: None  # type: ignore[method-assign]
+    drive = frozenset({"list", "view", "prompt", "steer", "stop", "slash"})
+    for command in ("archive", "unarchive", "delete"):
+        plain = await handle.slash(command, "yes", locality="remote", capabilities=drive)
+        imaged = await handle.slash_images(
+            command,
+            "yes",
+            [{"media_type": "image/png", "data": "aGk="}],
+            locality="remote",
+            capabilities=drive,
+        )
+        for receipt in (plain, imaged):
+            assert command in receipt, receipt
+            assert "delete" in receipt, receipt
+    assert ran == [], ran
+
+    # THE NEGATIVE CONTROL: the gate weighs the CAPABILITY, not the verb, so the
+    # same frame from a connection that resolved ``delete`` still runs the command
+    # in the owner's terminal exactly as it always has.
+    permitted = await handle.slash("archive", "", locality="remote", capabilities=drive | {"delete"})
+    assert permitted == "ran /archive", permitted
+    assert ran == ["/archive"], ran
+    # AND A LOCAL PANE IS UNTOUCHED BY ANY OF THIS.
+    assert await handle.slash("archive", "", locality="local") == "ran /archive"
+    assert ran == ["/archive", "/archive"], ran
