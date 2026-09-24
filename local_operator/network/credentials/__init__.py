@@ -74,21 +74,33 @@ def build_auth_store(config_dir: Path | None = None) -> Any:
 class _LocalOps:
     """LEG 1: the control-socket ops a runtime uses to ask its own relay.
 
-    One instance per relay, holding the relay-side client (``None`` on a device with
-    no placement, in which case every op refuses in operator language rather than
-    with the generic unknown-op sentence — the slice IS in this build, so telling
-    the operator ``mesh-credentials.md owns that slice`` would be wrong).
+    THE CLIENT IS RESOLVED PER REQUEST, not once at relay start. "Does this device
+    borrow anything" is a fact about the placement document on disk, and a relay that
+    starts before the device joins a network (or before the first credential is shared
+    with it) would otherwise freeze that answer as "nothing" for its whole life — the
+    same staleness F2 closed on the owner side, in the other direction. While the
+    answer is genuinely no, every op refuses in operator language rather than with the
+    generic unknown-op sentence, because the slice IS in this build.
     """
 
-    def __init__(self, client: Any = None) -> None:
-        self._client = client
+    def __init__(self, server: Any) -> None:
+        self._server = server
+        self._client: Any = None
+
+    def _source(self) -> Any:
+        if self._client is None:
+            from local_operator.network.credentials import client as client_mod
+
+            self._client = client_mod.MeshCredentialClient.for_relay(self._server)
+        return self._client
 
     def grant(self, frame: dict[str, Any]) -> dict[str, Any]:
         key = str(frame.get("credential_key") or "")
         provider = str(frame.get("provider") or key)
-        if self._client is None:
+        client = self._source()
+        if client is None:
             return _detail("not_a_holder", key, _no_placement_sentence(provider))
-        return self._client.serve_grant(
+        return client.serve_grant(
             key,
             provider=provider,
             session_id=str(frame.get("session_id") or ""),
@@ -98,13 +110,15 @@ class _LocalOps:
 
     def report(self, frame: dict[str, Any]) -> dict[str, Any]:
         key = str(frame.get("credential_key") or "")
-        if self._client is None:
+        client = self._source()
+        if client is None:
             return _detail("not_a_holder", key, _no_placement_sentence(key))
-        return self._client.serve_report(
+        return client.serve_report(
             key,
             kind=str(frame.get("kind") or "noted"),
             session_id=str(frame.get("session_id") or ""),
             model_id=str(frame.get("model_id") or ""),
+            block_scope=str(frame.get("block_scope") or ""),
             for_session=str(frame.get("session_id") or ""),
             retry_after_ms=int(frame.get("retry_after_ms") or 0),
         )
@@ -117,9 +131,10 @@ class _LocalOps:
         bounded round trip, issued by an explicit act rather than on every provider
         call.
         """
-        if self._client is None:
+        client = self._source()
+        if client is None:
             return {"kind": "ack", "key": "", "changed": [], "owners": 0}
-        return self._client.pull_placement()
+        return client.pull_placement()
 
 
 def _detail(code: str, key: str, message: str) -> dict[str, Any]:
@@ -143,17 +158,14 @@ def install(server: RelayServer) -> None:
     with before this slice existed, and its peer learns that in one frame rather than
     after a reader stalls.
 
-    When this device DOES own something to lend, ``MeshCredentialBroker.for_relay``
-    builds the broker and the real handler replaces the refusal.
+    Whether this device owns something to lend is decided PER REQUEST, from the
+    document on disk (``MeshCredentialBroker.relay_handler``), so a share made after
+    the relay started is served without a restart.
     """
-    from local_operator.network.credentials import client as client_mod
     from local_operator.network.credentials import owner as owner_mod
-    from local_operator.network.relay import not_implemented_peer_op
 
-    peer_client = client_mod.MeshCredentialClient.for_relay(server)
-    broker = owner_mod.MeshCredentialBroker.for_relay(server)
-    handler = broker.on_broker if broker is not None else not_implemented_peer_op("net_broker")
-    ops = _LocalOps(peer_client)
+    handler = owner_mod.MeshCredentialBroker.relay_handler(server)
+    ops = _LocalOps(server)
     server.register_ops(
         {"net_broker": handler},
         local_handlers={

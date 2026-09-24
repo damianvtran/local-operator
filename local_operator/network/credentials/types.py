@@ -164,6 +164,10 @@ BROKER_ERROR_TTL_MS: dict[str, int] = {
     "unsupported": NO_RETRY,
     "device_bound": 300_000,
     "not_authorised": 60_000,
+    # The frame named a sender other than the device the transport authenticated
+    # (review round 1, F1). An honest client never produces it, so it is cached like
+    # an authorisation refusal rather than retried.
+    "identity_mismatch": 60_000,
     "not_implemented": NO_RETRY,
     "internal": 60_000,
 }

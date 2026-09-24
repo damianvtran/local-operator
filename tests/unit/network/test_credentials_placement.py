@@ -814,6 +814,72 @@ def test_a_failed_borrow_is_reported_to_the_owner_and_not_repaired_here(
         wrapper.close()
 
 
+def test_the_wrapper_takes_the_logout_signature_its_callers_use(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F5: the logout method's signature IS the base store's, keyword included.
+
+    Both real callers (``ProviderController.logout`` and the auth CLI) pass
+    ``disabled_cause``, and the first version's narrower signature raised ``TypeError``
+    there — on a path no test reached, because every ``ProviderController`` today is
+    built over a plain ``AuthStore``. So the protection this method carries ("``/logout``
+    on this device must not delete the OWNER's row") was on code nothing called.
+    """
+    root = root / "logout"
+    root.mkdir()
+    _point_config_at(monkeypatch, root)
+    from local_operator.providers.auth_store import AuthStore
+
+    wrapper = mesh_store.MeshAwareAuthStore(AuthStore(config_dir=root), mesh=None, config_dir=root)
+    try:
+        wrapper.local.upsert_credential(
+            "openai", {"type": "api_key", "key": LOCAL_KEY, "account_id": "local-account"}
+        )
+        # The keyword is the whole point: this line raised TypeError before the fix.
+        assert wrapper.delete_credentials_for_provider("openai", disabled_cause="logged-out") == 1
+        assert wrapper.local.list_credentials("openai", include_disabled=True) == []
+        # Idempotent on a provider with nothing stored, like the base store.
+        assert wrapper.delete_credentials_for_provider("openai", disabled_cause="logged-out") == 0
+    finally:
+        wrapper.close()
+
+
+def test_a_logout_drops_the_borrowed_bearer_and_leaves_the_owner_alone(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of F5: what a logout may and may not reach on a borrower.
+
+    A logout must drop this device's cached borrow — the operator asked for it — and
+    must NOT touch the owner's row, which is un-shared by ``credential revoke`` on the
+    device that holds it.
+    """
+    import asyncio
+
+    root = root / "borrower-logout"
+    root.mkdir()
+    wrapper, document, _db_path = _borrower_wrapper(root, monkeypatch)
+    try:
+        borrowed = asyncio.run(wrapper.get_api_key("openai", "sess-1"))
+        wire = wrapper.mesh_client
+        assert wire is not None
+        # The REAL client caches the grant it is served (``_from_reply`` ->
+        # ``GrantCache.put``); this fake hands the grant back without touching the
+        # cache, so the line below stands in for that one write and nothing else.
+        wire.grants.put("openai", "sess-1", _borrower_grant())
+        assert borrowed and wire.grants.get("openai", "sess-1") is not None
+        assert wrapper.delete_credentials_for_provider("openai", disabled_cause="logged-out") == 0
+        assert wire.grants.get("openai", "sess-1") is None, "the borrowed bearer survived a logout"
+        # The OWNER's row — the only copy of the sharing decision this device has — is
+        # untouched, and the peer's own document still names the borrow as granted.
+        document = placement_mod.PlacementDocument.load(
+            document.network_id, root, self_device=wrapper.mesh_client.self_device
+        )
+        assert document.entry("openai") is not None
+        assert document.is_holder("openai", wire.self_device)
+    finally:
+        wrapper.close()
+
+
 def test_the_credentials_listing_names_the_owner_and_who_may_borrow(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -43,7 +43,9 @@ from typing import Any
 from local_operator.network.credentials.messages import render_broker_error
 from local_operator.network.credentials.placement import (
     PlacementDocument,
+    merge_from_peer,
     placement_for_store,
+    placement_path,
 )
 from local_operator.network.credentials.state import PlacementState
 from local_operator.network.credentials.types import (
@@ -160,7 +162,11 @@ class MeshCredentialClient:
         self.root = root
         self.self_device = self_device
         self.network_id = network_id
-        self.placement = placement
+        self._placement = placement
+        #: ``(mtime_ns, size)`` of the file ``_placement`` was read from, so a change
+        #: on disk is noticed with one ``stat`` instead of a parse per call.
+        self._placement_stamp: tuple[int, int] | None = self._stat_placement()
+        self._placement_lock = threading.Lock()
         self._state: PlacementState | None = state
         self._relay = relay
         self.deadline_s = deadline_s
@@ -230,6 +236,37 @@ class MeshCredentialClient:
         )
 
     # -- placement queries --------------------------------------------------
+
+    @property
+    def placement(self) -> PlacementDocument | None:
+        """The placement document AS IT IS ON DISK, re-read when the file changes.
+
+        A copy loaded once at construction is what let a relay keep answering from
+        a sharing list the CLI (another process) had already changed, and then save
+        that stale copy back over the change (review round 1, F2). One ``stat`` per
+        read keeps this off the provider hot path's cost sheet.
+        """
+        if not self.network_id:
+            return self._placement
+        stamp = self._stat_placement()
+        if stamp is None or stamp == self._placement_stamp:
+            return self._placement
+        with self._placement_lock:
+            if stamp != self._placement_stamp:
+                self._placement = PlacementDocument.load(
+                    self.network_id, self.root, self_device=self.self_device
+                )
+                self._placement_stamp = stamp
+        return self._placement
+
+    def _stat_placement(self) -> tuple[int, int] | None:
+        if not self.network_id:
+            return None
+        try:
+            found = placement_path(self.network_id, self.root).stat()
+        except OSError:
+            return None
+        return (found.st_mtime_ns, found.st_size)
 
     def entry(self, key: str) -> CredentialPlacementEntry | None:
         return self.placement.entry(key) if self.placement is not None else None
@@ -467,7 +504,12 @@ class MeshCredentialClient:
         """
         if not owner:
             return None
-        ensure = getattr(self._relay, "_ensure_link", None)
+        # ``_ensure_link_with_reason``, which returns ``(link, reason)``. The first
+        # version called ``_ensure_link`` — which returns a bare link — and unpacked
+        # it as a pair, so EVERY leg-2 ask on a real relay raised ``TypeError`` and
+        # answered ``internal``, including the owner-unreachable case that must
+        # answer ``owner_offline`` (found building the running-relay test F7 asked for).
+        ensure = getattr(self._relay, "_ensure_link_with_reason", None)
         if ensure is None:
             # The relay's one implementation of "reach this peer, dialling if
             # needed" — with its own endpoint probe, its own budget and its own
@@ -509,11 +551,15 @@ class MeshCredentialClient:
         session_id: str = "",
         model_id: str = "",
         retry_after_ms: int = 0,
+        block_scope: str = "",
     ) -> None:
         """Tell the owner a borrowed bearer failed. BLOCKING, best effort.
 
         ``kind`` is what the PROVIDER said, never a verdict about the credential:
-        ``quota`` for a 429, ``invalid`` for a 401 or an ``invalid_grant``. The
+        ``quota`` for a usage limit, ``invalid`` for an ``invalid_grant``,
+        ``unauthorized`` for a plain 401 and ``unavailable`` for a provider fault
+        (5xx/529). ``block_scope`` carries the family a scoped verdict named, so the
+        owner never has to widen it (review round 1, F3). The
         owner decides what that means for its own row, and the whole point of the
         split is that this device cannot decide it — see ``owner.py``'s report arm
         for why routing this into ``rotate_sibling`` would log the operator out of
@@ -538,6 +584,7 @@ class MeshCredentialClient:
                 session_id=session_id,
                 model_id=model_id,
                 retry_after_ms=int(retry_after_ms),
+                block_scope=block_scope,
             )
         except Exception:  # noqa: BLE001 — a failed report must not raise into a turn
             return
@@ -577,7 +624,7 @@ class MeshCredentialClient:
         about the rows IT owns; a document that claims a third device's credential
         is dropped there rather than here.
         """
-        if self.placement is None:
+        if self.placement is None or not self.network_id:
             return {"kind": "ack", "key": "", "changed": [], "owners": 0}
         changed: list[str] = []
         asked = 0
@@ -597,12 +644,22 @@ class MeshCredentialClient:
             detail = (reply or {}).get("detail")
             document = detail.get("document") if isinstance(detail, dict) else None
             if isinstance(document, dict):
-                changed.extend(self.placement.merge(document, from_device=device))
-        if changed:
-            try:
-                self.placement.save()
-            except OSError:
-                pass
+                # ``device`` is the member this device DIALLED, whose key the
+                # handshake verified — the transport's identity, not a frame field.
+                # Merged into the FILE under its lock: saving an in-memory copy is
+                # what wrote a revoked holder back over a CLI revoke (F2).
+                try:
+                    changed.extend(
+                        merge_from_peer(
+                            self.network_id,
+                            document,
+                            from_device=device,
+                            self_device=self.self_device,
+                            root=self.root,
+                        )
+                    )
+                except OSError:
+                    pass
         return {
             "kind": "ack",
             "key": "",

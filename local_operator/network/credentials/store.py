@@ -92,6 +92,7 @@ class CredentialSource(Protocol):
         session_id: str = "",
         model_id: str = "",
         retry_after_ms: int = 0,
+        block_scope: str = "",
     ) -> None: ...
 
     def close(self) -> None: ...
@@ -324,6 +325,9 @@ class MeshAwareAuthStore:
 
         So: a local failure delegates unchanged, and a brokered one becomes a
         REPORT. The owner decides, and this device never touches the owner's row.
+        The owner also BOUNDS what a report can do (``owner.py``'s report arm): a
+        quota report writes at most a short, family-scoped block, never an
+        account-wide one.
         ``False`` means "no sibling of this type here", which lets the failover
         driver move on to another provider — the honest answer, because there is no
         local sibling to rotate to.
@@ -352,13 +356,24 @@ class MeshAwareAuthStore:
         to is on the OWNER, so a local write would either create a block against an id
         that does not exist — or, if ids ever collided, against an unrelated local
         login. The owner's own ``block_credential`` is reached through the report
-        instead (``owner.py``'s quota arm), scoped to the model the borrower ran.
+        instead (``owner.py``'s quota arm).
+
+        ``block_scope`` TRAVELS WITH THE REPORT. ``configure._write_quota_block``
+        writes ``model:fable`` for a Fable-only cap, and dropping it here made the
+        owner receive an unscoped report — which the first version turned into an
+        ACCOUNT-WIDE block (review round 1, F3). An unscoped report is now written
+        nowhere on the owner, so losing the scope would lose the verdict; carrying
+        it keeps the family block the borrower actually observed.
         """
         if is_synthetic_credential_id(credential_id):
             pair = self._brokered_pair(credential_id)
             if pair is not None and self._mesh is not None:
                 self._mesh.report_sync(
-                    pair[0], kind="quota", session_id=pair[1], retry_after_ms=int(block_ms or 0)
+                    pair[0],
+                    kind="quota",
+                    session_id=pair[1],
+                    retry_after_ms=int(block_ms or 0),
+                    block_scope=block_scope,
                 )
             return
         kwargs: dict[str, Any] = {}
@@ -411,13 +426,10 @@ class MeshAwareAuthStore:
         """
         if self._mesh is None:
             return
-        from local_operator.providers.failover import (
-            is_invalidated_credential_error,
-            retry_after_ms_from_error,
-        )
+        from local_operator.providers.failover import retry_after_ms_from_error
 
-        kind = "invalid" if is_invalidated_credential_error(error) else "quota"
         self._mesh.grants.drop(key, session_id)
+        kind = report_kind_for(error)
         self._mesh.report_sync(
             key,
             kind=kind,
@@ -584,16 +596,25 @@ class MeshAwareAuthStore:
             return False
         return bool(self._local.send_unconfirmed(credential_id, refresh_token))
 
-    def delete_credentials_for_provider(self, provider: str) -> int:
+    def delete_credentials_for_provider(
+        self, provider: str, disabled_cause: str = "logged-out"
+    ) -> int:
         """Local rows only, and that is the point.
 
         ``/logout`` on this device must not be able to delete the OWNER's row. A
         shared credential is un-shared by its owner (``credential revoke``), and a
         borrower's logout drops its cached bearer without touching the login it was
         borrowing.
+
+        THE SIGNATURE IS ``AuthStore``'s, keyword included: both callers
+        (``ProviderController.logout`` and ``auth_cli``) pass ``disabled_cause``, and
+        the first version's narrower signature raised ``TypeError`` there (review
+        round 1, F5).
         """
         self._drop_borrowed(provider)
-        return int(self._local.delete_credentials_for_provider(provider))
+        return int(
+            self._local.delete_credentials_for_provider(provider, disabled_cause=disabled_cause)
+        )
 
     def _drop_borrowed(self, provider: str) -> None:
         """Drop this device's cached borrows for ``provider``.
@@ -659,6 +680,39 @@ class MeshAwareAuthStore:
         if local is None:  # pragma: no cover - during unpickling/copy, never in a turn
             raise AttributeError(name)
         return getattr(local, name)
+
+
+def report_kind_for(error: BaseException) -> str:
+    """What a borrower tells the owner a provider said. The FAILOVER DRIVER's classes.
+
+    The same predicates ``AuthStore.rotate_sibling`` branches on, in the same order,
+    so the owner hears what its own rotation would have concluded. The first version
+    sent ``quota`` for EVERY non-invalidation error, so a provider 529 overload
+    arrived as quota exhaustion and blocked the owner's login for a fault no
+    credential caused (review round 1, F3).
+
+    * ``invalid`` — an explicit revocation (``invalid_grant``, ``token_revoked``);
+    * ``unavailable`` — the provider failed (5xx/529, timeout): never a block;
+    * ``quota`` — a usage limit (429 / an exhausted-quota body);
+    * ``unauthorized`` — any other auth refusal: the owner may refresh, once;
+    * ``failed`` — anything else: audited on the owner and changes nothing.
+    """
+    from local_operator.providers.failover import (
+        classify_provider_error,
+        is_invalidated_credential_error,
+        is_server_side_failure,
+        is_usage_limit_error,
+    )
+
+    if is_invalidated_credential_error(error):
+        return "invalid"
+    if is_server_side_failure(error):
+        return "unavailable"
+    if is_usage_limit_error(error):
+        return "quota"
+    if classify_provider_error(error) == "auth":
+        return "unauthorized"
+    return "failed"
 
 
 def mcp_provider_label(key: str) -> str:

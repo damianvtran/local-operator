@@ -251,7 +251,6 @@ def owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stub_provider: str) -
         self_device=OWNER_DEVICE,
         self_device_name="owner-laptop",
         network_id="n_owner",
-        placement=document,
         auth_store=auth,
         audit=audit,
     )
@@ -417,7 +416,8 @@ def test_a_device_that_is_not_a_holder_is_refused_without_a_post(
 
 
 def test_a_revoked_holder_stops_being_served(owner: Any, idp: RotatingIdP) -> None:
-    owner.document.revoke(STUB_PROVIDER, BORROWER_TWO, by=OWNER_DEVICE)
+    with placement_mod.mutate("n_owner", owner.root, self_device=OWNER_DEVICE) as document:
+        document.revoke(STUB_PROVIDER, BORROWER_TWO, by=OWNER_DEVICE)
     detail = _ask_grant(owner, BORROWER_TWO)
     assert detail["code"] == "not_a_holder"
     assert idp.posts == []
@@ -476,16 +476,56 @@ def _report(owner: Any, device: str, failure: str, **extra: Any) -> dict[str, An
     return _detail(owner.broker.on_broker(_Link(device), frame))
 
 
+def test_the_report_fixture_can_actually_see_a_rotate_sibling_regression(
+    owner: Any, idp: RotatingIdP
+) -> None:
+    """CONTROL for the test below: this fixture state CAN be disabled.
+
+    The reviewer's P7 was that the old assertion (``disabled_cause == [None]``) passed
+    even with ``rotate_sibling`` swapped in for the report arm, because
+    ``rotate_sibling`` found no failing row: there was no sticky pointer for the
+    borrower's session and no ``api_key`` to match. That made the test unable to fail
+    for the regression it is named after. So the row here is made FINDABLE the way the
+    failover driver leaves it — a pinned session and the bearer that actually failed —
+    and then the exact call the mutation would make really does disable it.
+    """
+    from local_operator.providers.failover import ProviderError
+
+    grant = _ask_grant(owner, BORROWER_DEVICE)
+    bearer = str(grant["access_token"])
+    owner.auth.pin_session_credential(STUB_PROVIDER, "sess-1", owner.row.id)
+    assert owner.auth.session_credential_id(STUB_PROVIDER, "sess-1") == owner.row.id
+    assert owner.auth.credential_id_for_key(STUB_PROVIDER, bearer) == owner.row.id, (
+        "the row is not reachable from the bearer the borrower used, so a "
+        "rotate_sibling regression would be invisible to this fixture"
+    )
+    owner.auth.rotate_sibling(STUB_PROVIDER, "sess-1", ProviderError(401, "invalid_grant"), bearer)
+    rows = owner.auth.list_credentials(STUB_PROVIDER, include_disabled=True)
+    assert [row.disabled_cause for row in rows] == ["invalidated-token"], rows
+
+
 def test_a_peer_report_cannot_disable_or_delete_the_owners_login(
     owner: Any, idp: RotatingIdP
 ) -> None:
-    """THE REQUIREMENT'S NAMED FAILURE, refused three ways.
+    """THE REQUIREMENT'S NAMED FAILURE, on a fixture that CAN be disabled.
 
     A 401, an ``invalid_grant`` and a 429 from a borrower, all against the owner's
     live row. Afterwards every row this device holds is still ENABLED — no
-    ``disabled_cause``, nothing deleted — because acting on a peer's observation is
-    how one bad 401 on one peer logs the operator out of every device.
+    ``disabled_cause``, nothing deleted — because acting on a peer's observation is how
+    one bad 401 on one peer logs the operator out of every device.
+
+    THE PRECONDITION IS THE DISCRIMINATOR (review round 1, F6): the session is pinned
+    and the served bearer is a key that matches the owner's row, which is the state the
+    control above shows a swapped-in ``rotate_sibling`` WOULD disable. Without it this
+    test passed for a mutation it exists to catch.
     """
+    grant = _ask_grant(owner, BORROWER_DEVICE)
+    owner.auth.pin_session_credential(STUB_PROVIDER, "sess-1", owner.row.id)
+    assert owner.auth.session_credential_id(STUB_PROVIDER, "sess-1") == owner.row.id
+    assert (
+        owner.auth.credential_id_for_key(STUB_PROVIDER, str(grant["access_token"])) == owner.row.id
+    ), "the fixture cannot see a rotate_sibling regression; see the control above"
+
     _report(owner, BORROWER_DEVICE, "invalid")
     _report(owner, BORROWER_DEVICE, "invalid")
     _report(owner, BORROWER_DEVICE, "quota", model_id="stub-model", retry_after_ms=1_000)
@@ -541,6 +581,10 @@ from pathlib import Path
 root = Path(sys.argv[1])
 owner_device = sys.argv[2]
 self_device = sys.argv[3]
+# ``relay`` runs the leg-1 half against a REAL relay on this root too: the
+# owner-unreachable path is a different code path from "no relay at all", and the
+# reviewer's F7 was that only the latter was covered.
+mode = sys.argv[4] if len(sys.argv) > 4 else "norelay"
 
 from local_operator.network.credentials import placement as placement_mod
 from local_operator.network.credentials import store as mesh_store
@@ -580,15 +624,89 @@ document.save()
 
 store = mesh_store.build_auth_store(root)
 kind = type(store).__name__
-key = asyncio.run(store.get_api_key("meshtest", "sess-1"))
-print(json.dumps({"kind": kind, "key": key, "refresh_calls": len(calls)}))
+relay_code = "no_relay"
+if mode == "relay":
+    # A REAL relay on this root, in its own process, with a network record that lists
+    # the owner at an address nothing is listening on: the borrower's own relay is up
+    # and cannot reach the owner, which is the case a "no relay" test cannot see.
+    import socket
+    from secrets import token_bytes
+
+    from local_operator.network import relay as relay_mod
+    from local_operator.network import store as net_store
+    from local_operator.network import wire
+    from local_operator.network.identity import load as load_identity
+    from local_operator.network.types import NetworkRecord, SecretState
+
+    dead = socket.socket()
+    dead.bind(("127.0.0.1", 0))
+    dead_port = dead.getsockname()[1]
+    dead.close()
+    identity = load_identity(root)
+    record = NetworkRecord(
+        network_id="n_owner",
+        name="relay-net",
+        created_by=self_device,
+        self_device_id=self_device,
+        self_role="drive",
+        self_capabilities=["drive"],
+    )
+    for device_id, public_key, name in (
+        (self_device, identity.public_key, identity.name),
+        (owner_device, "a" * 43, "owner-laptop"),
+    ):
+        relay_mod.admit(
+            record,
+            device_id=device_id,
+            public_key=public_key,
+            name=name,
+            role="admin" if device_id == owner_device else "drive",
+            capabilities=["admin"] if device_id == owner_device else ["drive"],
+            added_by=self_device,
+            root=root,
+            persist=False,
+            endpoints=[f"127.0.0.1:{dead_port}"] if device_id == owner_device else [],
+        )
+    net_store.save(record, root)
+    net_store.save_secrets(
+        SecretState(network_id="n_owner", epoch=1, secret=wire.b64u(token_bytes(32))), root
+    )
+    server = relay_mod.RelayServer(
+        root=root, settings=relay_mod.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    server.start()
+    try:
+        own = net_store.find_own_relay(root)
+        assert own is not None, "the relay published no record to dial"
+        # THE LEG-1 OP THE RUNTIME USES, over the real control socket.
+        reply = relay_mod.control_request(
+            own,
+            "credential_grant",
+            timeout=30.0,
+            credential_key="meshtest",
+            provider="meshtest",
+            session_id="sess-1",
+            model_id="",
+        )
+        detail = (reply or {}).get("detail") or {}
+        relay_code = str(detail.get("code") or detail.get("kind") or "no_detail")
+    finally:
+        server.stop()
+
+key = asyncio.run(mesh_store.build_auth_store(root).get_api_key("meshtest", "sess-1"))
+print(json.dumps({"kind": kind, "key": key, "refresh_calls": len(calls), "relay_code": relay_code}))
 '''
 
 
+@pytest.mark.parametrize("mode", ["norelay", "relay"])
 def test_a_borrower_with_the_owner_away_makes_zero_token_posts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stub_provider: str, idp: RotatingIdP
+    mode: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_provider: str,
+    idp: RotatingIdP,
 ) -> None:
-    """§2.4 in a SEPARATE PROCESS: no relay, no owner, no grant, no POST.
+    """§2.4 in a SEPARATE PROCESS, in both shapes of "the owner is away".
 
     Two things this proves that a same-process test could not. First, the borrower
     really is another process with its own config root, so "off the owner" is a fact
@@ -597,23 +715,35 @@ def test_a_borrower_with_the_owner_away_makes_zero_token_posts(
     is installed in that child and counts — and it stays at zero, which is the
     structural claim ("the borrower holds no refresh token") measured rather than
     asserted.
+
+    BOTH MODES, because one is not the other (review round 1, F7). ``norelay`` is
+    ``find_own_relay -> None``; ``relay`` starts a REAL relay on the child's own root,
+    with the owner listed at an address nothing listens on, so the request travels the
+    child's whole leg-1 path and comes back ``owner_offline`` — a path on which the
+    first version raised ``TypeError`` out of the dial seam and answered ``internal``.
+
+    THE CHILD'S REFRESH COUNT IS THE MEASUREMENT, and it is the only one kept: the
+    parent-side ``idp.posts`` check the first version carried could never fail, because
+    the child is a separate process with no knowledge of this IdP's address.
     """
-    root = tmp_path / "borrower"
+    root = tmp_path / ("borrower-relay" if mode == "relay" else "borrower")
     root.mkdir()
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
     from local_operator.network.identity import mint
 
     identity = mint(root, name="borrower-laptop")
-    script = tmp_path / "borrow_child.py"
+    script = tmp_path / f"borrow_child_{mode}.py"
     script.write_text(_BORROWER_CHILD, encoding="utf-8")
 
+    # EVERY INHERITED CMUX_* IS UNSET: an inherited workspace id once let a headless
+    # test rename the operator's real workspaces.
     env = {k: v for k, v in os.environ.items() if not k.startswith("CMUX_")}
     env["LOCAL_OPERATOR_CONFIG_DIR"] = str(root)
     completed = subprocess.run(
-        [sys.executable, str(script), str(root), OWNER_DEVICE, identity.device_id],
+        [sys.executable, str(script), str(root), OWNER_DEVICE, identity.device_id, mode],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=180,
         env=env,
         check=False,
     )
@@ -622,7 +752,15 @@ def test_a_borrower_with_the_owner_away_makes_zero_token_posts(
     assert result["kind"] == "MeshAwareAuthStore", result
     assert result["key"] is None, "a credential appeared with no owner to lend one"
     assert result["refresh_calls"] == 0, "the borrower tried to refresh locally"
-    assert idp.posts == [], "the borrower reached a token endpoint"
+    if mode == "relay":
+        # The refusals here are the same ones the operator reads: the borrower's own
+        # relay was up and could not reach the owner, so the answer is the offline
+        # sentence — never a silent local refresh.
+        assert result["relay_code"] == "owner_offline", result
+    else:
+        assert result["relay_code"] == "no_relay", result
+    # The owner's IdP was never part of the child's reach, so it recorded nothing.
+    assert idp.posts == []
 
 
 # ---------------------------------------------------------------------------
@@ -792,3 +930,669 @@ def test_a_refused_grant_is_audited_with_its_code(owner: Any, idp: RotatingIdP) 
     assert len(records) == 1, records
     assert records[0]["detail"]["code"] == "not_a_holder"
     assert records[0]["detail"]["sub"] == stranger
+
+
+# ---------------------------------------------------------------------------
+# Who is asking comes from the TRANSPORT (review round 1, F1)
+# ---------------------------------------------------------------------------
+#
+# THE DEFECT THESE CLOSE, reproduced by the reviewer against this fixture: the
+# caller was read from ``frame["from_device"]``, a field the peer writes. A member
+# holding ``broker_credential`` could therefore put the OWNER'S id in a frame and be
+# served a grant, have a forced refresh honoured, and — through the placement arm —
+# rewrite the owner's own sharing list on disk, cutting off every real borrower.
+# Nothing below is about the parse: the whole point is which device the link says is
+# on the far end.
+
+STRANGER = "d_00000000000000000000000000000009"
+MCP_URL = "https://mcp.example.test/mcp"
+MCP_KEY = "mcp:" + MCP_URL
+
+
+def _placement_file(owner: Any) -> Path:
+    return placement_mod.placement_path("n_owner", owner.root)
+
+
+def _holder_ids(owner: Any, key: str = STUB_PROVIDER) -> list[str]:
+    """The holders ON DISK. Read from the file, never from a live object."""
+    document = placement_mod.PlacementDocument.load("n_owner", owner.root, self_device=OWNER_DEVICE)
+    entry = document.entry(key)
+    assert entry is not None, key
+    return [row.device for row in entry.holders]
+
+
+def _push(device: str, document: dict[str, Any], *, want: str = "push") -> dict[str, Any]:
+    return {
+        "op": PEER_BROKER_OP,
+        "kind": "placement",
+        "want": want,
+        "network_id": "n_owner",
+        "from_device": device,
+        "document": document,
+    }
+
+
+def _row_json(key: str, *, owner: str, holders: list[str], rev: int = 2) -> dict[str, Any]:
+    return {
+        "key": key,
+        "provider": key,
+        "kind": "oauth-rotating",
+        "owner_device": owner,
+        "owner_device_name": owner,
+        "identity_label": "",
+        "holders": [
+            {"device": device, "scope": "session", "granted_at": 1.0, "granted_by": owner}
+            for device in holders
+        ],
+        "doc_rev": rev,
+    }
+
+
+def test_every_arm_refuses_a_frame_that_claims_another_devices_id(
+    owner: Any, idp: RotatingIdP
+) -> None:
+    """A stranger's link claiming the OWNER'S id gets a named refusal, and no work.
+
+    All three arms, because all three read an identity: a grant (the holder check, the
+    admin check and the audit subject), a report (the refresh arm and the block arm) and
+    a placement push (the merge rule). `identity_mismatch` is closed and named, so the
+    peer is told what happened rather than being handed a generic internal error.
+    """
+    frames = [
+        _grant_frame(OWNER_DEVICE),
+        {
+            "op": PEER_BROKER_OP,
+            "kind": "report",
+            "key": STUB_PROVIDER,
+            "provider": STUB_PROVIDER,
+            "from_device": OWNER_DEVICE,
+            "failure": "quota",
+            "model_id": "stub-model",
+            "retry_after_ms": 10_000_000,
+        },
+        _push(
+            OWNER_DEVICE,
+            {"credentials": [_row_json(STUB_PROVIDER, owner=OWNER_DEVICE, holders=[STRANGER])]},
+        ),
+        {"op": PEER_BROKER_OP, "kind": "placement", "want": "pull", "from_device": OWNER_DEVICE},
+    ]
+    for frame in frames:
+        detail = _detail(owner.broker.on_broker(_Link(STRANGER), frame))
+        assert detail["code"] == "identity_mismatch", (frame["kind"], detail)
+        assert "nothing was lent or changed" in detail["message"]
+    # Nothing was spent, nothing was written, and nobody was blocked.
+    assert idp.posts == []
+    assert owner.auth.get_credential(owner.row.id).disabled_cause is None
+    assert (
+        owner.auth._conn.execute("SELECT COUNT(*) FROM auth_credential_blocks").fetchone()[0] == 0
+    )
+    assert _holder_ids(owner) == [OWNER_DEVICE, BORROWER_DEVICE, BORROWER_TWO]
+    # The forced-refresh arm would have cost a POST through the admin check; the
+    # forged frame never reaches it, so the count stays at zero above.
+
+
+def test_a_forged_placement_push_cannot_rewrite_the_sharing_list(
+    owner: Any, idp: RotatingIdP
+) -> None:
+    """THE REVIEWER'S P1c, on the file: the owner's entry survived a stranger's push.
+
+    ``[owner, B, B2] -> [owner, stranger]`` is what the reviewer measured, and the
+    consequence was that every real borrower was cut off and the stranger was admitted
+    afterwards. The file is compared BYTE FOR BYTE, so a rewrite that happened to keep
+    the same holder set would fail this too.
+    """
+    before = _placement_file(owner).read_bytes()
+    forged = _push(
+        OWNER_DEVICE,
+        {
+            "epoch": 9,
+            "credentials": [
+                _row_json(STUB_PROVIDER, owner=OWNER_DEVICE, holders=[STRANGER], rev=99)
+            ],
+        },
+    )
+    detail = _detail(owner.broker.on_broker(_Link(STRANGER), forged))
+    assert detail["code"] == "identity_mismatch"
+    assert _placement_file(owner).read_bytes() == before, "a forged push rewrote the document"
+    assert _holder_ids(owner) == [OWNER_DEVICE, BORROWER_DEVICE, BORROWER_TWO]
+    # And the stranger is still refused on the honest path.
+    assert _ask_grant(owner, STRANGER)["code"] == "not_a_holder"
+
+
+def test_the_same_push_from_the_device_that_owns_the_row_is_still_accepted(owner: Any) -> None:
+    """THE POSITIVE CONTROL for the refusal above.
+
+    Without this, "the file did not change" would be satisfied by a merge path that
+    never ran. An honest borrower pushing a row IT owns is merged and lands on disk —
+    so the refusal above is attributable to the forged identity and not to pushes
+    being ignored.
+    """
+    honest = _push(
+        BORROWER_DEVICE,
+        {
+            "epoch": 3,
+            "credentials": [_row_json("deepseek", owner=BORROWER_DEVICE, holders=[OWNER_DEVICE])],
+        },
+    )
+    detail = _detail(owner.broker.on_broker(_Link(BORROWER_DEVICE), honest))
+    assert detail["kind"] == "ack", detail
+    document = placement_mod.PlacementDocument.load("n_owner", owner.root, self_device=OWNER_DEVICE)
+    assert document.owner_of("deepseek") == BORROWER_DEVICE
+    # A claim about a THIRD device's row is still dropped, and so is a row that names
+    # this device as its owner.
+    third = _push(
+        BORROWER_DEVICE,
+        {
+            "epoch": 4,
+            "credentials": [
+                _row_json("moonshot", owner=BORROWER_TWO, holders=[BORROWER_DEVICE]),
+                _row_json("openai", owner=OWNER_DEVICE, holders=[BORROWER_DEVICE], rev=99),
+            ],
+        },
+    )
+    _detail(owner.broker.on_broker(_Link(BORROWER_DEVICE), third))
+    document = placement_mod.PlacementDocument.load("n_owner", owner.root, self_device=OWNER_DEVICE)
+    assert document.entry("moonshot") is None, "a third device's row was taken on a rumour"
+    assert document.entry("openai") is None, "a peer's row naming THIS device was accepted"
+
+
+def test_a_document_that_names_this_device_is_refused_by_merge_itself(tmp_path: Path) -> None:
+    """The second lock on the same door, at the merge rule rather than the transport.
+
+    ``merge`` takes ``from_device`` as the caller the TRANSPORT authenticated, so a
+    merge "from" this device is a forgery by construction — refused even if a caller
+    ever reaches it with the wrong argument.
+    """
+    document = placement_mod.PlacementDocument("n_net", root=tmp_path, written_by=OWNER_DEVICE)
+    incoming = {
+        "credentials": [_row_json("openai", owner=OWNER_DEVICE, holders=[STRANGER], rev=99)]
+    }
+    assert document.merge(incoming, from_device=OWNER_DEVICE, self_device=OWNER_DEVICE) == []
+    assert document.entries == {}
+    assert document.merge(incoming, from_device="", self_device=OWNER_DEVICE) == []
+
+
+# ---------------------------------------------------------------------------
+# A revoke reaches a running broker, and is never written back (review F2)
+# ---------------------------------------------------------------------------
+
+
+def test_a_revoke_made_while_the_broker_runs_stops_the_service(
+    owner: Any, idp: RotatingIdP
+) -> None:
+    """THE REVIEWER'S P2: revoke through ``mutate``, exactly as the CLI does it.
+
+    The broker was built before the revoke, so a document held on the object would
+    still name B2 a holder. ``grant_ttl_s`` does NOT bound this: it bounds a grant
+    already lent out, and an ungranted request is decided now.
+    """
+    assert _ask_grant(owner, BORROWER_TWO)["kind"] == "grant"
+    idp.posts.clear()
+    with placement_mod.mutate("n_owner", owner.root, self_device=OWNER_DEVICE) as document:
+        document.revoke(STUB_PROVIDER, BORROWER_TWO, by=OWNER_DEVICE)
+    detail = _ask_grant(owner, BORROWER_TWO, session="sess-2")
+    assert detail["code"] == "not_a_holder", detail
+    assert idp.posts == []
+    assert _holder_ids(owner) == [OWNER_DEVICE, BORROWER_DEVICE]
+
+
+def test_a_merge_never_writes_a_revoked_holder_back(owner: Any) -> None:
+    """THE REVIEWER'S P2b: a merge after a revoke used to resurrect the revoked row.
+
+    The trigger needs no attacker: any peer notification that changed anything made the
+    broker save its stale in-memory copy, and the revoke was reverted on disk. So this
+    revokes, then performs a merge that really does change the document, and asserts
+    BOTH that the change landed and that the revoked holder stayed out.
+    """
+    with placement_mod.mutate("n_owner", owner.root, self_device=OWNER_DEVICE) as document:
+        document.revoke(STUB_PROVIDER, BORROWER_TWO, by=OWNER_DEVICE)
+    before = _placement_file(owner).read_bytes()
+    assert BORROWER_TWO not in before.decode()
+
+    push = _push(
+        BORROWER_DEVICE,
+        {
+            "epoch": 5,
+            "credentials": [_row_json("deepseek", owner=BORROWER_DEVICE, holders=[OWNER_DEVICE])],
+        },
+    )
+    detail = _detail(owner.broker.on_broker(_Link(BORROWER_DEVICE), push))
+    assert detail["kind"] == "ack"
+    document = placement_mod.PlacementDocument.load("n_owner", owner.root, self_device=OWNER_DEVICE)
+    assert document.entry("deepseek") is not None, "the merge did not land, so nothing was proved"
+    assert _holder_ids(owner) == [OWNER_DEVICE, BORROWER_DEVICE], "the revoked holder came back"
+    assert _ask_grant(owner, BORROWER_TWO, session="sess-3")["code"] == "not_a_holder"
+
+
+def test_a_share_made_after_the_relay_started_is_served(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stub_provider: str
+) -> None:
+    """THE OTHER DIRECTION OF F2, and it needs no restart either.
+
+    A relay that starts before the first ``credential share`` owns nothing to lend yet.
+    The first version decided that ONCE, at relay start, so it refused every borrow until
+    it was restarted; the handler now decides per request, from the document on disk.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    root = tmp_path / "later"
+    root.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    from local_operator.network import store as network_store
+    from local_operator.network.types import MeshRefusal, NetworkRecord
+    from local_operator.providers.auth_store import AuthStore
+
+    record = NetworkRecord(
+        network_id="n_owner",
+        name="later-net",
+        created_by=OWNER_DEVICE,
+        self_device_id=OWNER_DEVICE,
+        self_role="admin",
+        self_capabilities=["admin"],
+    )
+    network_store.save(record, root)
+    server = SimpleNamespace(
+        root=root,
+        identity=SimpleNamespace(device_id=OWNER_DEVICE, name="owner-laptop"),
+        audit=None,
+    )
+    handler = owner_mod.MeshCredentialBroker.relay_handler(server)
+    frame = {
+        "op": PEER_BROKER_OP,
+        "kind": "grant",
+        "key": STUB_PROVIDER,
+        "provider": STUB_PROVIDER,
+        "from_device": BORROWER_DEVICE,
+        "for_session": "sess-1",
+        "model_id": "stub-model",
+    }
+    # Nothing is declared yet: the same by-name refusal a relay with no broker gives.
+    with pytest.raises(MeshRefusal) as excinfo:
+        handler(_Link(BORROWER_DEVICE), frame)
+    assert excinfo.value.code == "not_implemented"
+
+    auth = AuthStore(config_dir=root)
+    auth.upsert_credential(
+        STUB_PROVIDER,
+        {
+            # ``type: oauth`` explicitly: without it the store infers an ``api_key``
+            # row, and ``get_oauth_access`` — the read the owner's own resolve uses —
+            # answers ``None``, so the test would fail on its own fixture.
+            "type": "oauth",
+            "access": "access-later",
+            "expires": int(time.time() * 1000) + 3_600_000,
+            "refresh": "",
+            "email": "later@example.test",
+        },
+    )
+    try:
+        with placement_mod.mutate("n_owner", root, self_device=OWNER_DEVICE) as document:
+            document.declare(
+                STUB_PROVIDER,
+                owner_device=OWNER_DEVICE,
+                owner_device_name="owner-laptop",
+                provider=STUB_PROVIDER,
+                by=OWNER_DEVICE,
+            )
+            document.grant(STUB_PROVIDER, BORROWER_DEVICE, scope="session", by=OWNER_DEVICE)
+        detail = _detail(handler(_Link(BORROWER_DEVICE), frame))
+        assert detail["kind"] == "grant", detail
+        assert detail["access_token"] == "access-later"
+        assert asyncio.run(auth.get_api_key(STUB_PROVIDER, "owner-sess")) == "access-later"
+    finally:
+        auth.close()
+
+
+# ---------------------------------------------------------------------------
+# What a peer's report may do to the owner's OWN login (review round 1, F3)
+# ---------------------------------------------------------------------------
+#
+# THE DEFECT THESE CLOSE, reproduced by the reviewer: one ``quota`` report with no
+# model and a huge retry time wrote an ACCOUNT-WIDE, one-hour block on the owner's
+# credential, and the owner's own session then got no key at all. Honest borrowers
+# send this report: a provider 529 overload was classified as quota exhaustion, and a
+# family-scoped cap lost its scope in transit and arrived account-wide. So every test
+# here asserts the OUTCOME the operator cares about — the owner can still get a key
+# and complete a turn — and not merely that a column is NULL.
+
+
+def _block_rows(owner: Any) -> list[tuple[str, int]]:
+    return list(
+        owner.auth._conn.execute(
+            "SELECT block_scope, blocked_until_ms FROM auth_credential_blocks"
+        ).fetchall()
+    )
+
+
+def _owner_resolves(owner: Any, model_id: str = "") -> bool:
+    import asyncio
+
+    key = asyncio.run(owner.auth.get_api_key(STUB_PROVIDER, "owner-own", model_id=model_id))
+    return bool(key)
+
+
+def test_one_unscoped_quota_report_cannot_lock_the_owner_out_of_its_own_login(
+    owner: Any, idp: RotatingIdP
+) -> None:
+    """THE REVIEWER'S P3, as the operator would notice it: the owner still works.
+
+    ``retry_after_ms`` is a peer's claim, it arrives with no model, and the cap it used
+    to reach was the owner's own one-hour ceiling. A report that cannot be scoped
+    faithfully is now NOTED and writes nothing at all.
+    """
+    detail = _report(owner, BORROWER_DEVICE, "quota", retry_after_ms=10_000_000)
+    assert detail["action"] == "noted" and detail.get("reason") == "unscoped", detail
+    assert _block_rows(owner) == [], "an unscoped peer report wrote a block on the owner"
+    assert _owner_resolves(owner), "the owner's own session cannot get a key"
+
+
+def test_a_scoped_report_blocks_only_that_family_and_only_briefly(
+    owner: Any, idp: RotatingIdP
+) -> None:
+    """A family-scoped 429 is carried faithfully — and bounded by the OWNER's rules.
+
+    The scope is written as the owner's own block READ understands it
+    (``model:<family>``), the duration is the owner's shortest backoff rather than the
+    peer's claim, and another family on the same account still resolves — which is the
+    under-block direction ``rotate_sibling`` argues for.
+    """
+    detail = _report(
+        owner, BORROWER_DEVICE, "quota", model_id="claude-fable-5", retry_after_ms=10_000_000
+    )
+    assert detail["action"] == "blocked" and detail["scope"] == "model:fable", detail
+    assert detail["block_ms"] <= 60_000, detail
+    rows = _block_rows(owner)
+    assert [row[0] for row in rows] == ["model:fable"], rows
+    remaining_ms = rows[0][1] - int(time.time() * 1000)
+    assert 0 < remaining_ms <= 60_000, remaining_ms
+    # The family the report named is out of rotation; every other model still resolves,
+    # and the owner's own session still completes on the account.
+    assert owner.auth.is_blocked_for_model(owner.row.id, STUB_PROVIDER, "claude-fable-5") is True
+    assert owner.auth.is_blocked_for_model(owner.row.id, STUB_PROVIDER, "claude-opus-5") is False
+    assert _owner_resolves(owner, model_id="claude-opus-5a"), "the account was taken out entirely"
+
+
+def test_a_second_scoped_report_in_the_window_writes_nothing_new(
+    owner: Any, idp: RotatingIdP
+) -> None:
+    """The per-holder rate limit: a broken borrower cannot keep the block alive.
+
+    Without it a holder that reports on every provider call renews its own verdict
+    forever, which is the same lock-out by a slower route.
+    """
+    first = _report(owner, BORROWER_DEVICE, "quota", model_id="claude-fable-5")
+    before = _block_rows(owner)
+    second = _report(owner, BORROWER_DEVICE, "quota", model_id="claude-fable-5")
+    assert first["action"] == "blocked"
+    assert second["action"] == "coalesced", second
+    assert _block_rows(owner) == before, "the second report extended the block"
+    # A DIFFERENT holder is its own slot: the limit is per holder, not global.
+    third = _report(owner, BORROWER_TWO, "quota", model_id="claude-fable-5")
+    assert third["action"] == "blocked", third
+
+
+def test_a_report_whose_scope_cannot_be_carried_faithfully_widens_nothing(
+    owner: Any, idp: RotatingIdP
+) -> None:
+    """Unknown family, short slug, or a claimed scope that is not one: write NOTHING.
+
+    The block READ matches a scope by SUBSTRING, so accepting whatever a peer sent would
+    let a slug like ``a`` — or an empty one — stop every model on the account, which is
+    the over-block this whole arm exists to avoid.
+    """
+    for extra in (
+        {"model_id": "gpt-5-mini"},  # a model this registry parses no family from
+        {"block_scope": "a", "model_id": "claude-fable-5"},
+        {"block_scope": "model:", "model_id": "claude-fable-5"},
+        {"block_scope": "model:not-a-family", "model_id": "claude-fable-5"},
+    ):
+        detail = _report(owner, BORROWER_DEVICE, "quota", retry_after_ms=10_000_000, **extra)
+        assert detail["action"] == "noted" and detail.get("reason") == "unscoped", (extra, detail)
+    assert _block_rows(owner) == []
+    assert _owner_resolves(owner)
+
+
+def test_a_provider_overload_is_not_reported_as_quota_exhaustion(
+    owner: Any, idp: RotatingIdP
+) -> None:
+    """THE REVIEWER'S P6: a 529 was mapped to ``quota`` and blocked the account.
+
+    Both halves: the classifier a borrower uses, and what the owner does with the kind
+    it produces. ``rotate_sibling`` deprioritises on a provider fault and blocks on a
+    usage limit; a peer report must not be more destructive than the owner's own
+    reaction, so an ``unavailable`` report changes nothing at all.
+    """
+    from local_operator.network.credentials.store import report_kind_for
+    from local_operator.providers.failover import ProviderError
+
+    assert report_kind_for(ProviderError(529, "overloaded")) == "unavailable"
+    assert report_kind_for(ProviderError(503, "service unavailable")) == "unavailable"
+    assert report_kind_for(ProviderError(429, "rate limit exceeded")) == "quota"
+    assert report_kind_for(ProviderError(401, "invalid_grant")) == "invalid"
+    assert report_kind_for(ProviderError(401, "unauthorized")) == "unauthorized"
+
+    detail = _report(owner, BORROWER_DEVICE, "unavailable", model_id="claude-fable-5")
+    assert detail == {"kind": "ack", "key": STUB_PROVIDER, "action": "noted"}, detail
+    assert _block_rows(owner) == [], "a provider overload wrote a block on the owner"
+    assert owner.auth.get_credential(owner.row.id).disabled_cause is None
+    assert _owner_resolves(owner)
+
+
+# ---------------------------------------------------------------------------
+# MCP: a real row id, and a bearer that stops at its grant (review F4)
+# ---------------------------------------------------------------------------
+#
+# THE DEFECTS THESE CLOSE, reproduced by the reviewer: ``_resolve_mcp`` converted
+# ``McpTokenStorage.credential_id`` — the STRING ``mcp_oauth:<url>`` — to an int, so
+# every MCP grant answered ``internal ValueError`` and every MCP report crashed out of
+# the handler, on a path no test touched. And a borrowed MCP bearer was kept on the
+# auth object until the server rejected it rather than until the grant expired.
+
+MCP_BEARER = "-".join(("mcp", "borrowed", "bearer"))
+
+
+def _declare_mcp(owner: Any, *, holders: tuple[str, ...] = (BORROWER_DEVICE,)) -> Any:
+    """A real ``mcp-oauth`` row on the owner, plus the placement entry for it."""
+    row = owner.auth.upsert_credential(
+        "mcp-oauth",
+        {
+            "type": "oauth",
+            "tokens": {"access_token": MCP_BEARER, "token_type": "Bearer", "expires_in": 3600},
+            "project_id": MCP_URL,
+        },
+    )
+    assert row.identity_key == MCP_URL, row.identity_key
+    with placement_mod.mutate("n_owner", owner.root, self_device=OWNER_DEVICE) as document:
+        document.declare(
+            MCP_KEY,
+            owner_device=OWNER_DEVICE,
+            owner_device_name="owner-laptop",
+            provider="mcp-oauth",
+            kind="mcp-rotating",
+            by=OWNER_DEVICE,
+        )
+        for device in holders:
+            document.grant(MCP_KEY, device, scope="session", by=OWNER_DEVICE)
+    return row
+
+
+@pytest.fixture()
+def no_mcp_refresh(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The owner's own MCP refresh, stubbed: it needs the network, not a broker."""
+    calls: list[str] = []
+
+    async def _refresh(url: str, cfg: Any, store: Any = None) -> None:
+        calls.append(url)
+        return None
+
+    monkeypatch.setattr("local_operator.mcp.auth.ensure_mcp_oauth_fresh", _refresh)
+    return calls
+
+
+def test_an_mcp_grant_serves_the_owners_access_token(owner: Any, no_mcp_refresh: list[str]) -> None:
+    """The whole MCP brokering path, which had NO test at all before this round.
+
+    The grant must carry the row's OWN integer id (a synthetic or string id would make
+    the borrower's descriptor and the owner's audit disagree about which row was lent),
+    and the token must be the owner's stored access token.
+    """
+    row = _declare_mcp(owner)
+    detail = _detail(
+        owner.broker.on_broker(
+            _Link(BORROWER_DEVICE),
+            {
+                "op": PEER_BROKER_OP,
+                "kind": "grant",
+                "key": MCP_KEY,
+                "provider": MCP_KEY,
+                "from_device": BORROWER_DEVICE,
+                "from_session": "",
+                "for_session": "sess-1",
+                "model_id": "",
+            },
+        )
+    )
+    assert detail["kind"] == "grant", detail
+    assert detail["access_token"] == MCP_BEARER
+    assert detail["credential_ref"]["credential_id"] == row.id
+    assert detail["credential_ref"]["credential_id"] > 0
+    assert detail["credential_ref"]["kind"] == "mcp-oauth"
+    assert no_mcp_refresh == [MCP_URL], "the owner's own refresh is the one that runs"
+
+
+def test_an_mcp_report_is_answered_and_blocks_nothing(
+    owner: Any, no_mcp_refresh: list[str]
+) -> None:
+    """The report arm was dead for MCP: it raised ``ValueError`` out of the handler.
+
+    A used-up provider error must not be able to reach it either way, which is why
+    ``quota`` for an MCP key is NOTED rather than scoped — the owner's provider-side
+    block vocabulary is about provider rows, and an MCP server has none.
+    """
+    _declare_mcp(owner)
+    for failure in ("quota", "invalid", "unavailable"):
+        reply = owner.broker.on_broker(
+            _Link(BORROWER_DEVICE),
+            {
+                "op": PEER_BROKER_OP,
+                "kind": "report",
+                "key": MCP_KEY,
+                "provider": MCP_KEY,
+                "from_device": BORROWER_DEVICE,
+                "failure": failure,
+                "model_id": "",
+                "retry_after_ms": 10_000_000,
+            },
+        )
+        assert reply["op"] == "ack", (failure, reply)
+        detail = _detail(reply)
+        assert detail["kind"] == "ack" and detail["action"] in ("noted", "refreshed"), (
+            failure,
+            detail,
+        )
+    assert _block_rows(owner) == []
+    # Exactly ONE owner-side refresh for the three reports: only the ``invalid`` arm
+    # asks for one, and the per-credential window coalesces a second ask. A refresh the
+    # owner did not offer here is the retry storm the coalescing exists to stop.
+    assert no_mcp_refresh == [MCP_URL]
+
+
+def test_a_borrowed_mcp_bearer_is_re_borrowed_when_its_grant_expires() -> None:
+    """F4's second half: the bearer is the GRANT's lifetime, not the connection's.
+
+    The first version cached the bearer on the auth object and re-borrowed only after a
+    401, so a borrower whose grant had expired kept presenting the old token until the
+    server happened to refuse it — a revocation that never arrived. Driven through the
+    real ``async_auth_flow``, with the real ``GrantCache`` applying the real
+    ``grant_expires_at_ms``: while the grant is live, no borrow is issued at all, and
+    once it is not, the next request borrows again rather than reusing it.
+    """
+    import asyncio
+
+    import httpx2
+
+    from local_operator.network.credentials.client import GrantCache
+    from local_operator.network.credentials.mcp_bearer import BrokeredBearerAuth
+    from local_operator.network.credentials.types import CredentialRef, Grant
+
+    def _grant(token: str, *, expires_in_ms: int) -> Grant:
+        now_ms = int(time.time() * 1000)
+        return Grant(
+            access_token=token,
+            kind="bearer",
+            token_expires_at_ms=now_ms + expires_in_ms,
+            grant_expires_at_ms=now_ms + expires_in_ms,
+            credential_ref=CredentialRef(
+                owner_device=OWNER_DEVICE,
+                owner_device_name="owner-laptop",
+                provider="mcp-oauth",
+                kind="mcp-oauth",
+                credential_id=1,
+            ),
+            served_by=OWNER_DEVICE,
+        )
+
+    class _Source:
+        def __init__(self) -> None:
+            self.grants = GrantCache()
+            self.borrows = 0
+            self.reports: list[str] = []
+
+        def request_grant_sync(self, key: str, **_kwargs: Any) -> Grant:
+            self.borrows += 1
+            return _grant(f"fresh-{self.borrows}", expires_in_ms=900_000)
+
+        def report_sync(self, key: str, *, kind: str, **_kwargs: Any) -> None:
+            self.reports.append(kind)
+
+    async def _authorization(auth: BrokeredBearerAuth, status: int = 200) -> list[str | None]:
+        """Every ``Authorization`` header one request through the flow puts on the wire."""
+        generator = auth.async_auth_flow(httpx2.Request("POST", MCP_URL))
+        seen: list[str | None] = []
+        request = await generator.__anext__()
+        seen.append(request.headers.get("Authorization"))
+        while True:
+            try:
+                request = await generator.asend(httpx2.Response(status, request=request))
+            except StopAsyncIteration:
+                return seen
+            seen.append(request.headers.get("Authorization"))
+
+    source = _Source()
+    auth = BrokeredBearerAuth(url=MCP_URL, key=MCP_KEY, client=source)
+
+    async def _run() -> tuple[list[str | None], list[str | None]]:
+        # A LIVE grant: served from the cache, so the MCP server costs no borrow.
+        source.grants.put(MCP_KEY, "", _grant("live-grant", expires_in_ms=600_000))
+        served = await _authorization(auth)
+        assert source.borrows == 0, "a live grant was re-borrowed for every request"
+        # THE GRANT HAS EXPIRED (the owner's task expiry or a revoke), so the next
+        # request must borrow again rather than present the token it still holds.
+        source.grants.put(MCP_KEY, "", _grant("stale-grant", expires_in_ms=-1_000))
+        after = await _authorization(auth)
+        return served, after
+
+    served, after = asyncio.run(_run())
+    assert served == ["Bearer live-grant"], served
+    assert after == ["Bearer fresh-1"], after
+    assert source.borrows == 1, source.borrows
+
+
+def test_the_remote_block_ceiling_is_the_owners_own_shortest_backoff() -> None:
+    """The peer's claimed retry time is bounded by the OWNER's rule, and pinned to it.
+
+    Restated rather than imported (``owner.py`` must stay importable on the relay's
+    construction path, which cannot pull ``providers.auth_store``), so the relation is
+    asserted here instead: a remote quota report buys the shortest block the owner would
+    have written on its own evidence, and the owner's own usage probe decides anything
+    longer.
+    """
+    from local_operator.network.credentials.owner import REMOTE_QUOTA_BLOCK_MAX_MS
+    from local_operator.providers.auth_store import (
+        DEFAULT_BLOCK_MS,
+        MAX_CREDENTIAL_BLOCK_MS,
+    )
+
+    assert REMOTE_QUOTA_BLOCK_MAX_MS == DEFAULT_BLOCK_MS
+    assert REMOTE_QUOTA_BLOCK_MAX_MS < MAX_CREDENTIAL_BLOCK_MS
