@@ -283,10 +283,11 @@ describe("the list teaches its own pin gesture (design round 1, D2)", () => {
 	});
 });
 
-describe("a refused pin reports where the press happened (design round 5, D12)", () => {
-	/* A list LONGER THAN THE SCREEN, which is the case that exposed the placement:
-	   with a handful of rows the old bottom-of-list band was on screen too, so a
-	   short list would pass either way. */
+describe("a refused pin reports where the reader is looking (D12/D14, R8-2, Q4)", () => {
+	/* A list LONGER THAN THE SCREEN, which is the case that exposed both earlier
+	   placements: after the last row (D12) and above the first row inside the
+	   scroller (D14). With a handful of rows both were on screen, so a short list
+	   would pass either way. */
 	const ROWS = 32;
 
 	function longList(): SessionSummary[] {
@@ -306,33 +307,72 @@ describe("a refused pin reports where the press happened (design round 5, D12)",
 		return inner.parentElement as HTMLElement;
 	}
 
+	/* The list's scroll container, found by what makes it one (its overflow
+	   class), from a row — not by tag, so a refactor that moves the scroll onto a
+	   different element is still what these tests ask about. */
+	function scroller(): HTMLElement {
+		const found = cardByName("Row 0").closest(".overflow-y-auto");
+		expect(found).not.toBeNull();
+		return found as HTMLElement;
+	}
+
+	/* THE PROPERTY, structurally, because happy-dom has no layout: no
+	   `getBoundingClientRect` or `scrollTop` here moves anything, so a pixel
+	   assertion would pass on every placement. What keeps the band on screen at
+	   any scroll position is that it is NOT scroll content: it is a sibling of the
+	   scroller in the fixed `h-dvh` column, ahead of it, with no scrolling
+	   ancestor of its own. The rendered frames at 100% and 200% root font on the
+	   PR are the pixel half of this claim. */
+	function expectOutsideTheScroller(alert: HTMLElement) {
+		const list = scroller();
+		expect(list.contains(alert)).toBe(false);
+		expect(alert.closest(".overflow-y-auto")).toBeNull();
+		const band = errorBox();
+		expect(band.parentElement).toBe(list.parentElement);
+		expect(band.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+		/* A flex child that may shrink could be squeezed to nothing by a long list,
+		   which is the silent version of the same defect. */
+		expect(band.className).toContain("shrink-0");
+	}
+
 	async function refuseAPinOn(name: string) {
 		setSessionPin.mockRejectedValueOnce(
 			new Error("no saved messages yet — pin it after you send one"),
 		);
-		render(<SessionListScreen />);
 		longPress(cardByName(name));
 		fireEvent.click(await screen.findByRole("button", { name: "Pin to the top" }));
-		return screen.findByRole("alert");
+		return waitFor(() => {
+			const alert = screen.getByRole("alert");
+			expect(alert.textContent).not.toBe("");
+			return alert;
+		});
 	}
 
-	it("renders the refusal above the first row, not after the last", async () => {
+	it("renders the refusal outside the scroll container, above it", async () => {
 		sessionList = longList();
+		render(<SessionListScreen />);
 		const alert = await refuseAPinOn("Row 0");
 		expect(alert.textContent).toContain("Could not save the pin: no saved messages yet");
+		expectOutsideTheScroller(alert);
+	});
 
-		/* STRUCTURAL, not pixel: the band PRECEDES both the first and the last row
-		   in document order, so it sits at the top of the list surface instead of
-		   being appended after the list. The last-row comparison is the one that
-		   fails on the old placement; the first-row one is what makes "top" mean
-		   top rather than "somewhere above the end". */
-		const first = cardByName("Row 0");
-		const last = cardByName(`Row ${ROWS - 1}`);
-		expect(first.compareDocumentPosition(alert) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
-		expect(last.compareDocumentPosition(alert) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
-		/* And it is inside the SAME scroll container as the rows, so it is on screen
-		   with the row it is about rather than in some other pane. */
-		expect(alert.closest("main")).toBe(first.closest("main"));
+	it("reports a refusal on a row reached by scrolling down the list", async () => {
+		/* The reader's natural position (Q4, D14): scrolled to a row far below the
+		   first screen. The scroll is simulated — happy-dom records `scrollTop` but
+		   lays nothing out — so what is asserted is the structure that makes the
+		   band independent of it: the scroll happened on the element the band is
+		   not inside, and the scroll position is left where the reader put it (the
+		   refusal does not yank the list back to the top to show itself). */
+		sessionList = longList();
+		render(<SessionListScreen />);
+		const list = scroller();
+		list.scrollTop = 900;
+		fireEvent.scroll(list);
+		const alert = await refuseAPinOn(`Row ${ROWS - 2}`);
+		expect(alert.textContent).toContain("Could not save the pin: no saved messages yet");
+		expectOutsideTheScroller(alert);
+		expect(list.scrollTop).toBe(900);
+		expect(errorBox().className).toContain("grid-rows-[1fr]");
 	});
 
 	it("keeps the band collapsed and empty until a refusal arrives", () => {
@@ -340,17 +380,22 @@ describe("a refused pin reports where the press happened (design round 5, D12)",
 		render(<SessionListScreen />);
 		expect(errorBox().className).toContain("grid-rows-[0fr]");
 		expect(screen.getByRole("alert").textContent).toBe("");
+		/* Mounted in the fixed region from the first render, so the live region a
+		   screen reader registered is the one the refusal later arrives in. */
+		expectOutsideTheScroller(screen.getByRole("alert"));
 	});
 
-	it("reads the refusal out while the caption beside it is still expanded", async () => {
+	it("reads the refusal out while the caption is still expanded", async () => {
 		/* The band's predicate is its own, NOT the caption's: with nothing pinned
 		   the caption is expanded (its own condition), and a refusal can arrive on
 		   exactly that list. A shared predicate would have to collapse one of the
 		   two here — and the band is the one that must never be hidden while its
 		   text is on screen (D12's a11y half). */
 		sessionList = longList();
+		render(<SessionListScreen />);
 		const alert = await refuseAPinOn("Row 0");
 		expect(alert.getAttribute("aria-hidden")).toBeNull();
+		expect(alert.closest("[aria-hidden]")).toBeNull();
 		expect(errorBox().className).toContain("grid-rows-[1fr]");
 		const caption = screen.getByText("touch and hold a row to pin it");
 		const captionBox = caption.parentElement?.parentElement as HTMLElement;
