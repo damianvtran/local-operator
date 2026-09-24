@@ -1231,6 +1231,12 @@ class AttachedSession:
         #: Where a REFUSED gate reply goes when the host has a surface for it
         #: (see ``set_gate_refusal_handler``): unset means "log it".
         self._gate_refusal_handler: Callable[[BaseException], None] | None = None
+        #: Where an answer that was ACCEPTED here and never REACHED the owner
+        #: goes (see ``set_gate_undelivered_handler``): unset means "log it".
+        #: A separate channel from the refusal above because it is a separate
+        #: fact — nothing refused this reply, nothing received it — and the two
+        #: need different words on screen.
+        self._gate_undelivered_handler: Callable[[str], None] | None = None
         self._ask_handler: AskUserFn | None = None
         self._gate_task: asyncio.Task[None] | None = None
         self._gates_detached = False
@@ -5805,7 +5811,7 @@ class AttachedSession:
         # notice, nothing on screen saying the turn is still blocked. Diagnosing
         # the lost-gate-card bug needed a monkeypatched probe to learn which
         # guard had returned, which is a fact the code should carry itself.
-        # Each drop names its guard (G1-G5) so the next reader reads a log line
+        # Each drop names its guard (G1-G6) so the next reader reads a log line
         # instead of re-deriving the ladder.
         if self._disposed or not self._ready_for_events:
             logger.debug(
@@ -5839,6 +5845,44 @@ class AttachedSession:
         if self._gates_detached and not background:
             logger.debug(
                 "gate ladder G4: gates are detached, dropping %s/%s",
+                pending.kind,
+                pending.request_id,
+            )
+            return
+        # G6: NO OWNER ON THE OTHER END CAN EVER TAKE AN ANSWER FROM THIS
+        # VIEWER, so the question must not be offered. `can_ever_bind` is the
+        # one predicate that separates this from every recoverable cold
+        # state — a socket blip, a recovery loop mid-flight, a live owner
+        # whose display history is refreshing all answer it True and all of
+        # them heal on their own, while a facade closed to dialling by
+        # construction (the deliberate stop on the legacy attach contract,
+        # `can_ever_bind`'s own reachable False) answers False for the life
+        # of the process.
+        #
+        # CHECKED HERE, immediately before the arm that would start a
+        # bridge, and NOT at the top: this is the one place every route to a
+        # card converges — the commit site, the settled-navigation re-arm,
+        # `_reconcile_gate_surface`, and `set_ask_handler`/`set_ask`'s own
+        # re-arm — so one guard covers all of them, and it only ever
+        # refuses when there is BOTH a gate to present AND no bridge already
+        # running for it.
+        #
+        # WHY IT IS THE LADDER AND NOT A REFUSAL TO MOUNT IN THE HOST. The
+        # host's own verdict (`SessionInteraction.can_never_bind`, proven by
+        # the durable stop record as well as by this predicate) is published
+        # by the connect that the PAINT arms, so on the return leg it does
+        # not exist yet when the card would mount. The viewer's predicate
+        # does: the stop happened while the user was away. Refusing here is
+        # therefore the only shape that can precede the card, and a card that
+        # mounts and takes keystrokes is a question the app cannot honour —
+        # measured as a silently discarded answer for an ask and a FALSE
+        # `✓ allowed` receipt for an approval (UX round 1, U1). Not
+        # starting the bridge at all is what makes both unreachable rather
+        # than merely apologised for.
+        if not self.can_ever_bind:
+            logger.debug(
+                "gate ladder G6: the viewer can never bind, so no owner can "
+                "take an answer for %s/%s",
                 pending.kind,
                 pending.request_id,
             )
@@ -5890,7 +5934,20 @@ class AttachedSession:
             if not self._gate_reply_is_current(pending, client):
                 return
             self.preserve_viewer_gate_reply()
-            await client.approval_answer(pending.request_id, approved)
+            try:
+                await client.approval_answer(pending.request_id, approved)
+            except (RuntimeError, ConnectionError) as error:
+                # ACCEPTED HERE, NEVER DELIVERED THERE. Both arms below swallow
+                # this exception by design (a stale-request race, and the stop
+                # path's dead-owner post), and both are ordinary ends — but the
+                # operator who pressed the key is looking at a card that
+                # resolved, and their answer went nowhere. The host is the only
+                # party that can take the `✓ allowed` receipt back and say so,
+                # so it is told here, on the ONE branch that means "the reply
+                # did not land" (UX round 1, U1). Re-raised unchanged: the
+                # swallow stays exactly where it was.
+                self._note_gate_reply_undelivered(pending, error)
+                raise
             self._gate_answered_key = self._gate_identity(pending)
         except OperatorAuthorityRequired as error:
             # THE THIRD DOOR (design round 2, D9). This is NOT the
@@ -5963,6 +6020,35 @@ class AttachedSession:
             ):
                 self._gate_task = None
 
+    def _note_gate_reply_undelivered(self, pending: PendingRequest, error: BaseException) -> None:
+        """Tell the host that an answer this pane accepted never reached the owner.
+
+        A THIRD fact, and not a spelling of either one above. The refusal
+        channel (``set_gate_refusal_handler``) carries an owner that answered and
+        said no; the swallow arms in ``_run_approval``/``_run_ask`` carry the
+        ordinary races. Neither leaves the app able to tell the operator that
+        the key they just pressed did nothing — which is exactly the state a stop
+        landing under a live card produces, and it is met with a receipt claiming
+        the call was allowed (``ApprovalBlock.receipt``), because the card
+        resolves on the KEYPRESS and the post happens one await later.
+
+        It cannot be answered by a pre-check on the delivery path: at the moment
+        the widget settles, whether the owner is still there is not yet known.
+        Hence an after-the-fact channel, the same shape as the refusal one, and
+        the host decides what its own surfaces owe.
+        """
+        logger.warning(
+            "gate reply for %s/%s was not delivered: %s",
+            pending.kind,
+            pending.request_id,
+            error,
+        )
+        notify = self._gate_undelivered_handler
+        if notify is None:
+            return
+        with contextlib.suppress(Exception):
+            notify(pending.kind)
+
     async def _run_ask(self, pending: PendingRequest) -> None:
         try:
             handler = self._ask_handler
@@ -5978,11 +6064,20 @@ class AttachedSession:
             values = answer.get(pending.request_id) or []
             if values:
                 self.preserve_viewer_gate_reply()
-                await client.ask_answer(
-                    pending.request_id,
-                    values[0],
-                    question_index=pending.question_index,
-                )
+                try:
+                    await client.ask_answer(
+                        pending.request_id,
+                        values[0],
+                        question_index=pending.question_index,
+                    )
+                except (RuntimeError, ConnectionError) as error:
+                    # The approval gate's branch, one kind over: an ask the
+                    # operator answered on a viewer whose owner is gone was
+                    # discarded in silence (UX round 1, U1). No transcript
+                    # receipt is written for an ask, so the host's half here is
+                    # the sentence, not a correction.
+                    self._note_gate_reply_undelivered(pending, error)
+                    raise
                 self._gate_answered_key = self._gate_identity(pending)
         except (asyncio.CancelledError, RuntimeError, ConnectionError):
             # Same three outcomes as the approval gate above, including the
@@ -8528,6 +8623,15 @@ class AttachedSession:
         and the refusal is logged.
         """
         self._gate_refusal_handler = handler
+
+    def set_gate_undelivered_handler(self, handler: Callable[[str], None] | None) -> None:
+        """Where an answer that never reached the owner goes, for a host with a voice.
+
+        ``handler`` receives the gate's kind (``"ask"`` or ``"approval"``).
+        Optional in the same way ``set_gate_refusal_handler`` is: a host with no
+        surface for it leaves this unset and the drop stays in the log.
+        """
+        self._gate_undelivered_handler = handler
 
     def set_approval_handler(self, handler: ApprovalGate | None) -> None:
         self._approval_handler = handler

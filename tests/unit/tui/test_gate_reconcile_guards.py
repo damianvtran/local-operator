@@ -763,3 +763,88 @@ async def test_a_delta_inside_a_departing_detach_does_not_rearm_the_bridge(
                     await asyncio.gather(gate_task, return_exceptions=True)
     finally:
         await rig.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_delta_inside_the_relaunch_window_does_not_rearm_the_bridge(
+    tmp_path, monkeypatch
+) -> None:
+    """The reconcile must also stay out of the RELAUNCH window (``_restart_plan``).
+
+    The third disjunct of the reconcile's guard, and the one nothing else
+    exercises: ``_session_transition_pending`` is covered by the sibling case
+    above, and ``_sidebar_navigation.requested_id`` by the rearm cases beside it.
+    A relaunch is the same shape as a departure for a different reason —
+    ``_detach_relaunch_gates`` withdraws every viewer bridge (``preserve_answers``
+    so the next viewer receives the unanswered gate from canonical state) and the
+    process re-execs, so a frontend delta that lands in that window must not put a
+    bridge back on a session about to be disposed. Nothing in
+    ``_gates_detached`` tells that apart from a sidebar suspension, which is why
+    the window is read from the plan.
+
+    DRIVEN THROUGH THE REAL SEAM. The withdrawal is the real
+    ``_detach_relaunch_gates``; the delta is delivered through the real
+    ``_source_frontend_changed``, which is what a socket read calls. Only
+    ``_restart_plan`` itself is set by hand: constructing a ``RestartPlan`` means
+    ``make_plan``/``stash_plan`` over ``sys.argv``, and the plan's contents are
+    not what the guard reads — its PRESENCE is.
+    """
+    rig = await _rig(tmp_path / "config", monkeypatch, "alpha")
+    app = _app(rig, "alpha")
+    try:
+        with patch("local_operator.mobile.attach_client.find_runtime_record", rig.find_owner):
+            async with app.run_test(size=(100, 30)) as pilot:
+                assert await _pump_until(pilot, lambda: app._session is not None, tries=300)
+                alpha, source = _attached(app._session), app._interaction
+                app._set_approve_all(False)
+                probe = _install_probe(monkeypatch, alpha)
+
+                gate_task = await _raise_ask(rig, "alpha", _one_question())
+                try:
+                    assert await _pump_until(
+                        pilot, lambda: app._ask_screen is not None, tries=300
+                    ), "the ask card never mounted; the premise is unmet"
+
+                    app._restart_plan = object()
+                    await app._detach_relaunch_gates()
+                    await _pump(pilot, 16)
+
+                    # THE GUARD'S OWN PREMISE, asserted rather than assumed: every
+                    # earlier return in the reconcile has to be FALSE, or this test
+                    # would pass without reaching the disjunct it is about. The
+                    # earlier ones are `requested_id` (nothing was requested here)
+                    # and `_sidebar_gate_card_ready` — hence the check that the
+                    # withdrawal really did take the card off the screen.
+                    card_ready = app._sidebar_gate_card_ready(source, require_paint=False)
+                    detached_before = alpha._gates_detached
+                    assert detached_before, (
+                        "the relaunch withdrawal did not leave the current source "
+                        "detached, so there is no latch for the delta to undo and this "
+                        "test proves nothing"
+                    )
+                    assert not card_ready and app._ask_screen is None, (
+                        "the card is still mounted, so the reconcile would return at "
+                        "`_sidebar_gate_card_ready` and never reach the plan disjunct"
+                    )
+
+                    app._source_frontend_changed(source)
+                    await _pump(pilot, 16)
+
+                    diagnosis = (
+                        f"\n  detached before the delta = {detached_before!r}"
+                        f"\n  detached after the delta = {alpha._gates_detached!r}"
+                        f"\n  _restart_plan is not None = {app._restart_plan is not None!r}"
+                        + _state(app, alpha, source, probe)
+                    )
+                    _dump(diagnosis)
+
+                    assert alpha._gates_detached, (
+                        "REGRESSION: a frontend delta inside the relaunch window cleared "
+                        "_gates_detached and re-armed a gate bridge on a session whose "
+                        "runtime is about to be disposed by the re-exec" + diagnosis
+                    )
+                finally:
+                    gate_task.cancel()
+                    await asyncio.gather(gate_task, return_exceptions=True)
+    finally:
+        await rig.dispose()
