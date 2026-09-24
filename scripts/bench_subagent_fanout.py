@@ -21,7 +21,23 @@ What it reports, per fan-out size N:
 * ``launch_ms``      -- time from the first launch until every child has started;
 * ``settle_ms``      -- time from the last child's final message until the
   parent's settled event for it fires;
-* ``cpu_s``          -- process CPU for the whole fan-out (host-noise tolerant).
+* ``cpu_s``          -- process CPU for the whole fan-out (host-noise tolerant);
+* ``step_gap_ms``    -- p50/p95/max of the NON-TOOL overhead of one step: the
+  wall time from a model call's final stream event to the SAME conversation's
+  next provider request (tool execution is the scripted ``todo`` no-op, so this
+  is request assembly, relay, persistence and loop contention). Reported for
+  the solo parent and for the children, which is the "child vs parent step"
+  the operator asked about;
+* ``hub_wake_ms``    -- with ``--hub``, every child's tool call is a ``hub``
+  note to its parent; this is the time from that delivery until a parked
+  parent-side waiter on the arrival signal actually runs.
+
+``--runtime`` (on by default) attaches the production runtime host
+(``ServingSessionHandle``) to the parent, which is what a runtime-hosted
+conversation -- every desktop/phone session -- runs per root event.
+``--history N`` seeds N settled children into the parent's registry first: a
+long-lived parent carries up to ``MAX_RECORDS`` of them, and a per-event cost
+that is linear in the registry is invisible on an empty one.
 
 Run it from a worktree with that worktree's interpreter, ISOLATED (the children
 write real session directories under the config dir):
@@ -90,14 +106,26 @@ class ScriptedStream:
         self.pace_s = pace_s
         self.tool = tool
         self.turn_times: list[float] = []
+        #: Non-tool overhead per step, see ``step_gap_ms``: keyed by the
+        #: conversation's first message id, which is unique per session and
+        #: stable across its requests, so solo and child gaps are measured by
+        #: the same clock at the same two boundaries.
+        self.step_gaps: list[float] = []
+        self.final_ends: list[float] = []
+        self._last_end: dict[str, float] = {}
 
     def __call__(self, request: ChatRequest, signal: Any = None):
+        now = time.perf_counter()
+        key = str(getattr(request.messages[0], "id", "") if request.messages else "")
+        ended = self._last_end.pop(key, None)
+        if ended is not None:
+            self.step_gaps.append(now - ended)
         assistant_turns = sum(
             1 for m in request.messages if isinstance(m, Message) and m.role == "assistant"
         )
-        return self._gen(assistant_turns)
+        return self._gen(assistant_turns, key)
 
-    async def _gen(self, done: int):
+    async def _gen(self, done: int, key: str = ""):
         start = time.perf_counter()
         # Token pacing: a real stream yields to the loop between chunks, and
         # the loop's other tenants run in those gaps. Batched sleeps keep the
@@ -117,13 +145,20 @@ class ScriptedStream:
         usage = Usage(input_tokens=20_000 + done * 1500, output_tokens=self.text + self.reasoning)
         if done + 1 >= self.turns:
             self.turn_times.append(time.perf_counter() - start)
+            self.final_ends.append(time.perf_counter())
             yield StreamEndEvent(stop_reason="stop", usage=usage)
             return
-        args = {"command": "true"} if self.tool == "bash" else {"op": "view"}
+        if self.tool == "bash":
+            args: dict[str, Any] = {"command": "true"}
+        elif self.tool == "hub":
+            args = {"message": f"progress note {done}"}
+        else:
+            args = {"op": "view"}
         yield StreamToolCallDelta(
             index=0, id=f"call-{done}", name=self.tool, argument_delta=json.dumps(args)
         )
         self.turn_times.append(time.perf_counter() - start)
+        self._last_end[key] = time.perf_counter()
         yield StreamEndEvent(stop_reason="toolUse", usage=usage)
 
     # Session-owned forks share this script (and its clock) with the parent.
@@ -156,25 +191,90 @@ def _pct(xs: list[float], p: float) -> float:
     return xs[min(len(xs) - 1, int(p * len(xs)))]
 
 
+def _dist_ms(xs: list[float]) -> dict[str, float]:
+    return {
+        "p50": _pct(xs, 0.5) * 1000,
+        "p95": _pct(xs, 0.95) * 1000,
+        "max": max(xs, default=0.0) * 1000,
+        "n": len(xs),
+    }
+
+
+def _seed_history(parent: Session, root: Path, count: int) -> None:
+    """Give the parent ``count`` settled children, as a long-lived parent has.
+
+    Real transcript files, because the registry's roster probes each one's
+    existence; synthetic content, because no retained user session is read.
+    """
+    if count <= 0:
+        return
+    rows = []
+    for index in range(count):
+        directory = root / f"history-{id(parent)}-{index}"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "transcript.jsonl").write_text("{}\n")
+        rows.append(
+            {
+                "job_id": f"hist-{index}",
+                "label": f"earlier child {index}",
+                "session_dir": str(directory),
+                "prompt": "an earlier delegated task " * 40,
+                "outcome": "completed",
+                "settled_at": time.time() - 60 - index,
+                "result_text": "done " * 200,
+            }
+        )
+    parent.subagent_comms.restore(rows)
+
+
+def _attach_runtime(parent: Session, root: Path) -> Any:
+    """The production runtime host, subscribed exactly as ``RuntimeServer`` does."""
+    from local_operator.session.runtime.serving import ServingSessionHandle
+
+    handle = ServingSessionHandle(
+        parent, asyncio.get_running_loop(), cwd=str(root), install_gates=False
+    )
+    pushes = [0]
+
+    def _push() -> None:
+        pushes[0] += 1
+
+    handle.subscribe(_push)
+    return handle, pushes
+
+
 async def run_solo(args: argparse.Namespace, root: Path) -> dict[str, Any]:
+    # ``hub`` exists only inside a child (its target is the parent), so the
+    # solo baseline takes the same no-op step with ``todo`` instead.
+    tool = "todo" if args.tool == "hub" else args.tool
     stream = ScriptedStream(
-        turns=args.turns, reasoning=args.reasoning, text=args.text, pace_s=args.pace, tool=args.tool
+        turns=args.turns, reasoning=args.reasoning, text=args.text, pace_s=args.pace, tool=tool
     )
     session = Session(
         model=MODEL,
         stream_fn=stream,
-        tools=_tools([args.tool]),
+        tools=_tools([tool]),
         transcript=Transcript(root / "solo"),
         system_blocks_provider=lambda *a, **k: ["bench"],
         cwd=str(root),
         yolo=True,
     )
     await session.async_init()
+    # The same host the fan-out parent gets, so a parent step and a child step
+    # are compared under the same per-event runtime work.
+    handle, _pushes = _attach_runtime(session, root) if args.runtime else (None, [0])
     start = time.perf_counter()
     await session.prompt("do the scripted work")
     wall = time.perf_counter() - start
-    await session.dispose()
-    return {"solo_turn_ms": statistics.median(stream.turn_times) * 1000, "solo_wall_s": wall}
+    if handle is not None:
+        await handle.dispose()
+    else:
+        await session.dispose()
+    return {
+        "solo_turn_ms": statistics.median(stream.turn_times) * 1000,
+        "solo_wall_s": wall,
+        "solo_step_gap_ms": _dist_ms(stream.step_gaps),
+    }
 
 
 async def run_fanout(n: int, args: argparse.Namespace, root: Path) -> dict[str, Any]:
@@ -192,6 +292,58 @@ async def run_fanout(n: int, args: argparse.Namespace, root: Path) -> dict[str, 
     )
     await parent.async_init()
     parent.jobs.set_max_running(max(n, 1))
+    _seed_history(parent, root, args.history)
+    handle, pushes = _attach_runtime(parent, root) if args.runtime else (None, [0])
+    # Hub latency: stamp every arrival and let a parked waiter record when it
+    # actually ran. This is the wedge shape where a child's ``hub`` note sat
+    # unread while the parent loop was busy projecting the roster.
+    hub_marks: list[float] = []
+    hub_wakes: list[float] = []
+    arrival = parent._peer_arrival
+
+    class _StampedArrival:
+        """Delegates to the real signal; stamps the instant of each arrival.
+
+        A wrapper because ``_PeerArrival`` is slotted, and the session reads
+        the attribute on every ``queue_aside`` -- so the stamp is taken at
+        exactly the delivery point production uses.
+        """
+
+        # Spelled out rather than ``__getattr__``: ``ToolContext`` validates
+        # this field against a runtime-checkable protocol, which inspects the
+        # class for these members.
+        def event(self) -> asyncio.Event:
+            return arrival.event()
+
+        def count(self) -> int:
+            return arrival.count()
+
+        def arrivals(self) -> Any:
+            return arrival.arrivals()
+
+        def mark(self, *a: Any, **k: Any) -> None:
+            hub_marks.append(time.perf_counter())
+            arrival.mark(*a, **k)
+
+    parent._peer_arrival = _StampedArrival()  # type: ignore[assignment]
+
+    async def _hub_waiter(done: asyncio.Event) -> None:
+        seen = 0
+        while not done.is_set():
+            event = arrival.event()
+            waiter = asyncio.ensure_future(event.wait())
+            stopper = asyncio.ensure_future(done.wait())
+            await asyncio.wait({waiter, stopper}, return_when=asyncio.FIRST_COMPLETED)
+            for pending in (waiter, stopper):
+                pending.cancel()
+            now = time.perf_counter()
+            for stamp in hub_marks[seen:]:
+                hub_wakes.append(now - stamp)
+            seen = len(hub_marks)
+            event.clear()
+
+    hub_done = asyncio.Event()
+    hub_task = asyncio.create_task(_hub_waiter(hub_done))
     # An attached viewer: every real parent has one (TUI, desktop, phone), and
     # a subscriber is what arms the parent's 50 ms roster coalescer -- the
     # path that re-projects every child's trajectory while the fan-out runs.
@@ -214,17 +366,35 @@ async def run_fanout(n: int, args: argparse.Namespace, root: Path) -> dict[str, 
     while any(getattr(parent.jobs.get(j), "trajectory", None) is None for j in ids):
         await asyncio.sleep(0.005)
     launch = time.perf_counter() - t0
-    await asyncio.gather(*(parent.jobs.settled_event(j).wait() for j in ids))
+    woke: list[float] = []
+
+    async def _wait_one(job_id: str) -> None:
+        await parent.jobs.settled_event(job_id).wait()
+        woke.append(time.perf_counter())
+
+    await asyncio.gather(*(_wait_one(j) for j in ids))
     wall = time.perf_counter() - t0
+    settle = (max(woke) - max(stream.final_ends)) if woke and stream.final_ends else 0.0
+    hub_done.set()
+    await hub_task
     cpu = time.process_time() - cpu0
     stop.set()
     await beat
     statuses = [getattr(parent.jobs.get(j), "status", "gone") for j in ids]
     if subscription is not None:
         subscription.unsubscribe()
-    await parent.dispose()
+    if handle is not None:
+        await handle.dispose()
+    else:
+        await parent.dispose()
     return {
         "children": n,
+        "history": args.history,
+        "runtime": bool(args.runtime),
+        "step_gap_ms": _dist_ms(stream.step_gaps),
+        "settle_ms": settle * 1000,
+        "hub_wake_ms": _dist_ms(hub_wakes),
+        "runtime_pushes": pushes[0],
         "child_turn_ms": statistics.median(stream.turn_times) * 1000,
         "child_turn_p90_ms": _pct(stream.turn_times, 0.9) * 1000,
         "launch_ms": launch * 1000,
@@ -254,8 +424,20 @@ async def main() -> None:
         default=True,
         help="attach a frontend subscriber to the parent (the realistic case)",
     )
+    parser.add_argument(
+        "--runtime",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="attach the production runtime host (ServingSessionHandle) to the parent",
+    )
+    parser.add_argument(
+        "--history", type=int, default=0, help="settled children seeded into the parent first"
+    )
     parser.add_argument("--profile", help="write a cProfile of the largest fan-out here")
     parser.add_argument("--label", default="")
+    parser.add_argument(
+        "--repeat", type=int, default=1, help="run each fan-out size this many times"
+    )
     parser.add_argument("--output")
     args = parser.parse_args()
 
@@ -263,7 +445,7 @@ async def main() -> None:
         root = Path(tmp)
         solo = await run_solo(args, root)
         rows = []
-        for n in args.children:
+        for n in [size for size in args.children for _ in range(max(1, args.repeat))]:
             prof = cProfile.Profile() if args.profile and n == max(args.children) else None
             if prof:
                 prof.enable()
@@ -272,6 +454,8 @@ async def main() -> None:
                 prof.disable()
                 prof.dump_stats(args.profile)
             row["slowdown"] = row["child_turn_ms"] / solo["solo_turn_ms"]
+            solo_gap = solo["solo_step_gap_ms"]["p50"]
+            row["step_gap_ratio"] = row["step_gap_ms"]["p50"] / solo_gap if solo_gap else 0.0
             rows.append(row)
             print(json.dumps(row), flush=True)
     out = {
