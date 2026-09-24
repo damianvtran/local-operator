@@ -719,3 +719,29 @@ def test_no_ci_job_runs_both_watchdogs_in_one_process() -> None:
         assert not (job.get("env") or {}).get(
             watchdog.ENV_SECONDS
         ), f"{name} arms the shard watchdog; it must not also run the e2e C timer"
+
+
+def test_the_report_says_how_fast_the_run_is_progressing() -> None:
+    """A silence needs a rate beside it, or the reader cannot tell slow from parked.
+
+    Measured 2026-09-24: a run whose log stood still for 29 minutes (69% and no
+    further bytes) was neither stalled nor dead -- it had been killed by the
+    wall-clock ``timeout`` its operator passed, having progressed steadily until
+    that second. The count and the rate are the two numbers that separate that
+    case from a park, and they are cheap: the controller already sees every
+    teardown report.
+    """
+    sink = _Sink()
+    controller = watchdog._install_controller_for_test(2.0, sink)
+    for index in range(4):
+        nodeid = f"tests/unit/a.py::test_{index}"
+        controller.started(nodeid)
+        controller.note(nodeid, "setup")
+        controller.note(nodeid, "teardown")
+
+    controller._last_progress -= 10.0
+    assert controller.report_if_stalled() is True
+
+    text = sink.texts[-1]
+    assert "4 tests completed in" in text
+    assert "/s)" in text, text
