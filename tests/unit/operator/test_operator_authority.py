@@ -722,10 +722,13 @@ def test_the_spawn_only_status_lines_are_wrapped_by_the_terminal_not_by_hand(
 #    built with those NULL callbacks.
 #
 # Nothing in this section creates a key, raises a prompt, or writes to any keychain:
-# the ladder tests drive a fake ``_CF`` that models ownership and still runs the REAL
-# ``dict()``/``release()`` code, and the test that asks the real framework creates an
-# access-control object and nothing else. The one exception is the opt-in test at the
-# end, gated on ``LOP_OPERATOR_ENCLAVE_TEST=1``.
+# the ladder tests drive a fake ``_CF`` that models ownership by substituting the whole
+# CoreFoundation surface (the real one would reach the OS), so their subject is
+# OWNERSHIP — which ref exists, who releases it, and whether a released one is read.
+# The real ``dict()``'s callback ARGUMENTS are pinned separately, by the two dedicated
+# tests above it. The test that asks the real framework creates an access-control object
+# and nothing else. The one exception is the opt-in test at the end, gated on
+# ``LOP_OPERATOR_ENCLAVE_TEST=1``.
 
 #: A real uncompressed P-256 point, exported from a Secure Enclave key created on
 #: this machine (public data — the private half never leaves the Enclave). A fixed
@@ -882,6 +885,11 @@ class _FakeCF:
         return value
 
     def release(self, *refs: Any) -> None:
+        """Release each owned ref once; borrowing a const is a no-op, as in ``_CF``.
+
+        A second release of the same ref raises through :meth:`_touch`, which is what
+        makes "released exactly once" a real assertion rather than a counting one.
+        """
         for ref in refs:
             value = int(ref or 0)
             if value in self.kinds:
@@ -917,6 +925,14 @@ class _FakeCF:
         return self.blobs[self._touch(ref, "data_bytes")]
 
     def dict(self, pairs: list[tuple[int, int]]) -> int:
+        """Assert the contents are ALIVE at build time, then record an owned ref.
+
+        LIMIT, stated because it is the one thing this fake cannot model: it does not
+        RETAIN what it is given, so it cannot catch a value released after the
+        dictionary was built and then read THROUGH it. That half is not left untested —
+        it is asserted where it lives, in the typed-callbacks tests, which is also why
+        those read Apple's own callback tables rather than a flag on this fake.
+        """
         for key, value in pairs:
             self._touch(key, "CFDictionaryCreate key")
             self._touch(value, "CFDictionaryCreate value")
