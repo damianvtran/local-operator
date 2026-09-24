@@ -723,8 +723,21 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.rename",
         "temp FILE -> state, dir_fd-bound to an evidence root",
     ),
-    ("local_operator/mcp/config.py::_write_json_atomic", "os.replace", "temp FILE -> mcp json"),
-    ("local_operator/mcp/config.py::_write_json_atomic", "os.unlink", "temp FILE -> mcp json"),
+    # The mcp config writer: a temp file BESIDE its target and ``os.replace`` onto
+    # it. Its two call sites are the ``add_key`` header bind and the rollback that
+    # undoes a refused one, and both take the scope FILE ``_scope_path`` resolved
+    # for a server this module owns — the replaced path is a file it just read,
+    # never a directory, so no session DIRECTORY is removed, renamed or replaced.
+    (
+        "local_operator/mcp/config.py::_write_bytes_atomic",
+        "os.replace",
+        "temp FILE -> the mcp.json scope file this module resolved",
+    ),
+    (
+        "local_operator/mcp/config.py::_write_bytes_atomic",
+        "os.unlink",
+        "that temp FILE, only while the write above is failing",
+    ),
     ("local_operator/mobile/seen.py::SeenStore._persist_locked", "os.replace", "temp FILE"),
     ("local_operator/mobile/seen.py::SeenStore._persist_locked", "os.unlink", "temp FILE"),
     (

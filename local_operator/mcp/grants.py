@@ -119,22 +119,32 @@ async def login_allowed(manager: Any, cfg: Any) -> bool:
     return await probe_oauth_capability(cfg)
 
 
-def logout_server(name: str) -> str | None:
+def logout_server(name: str, cwd: str | os.PathLike[str] | None = None) -> str | None:
     """Delete ``name``'s stored credential. Returns an error body, or ``None``.
 
     Deletion goes through the module helper, which writes the shared
     ``auth.db`` — the row every future session reads — rather than any store
     one session was injected with.
+
+    ``cwd`` is the folder whose config set names the server. It MUST be passed
+    by any caller that is not a terminal sitting in that folder: the desktop
+    server's process cwd is wherever it was launched from, so ``os.getcwd()``
+    there resolved a project-scoped server against an unrelated directory and
+    answered "not configured" for a server the settings page had just listed.
     """
     from local_operator.mcp.auth import mcp_logout_server
 
     try:
-        return mcp_logout_server(name, os.getcwd())
+        return mcp_logout_server(name, cwd if cwd is not None else os.getcwd())
     except Exception as exc:  # noqa: BLE001 — a failed logout is a notice, not a crash
         return str(exc)
 
 
-def clear_for_reauth_server(name: str, removed: list[str] | None = None) -> str | None:
+def clear_for_reauth_server(
+    name: str,
+    removed: list[str] | None = None,
+    cwd: str | os.PathLike[str] | None = None,
+) -> str | None:
     """Remove ``name``'s credential for a REAUTH. Error body, or ``None``.
 
     Reauth needs a different precondition from logout — "nothing is left for
@@ -143,12 +153,13 @@ def clear_for_reauth_server(name: str, removed: list[str] | None = None) -> str 
     distinction is made, shared with the CLI's ``mcp reauth`` so the two
     surfaces cannot disagree about the same state. This wrapper only supplies
     the cwd and keeps a failure a notice rather than a crash, exactly as
-    :func:`logout_server` does for the logout verb.
+    :func:`logout_server` does for the logout verb (including why ``cwd``
+    must be passed by a non-terminal caller).
     """
     from local_operator.mcp.auth import clear_for_reauth
 
     try:
-        return clear_for_reauth(name, os.getcwd(), removed=removed)
+        return clear_for_reauth(name, cwd if cwd is not None else os.getcwd(), removed=removed)
     except Exception as exc:  # noqa: BLE001 — a failed removal is a notice, not a crash
         return str(exc)
 
@@ -176,8 +187,13 @@ async def run_grant(
     """
     from local_operator.mcp.auth import McpLoginCancelledError
 
+    # The MANAGER's folder, not the process's: the manager resolved ``name``
+    # against its own cwd, so the credential delete must resolve it against the
+    # same one (see :func:`logout_server`). ``None`` keeps the process cwd for a
+    # reduced host whose manager carries no folder.
+    cwd = getattr(manager, "cwd", None)
     if sub == "logout":
-        error = logout_server(name)
+        error = logout_server(name, cwd)
         if error is not None:
             return f"MCP logout failed for {name!r}: {error}", "warning"
         try:
@@ -202,7 +218,7 @@ async def run_grant(
         # nothing), and telling a user whose grant was cancelled that their
         # credential is gone would be false for that case. Only a real
         # deletion appends.
-        error = clear_for_reauth_server(name, forgotten)
+        error = clear_for_reauth_server(name, forgotten, cwd)
         if error is not None:
             return f"MCP reauth failed for {name!r}: {error}", "warning"
         try:
