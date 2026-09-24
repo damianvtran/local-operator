@@ -808,8 +808,12 @@ class FakeSupervisor:
         result_type: Any,
         *,
         timeout: float,
+        # Accepted for signature parity with ``AdapterSupervisor._call_raw`` and
+        # deliberately unused: this fake answers a rescue/cleanup call directly,
+        # so no RPC deadline exists for a per-action overhead to fund.
+        execution_overhead_seconds_per_action: float = 0.0,
     ) -> CleanupResult | AckResult:
-        del result_type, timeout
+        del result_type, timeout, execution_overhead_seconds_per_action
         self.methods.append(method)
         if method in ("begin_rescue", "close"):
             return AckResult()
