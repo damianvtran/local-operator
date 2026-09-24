@@ -650,11 +650,22 @@ def _memo_source_bytes(memo: dict[str, dict[Any, Any]], live: set[str]) -> int:
 
     Superseded SOURCES are the whole of what the memo holds — the entry keeps the
     row's own preview/result/reason objects alive, not copies of any frame — so
-    this is the figure review round 1 and QA round 1 both measured on their own
-    fixtures (1,694,671 B for a 32 -> 3 row shrink, 18,409,240 B at 256 x 25).
+    this is the quantity review round 1 and QA round 1 both measured on their own
+    fixtures, quoted here in the bytes they measured (1,694,671 B for a 32 -> 3
+    row shrink, 18,409,240 B at 256 x 25).
+
+    ENCODED rather than ``len(str)``, and that is not cosmetic on this fixture:
+    ``len`` is CHARACTERS, every prompt here ends in CJK (``工作项``), and
+    measured with the memo filled at 32 rows the same 480 pinned sources are
+    **175,284 characters against 179,124 bytes** — 32 of the 480 carrying the
+    non-ASCII preview. The name, this docstring and the figures cited above are
+    all bytes, so the sum has to be too (review round 2 on this PR, R2-3).
+
+    Both callers assert ``== 0``, so no caller depends on the unit — only on the
+    release being total.
     """
     return sum(
-        len(entry[0])
+        len(entry[0].encode("utf-8"))
         for row_id, row_memo in memo.items()
         if row_id not in live
         for entry in row_memo.values()
@@ -705,6 +716,23 @@ def test_frame_cap_memo_is_released_by_a_frame_that_comes_in_under_the_cap(
     assert sum(len(row_memo) for row_memo in memo.values()) < 32 * (3 + 2 * 6)
 
 
+def test_the_memo_source_figure_counts_bytes_and_not_characters() -> None:
+    """R2-3: the name, the docstring and the figures cited from it are all bytes.
+
+    ``len(str)`` is CHARACTERS, and this fixture's prompts carry CJK, so the two
+    units genuinely diverge: measured with the memo filled at 32 rows, the same
+    480 pinned sources are 175,284 characters against 179,124 bytes, 32 of the
+    480 being the non-ASCII preview. A helper that summed characters while
+    reporting a byte figure would be quoting a quantity it never measured.
+    """
+    source = "工作项" * 1000
+    entry = (source, 10, lambda text, limit: text, source)
+    memo: dict[str, dict[Any, Any]] = {"departed": {"prompt": entry}}
+
+    assert len(source.encode("utf-8")) > len(source)
+    assert _memo_source_bytes(memo, set()) == len(source.encode("utf-8"))
+
+
 def test_frame_cap_memo_is_reduced_to_the_shape_a_row_still_publishes() -> None:
     """A LIVE row's superseded slots are released too, not only a departed row's.
 
@@ -751,6 +779,77 @@ def test_frame_cap_memo_is_reduced_to_the_shape_a_row_still_publishes() -> None:
     assert len(memo["child-0"]) == 3 + 2 * 1
     # The other row is untouched: the release is per row, not a reset.
     assert len(memo["child-1"]) == 3 + 2 * 6
+
+
+def test_a_phase_reshape_costs_the_frame_a_sweep_and_not_a_grown_memo() -> None:
+    """R2-2: the per-row bound is ``previews + 4 x``, and the envelope is ATTAINED.
+
+    The reconcile's sweep test is a ``len()`` comparison taken BEFORE the tiers,
+    against the shape the row is publishing. A row whose item COUNT is unchanged
+    and whose ``(phase, item)`` POSITIONS moved passes it and then adds the new
+    positions' keys, so the honest bound after any frame is ``previews + 4 x``
+    rather than the ``+ 2 x`` the docstring used to claim (review round 2 on this
+    PR, R2-2). Pinned here on this file's fixture, one row of six items, where
+    ``previews + 2 x`` is 15 and ``previews + 4 x`` is 27:
+
+    * ``[6] -> [6]`` — nothing moved, so nothing new: ``15 -> 15``.
+    * ``[6] -> [3, 3]`` — three items moved: ``15 -> 21``.
+    * ``[6] -> [0, 6]`` — no old position survives, because a leading empty phase
+      is published rather than merged away, so the bound is reached: ``15 -> 27``.
+
+    Each peak is one frame wide — the NEXT frame sweeps back to ``15`` — which is
+    why the wider bound is documented rather than enforced in the code.
+    """
+    from local_operator.mobile.projection import cap_projection_frame
+
+    def phases(shape: list[int]) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": f"Phase {index}",
+                "items": [
+                    {
+                        "text": f"todo {index}.{item} " + "detail " * 90,
+                        "status": "pending",
+                        "reason": "reason " + "x" * 200,
+                    }
+                    for item in range(count)
+                ],
+            }
+            for index, count in enumerate(shape)
+        ]
+
+    def reshape_frame(before: list[int], after: list[int]) -> tuple[int, int, int]:
+        """``(slots before the reshaping frame, its peak, the next frame)``.
+
+        A FRESH fixture per pair, because the peak depends on the positions the
+        row was holding when the frame began — the sweep the previous frame left
+        behind is what decides how many of this frame's keys are new.
+        """
+        fold, _comms = _roster_with_todos(2)
+        projection = fold.projection
+        memo = projection._frame_cap_memo
+        cap = _over_cap(projection)
+        cap_projection_frame(projection, cap_bytes=cap)
+        fold.set_subagent_hydrated_details("child-0", [], phases(before))
+        cap_projection_frame(projection, cap_bytes=cap)
+        before_slots = len(memo["child-0"])
+        fold.set_subagent_hydrated_details("child-0", [], phases(after))
+        cap_projection_frame(projection, cap_bytes=cap)
+        peak = len(memo["child-0"])
+        cap_projection_frame(projection, cap_bytes=cap)
+        # The sibling is never reshaped, so it stays on the settled shape.
+        assert len(memo["child-1"]) == 3 + 2 * 6
+        return before_slots, peak, len(memo["child-0"])
+
+    two_x = 3 + 2 * 6
+    # Nothing moved, so no key is added: the frame is a pure hit.
+    assert reshape_frame([6], [6]) == (two_x, two_x, two_x)
+    # Three items move to positions the row had nothing at. The count is
+    # unchanged, so the frame's own sweep test passes and the keys land on top.
+    assert reshape_frame([6], [3, 3]) == (two_x, two_x + 2 * 3, two_x)
+    # No old position survives — a leading empty phase is published rather than
+    # merged away — so this is the bound itself, not a step toward it.
+    assert reshape_frame([6], [0, 6]) == (two_x, 3 + 4 * 6, two_x)
 
 
 def test_nested_subagent_completion_refreshes_selected_detail() -> None:

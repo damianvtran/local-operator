@@ -971,3 +971,57 @@ def test_a_row_that_cannot_name_itself_costs_a_mark_and_not_the_band(tmp_path: A
         "an unreadable row must cost its own mark and nothing else: the rest of "
         f"the roster still resolves — {counts}"
     )
+
+
+def test_a_session_whose_capability_reads_raise_costs_the_marks_not_the_band(
+    tmp_path: Any,
+) -> None:
+    """R2-1: the SESSION reads are guarded by the same rule as the row's identity.
+
+    ``getattr(session, "_subagent_comms", None)`` and ``getattr(session, "jobs",
+    None)`` swallow only the ``AttributeError`` they would have raised themselves
+    and propagate anything a property or an ``__getattr__`` raises — the gap
+    R1-2 closed on the row identity read, one read over. Measured on this head
+    before the fix, both escaped into the caller (``RuntimeError: comms
+    exploded``, ``RuntimeError: jobs exploded``) where the identity read now
+    answers.
+
+    A ``Session`` carries both as plain attributes, so the reachability is the
+    same synthetic class as R1-2 — what the guard buys is that the method's
+    totality contract holds for the shape rather than only for the shipped one.
+    """
+
+    class _CommsReadExplodes:
+        """A session whose comms capability raises on read, not merely missing."""
+
+        @property
+        def _subagent_comms(self) -> Any:
+            raise RuntimeError("comms exploded")
+
+        jobs: Any = None
+
+    class _JobsReadExplodes:
+        """A session whose ``jobs`` raises; the comms graph it carries is real."""
+
+        def __init__(self, comms: Any) -> None:
+            self._subagent_comms = comms
+
+        @property
+        def jobs(self) -> Any:
+            raise RuntimeError("jobs exploded")
+
+    app, comms = _docked_registry(4, tmp_path / "exploding", nested=True)
+    jobs, _selected = app._subagent_roster()
+    assert jobs, "the fixture must reach a full roster"
+    expected = app._subagent_child_counts(jobs)
+    assert expected == {"job-0000": 3}, expected
+
+    app._session = _CommsReadExplodes()
+    assert app._subagent_child_counts(jobs) == {}
+    assert app._subagent_roster() == ([], None)
+
+    # The same session shape with only ``jobs`` raising: the comms graph is real,
+    # so the guard has to answer the same nothing rather than escape.
+    app._session = _JobsReadExplodes(comms)
+    assert app._subagent_child_counts(jobs) == {}
+    assert app._subagent_roster() == ([], None)

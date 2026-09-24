@@ -718,11 +718,25 @@ def _frame_cap_row_memo(projection: SessionProjection, row_id: str) -> dict[Any,
     ran no tier, so a release that waited for the tiers left every departed
     row's slots pinned. Once that pass has run, two things are true of the memo
     rather than merely expected of it: its keys are the roster that frame
-    carried, and a live row holds at most ``previews + 2 x`` the todo items that
-    frame carried for it (the UNION of those, for rows sharing one slot). The
-    second holds because the reconcile sweeps exactly when a row holds MORE
-    slots than that, so a row cannot keep a shape it has shed, and nothing here
-    remembers one.
+    carried, and a live row holds at most ``previews + 4 x`` the todo items that
+    frame carried for it (the UNION of those, for rows sharing one slot).
+
+    WHY ``4 x`` AND NOT ``2 x``. The sweep is measured BEFORE the tiers, against
+    the shape the row is publishing, so a row whose item COUNT is unchanged and
+    whose ``(phase, item)`` POSITIONS moved passes that comparison and then adds
+    the new positions' keys once the tiers run. That is a phase reshape — six
+    items as ``[6]`` republished as ``[3, 3]`` — and it is the frame the tighter
+    claim did not hold on (review round 2 on this PR, R2-2). Measured in slots
+    for one row, on this file's own roster fixture (six items, so ``previews +
+    2 x`` is 15 and ``previews + 4 x`` is 27): ``[6] -> [6]`` stays ``15 -> 15``,
+    ``[6] -> [3, 3]`` goes ``15 -> 21``, and the envelope is ATTAINED rather
+    than merely allowed — ``[6] -> [0, 6]`` gives ``15 -> 27``, because a
+    leading empty phase is published rather than merged away and no old position
+    survives. Every one of those settles to ``15`` on the NEXT frame, which is
+    the sweep doing its work: the peak is one frame wide, nothing accumulates,
+    and that is why the bound is stated here rather than enforced in the code —
+    enforcing it means sweeping every row's slots on every repaint, which is the
+    per-frame cost this memo exists to remove.
 
     ``row_id`` is ``str(row.get("job_id") or "")``, so rows that reach the cap
     WITHOUT a ``job_id`` all share the ``""`` slot. That costs reuse — the
@@ -769,9 +783,11 @@ def _reconcile_frame_cap_memo(
     path below. Once a memo exists, what remains is one pass over the roster
     (a ``str`` and a dict lookup per row, plus a length comparison) and, only
     when a row holds MORE slots than the shape it is publishing needs — i.e.
-    exactly when it shrank — one sweep of that row's slots. A steady roster
-    takes the comparison and nothing else, which is what keeps this from
-    re-introducing the per-frame sweep the memo exists to remove.
+    exactly when that frame's shape is narrower than what the row still holds,
+    whether the row shrank or only moved its ``(phase, item)`` positions — one
+    sweep of that row's slots. A steady roster takes the comparison and nothing
+    else, which is what keeps this from re-introducing the per-frame sweep the
+    memo exists to remove.
 
     Rows sharing a key (no ``job_id``) are reconciled to the UNION of the
     shapes they ask for, so two rows on one slot do not sweep each other's

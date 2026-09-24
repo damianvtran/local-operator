@@ -27147,24 +27147,28 @@ class OperatorApp(App[None]):
         outside this guard. Every step in either caller that CAN raise is inside a
         guard, so a raising reader blanks the dock rather than escaping into a
         Textual handler. What each caller leaves outside one is ENUMERATED rather
-        than generalised, because the general form was wrong twice: "both callers
-        wrap their whole body" held for the outcome and not the syntax (review
-        round 3, N3-1), and so did "``getattr``/attribute reads, which cannot
-        raise" (review round 1 on this PR, R1-2).
+        than generalised, because the general form was wrong three times: "both
+        callers wrap their whole body" held for the outcome and not the syntax
+        (review round 3, N3-1), and so did "``getattr``/attribute reads, which
+        cannot raise" (review round 1 on this PR, R1-2) and then the same claim
+        one read over, about the SESSION reads (review round 2 on this PR, R2-1).
 
-        * :meth:`_subagent_roster` leaves, before its ``try``, ``self._session``,
-          the two capability ``getattr`` calls on it, and the ``_subagent_view``
-          read.
-        * :meth:`_subagent_child_counts` leaves, before its ``try``, the same two
-          capability ``getattr`` calls and the ``callable`` test on them; and
-          after it, ``manager``, ``paused``, ``counts = {}`` and the loop header
-          ``for job in jobs:``.
-        * What makes those reads total is that they are PLAIN attribute reads on
-          the session and on a job row, not that they are ``getattr``: ``getattr``
+        * :meth:`_subagent_roster` leaves, before its ``try``, ``self._session``
+          and the ``_subagent_view`` read. Both are plain attributes of the APP,
+          declared on it and never delegated, so neither can raise.
+        * :meth:`_subagent_child_counts` leaves, before its ``try``, only
+          ``self._session``; and after it, ``paused``, ``counts = {}`` and the
+          loop header ``for job in jobs:``.
+        * The session capability reads (``_subagent_comms``, then ``jobs``) are
+          INSIDE the guard in both callers, as is the ``callable`` test on
+          ``nodes`` and the row identity read. What is true of all of them is not
+          that they are total READS but that a guard bounds them: ``getattr``
           swallows only the ``AttributeError`` it would have raised itself and
-          propagates anything a property or an ``__getattr__`` raises. The row
-          identity read beside them was exactly that gap and now has its own
-          guard.
+          propagates whatever a property or an ``__getattr__`` raises, which is
+          how the identity read escaped first (round 1, R1-2) and how the two
+          session reads escaped one read over (round 2, R2-1). Each guard
+          degrades to what its own column needs: no marks at all, no roster, and
+          no mark for the row that cannot name itself.
         * The ``for job in jobs:`` header is left outside deliberately: it walks
           the roster the caller just built, and a guard there could only convert a
           caller's own type error into a silently blank band. Its residual risk is
@@ -27285,10 +27289,16 @@ class OperatorApp(App[None]):
         resumed session's rehydrated children are untouched.
         """
         session = self._session
-        comms = getattr(session, "_subagent_comms", None)
-        manager = getattr(session, "jobs", None)
         view = self._subagent_view
         try:
+            # The two capability reads are INSIDE the guard, not before it.
+            # ``getattr`` is not a guarantee — it propagates whatever a property
+            # or an ``__getattr__`` raises — so out here either one escaped into
+            # the Textual handler that called this (``RuntimeError: comms
+            # exploded`` / ``RuntimeError: jobs exploded``) instead of resolving
+            # to the empty roster below (review round 2 on this PR, R2-1).
+            comms = getattr(session, "_subagent_comms", None)
+            manager = getattr(session, "jobs", None)
             # This resolver's own pass: the child list, every node's job row and
             # the ``children()`` scan below all come off it. ``paused_child_ids``
             # builds one of its own (through ``comms.nodes()``), so the tick pays
@@ -27365,10 +27375,6 @@ class OperatorApp(App[None]):
         a leaf does. The alternative here is not a better mark but an exception
         in a Textual message handler, for a decoration.
         """
-        comms = getattr(self._session, "_subagent_comms", None)
-        nodes = getattr(comms, "nodes", None)
-        if not callable(nodes):
-            return {}
         try:
             # Built INSIDE the try, like the roster resolver's: ``_roster_read``
             # cannot raise today, but a build moved back out would be a raising
@@ -27377,15 +27383,27 @@ class OperatorApp(App[None]):
             # that CAN raise; what sits outside it is enumerated in
             # ``_roster_read``'s docstring, which is the single place that list
             # lives (review round 3, N3-1; review round 1 on this PR, R1-2).
+            #
+            # The two SESSION reads belong in here with it, and for the same
+            # reason: they are ``getattr``, which propagates whatever a property
+            # or an ``__getattr__`` raises, so outside the guard both escaped
+            # into the handler as ``RuntimeError: comms exploded`` / ``RuntimeError:
+            # jobs exploded`` rather than blanking the marks (review round 2 on
+            # this PR, R2-1). Nothing here is total because of how it is READ;
+            # it is total because every step that can raise is inside a guard.
+            comms = getattr(self._session, "_subagent_comms", None)
+            nodes = getattr(comms, "nodes", None)
+            if not callable(nodes):
+                return {}
             read = self._roster_read(comms)
             buckets: dict[str, list[Any]] = {}
             for node in cast(Sequence[Any], read.nodes()):
                 parent_id = str(getattr(node, "parent_job_id", "") or "")
                 if parent_id:
                     buckets.setdefault(parent_id, []).append(node)
+            manager = getattr(self._session, "jobs", None)
         except Exception:  # noqa: BLE001 — a mark may not cost the band
             return {}
-        manager = getattr(self._session, "jobs", None)
         paused = paused_child_ids(comms)
         counts: dict[str, int] = {}
         for job in jobs:
