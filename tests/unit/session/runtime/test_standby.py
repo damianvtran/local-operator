@@ -293,6 +293,8 @@ def test_a_moved_input_refuses_and_retires_the_standby(
 ) -> None:
     out = tmp_path / "probe.json"
     proc = _start(root, out, started)
+    target = Path(standby.__file__)
+    st = target.stat()
     if what == "config":
         # The product's own writer shape: a replace, i.e. a new inode.
         fresh = root / "config.yml.new"
@@ -301,8 +303,6 @@ def test_a_moved_input_refuses_and_retires_the_standby(
     else:
         # A loaded module of THIS tree moved: bump the mtime of a file the
         # standby imported (``standby.py`` itself), then put it back.
-        target = Path(standby.__file__)
-        st = target.stat()
         os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
     try:
         adopted, _, _ = _request(root, out)

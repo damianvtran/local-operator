@@ -225,7 +225,7 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
     parser.add_argument("--pairs", type=int, default=5)
     parser.add_argument("--warm-timeout", type=float, default=600.0)
     parser.add_argument("--json", default="")
