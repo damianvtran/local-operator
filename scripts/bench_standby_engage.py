@@ -123,8 +123,10 @@ async def _engage(root: Path, session_id: str) -> dict[str, Any]:
         takeover_factory=_no_takeover,
         surface="desktop",
     )
+    t1 = time.perf_counter()
     await remote.bind_runtime()
     bound_ms = (time.perf_counter() - t0) * 1000.0
+    bind_ms = (time.perf_counter() - t1) * 1000.0
     parent_cpu = _cpu_ms() - c0
     record, _ = await asyncio.to_thread(find_runtime_record, root, session_id)
     try:
@@ -133,9 +135,20 @@ async def _engage(root: Path, session_id: str) -> dict[str, Any]:
         pass
     return {
         "bound_ms": round(bound_ms, 1),
+        "cold_facade_ms": round(bound_ms - bind_ms, 1),
+        "bind_ms": round(bind_ms, 1),
         "parent_cpu_ms": round(parent_cpu, 1),
         "runtime_pid": getattr(record, "pid", None),
     }
+
+
+def _warm_parent() -> None:
+    import local_operator.mobile.attach_client  # noqa: F401
+    import local_operator.session.attached  # noqa: F401
+    import local_operator.session.runtime.launch  # noqa: F401
+    from local_operator.session_factory import warm_session_imports
+
+    warm_session_imports()
 
 
 def _one(arm: str, index: int, warm_timeout_s: float) -> dict[str, Any]:
@@ -195,7 +208,12 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         def pct(q: float) -> float:
             return values[min(len(values) - 1, int(round(q * (len(values) - 1))))]
 
+        binds = sorted(r["bind_ms"] for r in rows if r["arm"] == arm and "bind_ms" in r)
         out[arm] = {
+            "bind_p50": round(statistics.median(binds), 1) if binds else None,
+            "bind_p95": (
+                binds[min(len(binds) - 1, int(round(0.95 * (len(binds) - 1))))] if binds else None
+            ),
             "n": len(values),
             "p50": round(statistics.median(values), 1),
             "p95": round(pct(0.95), 1),
@@ -219,6 +237,12 @@ def main() -> int:
     from local_operator.tui.notify import suppress_notifications_for_process
 
     suppress_notifications_for_process("standby engage benchmark")
+    # THE PARENT IS WARMED FIRST, because the host this stands in for is: a TUI
+    # or the desktop daemon has imported the viewer stack long before its first
+    # /new. Without this, pass 0 of whichever arm runs first pays ~1 s of the
+    # PARENT's own imports inside ``AttachedSession.cold()`` (measured), which is
+    # a benchmark artefact, not a cost either arm has in production.
+    _warm_parent()
     rows: list[dict[str, Any]] = []
     for index in range(args.pairs):
         order = _ARMS if index % 2 == 0 else tuple(reversed(_ARMS))
