@@ -90,6 +90,10 @@ EVENT_KINDS: frozenset[str] = frozenset(
         "member_admitted",
         "member_removed",
         "member_left",
+        # `lop network member grant/revoke`: what a peer may do on THIS device
+        # changed. A membership-class event: an incident review asking "how could
+        # that device move a session here" is answered by exactly this record.
+        "member_capabilities_changed",
         # Learning a membership change from a peer is a MEMBERSHIP event: it is how
         # a member admitted after this device joined becomes visible here at all
         # (Q-R2-1), so an incident review that could not see it would read a
@@ -176,6 +180,7 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     # rows it added and the table it produced.
     "membership_learned": frozenset({"source", "added", "members", "members_digest"}),
     "member_removed": frozenset({"initiated_by", "rekeyed", "epoch_after"}),
+    "member_capabilities_changed": frozenset({"added", "removed", "capabilities", "initiated_by"}),
     "member_left": frozenset({"epoch"}),
     "device_rotated": frozenset({"old_device", "new_device"}),
     "epoch_rotated": frozenset({"epoch_before", "epoch_after", "rotation_id", "removed"}),
@@ -246,6 +251,9 @@ DURABLE_EVENTS: frozenset[str] = frozenset(
         "trust_changed",
         "member_removed",
         "member_admitted",
+        # A widened authority lost to a power cut would leave a device able to
+        # move or delete sessions here with no record of who allowed it.
+        "member_capabilities_changed",
         # Learning a membership change is the same class as being told one: an
         # operator investigating who could reach this device needs the moment a
         # newcomer became visible here, and a lost record would leave the mesh

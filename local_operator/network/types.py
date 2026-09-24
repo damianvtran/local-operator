@@ -235,7 +235,65 @@ LOCAL_OPS: tuple[str, ...] = (
     "peer_session_create",
     "peer_session_engage",
     "peer_session_stop",
+    # P0 PLUMBING (mesh build plan §0 finding 3): the LOCAL half of a capability
+    # grant. A member row's capabilities are resolved at admission and every
+    # device keeps its OWN copy (``relay.adopt_members`` rule 2), so widening what
+    # a peer may do HERE is a write to this device's row and nothing else — a
+    # local act with a local name, never a wire op.
+    "net_member_caps",
+    # The three verbs the later slices serve (§1.3). Declared here, in P0, so the
+    # totality rule ("a LOCAL_OPS name never appears in OP_CAPABILITY") already
+    # holds for them and no slice has to edit this tuple: the names are this
+    # tree's local vocabulary, deliberately not ``net_*`` (``relay.py``'s
+    # control-handler comment gives the rule).
+    "session_move",
+    "session_sync",
+    "session_lifecycle",
+    # The credential broker's leg 1 (runtime → its own relay, §2.3).
+    "credential_grant",
+    "credential_report",
+    "credential_placement",
 )
+
+#: The phases ``net_session_move`` carries (§1.3 of the build plan). Declared
+#: next to the op tables because the AUTHORISER reads them: ``status``, ``ready``
+#: and ``done`` must still reach a device that has already TOMBSTONED the id (the
+#: §6.5 recovery — the destination asks the source what happened), and ``invite``
+#: reaches the DESTINATION, which by definition does not own the id yet. See
+#: ``authorizer.Authorizer._session_scope`` for the carve-outs.
+MOVE_PHASES: tuple[str, ...] = ("status", "prepare", "ready", "done", "invite")
+
+#: Move phases the SOURCE must answer for an id it has already handed away. A
+#: ``prepare`` is deliberately absent: preparing a session this device no longer
+#: holds is exactly the double-writer INV-1 forbids, so the scope rule refuses it.
+MOVE_PHASES_AFTER_HANDOFF: frozenset[str] = frozenset({"status", "ready", "done"})
+
+#: Capabilities ``lop network member grant`` may add to a peer's LOCAL row.
+#: ``admin`` is absent ON PURPOSE: admin is a role granted by an admin invite and a
+#: human SAS step (``INVITE_ROLES``), and a one-line CLI verb that could mint one
+#: would be a way round that ceremony. ``broker_credential`` IS grantable — it is
+#: what ``credential share`` writes on the owner (§2.2) — but only by a device
+#: whose own row holds ``admin``, which is the "stays admin-only" rule: the
+#: capability is never in a non-admin ROLE, and only an admin may hand it out.
+GRANTABLE_CAPABILITIES: frozenset[str] = frozenset(
+    {"list", "view", "prompt", "steer", "stop", "slash", "delete", "move", "broker_credential"}
+)
+
+#: What each capability lets the peer DO, in words, for ``member grant/revoke``'s
+#: human output. A capability name alone ("broker_credential") does not tell the
+#: operator what they just allowed.
+CAPABILITY_WORDS: dict[str, str] = {
+    "list": "see this device's sessions",
+    "view": "watch a session here",
+    "prompt": "send prompts to a session here",
+    "steer": "steer a running turn here",
+    "stop": "stop a session here",
+    "slash": "run slash commands in a session here",
+    "delete": "archive or delete a session here",
+    "move": "move sessions to or from this device",
+    "broker_credential": "borrow this device's logins",
+    "admin": "administer the network",
+}
 
 #: The capability each peer-scope op requires. ``None`` means "an authenticated
 #: member at the current epoch, no capability needed" and exists for exactly one

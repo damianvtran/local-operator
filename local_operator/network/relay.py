@@ -38,6 +38,16 @@ AUTHORISED here — the chokepoint resolves the inner capability for
 ``net_forward`` — and then answered with a sentence naming the design document
 that owns them, which is what keeps the seam visible instead of silent.
 
+THE SLICE SEAM (build plan P0). Those ops land from THEIR OWN modules
+(``network/mobility.py``, ``network/sync.py``, ``network/credentials/``), each
+exposing ``install(server)`` that calls :meth:`RelayServer.register_ops`; an op
+whose handler blocks (a move's ``prepare``, a sync ``fetch``, a credential grant)
+is registered SLOW and runs on a bounded worker pool with a deadline the
+requester can see, never on the link's reader. Until a slice lands, its module
+registers the same by-name refusal the fallback gives. (The archive/delete note
+above is stale: ``session/archived.py`` and ``cleanup.delete_session`` are on
+the branch now — wiring them is the mobility slice's job.)
+
 WHAT THIS SLICE DOES IMPLEMENT is the session plane's piloting half
 (``mesh-session-mobility.md`` §2.2/§3.2/§4.3): ``net_session_create``,
 ``net_session_engage``, ``net_session_stop``, the ``net_forward`` carrier, the
@@ -60,9 +70,11 @@ import sys
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from local_operator.network import dial as session_dial
 from local_operator.network import store, wire
@@ -100,7 +112,10 @@ from local_operator.network.invite import (
 )
 from local_operator.network.invite import mint as mint_invite
 from local_operator.network.types import (
+    CAPABILITY_WORDS,
+    GRANTABLE_CAPABILITIES,
     NEEDS_ASK,
+    Granted,
     LinkContext,
     LinkPhase,
     MemberRecord,
@@ -240,6 +255,137 @@ MEMBERSHIP_PULL_TIMEOUT_S = 4.0
 #: stopped reading cannot hold a close — and its callers — past a blink. See
 #: :meth:`PeerLink.close` for what losing that window cost.
 CLOSE_FLUSH_S = 1.0
+
+# ---------------------------------------------------------------------------
+# Slow ops: off-reader dispatch (mesh build plan §0 finding 4)
+# ---------------------------------------------------------------------------
+
+#: Worker threads that run a SLOW op's handler instead of the link's reader.
+#:
+#: WHY OFF THE READER AT ALL. ``PeerLink._handle`` dispatches inline on the link's
+#: reader thread, and while a handler blocks the link reads NOTHING — keepalives,
+#: replies to this side's own requests, and every other op included. A move's
+#: ``prepare`` waits for a runtime to exit, a sync ``fetch`` reads a transcript
+#: that can be 100 MB, and a credential grant may sit through a provider refresh
+#: bounded at 60 s; any of those inline would stall the whole link past the 10 s
+#: request timeout (``wire.OP_WAIT_S``) that every OTHER caller on it is using.
+#:
+#: WHY FOUR. The ops that are slow are rare, operator-initiated acts (a move, a
+#: sync, a grant), and each worker may hold a runtime or a provider round trip:
+#: more workers would let one chatty peer pin more of this host, fewer would
+#: serialise a sync behind a move. The bound below, not the worker count, is what
+#: protects the host.
+SLOW_OP_WORKERS = 4
+
+#: Slow ops admitted at once — running plus queued for a worker. Past this a slow op
+#: is refused IMMEDIATELY with a sentence rather than queued without bound: an
+#: unbounded queue would turn a peer that retries into a memory leak here, and a
+#: queued op still burns its caller's deadline while it waits.
+SLOW_OP_MAX_PENDING = 16
+
+#: How much longer than the OWNER's deadline a requester waits for a slow op's
+#: reply. The owner answers ``deadline_exceeded`` AT its deadline with a sentence;
+#: waiting a margin past it is what lets that sentence arrive, instead of the
+#: requester giving up a moment earlier and reporting a bare timeout.
+SLOW_REPLY_MARGIN_S = 5.0
+
+#: The peer ops a slice module may register a handler for through
+#: :meth:`RelayServer.register_ops`. CLOSED ON PURPOSE: authorisation lives in
+#: ``authorizer.py``'s tables and the core handlers above are the ones those
+#: tables were decided for, so a slice that could REPLACE ``net_epoch`` or add a
+#: name nobody gave a capability to would be a way round the chokepoint's totality
+#: guarantee. ``net_session_lifecycle`` is here because its owner is the mobility
+#: slice (§1.1: archive/delete run the owner's own implementation) even though
+#: the refusal it answers with today lives in this module.
+SLICE_PEER_OPS: frozenset[str] = frozenset(
+    {"net_session_move", "net_sync", "net_broker", "net_session_lifecycle"}
+)
+
+#: The LOCAL control ops a slice module may register (see ``types.LOCAL_OPS``,
+#: where P0 declared them so the totality rule already covers them).
+SLICE_LOCAL_OPS: frozenset[str] = frozenset(
+    {
+        "session_move",
+        "session_sync",
+        "session_lifecycle",
+        "credential_grant",
+        "credential_report",
+        "credential_placement",
+    }
+)
+
+#: The modules that own the ops above, each exposing ``install(server)``. The
+#: relay imports them at construction and they call :meth:`RelayServer.register_ops`
+#: — so a slice lands by editing ITS module, and this file is not a merge point
+#: for four parallel slices (build plan §5: "only P0 edits relay.py").
+SLICE_MODULES: tuple[str, ...] = (
+    "local_operator.network.mobility",
+    "local_operator.network.sync",
+    "local_operator.network.credentials",
+)
+
+#: Which link, if any, THIS thread is currently serving a request for.
+#:
+#: THE DEADLOCK THIS NAMES (build plan §7, unsafe item 6). A handler that issues a
+#: request over the link it is answering waits for a reply that link's reader
+#: must deliver — and for an inline op the reader is the thread that is waiting.
+#: Off the reader it is still unsafe: two devices whose slow handlers each ask the
+#: other over one link can fill both worker pools with waiters, and nothing
+#: frees them before the deadline. So :meth:`PeerLink.request` REFUSES the call
+#: loudly (:class:`OwnLinkRequestError`) instead of letting it hang. A handler
+#: that needs a peer's answer asks over the peer's own dial, or returns and lets
+#: its caller drive the next step (the move protocol's ``invite`` phase is shaped
+#: that way for exactly this reason).
+_SERVING = threading.local()
+
+
+class OwnLinkRequestError(RuntimeError):
+    """A handler tried to issue a request over the link it is serving.
+
+    A programming error, not a condition to retry: raised rather than asserted so
+    it survives ``python -O``, and so ``dispatch`` answers the peer with a refusal
+    immediately instead of leaving it waiting on a reply that cannot come.
+    """
+
+
+@contextmanager
+def _serving_link(link_id: str) -> Iterator[None]:
+    previous = getattr(_SERVING, "link_id", None)
+    _SERVING.link_id = link_id
+    try:
+        yield
+    finally:
+        _SERVING.link_id = previous
+
+
+def serving_link_id() -> str | None:
+    """The link this thread is answering a request on, or ``None``."""
+    value = getattr(_SERVING, "link_id", None)
+    return str(value) if value else None
+
+
+@contextmanager
+def _slow_deadline(monotonic_deadline: float) -> Iterator[None]:
+    previous = getattr(_SERVING, "deadline", None)
+    _SERVING.deadline = monotonic_deadline
+    try:
+        yield
+    finally:
+        _SERVING.deadline = previous
+
+
+def slow_op_remaining_s() -> float | None:
+    """Seconds a SLOW handler has left before its requester is told it overran.
+
+    ``None`` outside a slow op. A handler that waits on something (a runtime
+    exiting, a provider refresh) bounds its own wait by this, so it gives up and
+    rolls back while the requester is still listening — instead of finishing a
+    move after the requester has already reported that it did not happen.
+    """
+    deadline = getattr(_SERVING, "deadline", None)
+    if deadline is None:
+        return None
+    return max(0.0, float(deadline) - time.monotonic())
 
 
 @dataclass(frozen=True)
@@ -1301,6 +1447,149 @@ def remove_member(
     return outcome
 
 
+@dataclass(frozen=True)
+class CapabilityChange:
+    """What ``set_member_capabilities`` did to one member row, for the receipt."""
+
+    device_id: str
+    name: str
+    added: tuple[str, ...]
+    removed: tuple[str, ...]
+    capabilities: tuple[str, ...]
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.added or self.removed)
+
+
+def set_member_capabilities(
+    record: NetworkRecord,
+    *,
+    device_id: str,
+    grant: Sequence[str] = (),
+    revoke: Sequence[str] = (),
+) -> CapabilityChange:
+    """Widen or narrow what a peer may do ON THIS DEVICE, by editing its local row.
+
+    WHY A LOCAL ROW WRITE (build plan §0 finding 3). A member's capabilities are
+    resolved at admission and stored, and each device keeps ITS OWN copy of every
+    row (``adopt_members`` rule 2: authority is not something a peer asserts about
+    a third device). The link's capability set is re-read from that row on every
+    frame (``PeerLink.role_capabilities``), so this write takes effect on an open
+    link immediately and on this device only — which is exactly the scope of the
+    decision: "may the laptop move sessions onto THIS box". The default ``drive``
+    role cannot move, delete or borrow a login, and a re-pair to get a wider role
+    would burn the device id.
+
+    THE REFUSALS, each named: only an ADMIN device may change another's authority
+    (the same test ``panic`` uses: this device's own row holds ``admin``); the
+    target must be an active member other than this device; a grant may not name
+    ``admin`` (that is a role granted by an invite and a human SAS step,
+    :data:`GRANTABLE_CAPABILITIES`); and an unknown name is refused rather than
+    stored, since a typo stored is an authority nobody decided. The CALLER holds
+    the record's write lock and saves; this function only mutates.
+    """
+    from local_operator.network.types import CAPABILITIES
+
+    me = record.self_member()
+    if not (me and me.active and "admin" in me.capabilities):
+        raise MeshRefusal(
+            "not_admin",
+            f"only an admin device can change what a peer may do; this device is "
+            f"{record.self_role or 'not an admin'} in {record.name}",
+        )
+    if device_id == record.self_device_id:
+        raise MeshRefusal(
+            "self_capabilities",
+            "a device cannot change its own capabilities; ask an admin device in the network",
+        )
+    member = record.member(device_id)
+    if member is None or not member.active:
+        raise MeshRefusal("unknown_member", f"{device_id} is not an active member of {record.name}")
+    unknown = sorted({*grant, *revoke} - set(CAPABILITIES))
+    if unknown:
+        raise MeshRefusal(
+            "unknown_capability",
+            f"no such capability: {', '.join(unknown)}; known: {', '.join(sorted(CAPABILITIES))}",
+        )
+    not_grantable = sorted(set(grant) - GRANTABLE_CAPABILITIES)
+    if not_grantable:
+        raise MeshRefusal(
+            "not_grantable",
+            f"{', '.join(not_grantable)} cannot be granted this way: admin comes only from an "
+            "admin invite, which a person confirms on both devices",
+        )
+    both = sorted(set(grant) & set(revoke))
+    if both:
+        raise MeshRefusal("conflicting_change", f"asked to grant and revoke {', '.join(both)}")
+    before = set(member.capabilities)
+    after = (before | set(grant)) - set(revoke)
+    member.capabilities = sorted(after)
+    return CapabilityChange(
+        device_id=member.device_id,
+        name=member.name,
+        added=tuple(sorted(after - before)),
+        removed=tuple(sorted(before - after)),
+        capabilities=tuple(sorted(after)),
+    )
+
+
+def _keep_local_authority(record: NetworkRecord, rows: list[MemberRecord]) -> None:
+    """Give each incoming row this device already holds its LOCAL role and set.
+
+    A row this device does not hold yet (a member admitted elsewhere) is taken as
+    the frame carries it, exactly as ``adopt_members`` does.
+    """
+    for row in rows:
+        local = next((m for m in record.members if m.device_id == row.device_id), None)
+        if local is not None and local.active:
+            row.role = local.role
+            row.capabilities = list(local.capabilities)
+
+
+def capability_change_lines(change: CapabilityChange, *, network_name: str) -> list[str]:
+    """The human receipt for a grant or revoke, in words rather than names.
+
+    ONE renderer for the relay's answer and the CLI's local fallback, so the two
+    paths cannot say different things about the same change.
+    """
+    who = change.name or change.device_id
+    if not change.changed:
+        return [f"no change: {who} already had exactly those capabilities in {network_name}"]
+    lines: list[str] = []
+    if change.added:
+        lines.append(
+            f"{who} may now "
+            + "; ".join(CAPABILITY_WORDS.get(cap, cap) for cap in change.added)
+            + f" (in {network_name}, on this device only)"
+        )
+    if change.removed:
+        lines.append(
+            f"{who} may no longer "
+            + "; ".join(CAPABILITY_WORDS.get(cap, cap) for cap in change.removed)
+            + f" (in {network_name}, on this device only)"
+        )
+    lines.append(f"capabilities now: {', '.join(change.capabilities) or 'none'}")
+    return lines
+
+
+def capability_change_event(record: NetworkRecord, change: CapabilityChange) -> AuditEvent:
+    """The audit record for a capability change — one shape for both writers."""
+    return AuditEvent(
+        event="member_capabilities_changed",
+        actor=record.self_device_id,
+        subject=change.device_id,
+        network_id=record.network_id,
+        epoch=record.epoch,
+        detail={
+            "added": list(change.added),
+            "removed": list(change.removed),
+            "capabilities": list(change.capabilities),
+            "initiated_by": record.self_device_id,
+        },
+    )
+
+
 def rotate_epoch(
     record: NetworkRecord,
     state: SecretState,
@@ -1435,6 +1724,14 @@ def apply_epoch(
     material = str(frame.get("secret") or "")
     if not material:
         return ApplyOutcome(False, "secret_missing")
+    # AUTHORITY STAYS LOCAL ACROSS A ROTATION — ``adopt_members`` rule 2, applied
+    # here too. The rotator's table is taken for WHO is a member, but a row this
+    # device already holds keeps the role and capabilities THIS device decided:
+    # without this, any peer's rotation (a `member rm` anywhere in the network)
+    # silently undid a `member grant` made here, because the rotator's copy of that
+    # row still carried the admission-time set. After the digest check on purpose:
+    # the digest proves the frame is the rotator's table as sent.
+    _keep_local_authority(record, rows)
     record.members = rows
     record.epoch = incoming_epoch
     record.rotations[str(incoming_epoch)] = sender_device_id
@@ -2071,6 +2368,15 @@ class StoreView(NetworkState):
     def local_session_ids(self) -> set[str]:
         return self._sessions()
 
+    def session_tombstones(self) -> dict[str, dict[str, Any]]:
+        # Read per question like everything else here, so a tombstone written by
+        # the move commit is honoured by the very next frame. Function-local: the
+        # projection module pulls the attach client, which this module does not
+        # otherwise need at import.
+        from local_operator.network.projection import read_tombstones
+
+        return read_tombstones(self._root)
+
 
 #: How long a mesh-requested engage may take before the op answers with a
 #: sentence. Longer than a local caller's own budget because this one spans a
@@ -2594,12 +2900,29 @@ class PeerLink:
         link also receives unsolicited events; a caller waiting for its own ack
         must not be handed someone else's ping answer.
         """
+        # THE DEADLOCK GUARD (build plan §7 unsafe item 6): a handler asking the
+        # peer it is answering, over the same link, waits on a reply that link
+        # cannot deliver in time. Refused loudly here rather than left to time out,
+        # because a 10 s hang that then reads as "the peer is unreachable" is the
+        # most misleading possible report of a programming error.
+        if serving_link_id() == self.link_id:
+            raise OwnLinkRequestError(
+                f"a handler may not ask the peer it is answering ({frame.get('op')!r} over "
+                "the link it is serving would wait on itself); ask over the peer's own "
+                "dial, or return and let the caller drive the next step"
+            )
         req = frame.get("req")
         waiter = self.server.expect_reply(self.link_id, req) if req is not None else None
         if not self.send(frame):
             return None
         if waiter is None:
             return None
+        if timeout is None:
+            # A SLOW op's reply arrives up to its OWNER's deadline later, so the
+            # default wait is that deadline plus a margin rather than the 10 s every
+            # other op uses — a requester that gave up first would report a bare
+            # timeout for an op the owner was about to answer with a sentence.
+            timeout = self.server.slow_request_timeout(str(frame.get("op") or ""))
         return waiter.wait(self.settings.op_wait_s if timeout is None else timeout)
 
 
@@ -2783,9 +3106,10 @@ class RelayServer:
             # THE SESSION PLANE (mesh-session-mobility.md §2.2/§3.2/§4.3). The
             # carriers and the three ops that make a session on this device
             # reachable from another one. net_sync/net_broker/net_session_move
-            # are deliberately ABSENT: they belong to other slices, and their
-            # absence is answered by the same sentence-naming fallback dispatch
-            # has always used (_owning_document).
+            # are deliberately ABSENT from this table: they belong to other
+            # slices, which add them through ``register_ops`` from their own
+            # modules (``_install_slices`` below), and an op no slice registered
+            # is answered by the sentence-naming fallback (_owning_document).
             "net_forward": self._op_forward,
             "net_stream": self._op_stream,
             "net_session_create": self._op_session_create,
@@ -2795,6 +3119,17 @@ class RelayServer:
             "net_pair_ready": self._op_pair_ready,
             "net_pair_abort": self._op_pair_abort,
         }
+        #: Peer op -> owner-side deadline (s) for ops whose handler runs OFF the
+        #: link's reader; see ``register_ops`` and ``_dispatch_slow``.
+        self._slow_ops: dict[str, float] = {}
+        #: Control-socket ops a slice module registered (``register_ops``).
+        self._local_slice_handlers: dict[str, Callable[[dict[str, Any]], Any]] = {}
+        #: Every op name a slice has claimed, so a second claim is refused.
+        self._slice_owned: set[str] = set()
+        self._slow_lock = threading.Lock()
+        self._slow_pool: ThreadPoolExecutor | None = None
+        self._slow_slots: threading.BoundedSemaphore | None = None
+        self._install_slices()
         self.started_at = time.time()
         #: Computed ONCE: the build stamp is decoration, and asking packaging
         #: metadata again on every heartbeat would be a per-15-seconds import for a
@@ -2883,6 +3218,12 @@ class RelayServer:
         handshake, and nothing here owns a transcript to lose.
         """
         self._stop.set()
+        # Queued slow ops are CANCELLED, not run: their callers are about to lose
+        # the link, and a move that starts during shutdown is the worst time for
+        # one. A handler already running keeps its worker until it returns.
+        with self._slow_lock:
+            if self._slow_pool is not None:
+                self._slow_pool.shutdown(wait=False, cancel_futures=True)
         with self._links_lock:
             links = list(self.links.values())
         for link in links:
@@ -3775,6 +4116,29 @@ class RelayServer:
             return wire.refusal_frame(
                 req, f"{granted.action} is only valid on a link that is still pairing"
             )
+        # AUTHORISED FIRST, OFF-LOADED SECOND: a slow op is decided on the reader
+        # like every other op (the chokepoint stays single-threaded per link and
+        # a refused frame costs no worker), and only its HANDLER leaves the reader.
+        deadline_s = self._slow_ops.get(carrier)
+        if deadline_s is not None:
+            return self._dispatch_slow(link, frame, handler, granted, deadline_s)
+        with _serving_link(link.link_id):
+            return self._run_handler(link, frame, handler, granted)
+
+    def _run_handler(
+        self,
+        link: PeerLink,
+        frame: dict[str, Any],
+        handler: Callable[[PeerLink, dict[str, Any]], dict[str, Any] | None],
+        granted: Granted,
+    ) -> dict[str, Any]:
+        """Run one authorised handler and shape its answer into a reply frame.
+
+        ONE copy for the inline and the slow path, so a slow op's refusals, its
+        internal-failure audit record and its ack shape cannot drift from every
+        other op's.
+        """
+        req = frame.get("req")
         try:
             result = handler(link, frame)
         except MeshRefusal as refusal:
@@ -3812,6 +4176,206 @@ class RelayServer:
         if result.get("op") in ("ack", "error"):
             return result
         return {"op": "ack", "req": req, "detail": result}
+
+    # -- slow ops (build plan §0 finding 4) ---------------------------------
+
+    def _slow_executor(self) -> tuple[ThreadPoolExecutor, threading.BoundedSemaphore]:
+        """The worker pool and its admission bound, built on first use.
+
+        LAZY on purpose: most relays never serve a slow op, and the test suite
+        constructs hundreds of servers that never start — four idle threads each
+        would be paid for nothing.
+        """
+        with self._slow_lock:
+            if self._slow_pool is None:
+                self._slow_pool = ThreadPoolExecutor(
+                    max_workers=SLOW_OP_WORKERS, thread_name_prefix="mesh-slow"
+                )
+                self._slow_slots = threading.BoundedSemaphore(SLOW_OP_MAX_PENDING)
+            assert self._slow_slots is not None
+            return self._slow_pool, self._slow_slots
+
+    def _dispatch_slow(
+        self,
+        link: PeerLink,
+        frame: dict[str, Any],
+        handler: Callable[[PeerLink, dict[str, Any]], dict[str, Any] | None],
+        granted: Granted,
+        deadline_s: float,
+    ) -> dict[str, Any] | None:
+        """Run a slow op's handler on a worker; its reply is sent from there.
+
+        Returns ``None`` (nothing for the reader to send) once the op is admitted,
+        or a refusal frame when it cannot be. EXACTLY ONE reply leaves this device
+        per request: the handler's, or — when the deadline passes first — a
+        sentence saying so. Whichever comes second is dropped, because two
+        replies to one ``req`` would satisfy one waiter and land as a stray on
+        the other side.
+
+        An op the deadline overtook BEFORE a worker picked it up is never run:
+        the requester has already been told it did not finish, and a move that
+        started after its caller gave up is a side effect nobody is waiting for.
+        """
+        req = frame.get("req")
+        op = granted.action
+        pool, slots = self._slow_executor()
+        if not slots.acquire(blocking=False):
+            return wire.refusal_frame(
+                req,
+                f"this device is already running {SLOW_OP_MAX_PENDING} long operations "
+                f"for its peers; {op} was not started — try again in a moment",
+            )
+        gate = threading.Lock()
+        state = {"answered": False, "started": False}
+
+        def _answer(reply: dict[str, Any]) -> None:
+            with gate:
+                if state["answered"]:
+                    return
+                state["answered"] = True
+            link.send(reply)
+
+        def _overdue() -> None:
+            with gate:
+                started = state["started"]
+            tail = (
+                "it may still complete, so ask for its status before retrying"
+                if started
+                else "it never started, so nothing was changed"
+            )
+            _answer(
+                wire.refusal_frame(
+                    req, f"{op} did not finish within {deadline_s:g} s on this device; {tail}"
+                )
+            )
+
+        timer = threading.Timer(deadline_s, _overdue)
+        timer.daemon = True
+
+        def _work() -> None:
+            try:
+                with gate:
+                    if state["answered"]:
+                        return
+                    state["started"] = True
+                with _serving_link(link.link_id), _slow_deadline(time.monotonic() + deadline_s):
+                    reply = self._run_handler(link, frame, handler, granted)
+                _answer(reply)
+            finally:
+                timer.cancel()
+                slots.release()
+
+        try:
+            timer.start()
+            pool.submit(_work)
+        except RuntimeError:
+            # The pool refuses new work once ``stop`` has shut it down.
+            timer.cancel()
+            slots.release()
+            return wire.refusal_frame(req, f"this device's relay is stopping; {op} was not started")
+        return None
+
+    def slow_request_timeout(self, op: str) -> float | None:
+        """How long a REQUESTER should wait for ``op``, or ``None`` for the default.
+
+        The owner's deadline plus :data:`SLOW_REPLY_MARGIN_S`. Read from THIS
+        device's registry, which is the same code the owner runs in a matched
+        fleet; a mismatched owner answers at its own deadline, and the margin is
+        what absorbs the difference.
+        """
+        deadline = self._slow_ops.get(op)
+        return None if deadline is None else deadline + SLOW_REPLY_MARGIN_S
+
+    def slow_op_deadline(self, op: str) -> float | None:
+        """The owner-side deadline registered for ``op``, or ``None`` when it is inline."""
+        return self._slow_ops.get(op)
+
+    # -- the slice hook (build plan §5: "only P0 edits relay.py") ----------
+
+    def register_ops(
+        self,
+        handlers: Mapping[str, Callable[[PeerLink, dict[str, Any]], dict[str, Any] | None]],
+        local_handlers: Mapping[str, Callable[[dict[str, Any]], Any]] | None = None,
+        *,
+        slow: Mapping[str, float] | None = None,
+        replace: bool = False,
+    ) -> None:
+        """Let a slice module serve its ops without editing this file.
+
+        ``handlers`` are PEER ops (named in :data:`SLICE_PEER_OPS`), dispatched
+        after the chokepoint exactly like the core table; ``local_handlers`` are
+        control-socket ops (:data:`SLICE_LOCAL_OPS`). ``slow`` maps a peer op to
+        its owner-side deadline in seconds and moves its handler off the link's
+        reader (see :data:`SLOW_OP_WORKERS`).
+
+        THE RULES, each a refusal rather than a warning:
+
+        * only the names above — authorisation was decided for them in
+          ``types.OP_CAPABILITY``, and a slice that could replace ``net_epoch``
+          or add an undecided op would bypass the chokepoint's totality;
+        * each op once — two modules both serving ``net_sync`` is a merge that
+          went wrong, and silently letting the later one win hides it.
+          ``replace=True`` is for a test standing in for a slice module;
+        * before ``start`` — the tables are read by reader threads without a
+          lock, which is only safe while nothing is reading them yet.
+
+        A handler registered here MUST NOT issue a request over the link it is
+        serving; :meth:`PeerLink.request` refuses that with
+        :class:`OwnLinkRequestError`.
+        """
+        if self._threads:
+            raise RuntimeError("register_ops must be called before the relay starts")
+        local_handlers = local_handlers or {}
+        slow = slow or {}
+        for name in handlers:
+            if name not in SLICE_PEER_OPS:
+                raise ValueError(
+                    f"{name!r} is not a peer op a slice may register; "
+                    f"known: {', '.join(sorted(SLICE_PEER_OPS))}"
+                )
+        for name in local_handlers:
+            if name not in SLICE_LOCAL_OPS:
+                raise ValueError(
+                    f"{name!r} is not a local op a slice may register; "
+                    f"known: {', '.join(sorted(SLICE_LOCAL_OPS))}"
+                )
+        for name, deadline in slow.items():
+            if name not in handlers:
+                raise ValueError(f"{name!r} is declared slow but no handler is registered for it")
+            if not float(deadline) > 0:
+                raise ValueError(f"{name!r} needs a positive deadline, not {deadline!r}")
+        if not replace:
+            taken = sorted((set(handlers) | set(local_handlers)) & self._slice_owned)
+            if taken:
+                raise ValueError(f"already registered by another slice: {', '.join(taken)}")
+        self._handlers.update(handlers)
+        self._local_slice_handlers.update(local_handlers)
+        for name in handlers:
+            if name in slow:
+                self._slow_ops[name] = float(slow[name])
+            else:
+                self._slow_ops.pop(name, None)
+        self._slice_owned.update(handlers)
+        self._slice_owned.update(local_handlers)
+
+    def _install_slices(self) -> None:
+        """Import each slice module and let it register its ops.
+
+        A module that fails to import or install is REPORTED and skipped, never
+        fatal: its ops then fall through to the not-implemented refusal, which
+        fails closed, while a relay that died at construction would take every
+        link on this device down with one slice's bug.
+        """
+        import importlib
+
+        for name in SLICE_MODULES:
+            try:
+                importlib.import_module(name).install(self)
+            except Exception as exc:  # noqa: BLE001 — reported; see the docstring
+                print(
+                    f"mesh relay: slice {name} did not install ({exc}); its ops will refuse",
+                    file=sys.stderr,
+                )
 
     # -- reply plumbing -----------------------------------------------------
 
@@ -6240,6 +6804,11 @@ class RelayServer:
 
     def _control_handlers(self) -> dict[str, Callable[[dict[str, Any]], Any]]:
         return {
+            # SLICE OPS FIRST so a core name below can never be shadowed by one:
+            # ``register_ops`` already refuses a name outside SLICE_LOCAL_OPS, and
+            # this order makes the core table win even if that check were lost.
+            **self._local_slice_handlers,
+            "net_member_caps": self._ctl_member_caps,
             "net_status": lambda frame: self.status(),
             "net_ls": self._ctl_ls,
             "net_show": lambda frame: self.network_detail(str(frame.get("network") or "")),
@@ -6371,6 +6940,36 @@ class RelayServer:
             "removed": device_id,
             "epoch": outcome.epoch,
             "queued": len(store.queued_frames(device_id, self.root)),
+        }
+
+    def _ctl_member_caps(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """``lop network member grant/revoke``: edit a peer's LOCAL member row.
+
+        Inside the record's write lock for the reason ``_ctl_member_rm`` gives: the
+        heartbeat and membership loops write the same record, and a grant written
+        from a snapshot would revert whatever they wrote in between. No broadcast
+        and no rotation — the change is this device's decision about this device
+        (see :func:`set_member_capabilities`).
+        """
+        resolved = self._require_network(str(frame.get("network") or ""))
+        with store.mutate(resolved.network_id, self.root) as record:
+            change = set_member_capabilities(
+                record,
+                device_id=str(frame.get("device_id") or ""),
+                grant=[str(item) for item in frame.get("grant") or []],
+                revoke=[str(item) for item in frame.get("revoke") or []],
+            )
+            if change.changed:
+                store.save(record, self.root)
+                self.audit.record(capability_change_event(record, change))
+        return {
+            "network_id": record.network_id,
+            "network": record.name,
+            "device_id": change.device_id,
+            "added": list(change.added),
+            "removed": list(change.removed),
+            "capabilities": list(change.capabilities),
+            "changed": change.changed,
         }
 
     def _ctl_trust(self, frame: dict[str, Any]) -> dict[str, Any]:
@@ -7235,8 +7834,34 @@ def _owning_document(op: str) -> str:
         "net_session_lifecycle": "mesh-session-mobility.md",
         "net_session_move": "mesh-session-mobility.md",
         "net_forward_session": "mesh-session-mobility.md",
+        # The LOCAL verbs P0 declared (types.LOCAL_OPS). Named here so a caller
+        # that reaches one before its slice lands gets the not-implemented
+        # sentence, not "this relay does not know the action".
+        "session_move": "mesh-session-mobility.md",
+        "session_sync": "mesh-session-mobility.md (R22)",
+        "session_lifecycle": "mesh-session-mobility.md",
+        "credential_grant": "mesh-credentials.md",
+        "credential_report": "mesh-credentials.md",
+        "credential_placement": "mesh-credentials.md",
     }
     return owners.get(op, "the design documents")
+
+
+def not_implemented_peer_op(op: str) -> Callable[[PeerLink, dict[str, Any]], dict[str, Any] | None]:
+    """A peer-op handler that refuses BY NAME, for a slice that has not landed.
+
+    Word for word the sentence ``dispatch`` gives an op with no handler at all, so
+    routing an op through ``register_ops`` before its slice exists changes the
+    path and nothing a peer can observe.
+    """
+
+    def _refuse(_link: PeerLink, _frame: dict[str, Any]) -> dict[str, Any] | None:
+        raise MeshRefusal(
+            "not_implemented",
+            f"{op} is not implemented in this build yet ({_owning_document(op)})",
+        )
+
+    return _refuse
 
 
 def _not_implemented(op: str, owner: str) -> Any:

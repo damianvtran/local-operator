@@ -67,6 +67,17 @@ class NetworkState(Protocol):
         """Sessions that live on THIS device (the relay's read-through cache)."""
         ...
 
+    def session_tombstones(self) -> dict[str, dict[str, Any]]:
+        """Sessions this device HANDED AWAY: id -> ``{device_id, ...}`` of the taker.
+
+        The one question the move protocol adds (build plan §1.3): a source must
+        still answer ``status``/``ready``/``done`` for an id it has tombstoned, or a
+        destination that crashed after the commit could never learn it won. A
+        default body, so a state that predates moves reads as "none handed away" —
+        which refuses closed.
+        """
+        return {}
+
 
 class Authorizer:
     """The chokepoint. Construct once per relay; ``check`` per inbound frame."""
@@ -280,6 +291,9 @@ class Authorizer:
             session_id = str(frame.get("session_id") or "")
         if not session_id:
             return None
+        carved = self._move_scope(link, op, frame, session_id)
+        if carved is not None:
+            return carved
         owned = self._networks.local_session_ids()
         if session_id not in owned:
             refusal = Refusal(
@@ -290,6 +304,39 @@ class Authorizer:
             self._refused(link, op, refusal, frame)
             raise refusal
         return session_id
+
+    def _move_scope(
+        self, link: LinkContext, op: str, frame: dict[str, Any], session_id: str
+    ) -> str | None:
+        """The two move phases that name a session this device does NOT own.
+
+        Returns the session id when the carve-out admits the frame, ``None`` to
+        fall through to the ordinary ownership rule (which then refuses).
+
+        * ``status``/``ready``/``done`` for an id this device TOMBSTONED to the
+          SENDER. After the commit the source no longer lists the id, yet the
+          destination's crash recovery is exactly "ask the source what happened"
+          (mesh-session-mobility.md §6.5). Only the device the tombstone names
+          gets through: a third device asking about a handed-away session is still
+          "does not live on this device". ``prepare`` is never carved out —
+          preparing a session this device no longer holds would make two writers.
+        * ``invite`` arrives at the DESTINATION, which by definition does not own
+          the id yet (O asks D to pull S from O). The capability check above has
+          already required ``move``; the id is checked where it matters, when D's
+          pull reaches O and O's own ownership rule answers.
+        """
+        from local_operator.network.types import MOVE_PHASES_AFTER_HANDOFF
+
+        if op != "net_session_move" or "frame" in frame:
+            return None
+        phase = str(frame.get("phase") or "")
+        if phase == "invite":
+            return session_id
+        if phase in MOVE_PHASES_AFTER_HANDOFF:
+            tombstone = self._networks.session_tombstones().get(session_id) or {}
+            if tombstone and str(tombstone.get("device_id") or "") == link.device_id:
+                return session_id
+        return None
 
     # -- audit --------------------------------------------------------------
 

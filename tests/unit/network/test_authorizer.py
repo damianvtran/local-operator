@@ -363,3 +363,95 @@ def test_the_wire_only_ever_gets_a_sentence() -> None:
     assert "prompt" in sentence  # the peer may know what IT asked for
     assert NETWORK not in sentence
     assert audit.events[-1].detail["capability"] == "prompt"
+
+
+# ---------------------------------------------------------------------------
+# The move carve-outs (mesh build plan §1.3, P0)
+# ---------------------------------------------------------------------------
+
+DEST = "d_" + "d" * 32
+THIRD = "d_" + "e" * 32
+
+
+class TombstoneState(FakeState):
+    """A source that has handed ``s_moved`` to :data:`DEST`."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.tombstones = {"s_moved": {"device_id": DEST, "moved_at": 1.0}}
+
+    def session_tombstones(self) -> dict[str, dict[str, Any]]:
+        return self.tombstones
+
+
+def _move(phase: str, session_id: str = "s_moved") -> dict[str, Any]:
+    return {"op": "net_session_move", "req": 1, "phase": phase, "session_id": session_id}
+
+
+@pytest.mark.parametrize("phase", sorted(types.MOVE_PHASES_AFTER_HANDOFF))
+def test_the_taker_may_ask_about_a_session_this_device_handed_it(phase: str) -> None:
+    """``status``/``ready``/``done`` reach a source that no longer lists the id —
+    the §6.5 recovery is exactly "ask the source what happened"."""
+    authorizer, _audit = make(state=TombstoneState())
+    granted = authorizer.check(link(capabilities={"move"}, device_id=DEST), _move(phase))
+    assert granted.session_id == "s_moved"
+
+
+def test_a_third_device_may_not_ask_about_a_handed_away_session() -> None:
+    authorizer, audit = make(state=TombstoneState())
+    with pytest.raises(types.Refusal) as excinfo:
+        authorizer.check(link(capabilities={"move"}, device_id=THIRD), _move("status"))
+    assert excinfo.value.code == "not_authorised"
+    assert "authorisation_refused" in audit.names()
+
+
+def test_prepare_is_never_carved_out_even_for_the_taker() -> None:
+    """Preparing a session this device no longer holds would make two writers."""
+    authorizer, _audit = make(state=TombstoneState())
+    with pytest.raises(types.Refusal) as excinfo:
+        authorizer.check(link(capabilities={"move"}, device_id=DEST), _move("prepare"))
+    assert excinfo.value.code == "not_authorised"
+
+
+def test_the_carve_out_still_requires_the_move_capability() -> None:
+    """Scope is decided AFTER capability: a drive member is refused first."""
+    authorizer, _audit = make(state=TombstoneState())
+    with pytest.raises(types.Refusal) as excinfo:
+        authorizer.check(
+            link(capabilities=set(types.ROLE_CAPABILITIES["drive"]), device_id=DEST),
+            _move("status"),
+        )
+    assert excinfo.value.code == "not_authorised"
+    assert "move" in excinfo.value.sentence
+
+
+def test_an_invite_reaches_the_destination_that_does_not_own_the_id_yet() -> None:
+    authorizer, _audit = make(state=FakeState(sessions=set()))
+    granted = authorizer.check(link(capabilities={"move"}), _move("invite", "s_elsewhere"))
+    assert granted.session_id == "s_elsewhere"
+
+
+def test_the_carve_out_is_for_the_move_op_only() -> None:
+    """A lifecycle op on a tombstoned id is still "does not live on this device"."""
+    authorizer, _audit = make(state=TombstoneState())
+    with pytest.raises(types.Refusal):
+        authorizer.check(
+            link(capabilities={"delete"}, device_id=DEST),
+            {"op": "net_session_lifecycle", "req": 1, "action": "delete", "session_id": "s_moved"},
+        )
+
+
+def test_a_state_without_tombstones_refuses_closed() -> None:
+    """The protocol's default body answers "nothing handed away"."""
+    authorizer, _audit = make(state=FakeState(sessions=set()))
+    with pytest.raises(types.Refusal):
+        authorizer.check(link(capabilities={"move"}, device_id=DEST), _move("status"))
+
+
+def test_the_new_local_verbs_are_total_and_never_peer_ops() -> None:
+    for name in ("net_member_caps", "session_move", "session_sync", "credential_grant"):
+        assert name in types.LOCAL_OPS
+        assert name not in types.OP_CAPABILITY
+    assert az.op_tables_are_total() == []
+    assert "broker_credential" not in types.ROLE_CAPABILITIES["drive"]
+    assert "broker_credential" not in types.ROLE_CAPABILITIES["read"]
