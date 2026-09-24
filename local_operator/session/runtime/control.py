@@ -1331,9 +1331,11 @@ async def stop_session(
         # contradiction. It is said here rather than after the identity gate because
         # rung 1 can end the runtime before that gate runs, and that stop needs its
         # reason too.
+        # "FINISH", NOT "DRAIN" (design round 1, D4): every other surface says the runtime
+        # is leaving or leaves by itself, and "drain" was this line's word alone.
         on_wait(
             f'"{name}" (pid {record.pid}) {_drain_phrase(record)}, but {stalled}, so it is '
-            "not left to drain; trying the ordinary stop"
+            "not left to finish; trying the ordinary stop"
         )
     if leaving and not force and not stalled and registry.pid_alive(record.pid):
         # THE REMEDY IS TWO-SIDED, and the line is read by whichever front end
@@ -1346,16 +1348,34 @@ async def stop_session(
         # runtime itself, so "skipped … (--force …)" alone reads as "this did
         # not work — retry if you meant it", when the answer for almost every
         # operator is to let it finish (UX round 2, NIT-2).
+        #
+        # EXCEPT WHEN THE LISTING SAID "lop stop" (design round 1 D3, agent review round 3
+        # m-C, QA round 3 Q-6). A held reading the artifacts cannot confirm — a marker
+        # from a build that predates the monotonic stamp — is LABELLED ``bound held;
+        # lop stop`` (cannot tell → held, for a person) but not ACTED on here (cannot
+        # tell → judge the heartbeat). An operator who followed that label and read
+        # "nothing to do" got two opposite instructions. So this skip says why the
+        # label and the ladder differ, and drops "nothing to do": the only remedy left
+        # is ``--force``, which is exactly what the operator came here to decide on.
+        remedy = _force_remedy(record.pid, _from_a_shell(_command))
+        if await asyncio.to_thread(_held_unconfirmed, record):
+            line = (
+                f'skipped "{name}" (pid {record.pid}) — it {_drain_phrase(record)}; its '
+                '"bound held" reading comes from an older build and cannot be confirmed, '
+                f"so it is left to finish ({remedy})"
+            )
+        else:
+            line = (
+                f'skipped "{name}" (pid {record.pid}) — it {_drain_phrase(record)}; stopping '
+                "it now cuts the turn it is finishing — it leaves by itself, nothing "
+                f"to do ({remedy})"
+            )
         return StopOutcome(
             pid=record.pid,
             session_id=record.session_id,
             name=name,
             method="draining",
-            line=(
-                f'skipped "{name}" (pid {record.pid}) — it {_drain_phrase(record)}; stopping '
-                "it now cuts the turn it is finishing — it leaves by itself, nothing "
-                f"to do ({_force_remedy(record.pid, _from_a_shell(_command))})"
-            ),
+            line=line,
         )
 
     # Rung 1 — the graceful op. Both its failure shapes are scheduled misses:
@@ -1633,12 +1653,49 @@ def _drain_stalled(record: SessionRecord) -> str:
             # number in this line is the number beside the row the operator just read.
             from local_operator.wakes.display import format_age
 
-            return f"it has not reported for {format_age(verdict.heartbeat_age_s)}"
+            return f"{_NOT_REPORTING}{format_age(verdict.heartbeat_age_s)}"
         if stall_watchdog.held_now(record.pid, record.started_at, proven=True):
-            return "its stall bound fired with work in flight and it has not re-armed since"
+            return STALL_HELD_REASON
     except Exception:  # noqa: BLE001 — the ladder never raises over a probe
         return ""
     return ""
+
+
+#: The held arm's reason, in the words of the ``bound held`` cell the operator arrived
+#: from rather than the watchdog's own ("has not re-armed since" was timer vocabulary —
+#: design round 1, D5). A constant because :func:`stall_tag` keys on it.
+STALL_HELD_REASON = "its stall bound is held (it fired with work in flight)"
+
+_NOT_REPORTING = "it has not reported for "
+
+
+def stall_tag(why: str) -> str:
+    """The ``/stop all`` row tag for a :func:`_drain_stalled` reason.
+
+    IN THE VOCABULARY THE OPERATOR CAN CHECK (design round 1, D1): "stalled" appeared on
+    no other surface, and ``lop sessions``' STALLED column is blank for a runtime that
+    is merely not reporting. The heartbeat arm says what ``HB_AGE`` shows; the held arm
+    says what the STALLED cell shows. Derived from the reason itself so the row and the
+    ``lop stop`` line cannot name different causes.
+    """
+    if why.startswith(_NOT_REPORTING):
+        return f"leaving, not reporting for {why[len(_NOT_REPORTING):]}"
+    return "leaving, bound held"
+
+
+def _held_unconfirmed(record: SessionRecord) -> bool:
+    """Is ``record`` labelled ``bound held`` on evidence the ladder will not act on?
+
+    Asked only on the skip path, where :func:`_drain_stalled` already answered that no
+    PROVEN held fire exists, so a held reading here is the unproven kind. Never raises:
+    a probe failure keeps the ordinary skip line.
+    """
+    try:
+        from local_operator.session.runtime import stall_watchdog
+
+        return stall_watchdog.held_now(record.pid, record.started_at)
+    except Exception:  # noqa: BLE001 — the ladder never raises over a probe
+        return False
 
 
 def _stop_targets(root: Path, own_pid: int | None = None) -> list[SessionRecord]:
