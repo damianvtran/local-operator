@@ -143,10 +143,14 @@ read — `submitted state=PENDING_REVIEW distributionChannels=[crxVersion=0.1.20
 at 2026-09-23T14:33:16Z — and the first evidence that it was live is the
 2026-09-24 run above at 13:56:45Z, with the listing read of the same day. The
 approval instant therefore lies **between 2026-09-23T14:33:16Z and
-2026-09-24T13:56:45Z**, and no run we hold narrows it further — which is why the
-`Approval timestamp` row above is left as written rather than rewritten. The
-heading is left standing for the same reason: its "in review as of 2026-09-23" is
-superseded by this addendum, not edited out of it. The listing carries the only
+2026-09-24T13:56:45Z**, and no run we hold narrows it further, which is why the
+`Approval timestamp` row above is left as written rather than rewritten. Four
+rows above are consequently stale — `Promotion route` (which still instructs a
+developer to dispatch a promote once the store reports the revision `STAGED`, a
+state this revision has left), `Store state`, `State last checked` and
+`Approval timestamp` — and the heading's "in review as of 2026-09-23" is
+superseded by this addendum; the rows and the heading are left standing, as this
+file leaves them. The listing carries the only
 fine-grained reading inside that window — a timestamp field beside the version and
 size in the page's own payload, `1790254705` seconds and `513623000` nanos, i.e.
 2026-09-24T12:58:25.513623Z, the value behind the rendered "Updated September 24,
