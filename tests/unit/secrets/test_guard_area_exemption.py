@@ -284,7 +284,9 @@ def _echo_tool(name: str, text: str) -> AgentTool:
     )
 
 
-async def _drive(session: Session, tool: AgentTool, stream: Any, session_cwd: str | None = None) -> list[str]:
+async def _drive(
+    session: Session, tool: AgentTool, stream: Any, session_cwd: str | None = None
+) -> list[str]:
     """Run one scripted turn and return the redacted tool rows' text.
 
     ``session_cwd`` is the SESSION root the reader resolves a relative ``path``
@@ -623,6 +625,6 @@ async def test_a_malformed_path_returns_an_ordinary_result_and_the_turn_survives
         stream = _OneCallStream("read", json.dumps({"path": raw}))
         rows = await _drive(session, _read_tool(), stream, str(session_dir))
         assert rows, f"no tool row for {raw!r}: the turn did not complete"
-        assert "Does not exist" in rows[0] or "does not exist" in rows[0], (
-            f"expected the ordinary missing-path result for {raw!r}, got {rows[0][:120]!r}"
-        )
+        assert (
+            "Does not exist" in rows[0] or "does not exist" in rows[0]
+        ), f"expected the ordinary missing-path result for {raw!r}, got {rows[0][:120]!r}"
