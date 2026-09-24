@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import ast
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -185,6 +185,9 @@ RULES: tuple[Rule, ...] = (
             "v=$(lop secret get NAME); $v",
             "nohup lop secret get NAME >/dev/stdout 2>/dev/null",
             "lop secret get NAME 2>/dev/null",
+            # R4-2: the NAME arrives on `xargs`'s stdin, and the fetch is the
+            # same fetch — `xargs` runs `lop` with this result as its stdout.
+            "echo NAME | xargs lop secret get",
         ),
         counterexamples=(
             "v=$(lop secret get GITHUB_TOKEN)",
@@ -228,6 +231,8 @@ RULES: tuple[Rule, ...] = (
             "v=$(lop secret get GITHUB_TOKEN); printf '%s' \"$v\" | sed 's/./& /g'",
             "lop secret get GITHUB_TOKEN | xxd",
             'v=$(lop secret get NAME); echo "TOKEN=$v" | rev',
+            "echo NAME | xargs lop secret get | rev",
+            "xargs lop secret get <<< NAME | rev",
         ),
         counterexamples=(
             "lop secret get GITHUB_TOKEN | wc -c",
@@ -334,6 +339,26 @@ RULES: tuple[Rule, ...] = (
             "lop secret run --secret NAME=TOKEN -- sh -c 'echo \"$TOKEN\"'",
             "lop secret run --secret NAME=TOKEN -- python3 -c "
             "'import os; print(os.environ[\"TOKEN\"])'",
+            # R4-1: a wrapper in front of the consumer is the consumer — the
+            # outer stage and this check share one wrapper grammar.
+            "lop secret run --secret NAME=TOKEN -- timeout 5 printenv TOKEN",
+            "lop secret run --secret NAME=TOKEN -- env printenv TOKEN",
+            "lop secret run --secret NAME=TOKEN -- env sh -c 'echo $TOKEN'",
+            "lop secret run --secret NAME=TOKEN -- command printenv TOKEN | rev",
+            "lop secret run --secret NAME=TOKEN -- stdbuf -oL printenv TOKEN | rev",
+            "lop secret run --secret NAME=TOKEN -- timeout 5 python3 -c "
+            "'import os;print(os.environ[\"TOKEN\"][::-1])'",
+            # R4-2: `xargs` hands its command the environment unchanged, and the
+            # other inline interpreters read it as Python does.
+            "lop secret run --secret NAME=TOKEN -- xargs printenv TOKEN",
+            "lop secret run --secret NAME=TOKEN -- perl -e 'print scalar reverse $ENV{TOKEN}'",
+            "lop secret run --secret NAME=TOKEN -- ruby -e 'puts ENV[\"TOKEN\"].reverse'",
+            "lop secret run --secret NAME=TOKEN -- node -e 'console.log(process.env.TOKEN)'",
+            "lop secret run --secret NAME=TOKEN -- awk 'BEGIN{print ENVIRON[\"TOKEN\"]}'",
+            # R4-3: `file`'s inline shell program is walked with the path
+            # variable bound, so an emitter the old word list lacked is seen.
+            "lop secret file GCP_SA_JSON -- sh -c 'rev \"$GOOGLE_APPLICATION_CREDENTIALS\"'",
+            "lop secret file GCP_SA_JSON --env-var KF -- sh -c 'rev \"$KF\"'",
         ),
         counterexamples=(
             "lop secret file GCP_SA_JSON -- gcloud auth activate-service-account "
@@ -346,6 +371,16 @@ RULES: tuple[Rule, ...] = (
             "lop secret run --secret NAME -- sed -n 1p /etc/hosts",
             "lop secret run --secret NAME=TOKEN -- declare -x TOKEN",
             "lop secret file GCP_SA_JSON -- env V=1 /bin/true",
+            # R4-1/R4-2: the same wrappers around a consumer that NEEDS the value,
+            # a program handed in a file, and an interpreter that never reads
+            # the environment stay allowed.
+            "lop secret run --secret NAME=TOKEN -- timeout 5 curl -sS "
+            '-H "Authorization: Bearer $TOKEN" https://x',
+            "lop secret run --secret NAME=TOKEN -- nice python3 client.py",
+            "lop secret run --secret NAME=TOKEN -- env -i printenv",
+            "lop secret run --secret NAME=TOKEN -- node app.js",
+            "lop secret run --secret NAME=TOKEN -- awk '{print $1}' /etc/hosts",
+            "lop secret file GCP_SA_JSON -- sh -c 'wc -c < \"$GOOGLE_APPLICATION_CREDENTIALS\"'",
             "lop secret run --secret NAME -- echo",
         ),
     ),
@@ -1514,15 +1549,6 @@ _PROGRAM_NAMES = frozenset({"lop", "lop.exe", "local-operator", "local-operator.
 #: defines, a copy of the binary under a new name) is read as the command
 #: itself. That residual is the same one a script invoked by name has, and the
 #: PR names it rather than implying a reach this table does not have.
-#: Ways an inline program hands an environment value back without a printer
-#: word: `printenv`, `os.environ[...]`/`getenv`, a bare `declare`/`set`. Used
-#: only for the `run` consumer position, where the value is in the environment.
-_ENV_READ_RE = re.compile(r"\b(?:printenv|getenv|environ|declare|typeset|export|set)\b")
-#: How a Python program reaches an environment variable it was given. Only
-#: the two documented spellings: an unknown one (`dict(os.environ)["TOKEN"]`)
-#: is the residual, stated in the rule rather than silently covered.
-_PY_ENV_READ_RE = re.compile(r"\b(?:os\.environ|environ|getenv)\b")
-
 _PRECOMMANDS: dict[str, tuple[frozenset[str], int]] = {
     "command": (frozenset(), 0),
     "builtin": (frozenset(), 0),
@@ -1538,6 +1564,101 @@ _PRECOMMANDS: dict[str, tuple[frozenset[str], int]] = {
 #: `env` options after which the rest of the line is a STRING, not words: the
 #: wrapper cannot be stepped over exactly, so `env` stays the command.
 _ENV_SPLIT = frozenset({"-S", "--split-string"})
+
+#: The consumer of `lop secret run|file … -- CMD`, and a source's own command
+#: word, step over the same wrappers plus `xargs` (R4-2). `xargs` hands its
+#: command the ENVIRONMENT unchanged, so `run … -- xargs printenv TOK` is
+#: `printenv TOK`, and `echo X | xargs lop secret get` is a source whose name
+#: arrives on stdin. The OUTER unwrap deliberately does not carry `xargs`: there
+#: it also turns stdin into argv, which the dedicated `xargs` branch models
+#: (:meth:`_ShellAnalyzer._interpreter`), and stepping over it would lose that.
+_CONSUMER_WRAPPERS: dict[str, tuple[frozenset[str], int]] = {
+    **_PRECOMMANDS,
+    "xargs": (
+        frozenset({"-I", "-L", "-n", "-P", "-s", "-d", "-E", "-a", "-J", "-R", "-S"}),
+        0,
+    ),
+}
+
+
+def _wrapped_command_index(
+    texts: Sequence[str],
+    *,
+    table: Mapping[str, tuple[frozenset[str], int]] = _PRECOMMANDS,
+    opaque: Collection[int] = (),
+    assignments: Collection[int] | None = None,
+) -> tuple[int, frozenset[int]]:
+    """Where the command a wrapper chain runs begins: ``(index, kept)``.
+
+    ``texts`` starts at the first word in command position. The result is the
+    index of the command the wrappers run (``0`` when the first word is not a
+    wrapper) and the indices of `env`'s own ``NAME=value`` words, which are the
+    child's environment rather than wrapper syntax.
+
+    ONE grammar for every caller (R4-1): the outer stage (:meth:`_ShellAnalyzer.
+    _unwrap`), the `run`/`file` consumer and a source's command word all ask
+    this, because R3-2 taught only the outer stage and `run … -- timeout 5
+    printenv TOK` then walked straight past the consumer check. A second copy
+    of the wrapper grammar is how that happened, so there is no second copy.
+
+    ``opaque`` marks words that are a substitution: their text is not known, so
+    the walk stops there rather than guess. ``assignments`` marks the
+    ``NAME=value`` words when the caller has the tokens (the lexer knows a
+    quoted `=` from a real one); plain text falls back to the assignment regex.
+    A wrapper with nothing after it IS the command (`env` alone dumps), and
+    `command -v`/`env -S` look a name up or re-split a string rather than
+    running the next word, so none of those is stepped over.
+    """
+
+    def is_assignment(position: int) -> bool:
+        if assignments is not None:
+            return position in assignments
+        return bool(_ASSIGNMENT_RE.match(texts[position]))
+
+    cursor = 0
+    kept: set[int] = set()
+    while cursor < len(texts):
+        if cursor in opaque:
+            break
+        wrapper = texts[cursor].rsplit("/", 1)[-1]
+        spec = table.get(wrapper)
+        if spec is None:
+            break
+        takes_argument, positionals = spec
+        probe = cursor + 1
+        lookup_only = False
+        while probe < len(texts):
+            option = texts[probe]
+            if option == "--":
+                probe += 1
+                break
+            if wrapper == "command" and option[:1] == "-" and set(option[1:]) & {"v", "V"}:
+                lookup_only = True
+                break
+            if wrapper == "env" and (option in _ENV_SPLIT or option.startswith("--split-string")):
+                lookup_only = True
+                break
+            if option in takes_argument:
+                probe += 2
+                continue
+            if option[:1] == "-":
+                probe += 1  # `-oL`, `-5`, `--signal=KILL`, env's `-i`/`-`
+                continue
+            break
+        if lookup_only:
+            break
+        step_kept: set[int] = set()
+        if wrapper == "env":
+            while probe < len(texts) and is_assignment(probe):
+                step_kept.add(probe)
+                probe += 1
+        probe += positionals
+        if probe >= len(texts):
+            break  # nothing left to run: the wrapper is the command
+        kept |= step_kept
+        cursor = probe
+    return cursor, frozenset(kept)
+
 
 #: `$l`, `${l}` or `"$l"` — a word that is one variable and nothing else, which
 #: is how `l=lop; $l secret get X` spells the program (R3-2).
@@ -1589,6 +1710,91 @@ _INLINE_PRINT_RE = re.compile(
     r"(?:print|echo|printf|cat|tee|base64|repr|logging\.\w+"
     r"|sys\.stdout\.write|sys\.stderr\.write)\b"
 )
+#: How a Python program reaches an environment variable it was given. Only
+#: the two documented spellings: an unknown one (`dict(os.environ)["TOKEN"]`)
+#: is the residual, stated in the rule rather than silently covered.
+_PY_ENV_READ_RE = re.compile(r"\b(?:os\.environ|environ|getenv)\b")
+
+
+@dataclass(frozen=True)
+class _InlineLanguage:
+    """How one non-shell interpreter's inline program reaches the value (R4-2).
+
+    These languages are not this module's walk, so the test is the coarse one
+    the Python arm always used, searched rather than parsed: the program must
+    NAME the variable, READ the environment and PRINT (``printer``, or a flag
+    in ``print_flags`` that prints the program's result, like `node -p`). A
+    `file` consumer must also READ A FILE (``file_read``), because there the
+    variable holds a path and naming it alone (`getsize(os.environ["G"])`)
+    reads no bytes. Fail-closed in the module's usual direction:
+    `print(len(os.environ["T"]))` is refused with the rest.
+    """
+
+    printer: re.Pattern[str]
+    env_read: re.Pattern[str]
+    file_read: re.Pattern[str]
+    print_flags: frozenset[str] = frozenset()
+
+
+_PYTHON_LANGUAGE = _InlineLanguage(
+    printer=_INLINE_PRINT_RE,
+    env_read=_PY_ENV_READ_RE,
+    file_read=re.compile(r"\bopen\s*\(|\bread_(?:text|bytes)\b|\bcopyfileobj\b"),
+)
+_AWK_LANGUAGE = _InlineLanguage(
+    printer=re.compile(r"\bprintf?\b"),
+    env_read=re.compile(r"\bENVIRON\b"),
+    file_read=re.compile(r"\bgetline\b"),
+)
+_NODE_LANGUAGE = _InlineLanguage(
+    printer=re.compile(r"\bconsole\.\w+|\bprocess\.std(?:out|err)\.write\b|\bthrow\b"),
+    env_read=re.compile(r"\bprocess\.env\b"),
+    file_read=re.compile(r"\breadFileSync\b|\breadFile\b|\bcreateReadStream\b"),
+    print_flags=frozenset({"-p", "--print"}),
+)
+
+#: The interpreters whose inline program a `run`/`file` consumer check reads,
+#: by command name (a versioned `python3.12` is looked up as `python3`).
+#: **The bound**, stated rather than implied: a program handed in a FILE
+#: (`perl x.pl`, `node app.js`), a language not listed (`php -r`, `lua -e`,
+#: `osascript -e`), a dump of the WHOLE environment that never names the
+#: variable (`print(os.environ)`, `print %ENV`, `console.log(process.env)`),
+#: and an environment read spelled another way (`system("printenv")`) are the
+#: residual — the "child prints on its own initiative" class the PR names.
+_INLINE_LANGUAGES: dict[str, _InlineLanguage] = {
+    "python": _PYTHON_LANGUAGE,
+    "python3": _PYTHON_LANGUAGE,
+    "perl": _InlineLanguage(
+        printer=re.compile(r"\b(?:print|printf|say|warn|die)\b"),
+        env_read=re.compile(r"\$ENV\s*\{|%ENV\b"),
+        file_read=re.compile(r"\bopen\b|<\s*\$?\w*\s*>|\bslurp\b"),
+    ),
+    "ruby": _InlineLanguage(
+        printer=re.compile(
+            r"\b(?:puts|print|printf|pp|p|warn|abort|raise)\b|\$std(?:out|err)\b|\bSTD(?:OUT|ERR)\b"
+        ),
+        env_read=re.compile(r"\bENV\b"),
+        file_read=re.compile(r"\b(?:File|IO)\.(?:read|open|readlines|foreach|binread)\b"),
+    ),
+    "node": _NODE_LANGUAGE,
+    "nodejs": _NODE_LANGUAGE,
+    "awk": _AWK_LANGUAGE,
+    "gawk": _AWK_LANGUAGE,
+    "mawk": _AWK_LANGUAGE,
+    "nawk": _AWK_LANGUAGE,
+}
+
+#: `python3.12` and `python3` are one interpreter to the check above.
+_VERSIONED_PYTHON_RE = re.compile(r"^(python3?)(?:\.\d+)+$")
+
+#: A shell's inline-program flag, alone or clustered (`-c`, `-lc`, `-ec`).
+_SHELL_INLINE_FLAG_RE = re.compile(r"^-[A-Za-z]*c[A-Za-z]*$")
+
+#: `lop secret file`'s default `--env-var`. Mirrored from
+#: ``secrets/cli.py``'s ``DEFAULT_FILE_ENV_VAR`` rather than imported: this
+#: module stays stdlib-only on the tool path, and a test pins the two equal.
+_DEFAULT_FILE_ENV_VAR = "GOOGLE_APPLICATION_CREDENTIALS"
+
 #: A raw-text source spelling, used ONLY to decide the fail-closed question
 #: when the tokenizer faults: is there something here that could be a source?
 _RAW_SOURCE_RE = re.compile(r"\b(?:lop|local-operator)\b[^\n]{0,80}?\bsecret\b")
@@ -1737,72 +1943,29 @@ class _ShellAnalyzer:
             if isinstance(item, _Word) and index not in targets
         ]
 
-        def text_at(position: int) -> str:
+        def word_at(position: int) -> _Word:
             item = stage[sequence[position]]
             assert isinstance(item, _Word)
-            return cls._word_text(item).strip()
+            return item
 
         cursor = 0
         while cursor < len(sequence):
-            item = stage[sequence[cursor]]
-            text = text_at(cursor)
-            if (
-                text
-                and text not in _SHELL_KEYWORDS
-                and not (isinstance(item, _Word) and cls._is_assignment(item))
-            ):
+            text = cls._word_text(word_at(cursor)).strip()
+            if text and text not in _SHELL_KEYWORDS and not cls._is_assignment(word_at(cursor)):
                 break
             cursor += 1
-        drop: set[int] = set()
-        while cursor < len(sequence):
-            word = stage[sequence[cursor]]
-            assert isinstance(word, _Word)
-            if any(piece.kind == "subst" for piece in word.pieces):
-                break
-            wrapper = text_at(cursor).rsplit("/", 1)[-1]
-            spec = _PRECOMMANDS.get(wrapper)
-            if spec is None:
-                break
-            takes_argument, positionals = spec
-            probe = cursor + 1
-            lookup_only = False
-            while probe < len(sequence):
-                option = text_at(probe)
-                if option == "--":
-                    probe += 1
-                    break
-                if wrapper == "command" and option[:1] == "-" and set(option[1:]) & {"v", "V"}:
-                    lookup_only = True
-                    break
-                if wrapper == "env" and (
-                    option in _ENV_SPLIT or option.startswith("--split-string")
-                ):
-                    lookup_only = True
-                    break
-                if option in takes_argument:
-                    probe += 2
-                    continue
-                if option[:1] == "-":
-                    probe += 1  # `-oL`, `-5`, `--signal=KILL`, env's `-i`/`-`
-                    continue
-                break
-            if lookup_only:
-                break
-            kept: set[int] = set()
-            if wrapper == "env":
-                while probe < len(sequence):
-                    candidate = stage[sequence[probe]]
-                    if not (isinstance(candidate, _Word) and cls._is_assignment(candidate)):
-                        break
-                    kept.add(sequence[probe])
-                    probe += 1
-            probe += positionals
-            if probe >= len(sequence):
-                break  # nothing left to run: the wrapper is the command
-            drop.update(index for index in sequence[cursor:probe] if index not in kept)
-            cursor = probe
-        if not drop:
+        tail = sequence[cursor:]
+        words = [word_at(position) for position in range(cursor, len(sequence))]
+        start, kept = _wrapped_command_index(
+            [cls._word_text(word).strip() for word in words],
+            opaque={
+                k for k, word in enumerate(words) if any(p.kind == "subst" for p in word.pieces)
+            },
+            assignments={k for k, word in enumerate(words) if cls._is_assignment(word)},
+        )
+        if start == 0:
             return stage
+        drop = {tail[k] for k in range(start) if k not in kept}
         return [item for index, item in enumerate(stage) if index not in drop]
 
     def _resolve_program(self, text: str) -> str:
@@ -2255,10 +2418,26 @@ class _ShellAnalyzer:
         index = self._command_index(words)
         if index is None:
             return None
-        first = self._resolve_program(self._word_text(words[index]).strip()).rsplit("/", 1)[-1]
+        # A wrapper around the source is the source (R3-2), and that includes
+        # `xargs` (R4-2): `echo X | xargs lop secret get` fetches X and prints
+        # it, with the NAME arriving on stdin rather than in the text. The
+        # outer unwrap has already dropped the ordinary wrappers from a walked
+        # stage; this call is what the prescan and `xargs` need.
+        texts = [self._resolve_program(self._word_text(word).strip()) for word in words[index:]]
+        start, _ = _wrapped_command_index(
+            texts,
+            table=_CONSUMER_WRAPPERS,
+            opaque={
+                k
+                for k, word in enumerate(words[index:])
+                if any(piece.kind == "subst" for piece in word.pieces)
+            },
+        )
+        via_xargs = "xargs" in (text.rsplit("/", 1)[-1] for text in texts[:start])
+        first = texts[start].rsplit("/", 1)[-1]
         if first not in _PROGRAM_NAMES:
             return None
-        args = [self._word_text(word).strip() for word in words[index + 1 :]]
+        args = texts[start + 1 :]
         if len(args) < 2 or args[0] != "secret":
             return None
         verb = args[1]
@@ -2277,6 +2456,9 @@ class _ShellAnalyzer:
             if name and not name.startswith("-"):
                 # `lop secret get --help` is not a source: no value exists.
                 return verb, name
+            if not name and via_xargs:
+                # The name is `xargs`'s stdin, which the text does not show.
+                return verb, "?"
         return None
 
     def _emitting_consumer(
@@ -2337,6 +2519,16 @@ class _ShellAnalyzer:
                 after_options = index
                 continue
             index += 1
+        # `file`'s value is at a path named by `--env-var` (default
+        # `GOOGLE_APPLICATION_CREDENTIALS`); an inline program that reads that
+        # variable's file is how the bytes come back (R4-3).
+        file_variable = _DEFAULT_FILE_ENV_VAR
+        own = words[: index if rest else len(words)]
+        for position, word in enumerate(own):
+            if word == "--env-var" and position + 1 < len(own):
+                file_variable = own[position + 1]
+            elif word.startswith("--env-var="):
+                file_variable = word.split("=", 1)[1]
         if not rest:
             # No `--` in the TEXT at all: argparse consumed it (or none was
             # written), so the child command is what remains after our OWN
@@ -2351,19 +2543,45 @@ class _ShellAnalyzer:
             rest = [word for word in words[start:] if not word.startswith("-")]
             if not rest:
                 return
-        consumer = self._resolve_program(rest[0]).rsplit("/", 1)[-1]
-        arguments = rest[1:]
+        # The consumer is found through the SAME wrapper grammar the outer
+        # stage uses (R4-1): `run … -- timeout 5 printenv TOK` runs `printenv
+        # TOK` with the value in its environment, and reading `timeout` as the
+        # consumer let it through while the unwrapped spelling was refused.
+        # `xargs` is stepped over here too (R4-2): it hands its command the
+        # environment unchanged.
+        resolved = [self._resolve_program(word) for word in rest]
+        start, _ = _wrapped_command_index(resolved, table=_CONSUMER_WRAPPERS)
+        wrappers = resolved[:start]
+        consumer = resolved[start].rsplit("/", 1)[-1]
+        arguments = resolved[start + 1 :]
         if verb == "run":
             variables = [name.split("=", 1)[-1] for name in names]
+            if "env" in (word.rsplit("/", 1)[-1] for word in wrappers) and any(
+                word in ("-i", "-", "--ignore-environment") for word in wrappers
+            ):
+                # `env -i` starts the child with an EMPTY environment. A
+                # `NAME=…` beside it is text the OUTER shell expanded, which
+                # never holds what `run` exported, so nothing of the value
+                # survives (measured by the round-4 review: `run -- env -i
+                # printenv` prints no value).
+                return
             leaked = self._run_consumer_dumps(consumer, arguments) or self._inline_program_reads(
-                consumer, arguments, variables, name, depth=depth
+                consumer, arguments, variables, name, verb=verb, depth=depth
             )
         else:
             # `file` hands over a PATH in an environment variable, so an
-            # argument-printing consumer reaches the bytes. Unchanged from what
-            # this rule always did for this verb.
-            leaked = consumer in _EMITTERS or (
-                consumer in _INTERPRETERS and _INLINE_PRINT_RE.search(" ".join(arguments))
+            # argument-printing consumer reaches the bytes, and an inline
+            # program reaches them by reading that path (R4-3: `sh -c 'rev
+            # "$GOOGLE_APPLICATION_CREDENTIALS"'` printed them reversed because
+            # only a fixed list of printer words was searched for).
+            leaked = (
+                consumer in _EMITTERS
+                or (
+                    consumer in _INTERPRETERS and bool(_INLINE_PRINT_RE.search(" ".join(arguments)))
+                )
+                or self._inline_program_reads(
+                    consumer, arguments, [file_variable], name, verb=verb, depth=depth
+                )
             )
         if leaked:
             span = next((item.span for item in stage if isinstance(item, _Word)), (0, 0))
@@ -2376,65 +2594,87 @@ class _ShellAnalyzer:
         variables: list[str],
         secret: str,
         *,
+        verb: str,
         depth: int,
     ) -> bool:
-        """Does this inline program reach a variable ``run`` exported the value as?
+        """Does this inline program reach a variable the verb handed the value in?
+
+        ``run`` exports the VALUE in those variables; ``file`` exports a PATH to
+        it. Either way the question is whether the program's printer reaches it.
 
         The precision is what keeps the verb's own sanctioned form working:
-        ``run --secret [redacted] -- sh -c 'curl -H "Authorization: Bearer $TOKEN"
+        ``run --secret N=TOKEN -- sh -c 'curl -H "Authorization: Bearer $TOKEN"
         http://…; echo done'`` is an approved CONSUMER, so a bare "an inline
         program that prints" test refused it the moment the program also wrote a
         `done` marker. What leaks is a program whose PRINTER reaches the value.
 
         For a shell program that question is already answered by this module's own
         walk, so it is asked with it rather than with a second, coarser rule: the
-        program is analysed with the exported variables pre-bound as values in the
-        child's environment, and any finding means the value came back. ``sh -c
-        'echo "$TOKEN" | base64'`` finds `shell.pipe-of-source`; ``sh -c
-        'printenv TOKEN'`` finds the dump rule; ``sh -c 'curl -H … $TOKEN; echo
-        done'`` finds nothing, which is the point.
+        program is analysed with the variables pre-bound — as values for ``run``,
+        as secret-file paths for ``file`` — and any finding means the value came
+        back. ``sh -c 'echo "$TOKEN" | base64'`` finds `shell.pipe-of-source`;
+        ``file … -- sh -c 'rev "$GOOGLE_APPLICATION_CREDENTIALS"'`` finds the
+        read rule (R4-3), where the fixed printer-word list this arm used to rely
+        on did not know `rev`; ``sh -c 'curl -H … $TOKEN; echo done'`` finds
+        nothing, which is the point.
 
-        A Python program is not this walk's language, so it keeps the coarser
-        test: the variable must be NAMED and the text must print or read an
-        environment. Deliberately fail-closed in this module's usual direction.
+        Every other language is not this walk's, so it keeps the coarse test
+        :class:`_InlineLanguage` describes (R4-2 widened it from Python alone to
+        the table in :data:`_INLINE_LANGUAGES`, whose comment states the bound).
         """
         if not variables:
             return False
-        if consumer in _INLINE_PYTHON:
+        language = _INLINE_LANGUAGES.get(_VERSIONED_PYTHON_RE.sub(r"\1", consumer))
+        if language is not None:
             text = " ".join(arguments)
-            names = "|".join(re.escape(name) for name in variables)
+            names = "|".join(re.escape(variable) for variable in variables)
             # A boundary written out rather than a `\b` escape: the name is
             # spliced into the pattern, and `$TOKEN`/`TOKEN=` must both count.
             if not re.search(rf"(?:^|[^A-Za-z0-9_]){names}(?:$|[^A-Za-z0-9_])", text):
                 return False
-            # BOTH halves are required for a Python program: naming the variable
-            # and reading the environment is not a leak on its own (an agent may
-            # check it is set, or hand it to a request), and a printer that never
-            # reads the environment cannot print the value. `print(len(...))` is
-            # still refused with the rest — a Python program is not this walk's
-            # language, so this arm is deliberately the coarse one.
-            return bool(_INLINE_PRINT_RE.search(text) and _PY_ENV_READ_RE.search(text))
+            if not language.env_read.search(text):
+                return False
+            if verb == "file" and not language.file_read.search(text):
+                # The variable holds a PATH: a program that never opens it
+                # (`getsize(os.environ["G"])`) prints a fact about the file.
+                return False
+            # Every half is required: naming the variable and reading the
+            # environment is not a leak on its own (an agent may check it is set,
+            # or hand it to a request), and a printer that never reads the
+            # environment cannot print the value. `print(len(...))` is still
+            # refused with the rest — this arm is deliberately the coarse one.
+            return bool(
+                language.printer.search(text)
+                or any(argument in language.print_flags for argument in arguments)
+            )
         if consumer not in _INTERPRETERS:
             return False
         program = ""
         for index, argument in enumerate(arguments):
-            if argument in ("-c", "--eval") and index + 1 < len(arguments):
+            # `-c` alone or clustered (`bash -lc '…'`, `sh -ec '…'`): the NEXT
+            # word is the program either way.
+            if (argument == "--eval" or _SHELL_INLINE_FLAG_RE.match(argument)) and index + 1 < len(
+                arguments
+            ):
                 program = arguments[index + 1]
                 break
         if not program:
             return False
         inner = _ShellAnalyzer()
         for variable in variables:
-            inner.value_vars[variable] = secret
-            inner.exported_vars.add(variable)
+            if verb == "file":
+                inner.file_vars[variable] = secret
+            else:
+                inner.value_vars[variable] = secret
+                inner.exported_vars.add(variable)
         try:
             inner._analyze(program, contained=False, depth=depth + 1)
             inner._after_walk()
         except _LexFault:
             # A program that does not lex is not evidence of a leak, and the
-            # fail-closed asymmetry belongs to a SOURCE in the text — a `run`
-            # consumer's program cannot carry one (its quotes make the text
-            # literal to the outer lexer).
+            # fail-closed asymmetry belongs to a SOURCE in the text — a consumer's
+            # program cannot carry one (its quotes make the text literal to the
+            # outer lexer).
             return False
         return bool(inner.findings)
 
