@@ -281,6 +281,70 @@ async def test_retiring_the_session_cancels_a_spaced_paint() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_live_prompt_backstop_runs_even_when_the_band_is_gated() -> None:
+    """Review round 1, F2: the card's only trigger here is this backstop.
+
+    The card's footer is derived from focus and draft state, neither of which
+    emits anything the card hears, so it is re-asked directly on every canonical
+    paint. Gating that with the band would leave the routine token/phase delta
+    (which moves no roster row) re-checked only by the 1 Hz poll.
+    """
+    viewer = _Viewer()
+    viewer.push(jobs=[_job("a")])
+    app = await _booted(viewer)
+    async with app.run_test(size=(100, 28)) as pilot:
+        await pilot.pause()
+        app._session = viewer
+        band_calls = 0
+        stale_checks = 0
+
+        def band() -> None:
+            nonlocal band_calls
+            band_calls += 1
+
+        class _Prompt:
+            def repaint_if_stale(self) -> None:
+                nonlocal stale_checks
+                stale_checks += 1
+
+        app._refresh_band = band  # type: ignore[method-assign]
+        app._live_prompt = lambda: _Prompt()  # type: ignore[method-assign]
+        app._apply_frontend_state(viewer.frontend_state)
+        assert (band_calls, stale_checks) == (1, 1)
+        # A scalar delta: the band is gated, the card is still re-asked.
+        viewer.push(activity_phase="responding", context_tokens=10)
+        app._apply_frontend_state(viewer.frontend_state)
+        assert band_calls == 1, "no roster row moved, so the band is skipped"
+        assert stale_checks == 2, "the backstop must still run"
+
+
+@pytest.mark.asyncio
+async def test_a_session_switch_does_not_space_the_new_sessions_first_paint() -> None:
+    """Review round 1, N2: the spacing describes the roster just left."""
+    viewer = _Viewer()
+    viewer.push(jobs=[_job("a")])
+    app = await _booted(viewer)
+    async with app.run_test(size=(100, 28)) as pilot:
+        await pilot.pause()
+        app._invalidate_pending_frontend_state()
+        app._paint_frontend_session(viewer)
+        _as_if_a_paint_just_cost(app, 0.040)
+        app._band_painted_revision = (viewer, viewer.frontend_revision())
+        app._frontend_painted_lifecycle = (viewer, "e1", 0)
+        app._invalidate_pending_frontend_state()
+        assert app._frontend_paint_cost_s == 0.0
+        assert app._frontend_painted_at is None
+        assert app._band_painted_revision is None
+        assert app._frontend_painted_lifecycle is None
+        recorder = _Recorder(app)
+        app._on_frontend_update(
+            viewer.push(jobs=[_job("a", latest_details={"progress": "later"})])
+        )
+        assert len(recorder.now) == 1, "the first paint after a switch is not spaced"
+        assert recorder.spaced == []
+
+
+@pytest.mark.asyncio
 async def test_the_band_is_not_repainted_when_no_collection_moved() -> None:
     viewer = _Viewer()
     viewer.push(jobs=[_job("a")])

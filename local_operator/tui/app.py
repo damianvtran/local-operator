@@ -10616,6 +10616,16 @@ class OperatorApp(App[None]):
         self._frontend_apply_scheduled = False
         self._frontend_apply_spaced = False
         self._cancel_frontend_apply_timer()
+        # The SPACING state is retired with them, not kept across the switch. The
+        # cost describes the roster that was just left, and the first paint after
+        # a switch is the cold one whose latency the user actually sees: spacing
+        # it by up to a stale second would delay exactly the frame this app is
+        # judged on. `_band_painted_revision` goes too -- it names the departed
+        # session, and the new session's first paint must establish its own.
+        self._frontend_paint_cost_s = 0.0
+        self._frontend_painted_at = None
+        self._frontend_painted_lifecycle = None
+        self._band_painted_revision = None
 
     def _cancel_frontend_apply_timer(self) -> None:
         timer = getattr(self, "_frontend_apply_timer", None)
@@ -10891,6 +10901,14 @@ class OperatorApp(App[None]):
             active_seconds=float(getattr(state, "active_duration_s", 0.0) or 0.0),
             activity_started_at=getattr(state, "activity_started_at", None),
         )
+        # BEFORE the gate, and deliberately: the live prompt's backstop is the
+        # second caller below, so gating this whole block with the band would
+        # leave a card whose trigger emits nothing to be re-checked only by the
+        # 1 Hz poll -- up to a second of a footer naming keys that no longer
+        # apply (review round 1, F2). It runs twice on a delta that does move the
+        # roster (here and at the tail of `_refresh_band`); that is a no-op the
+        # second time, by that method's own contract.
+        self._repaint_live_prompt_if_stale()
         # The band is painted from the roster, todos and wakes alone, so a delta
         # that moved none of them (a token count, a phase, a title) has nothing
         # to show there -- and on a 252-child roster the band cost 35-50 ms a
@@ -29156,15 +29174,30 @@ class OperatorApp(App[None]):
         # moved.
         self.call_after_refresh(self._sync_overlay_layout)
         # A live prompt rides it too, as a BACKSTOP rather than as its primary
-        # trigger. The card's footer is derived from state the card does not
-        # own — whether it holds focus, and whether the composer holds a draft —
-        # and neither emits anything the card hears, so "correct in the model,
-        # stale on screen" arrived three review rounds running on three
-        # different inputs. Each was fixed by adding one more explicit trigger,
-        # which is a fix per input and leaves the next one to be found by a
-        # reviewer. This asks the card whether what it is showing is still what
-        # it would draw, so a missed trigger is a frame late instead of
-        # permanently wrong. It is a no-op on every tick where nothing moved.
+        # trigger -- see :meth:`_repaint_live_prompt_if_stale`.
+        self._repaint_live_prompt_if_stale()
+
+    def _repaint_live_prompt_if_stale(self) -> None:
+        """Ask the live prompt card whether what it shows is still what it would draw.
+
+        The card's footer is derived from state the card does not own — whether it
+        holds focus, and whether the composer holds a draft — and neither emits
+        anything the card hears, so "correct in the model, stale on screen"
+        arrived three review rounds running on three different inputs. Each was
+        fixed by adding one more explicit trigger, which is a fix per input and
+        leaves the next one to be found by a reviewer. This asks the card
+        directly, so a missed trigger is a frame late instead of permanently
+        wrong. A no-op on every call where nothing moved.
+
+        Called from TWO places, and the second is load-bearing: ``_refresh_band``
+        (whose other callers are the 1 Hz poll, a resize and the density toggles)
+        and ``_apply_frontend_state`` BEFORE its collection-revision gate. The
+        gate skips the band for a delta that moved no roster row -- the routine
+        token/phase delta -- and without this the card's only remaining trigger
+        there would be the 1 Hz poll, i.e. up to a second of a footer naming keys
+        that no longer apply (review round 1, F2). Cheap enough to run on both
+        paths for the same reason it is safe on either.
+        """
         prompt = self._live_prompt()
         repaint_if_stale = getattr(prompt, "repaint_if_stale", None)
         if callable(repaint_if_stale):

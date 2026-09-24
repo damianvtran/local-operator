@@ -198,9 +198,19 @@ def test_an_invalid_delta_installs_nothing_and_keeps_the_records() -> None:
 
 
 def test_an_explicit_empty_roster_still_clears() -> None:
+    """The clear rides ``model_fields_set``, not a branch of the reuse path.
+
+    Pinned because the reuse path is exactly what could break it: an empty
+    ``jobs`` leaves ``plan`` and ``windows`` both empty, so a reducer that only
+    installed a roster from those would leave the previous rows standing. It is
+    ``patch.model_fields_set`` that carries the explicit ``[]`` into
+    ``normalized`` -- verified by deleting the special-case branch this test
+    originally guarded (review round 1, F3) and re-running it green.
+    """
     store = _store(2)
     store.apply_update(_delta(store, jobs=[]))
     assert list(store._state.jobs) == []
+    assert store._state.sequence == 2
     assert store._follower_job_bodies == {}
 
 
