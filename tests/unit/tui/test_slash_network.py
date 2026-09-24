@@ -879,6 +879,117 @@ def test_a_sentence_carrying_an_address_is_still_a_sentence() -> None:
     )
 
 
+def test_the_member_reading_fails_closed_on_prose_that_names_an_address() -> None:
+    """Round 11's R11-2 and Q-R25-3, and the trap R11-4 called a dead arm.
+
+    THREE INPUTS, ONE PROPERTY: prose the recogniser cannot read must still not reach a
+    person carrying an address, a class name or a stage word.
+
+    * R11-2 — a declared endpoint containing ``;``. Endpoints are stored verbatim and
+      unvalidated at both write points (an operator's ``advertise_hosts``, a peer's
+      handshake ``peer_endpoints``), so one ``;`` inside an address splits an
+      ``<endpoint> <detail>`` pair in two and left a segment whose last field is not a
+      code. The rule required EVERY segment to end in a code, so a genuine machine
+      list was handed back as prose. It now requires ANY, which is the fail-closed
+      direction: at worst a mixed tail reads blander than it is, never wider.
+    * Q-R25-3 — the doctor's PRE-round-24 spelling of ``handshake_not_attempted``,
+      which an old stored reason or a peer on an older build can still hand the member
+      table. It is not a machine list (no ``;`` at all), so the recogniser said prose
+      and the sentence kept the endpoint that ANSWERED.
+    * R11-4 — the bare stage word ``unreachable`` is an identifier, so the bare-code
+      fallback matched it first and read it as a REFUSAL, the opposite state, while
+      the arm written for it sat unreachable below.
+
+    The other direction is asserted beside them, because a rule that glosses
+    everything is not a fix: the relay's own member-level sentence (no address in it)
+    is still returned as written.
+    """
+    import local_operator.resume as resume
+    from local_operator.network import relay
+
+    # R11-2, through the real producer.
+    compound = relay.probe_reason(
+        [
+            relay.CandidateAttempt("10.0.0.1;evil", False, "connect_failed:ConnectionRefusedError"),
+            relay.CandidateAttempt("10.0.0.2:7", False, "no_answer"),
+        ]
+    )
+    assert ";" in compound, compound
+    read = resume.peer_reason_words(compound)
+    assert read == "no address of it answered", read
+    for leaked in ("10.0.0.1", "10.0.0.2", "evil", "ConnectionRefusedError", "no_answer"):
+        assert leaked not in read, (leaked, read)
+    # The discriminator itself, so the arm above cannot hide a regression in it.
+    assert resume._carries_wire_tokens(compound.rsplit(": ", 1)[-1]) is True  # noqa: SLF001
+
+    # Q-R25-3: the legacy spelling, built as the relay's own producer builds it.
+    legacy = (
+        "not_attempted: 127.0.0.1:64994 answered and the doctor budget ran out "
+        "before the handshake"
+    )
+    words = resume.peer_reason_words(legacy)
+    assert words == "it answered, and the listing ran out of time before the handshake", words
+    assert "127.0.0.1" not in words and "64994" not in words, words
+    assert "not_attempted" not in words, words
+    # Prose with no address in it is still prose, from the member's own producer.
+    untouched = resume.peer_reason_words(relay.NOT_ATTEMPTED_REASON)
+    assert untouched == "the listing budget ran out before this member was probed", untouched
+
+    # R11-4: the bare stage word is not a refusal.
+    assert resume.peer_reason_words("unreachable") == "no address of it answered"
+    assert resume.peer_reason_words("unreachable") != resume._BARE_CODE_WORDS  # noqa: SLF001
+    assert resume.peer_reason_words("connect_failed") == "it did not answer"
+
+
+def test_the_membership_table_speaks_in_words_too() -> None:
+    """Round 11, Step 1's own enumeration: a THIRD vocabulary, missed by all of 9-11.
+
+    ``MembershipReport``'s silent rows carry a reason for a member's TABLE not arriving,
+    and two renderers printed it raw beside a 34-character device id: the sentence
+    `lop network show` prints, and the marker `lop network ls` and the agent tool's
+    digest append to each row. Rounds 9-11 each swept a surface that renders a PEER's
+    reason and never looked at the surfaces that render a MEMBERSHIP row's, which is
+    the enumeration failure this round is about rather than a fourth instance of it.
+    """
+    import local_operator.resume as resume
+    from local_operator.network import relay
+
+    device = "d_1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d"
+    report = relay.MembershipReport(network_id="n_" + "a" * 22, refreshed_at=0.0)
+    report.silent.append({"device_id": device, "reason": "no_live_link"})
+    report.silent.append(
+        {"device_id": "d_ffffffffffffffffffffffffffffffff", "reason": "no_table:error"}
+    )
+    sentence = report.sentence()
+    assert sentence.startswith("members NOT verified"), sentence
+    for leaked in (device, "no_live_link", "no_table", "d_ffffffffffffffffffffffffffffffff"):
+        assert leaked not in sentence, (leaked, sentence)
+    assert "nothing is connected to it" in sentence, sentence
+
+    row = {
+        "members": 3,
+        "membership": {
+            "table": {
+                "complete": False,
+                "answered": [],
+                "not_answered": [{"device_id": device, "reason": "no_live_link"}],
+            }
+        },
+    }
+    marker = relay.membership_marker(row)
+    assert "NOT verified" in marker, marker
+    assert device not in marker and "no_live_link" not in marker, marker
+    # A reason the producer wrote for a reader survives; one that names an address
+    # does not, whichever shape it arrives in.
+    assert (
+        resume.table_reason_words("not_asked: the refresh budget ran out before this peer's turn")
+        == "the refresh budget ran out before this peer's turn"
+    )
+    assert resume.table_reason_words("nothing at 127.0.0.1:9 answered") == (
+        "it did not answer the table read"
+    )
+
+
 def test_the_gloss_never_hands_a_bare_wire_code_back_to_a_person() -> None:
     """Round 10, MAJOR-2: the single-code path's tokens had no table entry.
 

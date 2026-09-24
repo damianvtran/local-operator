@@ -1508,17 +1508,31 @@ class MembershipReport:
         }
 
     def sentence(self) -> str:
-        """One sentence a person reads, and the honest one in every case."""
+        """One sentence a person reads, and the honest one in every case.
+
+        THE SILENT MEMBERS ARE NAMED IN WORDS (round 11, Step 1's enumeration). This
+        line goes to `lop network show`'s screen AND into the ``--json`` payload, and
+        it used to render each silent member's raw table reason — ``no_live_link``,
+        ``no_table:error`` — beside a 34-character device id: the raw-token-and-id
+        shape UX round 5's U28 took off the peer listing, one vocabulary over. The
+        gloss is the table's own (``resume.table_reason_words``) and the id is
+        abbreviated; ``not_answered`` in ``to_json`` keeps both raw.
+        """
         age = self.oldest_answer_age_s
         age_text = "just now" if age is None or age < 1.5 else f"{int(age)}s ago"
         if self.complete:
             return f"members verified with all {len(self.answered)} peer(s) ({age_text})"
+        from local_operator.resume import short_device_id, table_reason_words
+
+        detail = ", ".join(
+            f"{short_device_id(str(item.get('device_id') or ''))} "
+            f"({table_reason_words(str(item.get('reason') or ''))})"
+            for item in self.silent
+        )
         if not self.answered:
-            detail = ", ".join(f"{row['device_id']} ({row['reason']})" for row in self.silent)
             return "members NOT verified: no peer answered a table read this time" + (
                 f" — {detail}" if detail else ""
             )
-        detail = ", ".join(f"{row['device_id']} ({row['reason']})" for row in self.silent)
         return (
             f"members verified with {len(self.answered)} of "
             f"{len(self.answered) + len(self.silent)} peer(s) ({age_text}); "
@@ -1725,6 +1739,13 @@ def membership_marker(row: dict[str, Any]) -> str:
     marker; every other row says how many peers answered, or that none did. ONE OWNER,
     because the CLI and the agent's own tool render this line from the same JSON and a
     second copy would be free to disagree about what "verified" means.
+
+    THE PEERS THAT SAID NOTHING ARE NAMED IN WORDS (round 11, Step 1's enumeration).
+    The no-answer branch used to append each silent member's raw table reason
+    (``no_live_link``, ``no_table:error``) beside a 34-character device id, on a line
+    both `lop network ls` and the agent tool's digest print. The gloss is the table's
+    own (``resume.table_reason_words``) and the id is abbreviated; the raw rows stay in
+    ``membership.table.not_answered``, which is the machine register.
     """
     if int(row.get("members") or 0) <= 1:
         return ""
@@ -1735,8 +1756,11 @@ def membership_marker(row: dict[str, Any]) -> str:
         return f"  [members verified with all {answered} peer(s)]"
     if answered:
         return f"  [members verified with {answered} of {answered + pending} peer(s)]"
+    from local_operator.resume import short_device_id, table_reason_words
+
     states = ", ".join(
-        f"{item.get('device_id')} ({item.get('reason')})"
+        f"{short_device_id(str(item.get('device_id') or ''))} "
+        f"({table_reason_words(str(item.get('reason') or ''))})"
         for item in (table.get("not_answered") or [])
     )
     return f"  [members NOT verified: no peer answered{': ' + states if states else ''}]"

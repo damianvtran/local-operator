@@ -416,6 +416,72 @@ def test_the_agent_digest_says_what_a_member_count_rests_on() -> None:
     assert any("NOT verified" in line for line in unread), unread
 
 
+def test_the_agent_peer_digest_reads_a_reason_the_way_a_person_does() -> None:
+    """Round 11's MAJOR (R11-0) and QA round 25's Q-R25-1 — the SAME leak, found twice.
+
+    ``_render("peers", …)`` printed the row's raw ``reason`` — a stage word, two
+    endpoint addresses and a Python class name — beside the 34-character device id,
+    while the ``doctor`` branch of the SAME function had just been routed through its
+    own gloss for exactly that reason, and the test above says what the argument is.
+    Both rounds filed it independently, which is the point of the guard in
+    ``test_reason_surfaces.py``: the surfaces were swept one at a time and this one was
+    always the one nobody had looked at yet.
+
+    The gloss is the SHARED member table (the same function `lop network peers` reads,
+    so one peer is described in one voice), the 34-character id is replaced by the name
+    every other surface addresses a peer by, and the raw reason and id stay in the row
+    the tool puts in ``details`` — this renderer does not consume them.
+    """
+    import local_operator.resume as resume
+
+    payload: dict[str, Any] = {
+        "peers": [
+            {
+                "reachable": False,
+                "device_id": "d_" + "1" * 32,
+                "name": "device-b",
+                "reason": (
+                    "unreachable: 127.0.0.1:0 connect_failed:OSError; "
+                    "127.0.0.1:39223 connect_failed:ConnectionRefusedError"
+                ),
+            },
+            {
+                "reachable": False,
+                "device_id": "d_" + "2" * 32,
+                "name": "device-c",
+                "reason": "handshake_refused:TimeoutError",
+            },
+            {"reachable": True, "device_id": "d_" + "3" * 32, "name": "device-d", "reason": ""},
+            {"reachable": False, "device_id": "d_" + "4" * 32, "name": "", "reason": "no_endpoint"},
+        ]
+    }
+    lines = net_tool._render("peers", payload)
+    body = "\n".join(lines)
+    for peer in payload["peers"]:
+        assert peer["device_id"] not in body, body
+    for leaked in (
+        "connect_failed",
+        "handshake_refused",
+        "unreachable:",
+        "ConnectionRefusedError",
+        "OSError",
+        "TimeoutError",
+        "127.0.0.1",
+        "no_endpoint",
+    ):
+        assert leaked not in body, (leaked, body)
+    assert lines == [
+        "unreachable device-b  no address of it answered",
+        "unreachable device-c  the link was refused",
+        "reachable   device-d",
+        f"unreachable {resume.UNNAMED_DEVICE}  no address published for it",
+    ], lines
+    # The machine register is untouched: the caller keeps the reason and the id it
+    # passed, which is what ``details`` carries into the agent's result.
+    assert payload["peers"][0]["reason"].startswith("unreachable: 127.0.0.1:0")
+    assert payload["peers"][0]["device_id"] not in body
+
+
 def test_the_agent_digest_carries_a_removed_devices_own_standing() -> None:
     """`show` on a removed device: the sentence, not a healthy-looking member list."""
     lines = net_tool._render(
