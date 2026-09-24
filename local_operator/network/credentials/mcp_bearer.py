@@ -1,4 +1,4 @@
-"""The borrowed-bearer ``httpx.Auth`` an MCP server is connected with.
+"""The borrowed-bearer ``httpx2.Auth`` an MCP server is connected with.
 
 WHY THIS LIVES HERE AND NOT IN ``mcp/manager.py``, where it is used: that module
 states (and relies on) a LAZY-SDK PROPERTY — it imports neither ``httpx`` nor
@@ -10,26 +10,38 @@ module is imported ONLY from the brokered branch of ``_build_oauth_auth``, which
 reached only on a device that borrows, so the dependency arrives exactly when MCP
 authentication arrives.
 
-WHY AN ``httpx.Auth`` AT ALL, AND NOT A BRANCH IN THE REFRESH (build plan §0
-finding 6): the MCP SDK reaches the wire through its own ``OAuthClientProvider``, so
-the only seam where a DIFFERENT token can be presented is the client's ``auth=``.
-``ensure_mcp_oauth_fresh`` returns endpoints, not tokens, so the design's original
-hook point could not have returned one.
+WHY AN ``httpx2.Auth`` AND NOT A BRANCH IN THE REFRESH (build plan §0 finding 6): the
+MCP SDK reaches the wire through its own ``OAuthClientProvider``, so the only seam
+where a DIFFERENT token can be presented is the client's ``auth=``.
+``ensure_mcp_oauth_fresh`` returns endpoints, not tokens, so the design's original hook
+point could not have returned one.
+
+AND IT MUST BE **``httpx2``**, NOT ``httpx``. That is not a typo and it is the one
+detail in this file a reader would otherwise "fix": the MCP SDK's transports are
+built on a separate ``httpx2`` distribution
+(``mcp.client.streamable_http.create_mcp_http_client`` types its ``auth`` parameter as
+``httpx2.Auth``), while the rest of this repository imports ``httpx``. The two classes
+are unrelated, so a subclass of one is REJECTED by the other — and rejected only at the
+moment a borrower connects to an MCP server, on a path no unit test with no mesh
+reaches. The type checker is what found it; keep the two names distinct here.
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncGenerator
 from typing import Any
 
-import httpx
+# ``httpx2``, deliberately — see this module's docstring. The MCP SDK's transports
+# type their ``auth`` parameter as ``httpx2.Auth``.
+import httpx2
 
 #: The status that means "this bearer was refused". One name, because the repair
 #: inside the flow and the challenge path outside it must agree on what a 401 is.
 HTTP_UNAUTHORIZED = 401
 
 
-class BrokeredBearerAuth(httpx.Auth):
+class BrokeredBearerAuth(httpx2.Auth):
     """An ``httpx.Auth`` that sets a BORROWED bearer, and repairs it once on a 401.
 
     WHY AN ``httpx.Auth`` AND NOT A BRANCH IN THE REFRESH (build plan §0 finding 6):
@@ -68,7 +80,14 @@ class BrokeredBearerAuth(httpx.Auth):
             return ""
         return grant.access_token if isinstance(grant, Grant) else ""
 
-    async def async_auth_flow(self, request: httpx.Request) -> Any:
+    # ANNOTATED AS THE BASE DOES, not as ``Any``: this function contains ``yield``, so it
+    # is an async GENERATOR, and the base class's own annotation is what says so.
+    # Declaring ``Any`` made a checker read the override as a plain coroutine and
+    # reject it against the protocol — which is the annotation being wrong, not the
+    # code, and it is exactly the kind of wrongness a reader would copy.
+    async def async_auth_flow(
+        self, request: httpx2.Request
+    ) -> AsyncGenerator[httpx2.Request, httpx2.Response]:
         if not self._bearer:
             self._bearer = await asyncio.to_thread(self._blocking_bearer)
         if not self._bearer:

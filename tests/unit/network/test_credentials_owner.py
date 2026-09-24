@@ -82,7 +82,11 @@ class RotatingIdP:
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
 
-            def log_message(self, *args: Any) -> None:  # keep pytest output clean
+            # Signature matches ``BaseHTTPRequestHandler``'s own (a keyword ``format``
+            # parameter), because a checker reads an override's shape as a contract and
+            # ``*args`` is not that shape. Bodies are suppressed: one line per request
+            # would bury the pytest output this test is read for.
+            def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
                 return
 
             def do_POST(self) -> None:  # noqa: N802 — http.server's spelling

@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any, Collection
+from typing import Any, Collection, Protocol
 
 from local_operator.network.credentials.client import MeshCredentialClient, key_for
 from local_operator.network.credentials.placement import placement_for_store
@@ -49,6 +49,52 @@ from local_operator.network.credentials.types import (
     is_synthetic_credential_id,
     synthetic_credential_id,
 )
+
+
+class CredentialSource(Protocol):
+    """The broker seam this store consumes, stated as a Protocol.
+
+    WHY A PROTOCOL AND NOT THE CLASS. Two reasons, and both are the repo's own
+    pattern (``mcp.auth.StructuralAuthStore`` is the precedent): the store must be
+    testable WITHOUT a wire — a fake that satisfies this names exactly what the
+    broker rung uses and nothing more, so a test cannot pass by accident — and MCP
+    reads the same seam through ``mesh_client`` (``mcp/manager.py``), which should
+    depend on the shape it uses rather than on the whole client.
+    """
+
+    #: This device's id, as the placement document spells it.
+    self_device: str
+    #: The in-memory grants. Never persisted; see ``client.GrantCache``.
+    grants: Any
+    placement: Any
+
+    def should_borrow(self, key: str) -> bool: ...
+
+    def owner_of(self, key: str) -> str: ...
+    def owner_label(self, key: str) -> str: ...
+    def owner_last_seen_s(self, device: str) -> float | None: ...
+
+    async def grant_async(
+        self,
+        key: str,
+        *,
+        session_id: str = "",
+        model_id: str = "",
+        force_refresh: bool = False,
+        provider: str = "",
+    ) -> Any: ...
+
+    def report_sync(
+        self,
+        key: str,
+        *,
+        kind: str,
+        session_id: str = "",
+        model_id: str = "",
+        retry_after_ms: int = 0,
+    ) -> None: ...
+
+    def close(self) -> None: ...
 
 
 def build_auth_store(config_dir: Path | None = None) -> Any:
@@ -81,7 +127,7 @@ class MeshAwareAuthStore:
         self,
         local: Any,
         *,
-        mesh: MeshCredentialClient | None,
+        mesh: CredentialSource | None,
         config_dir: Path | None = None,
     ) -> None:
         self._local = local
@@ -550,20 +596,28 @@ class MeshAwareAuthStore:
         return int(self._local.delete_credentials_for_provider(provider))
 
     def _drop_borrowed(self, provider: str) -> None:
+        """Drop this device's cached borrows for ``provider``.
+
+        ``self._brokered`` is keyed by ``(key, session_id)`` PAIRS, not by key: the
+        first version of this loop iterated the dict and called ``startswith`` on what
+        it got, which is a ``tuple`` — an ``AttributeError`` on a cold path nobody
+        exercises until a logout, which is the kind of defect a type checker finds and
+        a happy-path test does not. So the key is taken from the pair.
+        """
         if self._mesh is None:
             return
-        for key in [
-            key_for(provider=provider),
-            *(k for k in self._brokered if k.startswith("mcp:")),
-        ]:
+        wanted = key_for(provider=provider)
+        keys = {wanted}
+        keys.update(pair[0] for pair in self._brokered if pair[0] == wanted)
+        for key in keys:
             self._mesh.grants.drop(key)
-        for pair in [p for p in self._brokered if p[0] == key_for(provider=provider)]:
+        for pair in [p for p in self._brokered if p[0] == wanted]:
             self._brokered.pop(pair, None)
 
     # -- pass-through -------------------------------------------------------
 
     @property
-    def mesh_client(self) -> MeshCredentialClient | None:
+    def mesh_client(self) -> CredentialSource | None:
         """The broker client when this device borrows, else ``None``.
 
         The seam MCP reads (``mcp/manager.py``'s ``_build_oauth_auth``): the presence
