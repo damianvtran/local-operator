@@ -925,7 +925,8 @@ HOW_TO_READ_THE_FIRED_VALUE = (
     "never-engaged reading safe. It is a SMALLER value when a beat recomputed it "
     "from the oldest plane's stamp, which is how a plane that went quiet shows up as a number "
     f"below the bound. {DUMP_PREFIX}-<pid>{DEADLINE_SUFFIX} holds the deadline the timer is "
-    "currently armed for and the leg that pinned it, rewritten by every beat THAT RE-ARMED, and "
+    "currently armed for (as an epoch), the leg that pinned it and the same deadline on the "
+    "process's monotonic clock, rewritten by every beat THAT RE-ARMED, and "
     "removed when a runtime arms -- so it describes the runtime holding this pid NOW, never an "
     "earlier one (a pid is recycled). Its ABSENCE means no beat ever re-armed this timer, and "
     "its mtime is the last SUCCESSFUL re-arm: read any line below carrying the word 're-arm' "
@@ -1798,7 +1799,7 @@ def dump_candidates(pid: int | None = None, directory: Path | None = None) -> tu
 def deadline_path(pid: int | None = None, directory: Path | None = None) -> Path:
     """Where the CURRENT deadline goes: ``<log dir>/runtime-stall-<pid>.deadline``.
 
-    THE SIBLING OF THE DUMP, one number and one name on a line (~24 bytes), rewritten
+    THE SIBLING OF THE DUMP, ``<epoch> <leg> <monotonic>`` on one line (~40 bytes), rewritten
     by every :func:`beat` THAT RE-ARMED -- so a reader with a dead pid has, without
     opening anything else: the deadline the timer was armed for (compare it with the
     fire to say whether the bound came due or something else pre-empted it), the leg
@@ -2401,7 +2402,8 @@ def _record_held_fire(armed: "_Armed") -> bool:
         return False
     armed.seen_fires = fires
     armed.fired_held = True
-    armed.after_fire_at = time.monotonic()
+    fired_mono = time.monotonic()
+    armed.after_fire_at = fired_mono
     # WHICH MARKER GOES IN IS DECIDED BEFORE EITHER LINE IS WRITTEN (finding B of the
     # 2026-09-23 convergence round). The order used to be append-then-decide, which is
     # how a fire over an IDLE runtime came to carry ``HELD_MARKER`` — the very word the
@@ -2415,8 +2417,16 @@ def _record_held_fire(armed: "_Armed") -> bool:
         armed.held_fires += 1
         _append_dump_line(
             armed,
-            f"{HELD_MARKER}the bound fired at "
-            f"{time.strftime('%Y-%m-%d %H:%M:%S')} and did NOT end this runtime. Work was "
+            # THE MONOTONIC STAMP IS THE MACHINE-READABLE HALF; the local time beside it is
+            # for a person. :func:`_holds` compares it with the sibling's monotonic
+            # deadline, both written by THIS process on ONE clock, because a wall-clock
+            # comparison broke three ways (agent review round 1 M1/m1, QA Q-1): macOS
+            # pauses ``monotonic`` across sleep so a monotonic-derived epoch drifts
+            # forward, the repeated DST hour parses an hour early, and a reader in another
+            # zone parses by its offset — each reading a stuck runtime as recovered.
+            f"{HELD_MARKER}{_FIRED_AT_PHRASE}"
+            f"{time.strftime(_FIRED_AT_FORMAT)} ({_MONOTONIC_TAG}{fired_mono:.3f}) "
+            "and did NOT end this runtime. Work was "
             "in flight when the fire was observed, so the runtime is stalled with it. "
             "Every thread's stack is above. Inspect this dump and stop the runtime "
             "explicitly if it remains stuck.\n",
@@ -2528,7 +2538,13 @@ def _record_deadline(armed: "_Armed") -> None:
     try:
         leg, deadline = armed.pin()
         epoch = time.time() + (deadline - time.monotonic())
-        temp.write_text(f"{epoch:.3f} {leg}\n", encoding="utf-8")
+        # THE THIRD FIELD IS THE SAME DEADLINE ON THE CLOCK IT WAS COMPUTED ON. The epoch
+        # is for a reader holding a dead pid (compare it with the fire's wall time); the
+        # monotonic value is what :func:`_holds` compares with the held marker's own
+        # stamp, because the epoch is derived through ``time.time() - monotonic()``, an
+        # offset that grows across every host sleep (agent review round 1, M1). Appended
+        # rather than inserted, so ``epoch leg`` stays the first two tokens it always was.
+        temp.write_text(f"{epoch:.3f} {leg} {deadline:.3f}\n", encoding="utf-8")
         os.replace(temp, armed.deadline_path)
     except (OSError, ValueError) as exc:
         logger.debug("stall watchdog could not record its deadline: %s", exc)
@@ -3531,37 +3547,52 @@ def held_fire(pid: int | None = None, directory: Path | None = None) -> bool:
     return _holds(*evidence)
 
 
-#: The phrase both post-fire markers carry before the moment they were written, in the
-#: format :func:`_record_held_fire` stamps it with. Read back by :func:`_held_fired_at`.
+#: The phrase both post-fire markers carry before the moment they were written, and the
+#: local-time format of that moment. Shared by the writer (:func:`_record_held_fire`) and
+#: the reader (:func:`_held_fired_mono`), so the two cannot drift apart.
 _FIRED_AT_PHRASE = "the bound fired at "
 _FIRED_AT_FORMAT = "%Y-%m-%d %H:%M:%S"
+#: The tag the held marker writes its observation's ``time.monotonic()`` behind, in the
+#: parenthesis after the local time: ``… fired at <local> (monotonic 1234.567) and …``.
+_MONOTONIC_TAG = "monotonic "
 
 
-def _held_fired_at(text: str) -> float | None:
-    """The epoch the LAST :data:`HELD_MARKER` says its fire was observed at, or ``None``.
+def _held_fired_mono(text: str) -> float | None:
+    """The ``time.monotonic()`` the LAST :data:`HELD_MARKER` was written at, or ``None``.
 
     The LAST one, because a runtime that stays stalled re-fires on the held backoff and
     every repeat appends its own marker: the question a listing asks is whether the
-    runtime has recovered since the MOST RECENT fire, not since the first. Local time at
-    one-second resolution, exactly as the writer stamps it; ``None`` for a marker whose
-    stamp cannot be parsed (a build that wrote a different sentence, or a torn line),
-    which the caller reads as "cannot show a recovery" and so keeps the held reading.
+    runtime has recovered since the MOST RECENT fire, not since the first.
+
+    THE MONOTONIC STAMP AND NEVER THE LOCAL TIME, for the reasons the writer states:
+    the local time has no zone and no DST flag, so turning it back into an instant is
+    wrong by an hour in the repeated fall-back hour and by the zone offset for a reader
+    east of the writer, and both errors read a stuck runtime as recovered (QA round 1,
+    Q-1). ``None`` for a marker without the stamp — every dump written before it existed,
+    or a torn line — which the caller reads as "cannot show a recovery" and so keeps the
+    held reading the marker states.
+
+    Searched within the marker's OWN line only: the marker can land mid-line when
+    ``faulthandler``'s buffered write interleaves (Q-4), and a stamp found further down
+    the file would belong to some other line.
     """
     at = text.rfind(HELD_MARKER)
     if at < 0:
         return None
-    rest = text[at + len(HELD_MARKER) :]
-    if not rest.startswith(_FIRED_AT_PHRASE):
+    line = text[at + len(HELD_MARKER) :].split("\n", 1)[0]
+    if not line.startswith(_FIRED_AT_PHRASE):
         return None
-    stamp = rest[len(_FIRED_AT_PHRASE) : len(_FIRED_AT_PHRASE) + 19]
+    _, found, rest = line.partition(f"({_MONOTONIC_TAG}")
+    if not found:
+        return None
     try:
-        return time.mktime(time.strptime(stamp, _FIRED_AT_FORMAT))
-    except (ValueError, OverflowError):
+        return float(rest.split(")", 1)[0])
+    except ValueError:
         return None
 
 
-def _rearmed_since(dump: Path, fired_at: float) -> bool:
-    """Has EVERY plane reported since ``fired_at``, per this dump's deadline sibling?
+def _rearmed_since(dump: Path, fired_mono: float) -> bool:
+    """Has EVERY plane reported since the fire, per this dump's deadline sibling?
 
     THE SIBLING'S CONTENT, NOT ITS MTIME, and the difference is the whole predicate. The
     mtime moves on every successful re-arm, and a runtime whose WORKLOAD loop is parked
@@ -3574,27 +3605,32 @@ def _rearmed_since(dump: Path, fired_at: float) -> bool:
     recovered runtime; while any plane is still silent it stays at or before the fire,
     because that plane's deadline is what fired.
 
+    ONE CLOCK: the sibling's THIRD field (the pinned deadline in ``time.monotonic()``)
+    against the held marker's own monotonic stamp. Both are written by the runtime that
+    owns the pid, from the one clock ``pin`` computes on, so a host sleep, a wall-clock
+    step, the DST fall-back hour and the reader's zone cannot move one side without the
+    other (agent review round 1 M1/m1, QA round 1 Q-1).
+
     THE MARGIN IS HALF THE SMALLEST BOUND (``min_bound_seconds() / 2``, 22.5 s), sized
-    against both sides of the comparison rather than tuned: a stuck runtime's deadline
-    sits at the fire (the marker is stamped at OBSERVATION, up to one sampler interval
-    later, at one-second resolution), while a recovered one sits at least a whole bound
-    (>= 45 s) past the fire, minus that same observation lag. Half the floor separates
-    the two with room on either side.
+    against both sides of the comparison rather than tuned: a stuck runtime's pinned
+    deadline is at or BEFORE the fire's observation (that plane's deadline is what
+    fired), while a recovered one is at least a whole bound (>= 45 s) past it. Half the
+    floor separates the two with room on either side.
 
     THE PROGRESS LEG STAYS HELD HERE, stated because it is the conservative direction:
     its decided deadline is the fire's own moment and nothing in the watchdog clears
     it, so a sibling naming ``progress`` never reads as recovered. That is the reading
     the markers themselves keep giving, since that leg keeps re-firing.
 
-    Unreadable, absent or malformed siblings answer ``False`` — the evidence of a
-    recovery is missing, so the held reading the dump states stands.
+    Unreadable, absent, malformed or OLD-FORMAT (two-field) siblings answer ``False`` —
+    the evidence of a recovery is missing, so the held reading the dump states stands.
     """
     try:
         raw = dump.with_suffix(DEADLINE_SUFFIX).read_text(encoding="utf-8").split()
-        deadline = float(raw[0])
+        deadline_mono = float(raw[2])
     except (OSError, ValueError, IndexError):
         return False
-    return deadline - fired_at >= min_bound_seconds() / 2
+    return deadline_mono - fired_mono >= min_bound_seconds() / 2
 
 
 def _holds(dump: Path, text: str) -> bool:
@@ -3635,8 +3671,8 @@ def _holds(dump: Path, text: str) -> bool:
         return False
     if text.rfind(OBSERVED_MARKER) > text.rfind(HELD_MARKER):
         return False
-    fired_at = _held_fired_at(text)
-    return fired_at is None or not _rearmed_since(dump, fired_at)
+    fired_mono = _held_fired_mono(text)
+    return fired_mono is None or not _rearmed_since(dump, fired_mono)
 
 
 def held_now(pid: int, started_at: float, directory: Path | None = None) -> bool:
