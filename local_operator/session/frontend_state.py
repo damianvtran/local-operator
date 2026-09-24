@@ -5297,11 +5297,13 @@ class FrontendStateStore:
                     windows.append(cast(_FrozenSequence, kept.trajectory))
                     bodies[job_id] = self._follower_job_bodies[job_id][0]
                     continue
+                # The wire body is KEPT and the reducer works on a copy of it
+                # (one deep copy per rebuilt row, not two): what the next delta
+                # must be compared against is what the runtime sent, before the
+                # window/todo merges below rewrite it.
                 raw = cast(dict[str, Any], copy.deepcopy(received))
                 if isinstance(raw, dict) and job_id:
-                    # Recorded BEFORE the reducer rewrites the body below, so the
-                    # next delta compares like with like: what the runtime sent.
-                    bodies[job_id] = copy.deepcopy(raw)
+                    bodies[job_id], raw = cast(dict[str, Any], received), raw
                 # A runtime that says "this is a replacement" has told us the
                 # window is not a suffix, so the memo is not consulted at all.
                 window = None
@@ -5401,9 +5403,6 @@ class FrontendStateStore:
             normalized["jobs"] = _FrozenSequence(
                 step if isinstance(step, JobState) else validated[step] for step in plan
             )
-        elif "jobs" in update.changes:
-            # An explicit empty roster (``[]`` is the wire's clear).
-            normalized["jobs"] = _FrozenSequence(())
         candidate = self._state.model_copy(update=normalized)
         # ``jobs_are_canonical`` is now true on the jobs path too: the windows
         # above are frozen and the shells around them are frozen here, so the

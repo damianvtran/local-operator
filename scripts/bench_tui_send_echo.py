@@ -107,6 +107,41 @@ if not _config or not _home or not Path(_config).resolve().is_relative_to(Path(_
     )
 CONFIG_DIR = Path(_config)
 SESSION_ID = "benchecho0001"
+
+
+def repo_revision(repo: Path) -> str:
+    """``<short-sha>[-dirty]`` for the checkout being measured, or ``"unknown"``.
+
+    RECORDED BESIDE THE TREE, not instead of it. This rig's docstring already
+    cites #1528's failure -- "a bench that silently measures a different checkout
+    than the one named" -- and the first version of this script answered it with a
+    PATH, which identifies a directory rather than a commit: a before/after pair
+    taken from two worktrees could not be shown to be the two revisions it
+    claimed, and the base arm of the PR that added this rig was in fact 812
+    insertions off its own merge-base (review round 1, F1). The ``-dirty`` suffix
+    is part of the same honesty: an arm whose tree has uncommitted edits is not
+    the commit it prints, and a rig that hid that would be measuring code that
+    exists nowhere.
+    """
+    def git(*args: str) -> str:
+        try:
+            done = subprocess.run(
+                ["git", "-C", str(repo), *args],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        return done.stdout.strip() if done.returncode == 0 else ""
+
+    sha = git("rev-parse", "--short", "HEAD")
+    if not sha:
+        return "unknown"
+    return f"{sha}-dirty" if git("status", "--porcelain", "--untracked-files=no") else sha
+
+
 #: A launch prompt the size the fleet's roster records carry (effective_prompt
 #: p50 across 54 live sidecars is dominated by a ~12.9 KB team/role preamble).
 _PREAMBLE = ("You are a coder on this team. " * 440)[:12_900]
@@ -246,7 +281,7 @@ async def _child_main(args: argparse.Namespace) -> None:
     (directory / ".session.pid").write_text(str(os.getpid()))
     for i in range(args.lanes):
         session._launch_subagent(label=f"lane-{i}", prompt=_PREAMBLE + f" lane {i} work")
-    print(f"READY {local_operator.__file__}", flush=True)
+    print(f"READY {local_operator.__file__} {repo_revision(REPO)}", flush=True)
     # The parent closes our stdin when it is done; it owns our lifetime.
     await loop.run_in_executor(None, sys.stdin.read)
     os._exit(0)  # the lanes are still stepping
@@ -360,7 +395,9 @@ async def _parent_main(args: argparse.Namespace) -> dict[str, Any]:
         line = (await asyncio.to_thread(child.stdout.readline)).decode().strip()
         if not line.startswith("READY"):
             raise RuntimeError(f"runtime child did not start: {line!r}")
-        child_tree = line.split(" ", 1)[1]
+        parts = line.split(" ", 2)
+        child_tree = parts[1]
+        child_rev = parts[2] if len(parts) > 2 else "unknown"
         record = await _wait_record()
 
         async def never() -> Any:
@@ -418,7 +455,12 @@ async def _parent_main(args: argparse.Namespace) -> dict[str, Any]:
             child.kill()
             child.wait()
     return {
-        "tree": {"viewer": local_operator.__file__, "runtime": child_tree},
+        "tree": {
+            "viewer": local_operator.__file__,
+            "viewer_rev": repo_revision(REPO),
+            "runtime": child_tree,
+            "runtime_rev": child_rev,
+        },
         "lanes": args.lanes,
         "roster": args.roster,
         "load": round(os.getloadavg()[0], 1),
@@ -447,6 +489,11 @@ def main() -> int:
     parser.add_argument("--settle", type=float, default=4.0)
     parser.add_argument("--probe-timeout", type=float, default=60.0)
     parser.add_argument("--json", default="")
+    parser.add_argument(
+        "--label",
+        default="",
+        help="arm name for the A/B driver's log line (e.g. base / head)",
+    )
     parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     import logging
@@ -458,6 +505,11 @@ def main() -> int:
         return 0
     out = asyncio.run(_parent_main(args))
     brief = {key: value for key, value in out.items() if key != "rows"}
+    tree = out["tree"]
+    print(
+        f"ARM {args.label or 'unlabelled'} repo={REPO} "
+        f"viewer={tree['viewer_rev']} runtime={tree['runtime_rev']}"
+    )
     print(json.dumps(brief, indent=1))
     if args.json:
         Path(args.json).write_text(json.dumps(out, indent=2))
