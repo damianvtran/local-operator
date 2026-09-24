@@ -19,8 +19,13 @@ then log in at http://127.0.0.1:4200 with the synthetic password
 ``ordering-demo``. ``POST /fixture/tick`` republishes heartbeats and returns the
 order and sections, so repeated ticks show whether the order is stable.
 ``scripts.probe_isolation`` re-homes ``HOME`` and the config dir before any app
-import, so it never reads or writes the operator's real store. Restart it to
-reset.
+import, so it never reads or writes the operator's real store. THAT IS ENFORCED,
+not assumed: the module raises if anything under ``local_operator`` is already
+loaded (``tests/unit/tui/test_visual_capture.py::test_probe_isolation_refuses_a_late_import``),
+so moving this line below the app imports makes the script fail at once rather
+than re-home a process that has already resolved the real config. Do not rely on
+the gallery's import-order test for it: that one inspects scripts which call
+``save_capture(app,``, and this fixture captures nothing. Restart it to reset.
 """
 
 from __future__ import annotations
