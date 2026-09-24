@@ -7009,7 +7009,20 @@ class OperatorApp(App[None]):
 
         `requested_id` excludes a navigation in flight, whose commit does its
         own re-arm; re-arming underneath it would race the suspend it is about
-        to run. The answered-gate fence (`_gate_answered_key`, G3 in
+        to run.
+
+        `_session_transition_pending` and `_restart_plan` exclude the windows in
+        which `detach_viewer_gates` runs. That call is a DEPARTURE, not a
+        suspension: the session is about to be disposed (`/resume` onto a live
+        owner) or the process is relaunching. A delta that lands inside the
+        detach's await would otherwise read "pending gate, no card" and re-arm a
+        bridge for a conversation that is being torn down. A detach and a
+        suspend set the same `_gates_detached` latch, so the reconcile tells
+        them apart by the window it runs in, not by the latch. (`/reload`, the
+        third caller, retires the source first, and `_source_frontend_changed`
+        never calls this for a retired source.)
+
+        The answered-gate fence (`_gate_answered_key`, G3 in
         `_maybe_start_gate`) still decides whether an ALREADY ANSWERED question
         may re-mount \u2014 this raises how often that guard is consulted, it does
         not weaken it.
@@ -7023,9 +7036,13 @@ class OperatorApp(App[None]):
         # ~30 ms of a 135 ms cold frame, and this runs on every delta.
         if getattr(session, "pending_gate", None) is None:
             return
-        if self._sidebar_navigation.requested_id:
+        if (
+            self._sidebar_navigation.requested_id
+            or self._session_transition_pending
+            or self._restart_plan is not None
+        ):
             return
-        if self._sidebar_gate_card_ready(source, lambda _widget: True):
+        if self._sidebar_gate_card_ready(source, require_paint=False):
             return
         session.resume_viewer_gates()
 
@@ -7145,19 +7162,39 @@ class OperatorApp(App[None]):
                 offset = min(source.draft.scroll_offset, max(0, anchor_region.height - 1))
                 if anchor_region.y + offset != content.y and 0 < view.scroll_y < view.max_scroll_y:
                     return False
-        # A `display_only` frame runs the SAME gate/card check as a live one.
-        # It used to answer "ready" only when NO card was mounted, which made a
-        # correctly-bound card on a `display_only` source answer False forever:
-        # `_await_sidebar_frame` then sat out its 15 s timer, raised
-        # `SurfaceNotReady`, and re-latched `display_only` with a "Reconnect
-        # failed" notice — the frame that was already painted correctly being
-        # declared unpaintable. The `is_cold`/`display_history_current`
-        # preconditions stay excluded for `display_only` (see the guard at the
-        # top of this method); only the card check is shared.
+        # A `display_only` frame is a PREVIEW, and a preview owes no gate card.
+        # With no card on screen it is correct as painted, so it is ready. This
+        # cannot wait for a card to arrive. The bridge that mounts one refuses
+        # while the viewer is not ready for events (G1 in `_maybe_start_gate`),
+        # and that is one of the states that latch `display_only` in the first
+        # place. The connect that would end it is `connect_after_paint` in
+        # `_commit_sidebar_session`, which starts only once THIS frame resolves.
+        # So a card-less preview that waited for its card would be waiting on
+        # itself. It would sit out `_await_sidebar_frame`'s 15 s timer and
+        # raise the terminal `SurfaceNotReady` over a frame that was painted
+        # correctly.
+        #
+        # The card still comes back: the escape is here, in the FRAME verdict,
+        # and deliberately not in `_sidebar_gate_card_ready`, which the
+        # level-triggered `_reconcile_gate_surface` also asks. Out there it would
+        # tell the reconcile that a card-less preview is fine, and the re-arm
+        # that brings the card back once the viewer is ready would never run.
+        #
+        # A preview WITH a card mounted runs the same check as a live frame: a
+        # card bound to this source's current gate is ready, and one bound to
+        # anything else (a superseded gate view, another session) is refused.
+        # The `is_cold`/`display_history_current` preconditions stay excluded
+        # for `display_only` (see the guard at the top of this method).
+        if source.display_only and self._ask_screen is None and self._approval is None:
+            return True
         return self._sidebar_gate_card_ready(source, region)
 
     def _sidebar_gate_card_ready(
-        self, source: SessionInteraction, region: Callable[[Widget], Any]
+        self,
+        source: SessionInteraction,
+        region: Callable[[Widget], Any] | None = None,
+        *,
+        require_paint: bool = True,
     ) -> bool:
         """Whether this source's pending gate (if any) is correctly on screen.
 
@@ -7167,10 +7204,13 @@ class OperatorApp(App[None]):
         copy of the identity comparison is exactly the class of defect that
         stranded the gate card in the first place, so both go through here.
 
-        ``region`` reports where a widget was actually painted, which is what
-        distinguishes the two callers: the frame check passes the compositor map
-        of the display being judged, while a caller that only needs binding
-        identity passes a probe that does not assert paint.
+        ``region`` reports where a widget was actually painted: the frame check
+        passes the compositor map of the display being judged. A caller that
+        only needs binding identity has no such map and has to say so with
+        ``require_paint=False``. That opt-out is a keyword and not an
+        always-truthy ``region``, so that dropping the paint assertion is
+        visible at the call site. With ``require_paint`` left on and no
+        ``region`` supplied, the check fails closed.
         """
         # `pending_gate`, not `frontend_state.pending_gate`: the latter clones
         # the entire state (jobs, usage, trajectories) on every display, which
@@ -7190,7 +7230,7 @@ class OperatorApp(App[None]):
             and card.source_binding
             == (source.token, self._sidebar_gate_identity(source), source.gate_view_generation)
             and card.is_mounted
-            and region(card) is not None
+            and (not require_paint or (region is not None and region(card) is not None))
             and not card.disabled
             and not card.settled
         )

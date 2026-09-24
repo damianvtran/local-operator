@@ -17,39 +17,41 @@ through what the USER touches instead:
   ``tests/e2e/test_sidebar_reconnect_e2e.py`` uses). Nothing about the app's own
   leasing, parking, subscribing or gate wiring is stubbed.
 
-FIVE CONDITIONS, AND THE MEASURED VERDICT FOR EACH. Every case carries the
+FIVE CONDITIONS, EACH A REGRESSION GATE. Every case carries the
 ``_maybe_start_gate`` guard instrumentation borrowed from the sibling file, so a
-finding names the guard that dropped the card rather than a theory about one.
+failure names the guard that dropped the card rather than a theory about one.
 
-* **A — rapid switching.** DOES NOT REPRODUCE. See
-  :func:`test_a_rapid_switching_still_rearms_the_gate_bridge`.
-* **B — abandoned/failed commit.** DOES NOT REPRODUCE PERMANENTLY. A commit that
-  raises after ``_suspend_sidebar_gates`` leaves a genuinely torn state, and the
-  next selection heals it. See
+* **A — rapid switching.** A superseded navigation still re-arms the bridge.
+  See :func:`test_a_rapid_switching_still_rearms_the_gate_bridge`.
+* **B — abandoned/failed commit.** A commit that raises after
+  ``_suspend_sidebar_gates`` leaves a torn state, and the next selection heals
+  it. See
   :func:`test_a_commit_that_fails_after_suspending_gates_heals_on_the_next_click`.
-* **C — gate arrives while backgrounded.** DOES NOT REPRODUCE. See
+* **C — gate arrives while backgrounded.** It mounts on return. See
   :func:`test_a_gate_raised_while_the_session_is_backgrounded_mounts_on_return`.
-* **D — a source whose reconnect can never complete.** **REPRODUCES**, and
-  permanently. See :func:`test_a_source_that_can_never_bind_loses_its_gate_card`,
-  which is left RED as the reproduction.
-* **E — the answered-key latch against a second question.** DOES NOT REPRODUCE.
-  See :func:`test_a_second_question_in_the_same_ask_resurfaces_across_a_switch`.
+* **D — a source whose reconnect can never complete.** Its ``display_only``
+  latch never clears, and its card must still come back. See
+  :func:`test_a_source_that_can_never_bind_loses_its_gate_card`.
+* **E — the answered-key latch against a second question.** The second question
+  of one ask still resurfaces. See
+  :func:`test_a_second_question_in_the_same_ask_resurfaces_across_a_switch`.
 
-THE MECHANISM A, B AND C ALL HEAL THROUGH, which the first pass could not see
-because it never dispatched a real navigation: there is a SECOND re-arm of the
-bridge, and it is not the one at app.py:7539. ``_sidebar_navigation_pending``
-(app.py:6637-6646) is called by ``SessionNavigation`` at both ends of every
-navigation, and its ``session_id == ""`` arm — reached from
-``_prepare_and_commit``'s ``finally`` (session_navigation.py:184-187) on EVERY
-settled navigation, including a failed or superseded one — calls
-``current.resume_viewer_gates()`` whenever the session that ended up on screen
-is a viewer that is not ``display_only``. That is what clears ``_gates_detached``
-after a superseded commit, after a raising commit, and after a plain return leg.
-Measured on every one of those legs below.
+THE THREE ROUTES BACK FOR A DETACHED BRIDGE, since every case above is about
+one of them:
 
-WHICH IS ALSO WHY D IS THE ONE THAT REPRODUCES: that heal is gated on ``not
-self._interaction.display_only``, and D's whole premise is a source for which
-``display_only`` is latched True with no reconnect that can ever clear it.
+* the commit: ``_commit_sidebar_session`` calls ``resume_viewer_gates()`` for
+  every source it commits, ``display_only`` or not;
+* the settled navigation: ``_sidebar_navigation_pending``'s ``session_id == ""``
+  arm, reached from ``_prepare_and_commit``'s ``finally`` on EVERY settled
+  navigation, including a failed or superseded one where no commit runs at all
+  (A and B depend on it);
+* the reconcile: ``_reconcile_gate_surface``, level-triggered from
+  ``_source_frontend_changed``, which re-arms the visible session whenever it
+  owes a card it lacks.
+
+None of them is gated on ``display_only``. Re-arming a bridge submits nothing,
+so the flag that stops a saved preview from starting a turn has no business
+stopping it. D is the case that pins that: its latch can never clear.
 
 HERMETICITY. Every test pins ``LOCAL_OPERATOR_CONFIG_DIR`` at its own
 ``tmp_path``, patches ``find_runtime_record`` to see only its own in-process
@@ -666,64 +668,40 @@ async def test_a_gate_raised_while_the_session_is_backgrounded_mounts_on_return(
 
 @pytest.mark.asyncio
 async def test_a_source_that_can_never_bind_loses_its_gate_card(tmp_path, monkeypatch) -> None:
-    """**THIS IS THE REPRODUCTION. IT IS EXPECTED TO FAIL ON origin/main.**
+    """A session whose ``display_only`` latch can never clear still gets its card.
 
-    A pending gate is dropped PERMANENTLY, with no card, no notice and no retry,
-    for a session whose ``display_only`` latch can never be cleared.
-
-    THE CHAIN, every link measured by the readout this test prints:
+    THE CHAIN this pins, every link checked by the readout this test prints:
 
     1. The user leaves session A. ``_commit_sidebar_session`` suspends A's gates
-       (app.py:7383 -> ``suspend_viewer_gates``, ``_gates_detached = True``) and
-       unmounts both cards unconditionally (7386-7393).
-    2. A's owner is STOPPED — from another terminal's ``/stop all``, or a shell
+       (``suspend_viewer_gates``, ``_gates_detached = True``) and unmounts both
+       cards unconditionally.
+    2. A's owner is STOPPED, from another terminal's ``/stop all`` or a shell
        ``lop stop``. The runtime announces it on the wire and closes.
-       ``_on_disconnected``'s deliberate-stop branch (attached.py:5732-5746)
-       returns BEFORE setting ``_recovering``, so there is no recovery loop, and
-       on the boot facade ``_can_go_cold`` is False, so ``can_ever_bind``
-       answers False for the rest of the process. This is not a contrived
-       facade: it is exactly what ``cli.py:8313`` builds — ``AttachedSession.connect``
-       with no ``viewer=True`` — and ``attached.py:2335-2349`` documents this as
-       the reachable False.
+       ``_on_disconnected``'s deliberate-stop branch returns BEFORE setting
+       ``_recovering``, so there is no recovery loop, and on the boot facade
+       ``_can_go_cold`` is False, so ``can_ever_bind`` answers False for the
+       rest of the process. This is not a contrived facade: it is what the CLI
+       builds (``AttachedSession.connect`` with no ``viewer=True``), and
+       ``can_ever_bind``'s own docstring names this as the reachable False.
     3. The user clicks back onto A. ``_prepare_sidebar_session`` latches
-       ``display_only`` True (app.py:5912-5913, ``or session.is_cold``), and the
-       commit's ``if not source.display_only`` (app.py:7537) therefore SKIPS
-       ``resume_viewer_gates()``.
-    4. Both heals are unavailable, which is what makes this permanent rather
-       than slow. The connect armed at app.py:7646 cannot clear ``display_only``
-       at app.py:7973, because it raises at the bind postcondition
-       (app.py:7946-7948) and takes the ``terminal_reason`` arm, which sets NO
-       retry. And ``_sidebar_navigation_pending``'s empty-id re-arm — the second
-       route, the one that saves cases A, B and C above — is itself gated on
-       ``not self._interaction.display_only`` (app.py:6645).
-    5. So ``_gates_detached`` stays True forever and G4:5600 drops every
-       re-arm attempt. The card is gone, and the pending gate is not mentioned
-       anywhere on screen: the band says the session was stopped, which is true
-       and is not the same statement as "you still owe this session an answer".
+       ``display_only`` (``or session.is_cold``), and nothing on this path can
+       clear it: the connect armed after the paint raises at the bind
+       postcondition and takes the ``terminal_reason`` arm, which sets no retry.
+    4. The card must come back anyway, on the first return and on every later
+       one. The commit's ``resume_viewer_gates()`` and the settled-navigation
+       re-arm both run for a ``display_only`` source, so ``_gates_detached``
+       clears and the ladder mounts the card. Gating either of them on
+       ``display_only`` drops the card here for good, with G4 refusing every
+       attempt and nothing on screen mentioning the pending question.
 
-    WHAT THIS DOES AND DOES NOT CLAIM, because the difference matters for the
-    fix. The card loss is real and permanent. The BLOCKED TURN in the user's
-    report is not fully reproduced by this shape: a stopped owner's turn died
-    with its process, so the gate behind the card is gone too — here the owner
-    is in-process and its gate coroutine survives, which is a property of the
-    rig rather than of production. What generalises is the LATCH: any source
-    that reaches ``display_only`` with a reconnect that cannot complete loses
-    its gate card with no route back, and the un-bindable stop is the shape that
-    is reachable end to end today.
-
-    THE CHAIN WAS CONFIRMED BY MUTATION, not only by reading it. Making BOTH
-    re-arms unconditional on ``display_only`` — app.py:7537's
-    ``if not source.display_only`` around ``resume_viewer_gates()``, and
-    app.py:6645's ``elif not self._interaction.display_only`` — turns this test
-    GREEN with nothing else changed. That is a diagnostic probe rather than a
-    proposed fix (it would resume gates on a genuine saved-preview source, which
-    is what e1f1603c3/#808 added the first guard to prevent); what it
-    establishes is that those two branches, and nothing else, are what drop the
-    card here.
-
-    The assertion is deliberately the POSITIVE one (the card comes back) so this
-    test becomes the regression gate for the fix rather than a description of
-    the defect that would have to be inverted later.
+    WHAT THIS DOES AND DOES NOT CLAIM. The card loss is real and permanent
+    without the re-arm. The BLOCKED TURN behind it is not fully modelled: a
+    stopped owner's turn dies with its process, so in production the gate
+    behind the card goes too. Here the owner is in-process and its gate
+    coroutine survives, which is a property of the rig. What generalises is
+    the LATCH: any source that reaches ``display_only`` with a reconnect that
+    cannot complete needs a route back that does not depend on the latch, and
+    the un-bindable stop is the shape reachable end to end today.
     """
     rig = await _rig(tmp_path / "config", monkeypatch, "alpha", "beta")
     # `viewer=False`: the boot contract `lop` itself builds, and the one on which
@@ -811,7 +789,7 @@ async def test_a_source_that_can_never_bind_loses_its_gate_card(tmp_path, monkey
                         "(can_ever_bind is False), so the commit skips "
                         "resume_viewer_gates() at app.py:7537 AND the second re-arm at "
                         "app.py:6645 is skipped for the same reason. _gates_detached "
-                        "stays True and guard G4:5600 drops every attempt. Nothing on "
+                        "stays True and guard G4 drops every attempt. Nothing on "
                         "screen mentions the pending question." + diagnosis
                     )
                 finally:
@@ -945,7 +923,7 @@ async def test_a_second_question_in_the_same_ask_resurfaces_across_a_switch(
                     assert resurfaced, (
                         "REPRODUCED (E): the SECOND question of an ask did not come back "
                         "after a switch, while the first one did. Check whether "
-                        "_gate_answered_key (G3:5595) matched an identity it should not "
+                        "_gate_answered_key (G3) matched an identity it should not "
                         "have." + diagnosis
                     )
                 finally:
