@@ -64,6 +64,13 @@ the fire writes the leg marker — in ``faulthandler``'s own
   and 100 frames, and touches NO timer state, so there is nothing left to park in.
   It is taken OUTSIDE :data:`_LOCK`: an all-thread dump is hundreds of
   milliseconds on a loaded host, and the gate is what every ``beat`` needs.
+  ONE OWNER, AND IT IS THIS THREAD: with no C timer left, the sampler is the only
+  thing in the process that can take a deadline, so it reads ``due_at`` BEFORE it
+  asks the progress predicate again (:func:`_progress_sampler`). The progress leg
+  records a fresh deadline on every sample it fires on, and a predicate asked
+  first would re-arm over the deadline it had just set — an arm that cancels
+  itself, leaving a loop that burns without ever dipping with one ``no progress``
+  line and no dump at all (2026-09-24).
 * THE OUT-OF-PROCESS LEG IS A SIGNAL (:func:`_register_evidence_signal`).
   ``arm`` registers ``SIGUSR1`` on the SAME ``O_APPEND`` handle, so a supervisor
   or an operator can obtain a dump from a runtime whose Python is not running at
@@ -3085,13 +3092,6 @@ def _progress_sampler(armed: "_Armed", stop: threading.Event) -> None:
                 # Re-derived BEFORE the fire bookkeeping, so the ``continue`` on a
                 # recorded held fire waits on the fresh value too.
                 interval = _sample_interval(armed.seconds)
-                # AND THE WAKE FOLLOWS THE DEADLINE AS WELL AS THE WINDOW, because the
-                # fire is Python now (see :func:`_arm_timer`): this thread's own cadence
-                # IS the bound's resolution. Without it a liveness fire could land up to
-                # one whole window-sample late — 15 s at the shipped 300 s bound, since
-                # ``_sample_interval`` is ``bound / PROGRESS_SAMPLES_PER_WINDOW`` capped
-                # at the heartbeat — where the C timer expired exactly on time.
-                interval = min(interval, max(MIN_REARM_S, armed.due_at - time.monotonic()))
                 if armed.evidence_callbacks:
                     # AND IT FOLLOWS A REGISTERED EVIDENCE CALLBACK TOO, because that
                     # callback is how the runtime's own SIGUSR1 action is reached now
@@ -3106,18 +3106,40 @@ def _progress_sampler(armed: "_Armed", stop: threading.Event) -> None:
                 # last wake is recorded and re-armed on the same pass, only then is the
                 # exit leg applied — so a flip made while the timer was pending is in
                 # force before anything else acts on the arm — and only then is the
-                # next progress decision taken.
+                # deadline read and the next progress decision taken.
                 _apply_exit_leg(armed, held)
                 if _record_held_fire(armed):
                     continue
-                if _sample(armed, observation):
-                    return
                 # THE FIRE IS DECIDED UNDER THE GATE AND TAKEN OUTSIDE IT (see
                 # :func:`_fire`): an all-thread dump is hundreds of milliseconds, and
                 # the gate is what the other plane's ``beat`` needs. ``_record_held_fire``
                 # above runs FIRST, so a fire this process already wrote is annotated and
-                # re-armed before this line can fire on the same episode twice.
+                # re-armed before this decision can fire on the same episode twice.
+                #
+                # THE RECORDED DEADLINE IS READ BEFORE THE PREDICATE IS ASKED AGAIN,
+                # and the order is a correctness requirement rather than tidiness.
+                # THE RECORDER OF A DEADLINE IS ALSO ITS ONLY CONSUMER here (there is
+                # no C timer left — see :func:`_arm_timer`), and the progress leg
+                # records one on every sample it fires on: set to ``now``, it makes
+                # ``pin``/``deadline`` answer ``now + MIN_REARM_S``. Read the predicate
+                # FIRST and that re-arm pre-empts the read every single time the leg
+                # fires again — an arm that cancels itself, which is what made the
+                # deadline unreachable for a loop whose burn never dips — so the dump
+                # would land only on a pass that happened to skip the predicate (a
+                # reset run, or a sample with no window behind it) and never on a
+                # cleanly spinning one. Read the deadline first and the wake the leg
+                # recorded is taken on this pass, at the instant it was recorded for.
                 due = time.monotonic() >= armed.due_at
+                _sample(armed, observation)
+                # AND THE NEXT WAKE FOLLOWS THE DEADLINE *AS IT NOW STANDS*, which is
+                # why this clamp sits AFTER the sample rather than above it: the leg
+                # records its fire during that call, and a clamp taken before it would
+                # sleep on the deadline that fire has just replaced — up to a whole
+                # window-sample late, 8.33 s at the shipped 300 s bound, where the C
+                # timer this replaced expired exactly on time. The clamp is still the
+                # dead instrument's guard, so it stays: a liveness fire may not land
+                # later than ``max(MIN_REARM_S, due_at - now)``.
+                interval = min(interval, max(MIN_REARM_S, armed.due_at - time.monotonic()))
             if notified:
                 # OUTSIDE THE GATE, and on the sampler's own thread: the runtime's
                 # callback schedules its work on the loop (``call_soon_threadsafe``),
@@ -3141,7 +3163,18 @@ def _progress_sampler(armed: "_Armed", stop: threading.Event) -> None:
 
 
 def _sample(armed: "_Armed", observation: object = _UNSET) -> bool:
-    """One progress sample. True when the bound was FIRED, so the sampler is done.
+    """One progress sample. True when the progress leg FIRED on this sample.
+
+    THE RETURN VALUE IS AN ANSWER, NOT AN INSTRUCTION. It used to be an instruction —
+    "the sampler is done" — because the fire it announced was a timer the process did
+    not have to stay alive for; with the fire in Python (:func:`_fire`) the sampler is
+    the only thread that can take a deadline at all, so a leg that ended it here would
+    leave the deadline it had just recorded with nobody to honour it: the loop's
+    ``_fire`` would never run, the dump would never be written, and the runtime's stall
+    would be reported by one line and then be undetectable — a fire that is silent
+    about itself, which is the class of defect this module exists to end. The sampler
+    therefore keeps waking for every arm (see :func:`_progress_sampler`), and this
+    answer is what the predicate cells read to say the leg fired.
 
     Called with :data:`_LOCK` held, and it must be: it reads and writes the same
     ``progress_deadline`` that :func:`beat` re-arms from, on another thread, and
@@ -3213,40 +3246,51 @@ def _sample(armed: "_Armed", observation: object = _UNSET) -> bool:
     if mean is not None and mean >= PROGRESS_CPU_FLOOR:
         _fire_progress(armed, now)
 
-        # A HELD FIRE DOES NOT END THE SAMPLER, and it must not: the sampler is the
-        # only Python thread left in exactly that case, and the next wake is where a
-        # held fire is recorded and the bound is re-armed for the episode after it
-        # (``_record_held_fire``). Returning here would leave the dump unannotated,
-        # the timer unfired-again and the runtime's stall undetectable — a fire that
-        # is silent about itself, which is the class of defect this module exists to
-        # end.
-        return not armed.held
+        # TRUE IS "THIS LEG FIRED ON THIS SAMPLE", and the deadline it just recorded is
+        # what fires the runtime — the sampler's next pass reads ``due_at`` BEFORE it
+        # asks this predicate again, so the wake is taken even though the predicate is
+        # still true now. Both arms are answered the same way: an arm that is HELD is
+        # recorded, annotated and re-armed for the episode after it on the next pass
+        # (``_record_held_fire``), and an arm that is not held reaches ``_fire``'s own
+        # reading of the leg like every other fire — neither of them ends the sampler,
+        # which is the only thing left in the process that can take a deadline.
+        return True
     _extend_for_execution(armed, now, executing if probe_answered else ())
     return False
 
 
 def _fire_progress(armed: "_Armed", now: float) -> None:
-    """Leave through the SAME dump-and-exit path the liveness leg uses.
+    """Record the progress leg's fire: the line that names the leg, and its deadline.
 
     Past the window the runtime must stop being a session that burns a core to
     produce nothing, and the graceful rungs cannot be reached from the state
     being detected — this is the module's oldest constraint, and the reason the
     exit is ``faulthandler``'s rather than anything Python can sequence.
 
-    SO IT REUSES THAT PATH RATHER THAN ADDING A SECOND ONE: the dump file, the
-    ``FIRED_MARKER``, the every-thread stack and the ``_exit(1)`` are all the
-    liveness leg's, which is what keeps a reader's rule ("a dump with the fired
-    marker is evidence a bound actually fired") true for both. What this adds is
-    the ONE line above it naming WHICH leg fired — without it a reader could not
-    tell a runtime that went silent from one that spun, and the two want
-    different investigations.
+    SO THE FIRE GOES OUT THROUGH THE SAME PATH THE SILENCE LEG USES rather than
+    adding a second one: the dump file, the ``FIRED_MARKER``, the every-thread
+    stack and the leg's own reading at that instant are all :func:`_fire`'s, which
+    is what keeps a reader's rule ("a dump with the fired marker is evidence a
+    bound actually fired") true for both. What this adds is the ONE line above it
+    naming WHICH leg fired — without it a reader could not tell a runtime that went
+    silent from one that spun, and the two want different investigations.
 
-    ARMING FOR ``MIN_REARM_S`` IS WHAT FIRES IT: ``deadline()`` takes the minimum
-    over the legs, and setting the progress leg to ``now`` makes that minimum the
-    present moment, so this call and every later :func:`beat` agree on when the
-    timer expires. The write is before the arm, and it has to be: ``faulthandler``
-    reaches its timer from a C thread that runs no Python, so this line has no
-    later moment available to it.
+    THE DEADLINE RECORDED HERE IS HONOURED BY THE SAMPLER'S OWN NEXT PASS, and that
+    is the whole of the wake contract now. "Arming for :data:`MIN_REARM_S` is what
+    fires it" described the retired C timer (see :func:`_arm_timer`): nothing
+    outside this process comes due any more, so the only thing that can take this
+    deadline is the thread that recorded it, reading ``due_at`` BEFORE it asks the
+    predicate again — read the predicate first and this re-arm, taken on every
+    sample the leg fires on, would pre-empt its own deadline for ever and the dump
+    would never be written at all. THE VALUE IS STILL THE PRESENT MOMENT and still
+    has to be: ``deadline()`` takes the minimum over the legs, so setting the
+    progress leg to ``now`` is what makes the sibling, the ``Timeout (`` value and
+    the sampler all agree on one instant.
+
+    The write is before the re-arm, and that order matters for a reader rather than
+    for a timer: the leg's line has to be in the file above the ``Timeout (`` line
+    that :func:`_fire` appends, which is what lets whoever opens the dump attribute
+    the fire to the progress predicate.
     """
     armed.progress_deadline = now
     line = (
@@ -3269,15 +3313,14 @@ def _fire_progress(armed: "_Armed", now: float) -> None:
     try:
         _rearm(armed)
     except (OSError, ValueError, RuntimeError):
-        # The deadline STAYS set, deliberately. The timer already armed from the
-        # last beat is at most one heartbeat away, and every beat re-arms from
-        # ``deadline()``, so a failed re-arm here still ends the process within
-        # that heartbeat rather than silently withdrawing a decision already
-        # taken. Withdrawing it would make a transient arming failure a way for
-        # this leg never to fire again.
+        # The deadline STAYS set, deliberately. The sampler is the only consumer this
+        # deadline has, and it re-reads ``due_at`` on its next pass whatever this call
+        # did, so a failed re-arm here still leaves the sampler's own wake carrying the
+        # decision rather than silently withdrawing one already taken. Withdrawing it
+        # would make a transient arming failure a way for this leg never to fire again.
         logger.warning("stall watchdog could not fire its progress leg", exc_info=True)
     else:
-        # The progress leg's own deadline is what the timer is now armed for, so the
+        # The progress leg's own deadline is what the wake is now due from, so the
         # sibling has to be rewritten here too: leaving the last beat's number would
         # state a deadline that is no longer in force.
         _record_deadline(armed)
