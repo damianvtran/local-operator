@@ -22,6 +22,7 @@ from ``lsof`` by hand on 2026-09-23.
 from __future__ import annotations
 
 import urllib.error
+from email.message import Message
 from typing import Any
 
 import pytest
@@ -128,7 +129,7 @@ def test_an_error_response_is_not_reported_as_nobody(probe_env: dict[str, Any]) 
         "http://127.0.0.1:1111/health",  # the URL the probe asked
         500,  # the status it answered with
         "Internal Server Error",
-        {},  # headers
+        Message(),  # headers, in the shape the probe reads them from
         None,  # fp
     )
     probe = services.probe_address(_record())
@@ -291,7 +292,7 @@ def _reclaim(
     verdict: str = services.DEAF,
     command: str | None = SERVE_ARGV,
     uid: int | None = None,
-    alive: list[bool] | None = None,
+    alive: list[bool | None] | None = None,
     records: list[services.ServeDaemonReport] | None = None,
     probe_script: list[str] | None = None,
     kill_lookup_error: bool = False,
