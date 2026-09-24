@@ -516,7 +516,9 @@ class McpHost:
         result = await store_credentials(target, body)
         if result.get("code") != "saved":
             try:
-                await asyncio.to_thread(unbind_header_secret, body.name, header, binding)
+                # No name/header beside the binding: it already carries both, so
+                # a rollback cannot be pointed at a different header (R4-n1).
+                await asyncio.to_thread(unbind_header_secret, binding)
             except MCPConfigWriteError:
                 # The binding stays: it names a key the row now reports as
                 # ``missing``, and ``set_key`` is the way on from there.

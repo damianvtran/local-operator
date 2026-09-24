@@ -534,7 +534,14 @@ def _write_bytes_atomic(path: Path, payload: bytes) -> None:
     """Temp file + ``os.replace``, for a payload that is already final bytes.
 
     Split out of :func:`_write_json_atomic` so a rollback can put a file's
-    ORIGINAL bytes back rather than a re-serialisation of them.
+    ORIGINAL bytes back rather than a re-serialisation of them. It is a second
+    destructive call site in this module for exactly that reason, and its
+    callers are the two ``add_key`` config writes below: both are the scope file
+    :func:`_scope_path` resolved for a server this module owns, and
+    ``os.replace`` here lands on that FILE — the temp is its sibling and the
+    target was just read — so no path through this function removes, renames or
+    replaces a session DIRECTORY (``tests/unit/session/test_no_session_deletion.py``
+    carries the allow-list row and this reason).
     """
     import tempfile
 
@@ -851,8 +858,16 @@ class HeaderBinding:
     left a refused ``add_key`` reindenting a hand-formatted file and adding a
     final newline it never had (QA round 3, Q-2); holding both lets the undo
     restore the original bytes, and only while the file is still what we wrote.
+
+    The edit's IDENTITY travels with it — ``name`` and ``header`` — rather than
+    being handed to the undo beside the binding: the pair already is the edit,
+    and a caller that paired one binding with another server's name would have
+    the fallback branch in :func:`unbind_header_secret` remove a header this bind
+    never wrote (review round 4, R4-n1).
     """
 
+    name: str
+    header: str
     scope: str
     path: Path
     before_bytes: bytes
@@ -928,10 +943,12 @@ def bind_header_secret(
         _write_bytes_atomic(path, written)
     except OSError as exc:
         raise MCPConfigWriteError([f"could not write {path}: {exc}"]) from exc
-    return HeaderBinding(scope=scope, path=path, before_bytes=original, after_bytes=written)
+    return HeaderBinding(
+        name=name, header=header, scope=scope, path=path, before_bytes=original, after_bytes=written
+    )
 
 
-def unbind_header_secret(name: str, header: str, binding: HeaderBinding) -> None:
+def unbind_header_secret(binding: HeaderBinding) -> None:
     """Undo :func:`bind_header_secret` when the value could not be stored.
 
     While the file is still byte-for-byte what the bind wrote, its ORIGINAL
@@ -939,7 +956,12 @@ def unbind_header_secret(name: str, header: str, binding: HeaderBinding) -> None
     anything else edited it in between, only our header is removed, and only
     while it still holds a bare ``${ID}`` reference, so a concurrent hand edit
     is never thrown away.
+
+    The name and header come from ``binding`` and not from the caller: the
+    binding is the record of what was written, and the two cannot disagree
+    (review round 4, R4-n1).
     """
+    name, header = binding.name, binding.header
     path = binding.path
     try:
         current = path.read_bytes()

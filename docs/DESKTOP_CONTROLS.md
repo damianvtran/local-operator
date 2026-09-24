@@ -579,8 +579,9 @@ a settled result for an operation still in flight.
 references (`auth.secret_refs` non-empty): the client asks for each listed id and
 posts `{name, values:{<id>: <value>}, confirmed_replace?}`. `add_key` appears INSTEAD
 of `sign_in` for a REMOTE server we own (`source.editable`) that declares no
-reference, SENDS no credential of its own (no header at all, and no user-info or
-query in its URL) and is known to need a key: its config says `auth.type: apikey`,
+reference, SENDS no credential of its own (no header that could CARRY one, and no
+user-info or query in its URL) and is known to need a key: its config says
+`auth.type: apikey`,
 or a Test in this daemon watched it answer 401/403 while discovery found no OAuth
 authorization server. Such a row reads `auth.kind: api_key`, `signed_in: false`,
 `needs_sign_in`, and never offers `sign_in` (which could only fail with "No OAuth
@@ -588,6 +589,11 @@ authorization server was discovered"). A server that already sends a literal key
 header is never this row: it has somewhere its key already travels, so it reads
 `not_started` (or whatever its probe measured) rather than `needs_sign_in`, and its
 fix is the header it already has — `add_key` could only bind a second one.
+A header counts as a place a key travels only when its NAME can be one and the
+transport does not own it: `Accept` is invented by the protocol (every streamable
+HTTP client sends it) and `X-Tenant-Id` says nothing about a credential, so a
+keyless server sending either is still this row — it keeps `add_key`, and
+`status_reason` says why it needs a key despite sending headers.
 The client asks for the header name (e.g. `Authorization` or `X-Api-Key`), a key id
 (a `[A-Za-z_][A-Za-z0-9_]*` name) and the value, and posts `{name, header,
 values:{<id>: <value>}}` — exactly one id. The server binds
@@ -597,7 +603,8 @@ the binding back — including the FILE's own bytes, so a hand-formatted `mcp.js
 comes back exactly as it was. It refuses a header the server already sets (in ANY
 case, since HTTP header names are case-insensitive), a transport-owned
 header, a foreign row, and a row the catalog would not offer `add_key` on at all
-(an explicit OAuth server, a server that already sends a header, a stdio server),
+(an explicit OAuth server, a server that already sends a credential header, a stdio
+server),
 with `code: invalid_target` and nothing written. `add_key` is refused for the last
 of those on purpose: a second credential header bound beside the one the server
 already sends would look like a saved key while the server kept failing. After it

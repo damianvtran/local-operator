@@ -744,11 +744,201 @@ def test_a_401_with_a_literal_apikey_config_is_not_unbound(
     assert row["status"] != "needs_sign_in", row
 
 
+@pytest.mark.parametrize("ledger", [False, None], ids=["401-no-oauth", "no-ledger"])
+def test_a_header_that_cannot_carry_a_key_is_not_one_the_key_travels_in(
+    distinct: Path, challenges: dict[str, bool], ledger: bool | None
+) -> None:
+    """R4-M1: ``X-Tenant-Id`` is a header, and no key could ever be in it.
+
+    The header arm asked "does this server send a header at all", so a keyless
+    server with a tenant header and ``auth.type: apikey`` read ``signed_in:
+    true`` + ``not_started`` with no ``add_key``, and after a Test's 401 it read
+    ``needs_sign_in`` while ``offers_add_key`` refused the write: a row that says
+    it needs a credential, claims to be signed in, and offers no action that
+    could produce one. ``auth.type`` is the config's own signal, so the row knows
+    either way — the ledger only decides whether the SIGN-IN arm is offered.
+    """
+    from local_operator.mcp.catalog import offers_add_key
+
+    url = "https://mcp.example.invalid/rpc"
+    _write_global(
+        {
+            "acme-api": {
+                "type": "http",
+                "url": url,
+                "headers": {"X-Tenant-Id": "acme"},
+                "auth": {"type": "apikey"},
+            }
+        }
+    )
+    if ledger is not None:
+        challenges[url] = ledger
+    configs, _ = load_all_mcp_configs(distinct)
+
+    (row,) = describe_servers(str(distinct))["servers"]
+
+    assert row["auth"] == {"kind": "api_key", "signed_in": False, "secret_refs": []}, row
+    assert (row["status"], row["status_basis"]) == ("needs_sign_in", "stored"), row
+    assert row["status_reason"] == "The headers this server sends cannot carry a key.", row
+    assert row["actions"] == ["test", "add_key", "remove"], row
+    assert offers_add_key(configs["acme-api"]) is True
+
+
+def test_the_specs_accept_header_is_not_a_place_the_key_travels(
+    distinct: Path, challenges: dict[str, bool]
+) -> None:
+    """``Accept`` is a transport header — the spec makes EVERY client send it.
+
+    Counting it as "somewhere its key already travels" put a 401'd server with no
+    ``auth`` block back on ``unknown`` + a bare ``sign_in``, which can only fail
+    with "No OAuth authorization server was discovered" — the dead end the
+    ledger's ``False`` was added to close (UX round 1, U3).
+    """
+    url = "https://mcp.example.invalid/rpc"
+    _write_global(
+        {
+            "acme-api": {
+                "type": "http",
+                "url": url,
+                "headers": {"Accept": "application/json, text/event-stream"},
+            }
+        }
+    )
+    challenges[url] = False
+
+    (row,) = describe_servers(str(distinct))["servers"]
+
+    assert row["auth"] == {"kind": "api_key", "signed_in": False, "secret_refs": []}, row
+    assert "add_key" in row["actions"], row
+    assert "sign_in" not in row["actions"], row
+
+
+#: Every shape the credential clause decides, as (label, server entry, ledger).
+#: The ledger is what a Test records on a 401/403 whose discovery found no OAuth
+#: authorization server; ``None`` is the fresh daemon that has measured nothing.
+_CREDENTIAL_SHAPES: list[tuple[str, dict[str, Any], bool | None]] = [
+    ("bare remote", {"url": "https://a.invalid/rpc"}, False),
+    ("apikey, no headers", {"url": "https://b.invalid/rpc", "auth": {"type": "apikey"}}, False),
+    ("apikey, empty headers", {"url": "https://c.invalid/rpc", "headers": {}}, False),
+    (
+        "apikey + tenant header",
+        {
+            "url": "https://d.invalid/rpc",
+            "headers": {"X-Tenant-Id": "acme"},
+            "auth": {"type": "apikey"},
+        },
+        False,
+    ),
+    (
+        "apikey + tenant header, no ledger",
+        {
+            "url": "https://d2.invalid/rpc",
+            "headers": {"X-Tenant-Id": "acme"},
+            "auth": {"type": "apikey"},
+        },
+        None,
+    ),
+    (
+        "tenant header, no auth block",
+        {"url": "https://e.invalid/rpc", "headers": {"X-Tenant-Id": "acme"}},
+        False,
+    ),
+    (
+        "accept header, no auth block",
+        {"url": "https://f.invalid/rpc", "headers": {"Accept": "application/json"}},
+        False,
+    ),
+    (
+        "literal key header + apikey",
+        {
+            "url": "https://g.invalid/rpc",
+            "headers": {"X-Api-Key": PLACEHOLDER},
+            "auth": {"type": "apikey"},
+        },
+        False,
+    ),
+    (
+        "literal key header, no auth block",
+        {"url": "https://h.invalid/rpc", "headers": {"Authorization": PLACEHOLDER}},
+        False,
+    ),
+    ("url query", {"url": "https://i.invalid/rpc?api_key=" + PLACEHOLDER}, False),
+    ("url user-info", {"url": "https://user:" + PLACEHOLDER + "@j.invalid/rpc"}, False),
+    ("url fragment only", {"url": "https://k.invalid/rpc#frag"}, False),
+    (
+        "header reference",
+        {"url": "https://l.invalid/rpc", "headers": {"X-Api-Key": "${ACME_KEY}"}},
+        False,
+    ),
+    ("env reference", {"url": "https://m.invalid/rpc", "env": {"TOKEN": "${TOKEN}"}}, False),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "server", "ledger"),
+    _CREDENTIAL_SHAPES,
+    ids=[shape[0] for shape in _CREDENTIAL_SHAPES],
+)
+def test_no_shape_both_needs_a_sign_in_and_claims_to_be_signed_in(
+    distinct: Path,
+    challenges: dict[str, bool],
+    label: str,
+    server: dict[str, Any],
+    ledger: bool | None,
+) -> None:
+    """The invariant R4-M1 was measured against, over every shape at once.
+
+    The dead end is a row that reads ``needs_sign_in``, reports ``signed_in:
+    true`` and offers no action that could produce a credential — measured on
+    the PROBE basis, because that is the state a user reaches by pressing Test
+    on the server, and it is the state the wide header arm produced (the stored
+    basis said ``not_started``; the 401 changed the status and nothing else).
+
+    ``add_key``/``set_key`` are the key paths, and ``sign_in`` is usable only
+    while the row is NOT claiming to be signed in — a sign-in the server then
+    refuses is exactly what these rows must not offer.
+
+    The literal-key-header rows are the ONE deliberate exception, and the reason
+    the clause narrows to headers that cannot carry a key at all: such a server
+    already SENDS a credential, so ``signed_in: true`` is its claim about its own
+    config, ``add_key`` could only bind a SECOND header (the write refuses it),
+    and the way on is that config's own header (R3-M1, kept). The ``apikey`` one
+    is the shape that reaches ``signed_in: true``; the no-``auth``-block one reads
+    ``unknown`` and keeps a sign-in that can still work.
+    """
+    url = server["url"]
+    _write_global({"acme-api": {"type": "http", **server}})
+    if ledger is not None:
+        challenges[url] = ledger
+    configs, _ = load_all_mcp_configs(distinct)
+    probe = ProbeResult(
+        status="needs_sign_in",
+        reason="401 Unauthorized",
+        tool_count=None,
+        observed_at=1_000.0,
+        digest=config_digest(configs["acme-api"]),
+    )
+
+    (row,) = describe_servers(str(distinct), probes={"acme-api": probe}, now=1_000.0 + 1)["servers"]
+
+    assert row["status"] == "needs_sign_in", (label, row)
+    signed_in = row["auth"]["signed_in"]
+    key_action = bool({"add_key", "set_key"} & set(row["actions"]))
+    usable_sign_in = "sign_in" in row["actions"] and signed_in is not True
+    if label == "literal key header + apikey":
+        assert signed_in is True and not key_action, (label, row)
+        return
+    assert not (signed_in is True and not (key_action or usable_sign_in)), (label, row)
+
+
 @pytest.mark.parametrize(
     "url",
     [
         "https://mcp.example.invalid/rpc?api_key=" + PLACEHOLDER,
         "https://user:" + PLACEHOLDER + "@mcp.example.invalid/rpc",
+        # R4-n2: a URL ``urlsplit`` refuses counts as possibly carrying the key,
+        # the direction ``_public_url`` already redacts it in.
+        "https://[unterminated/rpc",
     ],
 )
 def test_a_url_that_carries_the_key_itself_is_not_unbound(
@@ -788,11 +978,14 @@ def test_a_server_with_a_stored_grant_is_not_unbound_either(
 def test_a_referenced_server_is_not_unbound_by_the_ledger_either(
     distinct: Path, challenges: dict[str, bool]
 ) -> None:
-    """R3-m3: the ``refs`` arm. ``auth`` is what the row claims, not just actions.
+    """R3-m3: a ``set_key`` row's CLAIM, not just its action list.
 
-    Dropping the ``refs`` check flipped this row to ``signed_in: false`` /
-    ``needs_sign_in`` while its key was stored — the ``set_key`` row contradicting
-    its own ``secret_refs``.
+    The ``refs`` arm itself is pinned by the env-reference test below (round 4,
+    R4-m1: this one cannot fail for that arm, because the credential clause
+    short-circuits on the ``${ACME_KEY}`` header first). What this pins is the
+    row: a server whose key is stored reads ``api_key`` + ``signed_in: false``
+    with a ``missing`` reference and ``needs_sign_in`` — never ``add_key`` beside
+    the ``set_key`` the user is meant to press.
     """
     url = "https://mcp.example.invalid/rpc"
     add_server(
@@ -809,6 +1002,36 @@ def test_a_referenced_server_is_not_unbound_by_the_ledger_either(
     }, row
     assert (row["status"], row["status_basis"]) == ("needs_sign_in", "stored"), row
     assert row["actions"] == ["test", "set_key", "remove"], row
+
+
+def test_an_env_referenced_server_is_not_unbound_by_the_ledger_either(
+    distinct: Path, challenges: dict[str, bool]
+) -> None:
+    """R4-m1: the ``refs`` arm, on the shape the credential clause cannot reach.
+
+    ``refs`` counts a reference in ``env`` as well as in ``headers``
+    (``public_secret_refs``), and a reference the header clause short-circuits on
+    cannot pin the arm: the round-3 mutation claim was wrong. An env reference
+    leaves no header for that clause to find, so the arm is the only thing
+    between this row and ``add_key`` — which the write would refuse, since the
+    server already names where its key goes.
+    """
+    from local_operator.mcp.catalog import offers_add_key
+
+    url = "https://mcp.example.invalid/rpc"
+    _write_global({"acme-api": {"type": "http", "url": url, "env": {"TOKEN": "${ACME_KEY}"}}})
+    challenges[url] = False
+    configs, _ = load_all_mcp_configs(distinct)
+
+    (row,) = describe_servers(str(distinct))["servers"]
+
+    assert row["auth"] == {
+        "kind": "api_key",
+        "signed_in": False,
+        "secret_refs": [{"id": "ACME_KEY", "state": "missing"}],
+    }, row
+    assert row["actions"] == ["test", "set_key", "remove"], row
+    assert offers_add_key(configs["acme-api"]) is False
 
 
 def test_a_bare_401_server_still_offers_add_key(
@@ -880,9 +1103,22 @@ def test_the_legacy_projection_keeps_mains_empty_url(distinct: Path) -> None:
 
     legacy = public_server_config(configs["broken"])
 
-    assert legacy["url"] == "", legacy
-    assert legacy["endpoint_redacted"] is False
-    assert legacy["transport"] == "http"
+    # The WHOLE payload, not just the field QA's regression was about: this shape
+    # exists for desktop builds that predate the catalog, and those clients cannot
+    # be updated in step with a change to any field (review round 4, R4-m2).
+    # Verified byte-identical to ``origin/main:local_operator/mcp/desktop.py``.
+    assert legacy == {
+        "transport": "http",
+        "command": None,
+        "argument_count": 0,
+        "url": "",
+        "endpoint_redacted": False,
+        "environment_keys": [],
+        "header_keys": [],
+        "secret_refs": [],
+        "transport_oauth_supported": False,
+        "downstream_authorization": "unknown",
+    }, legacy
     (row,) = describe_servers(str(distinct))["servers"]
     assert row["endpoint"]["url"] is None, row
     assert row["status"] == "error", row
@@ -898,8 +1134,18 @@ def test_the_legacy_projection_still_redacts_a_credentialed_url(distinct: Path) 
 
     legacy = public_server_config(configs["leaky"])
 
-    assert legacy["url"] is None, legacy
-    assert legacy["endpoint_redacted"] is True
+    assert legacy == {
+        "transport": "http",
+        "command": None,
+        "argument_count": 0,
+        "url": None,
+        "endpoint_redacted": True,
+        "environment_keys": [],
+        "header_keys": [],
+        "secret_refs": [],
+        "transport_oauth_supported": None,
+        "downstream_authorization": "unknown",
+    }, legacy
 
 
 def test_a_local_command_without_references_is_never_offered_a_sign_in(

@@ -1021,7 +1021,7 @@ class TestHeaderBinding:
         binding = bind_header_secret("acme", self.HEADER, self.KEY_ID, cwd=tmp_path)
         assert "${ACME_KEY}" in global_file.read_text()
 
-        unbind_header_secret("acme", self.HEADER, binding)
+        unbind_header_secret(binding)
 
         assert global_file.read_text() == before
         assert "headers" not in json.loads(before)["mcpServers"]["acme"]
@@ -1040,7 +1040,7 @@ class TestHeaderBinding:
         edited["mcpServers"]["acme"]["timeout"] = 30
         global_file.write_text(json.dumps(edited, indent=2))
 
-        unbind_header_secret("acme", self.HEADER, binding)
+        unbind_header_secret(binding)
 
         after = json.loads(global_file.read_text())["mcpServers"]["acme"]
         assert after["timeout"] == 30, "the hand edit was rolled back"

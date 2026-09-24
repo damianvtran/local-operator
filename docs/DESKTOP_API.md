@@ -839,7 +839,8 @@ travels in and the server binds `headers[<header>] = "${<id>}"` before storing t
 value. `header` is request-only: no response, no catalog row and no fixture carries
 it, because what crosses back is the row's own `auth.secret_refs`. A `header` on a
 row the catalog does not offer `add_key` for (an OAuth server, a server that
-already sends a header, a stdio server), or with more than one id, is `200` with
+already sends a credential header, a stdio server), or with more than one id, is
+`200` with
 `code: "invalid_target"`, and the whole code vocabulary of that route is in
 [DESKTOP_CONTROLS.md](DESKTOP_CONTROLS.md).
 

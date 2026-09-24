@@ -264,6 +264,45 @@ def _secret_ref_states(cfg: Any, base: Path) -> list[dict[str, str]]:
     ]
 
 
+#: Name fragments that mark a header as ONE a credential could travel in. The
+#: value is a literal the loader hands to the transport untouched, and nothing on
+#: disk records which header a hand-written or foreign-imported config MEANT as
+#: its key, so the name is the only evidence there is. Erring wide here keeps a
+#: real key header out of ``add_key`` (review round 3, R3-M1); erring narrow is
+#: what offers a second key header, so a name that merely mentions a key is
+#: counted as one.
+_CREDENTIAL_HEADER_TOKENS = ("auth", "key", "token", "secret", "credential", "password")
+
+
+def _headers_carry_credential(headers: Any) -> bool:
+    """Whether any header the config SENDS could be the server's key (R4-M1).
+
+    The header arm of :func:`_needs_unbound_key` used to be "has a header",
+    which is not the same question. A server that declares ``auth.type: apikey``
+    and sends ``X-Tenant-Id`` — or the streamable-HTTP spec's ``Accept``, which
+    every client sends — has NOT got somewhere its key travels, but the wide arm
+    read it as one: the row claimed ``signed_in: true`` with no reference, no
+    grant and nothing that could authenticate it, and after a Test's 401 it read
+    ``needs_sign_in`` while ``offers_add_key`` refused the write — a dead end
+    with no action that could produce a credential.
+
+    Two things are not a credential carrier: the TRANSPORT's own headers
+    (``config.TRANSPORT_OWNED_HEADERS`` — invented by the protocol, and the same
+    list the header write refuses to bind), and a name that says nothing about a
+    credential (``X-Tenant-Id``, ``X-Request-Id``). Nothing else is narrowed:
+    the URL arm stays as wide as :func:`_url_carries_credential`.
+    """
+    from local_operator.mcp.config import TRANSPORT_OWNED_HEADERS
+
+    if not isinstance(headers, dict):
+        return False
+    return any(
+        lowered not in TRANSPORT_OWNED_HEADERS
+        and any(token in lowered for token in _CREDENTIAL_HEADER_TOKENS)
+        for lowered in (str(name).lower() for name in headers)
+    )
+
+
 def _needs_unbound_key(cfg: Any, refs: list[dict[str, str]], granted: bool) -> bool:
     """A remote server that needs a key and declares no ``${ID}`` to hold one.
 
@@ -281,21 +320,25 @@ def _needs_unbound_key(cfg: Any, refs: list[dict[str, str]], granted: bool) -> b
     rather than toward claiming a fact nobody measured.
 
     A server that already SENDS something that can be its key is never
-    unbound, whatever the ledger says: any header (a literal one included —
-    the loader passes it to the transport untouched), or credentials or a
-    query in the URL. "Needs a key it has nowhere to put" is false for it, and
-    calling it unbound flipped a working server to ``signed_in: false`` +
-    ``needs_sign_in`` and offered ``add_key`` — which can only bind a SECOND
-    header, since the write refuses the one it already sets. A 401 with such a
-    config means the key it sends is wrong, and the fix is in that config
-    (review round 3, R3-M1).
+    unbound, whatever the ledger says: a header whose NAME can carry one (a
+    literal one included — the loader passes it to the transport untouched), or
+    credentials or a query in the URL. "Needs a key it has nowhere to put" is
+    false for it, and calling it unbound flipped a working server to
+    ``signed_in: false`` + ``needs_sign_in`` and offered ``add_key`` — which can
+    only bind a SECOND header, since the write refuses the one it already sets.
+    A 401 with such a config means the key it sends is wrong, and the fix is in
+    that config (review round 3, R3-M1).
+
+    A header that can carry NO credential is not that: ``X-Tenant-Id`` is a
+    header, and no key could ever be in it, so the row stays unbound and keeps
+    ``add_key`` (review round 4, R4-M1).
     """
     from local_operator.mcp.auth import OAUTH_CHALLENGES
 
     url = getattr(cfg, "url", None)
     if not url or refs or granted:
         return False
-    if getattr(cfg, "headers", None) or _url_carries_credential(url):
+    if _headers_carry_credential(getattr(cfg, "headers", None)) or _url_carries_credential(url):
         return False
     auth_type = getattr(getattr(cfg, "auth", None), "type", None)
     if auth_type == "apikey":
@@ -308,11 +351,18 @@ def _url_carries_credential(url: str) -> bool:
 
     The fragment is not one — it never leaves the client — which is why this is
     not simply :func:`_public_url`'s redaction fact.
+
+    A URL ``urlsplit`` refuses to parse answers ``True``: the answer decides
+    whether a server is offered a header bind, and a URL nobody can read might
+    be holding a key in a shape this parser does not know. That is the direction
+    the sibling :func:`_public_url` already takes — it redacts the same input —
+    and for a write gate the conservative direction is the one that does not
+    attract a second credential (review round 4, R4-n2).
     """
     try:
         parsed = urlsplit(url)
     except ValueError:
-        return False
+        return True
     return bool(parsed.username or parsed.password or parsed.query)
 
 
@@ -460,6 +510,13 @@ def _row(
         basis = "stored"
         if (auth["kind"] == "oauth" and not auth["signed_in"]) or unbound_key:
             status = "needs_sign_in"
+            headers = getattr(cfg, "headers", None)
+            if unbound_key and isinstance(headers, dict) and headers:
+                # A header the server sends, none of which can be its key: the
+                # row has to SAY that, or the user reads "sends headers" beside
+                # "needs a sign-in" and works out the rest themselves (review
+                # round 4, R4-M1).
+                reason = "The headers this server sends cannot carry a key."
         elif any(ref["state"] == "unavailable" for ref in refs):
             # The encrypted store could not be read, so the connect would fail
             # to resolve its references: "Ready" would be a promise we know is
