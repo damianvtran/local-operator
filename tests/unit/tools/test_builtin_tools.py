@@ -5341,15 +5341,31 @@ async def test_grep_keeps_a_non_zero_lower_bound_visible(
     already established. ``at least N`` cannot be read as a total and keeps the
     count, and D8's one-count rule is intact because this is still the count
     clause rather than a second number in the sentence.
+
+    The records stop is CONTROLLED, not raced (review round 3, R3-1). This test
+    used to force it with a spent ``GREP_SCAN_DEADLINE_S``, which kills ripgrep
+    before its first read — the mechanism the sibling
+    ``test_grep_skipped_count_from_a_stopped_walk_is_not_a_number`` documents — so
+    the call took the NO-MATCH path and every assertion below failed wherever
+    ripgrep exists, while a runner without ripgrep skipped the whole test. Either
+    way the clause's proof did not hold, which is exactly the hole R2-4's fix was
+    supposed to close. Stubbing the engine's two seam points asserts the RENDERED
+    arrangement and runs anywhere, ripgrep or not.
     """
-    monkeypatch.delenv("LOCAL_OPERATOR_GREP_ENGINE", raising=False)
-    if not builtin._use_ripgrep():
-        pytest.skip("ripgrep not on PATH; the rg count path cannot run")
     (tmp_path / "hit.py").write_text("needle\n")
+    stop = builtin._SearchStop(
+        stage="ripgrep",
+        reached="1 match",
+        seconds=builtin.GREP_SCAN_DEADLINE_S,
+        constant="GREP_SCAN_DEADLINE_S",
+    )
+
+    async def _scan(*args: Any, **kwargs: Any) -> builtin._GrepScan:
+        return builtin._GrepScan(records=[("hit.py", 1, "needle", "m")], stops=(stop,))
+
+    monkeypatch.setattr(builtin, "_use_ripgrep", lambda: True)
+    monkeypatch.setattr(builtin, "_ripgrep_scan", _scan)
     monkeypatch.setattr(builtin, "_count_oversized_files", lambda target, **kwargs: (12, True))
-    # Force a records stop too, so the assembled header carries the claim, the
-    # count clause and the remedy together — the arrangement D2-2 is about.
-    monkeypatch.setattr(builtin, "GREP_SCAN_DEADLINE_S", -1.0)
 
     result = await _call(tools, "grep", {"pattern": "needle"}, context)
 
@@ -5363,6 +5379,83 @@ async def test_grep_keeps_a_non_zero_lower_bound_visible(
         result.text.index("(at least 12 file(s) skipped")
         < result.text.index("ripgrep stopped at")
         < result.text.index("narrow path=<subdirectory>")
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_floor_count_survives_a_real_ripgrep_scan(
+    tools, context, tmp_path, monkeypatch
+) -> None:
+    """The same clause against the REAL engine, where one exists (R3-1).
+
+    The arm above controls the stop so its assertion runs on any runner; this one
+    keeps the real binary in the loop, because a stubbed engine cannot show that
+    the clause survives an rg result it did not compose. It SKIPS on a runner
+    without ripgrep (CI has none — seven rg tests skip in shard 2), which is why
+    it must never be the only proof of the clause: the arm above carries it, and
+    this one is the belt.
+    """
+    monkeypatch.delenv("LOCAL_OPERATOR_GREP_ENGINE", raising=False)
+    if not builtin._use_ripgrep():
+        pytest.skip("ripgrep not on PATH; the real-engine arm cannot run")
+    (tmp_path / "hit.py").write_text("needle\n")
+    monkeypatch.setattr(builtin, "_count_oversized_files", lambda target, **kwargs: (12, True))
+
+    result = await _call(tools, "grep", {"pattern": "needle"}, context)
+
+    assert "hit.py:1:needle" in result.text, "a real rg scan must still find the match"
+    assert "(at least 12 file(s) skipped over the 1MB cap)" in result.text
+
+    # And the floor is CONDITIONAL: a count that finished prints its exact number
+    # with no `at least`, so the wording tracks the count's completeness and not
+    # the engine.
+    monkeypatch.setattr(builtin, "_count_oversized_files", lambda target, **kwargs: (12, False))
+    complete = await _call(tools, "grep", {"pattern": "needle"}, context)
+
+    assert "(12 file(s) skipped over the 1MB cap)" in complete.text
+    assert "at least" not in complete.text
+
+
+@pytest.mark.asyncio
+async def test_the_no_match_count_clause_rides_with_the_stop(
+    tools, context, tmp_path, monkeypatch
+) -> None:
+    """R3-2: on the no-match path the count clause is not a caveat on the advice.
+
+    It used to sit after "… and re-run", the shape D2-2 fixed on the matches path
+    — an aside about a file count reading as a qualification of the remedy. On
+    this path the sentence's only number is the stop clause's own, so the count
+    clause rides directly after it, and it still precedes "No match", which is the
+    claim it qualifies.
+    """
+    (tmp_path / "hit.py").write_text("needle\n")
+    stop = builtin._SearchStop(
+        stage="ripgrep",
+        reached="0 matches",
+        seconds=builtin.GREP_SCAN_DEADLINE_S,
+        constant="GREP_SCAN_DEADLINE_S",
+    )
+
+    async def _scan(*args: Any, **kwargs: Any) -> builtin._GrepScan:
+        return builtin._GrepScan(records=[], stops=(stop,))
+
+    monkeypatch.setattr(builtin, "_use_ripgrep", lambda: True)
+    monkeypatch.setattr(builtin, "_ripgrep_scan", _scan)
+    monkeypatch.setattr(builtin, "_count_oversized_files", lambda target, **kwargs: (12, True))
+
+    result = await _call(tools, "grep", {"pattern": "needle"}, context)
+
+    assert result.text.startswith("Partial search: ripgrep stopped at")
+    assert "(at least 12 file(s) skipped over the 1MB cap)" in result.text
+    assert result.useless is False
+    assert "No matches for" not in result.text
+    # stop → count → the absence claim → the remedy, so the aside is nowhere near
+    # the advice it does not qualify.
+    assert (
+        result.text.index("ripgrep stopped at")
+        < result.text.index("(at least 12 file(s) skipped")
+        < result.text.index("No match")
+        < result.text.index("Narrow the search with")
     )
 
 

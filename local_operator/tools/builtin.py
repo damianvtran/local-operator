@@ -10408,17 +10408,20 @@ async def execute_grep(
             # at 100 / 80 / 60 columns (design review D2) — so "Partial search:"
             # sits in the cells that survive every width, and the one clause
             # names every stage that stopped (D4) with no constant name (D5) and
-            # no second file count to disagree with the first (D8). ``useless``
-            # stays unset: this is not an answer, so a caller must not treat it
-            # as one that closes the question.
+            # no second file count to disagree with the first (D8). The count
+            # clause rides directly after the stop clause because that clause is
+            # this sentence's only number — trailing the remedy put it with the
+            # ADVICE instead, the shape D2-2 fixed on the matches path (review
+            # round 3, R3-2). ``useless`` stays unset: this is not an answer, so a
+            # caller must not treat it as one that closes the question.
             return _text(
                 tool_call_id,
                 "grep",
-                f"Partial search: {_stop_clause(stops)}. No match for "
-                f"'{params.pattern}' was found in the part of the tree that was "
-                "read, and the rest was not — so this is not an absence of "
+                f"Partial search: {_stop_clause(stops)}{_skipped_clause()}. No match "
+                f"for '{params.pattern}' was found in the part of the tree that "
+                "was read, and the rest was not — so this is not an absence of "
                 "matches. Narrow the search with path=<subdirectory> or "
-                f"include=<glob> and re-run{_skipped_clause()}{engine_note}.",
+                f"include=<glob> and re-run{engine_note}.",
                 details=_partial_details(stops, None),
             )
         where = f" in {files_searched} file(s)" if not engine_note else ""
