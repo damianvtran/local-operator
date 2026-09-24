@@ -5090,12 +5090,36 @@ class OperatorApp(App[None]):
         #: cleared the moment the prompt is answered.
         self._last_login_prompt: Any = None
         #: The receipt block the last answered APPROVAL appended to the
-        #: transcript, retained after it settles so an answer that never reached
-        #: the owner can have its claim taken back (see
-        #: ``_note_gate_reply_undelivered_on_app_loop``). The transcript block is
-        #: the record of the decision, and nothing downstream of the keypress can
-        #: know the post failed, so the correction has to reach back to it.
-        self._last_gate_receipt: Any = None
+        #: transcript, WITH that card's gate identity — retained after it settles
+        #: so an answer that never reached the owner can have its claim taken back
+        #: (see ``_note_gate_reply_undelivered_on_app_loop``). The transcript block
+        #: is the record of the decision, and nothing downstream of the keypress
+        #: can know the post failed, so the correction has to reach back to it.
+        #:
+        #: THE IDENTITY IS PART OF THE SLOT, not decoration (agent review round 3,
+        #: A12 = QA Q5). The reply whose delivery failed is not always the one that
+        #: wrote the retained block — an approval answered with no card at all (the
+        #: allow-all latch, a background approval) writes none — so a slot that
+        #: held "the last receipt" let a later undelivered post remove a DELIVERED
+        #: row belonging to an unrelated gate. Matching the identity the session
+        #: reports is what makes the retraction the right row's.
+        self._last_gate_receipt: tuple[Any, Any] | None = None
+        #: The transcript notices that said a gate reply never reached its owner,
+        #: retained so they can be RETIRED when the link comes back. They are
+        #: present-progressive about a state the app owns ("not connected"), so
+        #: they may not outlive that state: measured still up 45 s later with the
+        #: card back, answerable, and a message sent successfully beneath them (UX
+        #: round 2, U5). A LIST because a second failed answer is a second event
+        #: and gets its own row (design round 2 verified that), while the state
+        #: they all report ends at once. The mechanism is the one
+        #: `_composer_refusal_notice` already uses — a slot plus a retire call from
+        #: the states that end it.
+        #:
+        #: KEYED BY THE SOURCE THAT WROTE THEM (its ``token``), because the state
+        #: they report is ONE session's link: a card coming back on session A is
+        #: no evidence that session B's owner is reachable, and a flat list would
+        #: let A's re-mount retire B's still-true sentence from B's retained view.
+        self._gate_reply_notices: list[tuple[str, Any]] = []
         self._approve_all = False
         #: The phone-facing bridge: registrant (discovery record + control
         #: socket) and the handle adapting this app to it. None until the
@@ -8643,8 +8667,23 @@ class OperatorApp(App[None]):
     def _show_sidebar_connection(self, source: SessionInteraction) -> None:
         if not self._is_current(source):
             return
+        # IS THERE AN ANSWERABLE CARD ON SCREEN FOR THIS SOURCE? Asked once, here,
+        # because two of the band's sentences and the undelivered-reply rows all
+        # turn on it: a card the operator can answer is the proof that the link is
+        # back, so the sentence saying it was gone has to end with it (UX round 2,
+        # U5 — measured still up 45 s later with the card re-mounted and a message
+        # sent under it). Retiring on the card (rather than only on the connect's
+        # own exit) is what covers the route those frames took: a re-arm that
+        # never left the session. Each block is removed from its OWN parent, for
+        # `_retire_composer_refusal`'s reason.
+        answerable = self._gate_card_is_answerable(source)
+        if answerable:
+            self._retire_gate_reply_notice(source)
         status = ""
         connecting = False
+        #: Whether the sentence above is an INSTRUCTION rather than a verdict, and
+        #: therefore takes the muted ink instead of `danger` (design round 2, D7).
+        instruction = False
         if source.display_only or source.can_never_bind:
             saved = (
                 "Saved excerpt"
@@ -8686,13 +8725,17 @@ class OperatorApp(App[None]):
                 # there and answerable. The band and the card are two surfaces
                 # making one claim about the same session, so the band yields to
                 # the card (design round 1, D1).
-                status = (
-                    f"{saved} · Answer the question above"
-                    if self._gate_card_is_answerable(source)
-                    else f"{saved} · Reconnect failed · Select again to retry"
-                )
+                #
+                # AND THE CARD'S RETURN RETIRES THE OTHER SURFACE'S CLAIM, which
+                # `answerable` above has already done — this branch only names the
+                # sentence that follows from it.
+                if answerable:
+                    instruction = True
+                    status = f"{saved} · Answer the question above"
+                else:
+                    status = f"{saved} · Reconnect failed · Select again to retry"
         if self._status is not None:
-            self._status.update(connection=status)
+            self._status.update(connection=status, connection_muted=instruction)
             # The glyph is what tells the user the app is working rather than
             # wedged; see `StatusLine.set_connecting`.
             self._status.set_connecting(connecting)
@@ -9029,6 +9072,12 @@ class OperatorApp(App[None]):
             # from `_transcript_view()`, because the row was written into the
             # INCOMING session's view and this commit is what made that view
             # current.
+            #
+            # The undelivered-reply rows describe the same state and end with it,
+            # from the same event: a connect that COMPLETED is the proof that the
+            # link is back, which is what makes "not connected" false (UX round 2,
+            # U5).
+            self._retire_gate_reply_notice(source)
             self._retire_composer_refusal()
         except asyncio.CancelledError:
             cancelled = True
@@ -10922,7 +10971,11 @@ class OperatorApp(App[None]):
             logger.debug("gate refusal notice could not be scheduled", exc_info=True)
 
     def _note_gate_reply_undelivered_on_app_loop(
-        self, kind: str, *, source: SessionInteraction | None = None
+        self,
+        kind: str,
+        identity: tuple[str, str, int] | None = None,
+        *,
+        source: SessionInteraction | None = None,
     ) -> None:
         """Say that an answer the operator gave never reached its session (U1).
 
@@ -10934,23 +10987,40 @@ class OperatorApp(App[None]):
         which leaves exactly two things to put right here, and both are done in
         this one place because only the host owns either surface:
 
-        * THE RECEIPT IS LIFTED OFF THE TRANSCRIPT. ``ApprovalBlock.receipt`` was
-          appended by the keypress, and a `✓ allowed` over a decision that reached
-          no owner is a false record of an authorisation — the strongest "it
-          worked" affordance the transcript has. REMOVED rather than rewritten:
-          the row records a decision that was never taken, so there is no true
-          version of it to paint, and ``TranscriptView.remove_block`` is the
-          established way to take back a block that should not be on screen
-          (``/clear``, the boot hint). The refusal beside this one cannot do the
-          same: it fires while the operator is watching a card do nothing, and
-          the words that explain it have to be the notice's own (see U13 there).
-          An ask writes no receipt, so that half is approval-only by
-          construction.
+        * THE RECEIPT IS LIFTED OFF THE TRANSCRIPT, and only the one THIS reply's
+          gate wrote. ``ApprovalBlock.receipt`` was appended by the keypress, and
+          a `✓ allowed` over a decision that reached no owner is a false record
+          of an authorisation — the strongest "it worked" affordance the
+          transcript has. REMOVED rather than rewritten: the row records a
+          decision that was never taken, so there is no true version of it to
+          paint, and ``TranscriptView.remove_block`` is the established way to
+          take back a block that should not be on screen (``/clear``, the boot
+          hint). The refusal beside this one cannot do the same: it fires while
+          the operator is watching a card do nothing, and the words that explain
+          it have to be the notice's own (see U13 there). An ask writes no
+          receipt, so that half is approval-only by construction.
 
-        * IT SPEAKS ONCE, in the register the composer already refuses in:
-          ``_unavailable_notice`` is the app's single sentence for "this session
-          cannot take what you just gave it right now", and it names the stopped
-          verdict -- the runnable next step -- on a source whose owner is gone.
+          ``identity`` is what keeps that removal honest (agent review round 3,
+          A12 = QA Q5): the reply that failed is not always the one that wrote the
+          retained row — an approval answered with NO card (the allow-all latch,
+          a background approval) writes none — so "the last receipt" is not the
+          same fact as "this reply's receipt", and retracting on the kind alone
+          deleted a DELIVERED row belonging to another gate. The slot is matched
+          by identity and never touched on a mismatch.
+
+        * IT SPEAKS ONCE PER EVENT, in a sentence that fits the one-row viewport
+          a card leaves behind. ``_unavailable_notice`` used to supply the tail,
+          but at 60 columns under a mounted card the transcript has a single
+          visible row and that whole sentence wrapped to two, so the only text on
+          screen was its last fragment — ``connected.`` (design round 2, D6).
+          The outcome now leads and the clause survives the truncation, and the
+          runnable next step is not lost with it: the band and the composer's
+          refusal row both name it (``Select again to retry``, or the stopped
+          session's ``/resume``).
+
+        RETIRED WHEN THE LINK IS BACK, by ``_retire_gate_reply_notice`` — the
+        sentence describes a connection state, so it may not outlive it (UX round
+        2, U5).
 
         ``call_later`` for the same reason as the refusal beside it: the notice
         is composed inside Textual's active-app context rather than from the
@@ -10964,18 +11034,23 @@ class OperatorApp(App[None]):
             # BEFORE the notice: the correction has to be on the same frame as
             # the sentence explaining it, or the operator reads a receipt that
             # says the call was allowed and a line about something else.
-            receipt, self._last_gate_receipt = self._last_gate_receipt, None
-            if kind == "approval" and receipt is not None:
-                try:
-                    # A no-op when the block is not in this view — the row
-                    # belongs to the conversation that raised the gate, and the
-                    # transcript may have been swapped or cleared while the
-                    # reply was in flight.
-                    self._transcript_view().remove_block(receipt)
-                except Exception:
-                    logger.debug("no transcript to retract the approval from", exc_info=True)
-            self._system_notice(
-                f"Answer not delivered. {self._unavailable_notice('Send')}", "warning"
+            slot, self._last_gate_receipt = self._last_gate_receipt, None
+            if kind == "approval" and slot is not None and identity is not None:
+                retained, receipt = slot
+                if retained == identity:
+                    try:
+                        # A no-op when the block is not in this view — the row
+                        # belongs to the conversation that raised the gate, and
+                        # the transcript may have been swapped or cleared while
+                        # the reply was in flight.
+                        self._transcript_view().remove_block(receipt)
+                    except Exception:
+                        logger.debug("no transcript to retract the approval from", exc_info=True)
+            self._gate_reply_notices.append(
+                (
+                    source.token,
+                    self._system_notice_block(self._gate_reply_undelivered_text(source), "warning"),
+                )
             )
 
         try:
@@ -10984,6 +11059,58 @@ class OperatorApp(App[None]):
             # No running app (a pilot's shutdown, an embed). The session has
             # already logged the drop, which is the fallback channel.
             logger.debug("undelivered gate reply notice could not be scheduled", exc_info=True)
+
+    def _gate_reply_undelivered_text(self, source: SessionInteraction) -> str:
+        """The one-row sentence for an answer that never reached its owner.
+
+        Two arms, and the discrimination is `_unavailable_notice`'s — the app's
+        single reading of "this session cannot take what you gave it and none is
+        coming" (a verdict that HAS no retry behind it). Only the tail differs,
+        deliberately: a sentence that wraps out of a one-row viewport says
+        nothing at all (design round 2, D6), and the remedy each arm would have
+        named is already on screen in the band directly below and in the
+        composer's refusal row.
+        """
+        if source.connection_error and source.can_never_bind:
+            return "Answer not delivered — this session was stopped."
+        return "Answer not delivered — not connected."
+
+    def _retire_gate_reply_notice(self, source: SessionInteraction) -> None:
+        """Take the undelivered-reply rows down once the link is back (U5).
+
+        "Send unavailable until connected" is present-progressive about a state
+        the app OWNS, so it may not outlive that state the way a chat message
+        can: UX round 2 measured it still on screen at t=33 s with the card back
+        and answerable, at t=37.6 s after a message had been accepted and sent
+        (so Send was demonstrably available), and idle at t=44.9 s. The states
+        that end it are the two this is called from — the gate becoming
+        answerable again, which the band already reads as
+        `_gate_card_is_answerable`, and a sidebar connect that COMPLETED (the
+        same pair of ends `_retire_composer_refusal` fires from, for the same
+        reason).
+
+        EVERY row this channel wrote goes, not just the newest: a second failed
+        answer is worth a second row while the state lasts, but the state is one
+        fact and all of the rows asserting it are false together once it ends.
+        Retired from each block's OWN parent, for `_retire_composer_refusal`'s
+        reason — the row was written into the view that was current when it was
+        composed, and a later switch makes that view a different widget.
+
+        ONLY ``source``'s rows: the link that came back is that session's, so
+        another session's undelivered sentence is still true and stays. Nothing
+        but ``_note_gate_reply_undelivered_on_app_loop`` writes to this slot, so
+        no other notice — a refusal, a composer row, a chat line — can be taken
+        down from here.
+        """
+        kept: list[tuple[str, Any]] = []
+        for token, notice in self._gate_reply_notices:
+            if token != source.token:
+                kept.append((token, notice))
+                continue
+            parent = notice.parent
+            if isinstance(parent, TranscriptView):
+                parent.remove_block(notice)
+        self._gate_reply_notices = kept
 
     async def _request_user_choice_on_app_loop(
         self, questions: list[AskQuestion], *, source: SessionInteraction | None = None
@@ -22415,6 +22542,16 @@ class OperatorApp(App[None]):
             self._unmount_prompt(prompt)
             if self._is_current(source):
                 self._notify_mobile_approval_settled(prompt)
+                # THE BAND SAID WHICH SENTENCE THE CARD OWED; the card is gone
+                # now, so it has to be asked again. Without this the band kept
+                # `Saved · Answer the question above` over an empty dock for as
+                # long as the operator looked at it — measured at +20 s, with
+                # nothing above it to answer, while the composer's own verdict
+                # said `Send unavailable until connected` (design round 2, D5 =
+                # QA Q6). Re-evaluated through the same predicate the band uses,
+                # so it falls back to the card-less sentence on every route out
+                # of the gate: answered, skipped, cancelled or unmounted.
+                self._show_sidebar_connection(source)
             # The decision belongs in the conversation: what was asked, and what
             # was answered. Appended after the fact so the transcript records a
             # settled fact rather than a question it would then have to revise.
@@ -22429,11 +22566,19 @@ class OperatorApp(App[None]):
                 try:
                     block = ApprovalBlock.receipt(tool_name, description, prompt.answer or "n")
                     self._append_block(block)
-                    # RETAINED AFTER IT SETTLES. An approval receipt is appended
-                    # on the KEYPRESS, and whether the answer reached the owner is
-                    # only known one await later; `mark_undelivered` is the way
-                    # back to this row when it did not.
-                    self._last_gate_receipt = block
+                    # RETAINED AFTER IT SETTLES, WITH THE GATE IT SPEAKS FOR. An
+                    # approval receipt is appended on the KEYPRESS, and whether
+                    # the answer reached the owner is only known one await later;
+                    # `mark_undelivered` is the way back to this row when it did
+                    # not. The identity is stored in the shape the SESSION reports
+                    # it (`set_gate_undelivered_handler`), which is this app's own
+                    # key one element in: `_sidebar_gate_identity` prefixes the
+                    # epoch, and the rest IS `(kind, request_id, question_index)`
+                    # — the tuple the viewer ladder keys bridges on. Matching that
+                    # is what keeps a later undelivered post from retracting an
+                    # unrelated, delivered row (agent review round 3, A12).
+                    identity = None if gate_key is None else tuple(gate_key[1:])
+                    self._last_gate_receipt = (identity, block)
                 except Exception:  # pragma: no cover - teardown races only
                     logger.debug("no transcript to record the approval in", exc_info=True)
             if self._approval is prompt:
@@ -22565,6 +22710,10 @@ class OperatorApp(App[None]):
             # a later ask already mounted.
             if self._is_current(source):
                 self._notify_mobile_ask_settled(card)
+                # The approval settle's twin, for the ask card: the band stops
+                # offering "Answer the question above" the moment there is no
+                # question above (design round 2, D5 = QA Q6).
+                self._show_sidebar_connection(source)
                 self._refresh_working_activity()
 
     def _notify_mobile_ask_pending(self, card: AskPickerScreen) -> None:
