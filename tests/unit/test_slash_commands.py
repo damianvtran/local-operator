@@ -176,6 +176,11 @@ WHOLE_DRAFT_TABLE = [
     ("/usage\tsome prose", None),
     ("/mcp logout\tand then", None),
     ("/move\tsome prose", "move"),
+    # `/session` takes ONE flag, and only the exact token is the control: a
+    # sentence or a near-miss after the word is prose, as for `/usage` (D1).
+    ("/session --copy", "session"),
+    ("/session more prose", None),
+    ("/session --cpy", None),
 ]
 
 
