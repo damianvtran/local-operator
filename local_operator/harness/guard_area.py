@@ -112,6 +112,7 @@ EXEMPT_SOURCES: frozenset[Path] = _exempt_sources()
 #: would make this decision steerable by writing a filename into a shell command.
 READING_TOOLS: frozenset[str] = frozenset({"read", "grep"})
 
+
 def reads_exempt_source(
     tool_name: str,
     arguments: Mapping[str, Any] | None,

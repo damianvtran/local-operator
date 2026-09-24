@@ -4102,8 +4102,9 @@ class AgentLoop:
             return content  # decided ON THE LOOP: imagery/empty pays no hop
 
         def _run() -> list[str]:
-            with tool_source(tool_name, arguments), exempt_from_escalation(
-                tool_name, arguments, session_cwd
+            with (
+                tool_source(tool_name, arguments),
+                exempt_from_escalation(tool_name, arguments, session_cwd),
             ):
                 return [redact(text) for text in texts]
 
