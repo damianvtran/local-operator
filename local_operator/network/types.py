@@ -188,6 +188,11 @@ NET_OPS: tuple[str, ...] = (
     "net_session_create",
     "net_session_engage",
     "net_session_stop",
+    # AGENT AND TEAM DEFINITIONS (definitions.py). A peer-scope op of its own
+    # rather than part of a session op: a definition is install-wide
+    # configuration with no owner device, and a create that named one had
+    # nothing on the far end to resolve it against until this existed.
+    "net_definitions",
     "net_bye",
     "ping",
 )
@@ -235,6 +240,11 @@ LOCAL_OPS: tuple[str, ...] = (
     "peer_session_create",
     "peer_session_engage",
     "peer_session_stop",
+    # The on-demand half of the definitions sync (definitions.py): reach every
+    # linked peer, or one named peer, and bring its definitions up to date.
+    # A local op because it is this device's own relay being told to talk
+    # outward — the same boundary `peer_session_create` sits on.
+    "definitions_sync",
     # P0 PLUMBING (mesh build plan §0 finding 3): the LOCAL half of a capability
     # grant. A member row's capabilities are resolved at admission and every
     # device keeps its OWN copy (``relay.adopt_members`` rule 2), so widening what
@@ -333,6 +343,17 @@ OP_CAPABILITY: dict[str, str | None] = {
     "net_session_create": "prompt",
     "net_session_engage": "view",
     "net_session_stop": "stop",
+    # ``admin``, and the conservative choice is deliberate. Installing a
+    # definition writes DURABLE, install-wide state on the receiving device and
+    # changes what every FUTURE session there resolves by name — which is
+    # broader than the one conversation a ``prompt``-level caller asked for. The
+    # vocabulary has no ``configure`` member, and ``admin`` is what
+    # ``net_identity_rotate`` and ``net_trust`` already use for "a change to
+    # this install", so a role that may not re-admit a network may not rewrite
+    # its agents either. A ``drive`` peer is therefore told, in words, that the
+    # definition could not be sent and why — never silently sent with the
+    # create and dropped.
+    "net_definitions": "admin",
     "net_bye": None,
     "ping": "list",
 }

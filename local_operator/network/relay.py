@@ -298,7 +298,7 @@ SLOW_REPLY_MARGIN_S = 5.0
 #: slice (§1.1: archive/delete run the owner's own implementation) even though
 #: the refusal it answers with today lives in this module.
 SLICE_PEER_OPS: frozenset[str] = frozenset(
-    {"net_session_move", "net_sync", "net_broker", "net_session_lifecycle"}
+    {"net_session_move", "net_sync", "net_broker", "net_session_lifecycle", "net_definitions"}
 )
 
 #: The LOCAL control ops a slice module may register (see ``types.LOCAL_OPS``,
@@ -311,6 +311,7 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
         "credential_grant",
         "credential_report",
         "credential_placement",
+        "definitions_sync",
     }
 )
 
@@ -322,6 +323,7 @@ SLICE_MODULES: tuple[str, ...] = (
     "local_operator.network.mobility",
     "local_operator.network.sync",
     "local_operator.network.credentials",
+    "local_operator.network.definitions",
 )
 
 #: Which link, if any, THIS thread is currently serving a request for.
@@ -5184,7 +5186,25 @@ class RelayServer:
                 "protocol_error",
                 "the device that will own a session mints its id; this frame named one",
             )
+        # ``yolo`` IS REFUSED BY NAME, and the refusal lives HERE as well as on the
+        # requesting side (``_ctl_peer_create``) so neither path can be the only
+        # one that remembers. There is deliberately NO capability that unlocks it:
+        # ``yolo`` auto-approves every tool tier, so honouring it from across a
+        # network would let one device make another run UNATTENDED — the peer's own
+        # person is not at that machine to see the card, and the requesting device
+        # is not the one whose files execute. A capability would make it a grant an
+        # admin could hand out by accident; a name that is always refused makes the
+        # boundary structural. The creator may still set it on the device the
+        # session lives on, which is the only place its consequences are visible.
+        if frame.get("yolo"):
+            raise MeshRefusal(
+                "not_permitted",
+                "a session created on another device cannot start unattended (yolo): that "
+                "would make this machine run tools with nobody here to see them. Create it "
+                "here, or start it on your own device with yolo.",
+            )
         from local_operator.fork import new_session_id
+        from local_operator.network import definitions
         from local_operator.session.creation import ensure_session_created_at
         from local_operator.session.placement import (
             MeshStamp,
@@ -5192,6 +5212,26 @@ class RelayServer:
             write_stamp,
         )
         from local_operator.session.retention import claim_session, release_session
+
+        # WHO THE SESSION IS, resolved BEFORE anything is created. A create that
+        # named an agent or a team this device cannot resolve is REFUSED with a
+        # sentence naming what is missing — never created on the default agent,
+        # which would run the wrong thing under the right name and leave the user
+        # unable to see it. Resolving first also means the refusal leaves nothing
+        # on disk (the rule the desktop route states for its own admissions).
+        identity, refusal = definitions.resolve_create_identity(
+            self.root,
+            profile=str(frame.get("profile") or ""),
+            agent_name=str(frame.get("agent_name") or ""),
+            agent_id=str(frame.get("agent_id") or ""),
+            team_name=str(frame.get("team") or ""),
+            effort=str(frame.get("effort") or ""),
+        )
+        if identity is None:
+            raise MeshRefusal("definition_missing", refusal)
+        stale = definitions.check_expected(self.root, frame.get("expect"))
+        if stale:
+            raise MeshRefusal("definition_stale", stale)
 
         session_id = new_session_id()
         session_dir = self.root / "sessions" / session_id
@@ -5241,6 +5281,29 @@ class RelayServer:
             ) from exc
 
         name = str(frame.get("name") or "")
+        # THE ATTACHMENT IS HOW A PROFILE REACHES THE RUNNING SESSION, and it is the
+        # product's own channel rather than a second one invented here: the runtime's
+        # ``Session.__init__`` calls ``_restore_attachment``, which reads
+        # ``attachment.json`` and calls ``attach_agent_profile`` / ``attach_team`` —
+        # so the profile's instructions and the team's two briefs ride the prompt's
+        # volatile tail from the FIRST turn, with no session rebuild and no new wire
+        # field. It is written BEFORE the engage below, because that is the runtime
+        # whose construction reads it.
+        #
+        # ONLY A NAMED, ATTACHABLE IDENTITY WRITES ONE. An unnamed create writes no
+        # file at all, which is what keeps today's create byte-for-byte identical; and
+        # an agent row that is not attachable (a legacy conversational row: see
+        # ``definitions.resolve_create_identity``) is NOT written, because a name the
+        # runtime cannot resolve would be reported as a failed restore. That half is
+        # reported in the reply instead — silence about it is the one thing the
+        # requirement rules out.
+        attachment_agent = identity.agent_name if identity.instructions_attachable else ""
+        if attachment_agent or identity.team_name:
+            from local_operator.resume import write_session_attachment
+
+            write_session_attachment(
+                session_dir, team=identity.team_name, agent=attachment_agent, goal=""
+            )
         if name:
             # THROUGH ``resume.write_session_title``, never a hand-rolled
             # ``title.json`` of our own. This write used to build the payload
@@ -5271,7 +5334,7 @@ class RelayServer:
 
             write_session_title(session_dir, name, user_set=True, past_names=[])
 
-        engage_error = self._engage_locally(session_id, cwd=cwd)
+        engage_error = self._engage_locally(session_id, cwd=cwd, initial_model=identity.birth)
         if engage_error:
             return {
                 "session_id": session_id,
@@ -5284,7 +5347,26 @@ class RelayServer:
         model_result: dict[str, Any] = {"applied": False, "detail": ""}
         model = frame.get("model")
         if isinstance(model, dict) and model.get("provider") and model.get("model_id"):
-            model_result = self._set_model_on(session_id, model)
+            if identity.birth is not None and (identity.birth.provider or identity.birth.model_id):
+                # THE AGENT OUTRANKS THE FLAG, which is session_factory's own
+                # precedence for a local session (agent > flag > config) and is
+                # therefore the parity answer rather than a preference of this op's.
+                # Applied loudly: the reply says the requested model was NOT applied
+                # and names the profile that overrode it, because a silent override
+                # of an explicit request is the shape this whole change exists to
+                # remove.
+                model_result = {
+                    "applied": False,
+                    "detail": (
+                        f"the agent {identity.agent_name!r} pins "
+                        f"{identity.birth.provider or 'its configured hosting'}/"
+                        f"{identity.birth.model_id or 'its default model'}, and an agent "
+                        "outranks a flag on its own device too, so the requested model was "
+                        "not applied"
+                    ),
+                }
+            else:
+                model_result = self._set_model_on(session_id, model)
         admitted = False
         prompt_detail = ""
         prompt = str(frame.get("prompt") or "")
@@ -5301,6 +5383,38 @@ class RelayServer:
             "duplicate": False,
             "detail": prompt_detail,
             "model": model_result,
+            # WHAT THE SESSION ACTUALLY IS, so the requester can show the binding it
+            # asked for instead of guessing it from its own registries — a claim
+            # about a store that does not hold this session (the desktop route already
+            # makes that argument for its local half).
+            "agent": (
+                {
+                    "name": identity.agent_name,
+                    "id": identity.agent_id,
+                    "kind": identity.agent_kind,
+                    "digest": identity.agent_digest,
+                    # The honest half: a legacy row that is not an attachable persona
+                    # contributes its ROUTING here, and its instructions do not travel
+                    # into the session. Said, never implied.
+                    "instructions_applied": bool(attachment_agent),
+                    "detail": (
+                        ""
+                        if attachment_agent
+                        else (
+                            "this agent's instructions are not attachable (it is not a role or "
+                            "a specialist), so the session runs its own instructions on that "
+                            "agent's model"
+                        )
+                    ),
+                }
+                if identity.agent_name
+                else None
+            ),
+            "team": (
+                {"name": identity.team_name, "id": identity.team_id, "digest": identity.team_digest}
+                if identity.team_name
+                else None
+            ),
             "record": self._row_for(session_id),
         }
 
@@ -5384,7 +5498,7 @@ class RelayServer:
 
     # -- the two local helpers the ops above share --------------------------
 
-    def _engage_locally(self, session_id: str, *, cwd: str) -> str:
+    def _engage_locally(self, session_id: str, *, cwd: str, initial_model: Any = None) -> str:
         """Start or join a runtime for a session this device owns.
 
         Returns an EMPTY STRING on success and a sentence on failure, so the
@@ -5395,6 +5509,15 @@ class RelayServer:
         §5.3 step 2: an omitted working directory means "the peer decides", and
         the peer's decision is its own home rather than the requesting
         device's path, which would not exist here.
+
+        ``initial_model`` is the BIRTH SAMPLE the desktop's draft chip already
+        sends (``launch.WarmErrand.initial_model``), and a create that names an
+        agent reuses it for the same reason: it is the only channel that reaches
+        a runtime BEFORE its first provider call, so it is the only one that can
+        make the session's FIRST turn run on the profile's model. Applying the
+        model afterwards over the model RPC (which this op also still does for a
+        frame that names one) leaves the session briefly on the device default
+        and loses the choice entirely if the owner was already running.
         """
         from local_operator.session.runtime.launch import WarmErrand, engage_runtime
 
@@ -5408,7 +5531,7 @@ class RelayServer:
                     started,
                     # Delivers nothing: warming is the whole job here, and the
                     # runtime materialises what it needs when real work arrives.
-                    WarmErrand(),
+                    WarmErrand(initial_model=initial_model),
                     config_dir=self.root,
                     deadline_s=ENGAGE_DEADLINE_S,
                 )
@@ -7266,16 +7389,92 @@ class RelayServer:
         return detail if isinstance(detail, dict) else {"value": detail}
 
     def _ctl_peer_create(self, frame: dict[str, Any]) -> dict[str, Any]:
-        return self._local_peer_call(
-            "net_session_create",
-            str(frame.get("peer") or ""),
-            cwd=str(frame.get("cwd") or ""),
-            model=frame.get("model"),
-            name=str(frame.get("name") or ""),
-            prompt=str(frame.get("prompt") or ""),
-            images=list(frame.get("images") or []),
-            origin=str(frame.get("origin") or "user"),
-        )
+        """Create a session on a peer, CARRYING WHO THE SESSION IS.
+
+        The three things this half owns, in order, and none of them is optional:
+
+        1. **``yolo`` is refused before the peer is asked.** The peer refuses it too
+           (``_op_session_create``), and the duplication is deliberate: the refusal
+           that reaches the user should be local, immediate and identical, and a
+           guard that lives only on the far end is one a future client can forget
+           to install. There is no capability that unlocks it — see the peer's
+           comment for why the boundary is structural rather than grantable.
+        2. **The names are RECONCILED BEFORE the create is sent.** A definition the
+           peer does not hold cannot resolve there, so ``definitions.push_to_peer``
+           runs first — this is what makes the create work against a CLEAN install
+           that was paired a minute ago, which is the whole forward direction
+           (``docs/design/mesh-compute-pool.md`` R21). The push is by NAME, so a
+           create ships the handful of rows it mentions rather than an install's
+           whole configuration.
+        3. **A failed push does not abort the create.** It continues, and the peer's
+           own refusal is the one the user reads; the push's reason is APPENDED to
+           it. That ordering matters: the peer is the only party that can say what
+           it lacks, and swallowing its sentence to print this side's failure would
+           answer a question the user did not ask (why the push failed) while hiding
+           the one they did (what is missing). Append, never replace.
+        """
+        peer = str(frame.get("peer") or "")
+        if frame.get("yolo"):
+            raise MeshRefusal(
+                "not_permitted",
+                "a session created on another device cannot start unattended (yolo): that "
+                "would make that machine run tools with nobody there to see them. Create "
+                "it here, or start it on your own device with yolo.",
+            )
+        profile = str(frame.get("profile") or "")
+        agent_name = str(frame.get("agent_name") or "")
+        agent_id = str(frame.get("agent_id") or "")
+        team = str(frame.get("team") or "")
+        effort = str(frame.get("effort") or "")
+        named = bool(profile or agent_name or agent_id or team)
+        push_reason = ""
+        expect: dict[str, Any] = {}
+        if named:
+            from local_operator.network import definitions
+
+            wanted = [name for name in (profile, agent_name) if name]
+            pushed = definitions.push_to_peer(
+                self,
+                self._resolve_peer(peer),
+                names={"agents": wanted, "teams": [team] if team else []},
+            )
+            expect = definitions.expect_from_push(pushed)
+            if not pushed.get("ok"):
+                push_reason = str(pushed.get("message") or pushed.get("code") or "")
+        fields: dict[str, Any] = {
+            "cwd": str(frame.get("cwd") or ""),
+            "model": frame.get("model"),
+            "name": str(frame.get("name") or ""),
+            "prompt": str(frame.get("prompt") or ""),
+            "images": list(frame.get("images") or []),
+            "origin": str(frame.get("origin") or "user"),
+        }
+        # ``profile`` and ``agent_name``/``agent_id`` are BOTH carried, because the
+        # local product has both vocabularies and the frame must be honest about
+        # which one the caller used: a role/specialist/seed (the ``/agent``
+        # surface, ``--profile``) is not the same thing as a legacy named agent row
+        # (``--agent NAME``, which carries its own hosting/model/history). See
+        # ``definitions.resolve_create_identity`` for what each half contributes
+        # and what is deliberately not carried.
+        for key, value in (
+            ("profile", profile),
+            ("agent_name", agent_name),
+            ("agent_id", agent_id),
+            ("team", team),
+            ("effort", effort),
+        ):
+            if value:
+                fields[key] = value
+        if expect:
+            fields["expect"] = expect
+        try:
+            return self._local_peer_call("net_session_create", peer, **fields)
+        except MeshRefusal as refusal:
+            if push_reason and refusal.code in ("definition_missing", "definition_stale"):
+                # ``sentence`` is the human half of a refusal (``code`` is the machine
+                # half); ``message`` is the wire frame's name for it, not the exception's.
+                raise MeshRefusal(refusal.code, f"{refusal.sentence} ({push_reason})") from None
+            raise
 
     def _ctl_peer_engage(self, frame: dict[str, Any]) -> dict[str, Any]:
         return self._local_peer_call(

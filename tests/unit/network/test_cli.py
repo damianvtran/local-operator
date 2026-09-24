@@ -44,6 +44,9 @@ ACTIONS = (
     # The session plane's client half (mesh-session-mobility.md §9.3): what the
     # peers hold, and the three acts on a session that lives on one of them.
     "sessions",
+    # Agent and team definitions (definitions.py): the deliberate half of the sync a
+    # create performs implicitly, so a peer can be brought up to date without one.
+    "definitions",
 )
 
 
@@ -87,7 +90,7 @@ def test_every_leaf_action_accepts_json() -> None:
     missing: list[str] = []
     for name, subparser in net_fixtures.subcommands_of(group).items():
         flags = {option for action in subparser._actions for option in action.option_strings}
-        if name in ("member", "identity"):
+        if name in ("member", "identity", "definitions"):
             for nested_name, nested_parser in net_fixtures.subcommands_of(subparser).items():
                 nested_flags = {
                     option for action in nested_parser._actions for option in action.option_strings

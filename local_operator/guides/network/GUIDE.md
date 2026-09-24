@@ -96,6 +96,46 @@ rendering is not a contract.
    keypair other networks will address it by, and a member list they can inspect.
    The next section says what the session plane can and cannot do across the mesh.
 
+## Who the session on the peer runs as
+
+A create on a peer can name the agent PROFILE it runs as and the TEAM it manages, and
+it may also name a legacy agent (`--agent NAME` / `--agent-id ID`) whose model and
+hosting that device will use. The definitions travel with the create:
+`lop network sessions --peer <id> --create --profile reviewer --team release`
+reconciles those two definitions onto that device FIRST (idempotent, by name, only
+what the frame mentions), so this works against a device that has never seen them —
+including a bare install that was paired a minute ago.
+
+Use `lop network definitions push [--peer <id>|--all-peers]` to bring a peer up to
+date deliberately, and `lop network definitions state` to see what THIS device holds
+and what it mirrored from elsewhere (agents and teams are configuration and are never
+secret; a row whose text looks like a credential is withheld and named rather than
+sent, and a definition is refused on arrival for the same reason).
+
+WHAT A PEER MAY AND MAY NOT BE ASKED FOR, and each is refused in words rather than
+quietly dropped:
+
+- **A name that does not resolve there is refused BY NAME**, never run as the default
+  agent — a session that runs the wrong thing under the right name is invisible to the
+  user. The sentence names the missing name and the remedy (`definitions push`), and
+  it is the PEER's own sentence, with this side's push failure appended if there was
+  one.
+- **`--yolo` is refused**, on both ends, with no capability that unlocks it: it would
+  let one device make another run unattended with nobody there to see the approval.
+  Start such a session on the machine it runs on.
+- **A profile's instructions are applied when it is a role, a specialist or a package
+  seed.** A legacy chat agent's own prompt is deliberately not attachable (that is the
+  product's rule, not the mesh's), so such a session runs its OWN instructions on that
+  agent's model — and the receipt says exactly that instead of implying the whole row
+  arrived.
+- **A profile outranks `--model`**, which is this product's precedence on a local
+  create too (agent > flag > config). The receipt says the requested model was not
+  applied and names the profile that overrode it.
+- **An edited copy is never overwritten.** Each device remembers what it mirrored; if
+  the local copy has been edited since, a later push REFUSES that row by name (`the
+  copy of that name here has local edits`) and leaves the edit alone. A row this device
+  authored itself is refused the same way.
+
 ## Which device should run this session
 
 A session can be listed, created, warmed and stopped ON a peer over a paired
@@ -106,7 +146,7 @@ mesh. From a shell:
 | `lop network sessions --all-peers --json` | every peer's sessions, merged; each row names the device holding it |
 | `lop network sessions --peer <id\|name> --json` | one device's own catalogue |
 | `lop sessions --peer <id\|name>` / `--all-peers` | the same rows through the ordinary session list |
-| `lop network sessions --peer <id> --create --name <n> [--prompt <p>]` | create the session ON the peer, which mints its id |
+| `lop network sessions --peer <id> --create --name <n> [--prompt <p>] [--profile <role>] [--agent <name>] [--team <name>] [--effort <level>]` | create the session ON the peer, which mints its id |
 | `lop network sessions --peer <id> --engage <session>` | warm a stored session on the peer |
 | `lop network sessions --peer <id> --stop <session>` | stop it where it lives |
 | `lop network sessions --peer <id> --stop <session> --force` | the same stop on a target whose turn is in flight, or that will not answer its socket — it WAITS for the owner's ladder to resolve, which can be minutes (see below) |

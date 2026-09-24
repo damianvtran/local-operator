@@ -1783,6 +1783,11 @@ async def create_session(body: CreateSession, request: Request):
                         if spec is not None
                         else None
                     ),
+                    # THE PICK TRAVELS, and the peer resolves it. The relay on this
+                    # side reconciles the definition first (``definitions.push_to_peer``),
+                    # so this works against a peer that has never seen the profile —
+                    # which is the case this route used to refuse.
+                    target=body.target.model_dump() if body.target else None,
                 )
             except MeshRefusal as error:
                 document = {
@@ -1799,11 +1804,22 @@ async def create_session(body: CreateSession, request: Request):
                 raise Unclaimed(document) from None
             return {
                 "session_id": str(detail.get("session_id") or ""),
-                # A remote session has no LOCAL attachment: the binding names the
-                # agent or team recorded on the session's own marker, which lives on
-                # the peer, and guessing from this device's registries would be a
-                # claim about a store that does not hold the session.
-                "binding": {"agent": None, "team": None},
+                # THE PEER'S OWN ANSWER, not a guess from this device's registries.
+                # The binding names what THAT device recorded, which is the whole
+                # point of the identity travelling: a local resolution here would be a
+                # claim about a store that does not hold this session.
+                "binding": {
+                    "agent": ((detail.get("agent") or {}) or {}).get("name"),
+                    "team": ((detail.get("team") or {}) or {}).get("name"),
+                },
+                # The rest of the peer's receipt, so the renderer can show what it
+                # needs (whether the profile's instructions were applied, and what the
+                # session is actually running on) without a second round trip.
+                "identity": {
+                    "agent": detail.get("agent"),
+                    "team": detail.get("team"),
+                    "model": detail.get("model"),
+                },
             }
         pool = host(request)
         target = body.target.model_dump() if body.target else None
@@ -1847,21 +1863,18 @@ async def create_session(body: CreateSession, request: Request):
             # ``<config>/agents``). See ``DesktopSessions.create`` /
             # ``resolve_working_directory``.
             #
-            # A PEER CREATE SKIPS THE TWO THAT ARE ABOUT THIS MACHINE, and refuses
-            # the third rather than re-interpreting it: ``cwd`` names a path HERE and
-            # ``target`` names a registry HERE, neither of which the peer shares. The
-            # model IS admitted (its catalogue is global, so the same pick is servable
-            # on the peer and a bad one still 422s here), and a target on a peer
-            # create is refused in words instead of being silently dropped — a session
-            # born on the wrong agent is exactly what the pick was for.
+            # A PEER CREATE SKIPS THE TWO ADMISSIONS THAT ARE ABOUT THIS MACHINE, and
+            # THE TARGET IS NO LONGER ONE OF ITS REFUSALS. ``cwd`` names a path HERE
+            # and ``target`` names a registry HERE, so neither is validated on this
+            # side: the peer owns the store the session will live in, and it is the
+            # only party that can say whether the name resolves. The model IS admitted
+            # (its catalogue is global, so the same pick is servable on the peer and a
+            # bad one still 422s here) — and the target is validated by the PEER's own
+            # resolution, which refuses by name rather than falling back to its default
+            # agent. Forwarding the target rather than refusing it is the whole point of
+            # the definitions sync: this route used to answer 422 with "pick the target
+            # after moving it home" because a name could not travel.
             if body.peer:
-                if body.target is not None:
-                    raise HTTPException(
-                        422,
-                        "a target cannot be chosen for a conversation created on another "
-                        "device yet: its agents and teams live on that device. Create the "
-                        "conversation here, or pick the target after moving it home.",
-                    )
                 if body.model is not None:
                     spec = await asyncio.to_thread(_draft_model_spec, body.model)
             else:
