@@ -2841,12 +2841,24 @@ class ServingSessionHandle(SessionHandle):
                 # dropped with it (agent review round 2, MINOR-3: the id used to
                 # be held on the handle and read by nothing).
                 command_id = str(uuid.uuid4())
-                await self.prompt(
-                    text,
-                    command_id=command_id,
-                    wait_complete=True,
-                    harness_injected=True,
-                )
+                try:
+                    await self.prompt(
+                        text,
+                        command_id=command_id,
+                        wait_complete=True,
+                        harness_injected=True,
+                    )
+                except BaseException:
+                    # A refused admission (`TurnInFlight`) makes the drain park
+                    # this id as `prompt-transfer`, keeping it claimable for a
+                    # client that retries the same id as a STEER. The judge never
+                    # retries: it publishes `waiting` and re-arms at the next turn
+                    # end with a NEW id. Without this release each refusal left
+                    # one entry in the map until dispose (agent review round 1,
+                    # MINOR-2, reproduced on this head). `reject` is a no-op for
+                    # an id that already went durable or was never reserved.
+                    self._command_reservations.reject(command_id)
+                    raise
 
             def changed(fields: dict[str, Any]) -> None:
                 # One writer for the judge's fields, so the journal and the frame
