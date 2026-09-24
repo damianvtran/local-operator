@@ -22,11 +22,12 @@ from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from anyio import CancelScope
 from fastapi import HTTPException
 
+from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
 from local_operator.harness.types import ModelSpec
 from local_operator.resume import (
     ORIGIN_SUBAGENT,
@@ -67,6 +68,7 @@ from local_operator.session.errors import MoveIndeterminate
 from local_operator.session.frontend_state import (
     FrontendSync,
     FrontendUpdate,
+    job_trajectory_wire_value,
     sync_wire_payload,
 )
 from local_operator.session.model_selection import session_uses_test_hosting
@@ -98,6 +100,13 @@ from local_operator.tui.sidebar_pins import set_pin as set_sidebar_pin
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    # Import-time only, so the server module's own import graph gains nothing at
+    # runtime: the class is needed to NAME what the trajectory count is taken on
+    # (see ``DesktopSessionBridge._owner_connection``), and ``AttachedSession``
+    # already reaches this module's graph through ``session.attached``.
+    from local_operator.mobile.attach_client import AttachClient
+
 #: The page ceiling one child read may ask for, in ONE place. The route declares
 #: it on the wire (FastAPI answers a bigger ``limit`` with 422 before the
 #: handler runs) and the adapter refuses a direct caller the same way, so the
@@ -105,6 +114,21 @@ logger = logging.getLogger(__name__)
 CHILD_PAGE_LIMIT = 500
 
 SESSION_ID = re.compile(r"^[a-f0-9]{12}$")
+
+#: A JOB id. Byte-identical to :data:`SESSION_ID` on purpose rather than by
+#: coincidence — the job manager mints ids as ``uuid.uuid4().hex[:12]`` — and
+#: kept as its own NAME so the two questions stay legible at the call site:
+#: "is this a session directory" and "is this a job row" are different
+#: questions, and the child reader's route asks the second one.
+JOB_ID = SESSION_ID
+
+#: The job type whose children record a trajectory (``harness/subagent.py``
+#: materialises ``job.trajectory`` for exactly these) and therefore the only
+#: type the child reader's live window can follow. Named rather than inlined
+#: because the desktop side asks the question in two places — the route adapter
+#: and the ``unsupported`` answer — and a second spelling would let them
+#: disagree about which jobs are followable.
+SUBAGENT_JOB_TYPE = "task"
 REPLAY_COUNT = 256
 REPLAY_BYTES = 8 * 1024 * 1024
 SUBSCRIBER_COUNT = 32
@@ -1000,6 +1024,39 @@ class DesktopSessionBridge:
         self.watch_lock = asyncio.Lock()
         self.move_lock = asyncio.Lock()
         self.unsubscribers: list[Any] = []
+        #: Per-JOB reference count of the trajectory subscriptions this bridge
+        #: holds on its owner connection — the desktop child reader's live path
+        #: (see :meth:`watch_trajectory` and :meth:`load_child_trajectory`).
+        #:
+        #: WHY REFCOUNTED, AND WHY IT LIVES HERE. One bridge is shared by every
+        #: window, tab and feed watching this session (``self.subscribers``, all
+        #: reading ONE attach connection), so the owner-side ``watch_job`` is not
+        #: something a caller can own alone. An un-refcounted unload has a
+        #: failure mode that is silent and invisible on screen: window A closes
+        #: the reader, the unload releases the subscription, and window B's page
+        #: simply stops growing. Every row B already holds stays correct, so
+        #: nothing says anything is wrong until someone notices the child did
+        #: work that never appeared. The count is what makes A's close a no-op
+        #: for B — the single most likely regression in this feature.
+        #:
+        #: Keyed by JOB id rather than by the child's session id: the retained
+        #: window lives on the job, and a child with a superseded attempt has
+        #: two job ids over one session directory, one of which the reader
+        #: holds.
+        #:
+        #: COUNTS BELONG TO A CONNECTION, which is what
+        #: :attr:`_trajectory_watch_client` records: a reconnect rebinds this
+        #: bridge's owner IN PLACE (the same facade, the same store, a new
+        #: ``_client``), and the connection that carried the ``watch_job`` calls
+        #: away takes their counts with it. See
+        #: :meth:`_drop_counts_from_a_replaced_connection`.
+        self._trajectory_watches: dict[str, int] = {}
+        #: The owner connection (:attr:`_owner_connection`) the counts above
+        #: were taken on, or ``None`` before the first one. Compared by OBJECT
+        #: IDENTITY because that is the only handle this side has on "the
+        #: connection I subscribed on": ``AttachedSession`` exposes no epoch for
+        #: the attach socket, and it builds a fresh ``AttachClient`` per connect.
+        self._trajectory_watch_client: AttachClient | None = None
         self.watch_task: asyncio.Task[None] | None = None
         #: The in-flight speculative engage started by :meth:`warm`, held so
         #: the event loop keeps a strong reference to it. A bare
@@ -1606,10 +1663,354 @@ class DesktopSessionBridge:
     def _event(self, event: Any) -> None:
         self.publish("event", event.model_dump(mode="json"))
 
+    @property
+    def watched_trajectory_jobs(self) -> frozenset[str]:
+        """Job ids whose trajectory deltas this bridge's connection follows.
+
+        The set :meth:`_frontend` filters against, exposed so a caller (and a
+        test) can ask what this bridge is following without reaching into the
+        count. Read-only: the count is owned by the two methods below.
+        """
+        self._drop_counts_from_a_replaced_connection()
+        return frozenset(self._trajectory_watches)
+
+    def _owner_connection(self) -> AttachClient | None:
+        """The attach connection this bridge's trajectory counts would be taken on now.
+
+        An IDENTITY rather than a flag, because a reconnect rebinds the facade
+        in place: ``AttachedSession`` keeps the same object and the same store
+        and swaps ``self._client`` under it (``session/attached.py``, in the
+        block that re-asserts the parking mute across a reconnect), and it keeps
+        no record of the jobs it has watched (``watch_job`` appears once, inside
+        :meth:`AttachedSession.load_job_trajectory`). So nothing on this side can
+        be TOLD that the owner it subscribed on has been replaced, and a count
+        taken on the old connection describes a subscription that went with it.
+        """
+        return getattr(self.remote, "_client", None)
+
+    def _drop_counts_from_a_replaced_connection(self) -> None:
+        """Discard counts taken on an owner connection this bridge no longer holds.
+
+        WHY THIS IS NEEDED AT ALL. ``watch_trajectory`` short-circuits on a
+        non-zero count, so a count left behind after a rebind is not merely
+        stale bookkeeping: the re-open neither re-subscribes nor re-fetches, and
+        the reader gets ``available: true`` over a window that has stopped
+        growing — the failure the count's own docstring names as this feature's
+        most likely regression, reached here by the RECONNECT path rather than
+        by an unload. The new connection's watcher set is empty, so treating the
+        old counts as ZERO is the safe direction: the next load re-subscribes
+        and re-seeds, and a release finds nothing to release (it must not reach
+        an owner it no longer holds).
+
+        Called from every path that reads or writes the count rather than from a
+        reconnect hook, for two reasons: there is no such hook on this side, and
+        the check itself is a comparison against the current client — cheap
+        enough for the frame filter, which is the path that matters most because
+        it is where a stale count would keep passing rows nobody subscribed to.
+        """
+        client = self._owner_connection()
+        if client is not self._trajectory_watch_client:
+            self._trajectory_watches.clear()
+            self._trajectory_watch_client = client
+
+    async def _release_owner_watch(self, job_id: str) -> None:
+        """Best-effort owner-side release for a count this bridge has given back.
+
+        ``AttachedSession.load_job_trajectory`` issues ``watch_job`` BEFORE it
+        pages the window (deliberately: subscribing first means events emitted
+        during the fetch are relayed rather than lost), so a load that fails
+        after that point — a dropped socket, a cancellation, an eviction — has
+        already armed a subscription on the owner while this bridge holds no
+        count for it. The runtime keeps that job in its ``watched_jobs``
+        (computing and relaying rows this side then drops, because the count is
+        what passes them), which no user can observe but which is cost with no
+        reader and a docstring that would not be true.
+
+        Owner-side op only, and best effort by construction: the subscription is
+        not the work, so a release that cannot land must not raise into a caller
+        already handling a failed load.
+        """
+        client = self._owner_connection()
+        if client is None:
+            return
+        try:
+            await client.unwatch_job(job_id)
+        except (ConnectionError, RuntimeError):
+            pass
+
+    def roster_jobs(self) -> tuple[Any, ...]:
+        """This follower's canonical roster rows, or ``()`` before its first sync.
+
+        An UNSYNCHRONIZED facade has no roster rather than an empty one, and both
+        the containment proof and the seed reply read through here so the two
+        cannot disagree about a bridge that is merely cold. Read once per call
+        rather than per row: ``frontend_state`` clones the roster, which costs
+        ~30 ms of a cold sidebar frame on a 22-job session.
+        """
+        remote = self.remote
+        if remote is None:
+            return ()
+        try:
+            return tuple(remote.frontend_state.jobs)
+        except RuntimeError:
+            # "frontend state has not synchronized" — a cold facade, not a fault.
+            return ()
+
+    def trajectory_window(self, job_id: str) -> dict[str, Any] | None:
+        """The window this follower HOLDS for one job, in the reply's own shape.
+
+        Read back OUT of canonical state rather than kept from the fetch, and
+        that is the point rather than a convenience: ``load_job_trajectory``
+        seeds the fetched page INTO the state the live append stream extends, so
+        what this returns is the very list the deltas will grow — one
+        accumulator, never two. ``base_seq`` is the identity stamp of the first
+        row, which is what lets a reader merge an append that overtook this
+        reply without splicing it twice.
+
+        ``None`` when the job is no longer on the roster (it settled and was
+        swept while the fetch was in flight), which the caller answers rather
+        than reporting an empty window as a successful seed.
+        """
+        for job in self.roster_jobs():
+            if job.id != job_id:
+                continue
+            rows = _first_occurrence_window(job_trajectory_wire_value(job.trajectory))
+            first = rows[0] if rows else None
+            base_seq = first.get(TRAJECTORY_SEQ_KEY) if isinstance(first, dict) else None
+            # ``trajectory_length`` is what the runtime retains, floored by what
+            # this reply carries — see the class docstring for why the floor is
+            # the honest direction rather than a decoration: a roster row's own
+            # count is the follower's copy of the runtime's number and can lag
+            # the window this call just read, and a reply that published the
+            # stale number reported a count matching neither its rows nor the
+            # runtime's (measured).
+            # BOTH COUNTS ARE ABOUT THIS REPLY, and the roster row's own
+            # ``trajectory_length`` is deliberately NOT reused — it is the
+            # follower's copy of the runtime's number rather than a reading of the
+            # rows in hand, and it drifts in both directions: it lags the window
+            # this call just read, and it is INFLATED by the very duplicated rows
+            # :func:`_first_occurrence_window` drops (measured: a reply that
+            # published it reported a count matching neither its rows nor the
+            # runtime's, in a window that was over-full rather than partial).
+            # The reply is the whole retained window — the pager loops to the end
+            # of it — so the two numbers answer the same question here, and a
+            # client that wants the runtime's own figure reads the roster row.
+            count = len(rows)
+            return {
+                "rows": rows,
+                "base_seq": base_seq if isinstance(base_seq, int) else None,
+                "total": count,
+                "trajectory_length": count,
+            }
+        return None
+
+    async def watch_trajectory(self, job_id: str) -> int:
+        """Load one job's retained window AND subscribe to its appends.
+
+        Returns the number of readers holding this job's subscription once the
+        call returns, and ``0`` when nothing was subscribed — the caller's
+        ``no-owner`` answer. The count is what lets a reply say whether an open
+        OPENED the window or merely JOINED a live one, which is the only way a
+        client can see a reference it did not mean to leave behind (a re-seed on
+        rotation, a double mount).
+
+        The count is taken BEFORE the load, with no ``await`` between the read
+        and the write — so the pair is atomic on the loop — because the seed is
+        not the only thing carrying this child's events: the owner starts
+        relaying the moment ``watch_job`` lands, and a delta that arrived while
+        the page fetch was in flight would be dropped by :meth:`_frontend`'s
+        pass-through if the count were still zero. (``AttachedSession
+        .load_job_trajectory`` issues the subscribe before the read for the same
+        reason, from the other end.)
+
+        A failed load gives the count back AND releases whatever the failed
+        attempt had already armed (see :meth:`_release_owner_watch`): a caller
+        that retries — the reader does, on its pulse — must not be refused by a
+        count left behind for a watch that never armed, and must not leave the
+        owner relaying a window nobody will read.
+        """
+        remote = self.remote
+        if remote is None:
+            return 0
+        self._drop_counts_from_a_replaced_connection()
+        if self._trajectory_watches.get(job_id, 0) == 0:
+            self._trajectory_watches[job_id] = 1
+            try:
+                loaded = await remote.load_job_trajectory(job_id)
+            except BaseException:
+                # Including a CANCELLED request: the count must not outlive the
+                # attempt that took it, or the count is a promise this bridge is
+                # still reading a window it never subscribed to.
+                self._trajectory_watches.pop(job_id, None)
+                try:
+                    await self._release_owner_watch(job_id)
+                except BaseException:
+                    # A cancelled request delivers its cancellation again at this
+                    # await. The release is best effort; the exception being
+                    # handled is the one that must reach the caller.
+                    pass
+                raise
+            if not loaded:
+                self._trajectory_watches.pop(job_id, None)
+                await self._release_owner_watch(job_id)
+                return 0
+            return 1
+        self._trajectory_watches[job_id] += 1
+        return self._trajectory_watches[job_id]
+
+    async def unwatch_trajectory(self, job_id: str) -> int:
+        """Release ONE caller's subscription; return the count still held.
+
+        Only the last release reaches the owner, which is what keeps another
+        window's stream alive (see ``self._trajectory_watches``). Even then the
+        rows stay cached on both sides — reopening the same page is common and
+        the next open re-seeds anyway — and nothing about the CHILD changes: a
+        viewer is not load-bearing on a child's execution, unlike the desktop
+        visibility lease.
+
+        A count of zero is an ordinary answer rather than an error: the release
+        is what a client sends on unmount, and a reopen after a bridge eviction
+        legitimately reaches here with nothing to give back.
+
+        A count taken on a REPLACED owner connection is not this bridge's to
+        release either: the identity check at the top (
+        :meth:`_drop_counts_from_a_replaced_connection`) drops it, and the answer
+        is the same zero — the owner the subscription was taken on is gone, and
+        the connection in its place has that job in no watcher set at all.
+        """
+        self._drop_counts_from_a_replaced_connection()
+        held = self._trajectory_watches.get(job_id, 0)
+        if held == 0:
+            return 0
+        if held > 1:
+            self._trajectory_watches[job_id] = held - 1
+            return held - 1
+        del self._trajectory_watches[job_id]
+        remote = self.remote
+        if remote is not None:
+            await remote.unload_job_trajectory(job_id)
+        return 0
+
+    async def load_child_trajectory(self, child_id: str) -> dict[str, Any]:
+        """Seed AND SUBSCRIBE to one child JOB's live trajectory window.
+
+        The child reader's live half (design § 1). ``child_id`` is a JOB id, not
+        the child's session id: the retained window lives on the job, every
+        lookup path beneath this method is job-keyed, and a child that ran more
+        than one attempt has several job ids over one directory — the reader
+        holds one of them. The reply IS the seed (see
+        :class:`~local_operator.server.models.desktop_sessions
+        .ChildTrajectoryWindow`), because a client that had to fetch and then
+        subscribe would lose whatever landed between the two calls.
+
+        The subscription this opens must be closed by the ``DELETE`` of the same
+        path, and the reply says what this open did to the count: ``watchers``
+        is how many readers hold this child's window after the call (``1`` for an
+        open, more when it joined one a sibling window already had live) and
+        ``joined`` is its boolean form. Every POST increments and one DELETE
+        releases one, so a client that re-seeds without unmounting accumulates a
+        reference; stating the count is what makes that observable instead of
+        invisible.
+
+        THE CALLER HAS ALREADY TAKEN THIS BRIDGE, in the read envelope, and that
+        split is deliberate: a subscribe is not work, so a cold conversation must
+        not be STARTED by someone opening a child's page, and a busy owner must
+        not fail the read. The envelope therefore belongs to the route that owns
+        the door, while everything below it — the containment proof, the job-type
+        question and the seed — needs a bridge and reads it here.
+
+        THE REFERENCE IS COUNTED PER JOB ON THIS BRIDGE (see
+        :meth:`watch_trajectory`): one bridge is shared by every window watching
+        the session, so an unload that was not counted would silently freeze
+        another window's reader. The matching release is the ``DELETE`` route.
+
+        A CONTAINMENT PROOF RUNS FOR EVERY CHILD JOB (:func:`_contained_child_job`),
+        so a job id that is not one of this conversation's own children is refused
+        rather than subscribed: the route takes ids and never a path, and the
+        proof — not the caller — decides that this job belongs to this parent. It
+        sits behind the job-type question below, which is a different question
+        rather than a way around it.
+
+        Three answers, and the distinctions are load-bearing:
+
+        * a refusal (404 ``child_not_found``) for an id that does not name one of
+          this conversation's child jobs;
+        * ``available: false, reason: "unsupported"`` for a job type that records
+          no trajectory at all — the reader stops asking;
+        * ``available: false, reason: "no-owner"`` when there is nothing live to
+          read the window from — no owner is attached, the owner is too old for
+          the subscription op, or the connection dropped mid-fetch. Retryable, so
+          the reader keeps its pulse.
+        """
+        roster = self.roster_jobs()
+        if not roster:
+            # NO CANONICAL STATE YET, so membership cannot be proved and there is
+            # nothing to subscribe to. The ids are still checked, because a
+            # crafted value must be refused here exactly as it is below; the
+            # "parent is the user's own conversation" clause is NOT repeated for
+            # the same reason the child routes do not repeat it — the session
+            # door resolved this id to a real conversation before this bridge
+            # existed, and it refuses a subagent or a fork there. What the empty
+            # roster costs is the MEMBERSHIP clause, which is the one no
+            # roster-free reader can answer.
+            if not SESSION_ID.fullmatch(self.session_id) or not JOB_ID.fullmatch(child_id):
+                raise SubagentChildUnavailable()
+            return _unavailable_child_trajectory("no-owner")
+        row = next((job for job in roster if str(getattr(job, "id", "")) == child_id), None)
+        if row is None:
+            # Not a job of this conversation at all: the containment refusal,
+            # which is the same answer every other child route gives for a pair
+            # this conversation never named.
+            raise SubagentChildUnavailable()
+        if str(getattr(row, "type", "") or "") != SUBAGENT_JOB_TYPE:
+            # A job type that records no trajectory: ``AsyncJob.trajectory`` is
+            # ``None`` for it and only a ``task`` child's is a list. The wire
+            # cannot state that distinction — the roster row's ``trajectory`` is
+            # a list on both sides, and its ``trajectory_length`` is 0 for "none"
+            # and "none yet" alike — so this job's TYPE is the only signal the
+            # follower has, read from the owner's own roster row rather than
+            # guessed from a request.
+            #
+            # ASKED BEFORE CONTAINMENT, deliberately, and it is not a shortcut
+            # around it: a background ``bash`` job of this conversation's own
+            # session has no child directory to contain, so the child proof could
+            # only refuse it — turning "this job type has nothing to follow" into
+            # "this job is not yours", which is the one answer the reader must
+            # not act on. Nothing is handed over here, and the row is one the
+            # caller may already read through ``/snapshot``.
+            return _unavailable_child_trajectory("unsupported")
+        await asyncio.to_thread(_contained_child_job, self.root, self.session_id, child_id, roster)
+        watchers = await self.watch_trajectory(child_id)
+        if watchers == 0:
+            return _unavailable_child_trajectory("no-owner")
+        window = self.trajectory_window(child_id)
+        if window is None:
+            # The job left the roster between the load and this read — it settled
+            # and was swept. Give the reference back so the count cannot outlive
+            # the job it described, and tell the reader the same thing the next
+            # open will see.
+            await self.unwatch_trajectory(child_id)
+            return _unavailable_child_trajectory("no-owner")
+        return {
+            "available": True,
+            "reason": None,
+            # What this open did to the count, stated so a client can SEE an
+            # accumulation rather than infer it from a release it never sent:
+            # ``watchers`` is the count after this call and ``joined`` says
+            # whether it opened the window or joined a live one. A repeat POST
+            # without an unmount is legitimate (a re-seed on rotation) but it is
+            # also the shape that leaks a reference — every POST increments and
+            # one DELETE releases one — and a reply that said nothing left that
+            # invisible until the job settled.
+            "watchers": watchers,
+            "joined": watchers > 1,
+            **window,
+        }
+
     def _frontend(self, update: FrontendUpdate) -> None:
         # Keep the runtime's field deltas, not a full snapshot per streamed token.
-        # Trajectories are intentionally opt-in on the runtime and absent here;
-        # large roster/usage fields still pass through the shared wire budget.
+        # Large roster/usage fields still pass through the shared wire budget; the
+        # two trajectory fields below are the exception and are handled there.
         payload = update.model_dump(mode="json")
         # THE COLD PAIR RIDES THIS FRAME TOO, and it is the frame that makes the
         # difference: a read that attached cold and retained its dial learns the
@@ -1624,8 +2025,48 @@ class DesktopSessionBridge:
         # projection below may update them; a delayed runtime delta must not undo
         # a read made through another process while this stream stays mounted.
         payload["changes"].pop("attention", None)
-        payload["job_trajectory_appends"] = {}
-        payload["job_trajectory_replacements"] = []
+        # THE CHILD READER'S HALF OF THIS FRAME, and the only change to it. Both
+        # fields are OPT-IN PER JOB: they pass through for the jobs THIS bridge
+        # has loaded and are empty otherwise, so a frame from a session nobody is
+        # reading stays byte-identical to the one this bridge has always
+        # published — the unconditional emptiness was a deliberate guarantee and
+        # it survives as a filter rather than as a constant.
+        #
+        # NO BOUNDING IS ADDED HERE, deliberately. The owner already scopes and
+        # byte-bounds these rows for THIS connection (``filter_update_
+        # trajectories``, per its ``watched_jobs``), keeping the newest rows
+        # against a per-frame byte share and naming in ``replacements`` every job
+        # that lost one; a second copy of that arithmetic here would restate a
+        # floor/ceiling rule this side cannot reproduce, and the two would drift.
+        #
+        # The replacements list is filtered the same way and never dropped
+        # wholesale: the marker is what says the window is a REPLACEMENT rather
+        # than a suffix, so shipping the rows without it would leave a hole in
+        # the follower's list permanently.
+        #
+        # The filter runs over the DUMPED payload rather than over the update's
+        # own fields, so what goes back on the wire is exactly what
+        # ``model_dump`` produced: nothing here can reintroduce a value JSON
+        # cannot write, and the frame an unwatched session publishes is
+        # byte-identical to the one this bridge has always published.
+        #
+        # The counts are bound to the connection they were taken on first, so a
+        # frame published after the owner was replaced stops passing a job the
+        # NEW connection was never asked to watch. This is the path where a
+        # stale count would matter most: it is the only thing standing between
+        # the runtime's rows and every subscriber's frame.
+        self._drop_counts_from_a_replaced_connection()
+        watched = self._trajectory_watches.__contains__
+        payload["job_trajectory_appends"] = {
+            job_id: rows
+            for job_id, rows in (payload.get("job_trajectory_appends") or {}).items()
+            if watched(job_id)
+        }
+        payload["job_trajectory_replacements"] = [
+            job_id
+            for job_id in (payload.get("job_trajectory_replacements") or [])
+            if watched(job_id)
+        ]
         if {"jobs", "usage_components"} & update.changes.keys():
             bounded = self.state()["snapshot"]
             for key in ("jobs", "usage_components"):
@@ -2891,6 +3332,104 @@ def _contained_child_dir(root: Path, session_id: str, child_id: str) -> Path:
     return child_dir
 
 
+def _persisted_child_for_job(parent_dir: Path, job_id: str) -> str:
+    """The child SESSION id the parent's own record gives for one job, or ``""``.
+
+    The second half of the job containment proof (see
+    :func:`_contained_child_job`), and it exists for exactly one case: a job row
+    whose live lineage is GONE. The comms registry is where a roster row's
+    ``session_id`` comes from, and a child that settled long enough ago may have
+    been swept out of it while its transcript — and therefore a reader's right to
+    open it — is still on disk. A row with no child id would otherwise be refused
+    as unreadable, which is a false refusal about a child the parent itself
+    launched and recorded.
+
+    The record's ``session_dir`` is reduced to its NAME rather than trusted as a
+    path, and the caller then resolves ``sessions/<name>`` and re-applies the
+    containment and origin checks. A hand-edited record can therefore name only
+    another directory inside ``sessions/`` — and a name that points at a
+    non-child is refused there, by the check that is load-bearing regardless of
+    which roster supplied the id.
+    """
+    for record in _persisted_children(parent_dir):
+        if str(record_field(record, "job_id", "") or "") != job_id:
+            continue
+        named = str(record_field(record, "session_id", "") or "")
+        if named:
+            return named
+        raw_dir = record_field(record, "session_dir")
+        if raw_dir:
+            return Path(str(raw_dir).rstrip("/")).name
+    return ""
+
+
+def _contained_child_job(root: Path, session_id: str, job_id: str, roster: Sequence[Any]) -> Any:
+    """The roster row of ``job_id`` as a contained child JOB of ``session_id``, or refuse.
+
+    The job-keyed sibling of :func:`_contained_child_dir`, and the two answer
+    different questions: that one proves "this session directory is a child this
+    conversation launched", which is what needs a page of its transcript; this
+    one proves "this JOB row is one of this conversation's children", which is
+    what needs a subscription to its live events. Keying the subscription on the
+    child's session id instead would force the bridge to resolve "the job for
+    this child" itself, and a child with a superseded attempt has TWO job ids over
+    one directory — the reader holds one of them and would be shown the other
+    attempt's events, silently.
+
+    Every clause carries the weight that function's docstring states, and two of
+    them differ on purpose:
+
+    * **Membership comes from the parent's LIVE roster first** (``roster``, the
+      session's own canonical job rows as its owner published them) and from the
+      parent's persisted record second (:func:`_persisted_child_for_job`). The
+      live half is the stronger witness where it exists — it is the running
+      session's own job table, so a launch is in it the moment it is admitted,
+      with no write window — and it is the only half that can answer for a child
+      whose directory is not materialised yet. What the roster must never be is
+      the CALLER's claim: it is read from the owner's canonical state, never from
+      the request.
+    * **The child's directory may be absent.** A trajectory lives on the JOB, in
+      memory, so a child that has not written a directory yet is still
+      followable. As in :func:`_contained_child_dir`, an ABSENT directory is not
+      a refusal; what is refused is a path that exists and is not a subagent
+      child.
+
+    Deliberately does NOT read the filesystem beyond the paths above: this is the
+    gate in front of a subscription, so it runs before anything is attached,
+    fetched or woken.
+    """
+    sessions = root / "sessions"
+    if not SESSION_ID.fullmatch(session_id) or not JOB_ID.fullmatch(job_id):
+        raise SubagentChildUnavailable()
+    parent_dir = sessions / session_id
+    if not parent_dir.is_dir() or not is_user_session(parent_dir):
+        raise SubagentChildUnavailable()
+    row = next((job for job in roster if str(getattr(job, "id", "")) == job_id), None)
+    child_id = str(getattr(row, "session_id", "") or "") if row is not None else ""
+    if not SESSION_ID.fullmatch(child_id):
+        child_id = _persisted_child_for_job(parent_dir, job_id)
+    if not SESSION_ID.fullmatch(child_id):
+        raise SubagentChildUnavailable()
+    resolved_root = sessions.resolve()
+    try:
+        child_dir = (sessions / child_id).resolve()
+    except (OSError, RuntimeError):
+        # A path that cannot be resolved (a symlink loop) is not a child.
+        raise SubagentChildUnavailable() from None
+    if not child_dir.is_relative_to(resolved_root):
+        raise SubagentChildUnavailable()
+    if child_dir.exists() and (
+        not child_dir.is_dir() or session_origin(child_dir) != ORIGIN_SUBAGENT
+    ):
+        raise SubagentChildUnavailable()
+    if row is None:
+        # A job only the persisted record knows cannot be followed: the live
+        # roster is what carries the row a subscription is keyed on, so an
+        # answer here would be a subscription nobody could read the result of.
+        raise SubagentChildUnavailable()
+    return row
+
+
 def _absent_child_page(state: str, *, before_id: str | None = None) -> dict[str, Any]:
     """The envelope for a child with no readable rows: ``pending`` or ``gone``.
 
@@ -2906,6 +3445,67 @@ def _absent_child_page(state: str, *, before_id: str | None = None) -> dict[str,
         "has_more": False,
         "cursor_missing": bool(before_id),
         "state": state,
+    }
+
+
+def _first_occurrence_window(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One retained window with each ``_lo_seq`` kept once, at its first position.
+
+    WHY THIS EXISTS (measured, not theorised). The seed a reader receives is read
+    back out of the follower's canonical window, and that window is grown by the
+    SAME attach connection that is relaying the deltas: ``watch_job`` lands
+    before the page fetch, and the owner computes each delta against ITS previous
+    published window, so a run of rows emitted between the owner's last publish
+    and the seed's install arrives twice — once inside the seed and once as an
+    append. 16 opens on a live child reproduced it on every open after the first
+    (17 rows for 15 distinct stamps, ``[(12,'turn_start'), (13,'message_start'),
+    (12,'turn_start'), (13,'message_start')]``), and a client that folds the rows
+    as delivered paints the repeated ones twice. The row a reader cannot lose
+    twice is ``message_update``: the reducer has no content-based dedupe by
+    design ("the the" is legitimate text).
+
+    FIRST OCCURRENCE WINS, and that is the whole rule: the extra copy is always
+    the LATER one (the append that overtook the seed), so keeping the first
+    occurrence keeps the window's own order — the seed is deduplicated, never
+    re-ordered and never re-stamped. Rows WITHOUT a stamp (an older runtime, a
+    restored roster row, a hand-built fixture, which readers must tolerate) are
+    kept as they are: identity is what makes the rule possible, and position
+    stays the documented fallback for a reader holding them.
+
+    Only the SEED goes through this. An append may still repeat a row the seed
+    already carried — the owner re-delivers from its own last published window
+    and does not know what a given reader has — which is exactly why the
+    documented rule is a stamp watermark rather than a position.
+    """
+    seen: set[int] = set()
+    window: list[dict[str, Any]] = []
+    for row in rows:
+        stamp = row.get(TRAJECTORY_SEQ_KEY)
+        if isinstance(stamp, int):
+            if stamp in seen:
+                continue
+            seen.add(stamp)
+        window.append(row)
+    return window
+
+
+def _unavailable_child_trajectory(reason: str) -> dict[str, Any]:
+    """The reply for a child job whose live window cannot be handed over.
+
+    One shape for both reasons, with the reason a TOKEN: the reader decides
+    between "retry on the next pulse" (``no-owner``) and "stop asking"
+    (``unsupported``), and a client that had to match prose would decide wrong
+    the first time the copy changed.
+    """
+    return {
+        "rows": [],
+        "base_seq": None,
+        "total": 0,
+        "trajectory_length": 0,
+        "watchers": 0,
+        "joined": False,
+        "available": False,
+        "reason": reason,
     }
 
 
@@ -3561,6 +4161,36 @@ class DesktopSessions:
             "cursor_missing": page.reconciled,
             "state": "ready",
         }
+
+    async def unload_child_trajectory(self, session_id: str, child_id: str) -> dict[str, Any]:
+        """Release ONE reader's subscription to a child job's live window.
+
+        A RELEASE, never an unconditional unsubscribe: the count is per job on the
+        shared bridge, so another window reading the same child keeps its stream
+        (see ``DesktopSessionBridge.unwatch_trajectory``). The answer states what
+        is left, so a client can see that its release was not the last one.
+
+        NO BRIDGE IS BUILT FOR THIS. A release must not be the request that
+        materialises a session's bridge — that is the cost and the side effect
+        (an attach, a warm task) a cleanup should never pay — and a session with
+        no resident bridge has no subscriptions to release, which is already the
+        release's own answer. So an unknown or evicted session answers
+        ``{watching: false, watchers: 0}`` rather than being refused: the caller's
+        intent is achieved either way. The id SHAPES are still checked, because a
+        value that could not name a child is a refusal this surface already makes
+        and not a cleanup target.
+
+        The rows stay cached on both sides afterwards — reopening the same page is
+        common and the next open re-seeds — and nothing about the CHILD changes: a
+        reader was never load-bearing on its execution.
+        """
+        if not SESSION_ID.fullmatch(session_id) or not JOB_ID.fullmatch(child_id):
+            raise SubagentChildUnavailable()
+        bridge = await self._resident_bridge(session_id)
+        if bridge is None:
+            return {"watching": False, "watchers": 0}
+        held = await bridge.unwatch_trajectory(child_id)
+        return {"watching": held > 0, "watchers": held}
 
     async def child_attachment(
         self, session_id: str, child_id: str, digest: str

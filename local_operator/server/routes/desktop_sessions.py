@@ -32,6 +32,8 @@ from local_operator.server.models.desktop_sessions import (
     AnswerReceipt,
     ArchiveState,
     AttentionState,
+    ChildTrajectoryRelease,
+    ChildTrajectoryWindow,
     ChildTranscriptPage,
     CommandReceipt,
     CreatedSession,
@@ -1894,6 +1896,71 @@ async def child_transcript(
                 session_id, child_id, before_id=before_id, limit=limit
             )
         )
+
+
+@router.post(
+    "/v1/desktop/sessions/{session_id}/children/{child_id}/trajectory",
+    response_model=CRUDResponse[ChildTrajectoryWindow],
+)
+async def child_trajectory(session_id: str, child_id: str, request: Request) -> Any:
+    """Seed AND subscribe to one child JOB's live trajectory window.
+
+    The child reader's live path, and the read route beside it is the durable
+    one: that one pages the child's own transcript off disk, this one hands over
+    the in-memory event window its runtime is retaining and keeps it growing.
+    ``child_id`` is the JOB id, not the child's session id — the window lives on
+    the job, and a child with a superseded attempt has two job ids over one
+    directory. Containment (a job of THIS conversation's own children) is the
+    route adapter's proof, never the caller's claim.
+
+    ONE op rather than a fetch plus a `watch`, deliberately: a client that did
+    both would lose whatever events landed between the two calls and would need
+    a third state ("resubscribe and re-fetch if the window moved") that the
+    seed-then-subscribe shape makes unnecessary.
+
+    The two ways it can answer WITHOUT rows are not the same fact and are not
+    flattened into one: ``unsupported`` is a job type that records no trajectory
+    (stop asking), ``no-owner`` is nothing live to read it from (keep polling).
+    Both ride a 200, because neither is a failure of the request — a refusal
+    (404 ``child_not_found``) is reserved for an id that is not one of this
+    conversation's children.
+
+    The subscription this opens must be closed by the ``DELETE`` of the same
+    path. It is counted per job on the session's shared bridge, so closing one
+    window does not stop another window's stream — but it must still be sent, or
+    the owner keeps relaying a window nobody is reading.
+
+    The bridge comes from the pool's own door, in the READ envelope, so this
+    route is covered by the refusal matrix like every other bridge-taking route
+    (the alternative — a pool adapter that acquires the bridge itself — reads
+    identically at the call site and drops out of
+    ``test_serve_retire``'s AST walk, which is the guard that keeps that matrix
+    complete).
+    """
+    async with errors(request), host(request).session(session_id, read=True) as bridge:
+        return reply(await bridge.load_child_trajectory(child_id))
+
+
+@router.delete(
+    "/v1/desktop/sessions/{session_id}/children/{child_id}/trajectory",
+    response_model=CRUDResponse[ChildTrajectoryRelease],
+)
+async def child_trajectory_release(session_id: str, child_id: str, request: Request) -> Any:
+    """Release one reader's subscription to a child's live window.
+
+    Idempotent, and deliberately built to be safe to send MORE often than it is
+    needed: a release for a job nobody is watching, or for a session with no
+    resident bridge, is an answer rather than an error, because this is what a
+    client sends on unmount and after a reconnect. The reply states how many
+    readers are left, which is the one thing a closing window cannot otherwise
+    observe.
+
+    It never BUILDS a bridge: materialising a session's bridge is the cost and
+    the side effect (an attach, a warm task) that a cleanup must not pay, and a
+    session with no bridge has nothing outstanding to release.
+    """
+    async with errors(request):
+        return reply(await host(request).unload_child_trajectory(session_id, child_id))
 
 
 @router.get(

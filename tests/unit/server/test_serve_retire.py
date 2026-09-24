@@ -1148,6 +1148,17 @@ REFUSAL_MATRIX: tuple[_DoorRoute, ...] = (
         "/v1/desktop/sessions/{session_id}/interrupt",
         {"request_id": "01234567-89ab-cdef-0123-456789abcdef"},
     ),
+    # The child reader's LIVE half (design § 1). A row for the same reason
+    # ``/interrupt`` and ``/mcp/credentials`` carry one: the open takes a bridge
+    # from the door, so on a latched daemon it must answer the typed refusal and
+    # start nothing. The ``child_id`` is a literal 12-hex id because the row's
+    # job is the DOOR, not containment — the containment refusals have their own
+    # cells, and this request never reaches one: the door refuses first.
+    _DoorRoute(
+        "child_trajectory",
+        "POST",
+        "/v1/desktop/sessions/{session_id}/children/abcdef012345/trajectory",
+    ),
 )
 
 #: Routes that refuse WITHOUT the door, because they never take a bridge: a

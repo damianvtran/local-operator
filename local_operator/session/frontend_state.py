@@ -3168,6 +3168,28 @@ def job_todos_wire_value(todos: Any) -> list[dict[str, Any]] | None:
     return value
 
 
+def job_trajectory_wire_value(rows: Any) -> list[dict[str, Any]]:
+    """One job's retained rows as ordinary JSON containers, for a wire reply.
+
+    Canonical state holds them FROZEN — a ``_FrozenSequence`` of
+    ``_FrozenMapping``, a ``tuple`` subclass with ``keys``/``items``/``get``
+    that is deliberately not a ``Mapping`` and is not serializable as a JSON
+    object. A caller that put the rows straight onto a response model would
+    either fail validation or ship every row as a list of pairs, and each row
+    carries whole tool results, so the mangling would be expensive to notice.
+    ``_wire_value`` is the ONE converter that knows the frozen shapes; it is
+    named here rather than imported from the desktop adapter so that the
+    snapshot path, the todos wire value beside it and the child reader's seed
+    all reach the wire through the same function.
+
+    The rows are NOT re-stamped, re-ordered or trimmed: ``_lo_seq`` is the
+    reader's identity for a row (see :data:`~local_operator.harness.jobs.
+    TRAJECTORY_SEQ_KEY`), so a seed that altered the stamps or the order would
+    break the one rule that makes the live stream safe to merge with it.
+    """
+    return [_wire_value(row) for row in (rows or ())]
+
+
 def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
     """Serialize one attach snapshot with job trajectories left OUT.
 
