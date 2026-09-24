@@ -282,6 +282,34 @@ async def test_a_read_of_the_guard_area_files_no_escalation(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_a_grep_scoped_to_the_guard_area_files_no_escalation(tmp_path: Path) -> None:
+    """The second reading tool, over its own result path.
+
+    ``grep`` is in the matcher for the same reason ``read`` is: its ``path``
+    argument is the file whose lines it returns. The result here IS the corpus's
+    matching lines, so this is the case that decides whether the exemption is
+    about reading the file or merely about the ``read`` tool.
+    """
+    session = _session(tmp_path)
+    grep = AgentTool(
+        name="grep",
+        parameters={
+            "type": "object",
+            "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}},
+        },
+        execute=builtin.execute_grep,
+    )
+    stream = _OneCallStream("grep", json.dumps({"pattern": "a", "path": str(CORPUS)}))
+
+    rows = await _drive(session, grep, stream)
+
+    # The lines really came back, and really carried shaped material, or this arm
+    # would be asserting silence about nothing.
+    assert f"{CORPUS.name}:" in rows[0] or REDACTION_MARKER in rows[0], "grep returned nothing"
+    assert _escalation_flags(session) == [], "a grep scoped to the guard's area still escalated"
+
+
+@pytest.mark.asyncio
 async def test_a_bash_command_that_merely_names_the_path_still_escalates(tmp_path: Path) -> None:
     """THE SECURITY ARM. ``cat <the corpus>`` is not a read of it, for this rule.
 
