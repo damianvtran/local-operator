@@ -76,6 +76,62 @@ async def test_tui_same_id_concurrent_steers_cross_thread_once() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tui_a_refused_prompt_retried_as_a_prompt_is_really_admitted() -> None:
+    """QA on PR #1528, Q1-5, on the TUI-hosted handle.
+
+    A prompt the owner refused with ``TurnInFlight`` used to leave its id parked
+    as ``prompt-transfer``, so the same id retried as a PROMPT — what the phone
+    and the desktop's receipt journal send after a failed attempt — answered
+    "already admitted" and reached no transcript. The retry must reach the
+    session and its receipt must be the real admission.
+    """
+    from local_operator.session.errors import TURN_IN_FLIGHT, TurnInFlight
+
+    class Session(FakeSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attempts: list[str] = []
+
+        async def prompt(  # type: ignore[override]  # noqa: ANN001, ANN201
+            self, text, images=None, *, message_id=None, admitted=None
+        ):
+            self.attempts.append(text)
+            if len(self.attempts) == 1:
+                raise TurnInFlight(TURN_IN_FLIGHT)
+            assert admitted is not None
+            self._history = [Message.user(text, id=message_id)]
+            admitted.set_result(None)
+
+    class App:
+        """Runs hops ON the loop thread, as Textual does (see the aside test)."""
+
+        def __init__(self, session) -> None:  # noqa: ANN001
+            self._session = session
+            self._loop = asyncio.get_running_loop()
+
+        def call_from_thread(self, callback) -> None:  # noqa: ANN001
+            done = threading.Event()
+
+            def run() -> None:
+                try:
+                    callback()
+                finally:
+                    done.set()
+
+            self._loop.call_soon_threadsafe(run)
+            assert done.wait(timeout=5.0), "the app loop never ran the hop"
+
+    session = Session()
+    handle = TuiSessionHandle(App(session))  # type: ignore[arg-type]
+    with pytest.raises(TurnInFlight):
+        await handle.prompt("raced", command_id="retried-id")
+    assert await handle.prompt("raced", command_id="retried-id") == "prompt admitted"
+    assert session.attempts == ["raced", "raced"], "the retry never reached the session"
+    assert await handle.prompt("raced", command_id="retried-id") == "already admitted"
+    assert session.attempts == ["raced", "raced"]
+
+
+@pytest.mark.asyncio
 async def test_tui_stalled_steers_apply_owner_loop_backpressure() -> None:
     class Session(FakeSession):
         def __init__(self) -> None:

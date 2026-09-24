@@ -449,11 +449,12 @@ async def test_a_stalled_record_is_not_rearmed_by_a_restart():
 async def test_a_refused_continuation_leaves_no_command_reservation_behind():
     """Agent review round 1, MINOR-2, reproduced before it was fixed.
 
-    A continuation refused with ``TurnInFlight`` makes the drain park its id as
-    ``prompt-transfer`` so a client can retry the same id as a STEER. The judge
-    never does: it publishes ``waiting`` and re-arms at the next turn end with a
-    fresh id. Measured before the fix, three refusals left three entries in the
-    map, and nothing but dispose would have cleared them.
+    A continuation refused with ``TurnInFlight`` used to be parked by the drain
+    as ``prompt-transfer`` so a client could retry the same id as a STEER. The
+    judge never does: it publishes ``waiting`` and re-arms at the next turn end
+    with a fresh id. Measured before the fix, three refusals left three entries
+    in the map, and nothing but dispose would have cleared them. The parking is
+    gone (Q1-5), and this still pins that nothing is left behind.
     """
     from local_operator.session.errors import TURN_IN_FLIGHT, TurnInFlight
 

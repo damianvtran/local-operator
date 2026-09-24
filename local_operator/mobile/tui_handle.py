@@ -527,14 +527,12 @@ class TuiSessionHandle(SessionHandle):
                     await session.prompt(text, image_blocks, **fields)
                 except BaseException as exc:
                     if not admitted.done():
-                        from local_operator.session.errors import TurnInFlight
-
-                        self._command_reservations.reject(
-                            command_id,
-                            transfer_to_steer=(
-                                isinstance(exc, TurnInFlight) or "already streaming" in str(exc)
-                            ),
-                        )
+                        # Released, never parked: the caller is told this prompt
+                        # failed, so the same id must admit on its retry — as a
+                        # prompt or, from ``AttachClient.send_command``'s
+                        # busy fallback, as a steer. See
+                        # ``CommandReservations.reject``.
+                        self._command_reservations.reject(command_id)
                         admitted.set_exception(exc)
                     raise
 
@@ -566,11 +564,7 @@ class TuiSessionHandle(SessionHandle):
 
         def do_steer() -> bool:
             session = self._session()
-            if not self._command_reservations.reserve(
-                command_id,
-                kind="steer",
-                prompt_transfer=True,
-            ):
+            if not self._command_reservations.reserve(command_id, kind="steer"):
                 return False
             try:
                 fields: dict[str, Any] = {"message_id": command_id}

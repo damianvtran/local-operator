@@ -2990,14 +2990,13 @@ class ServingSessionHandle(SessionHandle):
                         harness_injected=True,
                     )
                 except BaseException:
-                    # A refused admission (`TurnInFlight`) makes the drain park
-                    # this id as `prompt-transfer`, keeping it claimable for a
-                    # client that retries the same id as a STEER. The judge never
-                    # retries: it publishes `waiting` and re-arms at the next turn
-                    # end with a NEW id. Without this release each refusal left
-                    # one entry in the map until dispose (agent review round 1,
-                    # MINOR-2, reproduced on this head). `reject` is a no-op for
-                    # an id that already went durable or was never reserved.
+                    # The judge never retries: it publishes `waiting` and re-arms
+                    # at the next turn end with a NEW id, so nothing may keep this
+                    # one reserved (agent review round 1, MINOR-2). The drain
+                    # already releases a refused id itself; this stays as the
+                    # judge's own guarantee rather than a dependency on that, and
+                    # `reject` is a no-op for an id that already went durable or
+                    # was never reserved.
                     self._command_reservations.reject(command_id)
                     raise
 
@@ -3430,14 +3429,12 @@ class ServingSessionHandle(SessionHandle):
                 raise
             except Exception as exc:  # noqa: BLE001 — admitted turns need terminal handling
                 if not command.admitted.done():
-                    from local_operator.session.errors import TurnInFlight
-
-                    self._command_reservations.reject(
-                        command.command_id,
-                        transfer_to_steer=(
-                            isinstance(exc, TurnInFlight) or "already streaming" in str(exc)
-                        ),
-                    )
+                    # RELEASED, whatever the refusal was. The producer is about
+                    # to be told this command failed, so its retry of the same id
+                    # has to admit it for real — see
+                    # ``CommandReservations.reject`` for the silent drop the old
+                    # ``prompt-transfer`` parking caused on exactly that retry.
+                    self._command_reservations.reject(command.command_id)
                     command.admitted.set_exception(exc)
                 # Provider, transcript, and tool failures are all terminal for
                 # this one admission. Surface the failure asynchronously, then
@@ -3484,11 +3481,7 @@ class ServingSessionHandle(SessionHandle):
             if _already_bounded(images)
             else await _image_blocks_async(cast(list[dict[str, str]] | None, images))
         )
-        if not self._command_reservations.reserve(
-            command_id,
-            kind="steer",
-            prompt_transfer=True,
-        ):
+        if not self._command_reservations.reserve(command_id, kind="steer"):
             return "already admitted"
         # THE UPDATE WINDOW, and a steer is the one admission that cannot simply
         # wait: ``Session.steer`` queues against a TURN, and this runtime is idle
