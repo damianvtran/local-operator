@@ -830,7 +830,18 @@ statuses inside a 2 s bound, and a cold, silent or foreign one degrades to the
 config answer rather than to a refusal. That is the whole reason the key exists
 (`features.mcp_catalog`): the Settings page must be able to list servers on an
 install with no model configured, which is the install that could not start a
-session to ask.
+session to ask. The two writes beside it are the same shape: `POST /v1/desktop/mcp`
+takes one control, and `POST /v1/desktop/mcp/credentials` takes the MCP credential
+body (`{name, values, confirmed_replace?}`) plus the same optional
+`cwd`, plus ONE request-only field, `header` — the `add_key` form, where the server
+declares no `${ID}` for a key to fill, so the request also names the header the key
+travels in and the server binds `headers[<header>] = "${<id>}"` before storing the
+value. `header` is request-only: no response, no catalog row and no fixture carries
+it, because what crosses back is the row's own `auth.secret_refs`. A `header` on a
+row the catalog does not offer `add_key` for (an OAuth server, a server that
+already sends a header, a stdio server), or with more than one id, is `200` with
+`code: "invalid_target"`, and the whole code vocabulary of that route is in
+[DESKTOP_CONTROLS.md](DESKTOP_CONTROLS.md).
 
 `POST .../{id}/watch` is the one route whose envelope is WIDER than that budget,
 and it says so rather than leaving it to be discovered: after the attach it

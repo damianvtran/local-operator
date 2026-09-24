@@ -552,6 +552,95 @@ async def test_a_key_is_stored_without_a_session(app_env) -> None:
     assert _row(data["catalog"], "keyed")["status"] == "not_started"
 
 
+@pytest.fixture
+def ledger(monkeypatch: pytest.MonkeyPatch) -> dict[str, bool]:
+    """The per-process 401 ledger, isolated: it is what makes a row ``add_key``."""
+    from local_operator.mcp import auth
+
+    fresh: dict[str, bool] = {}
+    monkeypatch.setattr(auth, "OAUTH_CHALLENGES", fresh)
+    return fresh
+
+
+async def test_an_add_key_through_the_route_binds_the_header_it_was_sent(
+    app_env, ledger: dict[str, bool]
+) -> None:
+    """R3-m3: the HTTP wiring of ``header``, not just the host's handling of it.
+
+    The route's model has to hand the field through to ``store_credentials``, or
+    the whole ``add_key`` action is unreachable from a page — a failure the host
+    tests cannot see, because they call the host method directly.
+    """
+    url = "https://mcp.example.com/sse"
+    add = await app_env.client.post(
+        "/v1/desktop/mcp",
+        json={
+            "action": "add",
+            "name": "acme",
+            "url": url,
+            "scope": "global",
+            "cwd": str(Path.home()),
+        },
+    )
+    assert add.status_code == 200, add.text
+    ledger[url] = False
+
+    response = await app_env.client.post(
+        "/v1/desktop/mcp/credentials",
+        json={
+            "name": "acme",
+            "header": "X-Api-Key",
+            "values": {"ACME_KEY": "padlock"},
+            "cwd": str(Path.home()),
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    data = _data(response)
+    assert (data["code"], data["saved_ids"]) == ("saved", ["ACME_KEY"]), data
+    written = json.loads((app_env.config / "mcp.json").read_text(encoding="utf-8"))
+    assert written["mcpServers"]["acme"]["headers"] == {"X-Api-Key": "${ACME_KEY}"}
+    row = _row(data["catalog"], "acme")
+    assert row["auth"]["secret_refs"] == [{"id": "ACME_KEY", "state": "encrypted"}]
+    assert "set_key" in row["actions"] and "add_key" not in row["actions"]
+
+
+async def test_a_header_write_for_a_row_with_no_add_key_is_refused(app_env, ledger) -> None:
+    """The route answers the refusal as a RESULT, with the rows to repaint.
+
+    A ``409`` here would be wrong: the page renders ``code`` beside an unchanged
+    row rather than as a transport failure.
+    """
+    url = "https://mcp.example.com/sse"
+    await app_env.client.post(
+        "/v1/desktop/mcp",
+        json={
+            "action": "add",
+            "name": "oauth",
+            "url": url,
+            "oauth": True,
+            "scope": "global",
+            "cwd": str(Path.home()),
+        },
+    )
+    before = (app_env.config / "mcp.json").read_bytes()
+
+    response = await app_env.client.post(
+        "/v1/desktop/mcp/credentials",
+        json={
+            "name": "oauth",
+            "header": "Authorization",
+            "values": {"ACME_KEY": "padlock"},
+            "cwd": str(Path.home()),
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    data = _data(response)
+    assert (data["code"], data["saved_ids"]) == ("invalid_target", []), data
+    assert (app_env.config / "mcp.json").read_bytes() == before
+
+
 async def test_a_key_for_an_unknown_server_stores_nothing(app_env) -> None:
     response = await app_env.client.post(
         "/v1/desktop/mcp/credentials",

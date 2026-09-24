@@ -2729,6 +2729,18 @@ class McpManager:
             raise stderr_log.explain(exc) from exc
 
         conn.tools = tools
+        # This connect got IN: the server accepted us, so any "it refused us and
+        # has no OAuth" observation this process recorded is disproved. Without
+        # this, a transient 403 (a WAF or rate-limit edge that later cleared) kept
+        # the catalog row claiming ``signed_in: false`` + ``add_key`` for the life
+        # of the daemon, and that claim is what the desktop writes a SECOND key
+        # header on the strength of (review round 3, R3-m2). Cleared HERE rather
+        # than in the desktop host so every surface that connects — a Test, a
+        # login, the TUI, the CLI, a session's startup round — clears it.
+        if isinstance(url, str) and url:
+            from local_operator.mcp.auth import forget_refused_challenge
+
+            forget_refused_challenge(url)
         if self.tool_cache is not None:
             self.tool_cache.put(
                 name,

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -88,6 +89,20 @@ def _global_mcp_json() -> Path:
     from local_operator.paths import config_dir
 
     return config_dir() / "mcp.json"
+
+
+def _write_global(servers: dict[str, Any]) -> Path:
+    """Write the global mcp.json verbatim, for shapes ``add_server`` cannot express.
+
+    ``add_server`` only takes the fields the desktop's Add form offers, so a
+    config with an ``auth`` block, a literal header or a url-less http entry has
+    to be written as bytes — which is the whole point of these rows: they are
+    what a hand-edited or foreign-imported file looks like.
+    """
+    path = _global_mcp_json()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"mcpServers": servers}, indent=2))
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -606,20 +621,14 @@ def test_a_declared_apikey_server_offers_add_key_without_a_probe(
     distinct: Path, challenges: dict[str, bool]
 ) -> None:
     """``auth.type: apikey`` is the user's own statement; no 401 is needed."""
-    global_file = _global_mcp_json()
-    global_file.parent.mkdir(parents=True, exist_ok=True)
-    global_file.write_text(
-        json.dumps(
-            {
-                "mcpServers": {
-                    "acme-api": {
-                        "type": "http",
-                        "url": "https://mcp.example.invalid/rpc",
-                        "auth": {"type": "apikey"},
-                    }
-                }
+    _write_global(
+        {
+            "acme-api": {
+                "type": "http",
+                "url": "https://mcp.example.invalid/rpc",
+                "auth": {"type": "apikey"},
             }
-        )
+        }
     )
 
     (row,) = describe_servers(str(distinct))["servers"]
@@ -655,6 +664,242 @@ def test_a_foreign_401_row_is_not_offered_add_key(
     assert row["source"]["editable"] is False
     assert "add_key" not in row["actions"]
     assert "sign_in" not in row["actions"]
+
+
+def test_a_server_that_already_sends_a_key_is_never_offered_add_key(
+    distinct: Path, challenges: dict[str, bool]
+) -> None:
+    """R3-M1: a literal header IS a place its key travels, so ``add_key`` is a lie.
+
+    The regression: ``_needs_unbound_key`` asked only whether the config carried
+    a ``${ID}`` reference, so this server — which sends its key already, and
+    whose header the loader passes to the transport untouched — flipped from
+    ``not_started`` / ``signed_in: true`` to ``needs_sign_in`` /
+    ``signed_in: false`` the moment the ledger knew about it. ``add_key`` could
+    not have fixed it either: the write refuses the header it already sets, so
+    the only way to obey would be a SECOND key header.
+    """
+    url = "https://mcp.example.invalid/rpc"
+    _write_global(
+        {
+            "acme-api": {
+                "type": "http",
+                "url": url,
+                "headers": {"X-Api-Key": PLACEHOLDER},
+                "auth": {"type": "apikey"},
+            }
+        }
+    )
+
+    (row,) = describe_servers(str(distinct))["servers"]
+
+    assert row["auth"] == {"kind": "api_key", "signed_in": True, "secret_refs": []}
+    assert (row["status"], row["status_basis"]) == ("not_started", "stored")
+    assert row["actions"] == ["test", "remove"]
+
+
+def test_a_401_with_a_literal_header_is_not_unbound(
+    distinct: Path, challenges: dict[str, bool]
+) -> None:
+    """R3-M1, second route in: the user follows our own 401 advice by hand.
+
+    The connect's 401 is what put the ledger entry there, and the config now
+    carries the header it asked for. The same state was reachable before by
+    following the product's own message, and after a fresh Test it still read
+    ``needs_sign_in`` + ``add_key``.
+    """
+    url = "https://mcp.example.invalid/rpc"
+    _write_global(
+        {"acme-api": {"type": "http", "url": url, "headers": {"Authorization": PLACEHOLDER}}}
+    )
+    challenges[url] = False
+
+    (row,) = describe_servers(str(distinct))["servers"]
+
+    assert "add_key" not in row["actions"], row
+    assert row["status"] != "needs_sign_in", row
+    assert row["auth"]["signed_in"] is not False, row
+
+
+def test_a_401_with_a_literal_apikey_config_is_not_unbound(
+    distinct: Path, challenges: dict[str, bool]
+) -> None:
+    """The same server at the other known-to-need-a-key signal: ``auth.type``."""
+    url = "https://mcp.example.invalid/rpc"
+    _write_global(
+        {
+            "acme-api": {
+                "type": "http",
+                "url": url,
+                "headers": {"X-Api-Key": PLACEHOLDER},
+                "auth": {"type": "apikey"},
+            }
+        }
+    )
+    challenges[url] = False
+
+    (row,) = describe_servers(str(distinct))["servers"]
+
+    assert "add_key" not in row["actions"], row
+    assert row["status"] != "needs_sign_in", row
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://mcp.example.invalid/rpc?api_key=" + PLACEHOLDER,
+        "https://user:" + PLACEHOLDER + "@mcp.example.invalid/rpc",
+    ],
+)
+def test_a_url_that_carries_the_key_itself_is_not_unbound(
+    distinct: Path, challenges: dict[str, bool], url: str
+) -> None:
+    """The URL is the other place a key can already travel (never published)."""
+    _write_global({"acme-api": {"type": "http", "url": url, "auth": {"type": "apikey"}}})
+    challenges[url] = False
+
+    (row,) = describe_servers(str(distinct))["servers"]
+
+    assert "add_key" not in row["actions"], row
+
+
+def test_a_server_with_a_stored_grant_is_not_unbound_either(
+    distinct: Path, challenges: dict[str, bool]
+) -> None:
+    """R3-m3: the ``granted`` arm of the guard, which mutation proved untested.
+
+    A stored grant is a credential this server authenticates with, so a ledger
+    entry recording a 401 cannot turn the row into "needs a key it has nowhere to
+    put" — the write would bind a header beside the OAuth provider's own.
+    """
+    from local_operator.mcp.auth import McpTokenStorage
+
+    url = "https://mcp.example.invalid/rpc"
+    add_server("acme-api", url=url, scope="global", cwd=distinct)
+    McpTokenStorage(url)._write({"tokens": {"access_token": PLACEHOLDER}})
+    challenges[url] = False
+
+    (row,) = describe_servers(str(distinct))["servers"]
+
+    assert row["auth"]["kind"] == "oauth", row
+    assert "add_key" not in row["actions"], row
+
+
+def test_a_referenced_server_is_not_unbound_by_the_ledger_either(
+    distinct: Path, challenges: dict[str, bool]
+) -> None:
+    """R3-m3: the ``refs`` arm. ``auth`` is what the row claims, not just actions.
+
+    Dropping the ``refs`` check flipped this row to ``signed_in: false`` /
+    ``needs_sign_in`` while its key was stored — the ``set_key`` row contradicting
+    its own ``secret_refs``.
+    """
+    url = "https://mcp.example.invalid/rpc"
+    add_server(
+        "acme-api", url=url, headers={"X-Api-Key": "${ACME_KEY}"}, scope="global", cwd=distinct
+    )
+    challenges[url] = False
+
+    (row,) = describe_servers(str(distinct))["servers"]
+
+    assert row["auth"] == {
+        "kind": "api_key",
+        "signed_in": False,
+        "secret_refs": [{"id": "ACME_KEY", "state": "missing"}],
+    }, row
+    assert (row["status"], row["status_basis"]) == ("needs_sign_in", "stored"), row
+    assert row["actions"] == ["test", "set_key", "remove"], row
+
+
+def test_a_bare_401_server_still_offers_add_key(
+    distinct: Path, challenges: dict[str, bool]
+) -> None:
+    """The case the action exists for must survive the R3-M1 widening.
+
+    No header, no reference, no grant, no OAuth discovery: the row that had no
+    way to enter a key at all keeps ``add_key``.
+    """
+    url = "https://mcp.example.invalid/rpc"
+    add_server("acme-api", url=url, scope="global", cwd=distinct)
+    challenges[url] = False
+
+    (row,) = describe_servers(str(distinct))["servers"]
+
+    assert row["actions"] == ["test", "add_key", "remove"]
+
+
+def test_offers_add_key_is_the_write_paths_gate(
+    distinct: Path, challenges: dict[str, bool]
+) -> None:
+    """``offers_add_key`` answers the same question the row's action list does.
+
+    The header write (``mcp_host._bind_and_store``) calls this, so the two
+    cannot drift: a row that does not offer ``add_key`` must be the row that
+    refuses a header write.
+    """
+    from local_operator.mcp.catalog import offers_add_key
+
+    bare = "https://a.invalid/rpc"
+    keyed = "https://b.invalid/rpc"
+    add_server("bare", url=bare, scope="global", cwd=distinct)
+    add_server(
+        "keyed",
+        url=keyed,
+        headers={"X-Api-Key": PLACEHOLDER},
+        scope="global",
+        cwd=distinct,
+    )
+    add_server("oauth", url="https://c.invalid/rpc", oauth=True, scope="global", cwd=distinct)
+    challenges[bare] = False
+    challenges[keyed] = False
+    configs, _ = load_all_mcp_configs(distinct)
+
+    assert offers_add_key(configs["bare"]) is True
+    assert offers_add_key(configs["keyed"]) is False
+    assert offers_add_key(configs["oauth"]) is False
+
+
+# ---------------------------------------------------------------------------
+# the legacy projection
+# ---------------------------------------------------------------------------
+
+
+def test_the_legacy_projection_keeps_mains_empty_url(distinct: Path) -> None:
+    """QA Q-1: the legacy shape passes an empty URL through instead of nulling it.
+
+    ``public_server_config`` is the pre-catalog row projection that older desktop
+    builds still read, and main answered ``"url": ""`` for an http config with no
+    URL. Routing it through ``_public_url`` turned that into ``null`` — a shape
+    change no older renderer asked for. The CATALOG row keeps ``null``: there the
+    URL is an endpoint, and "absent" is what a client should render.
+    """
+    from local_operator.mcp.catalog import public_server_config
+
+    _write_global({"broken": {"type": "http"}})
+    configs, _ = load_all_mcp_configs(distinct)
+
+    legacy = public_server_config(configs["broken"])
+
+    assert legacy["url"] == "", legacy
+    assert legacy["endpoint_redacted"] is False
+    assert legacy["transport"] == "http"
+    (row,) = describe_servers(str(distinct))["servers"]
+    assert row["endpoint"]["url"] is None, row
+    assert row["status"] == "error", row
+
+
+def test_the_legacy_projection_still_redacts_a_credentialed_url(distinct: Path) -> None:
+    """The one thing the two projections SHARE: a URL that must not be published."""
+    from local_operator.mcp.catalog import public_server_config
+
+    url = "https://mcp.example.invalid/rpc?api_key=" + PLACEHOLDER
+    _write_global({"leaky": {"type": "http", "url": url}})
+    configs, _ = load_all_mcp_configs(distinct)
+
+    legacy = public_server_config(configs["leaky"])
+
+    assert legacy["url"] is None, legacy
+    assert legacy["endpoint_redacted"] is True
 
 
 def test_a_local_command_without_references_is_never_offered_a_sign_in(
@@ -887,6 +1132,10 @@ def test_the_pinned_fixture_still_matches_the_builder(distinct: Path) -> None:
         assert not {"add_key", "set_key"} <= set(row["actions"]), row["name"]
         if "add_key" in row["actions"]:
             assert row["auth"]["secret_refs"] == [] and row["auth"]["kind"] == "api_key"
+            # And it sends no credential of its own (round 3, R3-M1): a header is
+            # a place a key already travels, so the sample must not show the
+            # action beside one, and a redacted URL is the other such place.
+            assert row["endpoint"]["endpoint_redacted"] is False, row["name"]
     assert any("set_key" in row["actions"] for row in fixture["servers"])
     assert any("add_key" in row["actions"] for row in fixture["servers"])
     # The one row a merely-running operation owns: its basis is not a probe's,

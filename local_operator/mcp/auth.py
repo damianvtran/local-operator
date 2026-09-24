@@ -1653,6 +1653,22 @@ def record_oauth_challenge(server_url: str, *, oauth_available: bool) -> None:
         OAUTH_CHALLENGES[server_url] = oauth_available
 
 
+def forget_refused_challenge(server_url: str) -> None:
+    """Drop a "401/403 with no OAuth" observation once it stops being true.
+
+    The desktop catalog reads a ``False`` entry as "this server needs a key it
+    has nowhere to put" (``catalog._needs_unbound_key``) and says so on the row
+    (``signed_in: false`` + ``add_key``). Nothing else ever removes the entry,
+    so after a later connect SUCCEEDED — a transient WAF or rate-limit 403 that
+    cleared — the row kept claiming it for the life of the daemon (review
+    round 3, R3-m2). Only a ``False`` entry is dropped: a ``True`` one is
+    evidence an authorization server exists, which a success does not disprove
+    and :func:`record_oauth_challenge` deliberately never downgrades.
+    """
+    if OAUTH_CHALLENGES.get(server_url) is False:
+        del OAUTH_CHALLENGES[server_url]
+
+
 def server_has_stored_grant(server_url: str, store: StructuralAuthStore | None = None) -> bool:
     """True when an OAuth credential row already exists for ``server_url``.
 

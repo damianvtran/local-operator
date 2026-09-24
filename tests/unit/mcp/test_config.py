@@ -924,3 +924,124 @@ class TestCodexToolTimeoutImport:
         silent = configs["silent"]
         assert isinstance(silent, MCPStdioServerConfig)
         assert silent.preload_tools is False
+
+
+class TestHeaderBinding:
+    """``bind_header_secret``/``unbind_header_secret``: the ``add_key`` config half.
+
+    These are the CONFIG layer's own guards. The desktop host refuses a header
+    write for any row the catalog would not offer ``add_key`` on (an OAuth
+    server, a server that already sends a header), which means most of what
+    follows is unreachable through HTTP — kept, and pinned here, as the layer
+    that owns the file it writes: the alternative is a second credential header
+    in someone's config, and that is not a failure worth reaching for.
+    """
+
+    HEADER = "X-Api-Key"
+    KEY_ID = "ACME_KEY"
+
+    def _isolate(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        (tmp_path / "home").mkdir(exist_ok=True)
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+        return tmp_path / "config" / "mcp.json"
+
+    def _write(self, path: Path, server: dict[str, Any], *, indent: int = 4) -> str:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        text = json.dumps({"mcpServers": {"acme": server}}, indent=indent)
+        path.write_text(text)
+        return text
+
+    @pytest.mark.parametrize(
+        ("servers", "header", "key_id", "code"),
+        [
+            # A header name is case-INSENSITIVE, so this one is already set.
+            ({"headers": {"X-API-KEY": "plain"}}, "x-api-key", "ACME_KEY", "invalid_config"),
+            # The transport owns it: it would fight the SDK's own header.
+            ({"headers": {}}, "content-type", "ACME_KEY", "invalid_config"),
+            # Not a reference name the store could ever publish.
+            ({"headers": {}}, "X-Api-Key", "has-dash", "invalid_config"),
+        ],
+    )
+    def test_a_bind_is_refused_and_writes_nothing(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        servers: dict[str, Any],
+        header: str,
+        key_id: str,
+        code: str,
+    ) -> None:
+        from local_operator.mcp.config import bind_header_secret
+
+        global_file = self._isolate(tmp_path, monkeypatch)
+        server = {"type": "http", "url": "https://mcp.example.invalid/rpc", **servers}
+        before = self._write(global_file, server)
+
+        with pytest.raises(MCPConfigWriteError) as caught:
+            bind_header_secret("acme", header, key_id, cwd=tmp_path)
+
+        assert caught.value.code == code, caught.value.errors
+        assert global_file.read_text() == before
+
+    def test_a_bind_refuses_a_foreign_row_and_an_unknown_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only the file that DEFINES the server may gain a header for it."""
+        from local_operator.mcp.config import bind_header_secret
+
+        global_file = self._isolate(tmp_path, monkeypatch)
+        self._write(global_file, {"type": "http", "url": "https://a.invalid/rpc"})
+        (tmp_path / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"other": {"type": "http", "url": "https://b.invalid/rpc"}}})
+        )
+
+        with pytest.raises(MCPConfigWriteError) as unknown:
+            bind_header_secret("absent", "X-Api-Key", "ACME_KEY", cwd=tmp_path)
+        assert unknown.value.code == "unknown_server"
+
+        with pytest.raises(MCPConfigWriteError) as foreign:
+            bind_header_secret("other", "X-Api-Key", "ACME_KEY", cwd=tmp_path)
+        assert foreign.value.code == "not_owned"
+
+    def test_a_binding_rolls_back_to_the_files_own_bytes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """QA Q-2: the undo restores the bytes, not a re-serialisation of them.
+
+        A hand-formatted file (4-space indent, no final newline) came back
+        reindented with a newline added, so a refused ``add_key`` left a diff in
+        a file nobody asked it to touch.
+        """
+        from local_operator.mcp.config import bind_header_secret, unbind_header_secret
+
+        global_file = self._isolate(tmp_path, monkeypatch)
+        before = self._write(global_file, {"type": "http", "url": "https://a.invalid/rpc"})
+
+        binding = bind_header_secret("acme", self.HEADER, self.KEY_ID, cwd=tmp_path)
+        assert "${ACME_KEY}" in global_file.read_text()
+
+        unbind_header_secret("acme", self.HEADER, binding)
+
+        assert global_file.read_text() == before
+        assert "headers" not in json.loads(before)["mcpServers"]["acme"]
+
+    def test_a_binding_a_hand_edit_replaced_loses_only_our_header(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The byte restore is conditional: a concurrent edit is never thrown away."""
+        from local_operator.mcp.config import bind_header_secret, unbind_header_secret
+
+        global_file = self._isolate(tmp_path, monkeypatch)
+        self._write(global_file, {"type": "http", "url": "https://a.invalid/rpc"})
+        binding = bind_header_secret("acme", self.HEADER, self.KEY_ID, cwd=tmp_path)
+
+        edited = json.loads(global_file.read_text())
+        edited["mcpServers"]["acme"]["timeout"] = 30
+        global_file.write_text(json.dumps(edited, indent=2))
+
+        unbind_header_secret("acme", self.HEADER, binding)
+
+        after = json.loads(global_file.read_text())["mcpServers"]["acme"]
+        assert after["timeout"] == 30, "the hand edit was rolled back"
+        assert "headers" not in after

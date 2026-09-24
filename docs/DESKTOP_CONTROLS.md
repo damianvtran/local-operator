@@ -511,6 +511,16 @@ sessionless surface answers the same questions from the files on disk, gated on
 | `POST /v1/desktop/mcp` | `MCPControl` plus `cwd?` | the FULL catalog again, plus `operation: <McpOperation>\|null` — the op this request started or named. A REFUSAL is `409 {code, message}` and carries NO document, so a client that needs rows after one re-reads the GET |
 | `POST /v1/desktop/mcp/credentials` | `MCPCredentials` plus `cwd?` and `header?` (the `add_key` form, below) | `{name, saved_ids, failed_ids, code, catalog:<catalog>}` |
 
+The `code` vocabulary of that credentials route is the write's own, not the
+control route's `409` set above: `saved`, `invalid_target` (an unknown server or id,
+a key id no reference could name, a header the row may not take, more than one id
+with `header`), `replace_confirmation_required` (an id already held and not listed
+in `confirmed_replace`), `store_unavailable` (the encrypted store refused) and
+`write_failed` (the CONFIG write was refused — the `add_key` bind could not be
+written, so nothing was stored). All of them answer `200` with the rows to repaint,
+because a refused write is a result the page renders rather than a transport
+error.
+
 `add`, `remove`, `test`, `login`, `reauth`, `logout`, `status` and `cancel` are the
 sessionless actions. `connect`, `disconnect` and `reload` stay on the session route:
 they are about ONE runtime's live connections, which a sessionless request has none
@@ -569,20 +579,33 @@ a settled result for an operation still in flight.
 references (`auth.secret_refs` non-empty): the client asks for each listed id and
 posts `{name, values:{<id>: <value>}, confirmed_replace?}`. `add_key` appears INSTEAD
 of `sign_in` for a REMOTE server we own (`source.editable`) that declares no
-reference and is known to need a key: its config says `auth.type: apikey`, or a Test
-in this daemon watched it answer 401/403 while discovery found no OAuth
+reference, SENDS no credential of its own (no header at all, and no user-info or
+query in its URL) and is known to need a key: its config says `auth.type: apikey`,
+or a Test in this daemon watched it answer 401/403 while discovery found no OAuth
 authorization server. Such a row reads `auth.kind: api_key`, `signed_in: false`,
 `needs_sign_in`, and never offers `sign_in` (which could only fail with "No OAuth
-authorization server was discovered"). The client asks for the header name (e.g.
-`Authorization` or `X-Api-Key`), a key id (a `[A-Za-z_][A-Za-z0-9_]*` name) and the
-value, and posts `{name, header, values:{<id>: <value>}}` — exactly one id. The
-server binds `headers[<header>] = "${<id>}"` into the file that defines the server
+authorization server was discovered"). A server that already sends a literal key
+header is never this row: it has somewhere its key already travels, so it reads
+`not_started` (or whatever its probe measured) rather than `needs_sign_in`, and its
+fix is the header it already has — `add_key` could only bind a second one.
+The client asks for the header name (e.g. `Authorization` or `X-Api-Key`), a key id
+(a `[A-Za-z_][A-Za-z0-9_]*` name) and the value, and posts `{name, header,
+values:{<id>: <value>}}` — exactly one id. The server binds
+`headers[<header>] = "${<id>}"` into the file that defines the server
 (only a reference ever enters config), then stores the value; a refused store rolls
-the binding back. It refuses a header the server already sets, a transport-owned
-header, and a foreign row, with `code: invalid_target` and nothing written. After it
+the binding back — including the FILE's own bytes, so a hand-formatted `mcp.json`
+comes back exactly as it was. It refuses a header the server already sets (in ANY
+case, since HTTP header names are case-insensitive), a transport-owned
+header, a foreign row, and a row the catalog would not offer `add_key` on at all
+(an explicit OAuth server, a server that already sends a header, a stdio server),
+with `code: invalid_target` and nothing written. `add_key` is refused for the last
+of those on purpose: a second credential header bound beside the one the server
+already sends would look like a saved key while the server kept failing. After it
 the row carries the new reference and offers `set_key`. The challenge observation
 lives in this daemon's memory, so after a restart such a row reads `unknown` +
-`sign_in` again until the next Test.
+`sign_in` again until the next Test — and a connect that SUCCEEDS forgets the
+observation, so a transient 403 that later cleared cannot leave the row claiming
+`signed_in: false` + `add_key`.
 
 **A key write or a grant action forgets EVERY cached probe**, not only its own row's:
 a grant is keyed by the server URL (every folder) and a key by its id (every server

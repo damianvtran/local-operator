@@ -483,9 +483,11 @@ class McpHost:
     async def _bind_and_store(
         self, target: Any, body: Any, cwd: str, header: str
     ) -> dict[str, Any]:
+        from local_operator.mcp.catalog import offers_add_key
         from local_operator.mcp.config import (
             MCPConfigWriteError,
             bind_header_secret,
+            load_all_mcp_configs,
             unbind_header_secret,
         )
         from local_operator.mcp.credentials import store_credentials
@@ -494,8 +496,18 @@ class McpHost:
         if len(body.values) != 1:
             return {**refused, "code": "invalid_target"}
         (secret_id,) = body.values
+        configs, _ = await asyncio.to_thread(load_all_mcp_configs, cwd)
+        cfg = configs.get(body.name)
+        # The WRITE path enforces exactly what the row offers (R3-m1): a header
+        # write is the ``add_key`` action, so it is refused for any config the
+        # catalog would not offer that action on — an explicit OAuth server or a
+        # server that already sends a key would otherwise end up with a SECOND
+        # credential header bound beside the one it has. The config layer
+        # cannot decide this: it needs the grant store and the challenge ledger.
+        if cfg is None or not offers_add_key(cfg):
+            return {**refused, "code": "invalid_target"}
         try:
-            scope = await asyncio.to_thread(
+            binding = await asyncio.to_thread(
                 bind_header_secret, body.name, header, secret_id, cwd=cwd
             )
         except MCPConfigWriteError as error:
@@ -504,9 +516,7 @@ class McpHost:
         result = await store_credentials(target, body)
         if result.get("code") != "saved":
             try:
-                await asyncio.to_thread(
-                    unbind_header_secret, body.name, header, scope=scope, cwd=cwd
-                )
+                await asyncio.to_thread(unbind_header_secret, body.name, header, binding)
             except MCPConfigWriteError:
                 # The binding stays: it names a key the row now reports as
                 # ``missing``, and ``set_key`` is the way on from there.

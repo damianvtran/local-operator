@@ -190,17 +190,24 @@ def public_server_config(cfg: Any) -> dict[str, Any]:
 
     The legacy session-route row shape (``stdio``/``http`` transport words),
     kept byte-compatible for desktop builds that predate the catalog.
+
+    ``url`` is the RAW configured value unless redacted — NOT
+    :func:`_public_url`'s answer, which maps an empty URL to ``None``. The
+    catalog row wants that (``null`` = "no endpoint"), but this shape answered
+    ``""`` for an http config with no URL on every build before the catalog,
+    and an older renderer is exactly what this shape exists for (QA round 3,
+    Q-1). Only the redaction FACT is shared.
     """
     from local_operator.mcp.auth import server_rejects_oauth
     from local_operator.mcp.secret_refs import public_secret_refs
 
-    url, redacted = _public_url(cfg)
+    _, redacted = _public_url(cfg)
     command = getattr(cfg, "command", None)
     return {
         "transport": "stdio" if command else "http",
         "command": command,
         "argument_count": len(getattr(cfg, "args", [])),
-        "url": url,
+        "url": None if redacted else getattr(cfg, "url", None),
         "endpoint_redacted": redacted,
         "environment_keys": sorted(getattr(cfg, "env", {})),
         "header_keys": sorted(getattr(cfg, "headers", {})),
@@ -272,16 +279,60 @@ def _needs_unbound_key(cfg: Any, refs: list[dict[str, str]], granted: bool) -> b
     to ``unknown`` + Sign in until the next Test re-observes the challenge.
     That is the ledger's documented scope, and it errs toward the old answer
     rather than toward claiming a fact nobody measured.
+
+    A server that already SENDS something that can be its key is never
+    unbound, whatever the ledger says: any header (a literal one included —
+    the loader passes it to the transport untouched), or credentials or a
+    query in the URL. "Needs a key it has nowhere to put" is false for it, and
+    calling it unbound flipped a working server to ``signed_in: false`` +
+    ``needs_sign_in`` and offered ``add_key`` — which can only bind a SECOND
+    header, since the write refuses the one it already sets. A 401 with such a
+    config means the key it sends is wrong, and the fix is in that config
+    (review round 3, R3-M1).
     """
     from local_operator.mcp.auth import OAUTH_CHALLENGES
 
     url = getattr(cfg, "url", None)
     if not url or refs or granted:
         return False
+    if getattr(cfg, "headers", None) or _url_carries_credential(url):
+        return False
     auth_type = getattr(getattr(cfg, "auth", None), "type", None)
     if auth_type == "apikey":
         return True
     return auth_type is None and OAUTH_CHALLENGES.get(url) is False
+
+
+def _url_carries_credential(url: str) -> bool:
+    """User-info or a query: the two places a URL can hold a key.
+
+    The fragment is not one — it never leaves the client — which is why this is
+    not simply :func:`_public_url`'s redaction fact.
+    """
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return False
+    return bool(parsed.username or parsed.password or parsed.query)
+
+
+def offers_add_key(cfg: Any) -> bool:
+    """Whether ``cfg`` is a row the ``add_key`` action applies to (config half).
+
+    The WRITE path's gate, so a header write lands only where the catalog
+    offers ``add_key``: without it a client could post a header for an OAuth
+    server and get a second ``Authorization`` bound beside the provider's own
+    (review round 3, R3-m1). Ownership is the other half of the offer, and
+    :func:`~local_operator.mcp.config.bind_header_secret` enforces it. Blocking:
+    it reads the grant store.
+    """
+    from local_operator.mcp.auth import server_has_stored_grant
+    from local_operator.mcp.secret_refs import public_secret_refs
+
+    url = getattr(cfg, "url", None)
+    granted = bool(url) and server_has_stored_grant(url)
+    refs = [{"id": ref["id"]} for ref in public_secret_refs(cfg)]
+    return _needs_unbound_key(cfg, refs, granted)
 
 
 def _auth_facts(cfg: Any, refs: list[dict[str, str]]) -> dict[str, Any]:
@@ -593,6 +644,7 @@ __all__ = [
     "ProbeResult",
     "describe_servers",
     "live_facts_from_snapshot",
+    "offers_add_key",
     "public_reason",
     "public_server_config",
     "source_kind",

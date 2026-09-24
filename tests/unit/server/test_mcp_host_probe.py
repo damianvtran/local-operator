@@ -57,6 +57,13 @@ from local_operator.server.mcp_host import SESSIONLESS_ACTIONS, McpHost, resolve
 
 pytestmark = pytest.mark.asyncio
 
+#: A literal header value for the configs that already send their own key. It is
+#: never read as a credential: the short, obviously-fake shape is the point.
+LITERAL_KEY = "fixture-header-value"
+
+#: The URL ``_add_remote`` writes by default: the key the challenge ledger uses.
+DEFAULT_REMOTE_URL = "https://mcp.example.com/sse"
+
 #: The repo's one real stdio MCP peer (one tool, ``fixture_echo``), reached by
 #: PATH rather than copied, for the tests whose subject is a COMPLETED operation
 #: (a probe written through the real path, and the pruning it does on write).
@@ -641,11 +648,12 @@ async def test_a_test_in_flight_across_a_key_replace_records_no_probe(
 
 
 async def test_add_key_binds_a_header_reference_and_stores_the_value(
-    host: McpHost, folders: tuple[str, str], real_store: None
+    host: McpHost, folders: tuple[str, str], real_store: None, ledger: dict[str, bool]
 ) -> None:
     """The row goes from ``add_key`` to ``set_key`` with its key held."""
     home, _ = folders
     await _add_remote(host, "acme", cwd=home)
+    ledger[DEFAULT_REMOTE_URL] = False
 
     result = await host.store_credentials(
         MCPCredentials(name="acme", values={"ACME_KEY": SecretStr("padlock")}),
@@ -689,7 +697,7 @@ async def test_add_key_refuses_and_writes_nothing(
 
 
 async def test_add_key_rolls_the_binding_back_when_the_store_refuses(
-    host: McpHost, folders: tuple[str, str], real_store: None
+    host: McpHost, folders: tuple[str, str], real_store: None, ledger: dict[str, bool]
 ) -> None:
     """The id is already held and the replace was not confirmed: config unchanged."""
     home, _ = folders
@@ -697,6 +705,7 @@ async def test_add_key_rolls_the_binding_back_when_the_store_refuses(
     held = MCPCredentials(name="keeper", values={"ACME_KEY": SecretStr("padlock")})
     assert (await host.store_credentials(held, home))["code"] == "saved"
     await _add_remote(host, "acme", cwd=home, url="https://acme.example.com/mcp")
+    ledger["https://acme.example.com/mcp"] = False
     path = Path(home) / ".local-operator" / "mcp.json"
     before = path.read_text()
 
@@ -708,6 +717,216 @@ async def test_add_key_rolls_the_binding_back_when_the_store_refuses(
 
     assert result["code"] == "replace_confirmation_required", result
     assert json.loads(path.read_text()) == json.loads(before)
+
+
+@pytest.fixture
+def ledger(monkeypatch: pytest.MonkeyPatch) -> dict[str, bool]:
+    """The per-process 401 ledger, isolated around one test.
+
+    A row is offered ``add_key`` either because its config says ``auth.type:
+    apikey`` or because a Test watched it answer 401/403 with no OAuth
+    discovery. Every ``add_key`` test below has to state WHICH of those it is
+    exercising, because the write path now refuses any row the catalog would not
+    offer the action on (review round 3, R3-m1).
+    """
+    from local_operator.mcp import auth
+
+    fresh: dict[str, bool] = {}
+    monkeypatch.setattr(auth, "OAUTH_CHALLENGES", fresh)
+    return fresh
+
+
+async def test_a_server_that_already_sends_a_key_is_offered_no_add_key(
+    host: McpHost, folders: tuple[str, str], ledger: dict[str, bool]
+) -> None:
+    """R3-M1: a literal header keeps the row at ``not_started`` + a real key.
+
+    The row was ``needs_sign_in`` / ``signed_in: false`` / ``add_key`` while the
+    server was in fact sending its key and working. Written raw because the
+    desktop's own writer refuses a literal header — this is the hand-edited or
+    foreign-imported shape, which is the one the loader passes through to the
+    transport untouched.
+    """
+    home, _ = folders
+    url = DEFAULT_REMOTE_URL
+    path = Path(home) / ".local-operator" / "mcp.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "literal": {
+                        "type": "http",
+                        "url": url,
+                        "headers": {"X-Api-Key": LITERAL_KEY},
+                        "auth": {"type": "apikey"},
+                    }
+                }
+            }
+        )
+    )
+    ledger[url] = False
+
+    row = await _first_row(host, home)
+
+    assert row["auth"] == {"kind": "api_key", "signed_in": True, "secret_refs": []}, row
+    assert (row["status"], row["status_basis"]) == ("not_started", "stored"), row
+    assert row["actions"] == ["test", "remove"], row
+
+
+async def test_a_header_write_is_refused_for_a_row_that_does_not_offer_add_key(
+    host: McpHost, folders: tuple[str, str], real_store: None, ledger: dict[str, bool]
+) -> None:
+    """R3-m1: the write path enforces exactly what the row offers.
+
+    Measured on the previous head: an ``auth.type: oauth`` server returned
+    ``saved`` and got a second ``Authorization`` bound beside the OAuth
+    provider's own. Only a client that ignored ``actions`` reaches this, which is
+    the point — the server is the enforcement point, not the page.
+    """
+    home, _ = folders
+    url = DEFAULT_REMOTE_URL
+    await _add_remote(host, "oauth", cwd=home, url=url, oauth=True)
+    await _add_remote(host, "plain", cwd=home)
+    path = Path(home) / ".local-operator" / "mcp.json"
+    before = path.read_bytes()
+
+    for name in ("oauth", "plain"):
+        result = await host.store_credentials(
+            MCPCredentials(name=name, values={"ACME_KEY": SecretStr("padlock")}),
+            home,
+            header="Authorization",
+        )
+        assert (result["code"], result["saved_ids"]) == ("invalid_target", []), result
+
+    assert path.read_bytes() == before, "a refused write touched the config"
+    rows = {row["name"]: row for row in (await host.catalog(home))["servers"]}
+    assert "add_key" not in rows["oauth"]["actions"], rows["oauth"]
+    assert "add_key" not in rows["plain"]["actions"], rows["plain"]
+
+
+async def test_add_key_refuses_more_than_one_id(
+    host: McpHost, folders: tuple[str, str], real_store: None, ledger: dict[str, bool]
+) -> None:
+    """R3-m3: the one-id rule the ``add_key`` form states.
+
+    The header can name exactly one ``${ID}``, so a body with two is refused
+    rather than silently binding whichever came first out of a dict.
+    """
+    home, _ = folders
+    await _add_remote(host, "acme", cwd=home)
+    ledger[DEFAULT_REMOTE_URL] = False
+    path = Path(home) / ".local-operator" / "mcp.json"
+    before = path.read_bytes()
+
+    result = await host.store_credentials(
+        MCPCredentials(
+            name="acme", values={"ACME_KEY": SecretStr("padlock"), "OTHER_KEY": SecretStr("bar")}
+        ),
+        home,
+        header="X-Api-Key",
+    )
+
+    assert (result["code"], result["saved_ids"]) == ("invalid_target", []), result
+    assert path.read_bytes() == before
+
+
+async def test_a_refused_add_key_leaves_the_file_byte_identical(
+    host: McpHost, folders: tuple[str, str], real_store: None, ledger: dict[str, bool]
+) -> None:
+    """QA Q-2: the rollback restores the file's BYTES, not a re-serialisation.
+
+    The store refusing after the bind used to leave a hand-formatted file
+    reindented (4 spaces to 2) with a final newline it never had. The bytes are
+    the user's file, so nothing short of them is "as it was".
+    """
+    home, _ = folders
+    await _add_remote(host, "keeper", cwd=home, headers={"Authorization": "${ACME_KEY}"})
+    held = MCPCredentials(name="keeper", values={"ACME_KEY": SecretStr("padlock")})
+    assert (await host.store_credentials(held, home))["code"] == "saved"
+    await _add_remote(host, "acme", cwd=home, url=DEFAULT_REMOTE_URL)
+    ledger[DEFAULT_REMOTE_URL] = False
+    path = Path(home) / ".local-operator" / "mcp.json"
+    # Hand-formatted: 4-space indent and no final newline, which is what the
+    # writer does NOT produce and therefore what a re-serialisation loses.
+    doc = json.loads(path.read_text())
+    hand = json.dumps(doc, indent=4, ensure_ascii=False)
+    path.write_text(hand)
+
+    result = await host.store_credentials(
+        MCPCredentials(name="acme", values={"ACME_KEY": SecretStr("deadbolt")}),
+        home,
+        header="X-Api-Key",
+    )
+
+    assert result["code"] == "replace_confirmation_required", result
+    assert path.read_text() == hand, "the refused write changed the file's bytes"
+    assert "headers" not in json.loads(path.read_text())["mcpServers"]["acme"]
+
+
+async def test_a_key_write_takes_the_registry_lock(
+    host: McpHost, folders: tuple[str, str], real_store: None, ledger: dict[str, bool]
+) -> None:
+    """R3-m3: the bind is a CONFIG write, so it serialises with add/remove.
+
+    Asserted by HOLDING the lock and showing the write cannot proceed, which is
+    the property the lock exists for: two read-modify-write passes over one
+    mcp.json lose whichever landed first.
+    """
+    home, _ = folders
+    await _add_remote(host, "acme", cwd=home)
+    ledger[DEFAULT_REMOTE_URL] = False
+
+    async with host.ops.lock:
+        task = asyncio.create_task(
+            host.store_credentials(
+                MCPCredentials(name="acme", values={"ACME_KEY": SecretStr("padlock")}),
+                home,
+                header="X-Api-Key",
+            )
+        )
+        await asyncio.sleep(0.25)
+        assert not task.done(), "the key write ran without the registry lock"
+
+    result = await asyncio.wait_for(task, timeout=30)
+    assert result["code"] == "saved", result
+
+
+async def test_a_login_across_a_key_write_records_no_probe(
+    host: McpHost, folders: tuple[str, str], real_store: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3-m3: the ``_record_grant`` epoch gate.
+
+    A sign-in resolves the values stored when it STARTED, so when a key write
+    lands mid-grant its "connected" is about a credential that is gone. The
+    grant's task is held open here between ``_record_grant``'s two observations,
+    which is exactly the window the epoch closes.
+    """
+    home, _ = folders
+    await _add_remote(host, "remote", cwd=home, headers={"Authorization": "${PROBEKEY}"})
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def fake_grant(manager, action, name, op, cfg):
+        op["status"] = "complete"
+        started.set()
+        await release.wait()
+        return 3
+
+    monkeypatch.setattr("local_operator.server.mcp_host.grant_operation", fake_grant)
+    operation = await host.execute(_grant_control("login", "remote"), home)
+    assert operation is not None
+    await asyncio.wait_for(started.wait(), timeout=30)
+    replace = MCPCredentials(
+        name="remote", values={"PROBEKEY": SecretStr("deadbolt")}, confirmed_replace=["PROBEKEY"]
+    )
+    assert (await host.store_credentials(replace, home))["code"] == "saved"
+    release.set()
+    settled = await _settle(host, str(operation["id"]))
+
+    assert settled["status"] == "complete", settled
+    assert (home, "remote") not in host.probes, "a grant recorded the pre-write facts"
+    row = await _first_row(host, home)
+    assert (row["status"], row["status_basis"]) == ("not_started", "stored"), row
 
 
 async def test_a_new_probe_prunes_the_expired_ones(host: McpHost, tmp_path: Path) -> None:

@@ -24,6 +24,7 @@ import re
 import tomllib
 from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, Literal
@@ -521,13 +522,26 @@ def _write_json_atomic(path: Path, doc: dict[str, Any]) -> None:
     Temp file in the target directory + ``os.replace``: readers never see a
     half-written mcp.json (a crash mid-write used to truncate the config).
     """
+    _write_bytes_atomic(path, _json_payload(doc))
+
+
+def _json_payload(doc: dict[str, Any]) -> bytes:
+    """The exact bytes :func:`_write_json_atomic` puts on disk for ``doc``."""
+    return (json.dumps(doc, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def _write_bytes_atomic(path: Path, payload: bytes) -> None:
+    """Temp file + ``os.replace``, for a payload that is already final bytes.
+
+    Split out of :func:`_write_json_atomic` so a rollback can put a file's
+    ORIGINAL bytes back rather than a re-serialisation of them.
+    """
     import tempfile
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(doc, indent=2, ensure_ascii=False) + "\n"
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "wb") as handle:
             handle.write(payload)
         os.replace(tmp_name, path)
     except BaseException:
@@ -828,13 +842,30 @@ TRANSPORT_OWNED_HEADERS = frozenset(
 )
 
 
+@dataclass(frozen=True)
+class HeaderBinding:
+    """What :func:`bind_header_secret` changed, so it can be put back EXACTLY.
+
+    ``before_bytes`` is the file's bytes before the bind and ``after_bytes`` the bytes
+    the bind wrote. A rollback that re-serialised the parsed document instead
+    left a refused ``add_key`` reindenting a hand-formatted file and adding a
+    final newline it never had (QA round 3, Q-2); holding both lets the undo
+    restore the original bytes, and only while the file is still what we wrote.
+    """
+
+    scope: str
+    path: Path
+    before_bytes: bytes
+    after_bytes: bytes
+
+
 def bind_header_secret(
     name: str,
     header: str,
     secret_id: str,
     *,
     cwd: str | os.PathLike[str] | None = None,
-) -> str:
+) -> HeaderBinding:
     """Bind ``headers[header] = "${secret_id}"`` on a remote server we own.
 
     The config half of the desktop's ``add_key`` action: a remote server that
@@ -843,9 +874,14 @@ def bind_header_secret(
     encrypted store separately (only a reference ever enters config). Writes
     ONLY the scope file that already defines the effective server, and never
     replaces an existing header: a header the user wrote is theirs, and the way
-    to change a referenced value is ``set_key``. Returns the scope written.
-    Raises :class:`MCPConfigWriteError` (``unknown_server``, ``not_owned``,
+    to change a referenced value is ``set_key``. Returns the
+    :class:`HeaderBinding` a rollback needs. Raises
+    :class:`MCPConfigWriteError` (``unknown_server``, ``not_owned``,
     ``invalid_config`` or ``write_failed``).
+
+    Whether the server is one ``add_key`` applies to at all is the CALLER's
+    question (``catalog.offers_add_key``): it needs the grant store and the
+    challenge ledger, which this config layer does not read.
     """
     root = cwd if cwd is not None else "."
     if not HEADER_NAME_RE.match(header) or header.lower() in TRANSPORT_OWNED_HEADERS:
@@ -864,7 +900,18 @@ def bind_header_secret(
     if scope is None:
         raise MCPConfigWriteError([f"server {name!r} is not ours to edit"], "not_owned")
     path = _scope_path(root, scope)
-    doc = _read_json(path)
+    # ONE read, as bytes: the same bytes are parsed here and kept for the
+    # rollback, so the undo restores exactly what this edit replaced.
+    original = b""
+    try:
+        original = path.read_bytes()
+        loaded = json.loads(original.decode("utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        # Unreadable or unparseable: every branch below refuses, so the empty
+        # placeholder never reaches a binding (it only keeps the name bound for
+        # the type checker).
+        loaded = None
+    doc = loaded if isinstance(loaded, dict) else None
     servers = doc.get("mcpServers") if doc is not None else None
     raw = servers.get(name) if isinstance(servers, dict) else None
     if doc is None or not isinstance(raw, dict):
@@ -876,26 +923,34 @@ def bind_header_secret(
         raise MCPConfigWriteError([f"server {name!r} already sets {header!r}"], "invalid_config")
     headers[header] = f"${{{secret_id}}}"
     raw["headers"] = headers
+    written = _json_payload(doc)
     try:
-        _write_json_atomic(path, doc)
+        _write_bytes_atomic(path, written)
     except OSError as exc:
         raise MCPConfigWriteError([f"could not write {path}: {exc}"]) from exc
-    return scope
+    return HeaderBinding(scope=scope, path=path, before_bytes=original, after_bytes=written)
 
 
-def unbind_header_secret(
-    name: str,
-    header: str,
-    *,
-    scope: str,
-    cwd: str | os.PathLike[str] | None = None,
-) -> None:
+def unbind_header_secret(name: str, header: str, binding: HeaderBinding) -> None:
     """Undo :func:`bind_header_secret` when the value could not be stored.
 
-    Removes the header only while it still holds a bare ``${ID}`` reference,
-    so a concurrent hand edit of that header is never thrown away.
+    While the file is still byte-for-byte what the bind wrote, its ORIGINAL
+    bytes go back, so a refused ``add_key`` leaves the file identical. If
+    anything else edited it in between, only our header is removed, and only
+    while it still holds a bare ``${ID}`` reference, so a concurrent hand edit
+    is never thrown away.
     """
-    path = _scope_path(cwd if cwd is not None else ".", scope)
+    path = binding.path
+    try:
+        current = path.read_bytes()
+    except OSError:
+        current = None
+    if current == binding.after_bytes:
+        try:
+            _write_bytes_atomic(path, binding.before_bytes)
+        except OSError as exc:
+            raise MCPConfigWriteError([f"could not write {path}: {exc}"]) from exc
+        return
     doc = _read_json(path)
     servers = doc.get("mcpServers") if doc is not None else None
     raw = servers.get(name) if isinstance(servers, dict) else None
