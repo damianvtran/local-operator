@@ -135,6 +135,9 @@ def test_the_catalogue_carries_the_argument_shape_and_its_vocabulary(monkeypatch
     # an older renderer ignores the key, and a newer one must not read "empty" as
     # "no argument may be typed".
     assert words["usage"] == [] and words["compact"] == [] and words["rename"] == []
+    # A WORD row with a closed vocabulary of one: the flag the terminal copies on
+    # and the route refuses by name (decisions D1, D3).
+    assert words["session"] == ["--copy"]
 
     # And the wire vocabulary really is what the validators answer with, so a
     # renderer applying it reaches the endpoint's own decision. Both arms now take

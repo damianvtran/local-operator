@@ -47,6 +47,13 @@ from local_operator.tui.autocomplete import ArgumentMode, ArgumentShape, SlashCo
 #: instead of truncating, and the `/help` row is reachable at any width.
 PERSIST_HINT = "/model default saves this for new sessions"
 
+#: The one flag ``/session`` takes: copy the current session ID instead of
+#: opening the view. Exact and case-sensitive, like every WORD vocabulary here
+#: (``_is_single_word``). The TUI handler and the desktop route's refusal compare
+#: against THIS constant, and the catalogue publishes it, so the three cannot
+#: disagree about the spelling.
+SESSION_COPY_FLAG = "--copy"
+
 
 #: Slash commands handled synchronously before any prompt is sent. One
 #: registry entry per command; aliases live on the entry (TUI-014).
@@ -531,9 +538,18 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # has the session-scoped read it needs (`/v1/desktop/analytics?session_id=`);
     # like `/context`, it is a read-only view with no owner execution, so it
     # needs no `native_action` branch or `OWNER_COMMANDS` entry.
+    #
+    # WORD with a one-word vocabulary (`SESSION_COPY_FLAG`, via
+    # `command_argument_words`) rather than NONE, because `--copy` is a control:
+    # under NONE the messages endpoint admitted `/session --copy` as a paid model
+    # turn. Deliberately NOT a value list (`ArgumentMode.OPTIONAL`): a one-row
+    # list RUNS on a single Enter, so `/session ` + Enter would copy instead of
+    # opening the view — the description teaches the flag instead, the way
+    # `/fork --switch` is taught. 54 cells, inside the ~55 the column wraps past.
     SlashCommand(
         "session",
-        "Current-session usage, cost and request diagnostics",
+        "Usage, cost, diagnostics; --copy copies the session ID",
+        argument_shape=ArgumentShape.WORD,
         desktop_destination="session.diagnostics",
     ),
     # Beside `/session` because it is the same family — a read-only diagnostic
@@ -1009,6 +1025,8 @@ def command_argument_words(spec: SlashCommand) -> tuple[str, ...]:
         from local_operator.session.frontend_state import MCP_SUBCOMMANDS
 
         return tuple(sorted(MCP_SUBCOMMANDS))
+    if spec.name == "session":
+        return (SESSION_COPY_FLAG,)
     return ()
 
 
@@ -1122,11 +1140,16 @@ def command_argument_refusal(spec: SlashCommand, args: str) -> str | None:
 #: beside words the user can actually type, so the sentence teaches the vocabulary
 #: rather than only complaining about what it received.
 #:
-#: ``clears it``, not a synonym, and the two clauses stay in the flag's own
-#: command form: the palette row already reads "/goal --clear clears it", the
-#: picker says "Clear the standing goal" and the receipt says "goal cleared", so
-#: a fourth verb here was the odd one out beside a flag literally spelled
-#: ``--clear`` (round 2: design D5, UX U7, reviewer NIT-5).
+#: The clause after ``sets it`` NAMES the flags instead of giving each its own
+#: verb, and that is a budget decision rather than a wording preference: four
+#: flags now share a single notice row, and ``--clear/--done/--history`` is 24
+#: cells where three verb clauses are 45 — over budget by the width of the row
+#: itself. The verbs live where there is room for them and where the user is
+#: looking when they need one: the palette row reads "Set the goal and start
+#: work; /goal --clear clears it", and each picker row spells its own action
+#: ("Clear the standing goal", "Mark the standing goal done"). So the round-2
+#: pin (D5, UX U7, reviewer NIT-5) still holds — the sentence names no flag the
+#: neighbourhood does not also describe — while staying on ONE painted row.
 #:
 #: The rest of the sentence is spelled to the WRAP BUDGET rather than to the
 #: roomier "sets a goal": the refusal paints inside a notice whose body budget at
@@ -1139,7 +1162,7 @@ def command_argument_refusal(spec: SlashCommand, args: str) -> str | None:
 #: for ``--stop`` and 69 for ``--clearx``: one painted row at 80 columns for
 #: both, measured through a real ``NoticeBlock``.
 _FLAG_FORMS: dict[str, str] = {
-    "goal": "/goal <text> sets it, /goal --clear clears it",
+    "goal": "/goal <text> sets it, --clear/--done/--history",
     "loop": "/loop <goal> loops toward a goal, /loop <n> runs n turns, /loop --stop cancels",
 }
 
@@ -1150,7 +1173,8 @@ def unknown_flag_refusal(command: str, arguments: str) -> str | None:
     Two flag vocabularies are now taught side by side — ``--clear`` unsets the
     goal, ``--stop`` ends the loop — so reaching for the wrong one is the
     expected mistake rather than an exotic one. Under the whole-argument flag
-    rule (`session/goal.py::GOAL_CLEAR_ARGS`, `session/goal_loop.py::LOOP_CLEAR_ARGS`)
+    rule (`session/goal.py::GOAL_FLAG_ARGS`,
+    `session/goal_loop.py::LOOP_CLEAR_ARGS`)
     that mistake was not refused at all: it became the VALUE. ``/goal --stop``
     stored ``--stop`` as the standing objective and submitted a turn carrying it,
     and ``/loop --stop now`` started a paid goal-mode loop toward that literal
@@ -1168,11 +1192,15 @@ def unknown_flag_refusal(command: str, arguments: str) -> str | None:
     # Imported here rather than at module scope: this module is the registry every
     # host imports, and the vocabularies live in the session layer it should not
     # pull in at import time.
-    from local_operator.session.goal import GOAL_CLEAR_ARGS
+    from local_operator.session.goal import GOAL_FLAG_ARGS
     from local_operator.session.goal_loop import LOOP_CLEAR_ARGS, LOOP_STOP_ARGS
 
     known: frozenset[str] | None = {
-        "goal": GOAL_CLEAR_ARGS,
+        # EVERY flag `/goal` honours, not just the clearing ones: this map is what
+        # decides whether a bare token is refused as an unknown flag, so a new
+        # flag of this command that is not in it is refused — which is the loud,
+        # correct failure, and the reason the set is imported rather than listed.
+        "goal": GOAL_FLAG_ARGS,
         # `status` is a WORD the runtime loop branch answers with its state
         # block, not a flag — accepted here so the refusal does not name the
         # forms and then contradict itself on the one word it already honours.

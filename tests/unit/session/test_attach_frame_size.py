@@ -82,6 +82,7 @@ from local_operator.session.frontend_state import (
     McpServerState,
     TodoItemState,
     TodoPhaseState,
+    _bound_goal_record_in_place,
     _folded_components,
     _released_row,
     _with_lineage,
@@ -89,6 +90,7 @@ from local_operator.session.frontend_state import (
     oversized_frame_report,
     sync_wire_payload,
 )
+from local_operator.session.goal import GOAL_HISTORY_MAX, GOAL_HISTORY_TEXT_CHARS
 from local_operator.session.goal_loop import (
     LOOP_GOAL_CHARS,
     LOOP_REASON_CHARS,
@@ -123,10 +125,39 @@ _RELEASED_ARM_SETTLED_AT = 1_700_000_000.0
 #: figures before moving this — the arm's assertion message prints the total.
 #:
 #: "Bounds" here means a ZERO-SLACK EQUALITY on today's numbers, not headroom to
-#: spend (QA round 3, Q7): 1,050,626 − 1,048,576 = 2,050 exactly. One more byte
-#: per roster fails the arm, and raising this constant to clear that red IS the
-#: ceiling decision above, not a way to make the guard pass — report the byte.
-_RELEASED_ARM_PRE_EXISTING_EXCESS_BYTES = 2_050
+#: spend (QA round 3, Q7): raising this constant to clear a red IS the ceiling
+#: decision above, not a way to make the guard pass — report the byte.
+#:
+#: RAISED BY 95 B for the judged-goal record, from 2,050 to 2,145, and that is
+#: the whole of this feature's ceiling spend. MEASURED on this head by
+#: serializing the arm's own frame twice — once as the new fixture leaves it and
+#: once with the four goal keys removed from the snapshot — with the second
+#: reading 1,050,626 B, the exact figure this comment already documented for
+#: today's head. So the delta is 95 B and it is ADDITIVE here: the released arm's
+#: catalogue is already pinned at ``MODEL_CATALOGUE_FLOOR_ROWS`` (the frame is
+#: over the line even at the floor), so nothing else can absorb the bytes. On the
+#: member arm, where the catalogue still has rows to give, the same 95 B is spent
+#: by the residual budget instead.
+#:
+#: The 95 B is the record's KEY SKELETON at the guard's worst case, and the
+#: breakdown is the whole of it: ``goal_status`` 23 B ("done") + ``goal_judge``
+#: 20 B (yielded to null) + ``goal_history`` 20 B (yielded to the empty list) +
+#: ``goal_history_truncated`` 32 B (set, so the empty list cannot read as "no
+#: completed goals"). Nothing here is padding: the four keys serialize on every
+#: frame because this model dumps every field (no ``exclude_defaults`` anywhere
+#: in ``sync_wire_payload``), and an ordinary session with no settled goal pays
+#: 92 B of the same skeleton at its defaults.
+#:
+#: What the bound deliberately does NOT pay for is the record's PAYLOAD on a full
+#: frame. Keeping the judge's four keys with its reason clipped to 200 characters
+#: measured 362 B in total — 287 B of it the judge — to render one tooltip line on
+#: a frame that already has none to give, which is why
+#: ``_bound_goal_record_in_place`` yields the whole payload rather than a clipped
+#: share of it. A plan drafted before the code quoted +74 B for this spend; the
+#: measured skeleton is 95 B because the ``goal_judge`` KEY itself costs 20 B and
+#: cannot be dropped while the field exists on the model. The measured frame is
+#: the authority; raise this number only with a fresh measurement.
+_RELEASED_ARM_PRE_EXISTING_EXCESS_BYTES = 2_145
 
 #: No comms node: these released children have no lineage, which is the smaller
 #: of the two shapes `_with_lineage` can produce and the only one this arm needs
@@ -184,6 +215,25 @@ def _catalogue_row(index: int) -> dict[str, Any]:
         "connected": True,
         "aggregated": True,
         "routed": False,
+    }
+
+
+def _goal_history_row(index: int) -> dict[str, Any]:
+    """One settled goal at the WIDEST shape the record can hold.
+
+    Built from the record's own bounds rather than from numbers typed here, so a
+    later change to ``GOAL_HISTORY_TEXT_CHARS`` or to the reason clip moves this
+    fixture with it: the point of the row is that the entry cap alone does not
+    bound the frame, and a row authored at a comfortable width would prove
+    nothing about the bound that does.
+    """
+    return {
+        "id": f"{index:032x}",
+        "text": "g" * GOAL_HISTORY_TEXT_CHARS,
+        "status": "done",
+        "created_at": "2026-09-22T00:00:00Z",
+        "settled_at": "2026-09-22T00:00:01Z",
+        "reason": "r" * LOOP_REASON_CHARS,
     }
 
 
@@ -488,6 +538,16 @@ _BOUNDED_COLLECTION_FIELDS = {
     # wire by a RESIDUAL budget, with `model_catalogue_truncated` telling the
     # reader when the list it received is a prefix.
     "model_catalogue": "clipped at the wire to the frame's remaining bytes; truncation flagged",
+    # A FIXED four-key mapping (state/run/verdict/reason), REPLACED on every
+    # judge transition rather than appended to: a hundred-turn goal and a
+    # one-turn goal serialize the same shape. Its one free-text value is clipped
+    # where the model's answer enters the state (LOOP_REASON_CHARS, at the
+    # parse), and when the frame it would ride is over the line the whole mapping
+    # is YIELDED to None by `_bound_goal_record_in_place` — the key skeleton is
+    # 20 B and the four keys with a clipped reason are 287 B, for a value the
+    # next frame rebuilds. Typed `dict[str, Any] | None` on the model ON PURPOSE,
+    # because the annotation is what makes the class guard see it.
+    "goal_judge": "fixed four-key judge state; clipped at the parse and yielded at the wire",
     # One startup report from the MCP wiring pass, not an accumulator: it is
     # REPLACED on each wiring round rather than appended to, and its size is a
     # function of how many servers are configured.
@@ -507,6 +567,12 @@ _BOUNDED_COLLECTION_FIELDS = {
 _CAPPED_COLLECTION_FIELDS = {
     "usage_components": "capped at accumulation (USAGE_COMPONENT_CAP)",
     "jobs": "trajectories stripped, receipts folded, free text clipped on the wire",
+    # Swept at the RECORD (GOAL_HISTORY_MAX, newest-first) and yielded at the
+    # WIRE: the whole list is dropped and `goal_history_truncated` set when the
+    # frame it would ride is over the line. An entry cap alone is not a wire
+    # bound — the mistake `model_catalogue`'s entry records — because the frame
+    # this field rides is the socket's, not the record's.
+    "goal_history": "capped at the record (GOAL_HISTORY_MAX) and yielded at the wire",
 }
 
 
@@ -966,6 +1032,22 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
             "goal": "g" * LOOP_GOAL_CHARS,
             "reason": "r" * LOOP_REASON_CHARS,
         },
+        # The judged-goal record, populated PAST what a frame can carry. The
+        # entry cap alone does not bound these bytes, which is why the wire bound
+        # exists and why this fixture is what proves it actually runs — the
+        # `model_catalogue` precedent above: "longer than the budget can hold
+        # rather than tuned to sit under it". `goal_status` is a closed scalar
+        # and `run` is a two-digit counter, so what rides here is the widest
+        # each can be rather than a comfortable sample.
+        "goal_status": "done",
+        "goal_judge": {
+            "state": "continuing",
+            "run": 99,
+            "verdict": "continue",
+            "reason": "r" * LOOP_REASON_CHARS,
+        },
+        "goal_history": [_goal_history_row(index) for index in range(GOAL_HISTORY_MAX)],
+        "goal_history_truncated": True,
         "slash_capabilities": [],
         # PRODUCTION-SHAPED rows, and far more of them than any provider lists.
         # The old fixture used a 3-key, 63 B row while `refresh_model_catalogue`
@@ -999,6 +1081,18 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
 
     assert frame["data"]["snapshot"]["attention"] == attention
     size = _line_bytes(frame)
+    # The record YIELDED on this frame rather than being counted on to fit, which
+    # is what makes the assertion below a measurement of the BOUNDED shape: the
+    # entry cap alone could not have brought these bytes under the line, and a
+    # fixture that only proved the frame fits would not notice the wire bound
+    # being deleted.
+    snapshot = frame["data"]["snapshot"]
+    assert snapshot["goal_history"] == [], (
+        "the wire bound did not run on a frame this size, so this guard is "
+        "measuring the unbounded shape (see _bound_goal_record_in_place)"
+    )
+    assert snapshot["goal_history_truncated"] is True
+    assert snapshot["goal_judge"] is None
     assert size < _MAX_LINE_BYTES, (
         f"the attach frame is {size:,} bytes, over the {_MAX_LINE_BYTES:,} limit. "
         "Some field in FrontendSessionState grows without bound and is not "
@@ -6047,3 +6141,53 @@ def test_a_deep_roster_charges_for_its_own_keys_and_markers() -> None:
     kept = sum(len(rows) for rows in filtered["job_trajectory_appends"].values())
     assert kept > 0, "the bound emptied every job's rows to fit a frame the keys cost"
     assert len(filtered["job_trajectory_replacements"]) == jobs
+
+
+def test_the_goal_record_yields_only_when_the_frame_is_over_the_line() -> None:
+    """The wire bound, exercised directly, on both sides of its threshold.
+
+    The class guard above proves the frame FITS with the record populated past
+    what it can carry; this pins the two halves that make that true, because a
+    bound that always fired would pass that guard by throwing the history away on
+    every session and nobody's test would notice.
+
+    Dropping the history is what the flag has to accompany — the same lie
+    `model_catalogue_truncated` exists to prevent: a reader that receives an
+    empty list must be able to tell "nothing settled" from "yielded to fit".
+    """
+
+    def _record() -> dict[str, Any]:
+        return {
+            "goal_status": "active",
+            "goal_judge": {
+                "state": "continuing",
+                "run": 3,
+                "verdict": "continue",
+                "reason": "r" * LOOP_REASON_CHARS,
+            },
+            "goal_history": [_goal_history_row(index) for index in range(GOAL_HISTORY_MAX)],
+        }
+
+    small = {"op": "frontend_sync", "data": {"snapshot": _record()}}
+    _bound_goal_record_in_place(small, small["data"]["snapshot"])
+    snapshot = small["data"]["snapshot"]
+    # Under the line NOTHING yields, including the full-length reason: the entry
+    # clip is the record's own bound and survives here.
+    assert len(snapshot["goal_history"]) == GOAL_HISTORY_MAX
+    assert "goal_history_truncated" not in snapshot
+    assert len(snapshot["goal_judge"]["reason"]) == LOOP_REASON_CHARS
+    assert snapshot["goal_status"] == "active"
+
+    over = _record()
+    over["filler"] = "x" * (_MODEL_CATALOGUE_LINE_LIMIT + 1)
+    big = {"op": "frontend_sync", "data": {"snapshot": over}}
+    _bound_goal_record_in_place(big, big["data"]["snapshot"])
+    # Over it: the record becomes its KEY SKELETON — the list goes with the flag
+    # set, and the judge yields entirely rather than keeping four keys (287 B) to
+    # render one tooltip line on a frame that has none to give — while the ACTIVE
+    # goal and its state, the two things on this frame a user is looking at, are
+    # untouched.
+    assert big["data"]["snapshot"]["goal_history"] == []
+    assert big["data"]["snapshot"]["goal_history_truncated"] is True
+    assert big["data"]["snapshot"]["goal_judge"] is None
+    assert big["data"]["snapshot"]["goal_status"] == "active"

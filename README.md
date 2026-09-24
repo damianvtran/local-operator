@@ -408,7 +408,8 @@ per account and a hop would re-pay to rebuild it.
   windows and account spend; `/accounts` lists every signed-in provider account
   (the `lop secret` store is separate); `/session` reports the current session's
   cost, cache, and request
-  diagnostics. One exception: QwenCloud's personal Token Plan window needs a
+  diagnostics, and `/session --copy` copies the session ID. One exception:
+  QwenCloud's personal Token Plan window needs a
   [console ticket](./local_operator/guides/qwencloud/GUIDE.md) stored alongside
   the login.
 
@@ -499,12 +500,12 @@ with its title and age:
 | `/resume` | Pick a past conversation and continue it |
 | `/new`, `/clear`, `/reload` | Fresh conversation · wipe the screen · relaunch this conversation on the current install |
 | `/update` | Install the latest version from PyPI and relaunch |
-| `/goal <text>` | Set the session objective and send the same text to start work; bare `/goal` shows it and `/goal --clear` clears it without starting a turn (`/goal clear`, `none` and `reset` still work) |
+| `/goal <text>` | Set the session objective and send the same text to start work. A judge checks it at each turn end and continues or marks it done. Bare `/goal` opens the goal card (other hosts print a one-line report). `/goal --done` marks it done, `--dismiss` clears a done goal, `--history` lists settled goals, and `--clear` deletes it without a history entry. None of these start a turn (`/goal clear`, `none` and `reset` still work) |
 | `/loop` | Iterate autonomously toward the session objective: `/loop <n>` for a bounded count, `/loop <goal>` toward an inline goal; `/loop --stop` cancels a running one and `/loop --clear` clears it — which on a detached owner means dismissing a finished run's published state |
 | `/btw` | Ask a side question off the record; it never joins the conversation |
 | `/compact` | Compact the context now (it also happens automatically) |
 | `/usage`, `/context` | Provider quota and account spend · what's occupying the context window |
-| `/session` | Current-session recorded usage, combined cost, cache, and request diagnostics |
+| `/session` | Current-session recorded usage, combined cost, cache, and request diagnostics; `/session --copy` copies the session ID to the clipboard |
 | `/failovers` | The model cascade for this session, and which account is serving |
 | `/provider`, `/login`, `/logout`, `/accounts` | Manage providers and signed-in accounts |
 | `/credential` | Hand over a secret: type it after `/credential` and a space to have it masked and captured; a paste your terminal delivers as text is captured the same way; the composer's own paste key (`Ctrl+V` on macOS) is not. Bare `/credential` lists this session's credentials, and `/credential --persist <KEY>` saves one to the long-term store. See [Credentials and secrets](#credentials-and-secrets) |

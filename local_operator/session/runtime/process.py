@@ -4037,9 +4037,10 @@ async def _watch_stall_beats(stop: asyncio.Event) -> None:
     be started with a bare ``ensure_future`` and named exactly twice — there and
     at shutdown — so when it RAISED, nothing observed it: ``asyncio`` reports an
     unretrieved exception only at garbage collection, and a bound-firing
-    ``_exit(1)`` never reaches GC at all. Nothing re-created the task either, so
-    the WORKLOAD stamp froze FOREVER and the bound fired one deadline later on a
-    runtime that was perfectly healthy, killing the turn in flight. Three
+    ``_exit(1)`` — which is what a fire of THAT date did, and what no build does now
+    (every expiry is dump-only) — never reached GC at all. Nothing re-created the
+    task either, so the WORKLOAD stamp froze FOREVER and the bound fired one deadline
+    later on a runtime that was perfectly healthy, killing the turn in flight. Three
     readings were wrong at once: the runtime was reported as silent while it was
     working, the reporter's own death was reported nowhere, and the artifact
     could not tell the two apart — ``faulthandler`` dumps THREADS, and a dead
@@ -4155,8 +4156,9 @@ async def _watch_stall_beats(stop: asyncio.Event) -> None:
                     f" -- and the supervision GIVES UP here: {len(deaths)} deaths inside "
                     f"{STALL_BEAT_WINDOW_S:g}s. Terminal for this session by design; what that "
                     f"costs is stated plainly: from here on nothing watches whether the "
-                    f"workload plane reports, its stamp is left to freeze, and the bound ends "
-                    f"this runtime one deadline after its last stamp"
+                    f"workload plane reports, its stamp is left to freeze, and the bound dumps "
+                    f"every thread one deadline after that last stamp (dump-only: the fire "
+                    f"ends nothing)"
                 )
             # THE RECORD IS BEST-EFFORT AND THE GIVE-UP IS NOT, and since round 3 (M2)
             # that covers the CLAUSE as well as the write: everything the give-up needs is
@@ -4226,8 +4228,9 @@ async def _watch_stall_beats(stop: asyncio.Event) -> None:
         except Exception:  # noqa: BLE001 — nothing here may end the supervision unobserved
             # THROUGH THE TOTAL CALL, and this one matters most: a raise from this log line
             # escapes the handler, so the ``while`` ends and the supervision dies — the tick is
-            # never re-created, the stamp freezes and the bound ends a healthy runtime, which is
-            # the incident this function exists to prevent (agent review round 4, MINOR).
+            # never re-created, the stamp freezes and the bound fires over a healthy runtime,
+            # which is the incident this function exists to prevent (agent review round 4,
+            # MINOR). The fire itself is dump-only and ends nothing -- see stall_watchdog.
             _safe_warning(
                 "session runtime: the stall bound's WORKLOAD supervision raised in its own "
                 "recovery path and is continuing; the plane is not stamped on this path, so "
@@ -4854,6 +4857,37 @@ def _teardown_loop(runner: asyncio.Runner) -> None:
         loop.close()
 
 
+async def _run_amain(operator_cap: bytes | None) -> int:
+    """Run ``amain`` and annotate the dump when the asyncio runner starts tearing down.
+
+    THE WHOLE OF FINDING D (2026-09-23 convergence round) IS THE ``finally`` BELOW, and
+    its position is the mechanism rather than a style choice. ``main`` constructs
+    a ``Runner``, runs this coroutine, and only THEN tears the runner down: it cancels
+    the remaining tasks, runs async-generator shutdown and joins the default executor
+    (``shutdown_default_executor`` -> ``_do_shutdown`` -> ``Thread.join``, under this
+    branch's own bound, not CPython's). Those phases run OUTSIDE this coroutine,
+    so the ``finally`` is the last moment a Python thread of ours is alive to say which
+    phase the process has entered — and it is exactly the phase the operator's store
+    kept losing: 17-27 dumps whose loop sits in asyncio shutdown with the death
+    unattributed, because nothing in the artifact said the loop was in teardown rather
+    than in work that stopped reporting.
+
+    NAMED FOR WHAT IS KNOWN, NOT FOR WHAT USUALLY FOLLOWS: 'asyncio runner teardown
+    started; executor join may follow'. Task cancellation and async-generator shutdown
+    precede the join, so a line claiming the join would name the wrong phase for the
+    fires that land in the first two.
+
+    SYNCHRONOUS AND UNCONDITIONAL BY DESIGN: the annotation is a no-op when nothing is
+    armed (every in-process host, every TUI, the whole test suite), so this wrapper
+    costs an unarmed runtime one attribute read, and it cannot raise — a diagnostic must
+    never be the reason a shutting-down runtime fails to leave.
+    """
+    try:
+        return await amain(operator_cap=operator_cap)
+    finally:
+        stall_watchdog.note_runner_teardown()
+
+
 def main() -> int:
     # THE TOKENIZER WARM STARTS FIRST, before the log file, the imports and the
     # lease: it is the only piece of boot work that nothing else on this path
@@ -4930,7 +4964,12 @@ def main() -> int:
     # teardown.
     runner = asyncio.Runner()
     try:
-        return runner.run(amain(operator_cap=operator_cap))
+        # THROUGH THE WRAPPER, NEVER ``amain`` DIRECTLY: the wrapper's ``finally`` is what
+        # annotates the dump with the runner's own teardown phase, and it has to run
+        # BEFORE ``_teardown_loop`` starts that teardown. Calling ``amain`` here would put
+        # the note after the join it exists to explain — or, on the path where the join
+        # never returns, never write it at all. See :func:`_run_amain`.
+        return runner.run(_run_amain(operator_cap=operator_cap))
     except KeyboardInterrupt:
         return 0
     finally:

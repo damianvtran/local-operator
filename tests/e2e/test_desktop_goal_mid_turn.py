@@ -194,15 +194,27 @@ async def test_a_goal_mid_turn_is_answered_without_waiting_for_the_turn(
             sid = created.json()["result"]["session_id"]
             target = "/v1/desktop/sessions/" + sid
 
-            # Two turns for the held leg -- the held one, and the continuation
-            # that has to carry the steered goal text -- plus a third for the idle
-            # leg below. A call past the end is a test bug and ``ScriptedStream``
-            # fails loudly on it rather than answering with a bare stop.
+            # Five turns: the held one, the follow-up turn that has to carry the
+            # steered goal text, the steer goal's judge, the idle goal's own
+            # turn, and the idle goal's judge. A call past the end is a test bug
+            # and ``ScriptedStream`` fails loudly on it rather than answering with
+            # a bare stop — which is how this cell learned its tape had gone
+            # short when the judged goal started forking a judge.
             stream = HeldStream(
                 [
                     text_turn("The held turn finished."),
                     text_turn("Carried the steer."),
+                    # The STEER goal's forked judge, which answers ACHIEVED so it
+                    # settles that goal instead of admitting a continuation: this
+                    # cell is about the admission BOUND, and a chain of extra
+                    # turns would make its call census a measurement of the judge
+                    # rather than of the steer.
+                    text_turn("VERDICT: ACHIEVED\nSteered goal verified."),
                     text_turn("Carried the idle goal."),
+                    # ...and the IDLE goal's judge, for the same reason. Without
+                    # these two, the judged-goal machinery reads prose as an
+                    # unreadable verdict and keeps asking.
+                    text_turn("VERDICT: ACHIEVED\nIdle goal verified."),
                 ]
             )
             session = build_session(root / "sessions" / sid, stream, cwd=workspace)
@@ -316,12 +328,20 @@ async def test_a_goal_mid_turn_is_answered_without_waiting_for_the_turn(
             assert (
                 _user_rows(entries, GOAL_TEXT) == 1
             ), "one durable user row for one goal submission"
-            # DELIVERED ONCE, to the provider as well: the text first appears in
-            # the follow-up call the steer produced and was absent from the call
-            # that started the turn, so exactly one new call carried it.
-            assert _introduced_in(stream, GOAL_TEXT) == [1], (
-                "the steered goal text must reach the provider exactly once, in the "
-                f"follow-up call; introduced in calls {[i for i, r in enumerate(stream.requests)]}"
+            # DELIVERED ONCE, to the provider as well: the steer's text was ABSENT
+            # from the call that started the turn and appears in exactly one call
+            # after it. Counted rather than pinned to an index because the judged
+            # goal now forks the judge at the same turn end, so which of the two
+            # subsequent calls carries the text first is the judge's business —
+            # what must hold is that ONE call carries it and the held turn did not.
+            delivered = _introduced_in(stream, GOAL_TEXT)
+            assert len(delivered) == 1, (
+                "the steered goal text must reach the provider exactly once, never"
+                f" twice: delivered in calls {delivered}"
+            )
+            assert delivered[0] >= 1, (
+                "and NOT in the call that started the turn, which was already"
+                f" streaming when the goal was set: delivered in call {delivered[0]}"
             )
 
             # PHASE 2: THE IDLE LEG, the same route with no turn running. The ack
@@ -355,10 +375,19 @@ async def test_a_goal_mid_turn_is_answered_without_waiting_for_the_turn(
             # -- the ack that resolves on the durable append, i.e. the turn's own
             # start.
             assert idle_admission["detail"] == "prompt admitted", idle_admission["detail"]
-            await until(lambda: len(stream.requests) >= 3, timeout_s=20)
-            assert _introduced_in(stream, IDLE_GOAL_TEXT) == [2], (
-                "the idle goal's text must reach the provider in exactly one new call; "
-                f"introduced at {_introduced_in(stream, IDLE_GOAL_TEXT)}"
+            # WAIT FOR THE DELIVERY ITSELF, not for a request count: the steer
+            # goal's judge and the continuation it may admit are calls too, so a
+            # count of three can be reached by the machinery around the command
+            # rather than by the command's own turn.
+            await until(lambda: _introduced_in(stream, IDLE_GOAL_TEXT), timeout_s=20)
+            idle_delivered = _introduced_in(stream, IDLE_GOAL_TEXT)
+            assert len(idle_delivered) == 1, (
+                "the idle goal's text must reach the provider in exactly one call,"
+                f" never twice: delivered in calls {idle_delivered}"
+            )
+            assert idle_delivered[0] >= 2, (
+                "and in a call made AFTER the command — the steer leg's own calls"
+                f" were already made by then: delivered in call {idle_delivered[0]}"
             )
             idle_entries = (await client.get(target + "/history")).json()["result"]["entries"]
             assert (

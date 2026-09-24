@@ -39,13 +39,20 @@ requests rather than actions — a daemon that is mid-spawn refuses and says so.
 
 from __future__ import annotations
 
+import http.client
 import logging
 import os
+import re
+import signal
 import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Sequence
 
+from local_operator import procname
+from local_operator.procstate import pid_liveness
 from local_operator.server import registry as serve_registry
 from local_operator.server import reload as serve_reload
 
@@ -85,6 +92,215 @@ RELOAD_POLL_S = 0.2
 HEALTH_TIMEOUT_S = 1.0
 
 
+#: The ADDRESS axis, which the shared ``live``/``wedged``/``stale`` vocabulary
+#: cannot express.
+#:
+#: The shared classifier answers "is the OWNER there" from the record alone, with
+#: no network cost, and that two-fact contract is what keeps ``registry.scan``
+#: cheap enough to run on every ``lop`` invocation. It therefore cannot say the
+#: one thing that mattered on 2026-09-23: whether anything is SERVING the address
+#: the record names. A serve daemon whose loop is alive and whose heartbeat is
+#: fresh while nothing accepts on its port reads as ``live`` — which is exactly
+#: the state that cost this machine twelve minutes, because the desktop app's
+#: spawn gate believes a live record and the operator was told nothing.
+#:
+#: So the axis is added HERE, beside the identity probe that already owns "prove
+#: the process before touching it", and never in the shared classifier. The
+#: tokens below are the whole vocabulary of the axis and are rendered from these
+#: constants by every surface that prints them — a second spelling of "not
+#: serving" is the defect these exist to prevent.
+SERVING = "serving"
+
+#: pid alive, heartbeat fresh, and the identity probe did not answer.
+#:
+#: THE INCIDENT'S STATE, and it had no name anywhere in the product. It is NOT
+#: ``wedged``: a wedged owner stopped reporting, and the honest reading there is
+#: "a long turn or a starved loop"; this owner is still reporting and its port is
+#: still silent, which is a different fact with a different remedy.
+DEAF = "deaf"
+
+#: Something else answered at the record's address. Distinct from ``deaf``
+#: because the incident passed through both and the operator needs to know which:
+#: ``deaf`` is "nobody is there", this is "somebody else is", and only this one
+#: names another daemon to go and look at.
+SQUATTED = "squatted"
+
+#: The shared tokens, re-exported as names so a caller that composes a sentence
+#: per verdict imports one vocabulary rather than spelling strings twice.
+WEDGED = "wedged"
+STALE = "stale"
+
+#: How many consecutive probes must agree before ``deaf``/``squatted`` may
+#: authorize a SIGNAL (never before they may be REPORTED).
+#:
+#: A single refused connection is not evidence that a daemon is down: the loop
+#: may be mid-restart, the probe may have lost a race with a reload's exec, or
+#: the machine may simply be starved (this host ran at a load average of 130 for
+#: hours). Acting on one reading is how a healthy daemon gets killed by the
+#: command that exists to clean up the unhealthy ones, so the signal path asks
+#: three times and an unbroken run of agreement is required.
+PROBE_CONFIRMATIONS = 3
+
+#: The gap between those confirmations. Small enough that a refusal stays a
+#: command's worth of latency, large enough that two readings are two readings.
+PROBE_CONFIRM_GAP_S = 0.25
+
+
+@dataclass(frozen=True)
+class AddressProbe:
+    """One address's reading, before any classification is applied to it.
+
+    ``detail`` is the sentence fragment that says WHY, and it is empty exactly
+    when the verdict is :data:`SERVING` — the shape :func:`_answers_as_record`
+    has always had, kept so its callers did not have to learn a new one.
+    """
+
+    verdict: str
+    detail: str = ""
+    #: The instance id that answered, when one did and it was not ours.
+    answered_as: str = ""
+
+
+@dataclass(frozen=True)
+class ServeDaemonReport:
+    """One serve record as a reader needs it: its shared state, plus its address.
+
+    ``verdict`` is the COMPOSED answer, and the probe outranks the beat wherever a
+    probe ran: ``serving`` and ``squatted`` come from the address, ``deaf`` is a
+    ``live`` record the address could not reach, and ``wedged``/``stale`` keep the
+    shared classifier's word when the address agrees nobody is serving. Composing it
+    in one place is what keeps ``lop services status`` and ``lop services reclaim``
+    from disagreeing about what they are looking at.
+    """
+
+    record: Any
+    state: str
+    probe: AddressProbe | None = None
+
+    @property
+    def verdict(self) -> str:
+        """The one word for this daemon's address.
+
+        THE PROBE OUTRANKS THE BEAT, and that is a composition rule rather than a
+        preference. ``wedged`` says the owner stopped REPORTING — a long turn, a
+        starved loop — and the shared classifier is explicit that this is not a
+        verdict on the process (``registry``: a stale beat is not proof the
+        workload stopped). So a wedged record whose address answers as its own
+        instance IS serving: the strongest evidence there is, one loopback round
+        trip of it.
+
+        Reading the shared state first here made ``reclaim``'s only guard against
+        ending a working plane unreachable for every state but ``live`` — a wedged
+        record with 0 address probes and no confirmation was signalled while its
+        receipt asserted "it is not serving that address" (review round 1, R1-1).
+        """
+        if self.probe is None:
+            # Nothing was asked (a ``stale`` pid has no address to ask), so the
+            # shared classification is the whole story.
+            return self.state
+        if self.probe.verdict in (SERVING, SQUATTED):
+            # Both are answers the probe OWNS: nothing else can overrule "this
+            # address is served by X" or "by somebody who is not X".
+            return self.probe.verdict
+        # The probe found nobody answering. ``deaf`` is then exactly the state a
+        # ``live`` record names — the incident's state, and the reason this axis
+        # exists; a wedged or stale record already has a truer, more specific word.
+        return DEAF if self.state == "live" else self.state
+
+    def __getattr__(self, name: str) -> Any:
+        # The record's own fields are read through the report (``record.pid``,
+        # ``record.host``, …) because every renderer wants them; ``__getattr__``
+        # keeps that from becoming a copy of the record's field list here.
+        return getattr(self.record, name)
+
+
+def probe_address(record: Any) -> AddressProbe:
+    """Ask the record's address who is serving it — ONE loopback round trip.
+
+    Structured rather than sentence-shaped so the address axis can be composed
+    with the shared classification (see :class:`ServeDaemonReport`); the
+    sentence every existing caller wants is still produced by
+    :func:`_answers_as_record`, which is now a renderer over this.
+
+    FAIL-CLOSED: an unreadable probe is :data:`DEAF`, never :data:`SERVING`.
+    """
+    import urllib.error
+    import urllib.request
+
+    # AN IPv6 LITERAL MUST BE BRACKETED, and the first version of this line was
+    # not: `f"http://{[record.host]}:…"` renders the list `['::1']`, so every
+    # probe of a v6 daemon asked a URL that cannot parse and the daemon was
+    # reported as "did not identify itself" while answering perfectly. Found by
+    # the test the review asked for (serve-reload review round 2, R2-6), which is the
+    # whole reason it was asked for.
+    authority = f"[{record.host}]" if ":" in record.host else record.host
+    url = f"http://{authority}:{record.port}/health"
+    try:
+        with urllib.request.urlopen(url, timeout=HEALTH_TIMEOUT_S) as response:
+            import json
+
+            payload = json.load(response)
+    except urllib.error.HTTPError as exc:
+        # SOMETHING ANSWERED, and that is the whole difference between this arm
+        # and the one below. ``HTTPError`` is a response — a 500 from an orphaned
+        # daemon, a 403 from somebody else's server — and reporting it as "did not
+        # identify itself" would tell the operator nobody is there while a
+        # process they can see in `lsof` is answering (measured on 2026-09-23: a
+        # stray rig answered 500 on 8080 and nothing in the product named it).
+        return AddressProbe(
+            SQUATTED,
+            f"{record.host}:{record.port} answered {exc.code} — something is there "
+            "that is not this record's daemon",
+        )
+    except (OSError, urllib.error.URLError) as exc:
+        # NO ANSWER AT ALL — refused, timed out, or the connection died before a
+        # response (``RemoteDisconnected`` is both a ``ConnectionResetError`` and a
+        # ``BadStatusLine``, and it lands here because nothing was answered). This is
+        # the incident's ``deaf``, and the ONLY arm that may say "nothing is
+        # answering there".
+        return AddressProbe(DEAF, f"{record.host}:{record.port} did not answer ({exc})")
+    except http.client.HTTPException as exc:
+        # AN ANSWER ARRIVED AND WAS UNINTELLIGIBLE (``BadStatusLine``,
+        # ``IncompleteRead``) — so this is SQUATTED, not DEAF. The difference is
+        # what the operator does next, and the first version of this fix filed a
+        # TALKING port under "nothing is answering there": the same defect class as
+        # R1-3, one bucket over, and catching the exception is what made it
+        # printable (review round 2, R2-3).
+        return AddressProbe(
+            SQUATTED,
+            f"{record.host}:{record.port} answered with something that is not this "
+            f"product's health endpoint ({exc})",
+        )
+    except ValueError as exc:
+        # Bytes arrived and could not be read as JSON: an answer, not a silence, for
+        # the reason above.
+        return AddressProbe(
+            SQUATTED,
+            f"{record.host}:{record.port} answered with a body that is not a health "
+            f"report ({exc})",
+        )
+    if not isinstance(payload, dict):  # pragma: no cover - a non-object body
+        return AddressProbe(
+            SQUATTED,
+            f"{record.host}:{record.port} answered with something that is not a health report",
+        )
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else payload
+    served = result.get("instance_id") if isinstance(result, dict) else None
+    if not served:
+        return AddressProbe(
+            SQUATTED,
+            f"{record.host}:{record.port} answered as no instance at all",
+        )
+    if served != record.instance_id:
+        return AddressProbe(
+            SQUATTED,
+            f"{record.host}:{record.port} is answering as {served}, "
+            f"not the {record.instance_id[:8]}… this record names",
+            answered_as=str(served),
+        )
+    return AddressProbe(SERVING)
+
+
 def _answers_as_record(record: Any) -> str | None:
     """Why this record must NOT be trusted, or ``None`` when it is proven.
 
@@ -104,34 +320,7 @@ def _answers_as_record(record: Any) -> str | None:
     else's process, so an unreadable answer means "do not signal" — the daemon
     keeps serving and the operator is told the address did not identify itself.
     """
-    import urllib.error
-    import urllib.request
-
-    # AN IPv6 LITERAL MUST BE BRACKETED, and the first version of this line was
-    # not: `f"http://{[record.host]}:…"` renders the list `['::1']`, so every
-    # probe of a v6 daemon asked a URL that cannot parse and the daemon was
-    # reported as "did not identify itself" while answering perfectly. Found by
-    # the test the review asked for (serve-reload review round 2, R2-6), which is the
-    # whole reason it was asked for.
-    authority = f"[{record.host}]" if ":" in record.host else record.host
-    url = f"http://{authority}:{record.port}/health"
-    try:
-        with urllib.request.urlopen(url, timeout=HEALTH_TIMEOUT_S) as response:
-            import json
-
-            payload = json.load(response)
-    except (OSError, ValueError, urllib.error.URLError) as exc:
-        return f"{record.host}:{record.port} did not identify itself ({exc})"
-    if not isinstance(payload, dict):  # pragma: no cover - a non-object body
-        return f"{record.host}:{record.port} answered with something that is not a health report"
-    result = payload.get("result") if isinstance(payload.get("result"), dict) else payload
-    served = result.get("instance_id") if isinstance(result, dict) else None
-    if not served or served != record.instance_id:
-        return (
-            f"{record.host}:{record.port} is answering as {served or 'no instance'}, "
-            f"not the {record.instance_id[:8]}… this record names"
-        )
-    return None
+    return probe_address(record).detail or None
 
 
 @dataclass(frozen=True)
@@ -178,6 +367,747 @@ def live_serve_daemons() -> list[Any]:
     return sorted(found, key=lambda record: record.pid)
 
 
+#: The spawn contract of a ``lop serve`` daemon, matched as a WORD SEQUENCE.
+#:
+#: The same rule :func:`local_operator.session.runtime.reclaim.parse_process_row`
+#: states for runtimes — the match is the spawn contract, never a substring —
+#: because the census this proves against is read from the process table, where a
+#: person running ``grep 'local_operator.cli serve'`` is otherwise
+#: indistinguishable from the daemon. A stray serve daemon is exactly what the
+#: operator ends up holding when this command is needed, and ending a stranger is
+#: worse than reclaiming nothing (this module's recoverability rule).
+SERVE_SPAWN_MARKER = ("-m", "local_operator.cli", "serve")
+
+#: The other spelling: a daemon whose process IS the ``lop`` launcher.
+#:
+#: ``lop serve`` normally re-execs into the branded interpreter (``procname``), so
+#: the module marker above is what a live daemon shows. A process that never made
+#: that hop (a platform where branding is unavailable, or a checkout run as
+#: ``bin/lop serve``) keeps the launcher's argv, and a proof that recognised only
+#: the module form would refuse to reclaim precisely the daemons on those hosts.
+#: Both arms are the same claim — "this is this product's serve entry point" —
+#: which is why they live in one predicate, and a third spelling added later must
+#: be added HERE rather than at a call site.
+SERVE_LAUNCHER_NAMES = frozenset({"lop", "local-operator"})
+
+#: The verb that makes a launcher invocation a serve daemon rather than, say, a
+#: ``lop stop``.
+SERVE_LAUNCHER_VERB = "serve"
+
+#: The first words of the label :mod:`local_operator.procname` writes over ``argv[0]``,
+#: DERIVED from that module's own template rather than typed again: a label change
+#: must not be able to leave this proof behind (review round 3, NIT-2).
+_SERVE_LABEL_PREFIX = re.compile(
+    "^"
+    + re.escape(procname.LABEL_SERVE)
+    .replace(re.escape("{brand}"), re.escape(procname.BRAND))
+    .replace(re.escape("{port}"), r"\d+")
+    + "$"
+)
+
+#: The desktop app's managed backend script, word by word. The app spawns
+#: ``<interpreter> -c "from local_operator.cli import main; main()" serve --port N``
+#: (``local-operator-ui``, ``src/main/backend/owned-serve-launch.ts``) and that shape
+#: is DELIBERATELY never branded — ``procname`` refuses a ``-c`` launch on purpose,
+#: because the app verifies its backend by asking the same ``-c`` string to report
+#: ``sys.executable`` and a re-exec through the branded link would break that check
+#: on every machine. So the proof has to accept the spelling itself, or the app's own
+#: backend is the one daemon ``reclaim`` cannot end — which was the daemon holding
+#: 1111 in the incident this change exists for (review round 3, R3-1).
+#:
+#: Matched as a WORD SEQUENCE, not as a substring of the command: a ``-c`` that
+#: merely prints this text is not a serve daemon.
+SERVE_ENTRYPOINT_WORDS = ("from", "local_operator.cli", "import", "main;", "main()")
+
+#: How long a reclaimed daemon is given to leave after ``SIGTERM``.
+#:
+#: Sized to uvicorn's own shutdown rather than to a drain bound: a serve daemon
+#: holds no transcript lease (that is a runtime's) and answers ``SIGTERM`` by
+#: closing its listener and exiting. It is NOT the session runtime's 2.5-minute
+#: drain, and must not become it — this command exists because the daemon is
+#: already refusing to answer, so patience here only delays the operator.
+RECLAIM_TERM_GRACE_S = 10.0
+
+#: How long a ``SIGKILL``ed pid is given to disappear. The same 3 s
+#: ``control.SIGKILL_CONFIRM_S`` uses, for the same reason: ``SIGKILL`` cannot be
+#: refused, so this covers only a process wedged in an uninterruptible syscall.
+RECLAIM_KILL_CONFIRM_S = 3.0
+
+#: The poll period while waiting for either exit.
+RECLAIM_POLL_S = 0.2
+
+#: No record of OURS claims the address this process serves.
+#:
+#: The stray case, and the one the incident produced: the process holding the
+#: operator's port belonged to a rig whose records lived in its own config root,
+#: so nothing in the operator's root described it. Distinct from ``squatted``,
+#: which needs one of our records to compare against.
+STRAY = "stray"
+
+
+@dataclass(frozen=True)
+class ReclaimReport:
+    """What ``lop services reclaim`` did, and the evidence it decided on."""
+
+    pid: int
+    verdict: str
+    address: str = ""
+    acted: bool = False
+    lines: tuple[str, ...] = ()
+    #: Why nothing was done, when nothing was. Empty on a completed reclaim, and
+    #: on a refusal alike — a refusal is a completed decision, and its sentence
+    #: is in ``lines``; this field is the machine-readable half.
+    problem: str = ""
+
+    @property
+    def refused(self) -> bool:
+        return bool(self.problem) and not self.acted
+
+
+def is_serve_command(command: str) -> bool:
+    """Is this ``ps`` command line one of this product's serve entry points?
+
+    A PROOF OF BRAND, not a capability: it decides whether the operator's own
+    ``reclaim`` may act on a pid they named. The security boundary is elsewhere —
+    same uid, and the fact that a person asked for this specific pid — and this
+    exists so a mistyped or recycled pid is refused instead of signalled.
+    """
+    words = command.split()
+    marker = SERVE_SPAWN_MARKER
+    for index in range(len(words) - len(marker) + 1):
+        if tuple(words[index : index + len(marker)]) == marker:
+            return True
+    # THE LAUNCHER FORM IS ADJACENT — the process IS `lop serve`, so the two words
+    # are neighbours — AND IT SITS AT argv[0] OR RIGHT AFTER THE procname LABEL.
+    #
+    # Two measurements are both load-bearing here, and each one alone was wrong:
+    #
+    # * matching the pair ANYWHERE in argv accepted ``/bin/zsh -c "lop serve …"``
+    #   and ``grep -rn lop serve`` — a person or a script that merely MENTIONS the
+    #   command (review round 1, R1-8). That matters here and nowhere else because
+    #   a STRAY is signalled on this proof ALONE: no record of ours describes it,
+    #   so this brand test and the argv reading are the entire case for acting.
+    # * requiring argv[0] killed the proof for the daemons it exists for, because
+    #   ``procname`` REPLACES argv[0] with a label. Measured on this host
+    #   (2026-09-24): a live daemon reads
+    #   ``Local Operator [serve] port=18490 /Users/…/local-operator serve --host …``
+    #   and the launcher is four words in, so the round-1 fix refused it and sent
+    #   the operator back to killing by hand (review round 2, R2-1).
+    #
+    # The BASENAME, because a launcher is reached by PATH: the machine's own ``lop``
+    # is ``/Users/<me>/.local/bin/lop serve``, and a comparison against the bare word
+    # ``lop`` recognised only a daemon started from a directory on PATH — the exact
+    # daemons (a rig's, an installer's, a launchd agent's) this proof has to
+    # recognise. ``Path(...).name`` is the one place that takes a word and answers
+    # "which program is this".
+    labelled = _procname_label_length(words)
+    for index in range(len(words) - 1):
+        if Path(words[index]).name not in SERVE_LAUNCHER_NAMES:
+            continue
+        if words[index + 1] != SERVE_LAUNCHER_VERB:
+            continue
+        if index in (0, labelled):
+            return True
+    # THE DESKTOP APP'S OWN BACKEND: ``<interpreter> -c "<entrypoint>" serve …``.
+    # Its verb sits after the interpreter, the ``-c`` and the five script words, so
+    # the two arms above cannot see it, and it is the daemon the incident's operator
+    # most needed to be able to end (review round 3, R3-1: this predicate refused the
+    # app's live backend on 1111 while `services status` told the operator to reclaim
+    # that exact pid).
+    if _is_serve_entrypoint(words):
+        return True
+    return False
+
+
+def _procname_label_length(words: list[str]) -> int:
+    """How many leading words are the ``procname`` label; ``0`` when there is none.
+
+    ``procname`` is what makes this project's processes identifiable in the process
+    listing, and on this platform it works by REPLACING argv[0] (see
+    :mod:`local_operator.procname`), so a labelled daemon's real argv begins one
+    label further in. The pattern comes from that module's own ``LABEL_SERVE``
+    template, and the length is discovered rather than hard-coded because the brand
+    is a template field (``Local Operator [serve] port=18490`` is four words today).
+    """
+    for length in range(1, min(len(words), 8) + 1):
+        if _SERVE_LABEL_PREFIX.match(" ".join(words[:length])):
+            return length
+    return 0
+
+
+def _is_serve_entrypoint(words: list[str]) -> bool:
+    """Is this argv the desktop app's ``-c`` entry point AND its ``serve`` verb?
+
+    ``<interpreter> -c "from local_operator.cli import main; main()" serve …`` — the
+    app's managed backend, which is never branded (see :data:`SERVE_ENTRYPOINT_WORDS`).
+
+    THE ``-c`` IS FOUND, NOT ASSUMED TO BE ``words[1]``. The interpreter comes from
+    the console script's shebang, which is a home-derived path, so a home with a
+    space in it (``/Users/John Doe/…``) makes the interpreter two ``ps`` words and
+    the ``-c`` the third — and the round-3 version refused the app's own backend for
+    exactly those users. Measured (review round 4, R4-1).
+
+    A BOOLEAN, not the index it used to return (review round 5, R5-2): the only
+    consumer tested truthiness, and a returned index reads like a length.
+
+    The accepted trade-off, recorded because it widens a proof: because the ``-c`` is
+    SEARCHED FOR, this also admits an argv carrying an EARLIER, unrelated ``-c`` and
+    the app's own pre-exec wrapper (``bash -c 'exec "$@"' owned-serve <interpreter>
+    -c … serve``) — both still carry this product's serve entry point followed by the
+    verb (review round 5, R5-1). That costs nothing here: the app's plan execs, so no
+    nameable pid is ever that ``bash``, and an interpreter handed these exact words as
+    ``-c`` *is* our serve entry point, which is what a STRAY proof has to recognise.
+    """
+    window = len(SERVE_ENTRYPOINT_WORDS)
+    for index in range(len(words) - window - 1):
+        if words[index] != "-c":
+            continue
+        if tuple(words[index + 1 : index + 1 + window]) != SERVE_ENTRYPOINT_WORDS:
+            continue
+        if words[index + 1 + window] == SERVE_LAUNCHER_VERB:
+            return True
+    return False
+
+
+def serve_process(pid: int, *, timeout_s: float = HEALTH_TIMEOUT_S) -> str | None:
+    """ONE pid's command line, or ``None`` when it is not a serve daemon now.
+
+    The re-read discipline the runtime sweep already applies: the thing about to
+    be signalled must be re-identified at signal time, because a pid is
+    recyclable and a snapshot is not evidence about this instant. ``None`` is
+    therefore a REFUSAL at every call site, never "probably gone".
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            ["/bin/ps", "-p", str(pid), "-o", "uid=,command="],
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+    except Exception:  # noqa: BLE001 — an unreadable process table is doubt
+        return None
+    for line in result.stdout.splitlines():
+        fields = line.split(None, 1)
+        if len(fields) != 2 or not fields[0].lstrip("-").isdigit():
+            continue
+        return fields[1].strip()
+    return None
+
+
+def serve_process_uid(pid: int, *, timeout_s: float = HEALTH_TIMEOUT_S) -> int | None:
+    """One pid's uid, or ``None`` when it cannot be read."""
+    import subprocess
+
+    try:
+        result = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            ["/bin/ps", "-p", str(pid), "-o", "uid="],
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    text = result.stdout.strip()
+    return int(text) if text.isdigit() else None
+
+
+def _address_from_argv(command: str) -> tuple[str, int] | None:
+    """The ``--host``/``--port`` a serve daemon was started with, if it says.
+
+    Used only when no record of ours describes the pid — the stray case. A
+    ``--listener-fd`` child carries no ``--port`` of its own (its port came from
+    the descriptor), and ``None`` there is honest: the caller refuses rather than
+    probing an address it guessed.
+    """
+    words = command.split()
+    host = ""
+    port: int | None = None
+    for index, word in enumerate(words[:-1]):
+        if word == "--host":
+            host = words[index + 1]
+        elif word == "--port":
+            try:
+                port = int(words[index + 1])
+            except ValueError:
+                return None
+    if port is None or port == 0:
+        return None
+    return (host or "127.0.0.1", port)
+
+
+def serve_daemon_reports(
+    root: Path | None = None,
+    *,
+    probe: Callable[[Any], AddressProbe] = probe_address,
+) -> list[ServeDaemonReport]:
+    """Every serve record this machine's own root(s) hold, with its verdict.
+
+    ONE scan and — for records that claim to be alive — one identity probe each.
+    A ``stale`` record costs nothing (its pid is gone; there is no address to
+    ask), which matters because this is called by ``lop services status`` and by
+    the update path.
+
+    ``live`` and ``wedged`` are both probed, and that is deliberate: the whole
+    point of the address axis is that a FRESH HEARTBEAT IS NOT PROOF OF SERVING.
+    A wedged record whose address answers as somebody else is a squatted plane,
+    which is a different thing to tell the operator than a quiet owner.
+    """
+    # ``root=None`` is the caller's own config root: the one daemon a front end or
+    # a rig owns, and the only one this reader may act on. There is deliberately
+    # NO machine-wide sweep here — an address is not owned by a config root (see
+    # the design doc), and reading every root on the machine to decide a refusal
+    # would make the same address mean different things to two installs.
+    reports: list[ServeDaemonReport] = []
+    for record, state in serve_registry.scan(root):
+        if state == "stale":
+            # A gone pid has no address to ask, and probing it would spend a
+            # timeout on a daemon that has already been reaped.
+            reports.append(ServeDaemonReport(record=record, state=state))
+            continue
+        reports.append(ServeDaemonReport(record=record, state=state, probe=probe(record)))
+    return reports
+
+
+#: One entry per verdict that has a ROW: the sentence it renders, and the adjective
+#: the receipt uses. ONE dictionary, because two of them is how two surfaces come to
+#: describe one daemon differently (review round 1, N1) — and it is read with `[]`
+#: rather than `.get()`, so a verdict added without a row is a loud KeyError in a
+#: test rather than a silently borrowed sentence on the operator's terminal.
+#:
+#: THE SHAPE IS "recorded on X, but …", DELIBERATELY. The reader has just been
+#: shown the ordinary daemon line for this same record, which names the build the
+#: daemon says it serves; a second line reading "is not answering on X" beside it
+#: looks like a contradiction rather than the two halves of one statement — the
+#: RECORD claims an address (that is what the line above repeats), and the ADDRESS
+#: is where the evidence disagrees. Measured on the live evidence run for this
+#: change: "serving 0.62.24@eeeeeee" followed by "is not answering on" read as the
+#: product arguing with itself.
+@dataclass(frozen=True)
+class _Verdict:
+    """One verdict's row sentence (taking ``{address}``) and its receipt adjective."""
+
+    row: str
+    phrase: str
+
+
+VERDICTS: dict[str, _Verdict] = {
+    DEAF: _Verdict("recorded on {address}, but nothing is answering there", "deaf"),
+    SQUATTED: _Verdict(
+        "recorded on {address}, but what answers there is not this record's daemon",
+        "squatted",
+    ),
+    WEDGED: _Verdict("recorded on {address}, but the daemon stopped reporting", "wedged"),
+    STALE: _Verdict("recorded on {address}, but its process has exited", "stale"),
+    STRAY: _Verdict("serves {address}, which no record of this install claims", "stray"),
+}
+
+
+def _not_serving_sentence(report: ServeDaemonReport) -> str:
+    """One daemon's sentence, from the record's own fields — one renderer for
+    ``services status``'s rows and ``services restart``'s warnings."""
+    address = f"{report.record.host}:{report.record.port}"
+    return VERDICTS[report.verdict].row.format(address=address)
+
+
+def _remedy_lines(report: ServeDaemonReport) -> list[str]:
+    """The remedy, WHERE THERE IS ONE.
+
+    A ``stale`` record needs no command (its pid is gone and the next scan reaps
+    the file), and telling a reader to reclaim a pid that no longer exists is the
+    kind of advice this repo refuses to print.
+    """
+    if report.verdict not in (DEAF, SQUATTED, WEDGED, STRAY):
+        return []
+    return [
+        f"    end it with `lop services reclaim {report.record.pid}`"
+        " (nothing else on this machine can)"
+    ]
+
+
+def not_serving_lines(report: ServeDaemonReport) -> list[str]:
+    """The rows for one daemon that is NOT serving its address.
+
+    It always ends with the remedy, because the failure this whole axis exists
+    for was silent: the operator had to reconstruct "who is on 1111" by hand
+    while their app was dead, and the product said nothing at all.
+    """
+    lines = [f"  {_serve_name(report.record)}: {_not_serving_sentence(report)}"]
+    if report.probe is not None and report.probe.detail:
+        lines.append(f"    {report.probe.detail}")
+    return lines + _remedy_lines(report)
+
+
+def stuck_report_lines(report: ServeDaemonReport) -> tuple[str, ...]:
+    """What a command that MOVES services prints about one it cannot move.
+
+    Rendered from the same sentence and the same remedy as the status rows
+    (review round 1, R1-3). The first version typed its own sentence here, and it
+    said "nothing is answering there" about a SQUATTED address (something was),
+    told the reader to reclaim a STALE record's pid (which is gone), and printed
+    the raw verdict token where every other surface renders a sentence.
+    """
+    return (
+        f"warning: {_serve_name(report.record)}: {_not_serving_sentence(report)} — it"
+        " cannot be asked to move",
+        *_remedy_lines(report),
+    )
+
+
+def reclaim_serve_daemon(
+    pid: int,
+    *,
+    probe: Callable[[Any], AddressProbe] = probe_address,
+    reports: Callable[[], list[ServeDaemonReport]] = serve_daemon_reports,
+    read_command: Callable[[int], str | None] = serve_process,
+    read_uid: Callable[[int], int | None] = serve_process_uid,
+    kill: Callable[[int, int], None] = os.kill,
+    alive: Callable[[int], bool | None] = pid_liveness,
+    sleep: Callable[[float], None] = time.sleep,
+    term_grace_s: float = RECLAIM_TERM_GRACE_S,
+    kill_confirm_s: float = RECLAIM_KILL_CONFIRM_S,
+    poll_s: float = RECLAIM_POLL_S,
+    confirmations: int = PROBE_CONFIRMATIONS,
+    confirm_gap_s: float = PROBE_CONFIRM_GAP_S,
+) -> ReclaimReport:
+    """End ONE serve daemon the operator named — asked for, proven, bounded.
+
+    THE MISSING OWNER. Until this command existed, nothing in the product could
+    end a serve daemon: ``lop stop`` resolves through the SESSION registry,
+    ``lop sessions reclaim`` refuses any candidate whose record exists, and
+    ``lop services restart`` moves daemons it can still talk to. The daemon that
+    cost this machine twelve minutes on 2026-09-23 — alive, recorded, not
+    answering, holding the desktop app's port — was reachable by no command at
+    all; the operator had to find its pid by hand and ``kill`` it.
+
+    NEVER AUTOMATIC, and that is a design decision rather than an omission. A
+    serve daemon may own scheduled work and may be supervising session runtimes
+    mid-spawn, and no reader on this machine has a successor-readiness proof (see
+    :mod:`local_operator.server.retire`). So the destructive, irreversible step
+    stays where this repo puts destructive steps: behind an explicit request that
+    names the process.
+
+    PROOF, THEN VERDICT, THEN A RE-READ — in that order, and none of them is
+    skippable:
+
+    1. the pid must be THIS product's serve daemon right now (``is_serve_command``
+       over a fresh ``ps``), and the same uid as the caller;
+    2. its verdict must NOT be ``serving``. A working plane is never ended by
+       this command, however it was named — that is the one outcome worse than
+       the outage this exists to repair;
+    3. for the two verdicts that a transient could mimic — ``deaf`` and
+       ``squatted`` — the same probe must agree ``confirmations`` times in a row
+       (see :data:`PROBE_CONFIRMATIONS`);
+    4. the pid is re-read immediately before the signal, so a leftover pid whose
+       process died and was recycled is refused rather than signalled.
+
+    The signal goes to the DAEMON ONLY, never its process tree. A serve daemon's
+    children are, on this machine, the session runtimes it spawned for the
+    desktop app — conversations with their own journals and their own lives —
+    and taking a stuck backend down must not also cut the turns those sessions
+    are running. ``procstate.terminate_process_tree`` is therefore deliberately
+    NOT used here; that helper is for a tree this process owns.
+    """
+    command = read_command(pid)
+    if command is None:
+        return ReclaimReport(
+            pid=pid,
+            verdict=STALE,
+            problem="not-running",
+            lines=(f"pid {pid} is not a running process",),
+        )
+    if not is_serve_command(command):
+        return ReclaimReport(
+            pid=pid,
+            verdict="",
+            problem="not-a-serve-daemon",
+            lines=(
+                f"pid {pid} is not a `lop serve` daemon, so this command will not end it",
+                f"    it is running: {command}",
+            ),
+        )
+    uid = read_uid(pid)
+    ours = getattr(os, "getuid", None)
+    if uid is not None and ours is not None and uid != ours():
+        return ReclaimReport(
+            pid=pid,
+            verdict="",
+            problem="foreign-user",
+            lines=(f"pid {pid} belongs to uid {uid}, not this account — end it with sudo",),
+        )
+
+    # WHICH RECORD DESCRIBES THIS PID — and therefore what its address is.
+    #
+    # Two shapes, and both are real on this machine. A daemon of THIS root is the
+    # ordinary case: its record names the address and supplies the verdict. A
+    # daemon that no record of ours describes is the case this command was asked
+    # for — a rig's stray, holding an address our records still claim — and it
+    # takes its address from the argv the proof above already read.
+    described = next((item for item in reports() if item.record.pid == pid), None)
+    # ``basis`` is the ADDRESS READING the signal will rest on, when there is one: it
+    # is what gets confirmed and what gets re-read last, and it is deliberately not
+    # ``verdict`` — the word the receipt uses. The two differ in exactly one place: a
+    # stray is NAMED for what it is (no record of ours describes it) while its
+    # evidence is what its address answers (review round 1, R1-4/R1-5).
+    if described is not None:
+        subject = described.record
+        address = f"{subject.host}:{subject.port}"
+        basis = described.probe.verdict if described.probe is not None else None
+        verdict = described.verdict
+    else:
+        argv_address = _address_from_argv(command)
+        if argv_address is None:
+            return ReclaimReport(
+                pid=pid,
+                verdict="",
+                problem="no-address",
+                lines=(
+                    f"pid {pid} is a `lop serve` daemon but its address could not be read",
+                    "    (a daemon started with --listener-fd does not name its port in",
+                    "    argv), and no record of this install describes it; nothing was sent",
+                ),
+            )
+        host, port = argv_address
+        address = f"{host}:{port}"
+        claimant = next(
+            (item for item in reports() if (item.record.host, item.record.port) == (host, port)),
+            None,
+        )
+        if claimant is None:
+            # Nothing of ours claims the address, so there is no identity to compare
+            # against: the brand proof above is the whole of what is known, and the
+            # verdict says exactly that rather than borrowing a word that claims more.
+            #
+            # The subject carries an EMPTY instance id, so ``probe`` reads any answer
+            # at all as SQUATTED — "something is there" — which is the one fact the
+            # sentence needs. Before this the no-claimant arm never asked and asserted
+            # "it is not serving that address" about a process that (a rig's backend,
+            # on this very machine) can perfectly well be serving a plane of its own.
+            subject = SimpleNamespace(host=host, port=port, pid=pid, instance_id="")
+            basis = probe(subject).verdict
+            verdict = STRAY
+        else:
+            # Our record describes the ADDRESS but not this pid: the daemon it named is
+            # gone (or was replaced) and this process is where that daemon should be.
+            # The verdict still comes from a READING of that address rather than from
+            # the shape of the record (review round 1, R1-5): the claimant's owner may
+            # have come back.
+            subject = claimant.record
+            basis = probe(subject).verdict
+            if basis == SERVING:
+                return ReclaimReport(
+                    pid=pid,
+                    verdict=SERVING,
+                    address=address,
+                    problem="serving",
+                    lines=(
+                        f"{address} IS being served, by the daemon pid {subject.pid} names — "
+                        "nothing was sent",
+                        f"    pid {pid} is a different process, so ending it would not free the",
+                        "    address the record is about",
+                    ),
+                )
+            verdict = basis if basis in (DEAF, SQUATTED) else STRAY
+
+    # AN ALLOW-LIST, not a deny-list: only the states whose remedy IS this command may
+    # be signalled, so a ``stale`` record (its pid is gone; the brand re-read below
+    # would refuse it a moment later) and any verdict added later are refused by
+    # default rather than by remembering to add them here.
+    if verdict == SERVING:
+        return ReclaimReport(
+            pid=pid,
+            verdict=verdict,
+            address=address,
+            problem="serving",
+            lines=(
+                f"pid {pid} IS the daemon serving {address} — nothing was sent",
+                "    a working plane is never ended by this command; use `lop stop` for a",
+                "    session, or `lop services restart` to move this daemon onto the current build",
+            ),
+        )
+    if verdict not in (DEAF, SQUATTED, WEDGED, STRAY):
+        return ReclaimReport(
+            pid=pid,
+            verdict=verdict,
+            address=address,
+            problem="not-actionable",
+            lines=(
+                f"pid {pid} reads as {verdict or 'an unknown state'} on {address}, which is not a",
+                "    state this command ends — nothing was sent. Run `lop services status` for",
+                "    what this install knows about the address.",
+            ),
+        )
+
+    # CONFIRM THE EVIDENCE, not the word: ``basis`` can be DEAF for a WEDGED record
+    # (the beat says the owner stopped reporting; the address says nobody is there) and
+    # it is the ADDRESS that must not change its mind under the signal.
+    if basis in (DEAF, SQUATTED):
+        for _ in range(max(0, confirmations - 1)):
+            sleep(confirm_gap_s)
+            again = probe(subject)
+            if again.verdict != basis:
+                return ReclaimReport(
+                    pid=pid,
+                    verdict=again.verdict,
+                    address=address,
+                    problem="unconfirmed",
+                    lines=(
+                        f"pid {pid} read as {basis} on {address}, but the next reading was "
+                        f"{again.verdict} — nothing was sent",
+                        "    run it again to act on the newer reading",
+                    ),
+                )
+
+    # SIGNAL TIME: the process must still be the one this verdict was measured on.
+    # ONE read, held in a variable: two reads are two instants, and the second one
+    # could belong to a different process than the one that was just proven.
+    again = read_command(pid)
+    if again is None or not is_serve_command(again):
+        return ReclaimReport(
+            pid=pid,
+            verdict=verdict,
+            address=address,
+            problem="changed",
+            lines=(
+                f"pid {pid} is no longer the serve daemon this was measured on — "
+                "nothing was sent",
+            ),
+        )
+
+    # THE LAST READING BEFORE THE SIGNAL IS AN ADDRESS READING (review round 1,
+    # R1-5). Between the confirmation above and this instant a daemon can BEGIN
+    # SERVING — the recovery this whole command must not punish — and the brand
+    # re-read cannot see that, because the process is the same one either way.
+    if basis is not None:
+        last = probe(subject)
+        if last.verdict == SERVING:
+            holder = subject.instance_id[:8] if subject.instance_id else "another process"
+            return ReclaimReport(
+                pid=pid,
+                verdict=last.verdict,
+                address=address,
+                problem="serving",
+                lines=(
+                    f"{address} began answering as {holder}… since the last reading — "
+                    "nothing was sent",
+                    "    a working plane is never ended by this command; run it again if that",
+                    "    changes",
+                ),
+            )
+        if last.verdict != basis:
+            return ReclaimReport(
+                pid=pid,
+                verdict=last.verdict,
+                address=address,
+                problem="changed",
+                lines=(
+                    f"{address} changed while this was being confirmed ({basis} to "
+                    f"{last.verdict}) — nothing was sent",
+                    "    run it again to act on the newer reading",
+                ),
+            )
+
+    # WHAT THE EVIDENCE ACTUALLY SAYS, in the receipt rather than a claim that
+    # flattens three states into one (review round 1, R1-3): a stray CAN be serving a
+    # plane of its own, and ``deaf`` and ``squatted`` are different facts.
+    if verdict == STRAY:
+        evidence = (
+            f"it is serving {address} under records that are not this install's"
+            if basis == SQUATTED
+            else f"nothing is answering {address}"
+        )
+    elif basis == SQUATTED:
+        evidence = f"{address} is answered by a process this install does not claim"
+    else:
+        evidence = f"nothing is answering {address}"
+
+    lines = [
+        f"ending {VERDICTS[verdict].phrase} serve daemon on {address} (pid {pid})",
+        f"    {evidence}, and any session runtimes it spawned keep running",
+    ]
+    kill(pid, signal.SIGTERM)
+    outcome = _await_exit(pid, alive, sleep, term_grace_s, poll_s)
+    if outcome is True:
+        lines.append("    ended on SIGTERM")
+        return ReclaimReport(
+            pid=pid, verdict=verdict, address=address, acted=True, lines=tuple(lines)
+        )
+    lines.append(f"    did not leave within {term_grace_s:g}s; sending SIGKILL")
+    try:
+        kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        # It left between the last read and this signal: the escalation found no
+        # process, which is the outcome that was asked for rather than an error.
+        lines.append("    ended on SIGKILL")
+        return ReclaimReport(
+            pid=pid, verdict=verdict, address=address, acted=True, lines=tuple(lines)
+        )
+    outcome = _await_exit(pid, alive, sleep, kill_confirm_s, poll_s)
+    if outcome is True:
+        lines.append("    ended on SIGKILL")
+        return ReclaimReport(
+            pid=pid, verdict=verdict, address=address, acted=True, lines=tuple(lines)
+        )
+    if outcome is None:
+        # DOUBT, NOT A SURVIVOR (review round 1, R1-7). ``_await_exit`` answers three
+        # ways and the third used to be folded into "it is wedged in the kernel; a
+        # reboot is the only way left" — a diagnosis from a reading that did not
+        # arrive, which is the one thing a fail-closed command must never print.
+        lines.append("    the process table could not be read after SIGKILL: this is DOUBT, not a")
+        lines.append("    survivor — check `lop services status` and the process table by hand")
+        return ReclaimReport(
+            pid=pid,
+            verdict=verdict,
+            address=address,
+            acted=True,
+            problem="unreadable-after-signal",
+            lines=tuple(lines),
+        )
+    lines.append("    STILL RUNNING — it is wedged in the kernel; a reboot is the only way left")
+    return ReclaimReport(
+        pid=pid,
+        verdict=verdict,
+        address=address,
+        acted=True,
+        problem="survived-sigkill",
+        lines=tuple(lines),
+    )
+
+
+def _await_exit(
+    pid: int,
+    alive: Callable[[int], bool | None],
+    sleep: Callable[[float], None],
+    budget_s: float,
+    poll_s: float,
+) -> bool | None:
+    """Wait for a pid to disappear inside ``budget_s``.
+
+    ``True`` it is gone; ``False`` it is still there; ``None`` the LAST read could
+    not be taken. Three answers, and the third is DOUBT rather than death or
+    survival: ``alive`` is itself three-valued (``None`` = unreadable) and an
+    unreadable read keeps waiting rather than reporting an exit that was never
+    observed — the same rule the record classifier states for a heartbeat it could
+    not read. The answer describes the FINAL read rather than the worst one along
+    the way, because that is the reading the caller prints (review round 2, N-4: a
+    sticky "something was unreadable" flag could announce a doubt the last read had
+    already resolved).
+    """
+    waited = 0.0
+    while waited < budget_s:
+        if alive(pid) is False:
+            return True
+        sleep(poll_s)
+        waited += poll_s
+    seen = alive(pid)
+    if seen is False:
+        return True
+    return None if seen is None else False
+
+
 def _current_stamp() -> Any:
     """The build the pointer names, or ``None`` when it cannot be read.
 
@@ -218,6 +1148,7 @@ def reload_serve_daemons(
     kill: Callable[[int, int], None] = os.kill,
     probe: Callable[[Any], str | None] = _answers_as_record,
     monotonic: Callable[[], float] = time.monotonic,
+    stuck: Callable[[], list[ServeDaemonReport]] = serve_daemon_reports,
 ) -> list[ServiceRefresh]:
     """Ask every stale ``serve`` daemon to move itself onto the current build.
 
@@ -237,8 +1168,23 @@ def reload_serve_daemons(
     # every `lop update` on such a host would be noise that trains its reader to
     # ignore the line that matters.
     daemons = scan()
-    if not daemons:
+    # AND THE DAEMONS THAT ARE NOT THERE TO MOVE, reported FIRST and independently
+    # of the loop below — which iterates LIVE records, so a daemon that is alive
+    # and answering nothing is invisible to it, and the early return under it would
+    # swallow the report entirely on the machine where it matters most (the
+    # incident's own host: `live_serve_daemons()` was empty because the stuck record
+    # classified as `wedged`, so `lop services status` printed "none running" while
+    # 1111 was held). Reported, never signalled: the decision is the operator's.
+    stuck_reports = [report for report in stuck() if report.verdict != SERVING]
+    if not daemons and not stuck_reports:
         return []
+    refreshes: list[ServiceRefresh] = [
+        ServiceRefresh(
+            _serve_name(report.record),
+            warnings=stuck_report_lines(report),
+        )
+        for report in stuck_reports
+    ]
     # NO EARLY RETURN FOR A PLATFORM WITHOUT SIGUSR1 (serve-reload review round 8,
     # R8-1). The first version refused the whole fleet up front, which was redundant
     # for signalling — every daemon reports `reloadable: false` there, so the loop
@@ -278,7 +1224,11 @@ def reload_serve_daemons(
         # against an absent right-hand side is not a verdict. Fail-closed, and
         # said out loud — an operator whose pointer is unreadable AND who has
         # daemons running has a real problem and should hear about it.
-        return [
+        # The stuck-daemon reports are carried out through this return too: they are
+        # a fact about the machine, not about the pointer, and the one host where
+        # this arm fires is a source checkout — where a stuck daemon holding the
+        # app's address is exactly what the reader needs to see.
+        refreshes.append(
             ServiceRefresh(
                 "serve daemons",
                 warnings=(
@@ -288,8 +1238,8 @@ def reload_serve_daemons(
                     "from the install that owns them.",
                 ),
             )
-        ]
-    refreshes: list[ServiceRefresh] = []
+        )
+        return refreshes
     pending: list[Any] = []
 
     # The SCAN IS DONE ONCE and reused: scanning twice would let a daemon arrive
@@ -541,11 +1491,37 @@ def status_lines() -> list[str]:
             else "install: no build the pointer can name, so nothing can be compared"
         )
     ]
-    daemons = live_serve_daemons()
-    if not daemons:
+    # ONE SCAN, ONE ROW PER RECORD (review round 1, R1-6). Reading the fleet from
+    # ``live_serve_daemons()`` and the stuck set from a SECOND scan let a daemon that
+    # is live-and-deaf print twice — once as an ordinary row and once as a stuck one
+    # — which breaks the property ``_fleet_action_lines`` documents ("exactly one
+    # `serve daemon` line per record", the thing `grep`/`awk` counting relies on)
+    # and showed the incident's own daemon as two daemons in the evidence run. The
+    # row a record gets is now decided by its composed verdict, which is also what
+    # makes the probe authoritative for the ordinary row: a record the classifier
+    # calls ``wedged`` but whose address answers as its own instance is SERVING
+    # here, and it is listed as what it is rather than both ways.
+    reports = serve_daemon_reports()
+    daemons = [report.record for report in reports if report.verdict == SERVING]
+    stuck = [report for report in reports if report.verdict != SERVING]
+    if not reports:
         lines.append("serve daemons: none running")
+    elif not daemons:
+        # "none serving", NOT "not answering": the stuck set mixes records whose
+        # address is silent with records whose address is held by somebody else, and
+        # the summary is printed directly above rows that say which — so it must not
+        # claim the one reason while a `squatted` row sits two lines below it (review
+        # round 2, R2-4). The word for the state is the verdict; the count is the only
+        # thing this line adds.
+        lines.append(
+            f"serve daemons: none serving ({len(stuck)} recorded, none serving their address)"
+            if len(stuck) > 1
+            else "serve daemons: none serving (1 recorded, not serving its address)"
+        )
     for record in daemons:
         lines.extend(_daemon_status_lines(record, stamp))
+    for report in stuck:
+        lines.extend(not_serving_lines(report))
     lines.extend(_fleet_action_lines(daemons, stamp))
     supervised = _supervised_daemon_plists()
     for path in supervised:

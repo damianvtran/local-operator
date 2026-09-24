@@ -99,7 +99,11 @@ from local_operator.harness.intent import (
 # `_subagent_roster`), rather than re-deriving one that could drift from it.
 from local_operator.harness.jobs import roster_expired
 from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
-from local_operator.harness.rows import is_harness_notice_row, output_limit_call_receipt
+from local_operator.harness.rows import (
+    is_harness_chrome,
+    is_harness_notice_row,
+    output_limit_call_receipt,
+)
 
 # Free at runtime: `session.protocol` below already imports `harness.types` at
 # module level, so this adds no work to the boot path the lazy-import
@@ -173,6 +177,7 @@ from local_operator.session.runtime.types import (
 )
 from local_operator.slash_commands import (
     PERSIST_HINT,
+    SESSION_COPY_FLAG,
     SLASH_COMMANDS,
     primary_slash_name,
     slash_command_for,
@@ -301,6 +306,12 @@ from local_operator.tui.widgets.editor import (
     expand_pastes,
     resolve_markers,
     substitute_credentials,
+)
+from local_operator.tui.widgets.goal_panel import (
+    GoalDelete,
+    GoalDismissed,
+    GoalMarkDone,
+    GoalPanel,
 )
 from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.link_picker import LinkPickerScreen
@@ -1069,6 +1080,41 @@ _BACKGROUND_NOTIFY_ANNOUNCEABLE_STATES = frozenset({"", "idle"})
 #: stay readable. The FULL goal still drives the loop and the judge; only the
 #: on-screen label is clipped.
 _LOOP_GOAL_LABEL_CHARS = 120
+
+
+#: How long the judge's continuation waits for the turn that just ENDED to
+#: release the session before the admission is given up on, and how often it
+#: asks again while it waits.
+#:
+#: WHY THE WAIT EXISTS AT ALL, because "the continuation is admitted from the
+#: turn-end handler" is the whole defect it repairs (QA round 1, Q1). The app's
+#: ``TurnEnded`` is posted from the session's HELD end event, which the turn's
+#: own pipeline flushes from its ``finally`` with ``_turn_lock`` still held
+#: (``Session._run_turn_pipeline`` documents that ordering, and
+#: ``on_turn_settled`` is the hook that fires after it). So the one edge this
+#: driver hangs on is the one moment the session cannot take a prompt: measured
+#: on the real app, ``Session.prompt`` raised ``TurnInFlight: session is already
+#: streaming`` with the lock held and ``is_streaming`` already False, the driver
+#: parked the record at ``waiting``, and the goal sat inert with a CONTINUE
+#: verdict in hand and no continuation turn ever run — deterministically, in the
+#: app and in ``tests/e2e/test_goal_submission.py``.
+#:
+#: The runtime host never meets this, and that is the shape being mirrored: its
+#: continuation goes through the handle's prompt QUEUE and is drained by the
+#: session itself (``serving.py``'s ``_drain_prompt_queue``), so it cannot
+#: arrive mid-turn at all. The TUI host owns its session in process and admits
+#: directly, so this host needs the deferral the queue provides there.
+#:
+#: BOUNDED, because "the lock is free in a few loop turns" is a fact about the
+#: ORDINARY teardown, not about every holder: an on-demand compaction holds the
+#: same lock for the length of a rewrite. Giving up parks the goal at
+#: ``waiting``, which is honest — nothing is being spent on it — and the next
+#: turn end re-arms the judge. The retry gap is not politeness: the teardown
+#: between the end event and the release can include a thread-backed transcript
+#: flush, which resolves in wall-clock time and not in a fixed number of loop
+#: turns.
+_GOAL_CONTINUATION_ADMISSION_S = 5.0
+_GOAL_CONTINUATION_ADMISSION_RETRY_S = 0.02
 
 
 def _loop_goal_label(goal: str) -> str:
@@ -4608,6 +4654,9 @@ class OperatorApp(App[None]):
         # the user to the composer they were typing in rather than to nothing.
         # The approval card follows the same discipline for the same reason.
         self._usage_focus_restore: Any | None = None
+        #: What had focus when the goal overlay opened, so Esc puts it back —
+        #: the same restore the usage card keeps for the same reason.
+        self._goal_focus_restore: Any | None = None
         self._working_block: WorkingBlock | None = None
         #: What the working line says when nothing narrower is running. Set by
         #: the events that describe the whole turn rather than one row of it
@@ -9707,6 +9756,12 @@ class OperatorApp(App[None]):
         # it can show its loading state.
         with Container(id="usage-host"):
             yield UsagePanel()
+        # The goal overlay is on the same layer, mounted once and hidden, for the
+        # same reasons: `/goal` with no argument is a READ of standing state the
+        # user acts on in the same breath, so the card must appear on the
+        # keystroke and must not take a row from the conversation it describes.
+        with Container(id="goal-host"):
+            yield GoalPanel()
         # The aside card, on the same layer and mounted once for the same
         # reasons — with one of its own. `/btw` can be typed while the agent is
         # mid-turn, which is when the question is most likely ("what are you
@@ -10905,6 +10960,28 @@ class OperatorApp(App[None]):
         self._adopt_session(session)
         self._report_degraded_attach(session)
         self._submit_boot_prompt(session)
+        # TRIGGER 3, on the other owning host: a goal whose continuation was in
+        # flight when this terminal closed is re-engaged ONCE, here, where the
+        # restored record is readable and the session is current.
+        #
+        # Why this host needed its own wiring rather than inheriting the
+        # runtime's: `GoalJudge.rearm_on_resume` was called from exactly one
+        # place (`ServingSessionHandle.rearm_goal_judge`, wired once per boot in
+        # `server.py`), and the TUI builds its own driver whose ONLY caller was
+        # the turn-end hook. So a local session killed mid-continuation reopened
+        # with the goal reading `active` and the judge reading `continuing` and
+        # nothing to re-engage it until the user happened to type — the
+        # "silently sitting inert" case, in exactly the app-reopened shape the
+        # operator named (agent review round 1, MAJOR-1; reproduced: `judge_calls
+        # after boot = 0`, no prompt admitted).
+        #
+        # Once per BOOT and not per adoption: a sidebar switch re-adopts, and the
+        # record's state has moved on by then in every settled case — this is the
+        # restart prologue the runtime runs, not a rule about focus. The driver's
+        # own guard (RULINGS R3) refuses anything but `continuing`/`judging`, and
+        # its in-flight claim refuses a second run, so a re-arm that lands on a
+        # goal nothing was spending on is a no-op by construction.
+        self._rearm_goal_judge_on_boot(session)
         # Bring the runtime up NOW rather than on the first keystroke. A cold
         # viewer can only paint what it reads off disk — the cwd and the
         # configured model name — so the band opened without the MCP roster,
@@ -30800,6 +30877,15 @@ class OperatorApp(App[None]):
                     "info",
                 )
                 return
+            if block_type == "goal_history":
+                # The owner's answer is rows in `data`, and its `text` is the
+                # one-line count beside them: a viewer that paints only `text`
+                # would otherwise say nothing at all. Same shape as `team_list`,
+                # which is why it needed no new renderer.
+                self._append_block(self._goal_history_block(data.get("items") or []))
+                if text:
+                    self._notice(text, "info")
+                return
             if block_type == "loop":
                 self._notice(_loop_status_line(data), "info")
                 return
@@ -30842,6 +30928,27 @@ class OperatorApp(App[None]):
                 if data.get("type") == "goal_set":
                     request = arg
                 self._submit_command_prompt(request, attachments)
+
+    def _goal_history_block(self, items: list[Any]) -> RichBlock:
+        """Render ``/goal --history``'s wire rows: the objective, then its facts.
+
+        The same row layout as ``_team_listing_block``, because it is the same
+        shape of answer — a titled list of ``(subject, facts)`` rows — and a
+        second layout for it would be a second thing to keep in step. The rows
+        are CLIPPED by the owner (``goal_history_items``), not here: this half
+        paints what it was sent, so both hosts show the same bytes.
+        """
+        section = Style(color=theme_mod.semantic_color("fg"), bold=True)
+        heading = Style(color=theme_mod.semantic_color("muted"))
+        body = Style(color=theme_mod.semantic_color("dim"))
+        rows: list[Any] = [Text("settled goals", style=section)]
+        for item in items:
+            subject, facts = (list(item) + ["", ""])[:2]
+            rows.append(Padding(Text(str(subject), style=heading), (0, 0, 0, 2)))
+            if facts:
+                rows.append(Padding(Text(str(facts), style=body), (0, 0, 0, 4)))
+        rows.append(Text())
+        return RichBlock(Group(*rows))
 
     def _team_listing_block(self, items: list[Any]) -> RichBlock:
         """Rebuild the bare ``/team`` roster block from wire rows.
@@ -34865,12 +34972,18 @@ class OperatorApp(App[None]):
         never be stored as the literal goal ``--clear`` and never starts a turn.
         """
         from local_operator.session.goal import (
-            GOAL_CLEAR_ARGS,
+            GOAL_RECORD_OWNER_REFUSAL,
             MAX_GOAL_CHARS,
             cleared_goal_receipt,
+            goal_dismissed_receipt,
+            goal_done_answer,
+            goal_flag_form,
+            goal_history_items,
+            goal_history_notice,
         )
 
         session = self._session
+        record = self._goal_record()
         if session is None or not hasattr(session, "set_goal"):
             # A rejected command changed nothing, so the conversation has not
             # started: `_system_notice` keeps the boot composition intact where
@@ -34879,18 +34992,48 @@ class OperatorApp(App[None]):
             return
         request = expand_pastes(arg, attachments or {}).strip()
         if not request:
-            current = session.goal
-            notice(f"goal: {current}" if current else "no goal set — /goal <text> to set one")
+            self._open_goal_panel()
             return
-        if request.lower() in GOAL_CLEAR_ARGS:
+        # A FLAG is the WHOLE argument (`goal_flag_form`), in the same order and
+        # with the same rule the `--clear` branch has always used: `/goal --done
+        # the report` keeps its tail and stays an objective.
+        form = goal_flag_form(request)
+        if form and record is None:
+            # Every FLAG form WRITES the judged-goal record, and the record is
+            # the session OWNER's (`_goal_record_for`): a follower reaches these
+            # by the ROUTED `/goal`, which runs them on the owner and comes back
+            # as the owner's own receipt. A viewer that cannot route — a cold
+            # one, which advertises no capabilities — has no record here to
+            # write, so it says where the act lives rather than reporting one it
+            # did not perform. ``form`` is "" for an OBJECTIVE (`goal_flag_form`),
+            # which is why the test is truthiness and not ``is not None``.
+            self._system_notice(
+                GOAL_RECORD_OWNER_REFUSAL,
+                "warning",
+            )
+            return
+        if form == "clear":
             # Name what went. A standing goal is deliberately invisible in the UI
             # — the band does not carry it and the only echo is the one-time
             # `goal restored` notice on adopt — and there is no undo, so this
             # receipt is the user's whole chance to see what a mistaken clear
-            # took away and retype it (round 1: design D4, UX U3).
+            # took away and retype it (round 1: design D4, UX U3). A DELETE
+            # records nothing, which is the whole difference from mark-done.
             receipt = cleared_goal_receipt(session.goal)
-            session.set_goal("")
+            record.delete_goal()
             notice(receipt)
+            return
+        if form == "done":
+            entry = record.mark_goal_done()
+            notice(goal_done_answer(session.goal, entry))
+            return
+        if form == "dismiss":
+            notice(goal_dismissed_receipt(record.dismiss_goal()))
+            return
+        if form == "history":
+            rows = goal_history_items(record.history_view())
+            self._append_block(self._goal_history_block(rows))
+            notice(goal_history_notice(len(rows)))
             return
         # A bare `--token` that names no flag of THIS command. The app now teaches
         # two flag vocabularies (`--clear` for the goal, `--stop` for the loop),
@@ -34904,7 +35047,23 @@ class OperatorApp(App[None]):
         if refusal is not None:
             notice(refusal, "warning")
             return
-        stored = session.set_goal(request)
+        # `arm_goal` rather than `set_goal`: the same text write plus the record's
+        # supersede/arm ordering, which is what makes `/goal B` non-destructive
+        # to `/goal A` and what arms the judge.
+        #
+        # A session that is NOT the record's owner may still SET its goal locally,
+        # and must: `/loop` runs on THIS terminal for a cold capabilityless viewer,
+        # and its numeric branch iterates toward `session.goal`, so refusing the
+        # set refused the loop with it (pinned by
+        # `test_a_followers_loop_turn_holds_working_between_iterations`). The
+        # record's own `arm_goal` is used where this session IS the owner;
+        # otherwise the session's `arm_goal` where it holds one, else `set_goal`,
+        # which on an attached facade is the ROUTING setter rather than a local
+        # write (`AttachedSession.set_goal` asks the owner). What stays owner-only
+        # is the four FLAG forms above — those are acts on the OWNER's record.
+        holder = record if record is not None else session
+        arm = getattr(holder, "arm_goal", None)
+        stored = arm(request) if arm is not None else session.set_goal(request)
         # Only the standing objective is capped. The ordinary user message
         # retains the full request, and the normal submit path owns its ONE
         # transcript row, busy steering, compaction hold and attachment order.
@@ -34917,6 +35076,199 @@ class OperatorApp(App[None]):
         else:
             notice("goal set")
         self._submit_command_prompt(arg, attachments)
+
+    def _goal_argument_choices(self) -> list[ArgumentChoice]:
+        """The ``/goal`` argument rows the LIVE state allows, in a safe order.
+
+        Read off the session rather than off the command, because every one of
+        these flags is a no-op outside its own state — a row the state cannot
+        honour is a dead end taught by the palette. Gated on the RECORD's status
+        (``active``/``done``) exactly as the flag forms are specified: a goal
+        with no record (a pre-lifecycle restore, or one set through the mobile
+        relay's plain ``set_goal``) is still ACTIVE to the fold and still
+        markable by typing ``--done`` — the palette just does not advertise an
+        action whose record it cannot see. ``--clear`` is authoritatively LAST so
+        that a single pre-selected match on the bare command is never the
+        destructive row (see the caller's note); it is also the only row carrying
+        ``alert=True``, since it is the one acceptance that cannot be undone.
+        """
+        session = self._session
+        record = self._goal_record()
+        goal = getattr(session, "goal", "") or ""
+        status = getattr(record, "goal_status", "") or ""
+        history = getattr(record, "goal_history", None) or []
+        choices: list[ArgumentChoice] = []
+        if history:
+            choices.append(ArgumentChoice("--history", "List the settled goals"))
+        if goal and status == "active":
+            choices.append(ArgumentChoice("--done", "Mark the standing goal done"))
+        if status == "done":
+            choices.append(ArgumentChoice("--dismiss", "Clear the done goal chip"))
+        if goal:
+            choices.append(ArgumentChoice("--clear", "Clear the standing goal", alert=True))
+        return choices
+
+    def _goal_record_for(self, session: Any) -> Any:
+        """``session`` as the judged-goal record's OWNER, or ``None``.
+
+        The record — its status, its judge, its settled history and the four acts
+        that write it — belongs to the process that owns the session's loop, and
+        that is a fact about the SESSION rather than about this terminal. So the
+        question is asked of the object, with the one predicate that already
+        answers it everywhere else (``goal_judge.owns_the_session``), and the
+        answer is then narrowed to ``GoalRecordProtocol`` so pyright checks every
+        use against the real surface.
+
+        Why the narrowing matters twice over. Statically: the five record members
+        the TUI calls directly were undeclared on ``SessionProtocol``, which is
+        what the twelve attribute errors in the type gate were about, and the
+        reads it makes through ``getattr`` were invisible to pyright entirely
+        (``tests/unit/session/test_viewer_protocol.py`` derives them by AST). At
+        runtime: a follower holds a ``SessionProtocol`` too, and the four
+        mutators are NOT on it — deliberately, because a follower's route to
+        those acts is the ROUTED slash command (``/goal`` is not in
+        ``_FRONTEND_LOCAL_SLASHES``), which runs them on the owner and returns
+        the owner's own receipt. Declaring them shared would have promised a
+        capability a follower must not have.
+
+        ``None`` is therefore the honest answer on a viewer, and every caller
+        already has a fallback for it: a surface paints an empty record, and an
+        act reports that there is nothing to act on.
+        """
+        from local_operator.session.goal_judge import owns_the_session
+        from local_operator.session.protocol import GoalRecordProtocol
+
+        if session is None or not owns_the_session(session):
+            return None
+        return session if isinstance(session, GoalRecordProtocol) else None
+
+    def _goal_record(self) -> Any:
+        """This terminal's OWN session as the judged-goal record, or ``None``."""
+        return self._goal_record_for(self._session)
+
+    def _goal_panel(self) -> Any:
+        """The mounted overlay, or None before compose (or in a stripped harness)."""
+        try:
+            return self.query_one(GoalPanel)
+        except Exception:  # noqa: BLE001 — the card is optional chrome
+            return None
+
+    def _open_goal_panel(self) -> None:
+        """Show the goal overlay for the CURRENT session's record.
+
+        The typed forms keep their one-line receipts (`/goal --done` prints the
+        same sentence this panel's key does), because a receipt is the record of
+        an ACT and the panel is the state it left behind; this panel is the
+        surface for the no-argument form, which is a READ.
+
+        A FOLLOWER terminal keeps the owner's one-line receipt instead (the
+        routed path answers `/goal` before this runs). That is deliberate rather
+        than an oversight: the card's two keys WRITE the record, and a follower
+        that could act on the owner's goal would be the second writer the
+        ownership rule exists to prevent — so it is not offered a surface whose
+        keys it must refuse.
+        """
+        panel = self._goal_panel()
+        if panel is None:
+            self._system_notice("goal panel unavailable", "warning")
+            return
+        self._goal_focus_restore = self.focused
+        self._refresh_goal_panel()
+        panel.focus()
+
+    def _refresh_goal_panel(self) -> None:
+        """Repaint the card from the session — the record is the ONE source.
+
+        Called on open and after each action, always from the session, so the
+        card cannot show a copy of a record that has since moved (the desktop
+        chip's lesson: the goal repaints from the stream, never from local UI
+        state).
+        """
+        from local_operator.session.goal_judge import (
+            MAX_GOAL_CONTINUATIONS,
+            owns_the_session,
+        )
+
+        panel = self._goal_panel()
+        session = self._session
+        record = self._goal_record()
+        if panel is None or session is None:
+            return
+        # The WIRE's own truncation flag, read the way the footer reads the
+        # catalogue's sibling clause: a clipped record must not render like a
+        # complete one, and the flag is absent on a facade with no frontend state
+        # (a `getattr` default), which is the overwhelmingly common case. Without
+        # this the flag had no consumer anywhere under ``local_operator/tui/``
+        # (design D1 / UX U1).
+        state = getattr(session, "frontend_state", None)
+        # The OWNER reads its own record; anything else reads the WIRE. A
+        # viewer's `record` is None by design (`_goal_record_for`: the four acts
+        # that write the record are the owner's), but the record's READ half —
+        # status, judge, settled history — rides every frame, so a viewer that
+        # read it off `record` painted `judge: —` and `settled none yet` beside a
+        # record its own frame held (agent review round 2, MINOR-6). The wire is
+        # also where the truncation flag above comes from, so a viewer's card is
+        # now drawn from ONE source rather than three fields from nothing and a
+        # fourth from the frame.
+        source = record if record is not None else state
+        panel.show(
+            goal=getattr(session, "goal", "") or "",
+            status=getattr(source, "goal_status", "") or "",
+            judge=getattr(source, "goal_judge", None),
+            history=list(getattr(source, "goal_history", []) or []),
+            cap=MAX_GOAL_CONTINUATIONS,
+            actions=owns_the_session(session),
+            history_truncated=bool(getattr(state, "goal_history_truncated", False)),
+        )
+
+    def on_goal_dismissed(self, message: GoalDismissed) -> None:
+        """Esc/q in the card — give focus back to whatever had it."""
+        message.stop()
+        restore = self._goal_focus_restore
+        self._goal_focus_restore = None
+        if restore is not None and getattr(restore, "is_mounted", False):
+            restore.focus()  # type: ignore[union-attr]
+        else:
+            self._editor().focus()
+
+    def on_goal_mark_done(self, message: GoalMarkDone) -> None:
+        """`d` in the card — the same call `/goal --done` makes, same receipt."""
+        from local_operator.session.goal import goal_done_answer
+
+        message.stop()
+        record = self._goal_record()
+        if record is None:
+            return
+        entry = record.mark_goal_done()
+        self._system_notice(goal_done_answer(getattr(self._session, "goal", ""), entry))
+        self._refresh_goal_panel()
+
+    def on_goal_delete(self, message: GoalDelete) -> None:
+        """`c` in the card — the ERASE, or the done chip's dismissal.
+
+        One key, two acts, told apart by the record's own status (design D8/U4):
+        on a live goal it erases (the panel armed it, and this is the second
+        press), and on a DONE card it drops the chip — the act the palette
+        already names `--dismiss`, which is the benign one and needs no arming.
+        """
+        from local_operator.session.goal import (
+            cleared_goal_receipt,
+            goal_dismissed_receipt,
+        )
+
+        message.stop()
+        record = self._goal_record()
+        if record is None:
+            return
+        if record.goal_status == "done":
+            self._system_notice(goal_dismissed_receipt(record.dismiss_goal()))
+        else:
+            receipt = cleared_goal_receipt(getattr(self._session, "goal", ""))
+            record.delete_goal()
+            # The receipt names what went, and it is the user's whole chance to
+            # see it: a delete has no undo and records no history entry.
+            self._system_notice(receipt)
+        self._refresh_goal_panel()
 
     def _cmd_loop(self, arg: str, notice: NoticeFn) -> None:
         """``/loop [n]`` — iterate toward the goal; ``/loop --stop`` cancels.
@@ -35081,11 +35433,78 @@ class OperatorApp(App[None]):
             group=self._interaction.worker_group("loop"),
         )
 
+    async def _admit_goal_continuation(self, session: Any, text: str, echo: Any) -> None:
+        """Admit ONE judge continuation, deferred until the session can take it.
+
+        See :data:`_GOAL_CONTINUATION_ADMISSION_S` for why the wait is here at
+        all. Two things this method owns beyond the retry loop:
+
+        * The admission goes through ``_prompt_loop_turn``, i.e. the same route
+          the ``/loop`` worker uses, so this host has ONE admission path.
+        * The row carries the STRUCTURAL marker. ``harness_injected`` is what
+          tells every front end that a durable user-role row was authored by the
+          harness rather than typed, and this host was the one host that never
+          stamped it: the TUI's own paint and its replay are covered by the text
+          recogniser (``is_harness_chrome``), but the DESKTOP is marker-only by
+          contract (``docs/DESKTOP_API.md``), so a continuation written by a
+          local TUI replayed there as the user's own words — the operator's
+          invisibility requirement failing on a real cross-host path (agent
+          review round 1, MAJOR-2). The stamp itself now comes from
+          ``_prompt_loop_turn``, the route this method shares with the two
+          ``/loop`` workers: a caller-side stamp is how the goal-mode loop's own
+          turn went without one (see that method), and one route is what keeps a
+          fourth chrome row from repeating it.
+        """
+        from local_operator.session.errors import TurnInFlight
+
+        fields: dict[str, Any] = dict(echo.prompt_kwargs())
+
+        deadline = time.monotonic() + _GOAL_CONTINUATION_ADMISSION_S
+        while True:
+            try:
+                await self._prompt_loop_turn(session, text, **fields)
+                return
+            except TurnInFlight:
+                # The typed refusal, and the ONLY one worth waiting out: a
+                # session that is closing a turn accepts this the moment that
+                # turn's lock is released. Reaching the deadline raises, and the
+                # driver turns it into a `waiting` — never a retry of the judge.
+                if time.monotonic() >= deadline:
+                    raise
+                await asyncio.sleep(_GOAL_CONTINUATION_ADMISSION_RETRY_S)
+
     @staticmethod
     async def _prompt_loop_turn(session: SessionProtocol, prompt: str, **kwargs: Any) -> None:
+        """Admit ONE harness-authored turn — the ONE route all three of them use.
+
+        ``/loop``'s next iteration, the goal-mode loop's working turn and the goal
+        judge's continuation all come through here, and every one of them is
+        chrome: this host paints a NOTICE for the loops and a stamped row for the
+        continuation, and the durable row exists only so the transcript can say
+        why the conversation continued.
+
+        So the STRUCTURAL marker is stamped HERE, by the route, rather than by
+        each caller — which is how two of the three came to be missing it. The
+        goal-mode loop's own turn reached the transcript with no marker at all,
+        and ``LOOP_GOAL_PROMPT`` is in neither ``harness_chrome_prompts()`` nor
+        any producer-side recogniser (measured on a real session over the desktop
+        route: the persisted row reads ``stamp=no, chrome-recognised=False``).
+        The desktop is marker-only by contract (``docs/DESKTOP_API.md`` names
+        "the goal loop's own prompt" as a row that must carry it), so a goal loop
+        run from a terminal replayed there as the USER's own words — the
+        operator's invisibility requirement failing on the same cross-host path
+        the judge's continuation was fixed on.
+
+        Probed for the keyword the way ``serving.py`` probes it: a reduced or
+        third-party session that predates it must not raise, and the keyword's
+        job is to stamp a marker those hosts never read. ``setdefault``, so a
+        caller that states the stamp itself is not second-guessed.
+        """
         # Local Session.prompt already awaits the pipeline. Remote interactive
         # prompt only admits it; a loop needs its explicit terminal-outcome API.
         complete = getattr(session, "prompt_and_wait", session.prompt)
+        if "harness_injected" in inspect.signature(complete).parameters:
+            kwargs.setdefault("harness_injected", True)
         await cast(Callable[..., Awaitable[None]], complete)(prompt, **kwargs)
 
     async def _loop_worker(self, iterations: int, source: SessionInteraction | None = None) -> None:
@@ -35195,6 +35614,42 @@ class OperatorApp(App[None]):
         else:
             notice(f"loop finished after {completed} iteration(s)")
 
+    async def _ask_judge(self, session: Any, question: str) -> str | None:
+        """The app's ONE `complete_aside` judge call, returning the RAW answer.
+
+        Split out of `_judge_goal` rather than duplicated, because the judged
+        goal needs a different HALF of the same call: the `/loop` worker wants a
+        parsed verdict, while the goal judge's driver owns the parse
+        (`_parse_loop_verdict` is the one parser in this codebase and forking it
+        is how the CONTINUE-before-ACHIEVED rule gets lost). Both still make
+        exactly ONE provider call, from ONE place, billed through `_charge_aside`.
+
+        `None` means there was no answer at all — no judge primitive on this
+        session, or a provider failure, which is reported here so the caller
+        cannot forget to. `CancelledError` is a `BaseException`, so an Esc
+        mid-judge is NOT swallowed and the worker unwinds through its `finally`.
+        """
+        source = self._interactions.get(id(session), self._interaction)
+        if not hasattr(session, "complete_aside"):
+            return None
+        turns = [Message.user(question)]
+        try:
+            # ``aside_instruction=False``: this request is a JUDGE, not an aside,
+            # and its turn already carries the only instruction it may receive.
+            # Without it the remote seam framed the judge as an off-record side
+            # question ("no work is being asked for … answer briefly") on a TUI
+            # viewing another owner — the one request ``session/aside.py`` says
+            # must never receive that wrapper. Both callers (the `/loop` verdict
+            # and the standing-goal driver) are judges, so it lives here once.
+            return await session.complete_aside(
+                turns,
+                aside_instruction=False,
+                on_usage=lambda usage: self._charge_aside_for(source, usage),
+            )
+        except Exception as error:  # noqa: BLE001 — any provider failure is a judge failure
+            self._notice_for(source, f"judge unavailable, continuing: {error}", "warning")
+            return None
+
     async def _judge_goal(self, session: Any, goal: str) -> tuple[bool | None, str]:
         """Ask the off-the-record judge whether ``goal`` is achieved.
 
@@ -35206,38 +35661,239 @@ class OperatorApp(App[None]):
 
         Returns `(achieved, reason)` where `achieved is None` means the verdict
         was unreadable — the caller's fail-safe CONTINUE plus a failure strike.
-        A provider error is caught and reported the same way: `CancelledError`
-        is a `BaseException`, so an Esc mid-judge is NOT swallowed here and the
-        worker unwinds cleanly through its `finally` (same reasoning as the
-        aside worker). We do not pass `on_delta`: the judge answer must not
-        stream to any visible surface.
+        The call itself (and its one notice for a provider failure) lives in
+        `_ask_judge`, which the goal judge's driver also uses.
         """
-        # The local scheduler passes the captured source facade. Modern remotes
-        # route complete_aside to that owner; an older source without the
-        # primitive is a judge failure, not a reason to affect the current view.
         source = self._interactions.get(id(session), self._interaction)
-        if not hasattr(session, "complete_aside"):
-            return None, ""
-        turns = [Message.user(LOOP_JUDGE_PROMPT.format(goal=goal))]
-        try:
-            # ``aside_instruction=False``: this request is a JUDGE, not an aside,
-            # and its turn already carries the only instruction it may receive.
-            # Without it the remote seam framed the judge as an off-record side
-            # question ("no work is being asked for … answer briefly") on a TUI
-            # viewing another owner — the one request ``session/aside.py`` says
-            # must never receive that wrapper.
-            answer = await session.complete_aside(
-                turns,
-                aside_instruction=False,
-                on_usage=lambda usage: self._charge_aside_for(source, usage),
-            )
-        except Exception as error:  # noqa: BLE001 — any provider failure is a judge failure
-            self._notice_for(source, f"judge unavailable, continuing: {error}", "warning")
+        answer = await self._ask_judge(session, LOOP_JUDGE_PROMPT.format(goal=goal))
+        if answer is None:
             return None, ""
         achieved, reason = _parse_loop_verdict(answer)
         if achieved is None:
             self._notice_for(source, "judge returned no verdict, continuing", "warning")
         return achieved, reason
+
+    def _goal_judge_driver(self, session: Any, source: SessionInteraction) -> Any:
+        """The standing goal's judge for THIS terminal — the runtime's sibling.
+
+        The POLICY (the continuation cap, the failure breaker, the staleness
+        guard, when a verdict is re-judged) lives in
+        `session.goal_judge.GoalJudge`, the same object the runtime drives: what
+        is TUI-local here is only the three things that differ by host — how a
+        continuation is admitted, how the verdict is asked for, and how the goal
+        is settled. A host that re-implemented the policy would be the second
+        implementation the module docstring argues against.
+
+        Built per trigger rather than cached, because this app's session can be
+        REPLACED under it (`/reload`), and a cached driver would go on judging
+        the disposed session it was built for.
+        """
+        from local_operator.session.goal_judge import GoalJudge, goal_stalled_notice
+
+        # THE RECORD IS THE OWNER'S, and a session that does not implement it is
+        # not judged here at all. Four of the five members reached through this
+        # binding MUTATE the record (arm, mark done, delete, dismiss), it is read
+        # off the concrete session rather than off the shared viewer protocol
+        # (see ``_goal_record_for``), and an unguarded read of it off a
+        # duck-typed session is the crash class the protocol guards exist to
+        # close: the runtime's ``rearm_on_resume`` raised
+        # ``AttributeError: 'Slow' object has no attribute 'goal_judge_state'``
+        # inside a task nobody awaits when a scripted ``SessionProtocol`` double
+        # was on the other side (QA round 1, Q3).
+        record = self._goal_record_for(session)
+        if record is None:
+            return None
+
+        async def judge(question: str) -> str:
+            answer = await self._ask_judge(session, question)
+            # `""` rather than `None`: an unavailable judge is an UNREADABLE
+            # verdict, which the driver already handles as a strike (the same
+            # fail-safe CONTINUE the `/loop` worker takes).
+            return answer or ""
+
+        async def prompt(text: str) -> None:
+            source.turn.operation += 1
+            if self._is_current(source) and self._status is not None:
+                self._status.update(streaming=True)
+            echo = self._register_user_echo_for(
+                source, text, message_id=self._echo_message_id(session.prompt)
+            )
+            try:
+                # `_admit_goal_continuation` is this host's admission route: it
+                # DEFERS the continuation until the turn that just ended has
+                # released the session, then admits it through
+                # `_prompt_loop_turn` — which prefers `prompt_and_wait`, so the
+                # driver AWAITS the terminal outcome and judges the turn it just
+                # admitted instead of correlating an event.
+                await self._admit_goal_continuation(session, text, echo)
+            except BaseException:
+                # A refused admission (a retiring session) never announces, so
+                # take the echo entry back out — otherwise it would swallow the
+                # NEXT row carrying the same words. The exception is re-raised:
+                # the driver turns it into a `waiting`, and retrying here is
+                # exactly the spin it must not do.
+                self._discard_user_echo_for(source, echo)
+                if self._is_current(source):
+                    self._retire_turn_band(session)
+                raise
+            if self._is_current(source):
+                self._retire_turn_band(session)
+
+        def changed(fields: dict[str, Any]) -> None:
+            # The record is the SESSION's, not this terminal's: the goal rides the
+            # frame and the sidecar, so a phone watching the same session sees the
+            # same judge state. A host-local dict would leave every other surface
+            # reporting a goal nothing is acting on.
+            record.note_goal_judge(**fields)
+            self.call_later(self._source_frontend_changed, source)
+            # The TUI's HALF OF THE STALL RECEIPT, in the same register and off
+            # the same edge as the runtime's (design round 1, D2): a goal that
+            # has stopped being auto-continued is indistinguishable from one
+            # that is quietly waiting unless the transition says WHICH bound
+            # fired. `warning` matches the sibling notice this app already
+            # paints when the judge cannot answer. Scheduled through
+            # `call_later` like the row above, so this callback never mutates
+            # the UI from inside the judge's own task, and emitted once because
+            # the helper answers only on the transition into `stalled`.
+            notice = goal_stalled_notice(fields)
+            if notice is not None:
+                self.call_later(self._notice_for, source, notice, "warning")
+
+        def settled(reason: str) -> None:
+            # The same call `/goal --done` makes, so a verdict and a typed
+            # mark-done produce one record and the surfaces cannot tell them
+            # apart except by whose words the reason carries.
+            record.mark_goal_done(reason)
+            self.call_later(self._source_frontend_changed, source)
+
+        return GoalJudge(
+            judge=judge,
+            prompt=prompt,
+            changed=changed,
+            settled=settled,
+            goal=lambda: getattr(session, "goal", ""),
+            status=lambda: record.goal_status,
+            token=lambda: record.goal_token,
+            serial=lambda: record.goal_turn_serial,
+            judge_state=lambda: session.goal_judge_state,
+            # The loop check is a CALLBACK over the interaction's own flag, so a
+            # loop that ends re-enables this judge with no bookkeeping.
+            loop_running=lambda: source.loop.running,
+        )
+
+    def _rearm_goal_judge_on_boot(self, session: SessionProtocol) -> None:
+        """Trigger 3 on this host: re-engage a judge that was in flight at close.
+
+        Called once per boot, after adoption, for the reasons stated at the call
+        site. Deferred to a worker rather than awaited: boot must not wait on a
+        provider call, and nothing here is the session's boot outcome.
+        """
+        from local_operator.session.goal_judge import owns_the_session
+
+        source = self._interaction
+        if session is None or not owns_the_session(session) or source.goal.judge_in_flight:
+            return
+        source.goal.judge_in_flight = True
+        try:
+            self.run_worker(
+                self._rearm_goal_judge_worker(session, source),
+                thread=False,
+                group=source.worker_group("goal_judge"),
+            )
+        except Exception:  # noqa: BLE001 — an additive worker must not fail boot
+            source.goal.judge_in_flight = False
+            logger.debug("goal judge re-arm could not be started", exc_info=True)
+
+    async def _rearm_goal_judge_worker(self, session: Any, source: SessionInteraction) -> None:
+        """Run ONE trigger-3 re-arm and release the in-flight flag.
+
+        The flag is cleared unconditionally, for the same reason the turn-end
+        worker's is: a re-arm that raised must not leave this terminal convinced
+        a judge is running, or the goal would go unjudged for the app's life.
+        """
+        try:
+            driver = self._goal_judge_driver(session, source)
+            if driver is None:
+                return
+            await driver.rearm_on_resume()
+        except Exception:  # noqa: BLE001 — the judge is additive, never boot's fate
+            logger.debug("goal judge re-arm failed", exc_info=True)
+        finally:
+            source.goal.judge_in_flight = False
+
+    def _maybe_judge_goal_turn(self, message: TurnEnded) -> None:
+        """React to a LOCAL turn's end by judging the standing goal (§3.3).
+
+        Called at the foot of `on_turn_ended`, AFTER `_finalize_turn`: that is
+        what clears `_turn_open`/`_turn_notified`, and a judge started against a
+        half-retired turn would race the app's own turn bookkeeping.
+
+        Only two things are checked here rather than in the driver, and both are
+        about THIS host: whether the session is ours to spend in (a follower
+        never judges — §3.2), and whether our own judge is already running (the
+        continuation's turn end lands here, and the driver's chain is what judges
+        it). Everything else — no goal, a `/loop` running, an error turn — is the
+        driver's single decision, so it cannot be applied on one host and
+        forgotten on the other.
+        """
+        from local_operator.session.goal_judge import owns_the_session
+
+        source = self._interaction
+        session: Any = self._session
+        if session is None or not owns_the_session(session):
+            return
+        if source.goal.judge_in_flight:
+            return
+        source.goal.judge_in_flight = True
+        try:
+            self.run_worker(
+                self._goal_judge_worker(
+                    session,
+                    source,
+                    aborted=bool(message.aborted),
+                    error=message.error,
+                ),
+                thread=False,
+                group=source.worker_group("goal_judge"),
+            )
+        except Exception:  # noqa: BLE001 — an additive worker must not fail the turn
+            # The flag is released HERE because the worker never ran, so its own
+            # `finally` will not: a terminal that believed a judge was in flight
+            # would never judge this session again.
+            source.goal.judge_in_flight = False
+            logger.debug("goal judge worker could not be started", exc_info=True)
+
+    async def _goal_judge_worker(
+        self,
+        session: Any,
+        source: SessionInteraction,
+        *,
+        aborted: bool = False,
+        error: str | None = None,
+    ) -> None:
+        """Run ONE trigger of the judge and release the in-flight flag.
+
+        The flag is cleared UNCONDITIONALLY: a judge that raised must not leave
+        this terminal convinced one is still running, or the goal would sit
+        unjudged for the life of the app.
+        """
+        try:
+            driver = self._goal_judge_driver(session, source)
+            record = self._goal_record_for(session)
+            # ``None`` on a session that does not implement the judged-goal
+            # record: there is nothing here to judge, and the driver refuses to
+            # read the record off a duck-typed binding (see ``_goal_record_for``).
+            if driver is None or record is None:
+                return
+            await driver.on_turn_end(
+                error=bool(error),
+                aborted=aborted,
+                serial=int(record.goal_turn_serial or 0),
+            )
+        except Exception:  # noqa: BLE001 — the judge is additive, never a turn's fate
+            logger.debug("goal judge worker failed", exc_info=True)
+        finally:
+            source.goal.judge_in_flight = False
 
     async def _loop_goal_worker(self, goal: str, source: SessionInteraction | None = None) -> None:
         """Run goal mode: loop turns toward ``goal`` until the judge releases.
@@ -36332,7 +36988,27 @@ class OperatorApp(App[None]):
         )
 
     def _cmd_session(self, arg: str, notice: NoticeFn) -> None:
-        """Read only this session's ledger; never interpret arguments as a prompt."""
+        """Read only this session's ledger, or copy its ID; never treat text as a prompt."""
+
+        if arg.strip() == SESSION_COPY_FLAG:
+            # The ID onto the clipboard and nothing else (decision D2). No
+            # SessionScreen and no ledger read: the pushed screen would take focus
+            # from the composer the user is about to paste into. The write goes
+            # through `_put_on_clipboard` so this gesture cannot drift from the
+            # others, and its courtesy toast stays. "sent to", because OSC 52 is
+            # unacknowledged; the ID is printed so a terminal that ignored the
+            # write still leaves something selectable in the transcript.
+            session = self._session
+            session_id = session.session_id if session is not None else ""
+            if not session_id:
+                # Not "not ready yet": `_session is None` is also the state after
+                # a failed start, and this branch cannot tell the two apart. A
+                # failed start has its own error notice above (design DR2).
+                self._system_notice("no session ID to copy", "warning")
+                return
+            self._put_on_clipboard(session_id)
+            self._system_notice(f"session ID {session_id} sent to the clipboard", "info")
+            return
 
         from local_operator.tui.widgets.session_panel import (
             SessionDiagnostics,
@@ -36340,9 +37016,9 @@ class OperatorApp(App[None]):
         )
 
         if arg.strip():
-            self._system_notice(
-                "/session takes no arguments; it reports the current session", "warning"
-            )
+            # Names the one exception and leaves what it does to the description,
+            # so the sentence does not contradict itself (design DR1).
+            self._system_notice(f"/session takes no text except {SESSION_COPY_FLAG}", "warning")
             return
         session = self._session
         if session is None:
@@ -37610,38 +38286,28 @@ class OperatorApp(App[None]):
             picker.set_notice("")
             return
         if message.command == "goal":
-            # ONE row, and only while there is a goal to unset. `/goal`'s
+            # A GATED ROW SET, one row per act the LIVE state allows: `/goal`'s
             # argument is free text (the objective the model is given), so this
             # list is an OFFER beside it — the shape `/rename`'s `--refresh` row
             # has: nothing here filters or constrains what may be submitted, and
-            # a typed `/goal ship it` simply does not match the row, which closes
+            # a typed `/goal ship it` simply does not match a row, which closes
             # the list and submits the goal unchanged.
             #
-            # Gated on the LIVE state, not on the command: `--clear` is a no-op
-            # with nothing to clear, and a palette that taught it anyway would be
-            # advertising a dead end. Empty rows with no notice close the list,
-            # so the ungated case shows the user nothing at all.
+            # Gated on the LIVE state, not on the command: each flag is a no-op in
+            # the state its row is missing from, and a palette that taught it
+            # anyway would be advertising a dead end. Empty rows with no notice
+            # close the list, so the ungated case shows the user nothing at all.
             #
-            # `alert=True` is the app's own gate for "accepting this row removes
-            # something" (`/logout`, `/mcp remove`, `/stop`'s targets), and it is
-            # load-bearing HERE rather than decorative: the row is pre-selected
-            # and is the only match, so without it the editor's
-            # `_picker_choice_is_unambiguous` RUNS it on one Enter — which turned
-            # `/goal ` + Enter, the keystroke that used to report the standing
-            # goal, into a clear (round 1: design D1, UX U1, reviewer MAJOR-1).
-            # With the flag set the first Enter FILLS the buffer with
-            # `/goal --clear` and the second runs it; an explicit down-arrow onto
-            # the row keeps its one press, because the editor already treats a
-            # deliberate move as unambiguous.
-            # The tint it normally paints never lands here: the row is always
-            # `selected`, and `command_picker._argument_row` skips the danger
-            # colour on the selected row by design — so this changes the gate and
-            # not one pixel.
-            picker.set_choices(
-                [ArgumentChoice("--clear", "Clear the standing goal", alert=True)]
-                if getattr(self._session, "goal", "")
-                else []
-            )
+            # ORDER: `--history` first, `--clear` last. The editor's
+            # `_picker_choice_is_unambiguous` RUNS a pre-selected single match on
+            # one Enter, so the row that removes something must never be the only
+            # offer — `/goal ` + Enter, the keystroke that reports the standing
+            # goal, turned into a clear that way (round 1: design D1, UX U1,
+            # reviewer MAJOR-1). The rows are authored so a single match is the
+            # harmless row; `alert=True` stays on `--clear` alone, the one row
+            # whose acceptance cannot be undone (the record is kept by --done and
+            # --dismiss only drops the chip).
+            picker.set_choices(self._goal_argument_choices())
             picker.set_notice("")
             return
         if message.command == "notifications":
@@ -39135,7 +39801,10 @@ class OperatorApp(App[None]):
         try:
             from local_operator.config import ConfigManager
             from local_operator.paths import config_dir
-            from local_operator.providers.login_defaults import plan_login_defaults
+            from local_operator.providers.login_defaults import (
+                apply_login_defaults,
+                plan_login_defaults,
+            )
 
             manager = ConfigManager(config_dir())
             # The POLICY is shared with `local-operator login` (see
@@ -39153,19 +39822,13 @@ class OperatorApp(App[None]):
                 manager.get_config_value("hosting"),
                 manager.get_config_value("model_name"),
             )
-            if plan.hosting is None:
-                # Nothing to write, but there can still be something to SAY: a
-                # decision-only provider (TypeSafe's Jev) leaves the routing
-                # exactly as it was and says so in ``receipt``. Returning None
-                # here — as this did — swallowed that line and made the login
-                # look like it had silently done nothing.
-                return plan.receipt
-            manager.set_config_value("hosting", plan.hosting)
-            # ``None`` = leave it; ``""`` = clear a model belonging to the
-            # provider just replaced. The explicit None test is what keeps the
-            # clearing case from being swallowed by a falsy check.
-            if plan.model_name is not None:
-                manager.set_config_value("model_name", plan.model_name)
+            # A plan with nothing to write can still have something to SAY: a
+            # decision-only provider (TypeSafe's Jev) leaves the routing exactly
+            # as it was and says so in ``receipt``, so the receipt is returned
+            # whether or not anything was written. The write itself is the shared
+            # ``apply_login_defaults``, which also covers a plan that fills only
+            # an empty model beside an already-right hosting.
+            apply_login_defaults(manager, plan)
             return plan.receipt
         except Exception as error:  # noqa: BLE001 — never fail a completed login
             return f"logged in, but could not save default hosting/model: {error}"
@@ -40341,26 +41004,77 @@ class OperatorApp(App[None]):
 
     def _goal_slash_result(self, arg: str, SlashResult: Any) -> Any:
         from local_operator.session.goal import (
-            GOAL_CLEAR_ARGS,
+            GOAL_RECORD_OWNER_REFUSAL,
             MAX_GOAL_CHARS,
             cleared_goal_receipt,
+            goal_dismissed_receipt,
+            goal_done_answer,
+            goal_flag_form,
+            goal_history_items,
+            goal_history_notice,
+            goal_report,
         )
 
         arg = arg.strip()
         session = self._session
-        if session is None or not hasattr(session, "set_goal"):
+        record = self._goal_record()
+        if session is None:
             return SlashResult(kind="notice", text="session is still starting…", style="warning")
+        if record is None and not arg:
+            # The bare form is a READ, and the record's read half rides the wire
+            # (`_refresh_goal_panel` sources a viewer's card the same way), so
+            # it is answered rather than refused.
+            state = getattr(session, "frontend_state", None)
+            return SlashResult(
+                kind="notice",
+                text=goal_report(session.goal, getattr(state, "goal_status", "") or ""),
+                style="info",
+            )
+        if record is None:
+            # A session that EXISTS but whose record is not this host's: the
+            # same condition `_cmd_goal` refuses, so the same sentence — telling
+            # a started session it is "still starting" was the misleading answer
+            # the local handler's refusal was written to delete (agent review
+            # round 2, MINOR-7).
+            return SlashResult(kind="notice", text=GOAL_RECORD_OWNER_REFUSAL, style="warning")
         if not arg:
-            current = session.goal
-            text = f"goal: {current}" if current else "no goal set — /goal <text> to set one"
-            return SlashResult(kind="notice", text=text, style="info")
-        if arg.lower() in GOAL_CLEAR_ARGS:
+            return SlashResult(
+                kind="notice",
+                text=goal_report(session.goal, record.goal_status),
+                style="info",
+            )
+        form = goal_flag_form(arg)
+        if form == "clear":
             # The receipt names what went, on this host too: a follower's
             # `/goal --clear` is rendered by ITS terminal, so a receipt that named
             # nothing would be the same silent loss one hop out (design D4/U3).
             receipt = cleared_goal_receipt(session.goal)
-            session.set_goal("")
+            record.delete_goal()
             return SlashResult(kind="notice", text=receipt, style="info")
+        if form == "done":
+            entry = record.mark_goal_done()
+            return SlashResult(
+                kind="notice",
+                text=goal_done_answer(session.goal, entry),
+                style="info",
+            )
+        if form == "dismiss":
+            return SlashResult(
+                kind="notice",
+                text=goal_dismissed_receipt(record.dismiss_goal()),
+                style="info",
+            )
+        if form == "history":
+            rows = goal_history_items(record.history_view())
+            # Byte-for-byte the owner's answer (`serving.py::_goal_slash`): this is
+            # the product a follower paints, so the two must not differ by a row
+            # shape or a word (the host-disagreement rule at this function's
+            # refusal branch).
+            return SlashResult(
+                kind="block",
+                text=goal_history_notice(len(rows)),
+                data={"type": "goal_history", "items": rows},
+            )
         refusal = unknown_flag_refusal("goal", arg)
         if refusal is not None:
             # Same refusal, same words as the local handler: this is the bytes a
@@ -40368,7 +41082,7 @@ class OperatorApp(App[None]):
             # one that refused it is the host-disagreement class the shared
             # vocabularies in `session/goal.py` exist to remove (UX U6).
             return SlashResult(kind="notice", text=refusal, style="warning")
-        stored = session.set_goal(arg)
+        stored = record.arm_goal(arg)
         if len(stored) == MAX_GOAL_CHARS and len(arg.strip()) > MAX_GOAL_CHARS:
             return SlashResult(
                 kind="notice",
@@ -42072,6 +42786,12 @@ class OperatorApp(App[None]):
             # every cut-off as a completion (design review round 1, D2).
             cut_off=message.cut_off,
         )
+        # LAST, and after `_finalize_turn` on purpose (see
+        # `_maybe_judge_goal_turn`): the standing goal is judged off THIS turn's
+        # end, which is the LOCAL half of the edge trigger the runtime installs
+        # on its own session subscription. A follower terminal declines here —
+        # the owner in the other process is the one that judges.
+        self._maybe_judge_goal_turn(message)
 
     def on_turn_abandoned(self, message: TurnAbandoned) -> None:
         """Retire a turn whose worker returned without a terminal ``agent_end``.
@@ -43155,6 +43875,24 @@ class OperatorApp(App[None]):
             # end of the state the marker asserted (design round 1, D2).
             self._settle_queued_prompt(message.message_id)
             return  # our own echo — the row is already painted
+        # HARNESS CHROME — the harness minted this row, no person typed it, and
+        # the transcript records it while NO surface paints it. Placed after the
+        # echo check because an echo this app registered is by definition a row
+        # the user's own send produced.
+        #
+        # TWO LEGS, ONE DECISION, and both are needed. ``injected`` is the
+        # STRUCTURAL stamp on the announced message, exact wherever it exists;
+        # ``is_harness_chrome`` is the shared recogniser, which also covers rows
+        # written by a build that predates the stamp and every continuation
+        # prompt whose text is interpolated per goal. This leg closes the SLOW
+        # half of the gap the transcript has always had on a follower: a
+        # runtime-hosted owner admits a continuation, this terminal is attached,
+        # and before this the harness's own sentence appeared as the user's
+        # words. The owner's own announce site withholds the event now, so this
+        # fires for an owner on an older build (or a differently-shaped host),
+        # which is exactly the case a per-surface decision exists to survive.
+        if message.injected or is_harness_chrome(message.prompt):
+            return
         block = UserBlock(message.prompt, message.image_count)
         block.navigation_anchor_id = message.message_id
         self._append_block(block)

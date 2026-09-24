@@ -29,6 +29,8 @@ from local_operator.harness.types import (
     ToolResult,
 )
 from local_operator.paths import config_dir
+from local_operator.session.errors import TURN_IN_FLIGHT, TurnInFlight
+from local_operator.session.goal import GoalState
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import CompactionOutcome, RuntimeLocality
@@ -413,6 +415,15 @@ class FakeSession:
         #: How many times ``clear_agent_profile`` was called, so a `/agent
         #: clear` test can assert the detach reached the session.
         self.cleared_agents: int = 0
+        #: The REAL judged-goal record, not a bare string: the five flag forms
+        #: change what the session state IS (active/done, a settled history, a
+        #: judge state), and a fake that only echoed text could not tell
+        #: `/goal --done` from `/goal <text>` — so every flag assertion would
+        #: pass against a fake that had not implemented the feature.
+        self._goal_state = GoalState()
+        #: How many times ``refresh_frontend_state`` was asked for, so a test can
+        #: say a mutation PUBLISHED without standing up a real store.
+        self.publishes = 0
 
     @property
     def session_id(self) -> str:
@@ -449,11 +460,62 @@ class FakeSession:
 
     @property
     def goal(self) -> str:
-        return getattr(self, "_goal", "")
+        return self._goal_state.text
 
     def set_goal(self, text: str) -> str:
-        self._goal = (text or "").strip()
-        return self._goal
+        return self._goal_state.set(text)
+
+    def arm_goal(self, text: str) -> str:
+        return self._goal_state.arm(text)
+
+    @property
+    def goal_status(self) -> str:
+        return self._goal_state.status
+
+    @property
+    def goal_judge(self) -> Any:
+        return None if not self._goal_state.text else self._goal_state.judge.to_wire()
+
+    @property
+    def goal_history(self) -> list[Any]:
+        return self._goal_state.history_view()
+
+    def history_view(self, limit: int | None = None) -> list[Any]:
+        return self._goal_state.history_view(limit)
+
+    def mark_goal_done(self, reason: str = "") -> Any:
+        return self._goal_state.mark_done(reason)
+
+    def delete_goal(self) -> str:
+        return self._goal_state.delete()
+
+    def dismiss_goal(self) -> bool:
+        return self._goal_state.dismiss()
+
+    def note_goal_judge(self, **changes: Any) -> None:
+        judge = self._goal_state.judge
+        for name, value in changes.items():
+            setattr(judge, name, value)
+
+    @property
+    def goal_token(self) -> str:
+        return self._goal_state.token
+
+    @property
+    def goal_judge_state(self) -> Any:
+        return self._goal_state.judge
+
+    @property
+    def goal_turn_serial(self) -> int:
+        # Declared because the judge's staleness guard READS it on every tick:
+        # an undeclared attribute would raise inside a worker and be logged as
+        # a debug line, so the pilot would see a judge that silently never
+        # settles rather than a fake that is missing a field.
+        return 0
+        self.refresh_frontend_state()
+
+    def refresh_frontend_state(self) -> None:
+        self.publishes += 1
 
     def attach_team(self, team: Any) -> None:
         self.attached_teams.append(team)
@@ -958,17 +1020,19 @@ async def test_login_from_bad_provider_setup_state_repairs_the_config(
     assert repaired.get_config_value("hosting") == "deepseek"
     # The model belonged to the provider that was replaced, so it is replaced
     # too -- otherwise a real provider is pointed at a model that never existed.
-    assert repaired.get_config_value("model_name") == "deepseek-chat"
+    assert repaired.get_config_value("model_name") == "deepseek-flash"
 
 
 @pytest.mark.parametrize(
     "provider, expect_setup",
     [
-        # The two loginable providers with no default model: `/login` here
-        # writes a registry-VALID hosting with a CLEARED model, which is the
-        # config the repair produces on purpose.
-        ("alibaba-token-plan", True),
-        ("alibaba-token-plan-oauth", True),
+        # Providers with no default model -- the local runtimes, whose models
+        # are whatever the user pulled: the repair writes a registry-VALID
+        # hosting with a CLEARED model, which is the config it produces on
+        # purpose. (The Token Plan used to be the example; it now has a
+        # suggested model, qwen3.8-max.)
+        ("ollama", True),
+        ("vllm", True),
         # Control: an ordinary provider brings its own default, so the repaired
         # config boots straight through and must NOT land in setup. Without it
         # this test would pass on a build that sent every login to setup.
@@ -986,7 +1050,7 @@ async def test_repaired_config_boots_into_an_escapable_state(
 
     The coverage gap this closes: every other assertion about the repair stops
     at the plan or at the config file, and none asserted that the config the
-    repair writes can actually start a session. `alibaba-token-plan` has no
+    repair writes can actually start a session. A local runtime has no
     default model, so the repair clears the model deliberately — and the
     resolver used to answer that with a plain `ValueError`, which misses the
     recoverable-error gate in `_on_boot_failed` and painted the red "session
@@ -1069,8 +1133,8 @@ async def test_repaired_config_boots_into_an_escapable_state(
         # It names the provider and points at the command that can actually
         # fix this. `/login` must NOT be promised: hosting is already
         # registry-valid, so a login writes nothing and the user loops.
-        assert provider.startswith("alibaba")
-        assert "alibaba-token-plan" in notice
+        assert provider in ("ollama", "vllm")
+        assert provider in notice
         assert "/model" in notice
         assert "failed" not in notice.lower()
         # Budget check, same rule as the sibling splash assertions. The notice
@@ -1124,7 +1188,7 @@ async def test_missing_model_is_recoverable_not_fatal_on_every_surface() -> None
 
     class _Cfg:
         def get_config_value(self, key, default=None):
-            return {"hosting": "alibaba-token-plan", "model_name": ""}.get(key, default)
+            return {"hosting": "ollama", "model_name": ""}.get(key, default)
 
     with pytest.raises(ModelNotConfiguredError) as caught:
         resolve_hosting_model(
@@ -1143,9 +1207,9 @@ async def test_missing_model_is_recoverable_not_fatal_on_every_surface() -> None
     assert isinstance(error, ValueError)
     # The informative text survives: it names concrete model ids, which is what
     # the non-interactive paths print.
-    assert "alibaba-token-plan" in str(error)
-    assert "gpt-4o" in str(error)
-    assert error.hosting == "alibaba-token-plan"
+    assert "ollama" in str(error)
+    assert "gpt-6-astra" in str(error)
+    assert error.hosting == "ollama"
 
 
 def test_non_interactive_preflight_still_fails_fast_without_a_model(
@@ -1162,7 +1226,7 @@ def test_non_interactive_preflight_still_fails_fast_without_a_model(
     from local_operator.config import ConfigManager
 
     config = ConfigManager(tmp_path)
-    config.set_config_value("hosting", "alibaba-token-plan")
+    config.set_config_value("hosting", "ollama")
     config.set_config_value("model_name", "")
     args = argparse.Namespace(hosting=None, model=None)
 
@@ -5671,11 +5735,10 @@ async def test_run_tui_forwards_provider_controller(monkeypatch) -> None:
 
 
 class GoalSession(FakeSession):
-    """FakeSession with the goal surface and a recording prompt()."""
+    """FakeSession with a recording prompt() (the goal record is inherited)."""
 
     def __init__(self) -> None:
         super().__init__()
-        self._goal = ""
         self.fail_on_prompt = False
         #: Verdicts the goal-mode judge returns, consumed one per call. Default
         #: (empty list) => after the staged verdicts run out, answer ACHIEVED,
@@ -5704,18 +5767,33 @@ class GoalSession(FakeSession):
         #: it, because the completion toast fires from `on_turn_ended` off that
         #: queued event, not synchronously from `prompt`.
         self.post_turn_ended_to: Any = None
+        #: Number of leading `prompt` calls that raise `TurnInFlight` before one
+        #: is admitted. This is the REAL session's shape, not a contrivance: the
+        #: judge's continuation is admitted from the turn-end handler, which runs
+        #: on the session's held end event with `_turn_lock` still held, so the
+        #: first admission of every continuation meets this refusal (QA round 1,
+        #: Q1). A fake that accepted everything was why no unit test saw it.
+        self.turn_in_flight_prompts = 0
+        #: The continuation texts admitted WITH the structural `harness_injected`
+        #: stamp. `prompt` declares the keyword because the real `Session` does —
+        #: the driver probes for it, so a `**kwargs` fake would silently record
+        #: nothing and pass a test about a stamp that never arrived.
+        self.injected_prompts: list[str] = []
 
-    @property
-    def goal(self) -> str:
-        return self._goal
-
-    def set_goal(self, text: str) -> str:
-        self._goal = (text or "").strip()
-        return self._goal
-
-    async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
+    async def prompt(
+        self,
+        text: str,
+        images: Sequence[ImageContent] | None = None,
+        *,
+        harness_injected: bool = False,
+    ) -> None:
         if self.fail_on_prompt:
             raise RuntimeError("boom")
+        if self.turn_in_flight_prompts > 0:
+            self.turn_in_flight_prompts -= 1
+            raise TurnInFlight(TURN_IN_FLIGHT)
+        if harness_injected:
+            self.injected_prompts.append(text)
         if self.prompt_gate is not None:
             await self.prompt_gate.wait()
         self.prompts.append(text)
@@ -6180,6 +6258,41 @@ async def test_loop_goal_judge_error_continues_with_warning() -> None:
     assert len(session.prompts) == 2
     assert "judge unavailable, continuing" in text
     assert "goal achieved after 2" in text
+
+
+@pytest.mark.asyncio
+async def test_a_loop_turn_is_stamped_as_harness_chrome() -> None:
+    """Agent review round 3: a loop's own turn is chrome, and now says so.
+
+    Both loops are admitted through ``_prompt_loop_turn``, and the stamp lives
+    THERE because a caller-side stamp is how the goal-mode loop went without one:
+    ``LOOP_GOAL_PROMPT`` is in neither ``harness_chrome_prompts()`` nor any
+    producer-side recogniser, and the desktop is marker-only by contract
+    (``docs/DESKTOP_API.md`` names "the goal loop's own prompt" as a row that must
+    carry it) — so an unstamped row replayed on every surface as the USER's own
+    words. Pinned with its own negative control in the same transcript: the
+    person's typed turn is NOT stamped, which is the half that would hide a
+    human's words if the marker leaked.
+    """
+    from local_operator.session.goal_loop import LOOP_GOAL_PROMPT
+
+    session = GoalSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        # A person's own turn, typed plainly (not through `_type_command`, which
+        # opens the slash picker): this is the row the marker must never hide.
+        app.query_one(Editor).load_text("ship it now")
+        await pilot.press("enter")
+        await pilot.pause()
+        session.judge_verdicts = ["VERDICT: ACHIEVED\ndone"]
+        await _type_command(pilot, app, "loop do the thing")
+        await _settle_loop(pilot, app)
+    loop_turn = LOOP_GOAL_PROMPT.format(goal="do the thing")
+    assert session.prompts == ["ship it now", loop_turn]
+    assert session.injected_prompts == [
+        loop_turn
+    ], "the loop's turn carries the structural marker; the typed one does not"
 
 
 @pytest.mark.asyncio
