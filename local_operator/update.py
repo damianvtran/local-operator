@@ -1265,6 +1265,175 @@ def current_generation() -> Path | None:
     return generation if generation.is_dir() else None
 
 
+#: How long one ``ps`` argv read may take, in seconds.
+#:
+#: BOUNDED because the refresh child that consults it is itself bounded at
+#: ``_DAEMON_REFRESH_TIMEOUT_S``, and a wedged ``ps`` must not spend that whole
+#: budget on one daemon: this probe's contract is "an answer or ``None``", never
+#: "a hang". Five seconds is ~1000x the measured cost of the call on this machine
+#: (``ps -o args=`` answers in single-digit milliseconds); the bound exists so a
+#: pathological host still finishes.
+_PS_PROBE_TIMEOUT_S = 5.0
+
+
+def _process_argv(pid: int) -> str | None:
+    """``ps -o args= -p <pid>``, or ``None`` when it cannot be read.
+
+    THE ONLY PROCESS PROBE THIS MODULE MAKES, and ``ps`` rather than a heavier
+    reader for a measured reason: ``lsof`` walks every file descriptor the process
+    holds (tens of milliseconds, and it needs the fd table) to answer what ``ps``
+    already has, and ``proc_pidinfo`` is a ctypes shim over the same kernel data.
+    ``psutil`` is deliberately not a dependency of this project (see
+    ``tools/group_reaper.py`` for the same choice, and ``cli.py``'s ``etime``
+    probe for the same sentence).
+
+    ``text=True`` with ``errors="replace"``: argv is arbitrary bytes a process
+    chose, and a decode error here must not become an exception out of a repair
+    that is only decorating an upgrade which already succeeded. ``LC_ALL=C`` is
+    deliberately NOT set — the precedent that sets it
+    (``group_reaper._owner_start_token``) does so to pin a locale-FORMATTED date,
+    and there is no format to pin in a process's own bytes.
+
+    The ``subprocess`` import is function-local for this module's usual reason
+    (see ``_refresh_steps``): ``update`` is imported by the TUI, and this runs once
+    per supervised daemon on an upgrade.
+    """
+    import subprocess
+
+    try:
+        completed = subprocess.run(
+            ["ps", "-o", "args=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            check=False,
+            timeout=_PS_PROBE_TIMEOUT_S,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        # No `ps` at all (a non-POSIX host), a pid `ps` refuses as an argument, or
+        # a call that did not answer inside the bound. All three are "unreadable".
+        logger.debug("could not read the argv of pid %s: %s", pid, exc)
+        return None
+    if completed.returncode != 0:
+        # Non-zero is "no such process" in every case that matters here: the pid is
+        # gone (the daemon exited between launchd's answer and this probe).
+        return None
+    text = completed.stdout.strip()
+    return text or None
+
+
+def generation_in_argv(argv: str) -> Path | None:
+    """The generation root a process's ``argv`` names, or ``None``.
+
+    PURE: no filesystem, no pointer, no ``ps`` — the string question on its own, so
+    it can be pinned against the literal argv strings a real machine shows and so
+    that an unreadable input has one obvious answer.
+
+    A PREFIX read rather than a search of the whole line, which is the measured
+    shape and not a guess: the generation's own image is executed as ``argv[0]``,
+    so ``ps -o args=`` prints the generation path FIRST and the command line after
+    it. Measured on the operator's machine 2026-09-24 on every supervised daemon
+    (``ps -o pid=,args=``; the home below is elided to ``~`` — ``ps`` prints it
+    absolute — and the module argv is elided for width):
+
+    .. code-block:: text
+
+        59435     1 ~/.local/share/lop/generations/20260924T103058Z-509c7450dbf6/…
+
+    …whose first field is that generation's own ``bin/Local Operator``, followed by
+    the module and its arguments.
+
+    THE PATH HAS A SPACE IN IT (``…/bin/Local Operator``), which is why this walks
+    the path's ANCESTORS instead of splitting the line into fields: ``ps`` joins
+    argv with single spaces and quotes nothing, so the image path is not separable
+    from the argument list by parsing — and it does not have to be, because the
+    generation is an ancestor of the image path, i.e. of everything before the
+    first space.
+
+    LEXICAL THE FILE, RESOLVED THE ANCESTORS, and both halves are load-bearing.
+    The file itself is never resolved: the fallback interpreter in a generation's
+    ``bin`` is a SYMLINK out to the uv-managed Python (``python3 -> python ->
+    ~/.local/share/uv/python/…/python3.14``), so resolving it would jump OUT of the
+    generation for exactly the shape in which no branded image could be planted.
+    The ANCESTORS are resolved on both sides because the shim runs ``pwd -P``: on a
+    machine whose home is reached through a symlink, argv carries the PHYSICAL path
+    while ``generations_dir()`` is spelled from ``~``, and a lexical comparison
+    would answer ``None`` for the very daemon this exists to move. Nothing is
+    invented by the resolve — a PRUNED generation is absent from disk, and
+    ``resolve()`` leaves those components as the path it was given.
+
+    ``None`` for an empty or whitespace-only input, for a field that is not under
+    ``generations_dir()`` at all (a pip venv, a launcher, a relative path), and for
+    ``generations_dir()`` itself.
+    """
+    fields = argv.split(None, 1)
+    if not fields:
+        return None
+    candidate = Path(fields[0])
+    generations = generations_dir().resolve()
+    for parent in candidate.parents:
+        if parent.parent.resolve() == generations:
+            return parent
+    return None
+
+
+def generation_of_process(pid: int) -> Path | None:
+    """The generation the LIVE process ``pid`` was started from, or ``None``.
+
+    THE OBSERVATION, deliberately not an inference: this reads the running
+    process's OWN argv, so what it answers is the build that process actually
+    loaded, which is the only claim the daemon repair is entitled to act on.
+
+    ``None`` for every way this can fail to be established — a pid that is gone or
+    was never there, no ``ps``, a timeout, a non-POSIX host, an argv that names no
+    generation (see :func:`generation_in_argv`). EVERY CALLER MUST READ ``None`` AS
+    "NO MOVE": the direction is chosen, not accidental. A missed reload leaves a
+    daemon on the build it is already serving, while a reload reasoned from a
+    failed probe would interrupt a working one for nothing — and for the tunnel
+    connector that interruption is remote access.
+    """
+    if pid <= 0:
+        return None
+    argv = _process_argv(pid)
+    if argv is None:
+        return None
+    return generation_in_argv(argv)
+
+
+def stale_generation_of_process(pid: int) -> Path | None:
+    """The generation ``pid`` runs, when that is provably NOT ``current``.
+
+    THE SECOND STALENESS QUESTION a supervised daemon's repair has to ask. The
+    first — "does the plist on disk say what this build would render?" — is
+    ``launchd.rewrite_if_stale``'s, and under the generation layout it is answered
+    "current" for a daemon that is generations behind, because the unit names the
+    STABLE SHIM (``~/.local/share/lop/bin/python3``) and a shim does not change when
+    the pointer moves. Measured live on the operator's machine 2026-09-24: four
+    byte-identical plists, two daemons on the current generation and two
+    two-and-three generations behind. Comparing what the RUNNING PROCESS reports is
+    therefore the only question that can see the difference.
+
+    A NONE HERE MEANS TWO DIFFERENT THINGS, and both mean "do not touch it": the
+    process is running the current build, or the comparison could not be made (no
+    generation in its argv, no readable pointer, a pointer that is dangling or
+    being renamed as we read it). Neither is evidence of a move, so neither may
+    produce one.
+
+    Names are compared rather than paths, because the two sides are spelled
+    differently BY CONSTRUCTION — the shim's ``pwd -P`` against ``~``-derived
+    ``stable_root()`` — and a generation id is unique per build, which is the whole
+    naming scheme. Two different generations cannot share a name; see
+    ``_new_generation_id``.
+    """
+    running = generation_of_process(pid)
+    if running is None:
+        return None
+    current = current_generation()
+    if current is None:
+        return None
+    return None if running.name == current.name else running
+
+
 def current_install_root() -> Path | None:
     """The install root the POINTER resolves to, or ``None``.
 

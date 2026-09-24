@@ -1742,6 +1742,18 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
         # daemon someone installed on a non-default port back to the default.
         port = launchd.int_arg(launchd.load(path), "--port", DEFAULT_PORT)
         outcome = launchd.rewrite_if_stale(name=name, path=path, rendered=render_plist(port))
+        if outcome.kind == "current":
+            # A CURRENT PLIST IS NOT A CURRENT BUILD: this unit names the stable
+            # shim, so its content is byte-identical across generations while a
+            # daemon started from an older one keeps serving it. See
+            # :func:`launchd.restart_if_build_moved`.
+            return launchd.restart_if_build_moved(
+                name=name,
+                label=LABEL,
+                path=path,
+                recovery="lop mobile install",
+                run=_launchctl,
+            )
         if outcome.kind != "repaired":
             return outcome
         # bootout + bootstrap through the shared helper, NOT kickstart -k:
