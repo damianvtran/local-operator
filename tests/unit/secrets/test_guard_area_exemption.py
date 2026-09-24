@@ -17,13 +17,9 @@ from typing import Any
 
 import pytest
 
-from local_operator.harness.guard_area import (
-    EXEMPT_SOURCES,
-    READING_TOOLS,
-    reads_exempt_source,
-    source_is_exempt,
-)
+from local_operator.harness.guard_area import EXEMPT_SOURCES, READING_TOOLS
 from local_operator.harness.guard_area import exempt_from_escalation as exempt
+from local_operator.harness.guard_area import reads_exempt_source, source_is_exempt
 from local_operator.harness.loop import AgentLoop, LoopContext
 from local_operator.harness.types import (
     AgentEndEvent,
@@ -53,9 +49,7 @@ SHAPE_TABLE = _PACKAGE_ROOT / "redaction_shapes.py"
 CORPUS = _PACKAGE_ROOT.parent / "tests" / "unit" / "secrets" / "credential_shape_corpus.py"
 #: The corpus's own test module: exempt because it was MEASURED to escalate when
 #: read (21 hits, 18 of them escalating) — see ``guard_area._EXEMPT_RELATIVE_PATHS``.
-CORPUS_TESTS = (
-    _PACKAGE_ROOT.parent / "tests" / "unit" / "secrets" / "test_credential_shapes.py"
-)
+CORPUS_TESTS = _PACKAGE_ROOT.parent / "tests" / "unit" / "secrets" / "test_credential_shapes.py"
 
 
 def test_the_exempt_set_is_the_guards_source_and_corpus_and_nothing_else() -> None:
@@ -240,7 +234,10 @@ async def _drive(session: Session, tool: AgentTool, stream: Any) -> list[str]:
         redact_tool_result=session._redact_tool_result_text,
     )
     events = [
-        event async for event in AgentLoop().run([Message.user("go")], LoopContext(tools=[tool]), config, None)
+        event
+        async for event in AgentLoop().run(
+            [Message.user("go")], LoopContext(tools=[tool]), config, None
+        )
     ]
     end = events[-1]
     assert isinstance(end, AgentEndEvent), "the scripted turn did not end"
@@ -298,9 +295,9 @@ async def test_a_bash_command_that_merely_names_the_path_still_escalates(tmp_pat
     rows = await _drive(session, _echo_tool("bash", CORPUS.read_text(encoding="utf-8")), stream)
 
     assert REDACTION_MARKER in rows[0], "the bash result was not masked"
-    assert _escalation_flags(session) == [True], (
-        "a bash command whose ARGUMENT names the guard's file conferred the exemption"
-    )
+    assert _escalation_flags(session) == [
+        True
+    ], "a bash command whose ARGUMENT names the guard's file conferred the exemption"
     assert session._pending_shape_incidents[0][0] == "bash"
 
 
@@ -322,9 +319,9 @@ async def test_a_result_that_prints_the_path_inside_credential_text_still_escala
     rows = await _drive(session, _read_tool(), stream)
 
     assert REDACTION_MARKER in rows[0], "the result was not masked"
-    assert _escalation_flags(session) == [True], (
-        "a tool OUTPUT that printed the guard's path silenced an escalation"
-    )
+    assert _escalation_flags(session) == [
+        True
+    ], "a tool OUTPUT that printed the guard's path silenced an escalation"
 
 
 @pytest.mark.asyncio

@@ -76,6 +76,8 @@ _EXEMPT_RELATIVE_PATHS: tuple[str, ...] = (
 #: installed wheel (``site-packages/local_operator/…``) with the same relative
 #: spelling; the corpus entry resolves only where ``tests/`` sits beside the
 #: package, which is the only place the corpus exists.
+
+
 def _exempt_sources() -> frozenset[Path]:
     found: set[Path] = set()
     for candidate in (_REPO_ROOT, _PACKAGE_ROOT):
@@ -99,6 +101,8 @@ READING_TOOLS: frozenset[str] = frozenset({"read", "grep"})
 #: repo root. The CWD is what the resolver uses in the common case; the repo root
 #: is here because a session's own working directory is not required to be the
 #: process's, and both resolve the repo-relative spellings above.
+
+
 def _roots() -> tuple[Path, ...]:
     try:
         cwd = Path.cwd()
