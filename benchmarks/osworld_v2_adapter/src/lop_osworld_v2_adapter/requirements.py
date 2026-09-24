@@ -19,10 +19,12 @@ executable spec of this table.
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from types import MappingProxyType
 
 from lop_osworld_v2_adapter.provisioning import resolve_proxy_policy
 from lop_osworld_v2_adapter.taskfile import TaskDescriptor
+from lop_osworld_v2_adapter.vendor_bridge import SECRET_ENV_NAMES, USER_SIM_KEY_ENV
 
 from local_operator.evaluation.adapters.api import (
     Requirement,
@@ -297,13 +299,23 @@ def derive_task_requirements(
         out.append(_requirement("OSWORLD_PROXY_ENDPOINT", kind="infra", required=False))
 
     if _has_config_type(descriptor, "googledrive", "login"):
-        out.append(_requirement("GOOGLE_ACCOUNT_CREDENTIALS", kind="secret", required=True))
+        # Declared OPTIONAL, and the row is kept so an invocation that already
+        # supplies it is accepted unchanged. A search of the pinned tree finds
+        # this name at NO call site at all -- the googledrive controller signs in
+        # with the credentials its own settings carry -- so declaring it binding
+        # is the anti-pattern this table already condemns for
+        # OSWORLD_PROXY_CREDENTIALS: a required name the apparatus cannot consume
+        # trains an operator to fabricate a credential.
+        out.append(_requirement("GOOGLE_ACCOUNT_CREDENTIALS", kind="secret", required=False))
 
     # user_simulator is a dict like {"type": "llm", "provider": ..., "model": ...}
-    # Only an LLM-backed simulator needs an API key; scripted/fixed do not.
+    # Only an LLM-backed simulator needs an API key; scripted/fixed do not. The
+    # name comes from vendor_bridge (the module that owns the env names) so the
+    # declaration, the delivery allowlist and the substitute table cannot spell it
+    # three ways.
     sim = descriptor.user_simulator
     if isinstance(sim, dict) and sim.get("type") == "llm":
-        out.append(_requirement("OSWORLD_USER_SIM_API_KEY", kind="secret", required=True))
+        out.append(_requirement(USER_SIM_KEY_ENV, kind="secret", required=True))
 
     # A date-sensitive evaluator needs the host to pin the episode clock.
     # Detected from the evaluator text so the requirement follows the task.
@@ -354,6 +366,43 @@ def derive_requirements(
     )
 
 
+# Which declared SECRETS can actually reach their consumer in this build.
+#
+# A requirement the host cannot deliver is not one it can satisfy, and
+# ``require_supplied`` refuses such a name outright rather than asking for a value
+# that changes nothing. That is QA round 1's finding, not a hypothetical: this
+# check matched GITLAB_PRIVATE_TOKEN by name, the operator supplied it, and the
+# episode still allocated a guest and died in vendor code -- because
+# ``desktop_env/controllers/gitlab.py:19-23`` reads it through ``os.getenv`` at
+# import and nothing in this build put it there.
+#
+# DERIVED, never restated: the AWS pair reaches the provider directly out of the
+# resolved secrets, and every other secret needs the env-delivery allowlist
+# (``vendor_bridge``) that exists for exactly this reason. A name that gains a
+# channel therefore becomes deliverable here for free, and a declaration naming
+# something that has none is refused instead of offering an inert remedy.
+#
+# Infra values are absent from this table because they are deliverable by
+# construction: they arrive as ``infra_values`` and the adapter injects the ones
+# upstream reads into the worker's environment before its first import.
+_DELIVERED_SECRETS = frozenset({"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"}) | SECRET_ENV_NAMES
+
+# Names the pinned vendor ACCEPTS IN PLACE OF another, so supplying the substitute
+# satisfies the requirement. ``user_simulator.respond`` hands its options to
+# ``model_client.generate_chat`` WITHOUT a key when the simulator has none
+# configured, and that client then resolves one through its own
+# ``default_api_key_env`` -- which for these tasks is the judge key
+# (``model_client.py:162-172``). Measured on the release corpus, 6 tasks
+# (task_007/024/026/034/095/098) declare the simulator key and nothing else, so
+# refusing it on its own absence would be a coverage regression: those episodes
+# ran before this check existed. What they risk is also CONDITIONAL -- the
+# simulator is only called when the agent asks the user something -- which is why
+# the substitute, not the requirement, is what has to be relaxed.
+_SECRET_SUBSTITUTES: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {USER_SIM_KEY_ENV: (_JUDGE_SECRET,)}
+)
+
+
 class MissingRequiredRequirements(RuntimeError):
     """A requirement the task declares as REQUIRED was not supplied.
 
@@ -364,8 +413,60 @@ class MissingRequiredRequirements(RuntimeError):
     """
 
 
-def missing_required(requirements: Iterable[Requirement], *, supplied: set[str]) -> tuple[str, ...]:
+class UndeliverableRequirement(RuntimeError):
+    """The task requires a value this build has no channel to hand over.
+
+    Deliberately NOT the same failure as :class:`MissingRequiredRequirements`,
+    because the remedy is different: that one asks the operator for a value they
+    can supply, while this one says the episode cannot run here at all -- a
+    supplied value changes nothing, so the choices are a build whose secret path
+    carries the name or an excluded task. Raised from the same seam, so it is
+    equally free: nothing is allocated and the diagnostic names only the ref.
+    """
+
+
+def undelivered_secrets(requirements: Iterable[Requirement]) -> tuple[str, ...]:
+    """The required secret names no channel in this build can carry.
+
+    Sorted, and derived from :data:`_DELIVERED_SECRETS` rather than from a list
+    of names, so a secret that gains a delivery channel stops being refused by
+    that change alone.
+    """
+
+    return tuple(
+        sorted(
+            req.name
+            for req in requirements
+            if req.required and req.kind == "secret" and req.name not in _DELIVERED_SECRETS
+        )
+    )
+
+
+def _remedy(requirement: Requirement) -> str:
+    """How an operator supplies this name, in one step: the flag and the kind."""
+
+    if requirement.kind == "secret":
+        flag = f"--secret {requirement.name}"
+    else:
+        flag = f"--infra {requirement.name}=..."
+    alternatives = _SECRET_SUBSTITUTES.get(requirement.name)
+    if alternatives:
+        return f"{requirement.name} (supply as {flag}, or as the substitute {list(alternatives)})"
+    return f"{requirement.name} (supply as {flag})"
+
+
+def missing_required(
+    requirements: Iterable[Requirement],
+    *,
+    supplied: set[str],
+    substitutes: Mapping[str, tuple[str, ...]] = MappingProxyType({}),
+) -> tuple[str, ...]:
     """The names in ``requirements`` that are required and were NOT supplied.
+
+    A name counts as supplied when one of its accepted SUBSTITUTES was: the
+    pinned vendor resolves some keys through a fallback chain, and refusing a
+    name it would have found by another route is a coverage regression rather
+    than a safety win.
 
     Sorted, so the refusal is deterministic. ``required=False`` declarations
     are excluded by construction: their absence is benign by the table's own
@@ -373,8 +474,12 @@ def missing_required(requirements: Iterable[Requirement], *, supplied: set[str])
     nothing consumes.
     """
 
+    satisfied = set(supplied)
+    for name, alternatives in substitutes.items():
+        if satisfied.intersection(alternatives):
+            satisfied.add(name)
     return tuple(
-        sorted(req.name for req in requirements if req.required and req.name not in supplied)
+        sorted(req.name for req in requirements if req.required and req.name not in satisfied)
     )
 
 
@@ -429,6 +534,18 @@ def require_supplied(
     Only REFS are named, never values: this text crosses the RPC boundary into
     the episode diagnostic and the sealed bundle.
 
+    TWO REFUSALS, because there are two failure modes and they need different
+    words. A name that is absent but deliverable is
+    :class:`MissingRequiredRequirements`, and its message names the flag that
+    supplies it (``--secret``/``--infra``) so the remedy is one step. A name this
+    build cannot deliver at all is :class:`UndeliverableRequirement` and is
+    refused whether or not it was supplied: an episode that proceeds on a value
+    the vendor can never read would allocate a guest and die in vendor code, which
+    is the exact defect QA round 1 reproduced on ``GITLAB_PRIVATE_TOKEN``. If you
+    want that family runnable, the change is to put the name on the env-delivery
+    allowlist -- a secret-plumbing change with its own review, deliberately not
+    taken here.
+
     ``task_id`` is the name the RUNNER gave this task (``ResetStartParams``),
     which is the spelling the episode, the manifest and the operator's command
     line carry -- the descriptor's own ``task_id`` is the task file's internal
@@ -436,15 +553,25 @@ def require_supplied(
     the descriptor; the two describe one task or the run is already wrong.
     """
 
+    derived = derive_task_requirements(descriptor, infra_values=tuple(infra_values))
     supplied = {ref.name for ref in secret_refs} | {value.name for value in infra_values}
-    missing = missing_required(
-        derive_task_requirements(descriptor, infra_values=tuple(infra_values)),
-        supplied=supplied,
-    )
+
+    undeliverable = undelivered_secrets(derived)
+    if undeliverable:
+        raise UndeliverableRequirement(
+            f"task {task_id!r} declares {list(undeliverable)} as required, but this "
+            "adapter build has no channel that can hand the value to the code that "
+            "reads it, so supplying it would change nothing; refusing before the "
+            "provider is constructed. A build whose secret path carries the name "
+            "(vendor_bridge.SECRET_ENV_NAMES) can run this task; this one cannot."
+        )
+
+    missing = missing_required(derived, supplied=supplied, substitutes=_SECRET_SUBSTITUTES)
     if missing:
+        by_name = {req.name: req for req in derived}
         raise MissingRequiredRequirements(
-            f"task {task_id!r} declares {list(missing)} as required, and the "
-            "host supplied neither a secret ref nor an infra value for them; refusing "
-            "before the provider is constructed, because the task's own controller "
-            "reads them the moment the guest's task object is instantiated"
+            f"task {task_id!r} declares {[_remedy(by_name[name]) for name in missing]} as "
+            "required, and the host supplied neither a secret ref nor an infra value for "
+            "them; refusing before the provider is constructed, because the task's own "
+            "controller reads them the moment the guest's task object is instantiated"
         )

@@ -534,18 +534,20 @@ class OSWorldV2Adapter:
         provisioning.validate_proxy_config_file(self._infra_values, enable_proxy=needs_proxy)
         # THE DECLARATION CONTRACT, enforced at the last free moment. Every
         # requirement THIS TASK declares as required must have been supplied --
-        # as a secret ref or as an infra value -- or the episode is refused
-        # here: after the descriptor exists, before the provider is built and
-        # therefore before any guest is allocated.
+        # as a secret ref or as an infra value -- or be a name this build cannot
+        # hand over at all, which is refused here just the same: after the
+        # descriptor exists, before the provider is built and therefore before
+        # any guest is allocated.
         #
         # It sits AFTER the two refusals above, not instead of them. Those name
         # a benchmark-specific consequence ("OSWorld would return a silent
         # 0.0") for the two families they cover; this is the net for every
-        # OTHER requirement the task's own fields introduce, which until now
-        # had no check at all -- GOOGLE_ACCOUNT_CREDENTIALS,
-        # OSWORLD_USER_SIM_API_KEY, GITLAB_PRIVATE_TOKEN/GITLAB_URL and
-        # WEBSITE_HOST_SUFFIX, the last of which cost an allocated guest and
-        # then a vendor traceback on 40 of the release's 108 tasks. It cannot
+        # OTHER requirement the task's own fields introduce, which until now had
+        # no check at all -- OSWORLD_USER_SIM_API_KEY and WEBSITE_HOST_SUFFIX
+        # (declared by 40 of the release's 108 tasks, each of which allocated a
+        # guest and then died in vendor code), plus GITLAB_PRIVATE_TOKEN, which
+        # this build cannot deliver to its controller and so refuses outright
+        # rather than asking for a value that would change nothing. It cannot
         # live in the runner: ``inspect_requirements`` runs before the task is
         # named, so the runner's gate sees only the always-on baseline. See
         # ``requirements.require_supplied`` for the full argument, including
