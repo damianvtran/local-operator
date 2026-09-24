@@ -1936,61 +1936,57 @@ class ProviderController:
         return entries
 
     def initial_catalogue(self, *, cache_dir: Any = None) -> list[CatalogueEntry]:
-        """First frame catalogue: shipped models and authoritative cached listings.
+        """First frame catalogue: every provider's rows, from its CACHED listing.
 
-        Synchronous, non-blocking, and network-free. While direct providers have
-        stable shipped static models in the registry, aggregator providers
-        (OpenRouter, Radient) have no hardcoded registry models and rely on their
-        dynamic catalogues. When a previous live listing exists on disk, reading it
-        via :func:`cached_available_models` allows hundreds of available models to
-        paint on the very first frame rather than appearing only after a network
-        round trip. DeepSeek's native inventory also owns its selectable set:
-        using the shipped rows here would flash retired ids even when the live
-        catalogue was already cached. Its cache reader supplies the ordinary
-        static fallback when no trustworthy native listing exists.
+        Synchronous, non-blocking and NETWORK-FREE: the reader is
+        :func:`cached_available_models`, which peeks at the document on disk and
+        never takes a fetch lease, spawns a revalidation thread or issues a
+        request. A picker has to paint on the keystroke that opened it.
+
+        WHY EVERY PROVIDER AND NOT JUST THE AGGREGATORS. This used to hand a
+        direct provider the shipped static registry alone, so the first frame --
+        and, for the desktop composer's inline ``/model `` argument list, the
+        ONLY frame -- could not offer a model the provider lists and the registry
+        does not carry. Aggregators were read through the cache because they ship
+        no static rows at all; that was never a special rule, it was just the one
+        provider class where the gap was fatal enough to be noticed.
+
+        The policy lives where it already lived, in the reader: on a cold or
+        unusable cache :func:`cached_available_models` falls back to the shipped
+        rows, so the first frame is field-for-field the one this method always
+        painted, and ``discovery._listing_replaces_static()`` still decides when a
+        cached listing OWNS the set -- deepseek lists its own selectable
+        inventory, and an account-scoped provider prunes the registry against its
+        listing.
+
+        ORDER, which pickers rely on: within a provider the cached listing comes
+        first (providers list newest-first) and the registry-only ids it did not
+        mention follow; between providers it is the ``_chat_providers()``
+        registry order. With nothing cached that is the registry's own dict order.
         """
         entries: list[CatalogueEntry] = []
         usable = self.usable_providers()
         for definition in _chat_providers():
             connected = usable is None or definition.id in usable
-            if definition.id in AGGREGATOR_PROVIDERS or definition.id == "deepseek":
-                models, _status = cached_available_models(definition.id, cache_dir=cache_dir)
-                for model in models:
-                    entries.append(
-                        CatalogueEntry(
-                            provider=definition.id,
-                            model_id=model.id,
-                            label=model_label(definition.id, model.id, model.name or "").full,
-                            listing_name=model.name or "",
-                            context_window=max(0, model.context_window),
-                            default_context_window=model.default_context_window,
-                            max_context_window=model.max_context_window,
-                            input_price=_price(model.input_price, definition, free=model.free),
-                            output_price=_price(model.output_price, definition, free=model.free),
-                            connected=connected,
-                            aggregated=definition.id in AGGREGATOR_PROVIDERS,
-                            routed=model.routed,
-                            time_of_use=model.time_of_use,
-                        )
+            models, _status = cached_available_models(definition.id, cache_dir=cache_dir)
+            for model in models:
+                entries.append(
+                    CatalogueEntry(
+                        provider=definition.id,
+                        model_id=model.id,
+                        label=model_label(definition.id, model.id, model.name or "").full,
+                        listing_name=model.name or "",
+                        context_window=max(0, model.context_window),
+                        default_context_window=model.default_context_window,
+                        max_context_window=model.max_context_window,
+                        input_price=_price(model.input_price, definition, free=model.free),
+                        output_price=_price(model.output_price, definition, free=model.free),
+                        connected=connected,
+                        aggregated=definition.id in AGGREGATOR_PROVIDERS,
+                        routed=model.routed,
+                        time_of_use=model.time_of_use,
                     )
-            else:
-                for model_id, info in static_models(definition.id).items():
-                    entries.append(
-                        CatalogueEntry(
-                            provider=definition.id,
-                            model_id=model_id,
-                            label=model_label(definition.id, model_id, info.name or "").full,
-                            listing_name=info.name or "",
-                            context_window=max(0, info.context_window or 0),
-                            default_context_window=info.default_context_window,
-                            max_context_window=info.max_context_window,
-                            input_price=_price(info.input_price, definition),
-                            output_price=_price(info.output_price, definition),
-                            connected=connected,
-                            aggregated=False,
-                            time_of_use=info.time_of_use,
-                        )
-                    )
+                )
         return entries
 
     def entry_for(
