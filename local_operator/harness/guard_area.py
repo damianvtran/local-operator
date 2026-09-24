@@ -130,10 +130,14 @@ def reads_exempt_source(
     ``session_cwd`` is the root the READER will use (``ToolContext.cwd``), and
     resolution goes through the reader's own resolver rather than through a
     second rule written to agree with it. When it is omitted the process CWD is
-    used, which is what a bare ``Path.resolve`` would do and what the callers
-    that have no session (unit calls, introspection) want; the loop always
-    threads it. See the module docstring for the bypass that made this
-    load-bearing.
+    used (``or "."``), which is what a bare ``Path.resolve`` would do and what
+    the callers that have no session (unit calls, introspection) want; that is
+    the SAME fallback ``_safe_cwd`` applies to a context-less reader, so the two
+    still agree — but they agree on the process CWD, not on a session root, and
+    this is therefore NOT a fail-safe default: a relative spelling resolves
+    elsewhere whenever the process CWD and the session root differ. The loop
+    always threads the real root. See the module docstring for the bypass that
+    made this load-bearing.
     """
     if tool_name not in READING_TOOLS or not arguments:
         return False

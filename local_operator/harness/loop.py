@@ -4093,9 +4093,14 @@ class AgentLoop:
         ``session_cwd`` is threaded in for that same exemption: a relative
         ``path`` must be resolved against the root the READER uses, and a
         verdict that resolved it against anything else would exempt a read of a
-        different file — the round-1 blocker on PR #1502. ``None`` is the
-        escalating reading, so a caller that has no session root cannot widen
-        the exemption by forgetting it.
+        different file — the round-1 blocker on PR #1502. ``None`` does NOT make
+        the verdict fail safe, and must not be read as if it did: the guard then
+        falls back to the process CWD (``guard_area.py`` resolves
+        ``session_cwd or "."``), which is the same fallback ``_safe_cwd``
+        applies to a context-less reader — so the two still AGREE, but they
+        agree on the process CWD, and a relative spelling resolves somewhere
+        other than the session root whenever the two differ. That route is only
+        ever exercised by a caller that forgot the argument; this one does not.
         """
         texts = [item.text for item in content if isinstance(item, TextContent)]
         if not texts:
