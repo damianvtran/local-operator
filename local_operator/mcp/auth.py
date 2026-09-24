@@ -1587,7 +1587,10 @@ class McpTokenStorage:
         if store is None:
             # No store configured is a KNOWN state, not a failed read: there is
             # no grant, and there never will be one until a store appears.
-            return (0.0, False)
+            # Every return is a GrantMarker, never a bare tuple: the manager's
+            # retry rule reads the fields by NAME, so a two-element tuple here
+            # raised AttributeError in the poll the first time it was compared.
+            return GrantMarker(0.0, False, None)
         try:
             rows = store.list_credentials(MCP_OAUTH_PROVIDER)
         except Exception:  # noqa: BLE001 — an unreadable store is "unknown", never a value
@@ -1596,7 +1599,7 @@ class McpTokenStorage:
         row = next((r for r in rows if r.identity_key == self.server_url), None)
         data = row.data if row is not None and isinstance(row.data, dict) else {}
         if not isinstance(data, dict):
-            return (0.0, False)
+            return GrantMarker(0.0, False, None)
         dead = data.get(GRANT_DEAD_AT_KEY)
         is_dead = isinstance(dead, (int, float)) and not isinstance(dead, bool) and dead > 0
         return GrantMarker(_chain_stamp_of(data), is_dead, _grant_witness_at(data))

@@ -4833,7 +4833,8 @@ class TestAuthBlockRevalidation:
         try:
             await self._seed_client_info(store)
             storage = McpTokenStorage(self.URL, store)
-            assert storage.grant_marker().witness_at is None, "nothing has stood up yet"
+            before = storage.grant_marker()
+            assert before is not None and before.witness_at is None, "nothing has stood up yet"
 
             async def refuses(name: str, cfg: Any) -> Any:
                 return None  # "refused us on authorization"
@@ -4859,6 +4860,7 @@ class TestAuthBlockRevalidation:
             assert done["ran"], "the sibling never landed inside our attempt: measured nothing"
 
             marker = storage.grant_marker()
+            assert marker is not None
             assert marker.witness_at is not None, "the sibling's success left no witness"
             assert marker.stamp == 500.0, (
                 "the sibling's rotation moved the chain stamp, so this test would "
@@ -4947,7 +4949,8 @@ class TestAuthBlockRevalidation:
                 f"{len(ours) - baseline_attempts} retries for {len(set(values))} witness "
                 "values over 60 polls"
             )
-            assert storage.grant_marker().stamp == 500.0, "the chain moved: wrong axis measured"
+            now = storage.grant_marker()
+            assert now is not None and now.stamp == 500.0, "the chain moved: wrong axis measured"
         finally:
             await manager.disconnect_all()
             store.close()
@@ -5148,8 +5151,9 @@ class TestAuthBlockRevalidation:
             self._stub_transport(monkeypatch, refuses)
             await manager._reconnect("dd", 0.0, manager._epoch)
             assert manager.auth_blocked("dd") is True
+            after_failure = storage.grant_marker()
             assert (
-                storage.grant_marker().witness_at is None
+                after_failure is not None and after_failure.witness_at is None
             ), "a FAILED connect wrote a success witness"
 
             value = await self._a_sibling_connect_stands_up(
@@ -5248,7 +5252,8 @@ class TestAuthBlockRevalidation:
             await self._seed_client_info(store)
             self._stub_token_endpoint(monkeypatch)
             storage = McpTokenStorage(self.URL, store)
-            assert storage.grant_marker().witness_at is None, "nothing has stood up yet"
+            before = storage.grant_marker()
+            assert before is not None and before.witness_at is None, "nothing has stood up yet"
 
             provider = build_oauth_provider(
                 self.URL, manager._configs["dd"], store=store, endpoints=self._endpoints()
@@ -5300,6 +5305,24 @@ def test_the_retry_rule_still_sees_a_tombstone() -> None:
     assert _grant_change_is_evidence(GrantMarker(500.0, False, 900.0), known) is False
 
 
+def test_a_storeless_marker_is_comparable_by_the_retry_rule() -> None:
+    """With no store, the marker is still a ``GrantMarker``, not a bare tuple.
+
+    ``grant_marker()`` returned ``(0.0, False)`` from its no-store arm after the
+    marker grew a third, NAMED field; the retry rule reads fields by name, so a
+    blocked server on a host whose ``AuthStore`` could not be built raised
+    ``AttributeError`` in the poll instead of staying quietly blocked.
+    """
+    from local_operator.mcp.auth import GrantMarker, McpTokenStorage
+    from local_operator.mcp.manager import _grant_change_is_evidence
+
+    storage = McpTokenStorage("https://srv.example/mcp", None)
+    storage._store = None  # the "AuthStore could not be constructed" state
+    marker = storage.grant_marker()
+    assert isinstance(marker, GrantMarker)
+    assert _grant_change_is_evidence(marker, GrantMarker(0.0, False, None)) is False
+
+
 class TestAttemptMarkerUnknownSemantics:
     """``None`` (the store was unreadable) is not "the caller did not say".
 
@@ -5335,8 +5358,10 @@ class TestAttemptMarkerUnknownSemantics:
         store = TestAuthBlockRevalidation._real_store(tmp_path, obtained_at=1000.0)
         manager = TestAuthBlockRevalidation._oauth_manager(tmp_path, store)
         try:
+            from local_operator.mcp.auth import GrantMarker
+
             # A first ordinary block, as a real arm would have taken it.
-            manager._block_on_auth("dd", (1000.0, False, None))
+            manager._block_on_auth("dd", GrantMarker(1000.0, False, None))
             assert manager._auth_grant_marker.get("dd") == (1000.0, False, None)
 
             # The attempt's own read failed (a store hiccup) AND a peer re-auths
