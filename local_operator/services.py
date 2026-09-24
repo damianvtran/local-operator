@@ -51,6 +51,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Sequence
 
+from local_operator import procname
 from local_operator.procstate import pid_liveness
 from local_operator.server import registry as serve_registry
 from local_operator.server import reload as serve_reload
@@ -393,10 +394,30 @@ SERVE_LAUNCHER_NAMES = frozenset({"lop", "local-operator"})
 #: ``lop stop``.
 SERVE_LAUNCHER_VERB = "serve"
 
-#: The first words of the label :mod:`local_operator.procname` writes over argv[0].
-#: The fourth word is the port (``port=<digits>``), checked by pattern rather than
-#: listed, because the port is the machine's own number.
-SERVE_PROCNAME_LABEL = ("Local", "Operator", "[serve]")
+#: The first words of the label :mod:`local_operator.procname` writes over ``argv[0]``,
+#: DERIVED from that module's own template rather than typed again: a label change
+#: must not be able to leave this proof behind (review round 3, NIT-2).
+_SERVE_LABEL_PREFIX = re.compile(
+    "^"
+    + re.escape(procname.LABEL_SERVE).replace(
+        re.escape("{brand}"), re.escape(procname.BRAND)
+    ).replace(re.escape("{port}"), r"\d+")
+    + "$"
+)
+
+#: The desktop app's managed backend script, word by word. The app spawns
+#: ``<interpreter> -c "from local_operator.cli import main; main()" serve --port N``
+#: (``local-operator-ui``, ``src/main/backend/owned-serve-launch.ts``) and that shape
+#: is DELIBERATELY never branded — ``procname`` refuses a ``-c`` launch on purpose,
+#: because the app verifies its backend by asking the same ``-c`` string to report
+#: ``sys.executable`` and a re-exec through the branded link would break that check
+#: on every machine. So the proof has to accept the spelling itself, or the app's own
+#: backend is the one daemon ``reclaim`` cannot end — which was the daemon holding
+#: 1111 in the incident this change exists for (review round 3, R3-1).
+#:
+#: Matched as a WORD SEQUENCE, not as a substring of the command: a ``-c`` that
+#: merely prints this text is not a serve daemon.
+SERVE_ENTRYPOINT_WORDS = ("from", "local_operator.cli", "import", "main;", "main()")
 
 #: How long a reclaimed daemon is given to leave after ``SIGTERM``.
 #:
@@ -487,6 +508,16 @@ def is_serve_command(command: str) -> bool:
             continue
         if index in (0, labelled):
             return True
+    # THE DESKTOP APP'S OWN BACKEND: ``<interpreter> -c "<entrypoint>" serve …``.
+    # Its verb sits after the interpreter, the ``-c`` and the five script words, so
+    # the two arms above cannot see it, and it is the daemon the incident's operator
+    # most needed to be able to end (review round 3, R3-1: this predicate refused the
+    # app's live backend on 1111 while `services status` told the operator to reclaim
+    # that exact pid).
+    entrypoint = _serve_entrypoint_length(words[1:])
+    if entrypoint:
+        verb = 1 + entrypoint
+        return verb < len(words) and words[verb] == SERVE_LAUNCHER_VERB
     return False
 
 
@@ -496,15 +527,28 @@ def _procname_label_length(words: list[str]) -> int:
     ``procname`` is what makes this project's processes identifiable in the process
     listing, and on this platform it works by REPLACING argv[0] (see
     :mod:`local_operator.procname`), so a labelled daemon's real argv begins one
-    label further in. The shape is narrow on purpose and is the one measured on
-    this host — ``Local Operator [serve] port=18490 …`` — rather than a guess at
-    what a future label might look like: a looser rule is how a proof stops
-    proving.
+    label further in. The pattern comes from that module's own ``LABEL_SERVE``
+    template, and the length is discovered rather than hard-coded because the brand
+    is a template field (``Local Operator [serve] port=18490`` is four words today).
     """
-    if len(words) >= 4 and tuple(words[:3]) == SERVE_PROCNAME_LABEL:
-        if re.fullmatch(r"port=\d+", words[3]):
-            return 4
+    for length in range(1, min(len(words), 8) + 1):
+        if _SERVE_LABEL_PREFIX.match(" ".join(words[:length])):
+            return length
     return 0
+
+
+def _serve_entrypoint_length(words: list[str]) -> int:
+    """How many leading words are the desktop app's ``-c`` entry point; ``0`` if none.
+
+    ``<interpreter> -c "from local_operator.cli import main; main()" serve …`` — the
+    app's managed backend, which is never branded (see :data:`SERVE_ENTRYPOINT_WORDS`).
+    """
+    window = len(SERVE_ENTRYPOINT_WORDS)
+    if len(words) < window + 1 or words[0] != "-c":
+        return 0
+    if tuple(words[1 : 1 + window]) != SERVE_ENTRYPOINT_WORDS:
+        return 0
+    return window + 1
 
 
 def serve_process(pid: int, *, timeout_s: float = HEALTH_TIMEOUT_S) -> str | None:
@@ -634,7 +678,10 @@ class _Verdict:
 
 VERDICTS: dict[str, _Verdict] = {
     DEAF: _Verdict("recorded on {address}, but nothing is answering there", "deaf"),
-    SQUATTED: _Verdict("recorded on {address}, but something else is answering there", "squatted"),
+    SQUATTED: _Verdict(
+        "recorded on {address}, but what answers there is not this record's daemon",
+        "squatted",
+    ),
     WEDGED: _Verdict("recorded on {address}, but the daemon stopped reporting", "wedged"),
     STALE: _Verdict("recorded on {address}, but its process has exited", "stale"),
     STRAY: _Verdict(
