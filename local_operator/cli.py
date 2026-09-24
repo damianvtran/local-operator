@@ -1170,6 +1170,34 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "the next `lop services restart`."
         ),
     )
+    # The RECOVERY verb, and the only destructive one in this group. It exists
+    # because a `lop serve` daemon that is alive and not serving its address is
+    # reachable by NO other command on this machine: `lop stop` resolves session
+    # runtimes, `sessions reclaim` refuses any candidate that has a record, and
+    # `services restart` only ASKS a daemon to move. On 2026-09-23 that left the
+    # operator's desktop app down for twelve minutes with `kill` by hand as the
+    # only way out, and the pid to kill discoverable only by `lsof`.
+    services_reclaim = services_subparsers.add_parser(
+        "reclaim",
+        help=(
+            "End a `lop serve` daemon that is recorded but not serving its address "
+            "(never one that is serving)"
+        ),
+        description=(
+            "Ask ONE serve daemon, named by pid, to leave, escalating from SIGTERM to "
+            "SIGKILL at a bound, after proving the process is this product's serve "
+            "daemon and that it is not the one serving the address its record names. "
+            "`lop services status` lists the daemons this is for. It is never "
+            "automatic: the daemon may be supervising session runtimes, and no reader "
+            "of a record can prove a successor is ready to take its place."
+        ),
+        parents=[parent_parser],
+    )
+    services_reclaim.add_argument(
+        "pid",
+        type=int,
+        help="The daemon's pid, exactly as `lop services status` prints it",
+    )
 
     # The install LAYOUT's own commands. One verb group rather than flags on
     # ``update`` because neither of these installs anything from a network: they
@@ -8621,7 +8649,17 @@ def main() -> int:
             # for the same situation: 2 is argparse's own usage code and the one this
             # path already exited with through `parser.error`, so nothing that scripts
             # the exit status sees a change (round 11 R11-4).
-            print("usage: lop services {status, restart}", file=sys.stderr)
+            if command == "reclaim":
+                from local_operator.services import reclaim_serve_daemon
+
+                reclaim = reclaim_serve_daemon(getattr(args, "pid"))
+                for line in reclaim.lines:
+                    print(line)
+                # A REFUSAL IS A COMPLETED DECISION, and it exits non-zero so a
+                # script can tell it from a reclaim that ran — the same shape
+                # `lop stop`'s "turn is in flight" refusal has.
+                return 1 if reclaim.refused else 0
+            print("usage: lop services {status, restart, reclaim}", file=sys.stderr)
             return 2
         elif args.subcommand == "install":
             # Same lazy import, same reason. The generation layout's own verbs:

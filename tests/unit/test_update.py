@@ -1038,7 +1038,7 @@ def test_main_refuses_an_unknown_services_verb(monkeypatch: pytest.MonkeyPatch, 
     monkeypatch.setattr("sys.argv", ["lop", "services"])
     assert main() == 2
     err = capsys.readouterr().err
-    assert err.strip() == "usage: lop services {status, restart}"
+    assert err.strip() == "usage: lop services {status, restart, reclaim}"
     assert "{credential,config,agents" not in err, "the whole program's verb list"
 
 
