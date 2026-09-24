@@ -753,20 +753,17 @@ export function SessionListScreen() {
 					</p>
 				</div>
 			</div>
-			{/* NO BROWSER SCROLL ANCHORING on the list: the list moves itself. The
-			    FLIP settle animates every reorder in content coordinates, and the
-			    refusal band's observer pays the band's height out of `scrollTop`. Chrome's
-			    anchoring (and Safari's from 27) adjusts that same offset on its own
-			    schedule, so two mechanisms were correcting one position. Measured at
-			    200% root font on a scrolled 41-row list, with anchoring on: the
-			    optimistic ★ lift shifted every visible row by 142px in one frame, and a
-			    refused pin left the pressed row 127.6px above where it had been held.
-			    With anchoring off, the same press ended 0.4px from where it started.
-			    Off is also what a phone on Safari before 27 already gets, so this
-			    makes every browser behave like the one most readers have. */}
+			{/* BROWSER SCROLL ANCHORING STAYS ON (QA round 4, Q6). An earlier round
+			    opted the list out (`overflow-anchor: none`) so the refusal band's
+			    arithmetic carry and the browser were not both correcting one offset.
+			    With the opt-out, every unrelated list change moved a scrolled reader's
+			    rows: a new live session +76px, a session resuming +51px, another
+			    client's pin below the fold +45.5px at 100% and +91px at 200%, all 0px
+			    with anchoring on. The band's observer now re-reads the rows' position
+			    after every scroll the browser makes, so the two no longer compete. */}
 			<main
 				ref={mainRef}
-				className="flex flex-1 flex-col overflow-y-auto [overflow-anchor:none] px-1 pb-2"
+				className="flex flex-1 flex-col overflow-y-auto px-1 pb-2"
 			>
 				<input
 					value={query}
