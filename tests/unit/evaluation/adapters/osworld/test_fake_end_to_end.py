@@ -214,6 +214,43 @@ async def test_fake_provider_episode_seals_a_valid_bundle(tmp_path: Path, episod
 
 
 @pytest.mark.asyncio
+async def test_a_required_absent_value_fails_the_episode_by_name_without_allocating(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The operator-visible shape of the refusal, through the real runner.
+
+    The adapter's own tests watch the provider factory; this one watches the
+    EPISODE, because that is what an operator reads. The measured defect was
+    the same task in the opposite order: a guest allocated, then vendor code
+    raising ``ValueError: WEBSITE_HOST_SUFFIX must be set in environment
+    variables`` with a traceback that named no adapter. Here the diagnostic
+    must name the absent REF and the provider must never have been allocated.
+    """
+
+    provider = FakeProvider(scripted_score=1.0)
+    adapter = _adapter(tmp_path, provider)
+    (adapter._workspace_root / "tasks" / "task_website.py").write_text(fixtures.WEBSITE)
+    selector = _selector(tmp_path, adapter._workspace_root, adapter)
+    shim = _AdapterSupervisorShim(adapter, selector)
+    spec = _spec_with_task(episode_id)
+    object.__setattr__(spec, "task_id", "task_website")
+
+    runner = EpisodeRunner(
+        spec,
+        build_config(tmp_path),
+        selector=selector,
+        model=ScriptedModel(["finish"]),
+        launch=lambda _selector: shim,
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status == "failed", outcome.diagnostic
+    assert "WEBSITE_HOST_SUFFIX" in (outcome.diagnostic or "")
+    assert provider.allocated is False
+
+
+@pytest.mark.asyncio
 async def test_partial_score_maps_to_ppm_in_a_real_bundle(tmp_path: Path, episode_id: str) -> None:
     provider = FakeProvider(scripted_score=0.5)
     adapter = _adapter(tmp_path, provider)
