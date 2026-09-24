@@ -249,6 +249,28 @@ def user_turns(kinds: Sequence[str]) -> int:
     return sum(kind in {"user", "goal"} for kind in kinds)
 
 
+class ScriptedStreamExhausted(RuntimeError):
+    """A provider call arrived that the script had no turn for.
+
+    Raised in place of an ``IndexError``, and the difference is not cosmetic.
+    The session's turn machinery CATCHES an exception out of the stream and
+    continues on a failed turn ("model stream failed: …"), so an exhausted
+    script does not fail the test — it silently shifts every LATER call's
+    conversation, which is precisely how a census label goes wrong while the
+    cell's assertions stay green. Naming the call, the script's length and the
+    question it was asking is what makes the mis-script diagnosable at all; the
+    stream also records the exhaustion in ``exhausted_at``, so a cell can assert
+    its tape held (``assert stream.exhausted_at is None``).
+    """
+
+    def __init__(self, index: int, scripted: int, question: str) -> None:
+        super().__init__(
+            f"provider call #{index} has no scripted turn ({scripted} scripted), "
+            f"and it asked {question[:120]!r} — the tape is short, so every call "
+            "after this one would be answered from the wrong turn"
+        )
+
+
 class ScriptedStream:
     """Replays one canned event list per model call; records the requests.
 
@@ -260,15 +282,27 @@ class ScriptedStream:
     def __init__(self, turns: Sequence[Sequence[StreamEvent]]) -> None:
         self.turns = [list(turn) for turn in turns]
         self.requests: list[ChatRequest] = []
+        #: The call index a script ran out at, or ``None`` while it held. Recorded
+        #: as well as raised (see :class:`ScriptedStreamExhausted`): the raise is
+        #: swallowed by the turn machinery, so this is the only thing a cell can
+        #: assert on.
+        self.exhausted_at: int | None = None
 
     def __call__(
         self, request: ChatRequest, signal: AbortSignal | None = None
     ) -> AsyncIterator[StreamEvent]:
         self.requests.append(request)
         # A call past the end of the script is a test bug (the loop re-entered
-        # when the author expected it to stop), and an IndexError names it
-        # exactly. Answering with a bare stop would hide the extra turn.
-        turn = self.turns[len(self.requests) - 1]
+        # when the author expected it to stop, or the tape missed a harness call
+        # like a judge), and answering with a bare stop would hide the extra
+        # turn. The tape is indexed by CALL rather than by how many turns the
+        # conversation happened to need, so the error names the call that had
+        # nothing scripted for it.
+        index = len(self.requests)
+        if index > len(self.turns):
+            self.exhausted_at = index
+            raise ScriptedStreamExhausted(index, len(self.turns), last_user_text(request))
+        turn = self.turns[index - 1]
 
         async def gen() -> AsyncIterator[StreamEvent]:
             for event in turn:

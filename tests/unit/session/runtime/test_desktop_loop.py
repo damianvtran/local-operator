@@ -289,3 +289,58 @@ async def test_a_bare_unknown_flag_is_refused_instead_of_starting_a_loop(tmp_pat
         assert session.prompt_calls == []
     finally:
         await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_loops_own_turn_is_stamped_as_harness_chrome(tmp_path):
+    """Agent review round 3: the loop's working turn is chrome, on the wire.
+
+    Driven through THIS route's own driver over a REAL session, because the
+    marker's whole job is to survive into the durable transcript: the cell reads
+    the persisted rows back rather than the arguments a call was made with.
+
+    Why it matters: ``LOOP_GOAL_PROMPT`` is in neither ``harness_chrome_prompts()``
+    nor a producer-side recogniser, and ``docs/DESKTOP_API.md`` names "the goal
+    loop's own prompt" as a row that MUST carry
+    ``provider_payload.harness_injected`` — the desktop is marker-only by
+    contract. Unstamped, a goal loop's turn replayed on every surface as the
+    USER's own words. Measured before the fix, through this handle: the row read
+    ``stamp=no, chrome-recognised=False``.
+
+    The negative control is in the same transcript: the person's own turn is not
+    stamped, which is what stops the marker from hiding a human's words.
+    """
+    from local_operator.session.goal_loop import LOOP_GOAL_PROMPT
+    from tests.e2e.harness import (
+        ScriptedStream,
+        build_session,
+        dispose_quietly,
+        text_turn,
+    )
+
+    stream = ScriptedStream(
+        [text_turn("advanced")] + [text_turn("VERDICT: ACHIEVED\nthe work is done")] * 5
+    )
+    session = build_session(tmp_path / "loop", stream)
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    try:
+        await handle.prompt("Ship it now", wait_complete=True)
+        driver = handle._loop_driver()
+        driver.start("Verify the fixture goal", "")
+        async with asyncio.timeout(60):
+            while driver.running:
+                await asyncio.sleep(0.01)
+        rows = [m for m in session.history() if getattr(m, "role", None) == "user"]
+    finally:
+        await handle.dispose()
+        await dispose_quietly(session)
+
+    by_text = {m.text: (m.provider_payload or {}) for m in rows}
+    assert stream.exhausted_at is None, (
+        "the loop settled on this script: a short tape does not fail the test, it "
+        "answers the next call from the wrong turn"
+    )
+    assert by_text.get("Ship it now") == {}, "a person's own turn is never stamped"
+    loop_turn = LOOP_GOAL_PROMPT.format(goal="Verify the fixture goal")
+    assert loop_turn in by_text, f"the loop's own turn is on the record: {list(by_text)}"
+    assert by_text[loop_turn] == {"harness_injected": True}
