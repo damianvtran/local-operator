@@ -31,7 +31,7 @@ from typing import Any
 
 import pytest
 
-from local_operator import update
+from local_operator import paths, update
 from local_operator.incidents import STALL_BOUND_CAUSE
 from local_operator.session.attention import _classify_orphaned_run
 from local_operator.session.runtime import journal, registry, stall_watchdog
@@ -963,12 +963,19 @@ def test_a_fired_stall_bound_is_narrated_as_its_own_class(
     row = journal.TurnJournalRow.from_json(registry.read_turn_journal(directory))
     assert row is not None
 
+    # THE HEADER CARRIES THE ARM EPOCH, and the fence reads it (review round 1,
+    # MAJOR-2): ``arm`` runs in the child's entry point, before anything can write a
+    # journal row, so the artifact states a life that began BEFORE this turn. A dump
+    # whose life cannot be placed is not evidence, which is why every fixture below
+    # spells it rather than an anonymous "armed".
+    header = f"[stall watchdog] pid {row.pid} armed for 300s at {row.started_at - 5:.0f} \n"
+
     dump = stall_watchdog.dump_path(row.pid)
     dump.parent.mkdir(parents=True, exist_ok=True)
 
     # (a) A HEADER-ONLY FILE IS NOT A FIRE — the hard-death shape, which must keep
     # reaching the arm that says no act was recorded.
-    dump.write_text("[stall watchdog] armed\n", encoding="utf-8")
+    dump.write_text("{header}", encoding="utf-8")
     os.utime(dump, (row.started_at + 1, row.started_at + 1))
     kind, cause, reason = journal.death_verdict(row)
     assert cause != STALL_BOUND_CAUSE, reason
@@ -1036,7 +1043,7 @@ def test_a_fired_stall_bound_is_narrated_as_its_own_class(
     # the precise falsehood this rung was added to end, in the other direction. The
     # fact still reaches the reader, as a lead on whatever DID answer.
     dump.write_text(
-        f"[stall watchdog] armed\n{stall_watchdog.FIRED_MARKER}0:05:00)!\nThread 0x1:\n"
+        f"{header}{stall_watchdog.FIRED_MARKER}0:05:00)!\nThread 0x1:\n"
         f"{stall_watchdog.HELD_MARKER}it did not end it\n",
         encoding="utf-8",
     )
@@ -1097,7 +1104,7 @@ def test_a_fired_stall_bound_is_narrated_as_its_own_class(
     # a runtime that is still ALIVE — the exact lie this rung exists to end, restored
     # through the reader.
     dump.write_text(
-        f"[stall watchdog] armed\n{stall_watchdog.FIRED_MARKER}0:05:00)!\nThread 0x1:\n"
+        f"{header}{stall_watchdog.FIRED_MARKER}0:05:00)!\nThread 0x1:\n"
         f'  File "{stall_watchdog.HELD_MARKER}the bound fired at 1.0 and did NOT end this '
         "runtime\n",
         encoding="utf-8",
@@ -1129,8 +1136,17 @@ def test_a_fired_stall_bound_is_narrated_as_its_own_class(
     # inference got backwards, and the reason "no post-fire marker" is not proof: the
     # fire is named AND the missing fact is named with it, so a reader is sent to the
     # dump without being told which death to look for.
+    #
+    # THE ARM EPOCH IS STILL REQUIRED, and it is the FENCE rather than a second policy
+    # question: an artifact whose life cannot be placed is refused before its fire is
+    # read at all (see ``_stall_bound_evidence``), so a fixture that means "this
+    # life's fire, under a header stating no policy" has to date the life it means. The
+    # two facts are independent, and a header carrying the epoch but no convention is
+    # exactly the artifact whose fire is reported and whose death is not.
     dump.write_text(
-        f"[stall watchdog] armed\n{stall_watchdog.FIRED_MARKER}0:05:00)!\nThread 0x1:\n",
+        f"{stall_watchdog.ARM_MARKER}pid {row.pid} armed for 300s at "
+        f"{row.started_at - 5:.0f} (1970-01-01 00:00:00)\n"
+        f"{stall_watchdog.FIRED_MARKER}0:05:00)!\nThread 0x1:\n",
         encoding="utf-8",
     )
     os.utime(dump, (row.started_at + 1, row.started_at + 1))
@@ -1191,3 +1207,167 @@ def test_a_fired_stall_bound_is_narrated_as_its_own_class(
     assert (
         journal.HELD_BOUND_LEAD in reason
     ), f"the survived fire was dropped from a signal-attributed death: {reason}"
+
+
+def test_a_fired_dump_in_the_other_log_store_is_still_this_death_s_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE STORE A DUMP LANDS IN IS NOT ALWAYS THE STORE THE READER OPENS.
+
+    Measured 2026-09-22 on the peer session ``e0946beaafbe`` (pid 96510, 0.62.4):
+    the runtime was ended by its own stall bound — its dump is 14,976 B with one
+    ``Timeout (0:05:00)!`` line, no progress line, no tick death and NO deadline
+    sibling, i.e. the never-engaged class where no beat ever re-armed the timer —
+    and the cut-off card it left reads, byte for byte::
+
+        the runtime disappeared without exiting cleanly while this turn was running,
+        and no stop was asked for (unattributed, turn 1 in flight on 0.62.4@2301d02,
+        install .../tools/local-operator, pid 96510)
+
+    THE CAUSE IS THE DIRECTORY, NOT THE FENCE. ``_stall_bound_evidence``'s own
+    comment blames its mtime fence for what it cannot recover, and the fence was
+    innocent here. ``dump_path`` resolves its directory from ``paths.log_dir()``,
+    which honours ``LOCAL_OPERATOR_CONFIG_DIR`` PER PROCESS — and this fleet runs
+    the session runtimes WITH that variable set while the daemon that classifies
+    their deaths runs without it (``ps eww``: pid 92815 has it, pid 1276 does not).
+    The reader asked in ``~/Library/Logs/local-operator`` for a file written in
+    ``~/.local-operator/logs``, found nothing, and answered "this turn left no dump
+    of its own" about a runtime that had dumped every thread.
+
+    THE CELL IS DELIBERATELY CROSS-STORE, which is why the existing stall-bound cell
+    could not catch it: that one sets the override and then writes AND reads through
+    ``dump_path``, so writer and reader agree by construction. Here the row is
+    classified with the override unset (the classifier's process) while the dump sits
+    where a runtime that HAS the override puts it — the mismatch as measured, not as
+    constructed.
+    """
+    # The classifier's process: no override, so its own store is the platform one.
+    # Set here rather than assumed: an isolated run sets the override for the whole
+    # process, and it is the MISMATCH between the two processes that this cell is
+    # about.
+    monkeypatch.delenv("LOCAL_OPERATOR_CONFIG_DIR", raising=False)
+
+    directory = _session_directory(tmp_path, "sess-other-store")
+    writer = journal.TurnJournal(directory, "sess-other-store", update.BuildStamp("1.0.0", "aaa"))
+    writer.open_turn(command_id="cmd-other-store")
+    row = journal.TurnJournalRow.from_json(registry.read_turn_journal(directory))
+    assert row is not None
+
+    # Where the RUNTIME wrote it: its override named the DEFAULT config directory,
+    # which is exactly what this host does (``LOCAL_OPERATOR_CONFIG_DIR`` is set to
+    # ``$HOME/.local-operator`` on a live runtime).
+    runtime_store = Path.home() / paths.DEFAULT_CONFIG_DIRNAME / paths.LOG_DIRNAME
+    assert runtime_store in paths.log_dirs(), (
+        f"the store a default-config-dir runtime writes into is not searched at all: "
+        f"{paths.log_dirs()}"
+    )
+    assert paths.log_dir() != runtime_store, "this cell is meaningless when both agree"
+
+    dump = stall_watchdog.dump_path(row.pid, runtime_store)
+    dump.parent.mkdir(parents=True, exist_ok=True)
+    # A REAL HEADER, because the fence reads the arm epoch out of it: ``arm`` writes
+    # ``… armed for <bound>s at <epoch>`` as the artifact's first line, and a dump whose
+    # life cannot be placed is not evidence (review round 1, MAJOR-2).
+    dump.write_text(
+        _dump_text_for(row.pid, armed_at=row.started_at - 5.0),
+        encoding="utf-8",
+    )
+    os.utime(dump, (row.started_at + 1, row.started_at + 1))
+    # The never-engaged signature: the sibling no beat ever wrote.
+    assert not stall_watchdog.deadline_path(row.pid, runtime_store).exists()
+
+    # (a) THE DEATH IS NAMED, off an artifact one directory away.
+    kind, cause, reason = journal.death_verdict(row)
+    assert kind == "error"
+    assert cause == STALL_BOUND_CAUSE, (
+        f"a fired dump in the store this reader did not open left the death "
+        f"unattributed: {reason}"
+    )
+    assert "no plane reported" in reason, reason  # the SILENCE leg, named
+
+    # (b) ...AND IT IS STILL EVIDENCE-LED rather than a blanket attribution: with no
+    # dump in ANY store the same row reaches the arm that says no act was recorded,
+    # so the search cannot have made every death this class. The install-tear rung is
+    # patched off for the reason the sibling cell gives: this fixture's build stamp is
+    # a fake one, so the comparison against the running install would answer
+    # ``install-mid-update`` and hide whether the CRASH arm is still reachable.
+    monkeypatch.setattr(journal, "install_moved", lambda *_a, **_k: False)
+    dump.unlink()
+    kind, cause, reason = journal.death_verdict(row)
+    assert cause != STALL_BOUND_CAUSE, reason
+    assert "unattributed" in reason, reason
+
+    # (c) AN EXPLICIT DIRECTORY STILL CONFINES THE SEARCH, which is what keeps an
+    # isolated run inside its own root: handed one store, the readers must not widen
+    # it to this host's real log directories.
+    dump.write_text(_dump_text_for(row.pid, armed_at=row.started_at - 5.0), encoding="utf-8")
+    assert stall_watchdog.fired_dump(row.pid, runtime_store) == dump
+    assert stall_watchdog.fired_dump(row.pid, tmp_path / "elsewhere") is None
+
+
+def _dump_text_for(pid: int, *, armed_at: float) -> str:
+    """A fired dump's text in the shape ``arm`` writes: header, fire, one thread.
+
+    THE HEADER STATES THE LEGACY CONVENTION, and on the folded head that is what makes
+    its fire attributable at all: rung 0 of ``journal.death_verdict`` takes only an
+    artifact that says the convention it was written under (finding A of the 2026-09-23
+    convergence round), so a cell whose subject is WHICH STORE the reader opens has to
+    write an artifact that can support the claim it asserts about the death. The arm
+    epoch is independent of it and stays for the fence's sake: an artifact missing
+    either half is refused rather than guessed at, and a cell that lost only one of them
+    would be measuring the other.
+    """
+    from local_operator.session.runtime import stall_watchdog
+
+    return (
+        f"{stall_watchdog.ARM_MARKER}pid {pid} armed for 300s at {armed_at:.0f} "
+        f"(1970-01-01 00:00:00)\n{stall_watchdog.LEGACY_FATAL_POLICY_PHRASES[1]}\n"
+        f"{stall_watchdog.FIRED_MARKER}0:05:00)!\nThread 0x1:\n"
+    )
+
+
+def test_a_dump_armed_after_the_turn_began_is_not_its_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MAJOR-2: the arm epoch dates the artifact, and a LATER life's dump is not this death's.
+
+    ``arm`` runs in the child's entry point BEFORE anything can write a journal row, so
+    a dump whose header names an arm LATER than the turn the reader is judging was
+    written by a LATER PROCESS that drew the same pid. The mtime check cannot see that
+    on its own — a successor's dump is newer than an earlier life's row by construction
+    — which is what the search widened (review round 1, MAJOR-2).
+
+    The three states are driven off ONE row and ONE artifact, so the cell cannot pass by
+    refusing everything: a later life's fire is not this death's evidence, a fire from
+    this life IS, and an artifact whose header carries no readable epoch is refused
+    rather than guessed at (every artifact this fleet holds spells it: 178 of 178,
+    measured 2026-09-22).
+    """
+    monkeypatch.delenv("LOCAL_OPERATOR_CONFIG_DIR", raising=False)
+    directory = _session_directory(tmp_path, "sess-arm-epoch")
+    writer = journal.TurnJournal(directory, "sess-arm-epoch", update.BuildStamp("1.0.0", "aaa"))
+    writer.open_turn(command_id="cmd-arm-epoch")
+    row = journal.TurnJournalRow.from_json(registry.read_turn_journal(directory))
+    assert row is not None
+
+    dump = stall_watchdog.dump_path(row.pid)
+    dump.parent.mkdir(parents=True, exist_ok=True)
+
+    # (a) ARMED AFTER THE TURN BEGAN — a successor that drew this pid.
+    dump.write_text(_dump_text_for(row.pid, armed_at=row.started_at + 60.0), encoding="utf-8")
+    os.utime(dump, (row.started_at + 61.0, row.started_at + 61.0))
+    kind, cause, reason = journal.death_verdict(row)
+    assert (
+        cause != STALL_BOUND_CAUSE
+    ), f"a dump written by a LATER life was attributed to this death: {reason}"
+
+    # (b) ARMED BEFORE IT — this life's own artifact, and the same file now answers.
+    dump.write_text(_dump_text_for(row.pid, armed_at=row.started_at - 5.0), encoding="utf-8")
+    os.utime(dump, (row.started_at + 1.0, row.started_at + 1.0))
+    assert journal.death_verdict(row)[1] == STALL_BOUND_CAUSE
+
+    # (c) NO READABLE EPOCH — refused, not guessed.
+    dump.write_text(f"{stall_watchdog.FIRED_MARKER}0:05:00)!\n", encoding="utf-8")
+    assert journal.death_verdict(row)[1] != STALL_BOUND_CAUSE

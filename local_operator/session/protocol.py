@@ -326,10 +326,23 @@ class SessionProtocol(Protocol):
         self,
         turns: list[AgentMessage],
         *,
+        aside_instruction: bool = True,
         on_delta: Callable[[str], None] | None = None,
         on_usage: Callable[[Usage], None] | None = None,
     ) -> str:
         """Answer a side question against the live context WITHOUT joining it.
+
+        ``aside_instruction`` says whether ``turns`` still need the off-record
+        instruction applied. True (the default) is for a caller sending the RAW
+        question — the seams (``ServingSessionHandle``, ``TuiSessionHandle``)
+        wrap the last user turn, which is how every remote surface gets the
+        instruction. False is the caller's declaration that it supplied its OWN
+        instruction and the seam must not add a second: the TUI's ``/btw``
+        overlay wraps ``ASIDE_PROMPT`` itself, and its goal-loop judge sends
+        ``LOOP_JUDGE_PROMPT``, which is not an aside at all. IMPLEMENTATIONS
+        THAT DO NOT WRAP accept the flag and ignore it (``Session.complete_aside``
+        is the bare primitive), so a caller can pass it at every hop without
+        knowing which hop it holds.
 
         Reads what a real turn reads — the live system blocks and the whole
         message list — and writes nothing: no transcript entry, no append to

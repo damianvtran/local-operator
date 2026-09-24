@@ -934,28 +934,54 @@ def _stall_bound_evidence(
     ``asyncio``'s own shutdown (:func:`stall_watchdog.fired_in_runner_teardown`, which
     returns ``None`` unless the teardown annotation stands above the fire).
 
-    THE DUMP IS THE EVIDENCE AND THE MTIME IS THE KEYS. A file written after this
-    row's turn began can only be about this run — the dump's last write IS the
-    fire, because ``faulthandler`` writes with a bare descriptor at the moment its
-    timer expires — while a file older than the turn belongs to a predecessor that
-    happened to hold the same pid.
+    THE FILE IS SEARCHED FOR, NOT COMPUTED, and the reason is measured rather than
+    defensive. ``dump_path`` resolves its directory from ``paths.log_dir()``, which
+    honours ``LOCAL_OPERATOR_CONFIG_DIR`` PER PROCESS — and on this fleet (measured
+    2026-09-22) the session runtimes are started with that variable set, to the
+    DEFAULT config directory, while the ``lop serve`` daemon that classifies their
+    deaths is not (``ps eww``: pid 92815 carries it, pid 1276 does not). A reader
+    that asked for one path therefore opened a directory the dump had never been
+    written into, and answered "this turn left no dump of its own" about a runtime
+    that had dumped every thread: pid 96510 on 0.62.4, whose own cut-off card read
+    ``unattributed`` while its fired dump sat in ``~/.local-operator/logs`` — the
+    exact mis-narration this rung exists to end, reached by a path the rung's own
+    author could not see because the test wrote and read in one store.
+    ``stall_watchdog.dump_evidence`` searches every directory a writer on this machine
+    can have used and answers with the file that FIRED, so the fence below is applied
+    to the artifact this death actually left.
 
-    THE FENCE IS ONE-DIRECTIONAL, AND THE OTHER DIRECTION IS A NAMED LIMITATION
-    rather than a solved problem (agent review round 1, MINOR 3). It excludes a
-    STALE same-pid dump; it cannot recover a fired one, because ``arm`` opens the
-    dump with ``"w"`` and the next runtime to draw a recycled pid therefore
-    truncates the evidence away — and that reader then falls through to
-    ``runtime-killed``/``unattributed``, which is the mis-narration this whole rung
-    exists to end. Nothing cheap closes it: the arm site is the child's entry
-    point and has no session identity to key a second filename on (see
-    ``process._live_handle``'s comment for the same constraint from the other
-    side), and ``dump_path`` is deliberately pid-only so that a reader holding a
-    record's pid needs nothing else. WHAT A READER CAN DO: the dump's header
-    carries the epoch the bound was ARMED at, so a dump whose arm time falls
-    outside the row's turn is a recycled pid's file and not this death's evidence
-    — the same cross-check this fence performs on mtime, available by hand when a
-    reader has both files in front of them. A per-run filename remains the real
-    fix and is its own change.
+    THE DUMP IS THE EVIDENCE, AND BOTH ENDS OF ITS LIFE ARE READ OFF IT (review
+    round 1, MAJOR-2). A file last written before this turn began belongs to a
+    predecessor that happened to hold the same pid — the mtime is the LOWER bound on
+    its life. The header's own arm epoch (``armed for <bound>s at <epoch>``,
+    :func:`stall_watchdog.armed_at`) is the UPPER one: ``arm`` runs in the child's
+    entry point BEFORE anything can write a journal row, so a dump whose arm is later
+    than this row's turn was written by a LATER PROCESS that drew the same pid — the
+    case the mtime alone cannot see, because a successor's dump is newer than an
+    earlier life's row by construction. A dump whose header names no readable epoch is
+    not evidence here: every artifact this fleet holds spells it (178 of 178, measured
+    2026-09-22), and answering a death from a file whose life cannot be placed is the
+    mis-narration this whole rung exists to end.
+
+    WHAT THE FENCE STILL CANNOT DISTINGUISH, stated rather than implied:
+
+    * **an erased artifact**, unchanged from before — ``arm`` opens the dump with
+      ``"w"``, so the next runtime to draw a recycled pid truncates the evidence away
+      and that death falls to ``runtime-killed``/``unattributed``. Closing it means a
+      per-run filename, and the arm site has no session identity to key one on (see
+      ``process._live_handle``'s comment for the same constraint from the other
+      side);
+    * **an mtime rewritten by something other than the fire** — a backup restore, a
+      copy, a ``touch``. The epoch check narrows it (a restored file still carries its
+      own arm epoch, so it is placed by that rather than by its mtime), but a file
+      whose mtime was moved into this turn's window AND whose arm epoch falls inside
+      it is indistinguishable from this turn's own evidence.
+
+    THE ARM EPOCH USED TO BE FOR THE READER'S OWN EYES (agent review round 1, MINOR
+    3, which named the cross-check and left it by hand) and it is now APPLIED: see the
+    two-ends paragraph above, which is where the recycling case and the residual it
+    leaves are stated. What that paragraph keeps is this one's rule — the fence never
+    invents evidence to close a gap.
 
     NEVER RAISES: this runs while a session is opening, on a file a killed
     process may have been midway through, and an unreadable instrument must
@@ -964,14 +990,29 @@ def _stall_bound_evidence(
     try:
         from local_operator.session.runtime import stall_watchdog
 
-        path = stall_watchdog.dump_path(row.pid)
-        if not path.exists() or path.stat().st_mtime < row.started_at:
+        evidence = stall_watchdog.dump_evidence(row.pid)
+        if evidence is None:
             return None, (), _STALL_EVIDENCE_UNREADABLE, False
+        path, text = evidence
+        if not stall_watchdog.dump_is_current(path, row.started_at):
+            return None, (), _STALL_EVIDENCE_UNREADABLE, False
+        armed = stall_watchdog.armed_at(text)
+        if armed is None or armed > row.started_at:
+            return None, (), _STALL_EVIDENCE_UNREADABLE, False
+        # THE FOUR FACT-READERS ARE PINNED TO THE ARTIFACT THE FENCE PLACED. Handed no
+        # directory they search the stores themselves, and a second search is a second
+        # choice: the narration would then be describing one file while the fence above
+        # described another, which is the disagreement the one-read paragraph above
+        # exists to prevent — and it is reachable, because the two searches see a
+        # different world once a write lands between them. The chosen store is the
+        # whole answer to the alignment question, so it is passed rather than left
+        # implicit.
+        store = path.parent
         return (
-            stall_watchdog.fired_leg(row.pid),
-            stall_watchdog.tick_deaths(row.pid),
-            stall_watchdog.fire_outcome(row.pid),
-            stall_watchdog.fired_in_runner_teardown(row.pid) is True,
+            stall_watchdog.fired_leg(row.pid, store),
+            stall_watchdog.tick_deaths(row.pid, store),
+            stall_watchdog.fire_outcome(row.pid, store),
+            stall_watchdog.fired_in_runner_teardown(row.pid, store) is True,
         )
     except Exception:  # noqa: BLE001 — an unreadable dump is not a dead session
         logger.debug("stall dump unreadable for pid %s", row.pid, exc_info=True)

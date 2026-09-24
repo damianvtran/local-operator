@@ -68,7 +68,7 @@ from typing import Any
 
 import pytest
 
-from local_operator import incidents
+from local_operator import incidents, paths
 from local_operator.harness.types import (
     AgentTool,
     StreamEndEvent,
@@ -7310,3 +7310,150 @@ def test_a_GIL_parked_child_is_never_annotated_as_teardown(tmp_path: Path) -> No
     assert (
         stall_watchdog.fire_outcome(pid, tmp_path / "logs") == stall_watchdog.FIRE_SURVIVED
     ), "the GIL-held fire lost its honest reading while its phase stayed unknown"
+
+
+def test_every_reader_finds_a_dump_in_the_store_the_writer_used(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DUMP IS LOOKED FOR, NOT COMPUTED, because the writer is another process.
+
+    ``dump_path`` resolves one directory from ``paths.log_dir()``, and that honours
+    ``LOCAL_OPERATOR_CONFIG_DIR`` PER PROCESS. Measured on this fleet (2026-09-22):
+    the runtimes carry the override, the ``lop serve`` daemon that supervises them
+    does not, so a fired dump written under ``$CONFIG_DIR/logs`` was invisible to the
+    daemon's readers — which is how a death that had dumped every thread still
+    reached the next session's card as ``unattributed`` (pid 96510; the narration
+    half is pinned in ``test_turn_journal``).
+
+    EVERY READER IS DRIVEN HERE, not just the one the card uses, because the four
+    question-readers and the two listing scans each resolved a directory on their
+    own: fixing one would leave ``lop sessions`` reporting a fleet of fired runtimes
+    as never fired.
+    """
+    # The daemon's environment: HOME points at the scratch root, no override set.
+    monkeypatch.delenv("LOCAL_OPERATOR_CONFIG_DIR", raising=False)
+    assert paths.log_dir() != Path.home() / paths.DEFAULT_CONFIG_DIRNAME / paths.LOG_DIRNAME
+
+    store = Path.home() / paths.DEFAULT_CONFIG_DIRNAME / paths.LOG_DIRNAME
+    store.mkdir(parents=True, exist_ok=True)
+    pid = 424242
+
+    fired = stall_watchdog.dump_path(pid, store)
+    fired.write_text(
+        f"[stall watchdog] armed\n{stall_watchdog.FIRED_MARKER}0:05:00)!\nThread 0x1:\n"
+        f"{stall_watchdog.HELD_MARKER}work in flight\n",
+        encoding="utf-8",
+    )
+    fired_leg_expected = stall_watchdog.LEG_SILENCE
+
+    assert stall_watchdog.fired_dump(pid) == fired
+    assert stall_watchdog.fired_leg(pid) == fired_leg_expected
+    assert stall_watchdog.held_fire(pid) is True
+    assert pid in stall_watchdog.fired_pids()
+    assert pid in stall_watchdog.held_pids()
+
+    # THE EXPLICIT DIRECTORY IS THE ISOLATION SEAM: handing a reader one store must
+    # not licence it to open this host's other log directories.
+    assert stall_watchdog.fired_dump(pid, Path.home() / "nowhere") is None
+    assert stall_watchdog.fired_leg(pid, Path.home() / "nowhere") is None
+    assert pid not in stall_watchdog.fired_pids(Path.home() / "nowhere")
+
+    # ...and a pid whose dump is in NO store still reads as no evidence, so the
+    # search cannot turn "nothing on disk" into a bound that fired.
+    assert stall_watchdog.fired_dump(pid + 1) is None
+    assert stall_watchdog.fired_leg(pid + 1) is None
+    assert pid + 1 not in stall_watchdog.fired_pids()
+
+
+#: THE FOLD'S ROUTING PIN. ``#1454`` turned a pid's stall evidence into a SEARCH over
+#: every store a writer on this host can have used (``dump_evidence``); this branch
+#: added two readers on top of it (``fire_outcome``, ``fired_in_runner_teardown``) and
+#: left ``held_pids`` as the scan that answers "which of the fired ones is still alive"
+#: for a whole listing. A reader still composing ``dump_path(pid)`` answers about a file
+#: that does not exist for exactly the cross-store pids the search makes visible — and
+#: the readers routed here are the ATTRIBUTION rungs, so what a single-store reader
+#: loses is not a path but the reading: unknown where the artifact says fatal, no
+#: teardown where the annotation proves one, no held membership on a listing that is
+#: supposed to send a person to ``lop stop``. The cell below therefore writes its
+#: artifacts ONLY into the store ``dump_path(pid)`` does not resolve.
+def test_the_routed_readers_find_a_dump_in_the_store_the_writer_used(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """EVERY READER THIS FOLD ROUTES ANSWERS FROM THE STORE THE WRITER USED.
+
+    THE SHAPE IS THE FLEET'S MEASURED MISMATCH, not a constructor's: the artifact sits
+    in the DEFAULT config directory's logs — where a runtime carrying
+    ``LOCAL_OPERATOR_CONFIG_DIR`` writes — while the reader here runs without that
+    variable, exactly as the ``lop serve`` daemon that classifies those deaths does
+    (see ``dump_candidates``). The store is asserted to differ from ``paths.log_dir()``,
+    because a cell that reads and writes one directory proves nothing about a search.
+
+    IT GOES RED ON THE PRE-ROUTING HEAD, which is its whole purpose: with the readers
+    back on ``dump_path(pid)`` every assertion below reads an empty directory and
+    answers the quiet value (``FIRE_UNKNOWN``/``None``, no membership), so the cell
+    fails rather than passing for the wrong reason. The two facts each fixture carries
+    are also independent — the sentence a header states (what makes a fire
+    attributable) and the epoch it names (what dates the life) — which is why both are
+    spelled here: a fixture missing one would be measuring the other.
+
+    ``journal``'s stall-evidence reader is the fourth the fold routes, and it is pinned
+    cross-store by
+    ``test_turn_journal.test_a_fired_dump_in_the_other_log_store_is_still_this_death_s_evidence``
+    — where the row it narrates and the card it renders live.
+    """
+    monkeypatch.delenv("LOCAL_OPERATOR_CONFIG_DIR", raising=False)
+    store = Path.home() / paths.DEFAULT_CONFIG_DIRNAME / paths.LOG_DIRNAME
+    assert paths.log_dir() != store, "this cell is meaningless when both agree"
+    store.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    try:
+        # (a) A FIRE THE ARTIFACT ITSELF CALLS FATAL: the header states the legacy
+        # convention, so the positive reading is available off an artifact one
+        # directory away from the one this process would compose.
+        fatal = _write_dump(store, 424_243, LEGACY_FATAL_HEADER + FIRED_BODY)
+        written.append(fatal)
+        assert not stall_watchdog.dump_path(424_243).exists(), (
+            "the fixture landed in the store the pre-routing reader would have "
+            "opened, so this cell is not cross-store any more"
+        )
+        assert stall_watchdog.fire_outcome(424_243) == stall_watchdog.FIRE_LEGACY_FATAL
+
+        # (b) A FIRE THE RUNNER'S OWN TEARDOWN PRECEDES: the annotation's ORDER against
+        # the fire is the entire proof (see ``fired_in_runner_teardown``), so a reader
+        # that never opens the file cannot see either half of it.
+        torn = _write_dump(
+            store,
+            424_244,
+            CURRENT_HEADER
+            + f"{stall_watchdog.TEARDOWN_MARKER}{stall_watchdog.TEARDOWN_NOTE}\n"
+            + FIRED_BODY,
+        )
+        written.append(torn)
+        assert stall_watchdog.fired_in_runner_teardown(424_244) is True
+        assert stall_watchdog.fire_outcome(424_244) == stall_watchdog.FIRE_SURVIVED
+
+        # (c) THE THIRD STATE'S MEMBERSHIP TEST over a whole listing: a dump-only fire
+        # with work in flight is the one reading that wants a person, and it is a SCAN
+        # — a listing that scanned one directory answered "nothing held" for a fleet
+        # whose runtimes write under the override.
+        held = _write_dump(
+            store,
+            424_245,
+            CURRENT_HEADER + FIRED_BODY + f"{stall_watchdog.HELD_MARKER}work in flight\n",
+        )
+        written.append(held)
+        assert 424_245 in stall_watchdog.held_pids()
+        assert stall_watchdog.held_fire(424_245) is True
+
+        # AND THE EXPLICIT DIRECTORY STILL CONFINES A ROUTED READER, which is what
+        # keeps an isolated run inside its own root now that the default is a search.
+        elsewhere = Path.home() / "nowhere"
+        assert stall_watchdog.fire_outcome(424_243, elsewhere) == stall_watchdog.FIRE_UNKNOWN
+        assert stall_watchdog.fired_in_runner_teardown(424_244, elsewhere) is None
+        assert 424_245 not in stall_watchdog.held_pids(elsewhere)
+    finally:
+        # Nothing this cell writes outlives it: the store it uses is shared with every
+        # other cross-store cell and, on a developer's machine that is not isolated by
+        # ``HOME``, with the real one.
+        for path in written:
+            path.unlink(missing_ok=True)
