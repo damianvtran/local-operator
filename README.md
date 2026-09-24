@@ -1109,7 +1109,12 @@ duplicate — paths and sizes only, never the contents.
 
 Project-level `AGENTS.md` / `CLAUDE.md` files are discovered separately by
 walking up from your working directory, and can be disabled with
-`LOCAL_OPERATOR_CONTEXT_FILES=0`.
+`LOCAL_OPERATOR_CONTEXT_FILES=0`. Inside a git repository under your home
+directory, the walk continues past the repository root to the folder just
+below home, so a folder that groups several repos can carry their shared
+guidance; the guidance file in home itself is not included. A repository
+under a dot-named folder such as `~/.codex`, or itself dot-named, still stops
+at its own root.
 
 ## 🌟 Radient: automatic model selection and agent sharing
 
