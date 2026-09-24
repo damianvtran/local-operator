@@ -2271,3 +2271,138 @@ async def test_a_retired_conversation_leaves_nothing_in_the_attempt_table(monkey
         app._retire_attach_behind(source)
         assert source.token not in app._attach_behind_attempts
         assert source.attach_behind_account is None
+
+
+# --- A bind that is NOT one of the attempt's carriers settles the account too ---
+# (UX round 5, U15 and its item 4; QA round 5, Q-1/Q-2.) The arms above release
+# the bind through the attempt's own warm engage, which is a carrier, so they
+# restate the row on every head. In the real product the carriers have long
+# failed by the time the owner answers after a switch back, and the bind is
+# delivered by the SIDEBAR'S OWN CONNECT (`_start_sidebar_connection` →
+# `bind_runtime` → re-commit), which reported to nothing: the row stayed
+# "did not answer — send it again" for the rest of the session, above the reply
+# the resend produced.
+
+
+def _refreeze(frozen: _FrozenOwner) -> None:
+    """Every engage from now on waits again, like an owner that is still silent."""
+    frozen._gate = asyncio.Event()
+    frozen.fail = None
+
+
+async def _returned_then_back_with_carriers_spent(
+    app, pilot, owner, sends, frozen, text
+):  # noqa: ANN001, ANN202
+    """Send, switch away, the message comes back, switch back; no carrier is left."""
+    await _compose_and_send(pilot, app, text)
+    assert await _pump(pilot, lambda: len(sends.gates) == 1)
+    await _to_sidebar(app, pilot, _sidebar_remote("side-b"))
+    sends.refuse_all()
+    source = app._sidebar_sources["frozen-1"]
+    assert await _pump(pilot, lambda: not source.active_workers)
+    await _back_to(app, pilot, owner)
+    # The switch back's engage fails like the real one does against a silent
+    # owner (its own envelope), so NO carrier of the attempt is left alive.
+    frozen.thaw(fail=ConnectionError("gone"))
+    assert await _pump(pilot, lambda: not app._warm_engage_started)
+    _refreeze(frozen)
+    for _ in range(5):
+        await pilot.pause()
+    assert len(_returned_rows(_view_rows(app._transcript_view())[1])) == 1
+    return source
+
+
+@pytest.mark.asyncio
+async def test_a_bind_by_the_sidebar_connect_after_a_switch_back_settles_the_account(
+    monkeypatch, tmp_path
+):
+    """U15 / Q-1: the switch back's own connect binds; the row says the owner is back.
+
+    Before (``91b361dc``): only a CARRIER's bind reached the account, so the
+    connect bound, re-committed, and the row kept "did not answer — send it
+    again" with the owner answering. The settled row must then survive further
+    view swaps, exactly once each time.
+    """
+    async with _paint_first_with_sends(monkeypatch, tmp_path) as ctx:
+        app, pilot, owner, sends, frozen = ctx
+        coldness = _Coldness(monkeypatch, owner)
+        source = await _returned_then_back_with_carriers_spent(
+            app, pilot, owner, sends, frozen, "GONE-C"
+        )
+        # The owner answers, and the bind is the SIDEBAR CONNECT's, not a carrier's.
+        app._start_sidebar_connection(source)
+        coldness.cold = False
+        frozen.thaw()
+
+        def rows() -> list[str]:
+            return [n for n in _view_rows(app._transcript_view())[1] if "frozen-1" in n]
+
+        assert await _pump(pilot, lambda: any("is answering again" in n for n in rows())), (
+            "a bind that was not a carrier left the outcome row unsettled",
+            rows(),
+        )
+        assert len(rows()) == 1, rows()
+        assert not _returned_rows(rows()), rows()
+        # Survives the next swaps, one copy each time.
+        for _ in range(2):
+            await _to_sidebar(app, pilot, _sidebar_remote("side-b"))
+            await _back_to(app, pilot, owner)
+            assert rows() == ["session frozen-1 is answering again"], rows()
+
+
+@pytest.mark.asyncio
+async def test_a_delivered_resend_leaves_no_failure_row_standing(monkeypatch, tmp_path):
+    """UX round 5, item 4: following "send it again" after the owner came back.
+
+    The facade is bound by a path that is not a carrier and does not re-commit
+    the conversation, so the resend goes out over an already-bound facade and is
+    never an ``_AttachBehindSend``. Before (``91b361dc``): delivered exactly
+    once, and the row above it still said the message was not sent and to send
+    it again, over an empty composer.
+    """
+    async with _paint_first_with_sends(monkeypatch, tmp_path) as ctx:
+        app, pilot, owner, sends, frozen = ctx
+        from local_operator.tui.widgets.editor import Editor
+
+        coldness = _Coldness(monkeypatch, owner)
+        source = await _returned_then_back_with_carriers_spent(
+            app, pilot, owner, sends, frozen, "GONE-D"
+        )
+        coldness.cold = False
+        source.display_only = False
+        sends.gates.clear()
+        sends.outcomes.clear()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await pilot.press("enter")
+        assert await _pump(pilot, lambda: len(sends.gates) == 1)
+        sends.gates[0].set()
+        assert await _pump(pilot, lambda: [d.strip() for d in sends.delivered] == ["GONE-D"])
+        for _ in range(5):
+            await pilot.pause()
+        users, notices = _view_rows(app._transcript_view())
+        assert users.count("GONE-D") == 1, users
+        assert not _returned_rows(notices), (
+            "a failure row stands above the delivered message",
+            notices,
+        )
+        assert not editor.text.strip()
+
+
+@pytest.mark.asyncio
+async def test_retiring_a_conversation_takes_its_row_off_the_view(monkeypatch, tmp_path):
+    """QA round 5, Q-2: the row goes with the account, even detached from its ancestry."""
+    async with _paint_first_with_sends(monkeypatch, tmp_path, bound_s=600.0) as ctx:
+        app, pilot, _owner, _sends, _frozen = ctx
+        assert await _pump(pilot, lambda: any("still trying" in n for n in _notices(app)))
+        source = app._interaction
+        view = app._transcript_view()
+        # QA's `test_c3` end state: the table and the account were cleared,
+        # and the row stood on the view with nothing left to take it down.
+        assert [n for n in _view_rows(view)[1] if "frozen-1" in n]
+        app._retire_attach_behind(source)
+        for _ in range(3):
+            await pilot.pause()
+        assert not [n for n in _view_rows(view)[1] if "frozen-1" in n], _view_rows(view)
+        assert source.attach_behind_account is None
