@@ -166,12 +166,19 @@ contains an API key, access token, refresh token, or complete stored grant.
   carries `radient_login` and `tunnel_remedy`, because a row can be `configured`
   with an unexpired access token and still be refused by the identity provider.
   **Both are objects, not strings.** `radient_login` is
-  `{"credential_id": int|null, "state": "ok"|"login_required"|"unknown"}` — the
-  same shape as the `login` object on `GET /v1/desktop/tunnel` — and
+  `{"credential_id": int|null, "state": "ok"|"login_required"|"unknown"|"deferred"}` —
+  the same shape as the `login` object on `GET /v1/desktop/tunnel` — and
   `tunnel_remedy` is `{"command": str, "url": str}` or `null`, the same shape as
   `remedy` there. A renderer written from a sentence that called them a state and
   a command reads a dict where it expects a string.
   `unknown` means the check could not run and never means "the login is dead".
+  `deferred` is a state the store is WAITING OUT, not a failure and not an
+  expired login: the refresh token's last exchange is unsettled, so presenting it
+  again could revoke the whole token family and the store holds off until the
+  marker expires (about two minutes, re-armed by a repeating stall) or an exchange
+  resolves it. It clears by itself, so `remedy` is `null` for it and no surface
+  offers a sign-in; a renderer that knows three states must treat this fourth one
+  as "waiting", never as "expired".
   The verdict is decided from this machine's own credential store, but it is not
   free of the network: a stored access token outside its refresh skew makes the
   store attempt a refresh, which is a POST to a token endpoint. That one call is
@@ -227,8 +234,10 @@ alone is not an inference credential.
   `result.connector.state` is one of `parked`, `connected`, `connecting`,
   `not serving`, `stopped`, `not configured`, `unknown` (`unknown` only when a
   caller asked not to probe the loopback gateway); `result.login.state` is one
-  of `ok`, `login_required`, `unknown`, where `unknown` means the check could not
-  run and never means "the login is dead". `result.remedy` is
+  of `ok`, `login_required`, `unknown`, `deferred`, where `unknown` means the
+  check could not run and never means "the login is dead", and `deferred` means
+  the store is waiting out an unsettled refresh (see `GET /v1/auth/status` above:
+  self-clearing, no remedy offered). `result.remedy` is
   `{"command": str, "url": str}` or `null`: the command that clears the
   condition, with the console URL that belongs beside it. The remedy is a
   terminal command, so the UI shows it rather than running it, and this route has
@@ -399,6 +408,27 @@ restart without inventing a new session per request. Ordinary transcript/session
 origin metadata remain authoritative; no `desktop` origin hides the session from
 terminal/phone lists. Older sessions use their saved frontend checkpoint cwd,
 falling back to the parent of the config root when no cwd was retained.
+
+**A row says WHO opened it when an agent did.** `opened_by` is an additive,
+nullable field on every `GET /v1/desktop/sessions` row:
+`{"agent": str | null, "label": str | null, "session": str | null}`, and `null`
+on every row a person started. It is populated only for a session an agent opened
+as a WORKSTREAM the operator asked for (`lop exec --workstream`, whose
+`origin.json` reads `agent-workstream`) — the one machine-started population that
+is LISTED rather than hidden — and it carries the OPENING session's role, task
+label and session id, read from that session's own marker at creation time.
+
+Why it exists: the 2026-09-18 incident was not merely that a machine-started
+session appeared in the sidebar — it was that the row was indistinguishable from
+one the operator had opened. A listed workstream therefore has to name its owner,
+or the fix would repeat the confusion with the row visible instead of hidden. The
+three member names are FROZEN (`local_operator.resume.OPENED_BY_KEYS`): the
+renderer is written against exactly them, and a rename here would surface as an
+empty label rather than as an error. A member that could not be read is `null`,
+never guessed, and the key is always PRESENT (as `null`) so a client cannot read
+its absence as a claim. Every other listing reaches the same fact through the
+same predicate — `resume.is_user_session` — so the sidebar, `/resume` and the
+phone list cannot disagree about which rows exist to be offered.
 
 **A new conversation can be born on a chosen model and reasoning level.**
 `model` is an **optional, additive** field of both `POST /v1/desktop/sessions`

@@ -10,24 +10,34 @@ off", and both were measured on this machine on 2026-09-21:
 **A. A death with a name, recorded as one with none.** Pids 57975, 4698 and
 79757 each left ``logs/runtime-stall-<pid>.log`` carrying ``Timeout (`` — the
 marker ``stall_watchdog`` writes when the runtime's OWN 300 s no-progress bound
-fires, from a C thread, and the process then leaves via ``_exit(1)``. Each was
-nevertheless narrated to its successor as ``runtime-killed`` with
-``(unattributed, ...)``: nothing on the death path had ever read the file, so
-the one artifact that named the act was invisible to every surface.
+fires, from a C thread — and the builds that shipped before 2026-09-23 then took
+the process out of that same C thread. Each was nevertheless narrated to its
+successor as ``runtime-killed`` with ``(unattributed, ...)``: nothing on the
+death path had ever read the file, so the one artifact that named the act was
+invisible to every surface.
 
-THE CLASS IS NOW NAMED IN MAIN (PR #1408, ``incidents.STALL_BOUND_CAUSE =
-"runtime-stall-bound"``, read by ``journal._stall_bound_leg``), so this half is
-no longer a proposal: the rig keeps it as an INDEPENDENT end-to-end check of that
-rung — a real ``faulthandler`` fire in an isolated store, and the fallback a
-reader would get with no artifact at all. It asserts the merged name, and the
-control still prints the measured pre-change verdict (``runtime-killed`` /
-``unattributed``).
+PRODUCTION EXPIRY IS DUMP-ONLY NOW, so this half asserts the contract THAT holds
+rather than the one the incident was measured under: the bound FIRES, dumps every
+thread beside its log, and the process that armed it is STILL ALIVE afterwards —
+while no surface narrates it as gone. The child below is deliberately the smallest
+thing that can arm a bound and survive a fire: a bare interpreter that calls
+``stall_watchdog.arm(seconds=2)`` and then parks in ``time.sleep(60)``. It holds
+no work and serves no turn, so it is a LIVENESS control rather than the shape the
+incident had — the runtime holding a turn in flight is the serving-plane cell's
+child, not this one, and this half's job is the naming rung plus the fire's
+aftermath. A rig that waited for the child to die would wait
+forever on this build and pass only against the source it replaced, which is
+exactly what this half did before the convergence round (MAJOR-1): ``--phase a``
+returned ``RC=1`` on the head and ``RC=0`` on the pre-change tree.
 
-WHAT IT DOES NOT COVER, stated rather than implied (review round 5, R5-3): the
-child arms through ``stall_watchdog.arm()`` and never beats, so this exercises the
-SILENCE leg only — the class and its reader. The other leg (loops running while
-the work stops advancing) is main's own composite-progress leg; exercising it
-here would mean driving the probe, not the artifact, and that is a different rig.
+THE RUNG THE INCIDENT WAS ABOUT IS STILL CHECKED, against an artifact this half
+writes itself: ``incidents.STALL_BOUND_CAUSE = "runtime-stall-bound"`` (read by
+``journal._stall_bound_leg``) is what a LEGACY header that states its own
+convention earns, so the fire's own stacks are re-read under a legacy header and
+the name must still come back. That keeps the rig an INDEPENDENT end-to-end check
+of the rung without restoring any fatal behaviour to make an old assertion pass.
+The control still prints the measured pre-change verdict (``runtime-killed`` /
+``unattributed``) for the no-artifact case.
 
 **B. A handover that ended with no successor.** A session retired for a newer
 build with rows in its spool, and no runtime was ever raised for them. The
@@ -54,14 +64,17 @@ reaped by exact pid — never by program name.
 
     .venv/bin/python scripts/rig_spooled_turn_and_stall_bound.py
 
-Exit code 0 means both halves asserted what they claim. Any other value means one
-of them did not, and the printed line says which.
+Exit code 0 means both halves asserted what they claim — for half A that is the
+DUMP-ONLY contract: the bound fired, the runtime SURVIVED it, no surface calls that
+fire a death, and a legacy artifact still earns the class name. Any other value means
+one of them did not, and the printed line says which.
 """
 
 from __future__ import annotations
 
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -71,6 +84,13 @@ from pathlib import Path
 #: the production 300: the bound is a parameter of ``arm``, so the rig exercises
 #: the real mechanism at a speed a test can watch.
 RIG_STALL_S = 2.0
+
+#: How long half A waits for its child's own bound to fire. A BACKSTOP, not the
+#: assertion: the event is ``faulthandler``'s fired marker appearing in the dump, and
+#: this only bounds the rig when the bound never fires at all. Comfortably above the
+#: bound it waits on, so a loaded host reordering a 2 s timer and a poll cannot turn a
+#: working mechanism into a red rig.
+RIG_FIRE_DEADLINE_S = 30.0
 
 #: How long half B waits for the successor to boot, drain and clear.
 SUCCESSOR_DEADLINE_S = 60.0
@@ -108,10 +128,32 @@ def _run_phase(phase: str, root: Path) -> int:
 
 
 def _phase_a(root: Path) -> int:  # noqa: C901 — a script, and the print IS the report
-    """A real bound firing on a real child, then the verdict a successor reaches."""
+    """A real bound firing on a real child, then the verdict a successor reaches.
+
+    THE CONTRACT WITH A LIVE RUNTIME IS DUMP-ONLY (2026-09-23 convergence round,
+    MAJOR-1), so this half WAITS ON THE ARTIFACT rather than on the child's exit: a
+    fire no longer ends the child, and a wait for an exit is a wait that never
+    completes on this build. In order, it asserts:
+
+    1. the bound FIRED — the dump carries ``Timeout (`` — and the child was still
+       alive at that moment;
+    2. the child is still alive AFTER the fire, so the fire ended nothing;
+    3. :func:`stall_watchdog.fire_outcome` answers FIRE_SURVIVED, read off the header
+       this build writes rather than inferred from what the file does not say;
+    4. the verdict for that row is ``runtime-killed`` carrying the did-not-end clause
+       and ``(unattributed, ...)`` — nothing narrates a live runtime as a bound death;
+    5. THE SAME FIRE, re-read under a LEGACY header this half writes itself, still
+       names :data:`incidents.STALL_BOUND_CAUSE` — the rung the incident was about,
+       exercised end to end without any fatal arm in this tree;
+    6. with the artifact removed, the verdict is the measured pre-change state.
+    """
     import time
 
-    from local_operator.incidents import STALL_BOUND_CAUSE
+    from local_operator.incidents import (
+        KILL_CAUSE,
+        KILL_UNATTRIBUTED,
+        STALL_BOUND_CAUSE,
+    )
     from local_operator.paths import config_dir
     from local_operator.session.runtime import journal, registry, stall_watchdog
 
@@ -129,86 +171,154 @@ def _phase_a(root: Path) -> int:  # noqa: C901 — a script, and the print IS th
         stdout=subprocess.PIPE,
     )
     print(f"child pid {child.pid}")
+    failures = 0
     try:
         assert child.stdout is not None and child.stdout.readline().strip() == b"armed"
-        try:
-            code = child.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            child.kill()
-            print("FAIL A: the bound never fired within 30 s")
+        # THE EVENT IS FAULTHANDLER'S OWN MARKER; the deadline is only the backstop for
+        # a rig whose bound never fired at all. The dump file itself exists from arm
+        # time (the header is written before the timer is armed), so its existence is
+        # NOT the event — the fired line is.
+        dump = stall_watchdog.dump_path(child.pid)
+        deadline = time.monotonic() + RIG_FIRE_DEADLINE_S
+        text = ""
+        while time.monotonic() < deadline:
+            try:
+                text = dump.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                text = ""
+            if stall_watchdog.FIRED_MARKER in text:
+                break
+            time.sleep(0.05)
+        fired = stall_watchdog.FIRED_MARKER in text
+        alive_at_fire = child.poll() is None
+        print(f"dump: {dump}")
+        print(f"fired marker present: {fired}")
+        print(f"child alive at the fire: {alive_at_fire} (returncode {child.poll()})")
+        if not fired:
+            print(f"FAIL A: the bound never fired within {RIG_FIRE_DEADLINE_S:g} s")
             return 1
+        if not alive_at_fire:
+            print("FAIL A: the fire ended the child, and production expiry is dump-only")
+            return 1
+
+        outcome = stall_watchdog.fire_outcome(child.pid, dump.parent)
+        print(f"fire_outcome: {outcome}")
+        if outcome != stall_watchdog.FIRE_SURVIVED:
+            print(
+                "FAIL A: the artifact does not prove the fire was survivable "
+                f"({outcome!r} != {stall_watchdog.FIRE_SURVIVED!r})"
+            )
+            failures += 1
+
+        # THE ROW IS STAMPED WITH THE INSTALL THAT IS REAL HERE, not a fabricated
+        # one (review round 1, R1-9). With a made-up stamp the tear rung
+        # (``install-mid-update``) answers for the dump-less case instead of the
+        # unattributed one, and the control then shows "the artifact mattered"
+        # rather than the state the real successors were actually told — which is
+        # ``runtime-killed`` with ``(unattributed, ...)``.
+        from local_operator import buildwatch
+        from local_operator.update import installed_build
+
+        try:
+            stamp = installed_build(buildwatch.build_prefix())
+            build_fields = {"version": stamp.version, "source_ref": stamp.source_ref}
+        except Exception:  # noqa: BLE001 — an unstamped tree is itself a real shape
+            build_fields = {}
+        print(f"row build stamp: {build_fields or '(none — an unstamped tree)'}")
+
+        session = "rig-stall"
+        directory = cfg / "sessions" / session
+        directory.mkdir(parents=True, exist_ok=True)
+        now = time.time()
+        registry.write_turn_journal(
+            directory,
+            {
+                "session_id": session,
+                "pid": child.pid,
+                "parent_pid": os.getpid(),
+                "turn_seq": 1,
+                "command_id": "cmd-rig",
+                "started_at": now - 5,
+                "ended_at": None,
+                "open": True,
+                "end_cause": "",
+                "exit_cause": "",
+                "still_open_at_exit": False,
+                "last_boundary": "bash",
+                "build": build_fields,
+                "install_root": "/tmp/rig-install",
+                "updated_at": now - 1,
+            },
+        )
+        row = journal.TurnJournalRow.from_json(registry.read_turn_journal(directory))
+        assert row is not None
+
+        kind, cause, reason = journal.death_verdict(row)
+        print(f"verdict on the live runtime's row: {kind} / {cause}")
+        print(f"reason: {reason}")
+        if cause != KILL_CAUSE or STALL_BOUND_CAUSE in reason:
+            print(
+                "FAIL A: a dump-only fire on a live runtime was narrated as a bound "
+                f"death ({cause})"
+            )
+            failures += 1
+        elif journal.HELD_BOUND_LEAD not in reason or KILL_UNATTRIBUTED not in reason:
+            print("FAIL A: the fire is not on the row as the did-not-end clause")
+            failures += 1
+
+        # THE RUNG, against the artifact that can support it: the same fire's stacks
+        # under a header stating the LEGACY convention. Written by this phase, never
+        # produced by an arm in this tree — the point is that the reader still names the
+        # class for the dumps that exist on disk today.
+        fire_body = text[text.index(stall_watchdog.FIRED_MARKER) :]
+        dump.write_text(
+            f"{stall_watchdog.ARM_MARKER}pid {child.pid} armed for {RIG_STALL_S:g}s\n"
+            f"{stall_watchdog.LEGACY_FATAL_POLICY_PHRASES[1]}\n{fire_body}",
+            encoding="utf-8",
+        )
+        legacy_outcome = stall_watchdog.fire_outcome(child.pid, dump.parent)
+        _kind, legacy_cause, legacy_reason = journal.death_verdict(row)
+        print(f"legacy artifact: fire_outcome={legacy_outcome} verdict={legacy_cause}")
+        print(f"legacy reason: {legacy_reason}")
+        if legacy_outcome != stall_watchdog.FIRE_LEGACY_FATAL or legacy_cause != STALL_BOUND_CAUSE:
+            print(f"FAIL A: a legacy artifact no longer names {STALL_BOUND_CAUSE}")
+            failures += 1
+
+        # The counterfactual, taken away and re-asked: with no artifact the verdict
+        # falls to the rungs that existed before this change — and for a row whose
+        # install has not moved, that is exactly what the real successors were told:
+        # ``runtime-killed`` carrying ``(unattributed, ...)``.
+        dump.unlink()
+        _kind, without, without_reason = journal.death_verdict(row)
+        print(f"without the dump: {without} | {without_reason}")
+        if without != KILL_CAUSE or KILL_UNATTRIBUTED not in without_reason:
+            print("FAIL A: the dump-less verdict is not the measured pre-change state")
+            failures += 1
+
+        # THE RUNTIME IS STILL THERE, which is the whole property this half exists to
+        # assert: the fire was an observation and the process carried on holding work.
+        still_alive = child.poll() is None
+        print(f"child alive after the whole sequence: {still_alive}")
+        if not still_alive:
+            print("FAIL A: the runtime did not survive its own bound")
+            failures += 1
     finally:
-        if child.poll() is None:
-            child.kill()
+        # Reaped by EXACT PID, never by program name, and graduated like phase B.
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                child.send_signal(sig)
+            except ProcessLookupError:
+                break
+            try:
+                child.wait(timeout=5)
+                break
+            except subprocess.TimeoutExpired:
+                continue
 
-    dump = stall_watchdog.dump_path(child.pid)
-    text = dump.read_text(encoding="utf-8", errors="replace")
-    fired = any(line.startswith(stall_watchdog.FIRED_MARKER) for line in text.splitlines())
-    print(f"child exit code: {code} (1 = faulthandler's _exit)")
-    print(f"dump: {dump}")
-    print(f"dump carries the fired marker: {fired}")
-
-    # THE ROW IS STAMPED WITH THE INSTALL THAT IS REAL HERE, not a fabricated
-    # one (review round 1, R1-9). With a made-up stamp the tear rung
-    # (``install-mid-update``) answers for the dump-less case instead of the
-    # unattributed one, and the control then shows "the artifact mattered"
-    # rather than the state the real successors were actually told — which is
-    # ``runtime-killed`` with ``(unattributed, ...)``.
-    from local_operator import buildwatch
-    from local_operator.update import installed_build
-
-    try:
-        stamp = installed_build(buildwatch.build_prefix())
-        build_fields = {"version": stamp.version, "source_ref": stamp.source_ref}
-    except Exception:  # noqa: BLE001 — an unstamped tree is itself a real shape
-        build_fields = {}
-    print(f"row build stamp: {build_fields or '(none — an unstamped tree)'}")
-
-    session = "rig-stall"
-    directory = cfg / "sessions" / session
-    directory.mkdir(parents=True, exist_ok=True)
-    now = time.time()
-    registry.write_turn_journal(
-        directory,
-        {
-            "session_id": session,
-            "pid": child.pid,
-            "parent_pid": os.getpid(),
-            "turn_seq": 1,
-            "command_id": "cmd-rig",
-            "started_at": now - 5,
-            "ended_at": None,
-            "open": True,
-            "end_cause": "",
-            "exit_cause": "",
-            "still_open_at_exit": False,
-            "last_boundary": "bash",
-            "build": build_fields,
-            "install_root": "/tmp/rig-install",
-            "updated_at": now - 1,
-        },
-    )
-    row = journal.TurnJournalRow.from_json(registry.read_turn_journal(directory))
-    assert row is not None
-    kind, cause, reason = journal.death_verdict(row)
-    print(f"verdict: {kind} / {cause}")
-    print(f"reason: {reason}")
-
-    # The counterfactual, taken away and re-asked: with no artifact the verdict
-    # falls to the rungs that existed before this change — and for a row whose
-    # install has not moved, that is exactly what the real successors were told:
-    # ``runtime-killed`` carrying ``(unattributed, ...)``.
-    dump.unlink()
-    _kind, without, without_reason = journal.death_verdict(row)
-    print(f"without the dump: {without} | {without_reason}")
-
-    if cause != STALL_BOUND_CAUSE:
-        print(f"FAIL A: the fired bound did not name the death ({STALL_BOUND_CAUSE})")
+    if failures:
+        print(f"FAIL A: {failures} assertion(s) above did not hold")
         return 1
-    if without != "runtime-killed" or "unattributed" not in without_reason:
-        print("FAIL A: the dump-less verdict is not the measured pre-change state")
-        return 1
-    print(f"RESULT A: NAMED ({cause})")
+    print(f"RESULT A: DUMP-ONLY FIRE, RUNTIME SURVIVED, LEGACY RUNG NAMED ({STALL_BOUND_CAUSE})")
     return 0
 
 

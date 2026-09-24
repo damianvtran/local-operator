@@ -73,9 +73,11 @@ Every step that can hang runs inside :func:`tests.e2e.watchdog.bounded`; read
 that module before changing a timeout, because the failure mode this stage
 guards (a thread parked in a syscall) defeats ``asyncio.wait_for``, thread
 watchdogs and signal-based timeouts alike, and the C-level ``faulthandler``
-timer is the only bound that survives it. The stage runs ``-n0`` for the same
-reason: a fired watchdog exits the process, which under xdist would kill a
-worker carrying unrelated tests.
+timer is the only bound that survives it (it dumps, and the harness's own
+``SIGALRM`` arm ends a process still wedged at its bound -- the dump itself
+terminates nothing). The stage runs ``-n0`` for the same
+reason: nothing in-process can end a hang, and the timer is process-global, so
+under xdist it would take a worker's stacks with it.
 
 The child gets an isolated ``HOME`` and ``LOCAL_OPERATOR_CONFIG_DIR``, and the
 ``CMUX_*``/``LOP_*``/``HERDR_*`` families are stripped from its environment:

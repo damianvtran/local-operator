@@ -182,11 +182,13 @@ Four candidates, weighed against the corrected finding 5.
 no protocol change, no owner change. The other 18 ops are untouched because the
 default is unchanged.
 
-**(b) Real streaming.** `complete_aside` in `session/attached.py` already fakes it — it calls
-`on_delta` once with the settled answer — and the card is built to stream. Best
-end-state UX, and progress on the socket. But it needs an out-of-band
-owner→client frame, owner-side plumbing of `session.complete_aside(on_delta=)`,
-capability negotiation, and skew handling. Not a now-fix.
+**(b) Real streaming.** — IMPLEMENTED since this proposal was written.
+`complete_aside` in `session/attached.py` no longer fakes it: the owner streams
+`aside_delta` frames on the request's own connection
+(`session/runtime/server.py::_aside_delta_sink`, relayed live-only, capability-
+probed so an older handle still answers in one piece), and the single post-hoc
+`on_delta(answer)` survives only as the FALLBACK for an owner that sent no deltas
+at all — see `docs/DESKTOP_CONTROLS.md`'s `/asides` bullet for the wire shape.
 
 **(c) Heartbeat / in-progress frame.** Resets the client deadline. Solves less
 than (b) for nearly the same protocol cost, and invents a second progress

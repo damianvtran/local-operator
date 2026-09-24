@@ -961,6 +961,29 @@ class AssistantBlock(TranscriptBlock):
         self._apply_rows(self._flat_whole())
         self.finalize()
 
+    def commit_text(self, text: str) -> None:
+        """Apply a WHOLE, already-committed message and freeze it — one render.
+
+        The replay path's entry point. ``update_text`` followed by
+        ``finalize_text`` is the live path's shape: the first is the streaming
+        economy (fence scan, frozen-prefix flatten, tail flatten) and the second
+        re-lexes the whole message anyway. For a message that has already
+        stopped arriving the first render is thrown away unseen — measured on a
+        resume frame at 42 replies, ``_flat_whole`` ran 84 times and the markdown
+        parse inside it was 0.17-0.56 s of the open.
+
+        The rows are identical by construction: ``finalize_text`` applies
+        ``_flat_whole`` and nothing else, and every rebuild of a finalized block
+        (``refit_width``, ``retheme``, ``on_resize``) re-derives from
+        ``_full_text`` through that same method, never from the streaming caches
+        this skips. Callers must have marked the block settled/narration first,
+        for the rail reason ``finalize_text`` records.
+        """
+        if self._finalized:
+            return
+        self._full_text = text
+        self.finalize_text()
+
     def mark_truncated(self) -> None:
         """This message ended early — aborted, or cut off by the provider.
 

@@ -246,6 +246,52 @@ _ANNOUNCE_DEFERRED = "deferred"
 _ANNOUNCE_FAILED = "failed"
 
 
+def _session_may_announce(session: Any) -> bool:
+    """Whether ``session`` is one the operator's OWN listings would show.
+
+    THE RULE, stated once: a session the operator's own listings HIDE must not
+    put anything on his screen. Its supervising session owns it — that is what a
+    delegated or agent-opened run is — and the durable records still make it
+    findable (``lop sessions``, the phone, the supervising session's own
+    transcript), so silence here costs no information.
+
+    Read from the DURABLE MARKER rather than from the environment, and that is
+    the whole design. An earlier candidate was the kill switch
+    ``agent_shell.harness_child_env`` already carries, and it cannot work: no
+    production path calls that helper (only benches, probes and the eval
+    driver), and a variable set at ONE spawn site cannot describe a session that
+    was resumed somewhere else, or adopted by the desktop, or continued by
+    ``lop exec --resume``. ``origin.json`` is the fact every spawn path shares —
+    the same single predicate (:func:`local_operator.resume.is_user_session`)
+    every listing surface already filters on, so this gate and the sidebar
+    cannot disagree about whether a row exists to be looked at.
+
+    ASKED OF THE MIRROR CASE TOO, which matters as much as the gate: a session
+    the listings SHOW (the operator's own conversation, and an
+    ``agent-workstream`` run they asked for) must still announce. A gate that
+    silenced the workstream the operator requested would be the bug this exists
+    to fix, one rung up.
+
+    A session with no transcript directory at all cannot be described by the
+    marker question, so it answers YES: absence of a marker means the user's own
+    in ``resume``'s own contract, and a runtime whose session has no directory
+    yet is not a hidden agent run. The same answer covers a handle whose session
+    is not reachable at all (``None``), which is the shape partial rigs and an
+    early construction stage both have — asking would raise, and a question that
+    cannot be put must not silence a banner that was owed under the old rule.
+    """
+    directory = getattr(getattr(session, "transcript", None), "directory", None)
+    if not directory:
+        return True
+    from local_operator.resume import is_user_session
+
+    try:
+        return is_user_session(Path(directory))
+    except Exception:  # noqa: BLE001 — an unanswered question must not silence a toast
+        logger.debug("could not read the session origin for the announce gate", exc_info=True)
+        return True
+
+
 def _already_bounded(images: Any) -> bool:
     """Whether ``images`` are decoded ``ImageContent`` rather than wire dicts.
 
@@ -3643,11 +3689,23 @@ class ServingSessionHandle(SessionHandle):
         # by surface, "reachable" means "some surface is watching OR an OS
         # notification can actually be delivered" — the watching case is
         # handled above, and this is the remaining out-of-band leg.
+        #
+        # AND THE BANNER HAS TO BE ONE THIS SESSION MAY RAISE. A hidden session
+        # (``_session_may_announce`` false: an agent-opened run the operator's
+        # listings do not show) never reaches the OS leg of `_announce_pending`,
+        # so the notify flag alone would promise a person who is never told:
+        # measured before this arm existed, an unattached `agent-shell` gate
+        # parked for 86,400 s with zero toasts, holding the process and stalling
+        # whatever waited on it (PR #1436 agent review round 1, F2). The same
+        # predicate as the announce leg, so the two cannot disagree about who
+        # can learn of the question.
         from local_operator.tui.notify import notifications_enabled
 
         try:
             reachable = notifications_enabled()
         except Exception:  # noqa: BLE001 — an unreadable setting is "not reachable"
+            reachable = False
+        if reachable and not _session_may_announce(getattr(self, "_session", None)):
             reachable = False
         return parked if reachable else PENDING_REQUEST_TIMEOUT_S
 
@@ -3888,6 +3946,16 @@ class ServingSessionHandle(SessionHandle):
             # kill switch turned on mid-run (a session that just switched to the
             # mock hosting) silences a gate that parks afterwards — and
             # `reannounce_pending` on a detach re-reads it the same way.
+            return
+        if not _session_may_announce(getattr(self, "_session", None)):
+            # THE OS LEG ONLY, and the durable half above has already run: a
+            # hidden session's parked gate stays findable in `lop sessions` and
+            # on the phone, because the session that owns it may itself be
+            # waiting on it. What is skipped is the banner — a session the
+            # operator's listings do not show must not put a card on his lock
+            # screen announcing work he cannot see (`_session_may_announce`).
+            # Re-checked on a re-announce, so a run resumed into a visible form
+            # still gets its toast.
             return
         # ROUTE TO WHATEVER IS WATCHING; fall out to the OS only when nothing
         # is. The old test was `attached_clients() > 0`, which counts only
@@ -4188,11 +4256,21 @@ class ServingSessionHandle(SessionHandle):
         either, because the durable unseen mark is untouched, so any surface
         that still delivers — a TUI, a desktop app — reads the same state and
         raises its own banner.
+
+        A HIDDEN SESSION DOES NOT CLIMB IT EITHER, for the same reason and with
+        the same outcome (:func:`_session_may_announce`). A delegated run's
+        completion belongs to the session that owns it and is already visible
+        there; a toast for it is the operator being told about work he neither
+        opened nor can see in any list. Settled rather than deferred, and the
+        same absence of contention as the silenced arm above: no claim, no
+        release, and the durable mark left exactly as another surface needs it.
         """
         try:
             from local_operator.tui.notify import notifications_enabled
 
             if not notifications_enabled():
+                return _ANNOUNCE_SETTLED
+            if not _session_may_announce(getattr(self, "_session", None)):
                 return _ANNOUNCE_SETTLED
             if self._watching_surfaces():
                 # Rung 1. Cheap and first: no store read, no filesystem probe.
@@ -4371,7 +4449,13 @@ class ServingSessionHandle(SessionHandle):
         return result
 
     @_on_session_loop
-    async def complete_aside(self, turns: list[dict[str, Any]]) -> str:
+    async def complete_aside(
+        self,
+        turns: list[dict[str, Any]],
+        *,
+        aside_instruction: bool = True,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> str:
         """Run an off-record provider request against this session.
 
         The aside seam: a viewer asks a question that must NOT enter the
@@ -4380,22 +4464,62 @@ class ServingSessionHandle(SessionHandle):
         needs the real model, credentials and context — which is why it
         cannot be answered viewer-side.
 
+        THIS IS THE REMOTE SEAM'S INSTRUCTION SITE, and that is a placement,
+        not an implementation detail: :func:`wrap_aside_turns` wraps the last
+        user turn here because every remote caller reaches the primitive
+        through a handle like this one. It used to be applied by the TUI alone,
+        so the desktop ``/asides`` route sent the model the user's raw question
+        with no instruction that it was off the record and no instruction not
+        to call a tool — which is why tool calls appeared on that surface.
+        :meth:`Session.complete_aside` deliberately stays bare: its in-process
+        callers supply their own instruction, and the goal-loop judge (which
+        calls it with ``LOOP_JUDGE_PROMPT``) must never receive an aside wrap.
+        The stored/returned aside turns stay RAW — only the provider request
+        carries the wrapper, so the user never sees ``<aside>`` XML.
+
+        ``aside_instruction`` IS THE CALLER'S DECLARATION, not the seam's
+        assumption, and it defaults to True for the reporters this seam exists
+        for: a caller that sends RAW turns (the desktop ``/asides`` route, the
+        phone's quick-ask) gets the instruction applied here whether or not it
+        knows this parameter exists. A caller that supplies its OWN instruction
+        — the TUI's ``/btw`` overlay, and the goal-loop judge, whose question is
+        ``LOOP_JUDGE_PROMPT`` and not an aside at all — passes ``False``.
+        WITHOUT THE FLAG the TUI's pre-wrapped question was wrapped a second
+        time on a session it was only VIEWING (its ``self._session`` is an
+        ``AttachedSession`` there, so this handle runs in the owner), the judge
+        was framed as an aside question, and both failures were silent.
+        :func:`wrap_aside_turns` is idempotent underneath, so a caller that gets
+        the flag wrong is not doubled — the two cannot disagree without the
+        turn list showing it.
+
+        ``on_delta`` forwards each streamed text chunk to the caller that asked
+        for it, as it arrives. OPTIONAL, and probed by signature against the
+        primitive: an older/reduced session without the parameter is answered in
+        one settled piece exactly as before. The ``on_usage`` accrual below is
+        NOT optional and must keep riding every call — it is what stops a hidden
+        way of spending tokens for free (a remote aside, the goal judge) from
+        costing zero.
+
         Found by the post-U9 migration audit rather than by a review: without
         it every aside answered "this owner cannot run off-record requests".
         """
         from local_operator.harness.types import Message
+        from local_operator.session.aside import wrap_aside_turns
 
-        messages = [Message.model_validate(turn) for turn in turns]
+        parsed = [Message.model_validate(turn) for turn in turns]
+        messages = wrap_aside_turns(parsed) if aside_instruction else parsed
         complete = self._session.complete_aside
         store = getattr(self._session, "_frontend_state_store", None)
-        if store is not None and "on_usage" in inspect.signature(complete).parameters:
+        forwards = inspect.signature(complete).parameters
+        fields: dict[str, Any] = {}
+        if on_delta is not None and "on_delta" in forwards:
+            fields["on_delta"] = on_delta
+        if store is not None and "on_usage" in forwards:
             # A remote caller receives text, not a billable usage callback. The
             # authoritative owner must charge the request here; otherwise a
             # hidden goal judge (and other remote asides) silently costs zero.
-            return await complete(
-                messages, on_usage=lambda usage: store.accrue_usage(self._session, usage)
-            )
-        return await complete(messages)
+            fields["on_usage"] = lambda usage: store.accrue_usage(self._session, usage)
+        return await complete(messages, **fields)
 
     @_on_session_loop
     async def adopt_aside(self, messages: list[dict[str, Any]]) -> str:

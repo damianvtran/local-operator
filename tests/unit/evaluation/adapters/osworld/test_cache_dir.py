@@ -135,9 +135,19 @@ class _Shim:
         pass
 
     async def _call_raw(
-        self, method: str, params: object, result_type: object, *, timeout: float
+        self,
+        method: str,
+        params: object,
+        result_type: object,
+        *,
+        timeout: float,
+        # Accepted for signature parity with ``AdapterSupervisor._call_raw`` and
+        # deliberately unused: this double calls the adapter IN PROCESS, so
+        # there is no RPC deadline for the per-action overhead to fund. Dropping
+        # the keyword would be a TypeError the moment a caller sets a rate.
+        execution_overhead_seconds_per_action: float = 0.0,
     ) -> object:
-        del timeout
+        del timeout, execution_overhead_seconds_per_action
         return await getattr(self._adapter, method)(params)
 
 
