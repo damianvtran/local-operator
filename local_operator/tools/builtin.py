@@ -162,7 +162,7 @@ from local_operator.scratchpad import (
     scratchpad_env_injection,
 )
 from local_operator.text_bounds import OUTPUT_TRUNCATION_MARKER, clip_head_tail
-from local_operator.tools import group_reaper, search_guard, shell_env
+from local_operator.tools import group_reaper, search_guard, shell_env, sleep_guard
 from local_operator.tools.spill import (
     SPILL_ENTRY_LIMIT_BYTES,
     SPILL_SCHEME,
@@ -3570,6 +3570,17 @@ async def execute_bash(
         if _si_block:
             return _error(tool_call_id, "bash", interception)
         logger.warning("bash: %s", interception)
+    # Long-sleep refusal: a FOREGROUND call that is mostly `sleep 1500; tail
+    # log` holds the session where a hub note cannot reach it (notes are
+    # delivered at tool boundaries, and a running bash is not one) — measured
+    # on child f7318cc06bdd, whose parent's three notes each waited out a
+    # 15-30 min sleep. A background call is exempt by construction: its sleep
+    # holds no turn. Blocks with the replacement (background + `wait`), never
+    # rewrites; see tools/sleep_guard.py for the predicate and the escape hatch.
+    if not params.background:
+        long_sleep = sleep_guard.check_long_sleep(params.command)
+        if long_sleep is not None:
+            return _error(tool_call_id, "bash", long_sleep)
     # Approval for write/exec tiers is the LOOP's gate (it fires after
     # tool_execution_start so the UI shows the pending call). A second gate
     # here made the user answer twice per action, with the tier name rendered
