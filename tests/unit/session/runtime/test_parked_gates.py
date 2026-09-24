@@ -327,7 +327,9 @@ def test_an_expired_question_is_not_reported_to_the_model_as_a_denial() -> None:
     assert "approval request" not in ask.lower()
     # It must still say WHAT went unanswered and that nothing was decided...
     assert "Deploy to production or roll back?" in ask
-    assert "never answered" in ask and "No decision was made" in ask
+    # "expired unanswered" carries it without the "was never answered:" clause
+    # that said the same thing twice (round 2, D8r).
+    assert "expired unanswered" in ask and "No decision was made" in ask
     # ...and leave the model where pressing `esc` leaves it, since both mean
     # "no answer came back" (see ASK_UNANSWERED_TEXT).
     assert "Decide yourself" in ask and "what you assumed" in ask
@@ -342,7 +344,10 @@ def test_an_expired_approval_still_reads_as_the_automatic_denial_it_is() -> None
     approval = _rendered_timeout_text("approval")
 
     assert "denied automatically" in approval
-    assert "not a decision by the user" in approval
+    # "the operator", not "the user": one name for one person, in a row this PR
+    # touched while it moved the access flow to "the operator" (round 2, D8r).
+    assert "not a decision by the operator" in approval
+    assert "the user" not in approval
 
     # A row with no `kind` at all predates the field; it must keep reading as an
     # approval rather than silently becoming a question.

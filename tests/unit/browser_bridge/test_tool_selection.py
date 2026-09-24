@@ -425,6 +425,29 @@ async def test_bridge_open_recovers_from_a_dead_pinned_tab(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _rows(text: str) -> list[str]:
+    """The receipt's rows: ONE row per raw line, clipped at the card's measure.
+
+    Assertions about what the OPERATOR can read have to be per row, not over the
+    joined text: a phrase split across a line break is a phrase the card either
+    paints as two rows or loses the tail of. Round 1 measured exactly that (D6).
+    """
+    return text.split("\n")
+
+
+def _flow(text: str) -> str:
+    """The receipt's rows rejoined into one line, for CONTENT assertions.
+
+    What the operator loses is a CLIPPED row, not a wrapped one: the card paints
+    every row up to the measure, so text that wraps is text that is read. Content
+    assertions therefore run over the reflowed text, and the one property that
+    has to hold per row — the width — is asserted directly, for every arm and
+    every interpolation, by
+    ``test_no_access_arm_has_a_row_the_card_would_clip``.
+    """
+    return " ".join(row.strip() for row in _rows(text) if row.strip())
+
+
 @pytest.mark.asyncio
 async def test_request_access_works_without_a_surface(monkeypatch) -> None:
     # The whole point of the flow: 'open' just FAILED, so no surface exists.
@@ -581,7 +604,9 @@ async def test_request_access_reports_the_sessions_attachment(monkeypatch) -> No
     )
 
     assert "No Local Operator pane is attached to this session" in result.text
-    assert "then proceed with what you have" in result.text
+    # ROW-BOUND, not joined-text bound (round 1, D6): the card paints one row per
+    # raw line, so the clause this text exists to carry has to fit IN a row.
+    assert "then proceed with what you have" in _flow(result.text)
     # Still notify-first: the request is what makes the prompt visible when a
     # surface does attach.
     assert "Notify them anyway" in result.text
@@ -627,7 +652,7 @@ def test_a_pending_prompt_says_whether_an_interface_is_attached() -> None:
 
     assert "No Local Operator pane is attached to this session" in unattached
     assert "An interface is attached to this session" not in unattached
-    assert "proceed with what you have rather than blocking the turn" in unattached
+    assert "then proceed with what you have" in _flow(unattached)
 
     # Both name the surface the prompt is on, and both tell the agent to notify.
     for text in (attached, unattached):
@@ -659,7 +684,11 @@ def test_the_pending_prompt_names_the_fifteen_minute_wait_and_the_re_request() -
 
     assert "UP TO 15 MINUTES" in text
     assert "Keep calling action='await_access'" in text
-    assert "most 240s per call" in text or "waits at most 240s" in text
+    # NIT 10 (round 2): the count is only true for calls the model SIZES to the
+    # 240 s cap — an unsized call waits the 120 s default, so the assumption is
+    # stated rather than left for the reader to reconstruct.
+    assert "each call waits at most 240s" in _flow(text)
+    assert "about four calls sized to that cap span it (an unsized call waits 120s" in _flow(text)
     assert "action='request_access'" in text
     assert builtin.BROWSER_AWAIT_ACCESS_MAX_S == 240.0
     # The DEFAULT stays off the cap (round 1, MINOR 4 / U6): an unsized call is
@@ -669,8 +698,170 @@ def test_the_pending_prompt_names_the_fifteen_minute_wait_and_the_re_request() -
     # The re-request is BOUNDED (round 1, D5/U5): "keep doing that while the
     # origin is still needed" was an unbounded loop whose repeat is a silent
     # no-op until the prompt expires.
-    assert "at most once per 15-minute window" in text
+    assert "at most once" in text and "15-minute window" in text
     assert "notifies nobody" in text
+
+
+class _ChildComms:
+    """The one read :func:`_delegated_here` makes, and the same predicate
+    ``build_hub_tool`` uses to choose the child-shaped ``hub`` tool."""
+
+    def __init__(self, *child_jobs: str) -> None:
+        self._child_jobs = set(child_jobs)
+
+    def is_child(self, job_id: str | None) -> bool:
+        return job_id is not None and job_id in self._child_jobs
+
+
+def test_a_delegated_run_credits_its_parents_interface() -> None:
+    """D9: the browser text must not claim the PARENT's pane as the child's own.
+
+    A child renders its parent's attachment answer — ``harness/subagent.py``
+    installs the parent's live probe on the child's holder — so "attached to this
+    session" was a false statement of fact about the reader, and the same child
+    is told the opposite in the ``<interactivity>`` block that ships beside this
+    string ("the session this run was delegated from"). The two are read in one
+    turn, so they have to agree.
+    """
+    comms = _ChildComms("job-1")
+    child = ToolContext(subagent_comms=comms, job_id="job-1", attached_probe=lambda: True)
+    assert builtin._delegated_here(child) is True
+    # The parent's own foreground turn carries no job id of its own records.
+    assert builtin._delegated_here(ToolContext(subagent_comms=comms)) is False
+    assert builtin._delegated_here(ToolContext()) is False
+    # An unreadable comms surface must not fail the flow, and must not invent a
+    # parent either.
+    assert builtin._delegated_here(ToolContext(subagent_comms=object(), job_id="job-1")) is False
+
+    child_text = builtin._access_result_text(
+        "pending",
+        "https://www.linkedin.com/feed/",
+        host="",
+        attached=True,
+        delegated=True,
+        notify=builtin._notify_channel(child),
+    )
+    assert "An interface is attached to the session this run was delegated from" in _flow(
+        child_text
+    )
+    assert "An interface is attached to this session" not in child_text
+    assert "a short message, or `hub` to that session" in _flow(child_text)
+
+    parent_text = builtin._access_result_text(
+        "pending", "https://www.linkedin.com/feed/", host="", attached=True
+    )
+    assert "An interface is attached to this session" in parent_text
+    assert "delegated from" not in parent_text
+
+
+@pytest.mark.asyncio
+async def test_the_real_path_gives_a_child_the_parents_interface(monkeypatch) -> None:
+    """The WIRING, not the renderer: ``execute_browser`` has to read the delegated
+    fact off the live context, the way it reads the attachment probe.
+
+    Drives the tool rather than :func:`_access_result_text`, for the reason the
+    attachment test above does: a fact computed and never passed is the defect a
+    renderer-level test cannot see.
+    """
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
+
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
+        return {"origin": "https://www.linkedin.com/feed/", "state": "pending"}, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    child = ToolContext(
+        browser=BrowserSurface(),
+        subagent_comms=_ChildComms("job-1"),
+        job_id="job-1",
+        attached_probe=lambda: True,
+    )
+    result = await builtin.execute_browser(
+        "t",
+        {"action": "request_access", "url": "https://www.linkedin.com/feed/"},
+        None,
+        None,
+        child,
+    )
+
+    assert "An interface is attached to the session this run was delegated from" in result.text
+    assert "An interface is attached to this session" not in result.text
+    assert "`hub` to that session" in result.text
+    # The child keeps its OWN call mechanics: await_access is in its inventory and
+    # it is the child's call that waits.
+    assert "action='await_access'" in result.text
+
+
+def test_the_notify_route_names_only_tools_the_caller_has() -> None:
+    """Q9: a reader told to notify, with no ask hook, is told HOW — and only
+    with a route it has.
+
+    ``hub`` is named for a CHILD (its ``<interactivity>`` block names it, and it
+    is how a child reaches the operator), never for a top-level session: that
+    session holds ``hub`` so its own children can reach IT, and cannot notify
+    anyone through it, so the phrase there would be a false instruction.
+    """
+    assert builtin._notify_channel(ToolContext(ask_user=_never_asked)) == ASK_PHRASE
+    child = ToolContext(subagent_comms=_ChildComms("job-1"), job_id="job-1")
+    assert builtin._notify_channel(child) == "a short message, or `hub` to that session"
+    assert builtin._notify_channel(ToolContext()) == "a short message"
+    assert builtin._notify_channel(ToolContext(subagent_comms=_ChildComms("job-9"))) == (
+        "a short message"
+    )
+
+
+def test_no_access_arm_has_a_row_the_card_would_clip() -> None:
+    """U8 / D6r, pinned as the property it is: EVERY row of EVERY arm, in the
+    card's measure, for every interpolation.
+
+    Round 1 lost the tail of every long line (D6); round 2 hand-wrapped the
+    pending arms and still shipped three lines at 74-78 cells — one of them
+    losing exactly the notify clause that round had just added — plus three
+    single-line terminal arms whose recovery step clipped at every width,
+    ``none`` being the commonest post-expiry state. The card paints one row per
+    raw line and clips it, so the property is per row, and it can only hold for
+    every combination of host, state, attachment and channel because the wrap
+    runs after the interpolation.
+    """
+    origin = "https://www.linkedin.com/feed/"
+    states = ["allowed", "denied", "pending", "await_timeout", "superseded", "cancelled", "none"]
+    channels = [
+        "a short message",
+        "a short message, or `ask`",
+        "a short message, or `hub` to that session",
+    ]
+    rendered = 0
+    for state in states:
+        for host in ("", builtin.HOST_UI_PREFIX):
+            for attached in (True, False):
+                for delegated in (True, False):
+                    for notify in channels:
+                        text = builtin._access_result_text(
+                            state,
+                            origin,
+                            position=1,
+                            pending_count=2,
+                            host=host,
+                            attached=attached,
+                            delegated=delegated,
+                            notify=notify,
+                            total_s=240.0,
+                        )
+                        rendered += 1
+                        over = [row for row in _rows(text) if len(row) > builtin._RECEIPT_WRAP]
+                        assert not over, f"{state}/{host}/{attached}/{delegated}: {over}"
+    assert rendered == len(states) * 2 * 2 * 2 * len(channels)
+
+    # ...and the three arms that were single 162-262-cell lines keep their
+    # recovery step INSIDE a row, which is the half a width bound alone does not
+    # prove.
+    for state, recovery in (
+        ("none", "Call action='request_access' with the url to raise a new prompt."),
+        ("superseded", "then call action='request_access' again if this origin is still needed."),
+        ("denied", "raise it with them if it is essential"),
+    ):
+        text = builtin._access_result_text(state, origin, host="")
+        assert recovery in _flow(text), state
 
 
 def test_an_unanswered_prompt_is_not_reported_as_a_refusal() -> None:
@@ -683,7 +874,7 @@ def test_an_unanswered_prompt_is_not_reported_as_a_refusal() -> None:
         assert "Do not report it as" in text
         # ...and it must not forbid the honest admission that the agent went on
         # without access, which the previous wording did.
-        assert "say plainly if you proceeded without access" in text
+        assert "say plainly if you proceeded without access" in _flow(text)
 
 
 def test_the_access_advice_names_only_tools_the_caller_has() -> None:
@@ -698,7 +889,7 @@ def test_the_access_advice_names_only_tools_the_caller_has() -> None:
     child = builtin._access_result_text(
         "pending", "https://example.com", host="", notify=ASK_PHRASE
     )
-    assert "or `ask`" in child  # the phrase a host with the hook is given
+    assert "a short message, or `ask`" in _flow(child)  # the host with the hook
 
     subagent = builtin._access_result_text(
         "pending", "https://example.com", host="", notify=builtin._notify_channel(ToolContext())
@@ -743,7 +934,7 @@ async def test_the_await_timeout_names_re_request_not_an_endless_await(monkeypat
 
     assert "still pending after" in result.text
     assert "action='request_access'" in result.text
-    assert "15 MINUTES" in result.text
+    assert "15 MINUTES" in _flow(result.text)
     assert "AN UNANSWERED PROMPT IS NOT A REFUSAL" in result.text
     # The timeout arm and the pending arm now agree (round 1, U4): both name the
     # repeated ``await_access`` calls as the budget's mechanism. This context has
@@ -762,10 +953,11 @@ async def test_the_await_timeout_names_re_request_not_an_endless_await(monkeypat
         None,
         detached,
     )
-    assert "No pane is attached to this session" in result.text
-    # The line is hard-wrapped for the TUI receipt, so the assertion stops at the
-    # line break.
-    assert "notify the operator and proceed" in result.text
+    assert "No Local Operator pane is attached to this session" in result.text
+    # The row carries the RELIEF clause and, since round 2's Q9, the channel the
+    # caller actually has — the pending text told every reader to notify and a
+    # reader with no ask hook was left with no route named at all.
+    assert "notify the operator (a short message) and proceed" in _flow(result.text)
 
 
 @pytest.mark.asyncio

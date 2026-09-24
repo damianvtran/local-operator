@@ -54,6 +54,7 @@ import re
 import shutil
 import sys
 import tempfile
+import textwrap
 import threading
 import time
 import traceback
@@ -13393,6 +13394,85 @@ def _attached_here(context: ToolContext | None) -> bool:
         return True
 
 
+#: The width the TUI receipt can actually paint, and therefore the width every
+#: arm below is wrapped to. The card's lane is 76 cells at 80 columns and its
+#: text measure is 72; a raw line past the measure is clipped with an ellipsis,
+#: so whatever it carried is lost to the OPERATOR while the model still receives
+#: every byte. Measured twice: round 1 (D6) lost "proceed with what you have",
+#: "15 MINUTES" and "not a refusal"; round 2 (U8/D6r) still had three arms
+#: unwrapped and three lines at 74-78 cells, one losing exactly the notify
+#: clause it had just gained. Wrapping by hand cannot be right, because the
+#: interpolated clause (``{notify}``, ``{origin}``, the ``where`` sentence) is
+#: not in the string that was measured.
+_RECEIPT_WRAP = 72
+
+
+def _wrap_receipt(text: str) -> str:
+    """Wrap a receipt to the card's measure — ONE row per raw line is what the
+    card paints, so the raw line is the unit the operator sees.
+
+    Called with the arm's FINAL text, interpolations included, which is the
+    whole point: a hand-wrapped line containing ``{notify}`` can only be correct
+    for the expansion it was measured against (round 2, D6r).
+
+    ``break_long_words``/``break_on_hyphens`` stay OFF so a URL or an
+    ``action='await_access'`` token is never split into something the model
+    cannot hand back to the tool: an over-long token takes its own row and is
+    the one thing the card may still ellipsise.
+    """
+    lines: list[str] = []
+    for raw in text.split("\n"):
+        if not raw.strip():
+            lines.append("")
+            continue
+        # A bullet's continuation lines keep its two-space indent; nothing else in
+        # this flow is indented, so the rule stays this small on purpose. Branched
+        # rather than passed as ``**kwargs`` so the call stays fully typed.
+        if raw.startswith("- "):
+            wrapped = textwrap.wrap(
+                raw,
+                width=_RECEIPT_WRAP,
+                subsequent_indent="  ",
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
+        else:
+            wrapped = textwrap.wrap(
+                raw,
+                width=_RECEIPT_WRAP,
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
+        lines.extend(wrapped or [""])
+    return "\n".join(lines)
+
+
+def _delegated_here(context: ToolContext | None) -> bool:
+    """Whether THIS run is a session delegated from another — a subagent child.
+
+    It exists to keep a false subject out of the browser text (round 3, D9). The
+    attachment probe is the PARENT's live view, installed on the child's holder
+    by ``harness/subagent.py``, so a child rendering "an interface is attached to
+    this session" claims the parent's pane as its own — the same claim the
+    ``<interactivity>`` block was fixed for, one string over, read by the same
+    child in the same turn.
+
+    The test is ``subagent_comms.is_child(job_id)``: the SAME predicate
+    ``build_hub_tool`` uses to decide the child-shaped ``hub`` tool, so the two
+    readers cannot disagree about who a caller is. A top-level session holds the
+    comms surface as well (that is how its own children reach it) but its own
+    context carries no job id this instance knows, so it is not a child.
+    """
+    comms = getattr(context, "subagent_comms", None)
+    is_child = getattr(comms, "is_child", None)
+    if not callable(is_child):
+        return False
+    try:
+        return bool(is_child(getattr(context, "job_id", None)))
+    except Exception:  # noqa: BLE001 — attribution must never fail the flow
+        return False
+
+
 def _notify_channel(context: ToolContext | None) -> str:
     """How THIS caller can tell the operator something, from declared capabilities.
 
@@ -13403,16 +13483,22 @@ def _notify_channel(context: ToolContext | None) -> str:
     "ask the user directly" on a deny, for a reader whose only route out is
     ``hub`` to its parent.
 
-    It deliberately says no more than "a short message" when there is no ask
-    hook. ``hub`` is NOT offered here: a top-level session holds ``hub`` too (it
-    is how ITS children reach it), the two are indistinguishable from this
-    context, and the child-shaped phrase would be a false instruction for a
-    parent. A reader that has ``hub`` knows its route — and the pending text tells
-    every reader without an ask hook that nothing in this session can present the
-    question, which is the fact that matters.
+    A CHILD is therefore told ``hub`` (round 2, Q9): the browser text named no
+    route at all for a reader with no ask hook, and the same child's own
+    ``<interactivity>`` block names ``hub`` as its way through — the two are read
+    in one turn, so they have to agree. The child test is
+    :func:`_delegated_here`, the same ``is_child(job_id)`` the ``hub`` tool
+    builder uses.
+
+    ``hub`` is still NOT offered to a top-level session: it holds the tool so its
+    CHILDREN can reach it and cannot notify anyone through it, so naming it there
+    would be a false instruction. Such a reader gets "a short message" alone,
+    which is the channel it actually has.
     """
     if getattr(context, "ask_user", None) is not None:
         return "a short message, or `ask`"
+    if _delegated_here(context):
+        return "a short message, or `hub` to that session"
     return "a short message"
 
 
@@ -13424,6 +13510,7 @@ def _access_result_text(
     pending_count: int | None = None,
     host: str = "",
     attached: bool = True,
+    delegated: bool = False,
     notify: str = "a short message",
     total_s: float = 0.0,
 ) -> str:
@@ -13444,20 +13531,36 @@ def _access_result_text(
     tab — a surface the operator can click. "Nobody can act on it" was that
     contradiction, and it is the incident's own shape (round 1, D2/U3).
 
+    ``delegated`` says WHOSE pane this text is talking about. A child renders its
+    PARENT's attachment answer (``harness/subagent.py`` installs the parent's live
+    probe on the child's holder), so "attached to this session" attributes the
+    parent's pane to a run that owns none — the false-subject claim the
+    ``<interactivity>`` block beside it was fixed for, read by the same child in
+    the same turn (round 3, D9).
+
     ``notify`` is the channel this caller can actually use, from
     :func:`_notify_channel`, and ``total_s`` is the wait an ``await_access`` just
     spent. Both the pending and the timeout arms are rendered HERE rather than
     inline, so the two cannot give contradictory next steps — which they did:
     one said "proceed without blocking", the other told every caller to keep
     waiting (round 1, U4 / MAJOR 2).
+
+    Every arm leaves through :func:`_wrap_receipt`, AFTER its interpolations,
+    and that placement is the fix for a finding rather than a style: the card
+    clips each raw line to its measure, so a line whose length depends on
+    ``{notify}``/``{origin}``/``{where}`` has to be wrapped where those values
+    are known.
     """
+    # A child's attachment answer is its parent's, so every claim about a pane
+    # has to name the session that owns it (round 3, D9).
+    subject = "the session this run was delegated from" if delegated else "this session"
     extension_host = host != HOST_UI_PREFIX
     if state == "allowed":
-        return f"{origin} is allowed. 'open' or 'goto' the URL now."
+        return _wrap_receipt(f"{origin} is allowed. 'open' or 'goto' the URL now.")
     if state == "denied":
-        return (
-            f"the operator denied access to {origin}. Do not retry or re-request this "
-            f"origin; raise it with them if it is essential ({notify})."
+        return _wrap_receipt(
+            f"the operator denied access to {origin}. Do not retry or re-request "
+            f"this origin; raise it with them if it is essential ({notify})."
         )
     if state == "pending":
         # NOTIFY-FIRST is load-bearing: the browser's own notification banner is
@@ -13473,58 +13576,58 @@ def _access_result_text(
         # free to the model and are what keep the load-bearing clause inside the
         # first row.
         where = (
-            "in the Local Operator extension popup (toolbar icon,\n"
-            "numbered badge showing the pending count) — the badge alone\n"
-            "is not reliably seen"
+            "in the Local Operator extension popup (toolbar icon, numbered badge "
+            "showing the pending count) — the badge alone is not reliably seen"
             if extension_host
-            else "in the Local Operator desktop app's browser tab — the\n"
-            "prompt alone is not reliably seen"
+            else "in the Local Operator desktop app's browser tab — the prompt "
+            "alone is not reliably seen"
         )
         slots = f" ({position} of {pending_count})" if position and pending_count else ""
         head = f"approval for {origin} is pending{slots}.\nThe prompt is showing {where}.\n\n"
         if attached:
-            return (
+            return _wrap_receipt(
                 f"{head}"
-                "An interface is attached to this session, so the operator can answer\n"
+                f"An interface is attached to {subject}, so the operator can answer "
                 f"it as soon as they look — make sure they are told ({notify}).\n\n"
-                "- Wait UP TO 15 MINUTES in total for the decision: a person may be\n"
-                "  away from the desk, and a slow answer is NOT a refusal.\n"
-                "- Keep calling action='await_access' with the same url for that\n"
-                "  budget — each call waits at most 240s, so about four calls span\n"
-                "  it. That is the mechanism: there is no sleep shortcut here,\n"
-                "  because the `wait` tool awaits a background job and this flow\n"
-                "  has none.\n"
-                "- The prompt expires after about 10 minutes. If await_access\n"
-                "  returns \"no live access request\", call action='request_access'\n"
-                "  with the same url to raise a NEW prompt — that is what pings the\n"
-                "  operator again. Re-requesting while the old prompt is still live\n"
-                "  changes nothing and notifies nobody, so do it only once it has\n"
-                "  expired, and at most once per 15-minute window: after that,\n"
-                "  report what you have and move on.\n"
-                "- AN UNANSWERED PROMPT IS NOT A REFUSAL. Do not report it as\n"
-                "  refused — the request is still pending while an interface is\n"
-                "  attached — but say plainly if you proceeded without access."
+                "- Wait UP TO 15 MINUTES in total for the decision: a person may be "
+                "away from the desk, and a slow answer is NOT a refusal.\n"
+                "- Keep calling action='await_access' with the same url for that "
+                "budget — each call waits at most 240s, so about four calls sized "
+                "to that cap span it (an unsized call waits 120s, so eight of "
+                "those do). That is the mechanism: there is no sleep shortcut "
+                "here, because the `wait` tool awaits a background job and this "
+                "flow has none.\n"
+                "- The prompt expires after about 10 minutes. If await_access "
+                "returns \"no live access request\", call action='request_access' "
+                "with the same url to raise a NEW prompt — that is what pings the "
+                "operator again. Re-requesting while the old prompt is still live "
+                "changes nothing and notifies nobody, so do it only once it has "
+                "expired, and at most once per 15-minute window: after that, "
+                "report what you have and move on.\n"
+                "- AN UNANSWERED PROMPT IS NOT A REFUSAL. Do not report it as "
+                "refused — the request is still pending while an interface is "
+                "attached — but say plainly if you proceeded without access."
             )
-        # UNATTACHED. What is measured is that no PANE of this session is
+        # UNATTACHED. What is measured is that no PANE of this run's session is
         # attached; the prompt named above is still on a surface the operator uses,
         # so the text must not claim that nobody can act on it. The notify
         # instruction stays (it is what reaches them when nothing of theirs is
         # watching this session), and so does the re-request, which is what pings
         # them again once a surface attaches.
-        return (
+        return _wrap_receipt(
             f"{head}"
-            "No Local Operator pane is attached to this session right now, so\n"
-            "nothing here will present the question — the prompt above is the\n"
-            "surface, and the operator can answer it there. Notify them anyway, in\n"
-            "a short message they will read, so the decision is waiting for them;\n"
-            "then proceed with what you have rather than blocking the turn.\n\n"
-            "- The prompt expires after about 10 minutes. Re-raise it with\n"
-            "  action='request_access' (the same url) when the origin is next\n"
-            "  needed — that is what pings the operator again rather than leaving\n"
-            "  them a dead prompt.\n"
-            "- AN UNANSWERED PROMPT IS NOT A REFUSAL. Do not report it as refused:\n"
-            "  an interface may attach later, and this request is what makes it\n"
-            "  visible — but say plainly if you proceeded without access."
+            f"No Local Operator pane is attached to {subject} right now, so nothing "
+            f"in this run will present the question — the prompt above is the "
+            f"surface, and the operator can answer it there. Notify them anyway "
+            f"({notify}), so the decision is waiting for them; then proceed with "
+            f"what you have rather than blocking the turn.\n\n"
+            "- The prompt expires after about 10 minutes. Re-raise it with "
+            "action='request_access' (the same url) when the origin is next "
+            "needed — that is what pings the operator again rather than leaving "
+            "them a dead prompt.\n"
+            "- AN UNANSWERED PROMPT IS NOT A REFUSAL. Do not report it as refused: "
+            "an interface may attach later, and this request is what makes it "
+            "visible — but say plainly if you proceeded without access."
         )
     if state == "await_timeout":
         # The arm that used to disagree with the pending text (round 1, U4): it
@@ -13540,23 +13643,27 @@ def _access_result_text(
         )
         if attached:
             advice = (
-                "- An interface is attached to this session: keep calling\n"
-                "  action='await_access' — each call waits at most 240s — until\n"
-                "  about 15 MINUTES in total have gone by.\n"
+                f"- An interface is attached to {subject}: keep calling "
+                "action='await_access' — each call waits at most 240s — until "
+                "about 15 MINUTES in total have gone by.\n"
             )
         else:
+            # ONE term for the surface across the strings the same model reads:
+            # the pending arm calls it a "Local Operator pane", so a bare "pane"
+            # here left the reader holding two names for one thing
+            # (round 2, D8r2).
             advice = (
-                "- No pane is attached to this session, so nothing here will\n"
-                "  present it: notify the operator and proceed with what you\n"
-                "  have rather than blocking the turn.\n"
+                f"- No Local Operator pane is attached to {subject}, so nothing in "
+                f"this run will present it: notify the operator ({notify}) and "
+                "proceed with what you have rather than blocking the turn.\n"
             )
-        return (
-            f"still pending after {total_s:.0f}s, and the operator has not decided\n"
+        return _wrap_receipt(
+            f"still pending after {total_s:.0f}s, and the operator has not decided "
             f"on this origin yet:\n{origin}\n"
             f"Remind them to check {check}. Then:\n"
             f"{advice}"
-            "- Once the prompt has expired, call action='request_access' with\n"
-            "  the same url to raise a new one: that is what pings them again.\n"
+            "- Once the prompt has expired, call action='request_access' with the "
+            "same url to raise a new one: that is what pings them again.\n"
             "AN UNANSWERED PROMPT IS NOT A REFUSAL."
         )
     if state == "superseded":
@@ -13569,16 +13676,18 @@ def _access_result_text(
             if extension_host
             else "the desktop app shows one prompt at a time"
         )
-        return (
+        return _wrap_receipt(
             f"the approval prompt for {origin} was superseded by another session's "
-            f"request — {shower}. Wait for the other "
-            "session's prompt to resolve, then call action='request_access' again "
-            "if this origin is still needed."
+            f"request — {shower}. Wait for the other session's prompt to resolve, "
+            "then call action='request_access' again if this origin is still "
+            "needed."
         )
     if state == "cancelled":
-        return f"your pending access request for {origin} was cancelled."
-    # "none": no live request for the caller — expired or never raised.
-    return (
+        return _wrap_receipt(f"your pending access request for {origin} was cancelled.")
+    # "none": no live request for the caller — expired or never raised. The
+    # recovery is the LAST thing in the line, so it is the first thing the card
+    # used to clip: `none` is the commonest post-expiry state (round 2, U8).
+    return _wrap_receipt(
         f"no live access request for {origin} (it may have expired unanswered, or "
         "never been raised). Call action='request_access' with the url to raise a "
         "new prompt."
@@ -13611,7 +13720,12 @@ async def _bridge_access(
     # mid-wait to give up, and made the probe's own "live view" claim false.
     # ``_attached_here`` falls back to True without a probe, so the fail-open
     # direction is unchanged.
+    # ``notify`` and ``delegated`` are properties of THIS RUN — the hook its host
+    # installed and whether it is a delegated session — so reading them once here
+    # is right; only the attachment answer has to be re-read at each render site
+    # (round 1, MINOR 3), because a surface can attach while the model waits.
     notify = _notify_channel(context)
+    delegated = _delegated_here(context)
     if action == "request_access":
         result, problem = await _bridge_call(
             tool_call_id, "request_access", {"url": url, **identity}, client=client
@@ -13632,6 +13746,7 @@ async def _bridge_access(
                 host=host,
                 attached=_attached_here(context),
                 notify=notify,
+                delegated=delegated,
             ),
             details={
                 "origin": origin,
@@ -13661,6 +13776,7 @@ async def _bridge_access(
                 host=host,
                 attached=_attached_here(context),
                 notify=notify,
+                delegated=delegated,
             ),
             details={
                 "origin": origin,
@@ -13692,6 +13808,7 @@ async def _bridge_access(
                     host=host,
                     attached=_attached_here(context),
                     notify=notify,
+                    delegated=delegated,
                     total_s=total_s,
                 ),
                 details={"origin": url, "state": "pending"},
@@ -13719,6 +13836,7 @@ async def _bridge_access(
                     host=host,
                     attached=_attached_here(context),
                     notify=notify,
+                    delegated=delegated,
                 ),
                 details={
                     "origin": origin,
