@@ -3525,7 +3525,100 @@ def held_fire(pid: int | None = None, directory: Path | None = None) -> bool:
     watchdog fires are never fatal, and the quiet direction is the
     one that cannot narrate a runtime as stalled when it never fired.
     """
-    text = _evidence_text(pid, directory)
+    evidence = dump_evidence(pid, directory)
+    if evidence is None:
+        return False
+    return _holds(*evidence)
+
+
+#: The phrase both post-fire markers carry before the moment they were written, in the
+#: format :func:`_record_held_fire` stamps it with. Read back by :func:`_held_fired_at`.
+_FIRED_AT_PHRASE = "the bound fired at "
+_FIRED_AT_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+def _held_fired_at(text: str) -> float | None:
+    """The epoch the LAST :data:`HELD_MARKER` says its fire was observed at, or ``None``.
+
+    The LAST one, because a runtime that stays stalled re-fires on the held backoff and
+    every repeat appends its own marker: the question a listing asks is whether the
+    runtime has recovered since the MOST RECENT fire, not since the first. Local time at
+    one-second resolution, exactly as the writer stamps it; ``None`` for a marker whose
+    stamp cannot be parsed (a build that wrote a different sentence, or a torn line),
+    which the caller reads as "cannot show a recovery" and so keeps the held reading.
+    """
+    at = text.rfind(HELD_MARKER)
+    if at < 0:
+        return None
+    rest = text[at + len(HELD_MARKER) :]
+    if not rest.startswith(_FIRED_AT_PHRASE):
+        return None
+    stamp = rest[len(_FIRED_AT_PHRASE) : len(_FIRED_AT_PHRASE) + 19]
+    try:
+        return time.mktime(time.strptime(stamp, _FIRED_AT_FORMAT))
+    except (ValueError, OverflowError):
+        return None
+
+
+def _rearmed_since(dump: Path, fired_at: float) -> bool:
+    """Has EVERY plane reported since ``fired_at``, per this dump's deadline sibling?
+
+    THE SIBLING'S CONTENT, NOT ITS MTIME, and the difference is the whole predicate. The
+    mtime moves on every successful re-arm, and a runtime whose WORKLOAD loop is parked
+    keeps re-arming off its healthy SERVING plane every 15 s — measured on this fleet:
+    pid 65820's dump reads "workload last reported 4932.88s ago … the serving plane
+    reported 0s ago" — so a fresh mtime is exactly what a genuinely stuck runtime shows.
+    The content is :meth:`_Armed.pin`: the EARLIEST plane's last sign of life plus the
+    bound (or the progress leg's decided deadline). It therefore moves past the fire
+    only when EVERY plane has shown life after it, which is the definition of a
+    recovered runtime; while any plane is still silent it stays at or before the fire,
+    because that plane's deadline is what fired.
+
+    THE MARGIN IS HALF THE SMALLEST BOUND (``min_bound_seconds() / 2``, 22.5 s), sized
+    against both sides of the comparison rather than tuned: a stuck runtime's deadline
+    sits at the fire (the marker is stamped at OBSERVATION, up to one sampler interval
+    later, at one-second resolution), while a recovered one sits at least a whole bound
+    (>= 45 s) past the fire, minus that same observation lag. Half the floor separates
+    the two with room on either side.
+
+    THE PROGRESS LEG STAYS HELD HERE, stated because it is the conservative direction:
+    its decided deadline is the fire's own moment and nothing in the watchdog clears
+    it, so a sibling naming ``progress`` never reads as recovered. That is the reading
+    the markers themselves keep giving, since that leg keeps re-firing.
+
+    Unreadable, absent or malformed siblings answer ``False`` — the evidence of a
+    recovery is missing, so the held reading the dump states stands.
+    """
+    try:
+        raw = dump.with_suffix(DEADLINE_SUFFIX).read_text(encoding="utf-8").split()
+        deadline = float(raw[0])
+    except (OSError, ValueError, IndexError):
+        return False
+    return deadline - fired_at >= min_bound_seconds() / 2
+
+
+def _holds(dump: Path, text: str) -> bool:
+    """THE ONE HELD PREDICATE: fired, held over work, and not superseded since.
+
+    Every surface that renders the third state reads it through here —
+    :func:`held_fire`, :func:`held_dumps`/:func:`held_pids` (and so ``info.collect``'s
+    ``stall_held``, the ``/info`` panel's ``bound held`` and ``lop sessions``'
+    ``bound held; lop stop`` cell) and the kill ladder's drain check — so no two of them
+    can disagree about one dump.
+
+    SUPERSESSION IS WHAT THIS ADDS, and the defect it closes was a sticky flag: the
+    marker is appended once per fire and nothing ever withdrew it, so a runtime that
+    recovered minutes after a fire read ``bound held; lop stop`` for the rest of its
+    life (pids 65820 and 83160 on 2026-09-24, 5 and 14 hours after their fires, while
+    heartbeating every 15 s — an operator nearly stopped both). Two later facts end it:
+
+    * a later :data:`OBSERVED_MARKER` — the most recent fire found NO work in flight, so
+      whatever the earlier fire held has cleared;
+    * the deadline sibling showing every plane re-armed after the last held fire
+      (:func:`_rearmed_since`).
+
+    A runtime that is genuinely stuck has neither, and keeps the held reading.
+    """
     # A SUBSTRING TEST, NOT A LINE-START ONE (QA round 2, Q-4). This marker is the one
     # line of ours written into a file ANOTHER WRITER IS STILL FLUSHING: ``faulthandler``
     # writes its dump from its own thread with a buffered handle, we append this from
@@ -3536,8 +3629,28 @@ def held_fire(pid: int | None = None, directory: Path | None = None) -> bool:
     # ``held_fire=False``, ``held_pids()`` empty, no STALLED cell — and ``death_verdict``
     # narrating a STILL-ALIVE runtime as "the runtime ended ITSELF". The module's own
     # header states the rule this restores: readers test these markers as substrings,
-    # which is exactly why no header quotes one.
-    return _fires(text) and HELD_MARKER in text
+    # which is exactly why no header quotes one. ``rfind`` keeps that rule for the
+    # ordering test too: an interleaved marker is still found, wherever it landed.
+    if not _fires(text) or HELD_MARKER not in text:
+        return False
+    if text.rfind(OBSERVED_MARKER) > text.rfind(HELD_MARKER):
+        return False
+    fired_at = _held_fired_at(text)
+    return fired_at is None or not _rearmed_since(dump, fired_at)
+
+
+def held_now(pid: int, started_at: float, directory: Path | None = None) -> bool:
+    """Is THIS life of ``pid`` held right now? :func:`held_fire` behind the pid-reuse fence.
+
+    The per-pid spelling of what ``info.collect`` does for a whole listing (the held
+    scan plus :func:`dump_is_current`), for a caller holding one record — the kill
+    ladder, deciding whether a draining runtime can still reach the turn boundary it
+    is waiting for. One spelling, so the ladder and the listing cannot disagree.
+    """
+    evidence = dump_evidence(pid, directory)
+    if evidence is None or not dump_is_current(evidence[0], started_at):
+        return False
+    return _holds(*evidence)
 
 
 def fire_outcome(pid: int | None = None, directory: Path | None = None) -> str:
@@ -3664,8 +3777,8 @@ def _scan_marked(directory: Path | None, *, held_only: bool) -> dict[int, Path]:
             text = _dump_text(path)
             if not _fires(text):
                 continue
-            if held_only and HELD_MARKER not in text:
-                # a substring, for the interleaving reason above (Q-4)
+            if held_only and not _holds(path, text):
+                # the one held predicate, so a superseded fire leaves the set too
                 continue
             suffix = path.name[len(DUMP_PREFIX) + 1 : -len(".log")]
             if suffix.isdigit():
