@@ -572,7 +572,11 @@ def _ensure_action_settle_policy(
         ScopedInfraValue(
             name=_ACTION_SETTLE_POLICY_NAME,
             value=_DEFAULT_ACTION_SETTLE_POLICY,
-            purpose=purpose,
+            # ``purpose`` arrives as the CLI string that ``_parse_infra`` has
+            # already membership-checked against ``InfraPurpose``; the cast
+            # states that existing check to the type checker rather than
+            # repeating or weakening it.
+            purpose=cast(InfraPurpose, purpose),
         ),
     )
 
@@ -623,13 +627,15 @@ def _infra_disclosure_metadata(
         infra_values = _ensure_action_settle_policy(
             cast(tuple[ScopedInfraValue, ...], infra), purpose
         )
-    metadata = {
+    metadata: dict[str, Any] = {
         DISCLOSED_INFRA_METADATA_KEYS[item.name]: item.value
         for item in infra_values
         if item.name in DISCLOSED_INFRA_METADATA_KEYS
     }
-    # Manifest metadata allows only canonical JSON scalars with safe integers;
-    # the pacing code retains the numeric 3.0 value separately.
+    # Manifest metadata allows only portable JSON scalars, and floats are
+    # excluded from that subset (see ``protocol.py``): the pacing code retains
+    # the numeric 3.0 value separately, so this is the mapping's one int-valued
+    # member and the annotation above is what lets it hold both types.
     metadata["osworld_action_settle_seconds"] = int(_ACTION_SETTLE_SECONDS)
     return metadata
 

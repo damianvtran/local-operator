@@ -2387,13 +2387,26 @@ async def test_host_refusal_does_not_publish_supplied_answer(
     adapter = FakeAdapter(tmp_path, episode_id)
     original = adapter._call_raw
 
-    async def refusing(method: Any, params: Any, result_type: Any, *, timeout: float) -> Any:
+    async def refusing(
+        method: Any,
+        params: Any,
+        result_type: Any,
+        *,
+        timeout: float,
+        execution_overhead_seconds_per_action: float = 0.0,
+    ) -> Any:
         if method == "ask_user_exchange":
             adapter.calls.append(method)
             return AskUserExchangeResult(
                 ask_id=params.ask_id, request_digest=params.request_digest, accepted=False
             )
-        return await original(method, params, result_type, timeout=timeout)
+        return await original(
+            method,
+            params,
+            result_type,
+            timeout=timeout,
+            execution_overhead_seconds_per_action=execution_overhead_seconds_per_action,
+        )
 
     adapter._call_raw = refusing
     model = ScriptedModel(["ask", "finish"])

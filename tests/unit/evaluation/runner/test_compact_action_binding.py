@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from typing import cast
 
 import pytest
 
@@ -223,7 +224,7 @@ async def test_compact_contract_is_sealed_in_verified_runner_bundle(
         report.manifest.metadata["model_reply_contract_digest"]
         == expected["model_reply_contract_digest"]
     )
-    contract = json.loads(report.manifest.metadata["model_reply_contract"])
+    contract = json.loads(cast(str, report.manifest.metadata["model_reply_contract"]))
     assert contract["action_binding"] == COMPACT_ACTION_BINDING
     responses = payloads(outcome.bundle_root, ModelResponsePayload)
     assert len(responses) == 1
