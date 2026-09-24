@@ -759,6 +759,7 @@ def project_settled_rows(
     *,
     bound: int | None = None,
     end: int | None = None,
+    start: int | None = None,
     fold_width: int = 0,
 ) -> bool:
     """Mount settled transcript rows through the ONE role-aware renderer.
@@ -784,6 +785,15 @@ def project_settled_rows(
     projection — never sees the split at all. The gap-replay caller passes
     no bound, because a reconnect gap is by definition the small set of
     rows no frontend painted and bounding it could hide one.
+
+    ``start`` is the same deferral with the cut already DECIDED: messages
+    before it go to ``_resume_pending_head`` exactly as ``bound``'s snapped cut
+    would put them. It exists for the viewport-first resume
+    (``OperatorApp._render_resumed_history``), which has to paint a SUBSET of
+    the frame ``bound`` would paint and then fill in the rest at the cut
+    ``bound`` would have chosen — so it computes both cuts itself and hands
+    this one down, rather than asking for a second snapping rule here.
+    ``bound`` is ignored when ``start`` is given.
 
     ``fold_width`` is the width every block this pass BUILDS will be given.
     Zero means "not supplied", and it is only right where there is no
@@ -904,8 +914,9 @@ def project_settled_rows(
         self._resume_results = results
         self._resume_pending_tail = history[end:]
         history = history[:end]
-    if bound is not None and len(history) > bound:
+    if start is None and bound is not None and len(history) > bound:
         start = _resume_tail_start(history, bound)
+    if start is not None:
         if start > 0:
             deferred, history = history[:start], history[start:]
             # Whole-conversation results, so a deferred call still pairs with a
@@ -1237,8 +1248,11 @@ def project_settled_rows(
                 # `app.py::on_assistant_message_end`.
                 if narration:
                     block.mark_narration()
-                block.update_text(text)
-                block.finalize_text()
+                # ONE render: this message has stopped arriving, so the
+                # streaming pass `update_text` would build is discarded unseen
+                # by the whole-message render the commit does anyway
+                # (`AssistantBlock.commit_text` has the measurement).
+                block.commit_text(text)
                 self._append_block(block)
                 appended = True
             for call in tool_calls:
