@@ -2085,8 +2085,13 @@ class Session:
         #: Settled model-owned jobs whose auto-delivery was declined because a
         #: turn was streaming (see ``_on_job_completed``), in settle order. The
         #: turn's ``finally`` hands them over once it is idle again; see
-        #: ``_deliver_deferred_job_results``.
-        self._deferred_job_results: dict[str, None] = {}
+        #: ``_deliver_deferred_job_results``. Holds the JOB OBJECT and its
+        #: settled text, not just the id: the manager sweeps a settled row
+        #: ``retention_ms`` (5 min) after it settles, on any read, so a turn
+        #: that outlives that window would find nothing to re-look-up (review
+        #: round 1, R1-1). Holding the object keeps ``consumed`` observable
+        #: too, since ``wait`` flips it on this same instance.
+        self._deferred_job_results: dict[str, tuple[Any, str]] = {}
         self._job_label = job_label
         self._parent_display_name = parent_display_name
         self._subagent_comms = subagent_comms
@@ -10716,12 +10721,29 @@ class Session:
             # ``finally`` now re-offers these once it is idle, and the
             # ``consumed`` re-check there keeps a result the turn DID collect
             # through ``wait`` from arriving twice.
-            self._deferred_job_results[job_id] = None
+            self._deferred_job_results[job_id] = (job, text)
             return
-        self._deliver_job_result(job_id, text, job)
+        self._deliver_job_results([(job_id, text, job)])
 
-    def _deliver_job_result(self, job_id: str, text: str, job: Any) -> None:
-        """Queue one settled job's result as a fresh idle-time turn."""
+    def _deliver_job_results(self, results: list[tuple[str, str, Any]]) -> None:
+        """Queue settled jobs' results as ONE fresh idle-time turn.
+
+        One turn for the whole batch, not one per job: N children that settle
+        during one parent turn are one piece of news, and a turn per child cost
+        N model calls and N completion notifications for it (review round 1,
+        R1-2). Each result keeps its own ``CustomMessage`` -- the same shape a
+        single live delivery has always produced -- so every consumer that reads
+        one (the transcript, the stopped-work residue check, the TUI) sees the
+        rows it already understands.
+        """
+        if not results:
+            return
+        messages = [self._job_result_message(job_id, text, job) for job_id, text, job in results]
+        self._spawn_background(self._prompt_messages(list(messages)))
+
+    @staticmethod
+    def _job_result_message(job_id: str, text: str, job: Any) -> CustomMessage:
+        """The model-facing row for one settled job's result."""
         label = getattr(job, "label", job_id)
         status = getattr(job, "status", "completed")
         summary = (text or "").strip()
@@ -10732,47 +10754,48 @@ class Session:
             if summary
             else f"background job '{label}' {status}."
         )
-        message = CustomMessage(
+        return CustomMessage(
             custom_type=JOB_RESULT_MESSAGE_TYPE,
             attribution="user",
             details={"job_id": job_id, "text": delivery},
         )
-        self._spawn_background(self._prompt_messages([message]))
 
     def _deliver_deferred_job_results(self) -> None:
         """Hand over job results that settled while a turn was streaming.
 
         Called from the turn pipeline's ``finally`` AFTER ``_is_streaming`` is
         cleared, so it runs exactly when ``_on_job_completed`` would have
-        accepted the delivery in the first place. Each result becomes its own
-        ``_prompt_messages`` turn -- the same shape a live delivery takes -- and
-        those serialize on the turn lock, so a burst of N deferred children
-        costs N short turns in settle order rather than a race.
+        accepted the delivery in the first place. Everything deferred during
+        the turn goes out as ONE ``_prompt_messages`` turn (see
+        ``_deliver_job_results``), in settle order.
 
-        Re-checked here rather than trusted from the deferral: a job the turn
-        collected with ``wait`` is ``consumed`` by now and is skipped, a job
-        swept from the ledger is skipped, and a disposed session delivers
-        nothing. Never raises into the turn's ``finally``.
+        Reads the JOB OBJECT captured at settle time, never a fresh ledger
+        lookup: the manager sweeps a settled row five minutes after it settles,
+        so a long parent turn (a build, a slow tool) would otherwise find the
+        row gone and drop the result -- the very loss this path exists to close
+        (review round 1, R1-1). The one re-check that remains is ``consumed``,
+        read on that same object: a result the turn collected with ``wait`` is
+        not delivered a second time. A disposed session delivers nothing.
+        Never raises into the turn's ``finally``.
         """
         if not self._deferred_job_results:
             return
-        pending = list(self._deferred_job_results)
+        pending = list(self._deferred_job_results.items())
         self._deferred_job_results.clear()
         if self._disposed:
             return
-        for job_id in pending:
+        results: list[tuple[str, str, Any]] = []
+        for job_id, (job, text) in pending:
             try:
-                job = self.jobs.get(job_id)
-                if job is None or getattr(job, "consumed", False):
+                if getattr(job, "consumed", False):
                     continue
-                if getattr(job, "status", "running") == "running":
-                    continue
-                text = (
-                    (job.result_text or "") if job.status == "completed" else (job.error_text or "")
-                )
-                self._deliver_job_result(job_id, text, job)
+                results.append((job_id, text, job))
             except Exception:  # noqa: BLE001 - a delivery must not fail the turn's teardown
                 logger.warning("deferred job delivery failed for %s", job_id, exc_info=True)
+        try:
+            self._deliver_job_results(results)
+        except Exception:  # noqa: BLE001 - a delivery must not fail the turn's teardown
+            logger.warning("deferred job delivery failed", exc_info=True)
 
     async def _reject_steering(self, command_id: str, reason: str) -> None:
         """Terminally reject one accepted-but-undurable producer steer."""

@@ -228,12 +228,21 @@ class _Provider:
         if users and "CHILD" in users[0].text:
             return _text("tok ", pieces=40)
         done = sum(1 for m in request.messages if isinstance(m, Message) and m.role == "assistant")
-        last = request.messages[-1]
-        body = str(getattr(last, "text", "") or "") + json.dumps(
-            getattr(last, "details", {}) or {}, default=str
-        )
-        if "background job '" in body:
-            self.deliveries.append(body)
+        # A delivery turn carries one result row per settled job (batched:
+        # several children settling in one parent turn arrive together), and
+        # they trail the conversation. Record each row the first time it is
+        # seen, then acknowledge.
+        # The provider sees CONVERTED messages, so a result row arrives as user
+        # text (``CustomMessage.details`` does not survive the conversion).
+        fresh = []
+        for message in request.messages:
+            text = str(getattr(message, "text", "") or "")
+            for part in text.split("background job '")[1:]:
+                row = "background job '" + part
+                if row not in self.deliveries:
+                    fresh.append(row)
+        if fresh:
+            self.deliveries.extend(fresh)
             return _text("noted")
         if done == 0:
             return _tool_call("task", {"label": "a", "prompt": "CHILD a"}, "c0")
@@ -302,12 +311,8 @@ async def test_children_that_settle_mid_turn_are_delivered_after_it(
         await parent.dispose()
 
 
-@pytest.mark.asyncio
-async def test_a_result_the_turn_collected_with_wait_is_not_delivered_again(
-    tmp_path: Path, monkeypatch
-) -> None:
-    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
-    parent = Session(
+def _bare_parent(tmp_path: Path) -> Session:
+    return Session(
         model=MODEL,
         stream_fn=_Provider(),
         tools=[],
@@ -315,21 +320,109 @@ async def test_a_result_the_turn_collected_with_wait_is_not_delivered_again(
         system_blocks_provider=lambda *a, **k: ["parent"],
         cwd=str(tmp_path),
     )
-    delivered: list[str] = []
 
-    def record(job_id: str, text: str, job: Any) -> None:
-        delivered.append(job_id)
 
-    parent._deliver_job_result = record  # type: ignore[method-assign]
-    job = AsyncJob(id="j", type="task", status="completed", label="x", start_time=1.0)
+def _capture_deliveries(parent: Session) -> list[list[str]]:
+    """Each delivery TURN, as the list of job ids it carried."""
+    turns: list[list[str]] = []
+
+    def record(results: list[tuple[str, str, Any]]) -> None:
+        if results:
+            turns.append([job_id for job_id, _text, _job in results])
+
+    parent._deliver_job_results = record  # type: ignore[method-assign]
+    return turns
+
+
+def _settled(job_id: str) -> AsyncJob:
+    return AsyncJob(
+        id=job_id,
+        type="task",
+        status="completed",
+        label=job_id,
+        start_time=1.0,
+        result_text=f"{job_id} done",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_result_the_turn_collected_with_wait_is_not_delivered_again(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = _bare_parent(tmp_path)
+    turns = _capture_deliveries(parent)
+    job = _settled("j")
     parent.jobs._jobs["j"] = job
     parent._is_streaming = True
     await parent._on_job_completed("j", "done", job)
-    assert delivered == []
+    assert turns == []
     job.consumed = True  # the turn's own ``wait`` took it
     parent._is_streaming = False
     parent._deliver_deferred_job_results()
-    assert delivered == []
+    assert turns == []
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_result_survives_its_row_being_swept_mid_turn(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """R1-1: a turn longer than the 5-minute retention window lost the result.
+
+    The manager sweeps a settled row on any read once ``retention_ms`` has
+    passed, so re-looking the job up at turn end found nothing. Falsified: with
+    the deferral keyed on the id and re-read from ``self.jobs`` this delivers
+    nothing.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = _bare_parent(tmp_path)
+    turns = _capture_deliveries(parent)
+    job = _settled("swept")
+    parent.jobs._jobs["swept"] = job
+    parent._is_streaming = True
+    await parent._on_job_completed("swept", "swept done", job)
+    del parent.jobs._jobs["swept"]  # the retention sweep, mid-turn
+    assert parent.jobs.get("swept") is None
+    parent._is_streaming = False
+    parent._deliver_deferred_job_results()
+    assert turns == [["swept"]]
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_results_deferred_in_one_turn_arrive_as_one_turn(tmp_path: Path, monkeypatch) -> None:
+    """R1-2: N children settling in one parent turn are one delivery, not N."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = _bare_parent(tmp_path)
+    turns = _capture_deliveries(parent)
+    parent._is_streaming = True
+    for job_id in ("c1", "c2", "c3"):
+        job = _settled(job_id)
+        parent.jobs._jobs[job_id] = job
+        await parent._on_job_completed(job_id, f"{job_id} done", job)
+    parent._is_streaming = False
+    parent._deliver_deferred_job_results()
+    assert turns == [["c1", "c2", "c3"]]  # one turn, settle order
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_one_delivery_turn_carries_every_result_row(tmp_path: Path, monkeypatch) -> None:
+    """The batched turn still hands the model one result row per job."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = _bare_parent(tmp_path)
+    prompted: list[list[Any]] = []
+
+    async def fake_prompt(messages: list[Any]) -> None:
+        prompted.append(messages)
+
+    parent._prompt_messages = fake_prompt  # type: ignore[method-assign]
+    parent._deliver_job_results([("c1", "one", _settled("c1")), ("c2", "two", _settled("c2"))])
+    await _wait_until(lambda: bool(prompted))
+    assert len(prompted) == 1
+    texts = [message.details["text"] for message in prompted[0]]
+    assert texts == ["background job 'c1' completed:\none", "background job 'c2' completed:\ntwo"]
     await parent.dispose()
 
 
