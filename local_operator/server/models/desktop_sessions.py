@@ -12,6 +12,28 @@ from local_operator.session.frontend_state import FrontendSync, SlashResult
 from local_operator.session.runtime.types import reported_subagent_count
 
 
+class OpenedBy(BaseModel):
+    """WHO opened an agent workstream: the frozen ``{agent, label, session}`` object.
+
+    A MODEL rather than ``dict[str, str | None]`` so the three names the desktop
+    sidebar (local-operator-ui #448) is written against live in the published
+    schema and are ENFORCED at validation: with a free-form dict a producer-side
+    rename or an extra key passed silently and surfaced as an empty label in
+    another repository (PR #1436 agent review round 1, F4).
+
+    ``extra="forbid"`` is the enforcement half. Every member is REQUIRED-BUT-
+    NULLABLE rather than defaulted: the producer (``resume.workstream_opened_by``)
+    always writes all three, ``None`` where a member could not be read, so a
+    missing key is a producer bug to fail on, not a value to fill. The JSON is
+    byte-identical to the dict it replaces — same three keys, same order.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    agent: str | None
+    label: str | None
+    session: str | None
+
+
 class SessionRow(BaseModel):
     model_config = ConfigDict(extra="allow")
     id: str
@@ -112,7 +134,7 @@ class SessionRow(BaseModel):
     #: indistinguishable from one the operator opened; a visible workstream
     #: without this would repeat it with the row merely visible instead of
     #: hidden.
-    opened_by: dict[str, str | None] | None = None
+    opened_by: OpenedBy | None = None
 
 
 class SessionList(BaseModel):

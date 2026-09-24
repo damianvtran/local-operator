@@ -137,11 +137,12 @@ class ExecArgs:
     #: agent-opened run is stamped ``agent-shell`` and hidden everywhere — so the
     #: list only ever grows by the runs the operator actually asked for.
     #:
-    #: IT IMPLIES :attr:`control` rather than merely documenting the pairing
-    #: (``cli`` sets both from this one flag). A listed row the operator cannot
-    #: follow or steer is half a feature and an actively misleading one: the
-    #: sidebar can only attach to a run that published a live discovery record,
-    #: so without the control socket the row would appear and then never move.
+    #: INDEPENDENT OF :attr:`control`. Every exec run publishes its discovery
+    #: record and serves the control socket already, so the row is followable
+    #: and steerable without it; ``control`` changes the APPROVAL posture (gates
+    #: park instead of denying, ``tools`` stops standing as the approval), which
+    #: is not something choosing a row's visibility may change behind the
+    #: caller's back (PR #1436 agent review round 1, F1).
     #: Meaningful only under an agent's shell — that is where the run is stamped
     #: ``agent-workstream``; outside one nothing is stamped and the flag is a
     #: no-op, so the run is an ordinary session either way.

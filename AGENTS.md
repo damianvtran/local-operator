@@ -1581,8 +1581,9 @@ phone list — by minting `resume.ORIGIN_AGENT_WORKSTREAM`, a second value
 registered in `USER_ORIGINS`, which every listing in the tree already funnels
 through — and it carries `opened_by` (the opening session's role, task label and
 session id) so a machine-started row cannot be mistaken for one the operator
-opened. It implies `--control`, because a row can only be followed and steered
-where a live discovery record exists. Absent the flag nothing changes: an
+opened. It chooses visibility only and does NOT imply `--control`: every exec
+run already publishes a discovery record, so the row is steerable either way,
+and `--control` would change the approval posture. Absent the flag nothing changes: an
 unflagged agent run is `agent-shell`, hidden and silent, and a hidden run raises
 no completion banner of its own — its supervising session owns it, and the durable
 records still make it findable. Reach for the flag only when the operator asked

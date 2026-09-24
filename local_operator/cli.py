@@ -8741,16 +8741,17 @@ def main() -> int:
                 # getattr, like the additive flags above it: `exec` is not the
                 # only subcommand routed through this Namespace in tests, and a
                 # missing attribute must read as "off", never raise.
-                control=bool(getattr(args, "control", False))
-                # ``--workstream`` IMPLIES ``--control``, here rather than in the
-                # parser so the implication holds for both entry points that
-                # build this object. A workstream is a row the operator is meant
-                # to watch and steer, and the sidebar can only follow and steer a
-                # run that published a live discovery record — so without the
-                # socket the row would appear and then never move. Spelling it
-                # as a real assignment (not a documented pairing) is what makes
-                # the flag's help text true.
-                or bool(getattr(args, "workstream", False)),
+                # NOT implied by ``--workstream``, deliberately. Every exec run
+                # already publishes its discovery record and serves the control
+                # socket (``exec_control`` — publication and gate installation
+                # are separate), so a workstream row is followable and steerable
+                # without this flag. What ``--control`` adds is an APPROVAL
+                # POSTURE: gates park for up to a day instead of being denied,
+                # and a ``--tools`` declaration stops standing as the approval.
+                # Implying it silently parked the fan-out shape
+                # (`--workstream --background --tools bash,write`) on its first
+                # write (PR #1436 agent review round 1, F1).
+                control=bool(getattr(args, "control", False)),
                 tools=getattr(args, "tools", None),
                 # THE SUPERVISOR'S DESCRIPTOR, forwarded here or nowhere (stage E).
                 # Its absence was a real gap rather than a tidy-up: `run_session`

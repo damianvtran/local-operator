@@ -362,6 +362,45 @@ def test_an_opener_that_cannot_be_read_is_recorded_as_null_not_invented(
     }
 
 
+@pytest.mark.parametrize(
+    "scratchpad",
+    [
+        # QA round 1 E9: an inherited, non-session path. Its parent's name
+        # ("projects") used to be published as the opener's session id.
+        "work/projects/acme",
+        # QA round 1 E5: session-shaped, but the session directory is gone.
+        "store/sessions/nosuch000001/scratchpad",
+        # Agent review round 1 F3: a parent whose name is not a session store.
+        "x/Operator (you)/scratchpad",
+        # Right parent names, wrong leaf: not the scratchpad namespace.
+        "store/sessions/" + REQUESTER_ID + "/elsewhere",
+    ],
+)
+def test_a_scratchpad_path_not_shaped_as_a_session_attributes_nothing(
+    tmp_path: Path, requester: Path, monkeypatch: pytest.MonkeyPatch, scratchpad: str
+) -> None:
+    """Only ``<config>/sessions/<existing id>/scratchpad`` names an opener.
+
+    Every member derives from the directory the path names, so a rejected path
+    leaves all of them ``None`` — including ``agent``/``label``, which would
+    otherwise be read from whatever ``origin.json`` sat beside the guess. The
+    ``requester`` fixture's real, well-formed session exists in the same store
+    throughout, so a pass here is the SHAPE check refusing, not an empty store.
+    """
+    (tmp_path / "work" / "projects" / "acme").mkdir(parents=True)
+    (requester / "elsewhere").mkdir()
+    monkeypatch.setenv(SCRATCHPAD_PATH_ENV, str(tmp_path / scratchpad))
+    directory = tmp_path / "store" / "sessions" / "shape0000001"
+    assert (
+        stamp_agent_shell_session(directory, created_here=True, delegated_workstream=True) is True
+    )
+    assert workstream_opened_by(directory) == {"agent": None, "label": None, "session": None}
+    import json
+
+    marker = json.loads((directory / ORIGIN_NAME).read_text(encoding="utf-8"))
+    assert marker["opened_by"] == {"agent": None, "label": None, "session": None, "name": None}
+
+
 def test_opened_by_is_read_only_for_a_workstream_marker(tmp_path: Path) -> None:
     """Every other origin, and every broken marker, reads as "nobody machine-opened"."""
     plain = _session(tmp_path, "plain0000001", "Their own work")
@@ -476,3 +515,37 @@ def test_the_desktop_row_publishes_the_frozen_opened_by_object(
     # cannot read its absence as a claim.
     assert "opened_by" in rows["111100000001"]
     assert rows["111100000001"]["opened_by"] is None
+
+
+def test_the_wire_model_pins_the_three_frozen_names() -> None:
+    """``OpenedBy`` is the schema-level copy of ``resume.OPENED_BY_KEYS``.
+
+    A free-form dict let a producer-side rename or an extra key through
+    validation and surface as an empty label in the desktop sidebar (PR #1436
+    agent review round 1, F4). The model's fields, in order, ARE the frozen list,
+    and anything else is refused rather than carried.
+    """
+    from pydantic import ValidationError
+
+    from local_operator.server.models.desktop_sessions import OpenedBy, SessionRow
+
+    assert tuple(OpenedBy.model_fields) == OPENED_BY_KEYS
+    row = SessionRow.model_validate(
+        {
+            "id": "ffff00000001",
+            "name": "Fan-out audit",
+            "mtime": 1.0,
+            "pinned": False,
+            "archived": False,
+            "opened_by": {"agent": "coder", "label": None, "session": REQUESTER_ID},
+        }
+    )
+    assert row.model_dump(mode="json")["opened_by"] == {
+        "agent": "coder",
+        "label": None,
+        "session": REQUESTER_ID,
+    }
+    with pytest.raises(ValidationError):
+        OpenedBy.model_validate({"agent": None, "label": None, "session": None, "name": "x"})
+    with pytest.raises(ValidationError):
+        OpenedBy.model_validate({"agent": None, "label": None, "sessions": None})

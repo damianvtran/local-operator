@@ -180,9 +180,9 @@ def add_startup_arguments(parser: argparse.ArgumentParser) -> None:
             "Publish this run as a long-lived parallel WORKSTREAM the operator asked "
             "for: it is listed in the sidebar, /resume and the phone list, carries the "
             "session that opened it, and can be followed and steered. Without it an "
-            "agent-opened run stays ephemeral: hidden everywhere and silent. Implies "
-            "--control, because a row can only be steered where a live discovery "
-            "record exists. A no-op outside an agent's shell"
+            "agent-opened run stays ephemeral: hidden everywhere and silent. Changes "
+            "only the row's visibility, never how approvals are handled (pair it with "
+            "--control for that). Stamps nothing outside an agent's shell"
         ),
     )
 

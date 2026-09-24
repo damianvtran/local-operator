@@ -490,3 +490,46 @@ def test_a_workstream_gate_is_still_toasted(monkeypatch, tmp_path) -> None:
 
     assert len(sent) == 1, sent
     assert "deploy checks" in sent[0][0]
+
+
+@pytest.mark.parametrize(
+    ("origin", "expected"),
+    [
+        ("agent-shell", PENDING_REQUEST_TIMEOUT_S),
+        ("agent-workstream", DEFAULT_UNATTENDED_GATE_TIMEOUT_H * 3600.0),
+        (None, DEFAULT_UNATTENDED_GATE_TIMEOUT_H * 3600.0),
+    ],
+)
+def test_an_unattached_gate_parks_only_where_a_banner_may_reach_someone(
+    monkeypatch, tmp_path, origin, expected
+) -> None:
+    """The long park is a bet that the OS banner tells a person; a hidden run sends none.
+
+    `_announce_pending` skips the OS leg for a session the listings hide, so the
+    notify flag alone promised a reader who never came: an unattached
+    ``agent-shell`` gate parked for 86,400 s with zero toasts, holding its
+    process for a day (PR #1436 agent review round 1, F2). The workstream and the
+    operator's own session (no marker) keep the day, because their banner goes.
+    """
+    from local_operator.resume import mark_session_origin
+
+    directory = tmp_path / "sessions" / "gate00000001"
+    directory.mkdir(parents=True)
+    if origin is not None:
+        mark_session_origin(directory, origin)
+    handle = _handle_with_marker(monkeypatch, directory)
+
+    assert handle._gate_timeout_s() == expected
+
+
+def test_an_attached_pane_still_parks_a_hidden_sessions_gate(monkeypatch, tmp_path) -> None:
+    """The short cap is for "nobody can learn of it"; a mounted pane can present it."""
+    from local_operator.resume import ORIGIN_AGENT_SHELL, mark_session_origin
+
+    directory = tmp_path / "sessions" / "gate00000002"
+    directory.mkdir(parents=True)
+    mark_session_origin(directory, ORIGIN_AGENT_SHELL)
+    handle = _handle_with_marker(monkeypatch, directory)
+    handle._registrant._attached = 1
+
+    assert handle._gate_timeout_s() == DEFAULT_UNATTENDED_GATE_TIMEOUT_H * 3600.0

@@ -470,8 +470,28 @@ def _origin_attribution() -> dict[str, str | None]:
     # child is handed, so the session's own directory is its parent. A value
     # shaped some other way names no session this rule can describe, so it is
     # reported as no attribution rather than as a guess.
-    requesting = Path(raw).parent
-    if not requesting.name:
+    #
+    # THE SHAPE IS CHECKED, not assumed: the path has to end in the scratchpad
+    # namespace, sit directly under ``sessions/`` (``scratchpad_root``'s own
+    # predicate), name a legal session id, and that directory has to exist. A
+    # bare ``Path(raw).parent.name`` published ``"projects"`` for an inherited
+    # ``work/projects/acme`` and ``"nosuch000001"`` for a deleted session, and
+    # the desktop treats ``session`` as the id that makes the opener reachable,
+    # so either was a dead link dressed as an answer (PR #1436 agent review
+    # round 1, F3 / QA Q1). Every member below derives from this directory, so
+    # a rejected path leaves all of them ``None``.
+    from local_operator.scratchpad import SCRATCHPAD_DIRNAME
+    from local_operator.session.catalog import session_directory_name
+    from local_operator.session.retention import SESSIONS_DIRNAME
+
+    scratch = Path(raw)
+    requesting = scratch.parent
+    if (
+        scratch.name != SCRATCHPAD_DIRNAME
+        or requesting.parent.name != SESSIONS_DIRNAME
+        or not session_directory_name(requesting.name)
+        or not requesting.is_dir()
+    ):
         return attribution
     attribution["session"] = requesting.name
     try:

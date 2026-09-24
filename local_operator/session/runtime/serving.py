@@ -3689,11 +3689,23 @@ class ServingSessionHandle(SessionHandle):
         # by surface, "reachable" means "some surface is watching OR an OS
         # notification can actually be delivered" — the watching case is
         # handled above, and this is the remaining out-of-band leg.
+        #
+        # AND THE BANNER HAS TO BE ONE THIS SESSION MAY RAISE. A hidden session
+        # (``_session_may_announce`` false: an agent-opened run the operator's
+        # listings do not show) never reaches the OS leg of `_announce_pending`,
+        # so the notify flag alone would promise a person who is never told:
+        # measured before this arm existed, an unattached `agent-shell` gate
+        # parked for 86,400 s with zero toasts, holding the process and stalling
+        # whatever waited on it (PR #1436 agent review round 1, F2). The same
+        # predicate as the announce leg, so the two cannot disagree about who
+        # can learn of the question.
         from local_operator.tui.notify import notifications_enabled
 
         try:
             reachable = notifications_enabled()
         except Exception:  # noqa: BLE001 — an unreadable setting is "not reachable"
+            reachable = False
+        if reachable and not _session_may_announce(getattr(self, "_session", None)):
             reachable = False
         return parked if reachable else PENDING_REQUEST_TIMEOUT_S
 
