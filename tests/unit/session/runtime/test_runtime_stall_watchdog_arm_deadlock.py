@@ -217,14 +217,15 @@ def test_no_call_into_the_timer_api_is_made_in_an_armed_lifetime(
         "phases actually exercised)"
     )
     assert spy.registered, "the out-of-process leg (SIGUSR1) was never registered at arm"
-    assert spy.registered[0][1] is True, (
-        "the evidence signal was registered with chain=False, which would silently "
-        "displace whatever handler owned SIGUSR1 before this arm"
+    assert spy.registered[0][1] is False, (
+        f"the leg registered with chain={spy.registered[0][1]} (registered={spy.registered}); "
+        f"chaining re-raises against the handler faulthandler SAVED, and on a real runtime "
+        f"child that was measured as a segfault (rc=-11), so the leg must own its slot"
     )
-    assert spy.unregistered == [spy.registered[0][0]], (
-        f"disarm left the signal leg registered (unregistered={spy.unregistered}, "
-        f"registered={spy.registered}); a disarmed runtime must not keep a handler "
-        f"that writes into the file disarm has just removed"
+    assert not spy.unregistered, (
+        f"the module unregistered its signal leg ({spy.unregistered}); "
+        f"faulthandler.unregister restores the disposition saved at arm time rather than "
+        f"the live one, which is the same measured crash by another route"
     )
 
 
@@ -546,3 +547,139 @@ def test_the_arm_path_returns_while_a_dump_is_in_flight(tmp_path: Path) -> None:
         f"Python thread in the process could run"
     )
     assert "LOOP-SURVIVED" in output, output
+
+
+def test_the_signal_leg_is_one_registration_and_nothing_else() -> None:
+    """Decision 1's pins: one registration, no chain, no unregister, no second handler.
+
+    EACH ASSERTION IS A WAY THE MEASURED SEGFAULT COULD COME BACK, so this cell is the
+    regression the crash earns: a chain onto a saved disposition (``chain=True``), an
+    ``unregister`` that restores the disposition saved at arm time rather than the live
+    one, or the runtime installing its own handler over the leg's slot. The fourth
+    asserts the route that replaced the slot — the notification — is what the runtime
+    uses, so a later reader cannot re-add `add_signal_handler(debug_stacks, ...)` and
+    silently shadow the leg again.
+    """
+    import inspect
+
+    from local_operator.session.runtime import process as process_module
+
+    source = Path(stall_watchdog.__file__).read_text(encoding="utf-8")
+    assert "faulthandler.unregister(" not in source, (
+        "the module calls unregister again; that restores the disposition SAVED at arm "
+        "time, which is what faulted inside signal handling on a real runtime child"
+    )
+    assert ", chain=True" not in source, (
+        "the module chains onto a saved handler again; faulthandler's chain re-raises "
+        "against that saved disposition, measured as a segfault (rc=-11)"
+    )
+    assert ", chain=False" in source, "the leg must own its slot with no saved-handler path"
+
+    amain = inspect.getsource(process_module.amain)
+    assert "add_signal_handler(debug_stacks" not in amain, (
+        "the runtime installs its own SIGUSR1 handler again, which shadows the leg on "
+        "every live runtime — one signal, one slot, and the leg has to own it"
+    )
+    assert "notify_on_evidence_signal" in amain, (
+        "the runtime's own SIGUSR1 action is no longer reached from the leg: the walk "
+        "must be scheduled off the notification, or it is simply gone"
+    )
+
+
+def test_sigusr1_reaches_the_leg_on_a_real_armed_runtime_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Decision 1 end to end: a REAL armed runtime child takes SIGUSR1 and lives.
+
+    THE CRASH THIS CELL IS THE REGRESSION FOR: the re-registering revision died
+    ``rc=-11`` on the first SIGUSR1 the suite's own readiness probe sent. So the first
+    assertion is that the child is still running, the second that the datum arrived in
+    the MODULE'S OWN ``O_APPEND`` HANDLE, the third that it names the process's threads,
+    the fourth that the runtime's own walk still happens — one signal, both halves, no
+    sigaction fight.
+
+    The child is the production one (``launch._spawn_runtime`` with the detachment
+    suite's harness, ``_spawn_interpreter`` pinned to this interpreter so it runs this
+    tree). A signal dump writes no ``Timeout (`` line, so the last assertion also pins
+    that the leg cannot be read as a bound that fired.
+    """
+    import signal as signal_module
+
+    from local_operator.session.runtime import launch as launch_module
+    from tests.unit.session.runtime.test_runtime_detachment import (
+        _SESSION_ID,
+        _capture_text,
+        _isolate,
+        _log_text,
+        _reap,
+        _seed,
+        _wait_for_record,
+    )
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    _seed(config_dir)
+    _isolate(monkeypatch, config_dir)
+    monkeypatch.setattr(launch_module, "_spawn_interpreter", lambda: sys.executable)
+
+    previous_usr1 = signal_module.signal(signal_module.SIGUSR1, signal_module.SIG_IGN)
+    child = None
+    try:
+        child = launch_module._spawn_runtime(
+            _SESSION_ID,
+            str(config_dir),
+            defer_materialise=False,
+        )
+        pid = child.pid
+        _wait_for_record(config_dir)
+        dump = config_dir / "logs" / f"{stall_watchdog.DUMP_PREFIX}-{pid}.log"
+        assert dump.is_file(), (
+            f"the child never armed its bound:\n{_capture_text(child)}\n"
+            f"{_log_text(config_dir)[-800:]}"
+        )
+
+        # READINESS by the suite's own probe: SIGUSR1, until the runtime's walk reports.
+        deadline = time.monotonic() + 60.0
+        kills = 0
+        while "state: streaming=" not in _log_text(config_dir):
+            assert child.poll() is None, (
+                f"the runtime died on SIGUSR1 — rc={child.returncode}, which is the "
+                f"regression this cell exists for:\n{_capture_text(child)}\n"
+                f"{_log_text(config_dir)[-800:]}"
+            )
+            assert time.monotonic() < deadline, (
+                f"the runtime never performed its own walk after {kills} signals, so the "
+                f"notification route is not wired:\n{_log_text(config_dir)[-800:]}"
+            )
+            os.kill(pid, signal_module.SIGUSR1)
+            kills += 1
+            time.sleep(0.2)
+
+        # THE LEG: the module's own handle must now carry an all-threads dump.
+        deadline = time.monotonic() + 30.0
+        text = dump.read_text(encoding="utf-8", errors="replace")
+        while "Thread 0x" not in text and time.monotonic() < deadline:
+            time.sleep(0.2)
+            text = dump.read_text(encoding="utf-8", errors="replace")
+        # THE LEG WRITES ONLY THE SIGNAL'S OWN THREAD (``all_threads=False``): the
+        # all-threads walk is what segfaulted a booting runtime child, and the thread that
+        # interests an operator -- the one parked in the loop -- IS the signal's thread.
+        # So the header to look for is the frame, not faulthandler's "Thread 0x" banner,
+        # which only the all-threads form writes.
+        deadline = time.monotonic() + 30.0
+        while "in <module>" not in text and time.monotonic() < deadline:
+            time.sleep(0.2)
+            text = dump.read_text(encoding="utf-8", errors="replace")
+        assert "in <module>" in text, (
+            f"the signal never reached the module's handler: {kills} signals sent and the "
+            f"dump holds {dump.stat().st_size} bytes\n{_log_text(config_dir)[-800:]}"
+        )
+        assert child.poll() is None, "the runtime did not survive its own evidence signal"
+        assert (
+            stall_watchdog.fired_pids(config_dir / "logs") == set()
+        ), "a signal dump was read as a bound fire; the leg must leave no fired marker"
+        assert stall_watchdog.FIRED_MARKER not in text
+    finally:
+        signal_module.signal(signal_module.SIGUSR1, previous_usr1)
+        if child is not None:
+            _reap(child, config_dir)
