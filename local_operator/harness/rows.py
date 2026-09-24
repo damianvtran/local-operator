@@ -145,6 +145,12 @@ def harness_chrome_prompts() -> tuple[str, ...]:
       in two pieces across a network interruption; the live run showed a
       notice instead.
 
+    This is the EXACT-match half of the decision, and it is no longer the whole
+    of it: two fixed prompts that look like the user's words do not, because the
+    GOAL the harness interpolates into them is called for. The goal-mode loop's
+    working turn was the one that had neither leg (see
+    :func:`~local_operator.session.goal_loop.is_loop_goal_instruction`).
+
     Imported lazily and gathered here rather than listed per host: this list
     having been copied INCOMPLETELY into the phone fold (it suppressed the
     third and rendered the first two) is the drift this function exists to
@@ -183,23 +189,28 @@ def is_harness_chrome(text: str) -> bool:
     single fixed strings; a producer-side recogniser covers each family the
     producer composes and therefore cannot enumerate — the loop's
     :func:`~local_operator.harness.loop.is_connectivity_continuation_instruction`
-    for the "prose then an aborted tool call" instruction, and the goal judge's
+    for the "prose then an aborted tool call" instruction, the goal judge's
     :func:`~local_operator.session.goal_judge.is_goal_continuation_instruction`
-    for the continuation that interpolates the standing goal. Equality alone used
+    for the continuation that interpolates the standing goal, and the goal loop's
+    :func:`~local_operator.session.goal_loop.is_loop_goal_instruction` for the
+    working turn that interpolates its own. Equality alone used
     to be the whole test, and the composed connectivity instruction — the
     incident's own shape — was a member of neither, so a resumed session painted
     it (and the tool-call-only shape) as the operator's own words; the goal
     continuation would have done the same on every surface, since its text
-    changes with the goal.
+    changes with the goal. The goal-mode loop's turn was the third instance of
+    exactly that, and it had no recogniser at all.
     """
     from local_operator.harness.loop import is_connectivity_continuation_instruction
     from local_operator.session.goal_judge import is_goal_continuation_instruction
+    from local_operator.session.goal_loop import is_loop_goal_instruction
 
     stripped = text.strip()
     return (
         stripped in harness_chrome_prompts()
         or is_connectivity_continuation_instruction(stripped)
         or is_goal_continuation_instruction(stripped)
+        or is_loop_goal_instruction(stripped)
     )
 
 

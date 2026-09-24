@@ -1,4 +1,4 @@
-"""The goal-continuation prompt is recognised as harness chrome, on every surface.
+"""The goal-continuation AND goal-mode-loop prompts are chrome, on every surface.
 
 The one decision these tests pin lives in ``harness.rows.is_harness_chrome``, and
 what this file adds to it is the second leg: the goal judge's continuation prompt
@@ -24,6 +24,13 @@ from local_operator.session.goal_judge import (
     GOAL_CONTINUATION_TAIL,
     goal_continuation_prompt,
     is_goal_continuation_instruction,
+)
+from local_operator.session.goal_loop import (
+    LOOP_GOAL_HEAD,
+    LOOP_GOAL_PROMPT,
+    LOOP_GOAL_TAIL,
+    LOOP_PROMPT,
+    is_loop_goal_instruction,
 )
 
 
@@ -96,3 +103,64 @@ def test_the_goal_prompt_is_not_in_the_fixed_tuple():
     """It embeds the goal, so listing it there would make the tuple a lie."""
     assert GOAL_CONTINUATION_PROMPT not in harness_chrome_prompts()
     assert not any("{goal}" in entry for entry in harness_chrome_prompts())
+
+
+# ---------------------------------------------------------------------------
+# The goal-mode LOOP's working turn: the same family problem, one producer over.
+# ---------------------------------------------------------------------------
+
+
+def test_the_loop_goal_turn_is_recognised_for_every_goal_shape():
+    """Agent review round 3: ``LOOP_GOAL_PROMPT`` had NEITHER leg of the decision.
+
+    It is not in ``harness_chrome_prompts()`` (it interpolates the goal) and it
+    matched no recogniser, so every surface that folds by the text match painted
+    the loop's own words as the operator's. Measured on a real session through the
+    desktop route before this: the persisted row read
+    ``stamp=no, chrome-recognised=False``. The structural stamp now rides the same
+    row (``_prompt_loop_turn`` on the TUI, the loop callback in ``serving.py``),
+    and this is the text half, for the builds and folds that predate the stamp.
+    """
+    for goal in (
+        "",
+        "Verify the fixture goal",
+        "Line one\n\nLine two\n- and a bullet",
+        "x" * MAX_GOAL_CHARS,
+    ):
+        prompt = LOOP_GOAL_PROMPT.format(goal=goal)
+        assert is_loop_goal_instruction(prompt), goal[:40]
+        assert is_harness_chrome(prompt), goal[:40]
+
+
+def test_the_loop_goal_edges_are_the_only_thing_matched():
+    """Stated as a property so an edit that loosens an edge fails here."""
+    prompt = LOOP_GOAL_PROMPT.format(goal="Ship it")
+    assert prompt.startswith(LOOP_GOAL_HEAD)
+    assert prompt.endswith(LOOP_GOAL_TAIL)
+    assert LOOP_GOAL_PROMPT == LOOP_GOAL_HEAD + "{goal}" + LOOP_GOAL_TAIL
+
+
+def test_a_message_that_merely_opens_with_the_loop_head_is_the_users_own():
+    """A prefix match would eat a real message; the tail check is what stops it."""
+    assert not is_loop_goal_instruction(LOOP_GOAL_HEAD + "I typed this myself")
+    assert not is_loop_goal_instruction(LOOP_GOAL_HEAD)
+    assert not is_harness_chrome(LOOP_GOAL_HEAD + "and then I kept typing")
+
+
+def test_quoting_the_loop_template_in_another_sentence_is_not_chrome():
+    """The recogniser matches the SHAPE, never a substring of the goal."""
+    assert not is_loop_goal_instruction(
+        "Reminder: the loop sends " + LOOP_GOAL_TAIL.strip() + " every iteration."
+    )
+    assert not is_harness_chrome(f"why does it say {LOOP_GOAL_HEAD!r} at the top?")
+
+
+def test_the_loop_goal_prompt_is_not_in_the_fixed_tuple():
+    """It embeds the goal, so listing it there would make the tuple a lie."""
+    assert LOOP_GOAL_PROMPT not in harness_chrome_prompts()
+
+
+def test_the_count_loops_prompt_keeps_its_exact_match_leg():
+    """The sibling that never interpolates anything stays a fixed member."""
+    assert LOOP_PROMPT in harness_chrome_prompts()
+    assert is_harness_chrome(LOOP_PROMPT)
