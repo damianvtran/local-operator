@@ -123,6 +123,7 @@ def repo_revision(repo: Path) -> str:
     the commit it prints, and a rig that hid that would be measuring code that
     exists nowhere.
     """
+
     def git(*args: str) -> str:
         try:
             done = subprocess.run(
