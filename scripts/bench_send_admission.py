@@ -313,6 +313,49 @@ async def _child_main(args: argparse.Namespace) -> None:
     )
     del serving_module
 
+    # Per-call CPU of the loop's recurring publishers, so a share of loop
+    # samples can be turned into "N calls x M ms each" (thread_time: the
+    # honest instrument on a loaded host — it excludes time not scheduled).
+    from local_operator.mobile.projection import ProjectionFold
+    from local_operator.session.frontend_state import FrontendStateStore
+
+    call_cpu: dict[str, list[float]] = {}
+
+    def _time_sync(owner: Any, name: str) -> None:
+        original = getattr(owner, name)
+
+        def timed(self: Any, *a: Any, **kw: Any) -> Any:
+            c0 = time.thread_time()
+            try:
+                return original(self, *a, **kw)
+            finally:
+                call_cpu.setdefault(name, []).append((time.thread_time() - c0) * 1000)
+
+        setattr(owner, name, timed)
+
+    if os.environ.get("BENCH_PROFILE_REFRESH_JOBS"):
+        # Deterministic profile of ONE publisher's calls, aggregated across the
+        # run: which function inside it eats the budget.
+        import cProfile
+
+        profiler = cProfile.Profile()
+        original_refresh = FrontendStateStore.refresh_jobs
+
+        def profiled(self: Any, *a: Any, **kw: Any) -> Any:
+            profiler.enable()
+            try:
+                return original_refresh(self, *a, **kw)
+            finally:
+                profiler.disable()
+
+        FrontendStateStore.refresh_jobs = profiled  # type: ignore[method-assign]
+        import atexit
+
+        atexit.register(lambda: profiler.dump_stats(os.environ["BENCH_PROFILE_REFRESH_JOBS"]))
+    _time_sync(FrontendStateStore, "refresh_jobs")
+    _time_sync(FrontendStateStore, "refresh_from_session")
+    _time_sync(ProjectionFold, "set_subagent_details")
+
     loop = asyncio.get_running_loop()
     handle = ServingSessionHandle(session, loop, cwd=str(directory))
     server = RuntimeServer(handle, kind="daemon")
@@ -347,6 +390,10 @@ async def _child_main(args: argparse.Namespace) -> None:
         "loop_lag_ms": _pcts([x * 1000 for x in lags]),
         "child_cpu_s": cpu,
         "roster_writes": getattr(session, "_subagent_roster_written_generation", None),
+        "call_cpu_ms": {
+            name: {**_pcts(values), "total": round(sum(values), 1)}
+            for name, values in call_cpu.items()
+        },
     }
     if sampler:
         total = sum(sampler.leaf.values()) or 1
@@ -354,6 +401,10 @@ async def _child_main(args: argparse.Namespace) -> None:
         report["sample_inclusive"] = sorted(sampler.counts.items(), key=lambda kv: -kv[1])[:70]
         report["sample_leaf"] = sorted(sampler.leaf.items(), key=lambda kv: -kv[1])[:20]
     Path(args.report).write_text(json.dumps(report))
+    if os.environ.get("BENCH_PROFILE_REFRESH_JOBS"):
+        import atexit
+
+        atexit._run_exitfuncs()
     os._exit(0)  # the lanes are still stepping; the parent owns our lifetime
 
 
@@ -538,6 +589,7 @@ async def _parent_main(args: argparse.Namespace) -> dict[str, Any]:
         "summary": summary,
         "loop_lag_ms": child_report.get("loop_lag_ms"),
         "child_cpu_s": child_report.get("child_cpu_s"),
+        "call_cpu_ms": child_report.get("call_cpu_ms"),
         "sample_total": child_report.get("sample_total"),
         "sample_inclusive": child_report.get("sample_inclusive"),
         "sample_leaf": child_report.get("sample_leaf"),
