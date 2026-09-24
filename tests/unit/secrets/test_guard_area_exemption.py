@@ -10,6 +10,8 @@ other text. Only a file-reading tool's own ``path`` argument may.
 
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -185,6 +187,80 @@ def test_a_call_without_a_usable_path_is_not_exempt() -> None:
     assert reads_exempt_source("", {"path": str(CORPUS)}) is False
 
 
+@pytest.mark.parametrize("tool", sorted(READING_TOOLS))
+@pytest.mark.parametrize(
+    "spelling",
+    (" {path}", "{path} ", "  {path}  ", "\t{path}\n"),
+    ids=("leading", "trailing", "both", "tab-and-newline"),
+)
+def test_a_whitespace_padded_exempt_spelling_is_exempt_for_both_readers(
+    tool: str, spelling: str
+) -> None:
+    """R2-1. The guard and the READER must normalise a ``path`` identically.
+
+    Both readers strip before resolving, so a padded spelling names the SAME
+    file as the bare one and both must answer True. This is the arm that reds if
+    either reader stops stripping: ``grep`` used to hand the resolver the raw
+    argument, so a padded spelling matched the guard's stripped form while the
+    reader opened the whitespace-bearing name — a different file, not in
+    ``EXEMPT_SOURCES``, with the rotation demand suppressed.
+
+    Parametrized over the WHOLE whitespace class, not one trailing space, because
+    which whitespace Python's ``str.strip`` removes (leading, trailing, tabs,
+    newlines) is the dimension a later "normalise with ``rstrip()``" would break.
+    """
+    for path in (SHAPE_TABLE, CORPUS, CORPUS_TESTS):
+        assert (
+            reads_exempt_source(tool, {"path": spelling.format(path=path)}) is True
+        ), f"{tool} did not exempt the padded spelling of {path.name!r}"
+    # The bare spelling is exempt too, so the arm cannot pass by the padded
+    # form resolving somewhere else entirely.
+    assert reads_exempt_source(tool, {"path": str(CORPUS)}) is True
+
+
+@pytest.mark.parametrize("tool", sorted(READING_TOOLS))
+def test_the_guard_and_the_readers_share_one_normalisation(tool: str) -> None:
+    """THE STRUCTURAL PIN. One function, three callers, no second spelling.
+
+    ``normalise_path_argument`` is the single normalisation a ``path`` argument
+    gets, and it is what the guard and BOTH readers must call before resolving.
+    Asserted from the parsed AST rather than from ``inspect.getsource``: both
+    readers are wrapped by ``_guard`` (a bare closure, no ``functools.wraps``), so
+    ``getsource`` hands back the wrapper and would pass whatever the inner
+    function did -- the one shape where a source-text pin is worse than nothing.
+
+    A reader that reverted to its own inline ``.strip()`` keeps the R2-1 behaviour
+    arms green for as long as the two spellings happen to agree, and reintroduces
+    the class the first time they do not. This reds on that revert directly.
+    """
+    assert builtin.normalise_path_argument("  a/b.py  ") == "a/b.py"
+    assert builtin.normalise_path_argument("a/b.py") == "a/b.py"
+    assert builtin.normalise_path_argument("\t\n") == ""
+    assert builtin.normalise_path_argument("") == ""
+
+    def calls_it(path: Path, func_name: str) -> bool:
+        """True when ``func_name``'s body contains a call to the normaliser."""
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func_name:
+                return any(
+                    isinstance(inner, ast.Name) and inner.id == "normalise_path_argument"
+                    for inner in ast.walk(node)
+                )
+        raise AssertionError(f"{func_name} is gone from {path.name}")
+
+    readers = Path(builtin.__file__)
+    for name in ("execute_read", "execute_grep"):
+        assert calls_it(readers, name), (
+            f"{name} no longer routes its path through the shared normaliser "
+            f"(the call under test was {tool})"
+        )
+    guard = Path(inspect.getfile(reads_exempt_source))
+    assert calls_it(
+        guard, "reads_exempt_source"
+    ), "the guard no longer shares the readers' normalisation"
+
+
 # --- the escalation gate, driven through the REAL loop ------------------------
 #
 # Everything below runs the actual decision path: the REAL ``read`` tool (so the
@@ -260,6 +336,18 @@ def _read_tool() -> AgentTool:
         name="read",
         parameters={"type": "object", "properties": {"path": {"type": "string"}}},
         execute=builtin.execute_read,
+    )
+
+
+def _grep_tool() -> AgentTool:
+    """The REAL ``grep`` tool, not a stand-in for it."""
+    return AgentTool(
+        name="grep",
+        parameters={
+            "type": "object",
+            "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}},
+        },
+        execute=builtin.execute_grep,
     )
 
 
@@ -602,6 +690,150 @@ async def test_a_laundered_value_in_that_decoy_reaches_the_operator(
     assert ESCALATING_TEXT not in rows[0], "the laundered value reached the model"
     assert flags == [True], "the laundering vector was not escalated"
     assert "rotate" in body, "the demand never reached the journal"
+
+
+# --- R2-1: the whitespace spelling ------------------------------------------
+#
+# Round 1 was a different ROOT. This is the same class one transform along: the
+# guard and the reader disagreeing about what the ``path`` ARGUMENT means. Unlike
+# round 1 it needs no unusual layout -- the session root resolving to the real
+# exempt file is the whole precondition, which is what an ordinary checkout does
+# -- so these arms set that up with a symlink rather than by writing an attacker
+# file into the checkout they are reading.
+#
+# The defect: the guard resolved the STRIPPED argument while ``grep`` resolved the
+# raw one. For ``path = <exempt spelling> + " "`` the guard decided about the real
+# exempt file and exempted the call, while the reader opened the PADDED name --
+# the agent's file, not in ``EXEMPT_SOURCES``. Masking still hid the value from
+# the model; the rotation demand, the only thing the operator is told, was
+# dropped, and nothing else reports it. The FIXED behaviour is that both readers
+# strip, so a padded spelling opens the SAME file the guard's verdict is about,
+# and the agent's padded name is not reachable through ``read``/``grep`` at all.
+
+#: A token the agent writes INSIDE its file, so "the reader opened the agent's
+#: file" is decidable from the result text. Deliberately not the grep PATTERN:
+#: grep echoes the pattern back in its no-match row, so a marker used as the
+#: pattern would read as "the file was opened" in exactly the case where it was
+#: not. The pattern is a match-all ``.`` instead, which puts the whole (two-line)
+#: file -- marker and escalating case together -- into the result.
+ATTACKER_BODY = "ATTACKER-BODY-9f3a17"
+MATCH_ALL = "."
+DECOY_BODY = f"{ATTACKER_BODY} = 1\n{ESCALATING_TEXT!r}\n"
+
+
+def _grep_args(spelling: str) -> dict[str, str]:
+    return {"pattern": MATCH_ALL, "path": spelling}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ("read", "grep"))
+async def test_a_padded_spelling_opens_the_exempt_file_not_a_file_beside_it(
+    tmp_path: Path, tool: str
+) -> None:
+    """R2-1 BLOCKER ARM: the padded spelling must open the file the guard judged.
+
+    The session root holds ``local_operator/redaction_shapes.py`` -- a SYMLINK to
+    the real exempt file, so the stripped spelling resolves to the guard's own
+    source exactly as it does in an ordinary checkout -- beside an agent-authored
+    file at that same spelling plus a trailing space, carrying ``ATTACKER_BODY``.
+
+    FIXED behaviour, both readers: the padded argument strips, opens the real
+    exempt file, is exempt, and the agent's file is never read -- so ``ATTACKER_BODY``
+    cannot appear in the result. The regression this reds on: ``grep`` resolves the
+    raw argument, opens the padded name, and returns the AGENT's bytes while the
+    guard's verdict (from the stripped name) still says "the guard's own source" --
+    the marker lands in the model's text from a file the guard never exempted.
+    """
+    session_dir = tmp_path / "session"
+    (session_dir / "local_operator").mkdir(parents=True)
+    # The exempt file, reached the way the guard's stripped spelling reaches it.
+    (session_dir / "local_operator" / "redaction_shapes.py").symlink_to(SHAPE_TABLE)
+    attacker = session_dir / "local_operator" / "redaction_shapes.py "
+    attacker.write_text(DECOY_BODY, encoding="utf-8")
+    assert attacker.is_file(), "the padded attacker file was not created"
+
+    session = _session(session_dir)
+    padded = "local_operator/redaction_shapes.py "
+    args = {"path": padded, "raw": True} if tool == "read" else _grep_args(padded)
+    rows = await _drive(
+        session,
+        _read_tool() if tool == "read" else _grep_tool(),
+        _OneCallStream(tool, json.dumps(args)),
+        str(session_dir),
+    )
+
+    assert rows, f"no {tool} row: the turn did not complete"
+    assert ATTACKER_BODY not in rows[0], (
+        f"{tool} opened the PADDED name (the agent's file) while the guard's verdict "
+        "came from the stripped one -- the whitespace spelling is the whole bypass"
+    )
+    assert _escalation_flags(session) == [], (
+        f"{tool} did not exempt a read of the real exempt file reached through a " "padded spelling"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ("read", "grep"))
+async def test_the_padded_and_clean_spellings_both_escalate_for_a_decoy(
+    tmp_path: Path, tool: str
+) -> None:
+    """The isolating control, BOTH ways: identical bytes, differing only in the name.
+
+    A plain session root whose ``local_operator/redaction_shapes.py`` is an
+    agent-authored decoy carrying the corpus's escalating case. Two spellings of
+    that SAME decoy -- the clean name and the name plus a trailing space -- must
+    both open it and both escalate: it is not in ``EXEMPT_SOURCES``, and stripping
+    the padding is exactly what makes the reader agree with the guard about which
+    file that is. Under the defect ``grep`` resolved the padded spelling raw, found
+    no such file, and answered an ordinary missing-path row with no demand at all,
+    while the clean spelling escalated -- the same bytes decided two ways.
+    """
+    session_dir = tmp_path / "session"
+    (session_dir / "local_operator").mkdir(parents=True)
+    (session_dir / "local_operator" / "redaction_shapes.py").write_text(
+        DECOY_BODY, encoding="utf-8"
+    )
+
+    seen: dict[str, list[bool]] = {}
+    for label, spelling in (
+        ("clean", "local_operator/redaction_shapes.py"),
+        ("padded", "local_operator/redaction_shapes.py "),
+    ):
+        session = _session(session_dir)
+        args = {"path": spelling, "raw": True} if tool == "read" else _grep_args(spelling)
+        rows = await _drive(
+            session,
+            _read_tool() if tool == "read" else _grep_tool(),
+            _OneCallStream(tool, json.dumps(args)),
+            str(session_dir),
+        )
+        seen[label] = _escalation_flags(session)
+        # The decoy really was the file opened, in both spellings: otherwise the
+        # escalation below could be silence about a file nobody read.
+        assert ATTACKER_BODY in rows[0], f"{tool} did not open the decoy for the {label!r} spelling"
+
+    assert seen["clean"] == [True], "the clean control did not escalate; it isolates nothing"
+    assert seen["padded"] == [True], (
+        f"{tool} answered the same decoy differently on a trailing space "
+        f"(padded={seen['padded']}, clean={seen['clean']})"
+    )
+
+
+@pytest.mark.parametrize("tool", sorted(READING_TOOLS))
+def test_the_padded_and_bare_spellings_agree_for_the_real_exempt_file(tool: str) -> None:
+    """The positive half: padding must not LOSE the operator's own exemption either.
+
+    A fix that over-corrected -- refusing every padded spelling -- would silence
+    the request the exemption exists for. The whole whitespace class, on purpose:
+    which characters ``str.strip`` removes (leading, trailing, tab, newline) is the
+    dimension a later partial normalisation would break.
+    """
+    bare = str(CORPUS)
+    assert reads_exempt_source(tool, {"path": bare}) is True
+    for padded in (f"{bare} ", f" {bare}", f"\t{bare}\n", f"  {bare}  "):
+        assert (
+            reads_exempt_source(tool, {"path": padded}) is True
+        ), f"{tool} exempted the bare spelling but not {padded!r}"
 
 
 @pytest.mark.asyncio

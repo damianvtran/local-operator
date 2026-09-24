@@ -9700,9 +9700,7 @@ async def execute_grep(
     # stripped spelling and opened the whitespace-bearing name in EXEMPT_SOURCES'
     # place: an agent-authored file, rotation demand suppressed. Measured, PR
     # #1502 review round 2 (R2-1).
-    target, inside, resolvable = _resolve_workspace_path(
-        normalise_path_argument(params.path), cwd
-    )
+    target, inside, resolvable = _resolve_workspace_path(normalise_path_argument(params.path), cwd)
     if not target.exists():
         # Deliberately NOT a model fault: a well-formed path that does not
         # exist is unsatisfiable, not malformed, and the file may have vanished

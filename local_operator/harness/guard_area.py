@@ -55,7 +55,10 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
-from local_operator.tools.builtin import _resolve_workspace_path, normalise_path_argument
+from local_operator.tools.builtin import (
+    _resolve_workspace_path,
+    normalise_path_argument,
+)
 
 #: ``local_operator/`` in the tree this module was imported from — derived from
 #: this file rather than from the CWD, so the answer does not depend on where the
