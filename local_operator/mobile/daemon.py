@@ -802,14 +802,16 @@ class SessionTable:
         is membership in a display section, so the row must move even though
         nothing else about it changed.
 
-        Returns the state the store now holds (``set_pin``'s own answer).
+        Returns the state the READER now reports, not ``set_pin``'s answer: the
+        two differ exactly when the reader prunes the id (its folder is gone),
+        and the phone must be told what its list will show (QA round 1, Q2).
         """
         from local_operator.paths import config_dir
 
-        state = set_pin(config_dir(), session_id, pinned)
+        set_pin(config_dir(), session_id, pinned)
         self.pins = tuple(read_pins(config_dir()))
         self.invalidate_summaries_cache()
-        return state
+        return session_id in self.pins
 
     def _merge_summaries(self, durable: dict[str, Any]) -> list[dict[str, Any]]:
         """Merge cached durable rows with fresh live state into summary rows.
@@ -1075,6 +1077,20 @@ def _entry_for_session(daemon: "MobileDaemon", session_id: str) -> SessionEntry 
         if entry.record.session_id == session_id and not entry.ended
     ]
     return max(candidates, key=lambda entry: entry.record.heartbeat_at, default=None)
+
+
+def _session_folder_exists(session_id: str) -> bool:
+    """Whether ``session_id`` has a folder under ``sessions/`` -- the pin reader's
+    own keep rule (``sidebar_pins.read_pins`` prunes every id without one).
+
+    Called after the route has already resolved the id to a known conversation,
+    and name-checked again anyway so the join can never leave ``sessions/``.
+    """
+    from local_operator.paths import config_dir
+
+    if session_id in ("", ".", "..") or Path(session_id).name != session_id:
+        return False
+    return (config_dir() / "sessions" / session_id).is_dir()
 
 
 def _durable_user_session_dir(session_id: str) -> Path | None:
@@ -3282,13 +3298,31 @@ def build_app(daemon: MobileDaemon):
         # store a pin whose provenance nobody can reconstruct.
         if not isinstance(pinned, bool):
             return JSONResponse({"error": "pinned (a boolean) is required"}, status_code=422)
+        # A PIN NEEDS THE CONVERSATION'S FOLDER, because that is what the one
+        # reader keeps: ``read_pins`` prunes every id with no directory under
+        # ``sessions/``. A live session in the window before its conversation
+        # materialises passes the known-session check above yet has no folder, so
+        # accepting it answered 200 ``pinned: true`` for a row that stayed
+        # unpinned, and left the id in the file to pin itself silently once the
+        # folder appeared (QA round 1, Q2). Refused rather than deferred: a 409
+        # the phone shows as "could not save the pin" is honest, and the same
+        # press works a moment later. The stream is woken so the client's
+        # optimistic star is replaced by the listing's truth at once. Unpinning
+        # stays allowed -- it cannot plant anything, and it answers ``false``.
+        if pinned and not await asyncio.to_thread(_session_folder_exists, session_id):
+            daemon.table.notify_list_changed()
+            return JSONResponse(
+                {"error": "this conversation is not saved yet; pin it after its first message"},
+                status_code=409,
+            )
         state = await asyncio.to_thread(daemon.table.set_pins, session_id, pinned)
         # THE STREAM WAKE IS THE LOOP'S, not the worker's (review round 1, MAJOR 2).
         # ``notify_list_changed`` puts onto asyncio queues, which is only safe on the
         # loop; doing it inside the ``to_thread`` above could drop the repaint until
         # the next keepalive, so the pin would appear late for no reason.
         daemon.table.notify_list_changed()
-        # The caller gets the state the store now holds, so a retry is idempotent.
+        # The caller gets the state the list will show (the read-back), so a retry
+        # is idempotent and the answer cannot claim a pin the reader pruned.
         return JSONResponse({"ok": True, "pinned": state})
 
     async def api_subagent_detail(request: Request) -> Response:
