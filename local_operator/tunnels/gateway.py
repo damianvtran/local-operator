@@ -51,6 +51,14 @@ PROOF_HEADER = "x-radient-tunnel-assertion"
 CONSOLE_URL = "https://console.radienthq.com/dashboard/tunnels"
 UNREACHABLE = "control_plane_unreachable"
 REFUSED = "authorization_refused"
+#: The credential store DEFERRED the refresh: the refresh token's last exchange is
+#: not settled, so presenting it again could revoke the whole token family. Not a
+#: refusal and not a dead login — the store is waiting, the connector keeps
+#: retrying, and the state clears itself within about two minutes — so it gets
+#: copy of its own rather than the `REFUSED` sentence, which blamed the login for
+#: a state the login had nothing to do with (that sentence is what a phone
+#: rendered as "the authentication expired" through the whole outage).
+AUTHORIZATION_DEFERRED = "authorization_deferred"
 NOT_AUTHORIZED = "tunnel_not_authorized"
 LEASE_PENDING = "authorization_lease_pending"
 # The connector's own terminal states, not relay refusals: the connector exited
@@ -81,6 +89,14 @@ RELAY_DETAIL = {
         "Radient refused this computer's relay authorization check. The Radient login "
         "may have expired, or this tunnel's billing may be inactive. Sign in and check "
         f"billing at {CONSOLE_URL}."
+    ),
+    # No expired login, no sign-in instruction, no billing: none of them is true of a
+    # deferral, and each is a way to send someone to act on a state that clears
+    # itself. The window is named because a reader deciding whether to wait needs it.
+    AUTHORIZATION_DEFERRED: (
+        "This computer is waiting out an unconfirmed Radient sign-in refresh, so the "
+        "relay is paused rather than re-sending it. It clears by itself within about "
+        "two minutes; nothing here needs signing in again."
     ),
     # The console is the remedy on both surfaces, so this one sentence serves both.
     NOT_AUTHORIZED: (
@@ -120,6 +136,18 @@ TERMINAL_DETAIL = {
         "Radient refused the connector's authorization check, so the relay stopped "
         "serving. Signing in again, or checking this tunnel's billing, is what clears "
         f"it: {CONSOLE_URL}."
+    ),
+    # COMMAND-FREE for the same reason `REFUSED` is (the sentence travels into the
+    # park file, into `connector.detail` and onto the TUI card, none of which can run
+    # it), and here the check is also the honest advice: this state clears itself, so
+    # there is nothing for the operator to run — only something to look at if it does
+    # not go away.
+    AUTHORIZATION_DEFERRED: (
+        "Radient's answer to this computer's sign-in refresh is still unconfirmed, so "
+        "the connector is waiting it out rather than presenting that request again (a "
+        "re-presented refresh token can revoke every session at once). It retries every "
+        "10 seconds and clears by itself within about two minutes; no local command is "
+        "needed."
     ),
     LEASE_PENDING: (
         "The relay has not renewed its authorization yet. It retries every 10 seconds "
@@ -185,6 +213,10 @@ TERMINAL_REMEDY = {
     NOT_AUTHORIZED: "lop tunnel connect",
     LEASE_PENDING: "lop tunnel status",
     LOGIN_REQUIRED: "lop login radient",
+    # Names the CHECK rather than a fix, by the rule above: this state clears itself,
+    # and handing the operator `lop login radient` for it would be the misdirection
+    # this code exists to remove.
+    AUTHORIZATION_DEFERRED: "lop tunnel status",
     # The two local-repair codes: their sentences are the failure's own fixed
     # literal rather than an entry above (each one names its own missing
     # prerequisite, which no single sentence could), so this table is where the
@@ -201,6 +233,7 @@ TERMINAL_REMEDY = {
 REASON_LABEL = {
     UNREACHABLE: "control plane unreachable",
     REFUSED: "authorization refused",
+    AUTHORIZATION_DEFERRED: "sign-in refresh deferred",
     NOT_AUTHORIZED: "not authorized",
     LEASE_PENDING: "waiting for authorization",
     LOGIN_REQUIRED: "login required",

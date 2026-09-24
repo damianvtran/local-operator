@@ -174,6 +174,14 @@ def _status_text(
         else:
             command = gateway.TERMINAL_REMEDY[gateway.LOGIN_REQUIRED]
             lines.append(f"Login: sign-in expired — run {command}")
+    elif login["state"] == "deferred":
+        # A state the store is WAITING OUT — the refresh token's last exchange is
+        # unsettled — not a fault and not an expired login, so it names no command
+        # (there is nothing to run: it clears by itself, and `report.remedy()`
+        # returns `None` for it) and neither phrase above may appear here. This
+        # case used to print "could not be checked", which was wrong twice: the
+        # check did run, and no network had anything to do with it.
+        lines.append("Login: refresh deferred — it clears by itself within about two minutes.")
     elif login["state"] == "unknown":
         # Never "sign-in expired": this state means the check itself could not run,
         # and naming it anything else sends an operator whose network is down to a
