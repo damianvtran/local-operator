@@ -2342,6 +2342,18 @@ class TestTheRotatingRefreshTokenIsNeverRePresented:
             await store._ensure_oauth_fresh(self._current(store, row.id))
         assert isinstance(caught.value, AuthStoreError)
         assert "not settled" in str(caught.value)
+        # The text a support thread and a shell actually read, held to the rules the
+        # gateway's own table is held to (design round 1, D2; D5): no slash command
+        # — `/login radient` is a TUI command a shell answers with "no such file or
+        # directory", and this line is printed by `lop tunnel status` and written to
+        # the connector's log — and the window spelled the way every user-facing
+        # surface spells it, from the one helper that derives it.
+        from local_operator.providers.auth_store import self_clearing_window
+
+        window = self_clearing_window()
+        assert window in str(caught.value), "spelled by the shared helper"
+        assert "/login" not in str(caught.value)
+        assert "sign in again only if it persists" in str(caught.value), "the escalation"
         assert posts == ["rotating-token"]
         still = self._current(store, row.id)
         assert REFRESH_SEND_UNCONFIRMED_KEY in still.data
@@ -2905,6 +2917,7 @@ class TestTheRotatingRefreshTokenIsNeverRePresented:
         """
         from local_operator.providers.auth_store import (
             AUTH_REFRESH_LEASE_MS,
+            DEFAULT_BLOCK_MS,
             PROVIDER_REFRESH_HTTP_TIMEOUT_S,
             SEND_SHAPE_UNKNOWN,
             UNCONFIRMED_SEND_TTL_S,
@@ -2913,6 +2926,13 @@ class TestTheRotatingRefreshTokenIsNeverRePresented:
 
         assert UNCONFIRMED_SEND_TTL_S * 1000 > AUTH_REFRESH_LEASE_MS
         assert UNCONFIRMED_SEND_TTL_S < 3600 - 300, "longer than the bearer it outlives"
+        # Design §6.4's other hazard, pinned here because this is the test that owns the
+        # constant (agent review round 1, R3): `_resolve` still blocks a deferred
+        # credential for `DEFAULT_BLOCK_MS` in every process sharing the DB, so a bound
+        # at or below that would lift the block while this marker still suppressed the
+        # row — the credential would be re-asked and re-blocked on every poll instead
+        # of being held off once.
+        assert UNCONFIRMED_SEND_TTL_S * 1000 >= DEFAULT_BLOCK_MS
         # DERIVED, so the halves cannot drift: the window plus one per-op margin.
         assert UNCONFIRMED_SEND_TTL_S == (
             AUTH_REFRESH_LEASE_MS / 1000 + PROVIDER_REFRESH_HTTP_TIMEOUT_S

@@ -363,6 +363,23 @@ def classify_failure(failure: BaseException) -> Failure:
     return Failure("transient", REFUSED, TERMINAL_DETAIL[REFUSED])
 
 
+def _retry_detail(verdict: Failure, failure: BaseException) -> str:
+    """The trailing sentence of the retrying-exit line.
+
+    `failure`'s own text is ``RadientTunnels.request``'s deliberately SHARED literal
+    for every refresh failure it cannot name itself, so a deferral arrives here
+    saying "The tunnel's Radient login could not be refreshed." — the login blamed
+    for a wait, on the one line a support thread reads, a few rows under a sentence
+    that says nothing about the login changed (QA round 1, Q2). The verdict that has
+    its own vocabulary entry says that entry instead. Every other kind keeps the
+    failure's own text: it is what carries the transport detail an operator debugs
+    with, and for those the shared literal is not a misreport.
+    """
+    if verdict.reason == AUTHORIZATION_DEFERRED:
+        return verdict.detail
+    return str(failure)
+
+
 def _park(verdict: Failure) -> None:
     """Record the park and say so once, on a transition.
 
@@ -707,7 +724,7 @@ def main() -> int:
         # and a stale park left beside a retrying connector would have the
         # terminal nagging about a login for a machine already trying on its own.
         _withdraw_park(because="the connector is retrying")
-        _announce(f"connector stopped reason={verdict.reason}: {failure}")
+        _announce(f"connector stopped reason={verdict.reason}: {_retry_detail(verdict, failure)}")
         return 1
     except (OSError, httpx.HTTPError) as failure:
         # These carry text this module did not author: httpx echoes the full

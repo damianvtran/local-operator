@@ -49,6 +49,21 @@ PROOF_HEADER = "x-radient-tunnel-assertion"
 # literal: a detail reaches a phone render and an operator's support thread, so
 # it must never carry an upstream body, a request URL, or a credential.
 CONSOLE_URL = "https://console.radienthq.com/dashboard/tunnels"
+#: The window the deferral's copy quotes, in seconds, and the ONE place this module
+#: states it.
+#:
+#: A literal here on purpose, and the reason is the module boundary: `gateway`
+#: deliberately imports neither `providers.auth_store` (which owns
+#: `UNCONFIRMED_SEND_TTL_S`, derived there as one exchange window plus one
+#: per-operation margin) nor `tunnels.report`, because it is the one tunnel module
+#: the desktop server must not pull on boot — `tests/unit/test_import_graph.py`
+#: pins that — and none of this module's readers needs a credential store to read a
+#: sentence. So the number is declared here, used by BOTH deferral sentences and by
+#: the `Retry-After` header so the header and the copy cannot disagree, and
+#: `tests/unit/test_tunnels.py` holds it EQUAL to the store's derived bound — drift
+#: fails a test instead of reaching a phone's screen (design round 1, D5; QA round
+#: 1, Q1).
+DEFERRAL_WINDOW_S = 120
 UNREACHABLE = "control_plane_unreachable"
 REFUSED = "authorization_refused"
 #: The credential store DEFERRED the refresh: the refresh token's last exchange is
@@ -87,16 +102,22 @@ RELAY_DETAIL = {
     ),
     REFUSED: (
         "Radient refused this computer's relay authorization check. The Radient login "
-        "may have expired, or this tunnel's billing may be inactive. Sign in and check "
-        f"billing at {CONSOLE_URL}."
+        "may have expired, or this tunnel's billing may be inactive. Sign in again on "
+        f"that computer, and check billing at {CONSOLE_URL}."
     ),
-    # No expired login, no sign-in instruction, no billing: none of them is true of a
-    # deferral, and each is a way to send someone to act on a state that clears
-    # itself. The window is named because a reader deciding whether to wait needs it.
+    # What the phone is shown, and the two things the first draft left out (design
+    # round 1, D1/D3; UX round 1, U1): the READER'S OWN ACTION — this body IS the
+    # page, nothing refreshes it, and a reader who waits the window out and reloads
+    # nothing sees byte-identical text — and the ESCALATION, because a stalling
+    # endpoint re-arms a fresh window (see DEFERRAL_WINDOW_S) and a deferral that
+    # keeps returning is exactly where a sign-in becomes the remedy. What it still
+    # may not claim: that the login expired, that a sign-in is needed for THIS state,
+    # or that the page updates on its own.
     AUTHORIZATION_DEFERRED: (
-        "This computer is waiting out an unconfirmed Radient sign-in refresh, so the "
-        "relay is paused rather than re-sending it. It clears by itself within about "
-        "two minutes; nothing here needs signing in again."
+        "Remote access is paused: the computer running this tunnel is waiting for "
+        "Radient to confirm a sign-in refresh. It clears by itself within about two "
+        "minutes; reload this page to check. If it is still paused after that, sign "
+        "in again on that computer."
     ),
     # The console is the remedy on both surfaces, so this one sentence serves both.
     NOT_AUTHORIZED: (
@@ -137,17 +158,20 @@ TERMINAL_DETAIL = {
         "serving. Signing in again, or checking this tunnel's billing, is what clears "
         f"it: {CONSOLE_URL}."
     ),
-    # COMMAND-FREE for the same reason `REFUSED` is (the sentence travels into the
-    # park file, into `connector.detail` and onto the TUI card, none of which can run
-    # it), and here the check is also the honest advice: this state clears itself, so
-    # there is nothing for the operator to run — only something to look at if it does
-    # not go away.
+    # COMMAND-FREE for the rule above, and because this sentence travels further than
+    # this module's own surface: it is written into the park file, forwarded to the
+    # desktop as `connector.detail` and rendered by the TUI card — the desktop
+    # callout has no `Login:` line, so the window has to be HERE (design round 1,
+    # D4). The first draft spent 15 words on the token-family mechanism, which is why
+    # the store waits rather than what happened to the reader — that rationale lives
+    # in the comment above the reason code — and its "no local command is needed"
+    # absolute is gone for the same reason the phone's is (UX round 1, U1): the
+    # window re-arms, so the remedy belongs on the persisting case.
     AUTHORIZATION_DEFERRED: (
-        "Radient's answer to this computer's sign-in refresh is still unconfirmed, so "
-        "the connector is waiting it out rather than presenting that request again (a "
-        "re-presented refresh token can revoke every session at once). It retries every "
-        "10 seconds and clears by itself within about two minutes; no local command is "
-        "needed."
+        "Radient has not confirmed this computer's last sign-in refresh, so the "
+        "connector is waiting for it to settle rather than sending that request "
+        "again. It retries every 10 seconds and clears by itself within about two "
+        "minutes; sign in again only if it persists past that."
     ),
     LEASE_PENDING: (
         "The relay has not renewed its authorization yet. It retries every 10 seconds "
@@ -459,6 +483,22 @@ class Gateway:
         body["error"] = "tunnel authorization unavailable"
         return body
 
+    def refusal_headers(self) -> dict[str, str]:
+        """Headers for the refusal response, when a reason has one to add.
+
+        Only the DEFERRAL does: it is the one refusal with a known bound, so
+        `Retry-After` is what lets a client — a phone's fetch, a script, an
+        operator with curl — wait the right amount instead of guessing, and it is
+        the same number the sentence quotes (`DEFERRAL_WINDOW_S`), so the header
+        and the copy cannot drift apart (QA round 1, Q1; UX round 1, U3). A
+        withdrawal or an unknown cause gets no header: there is no honest number
+        to give, and inventing one would be the same promise the copy refuses to
+        make.
+        """
+        if self.refusal_reason() != AUTHORIZATION_DEFERRED:
+            return {}
+        return {"Retry-After": str(DEFERRAL_WINDOW_S)}
+
     @staticmethod
     def target(scope: Mapping[str, Any]) -> str:
         return (
@@ -510,7 +550,9 @@ class Gateway:
                 payload.update(self.refusal())
             return JSONResponse(payload)
         if self.revoked or time.monotonic() >= self.authorized_until:
-            return JSONResponse(self.unavailable_body(), status_code=503)
+            return JSONResponse(
+                self.unavailable_body(), status_code=503, headers=self.refusal_headers()
+            )
         harness = self.harness(host)
         if harness is None:
             return JSONResponse({"error": "unknown tunnel host"}, status_code=404)
@@ -558,7 +600,9 @@ class Gateway:
         # recheck after consuming/verifying its body, immediately before any
         # harness request or local side effect begins.
         if self.revoked or time.monotonic() >= self.authorized_until:
-            return JSONResponse(self.unavailable_body(), status_code=503)
+            return JSONResponse(
+                self.unavailable_body(), status_code=503, headers=self.refusal_headers()
+            )
         if request.url.path == "/logout":
             response = RedirectResponse("/_radient/logout", status_code=303)
             response.headers["Clear-Site-Data"] = '"storage"'

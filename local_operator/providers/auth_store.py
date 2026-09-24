@@ -240,8 +240,17 @@ GRANT_DEAD_AT_KEY = "grant_dead_at"
 #: GREATER than :data:`AUTH_REFRESH_LEASE_MS` (a peer that takes the lease the
 #: instant it expires arms a marker of its own for the same token, and a bound
 #: that lapsed before that peer's exchange could still be on the wire would
-#: re-present a token that may already be spent) and SHORTER than the 55-minute
+#: re-present a token that may already be spent), GREATER than
+#: :data:`DEFAULT_BLOCK_MS` (below it, the block ``_resolve`` writes would lift
+#: while this marker still suppressed the row), and SHORTER than the 55-minute
 #: bearer the marker is armed against.
+#:
+#: It bounds ONE DEFERRAL, NOT THE STATE, and that distinction matters to every
+#: sentence that quotes it: the marker is armed before EVERY POST, so an endpoint
+#: that stalls past the budget on each attempt arms a fresh window each time and a
+#: repeating stall keeps the row deferred in ~2-minute cycles. The copy therefore
+#: carries the escalation for the persisting case rather than an absolute that says
+#: nothing else is ever needed.
 #:
 #: What this costs, stated plainly: the round-1 property "you have an hour to
 #: notice and sign in" is gone. What it buys: an outage becomes a deferral.
@@ -577,11 +586,51 @@ def _self_clearing_minutes() -> int:
     Derived from the constant rather than typed into the messages that quote it:
     the reason :data:`UNCONFIRMED_SEND_TTL_S` is derived at all is that a reader
     must be told a window that matches the rule, and a hard-coded "2 minutes" in
-    a log line is the same drift in prose. It quotes the LONGEST a deferral can
-    last (the :data:`SEND_SHAPE_ANSWERED` shape clears sooner), so every sentence
-    built on it is an upper bound and never an over-promise.
+    a log line is the same drift in prose. It quotes the LONGEST a single deferral
+    can last (the :data:`SEND_SHAPE_ANSWERED` shape clears sooner).
+
+    ONE DEFERRAL, NOT THE STATE, and the first revision of this docstring claimed
+    more than the number supports (UX round 1, U1; design round 1, D5): a stalling
+    endpoint that again gets no answer after this window expires arms a FRESH
+    marker, because the marker is armed before every POST, so a repeating stall
+    keeps renewing it. The window is therefore an upper bound on one deferral, and
+    every sentence built on it is an upper bound on one deferral — which is why
+    the user-facing copy carries the escalation for the case it persists rather
+    than an absolute that says nothing else is ever needed.
     """
     return int(UNCONFIRMED_SEND_TTL_S // 60)
+
+
+#: How the deferral's bound is SPELLED in the sentences that quote it. Words,
+#: because every surface a person reads spells it that way ("about two minutes"),
+#: and a log line reading "about 2 minutes" beside a terminal reading "about two
+#: minutes" is two voices for one fact (design round 1, D5). Past ten the words
+#: stop being clearer than the digit, so a bound that large falls back to it.
+_SPELLED_MINUTES = {
+    1: "one",
+    2: "two",
+    3: "three",
+    4: "four",
+    5: "five",
+    6: "six",
+    7: "seven",
+    8: "eight",
+    9: "nine",
+    10: "ten",
+}
+
+
+def self_clearing_window() -> str:
+    """The deferral's bound as a spelled window (``"two minutes"``).
+
+    The single spelling every message in this module uses, so the surfaces that name
+    the window read as one voice, and so a changed bound changes all of them at once.
+    Public because the window is quoted OUTSIDE this module too — `tunnels/cli.py`
+    for the `Login:` line, when the screen has no other carrier for it — and that
+    caller must derive it rather than type it (agent review round 1, R2).
+    """
+    minutes = _self_clearing_minutes()
+    return f"{_SPELLED_MINUTES.get(minutes, minutes)} minutes"
 
 
 def _refresh_request_never_sent(exc: BaseException) -> bool:
@@ -1961,12 +2010,11 @@ class AuthStore:
                         "refresh for credential %s (%s) was NOT attempted: its stored "
                         "refresh token was presented by an exchange whose outcome is not "
                         "settled, and presenting it again may revoke the whole token "
-                        "family — this clears by itself within about %d minutes, and only "
-                        "if it persists is /login %s the remedy",
+                        "family — this clears by itself within about %s, and needs a "
+                        "sign-in only if it persists past that",
                         row.id,
                         row.provider,
-                        _self_clearing_minutes(),
-                        row.provider,
+                        self_clearing_window(),
                     )
                     raise RefreshUnconfirmedError(
                         f"OAuth refresh for '{row.provider}' was deferred: the stored "
@@ -1974,8 +2022,8 @@ class AuthStore:
                         "settled, so it is not presented again while that lasts "
                         "(presenting it may revoke the whole token family). This is not a "
                         "verdict about the login and it clears by itself within about "
-                        f"{_self_clearing_minutes()} minutes; sign in again only if it "
-                        "persists past that"
+                        f"{self_clearing_window()}; sign in again only if it persists "
+                        "past that"
                     )
                 armed: dict[str, Any] | None = None
                 if presented:
@@ -2253,6 +2301,15 @@ class AuthStore:
         rather than with a ``wait_for`` around the exchange or around a shield of
         it (both of which are the same defect with different amounts of stdlib
         ceremony). This is the task such a caller hands off.
+
+        HOW LONG THE HAND-OFF LASTS IS THE CALLER'S LOOP, not this module's promise
+        (agent review round 1, R1): a caller in a process that keeps running gets
+        the full guarantee, while one under ``asyncio.run`` that returns immediately
+        (``lop tunnel status``) has its loop torn down at process exit and this task
+        cancelled with it — the request dies mid-wire and the marker stays armed for
+        the derived bound, which is the accepted consequence rather than a defect
+        (design §6.1; a drain here would restore the measured 30.9 s poll latency the
+        bound exists to remove).
 
         The exchange gets its OWN store, and that is a correctness requirement
         rather than tidiness: a bounded caller is inside
