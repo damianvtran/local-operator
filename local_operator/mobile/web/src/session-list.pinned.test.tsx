@@ -21,6 +21,7 @@ import {
 	waitFor,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { HttpError } from "./api";
 import { SessionListScreen } from "./screens/session-list";
 import type { SessionSummary } from "./types";
 
@@ -38,10 +39,16 @@ vi.mock("./store", async (importOriginal) => {
 		applySessionPin: (id: string, pinned: boolean) => applySessionPin(id, pinned),
 	};
 });
-vi.mock("./api", () => ({
-	getDirectories: vi.fn(async () => ({ home: "", recent: [] })),
-	setSessionPin: (id: string, pinned: boolean) => setSessionPin(id, pinned),
-}));
+/* The REAL module is spread in, so the test's refusal fixture is the class
+   `api.request` actually throws (`HttpError`) rather than a lookalike. */
+vi.mock("./api", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("./api")>();
+	return {
+		...actual,
+		getDirectories: vi.fn(async () => ({ home: "", recent: [] })),
+		setSessionPin: (id: string, pinned: boolean) => setSessionPin(id, pinned),
+	};
+});
 
 function summary(over: Partial<SessionSummary>): SessionSummary {
 	return {
@@ -63,8 +70,13 @@ function summary(over: Partial<SessionSummary>): SessionSummary {
 	};
 }
 
-function cardByName(name: string): HTMLButtonElement {
-	return screen.getByRole("button", { name: new RegExp(name) });
+/* `hidden` reaches a card the sheet has hidden from assistive tech. The pin
+   sheet now STAYS OPEN until the daemon answers (design round 11, D25), and
+   `Sheet` marks the list behind it inert + aria-hidden for exactly that window —
+   which is the window every ★ assertion below is about. The default stays the
+   strict query, so nothing else stops noticing a genuinely hidden card. */
+function cardByName(name: string, hidden = false): HTMLButtonElement {
+	return screen.getByRole("button", { name: new RegExp(name), hidden });
 }
 
 /* A long-press: pointerdown, hold past the threshold (fake timers), release.
@@ -391,7 +403,7 @@ describe("a pin press reorders nothing until the daemon confirms (Q13/Q14/Q15/D1
 	}
 
 	function starOn(name: string): boolean {
-		return cardByName(name).querySelector("[aria-label=\"pinned\"]") !== null;
+		return cardByName(name, true).querySelector("[aria-label=\"pinned\"]") !== null;
 	}
 
 	/* Two animation frames, so a repaint that any part of the mark path
@@ -563,4 +575,84 @@ describe("a pin press reorders nothing until the daemon confirms (Q13/Q14/Q15/D1
 		expect(refused.star).toBe(false);
 		expect(rowOrder(list)).toEqual(before);
 	}, SLOW);
+});
+
+describe("a refused pin says why, in the sheet that asked (design round 11, D25)", () => {
+	/* THE DEFECT THIS REPLACES. Closing the sheet on the press left a refusal
+	   with nowhere to be said: the ★ appeared at +2.2…5.0ms and cleared at
+	   +5.3…20.5ms — a ~3ms existence window, a fifth of a 60Hz frame, so the
+	   reader often saw nothing — and on a slow answer it stayed up for the whole
+	   wait (306ms, 1516ms, 46.9s measured) and was then withdrawn with no
+	   explanation. So the surface the reader acted on stays open until the
+	   daemon's answer lands, and the daemon's own reason is rendered inside it. */
+	it("keeps the sheet open and shows the daemon's reason in flow inside it", async () => {
+		sessionList = [summary({ session_id: "a1", conversation_name: "Alpha" })];
+		render(<SessionListScreen />);
+		longPress(cardByName("Alpha"));
+
+		const action = await screen.findByRole("button", { name: "Pin to the top" });
+		/* THE DAEMON'S OWN 409, body and all: `api.request` puts the error body's
+		   `error` on the `HttpError`'s message, so this is the sentence a reader
+		   actually gets, not a fixture invented here. */
+		setSessionPin.mockRejectedValueOnce(
+			new HttpError(409, "no saved messages yet — pin it after you send one"),
+		);
+		fireEvent.click(action);
+
+		const reason = await screen.findByText(
+			"Could not save the pin: no saved messages yet — pin it after you send one",
+		);
+		/* The sheet is STILL THERE, with the action still on it. */
+		const sheet = screen.getByRole("dialog");
+		expect(screen.getByRole("button", { name: "Pin to the top" })).toBeTruthy();
+		/* The reason is inside it, announced to assistive tech... */
+		expect(sheet.contains(reason)).toBe(true);
+		expect(reason.getAttribute("role")).toBe("alert");
+		/* ...and IN FLOW: a paragraph that is the action's own SIBLING in the
+		   sheet's column, so it has to take layout space and cannot be drawn over
+		   the control above it. Anything floating (an overlay above the list, a
+		   positioned box) fails both of these. */
+		expect(reason.parentElement).toBe(action.parentElement);
+		expect(reason.className).not.toContain("absolute");
+		expect(reason.className).not.toContain("fixed");
+		expect(reason.className).not.toContain("z-");
+		expect(reason.className).toContain("text-danger");
+	});
+
+	it("falls back to a plain line when the daemon's answer carries no reason", async () => {
+		sessionList = [summary({ session_id: "a1", conversation_name: "Alpha" })];
+		render(<SessionListScreen />);
+		longPress(cardByName("Alpha"));
+
+		const action = await screen.findByRole("button", { name: "Pin to the top" });
+		/* A failure carrying no message at all — the shape where there is nothing to
+		   pass through. What the reader is owed is a line that does not pretend
+		   otherwise, not silence. */
+		setSessionPin.mockRejectedValueOnce(new Error(""));
+		fireEvent.click(action);
+
+		expect(
+			await screen.findByText("Could not save the pin: the daemon did not say why"),
+		).toBeTruthy();
+	});
+
+	it("still closes on a pin the daemon confirms, and the row reaches ★ Pinned", async () => {
+		sessionList = [summary({ session_id: "a1", conversation_name: "Alpha" })];
+		const view = render(<SessionListScreen />);
+		longPress(cardByName("Alpha"));
+
+		const action = await screen.findByRole("button", { name: "Pin to the top" });
+		setSessionPin.mockResolvedValueOnce({ ok: true, pinned: true });
+		fireEvent.click(action);
+		await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+		/* The daemon's confirming frame is the only thing that moves a row, and
+		   the mocked hook reads the list live, so re-rendering is that frame. */
+		sessionList = [
+			summary({ session_id: "a1", conversation_name: "Alpha", pinned: true }),
+		];
+		view.rerender(<SessionListScreen />);
+		expect(screen.getByText("★ Pinned")).toBeTruthy();
+		expect(cardByName("Alpha").querySelector("[aria-label=\"pinned\"]")).toBeTruthy();
+	});
 });
