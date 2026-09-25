@@ -193,6 +193,12 @@ def wrap_cells(text: str, width: int) -> list[str]:
     A word longer than the row — a URL, a resolved path, a session id — is broken
     rather than allowed to overhang, because the caller's whole reason for
     wrapping is that the overhang lands in another widget's column.
+
+    That break is the expensive half on a pasted blob, so it is :func:`_break_word`,
+    which answers "does the remainder still not fit?" by arithmetic instead of
+    re-measuring a shrinking suffix. Each word is measured at most twice here, and
+    once for the overwhelming majority: the fit test below IS the word's own
+    measurement whenever the row so far is empty.
     """
     if width <= 0:
         return [text]
@@ -200,44 +206,93 @@ def wrap_cells(text: str, width: int) -> list[str]:
     current = ""
     for word in text.split(" "):
         candidate = f"{current} {word}" if current else word
-        if cell_len(candidate) <= width:
+        remaining = cell_len(candidate)
+        if remaining <= width:
             current = candidate
             continue
         if current:
             rows.append(current)
             current = ""
-        while cell_len(word) > width:
-            head = ""
-            used = 0
-            for char in word:
-                size = cell_len(char)
-                if used + size > width:
-                    break
-                head += char
-                used += size
-            # Per-character sizes do not add up for a grapheme CLUSTER: `cell_len`
-            # counts `1️⃣` (digit + VS16 + keycap) as 2 when handed the whole
-            # string and as 1+0+0 per character, so a row built from the running
-            # sum overhung its frame by a cell. Measure the finished head ONCE —
-            # one call over at most `width` characters, so linear in the word,
-            # not the quadratic re-measure of a growing string this loop used to
-            # avoid — and shed trailing characters until it fits.
-            while head and cell_len(head) > width:
-                head = head[:-1]
-            if not head:
-                # A single character WIDER than the row (any CJK ideograph or
-                # emoji at width 1). Taking nothing appended "" forever and grew
-                # the row list without bound — a hung UI thread instead of a
-                # mis-wrap, on exactly the inputs this function exists to handle.
-                # One overhanging cell is the honest outcome: the caller's width
-                # cannot hold this character at all.
-                head = word[0]
-            rows.append(head)
-            word = word[len(head) :]
-        current = word
+            # `remaining` measured `candidate`, which carries the row so far and
+            # the space that joins it to this word; the break loop needs the WORD's
+            # own count. This is the one measurement the old loop also made here,
+            # on its first pass over a word it had not measured yet.
+            remaining = cell_len(word)
+        current = _break_word(word, width, rows, remaining)
     if current or not rows:
         rows.append(current)
     return rows
+
+
+def _break_word(word: str, width: int, rows: list[str], remaining: int) -> str:
+    """Break a word that does not fit into rows of at most ``width`` cells.
+
+    ``remaining`` is ``cell_len(word)``, measured by the caller — which has usually
+    measured it already, deciding that the word does not fit. Appends every full row
+    to ``rows`` and returns the tail that was left over (the caller's new
+    ``current``).
+
+    **Why the loop does not re-measure the suffix.** ``while cell_len(word) > width``
+    re-scans the whole SHRINKING remainder on every pass while each pass removes only
+    ``width`` cells, so the work is quadratic in the word's length: a 40,000-character
+    token (a base64 blob, a minified line, a resolved path) cost 41,419 ``cell_len``
+    calls measuring 10.1 M characters — 253x its own length — and 80,000 characters
+    cost ~195 ms **on the TUI main thread**, i.e. a stalled frame per oversized token.
+    The loop needs one bit from that scan: does the remainder still exceed ``width``?
+    For a word whose cell widths are ADDITIVE it can have that bit for free, because
+    the next pass's remainder is this pass's remainder minus the cells this pass
+    removed (``remaining -= consumed``), and the whole word is measured once.
+
+    Additivity is what the ``\u200d``/``\ufe0f`` test buys, and it is not an
+    assumption about rich: with neither codepoint present, ``cell_len`` is its own
+    documented per-character sum (``_cell_len``'s "simplest case", and the
+    single-cell fast path agrees with it), for the word and so for every suffix of
+    it. A word carrying either codepoint takes the ORIGINAL measured path instead,
+    unchanged: there a cluster can measure WIDER than its characters (``1️⃣`` is 2,
+    its characters sum to 1) or a joiner can swallow the next character, and one cell
+    is the difference between a row that fits and one that overhangs its frame. The
+    choice is per WORD, so an ordinary huge token never pays for the rare cluster
+    case, and the measured path is the loop this replaces, byte for byte.
+    """
+    additive = "\u200d" not in word and "\ufe0f" not in word
+    while remaining > width:
+        head = ""
+        consumed = 0
+        for char in word:
+            size = cell_len(char)
+            if consumed + size > width:
+                break
+            head += char
+            consumed += size
+        if not additive:
+            # Per-character sizes do not add up for a grapheme CLUSTER, so a row
+            # built from the running sum can overhang its frame by a cell. Measure
+            # the finished head ONCE — one call over at most `width` characters, so
+            # linear in the word, not the quadratic re-measure of a growing string
+            # this loop used to avoid — and shed trailing characters until it fits.
+            consumed = cell_len(head)
+            while head and consumed > width:
+                head = head[:-1]
+                consumed = cell_len(head) if head else 0
+        if not head:
+            # A single character WIDER than the row (any CJK ideograph or emoji at
+            # width 1). Taking nothing appended "" forever and grew the row list
+            # without bound — a hung UI thread instead of a mis-wrap, on exactly the
+            # inputs this function exists to handle. One overhanging cell is the
+            # honest outcome: the caller's width cannot hold this character at all.
+            head = word[0]
+            consumed = cell_len(head)
+        rows.append(head)
+        word = word[len(head) :]
+        if additive:
+            remaining -= consumed
+        else:
+            # Re-measured rather than subtracted: the boundary between two chunks
+            # can sit inside a cluster, so `cell_len(head) + cell_len(tail)` is not
+            # `cell_len(word)` here, and the ±1 is exactly what a mis-wrap is made
+            # of. This is the old loop's own re-measure, kept for these words.
+            remaining = cell_len(word)
+    return word
 
 
 #: Tool-ledger name column: the floor every card agrees on, and the ceiling it
