@@ -1368,6 +1368,12 @@ class SessionHandle(Protocol):
     #   Optional (getattr-probed in _dispatch) so reduced test handles and
     #   non-interactive exec hosts that never wired it keep working — a handle
     #   lacking it answers "this session cannot receive peer messages".
+    # receive_peer_model(provider, model_id, *, sender=None) -> str: another
+    #   local session switching this one's model (`send model=`, `lop model`).
+    #   Validates against THIS session's config, applies through the host's own
+    #   switch, reads back the model in force, and records a peer audit card.
+    #   Raises ValueError("refused: …; still on …") on refusal. Optional and
+    #   getattr-probed like receive_peer_message.
     # cancel_gracefully() -> str: stop the turn at the POST-TOOL boundary
     #   instead of cutting the running tool (Session.request_graceful_cancel).
     #   Serves the ``cancel`` op's default mode. Deliberately distinct from
@@ -5956,6 +5962,42 @@ class RuntimeServer:
                 frame["text"],
                 mode=str(frame.get("mode", "mailbox")),
                 wake=bool(frame.get("wake", False)),
+                sender=frame.get("sender") or {},
+            )
+        if op == "peer_set_model":
+            # Another local session switching THIS one's model (design D1). The
+            # same two gates as ``peer_message`` directly above, for the same
+            # reasons: an unengaged session is refused here because a sender on
+            # an older build cannot be trusted to have refused it, and the
+            # capability is getattr-probed so a reduced or older handle answers
+            # a sentence instead of an AttributeError.
+            #
+            # A NEW op rather than ``set_model`` on purpose: every older runtime
+            # already knows ``set_model`` and would apply it unvalidated and
+            # unaudited, while an unknown op fails closed — the sender maps that
+            # to "runs an older lop … nothing changed" (D7). The handle owns the
+            # validation, the hop to the session's own loop/thread, the read-back
+            # and the audit card; nothing here touches the Session.
+            if not self._started:
+                from local_operator.mobile.peer_send import (
+                    MODEL_SWITCH_CAPABILITY,
+                    unengaged_label,
+                    unengaged_refusal,
+                )
+
+                raise ValueError(
+                    unengaged_refusal(
+                        unengaged_label(pid=self._record.pid, session_id=self._record.session_id),
+                        capability=MODEL_SWITCH_CAPABILITY,
+                    )
+                )
+            receive_model = getattr(h, "receive_peer_model", None)
+            if not callable(receive_model):
+                raise ValueError("this session cannot switch models remotely")
+            typed_receive_model = cast(Callable[..., Awaitable[str]], receive_model)
+            return await typed_receive_model(
+                str(frame["provider"]),
+                str(frame["model_id"]),
                 sender=frame.get("sender") or {},
             )
         if op == "stop":

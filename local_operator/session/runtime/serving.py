@@ -4102,6 +4102,104 @@ class ServingSessionHandle(SessionHandle):
         return f"model: {self._projection.model_label}"
 
     @_on_session_loop
+    async def receive_peer_model(
+        self,
+        provider: str,
+        model_id: str,
+        *,
+        sender: dict[str, Any] | None = None,
+    ) -> str:
+        """Another local session switching this one's model (``peer_set_model``).
+
+        Four steps, in this order, all on the session's own loop (design D1):
+        validate against THIS runtime's config and credentials (off the loop —
+        the catalogue and the credential store are blocking reads), apply
+        through :meth:`set_model_effort` — the same switch the phone's model
+        sheet uses, so effort falls to the model's own default (effort is not on
+        the wire in v1) — read back the model actually in force, and record a
+        record-only peer card naming the sender, the old model and the new one.
+
+        A refusal raises ``ValueError`` BEFORE anything is mutated, so it cannot
+        half-switch; the dispatch turns it into the error frame the sender
+        prints. A switch that validated but did not take is also a refusal: the
+        answer comes from the read-back, never from the switch's own receipt.
+        """
+        self._check_loop_thread()
+        from local_operator.mobile import peer_model
+        from local_operator.model.configure import ModelSelectionRefused
+
+        provider, model_id = peer_model.normalise_pair(provider, model_id)
+        session = self._session
+        old_label = peer_model.selected_label(session)
+        try:
+            spec = await asyncio.to_thread(peer_model.validate_peer_selection, provider, model_id)
+        except ModelSelectionRefused as refused:
+            raise ValueError(
+                peer_model.refusal_detail(refused.message, _effective_label(session))
+            ) from refused
+        new_label = f"{spec.provider}/{spec.model_id}"
+        if peer_model.already_selected(session, new_label):
+            return peer_model.already_on_detail(new_label)
+        # Re-selecting the model a pinned fallback displaced: the selection will
+        # not move, the pin will be withdrawn (review round 2, N5).
+        dropped = peer_model.pinned_fallback_label(session) if old_label == new_label else ""
+        # Read BEFORE the switch: the question is whether a call was in flight
+        # when the switch landed, which is what decides the "mid-turn" wording.
+        busy = self.is_conversationally_active()
+        calling = peer_model.provider_call_in_flight(session)
+        apply_error: Exception | None = None
+        try:
+            await self.set_model_effort(spec.provider, spec.model_id, None)
+        except Exception as error:  # noqa: BLE001 — the read-back below decides the answer
+            # ``Session.set_model`` assigns the spec BEFORE its journal writes and
+            # stream notify, so a raise from a later step can leave the switch in
+            # force. The answer is read back from the session, never inferred from
+            # the raise (review round 1, N1).
+            apply_error = error
+        # "Did it take" is the SELECTION test, never the effective label (review
+        # round 2, M2): while a fallback serves the requested model the effective
+        # label already equals it, so an apply that never ran would read as a
+        # switch and write a false card. The effective label names what the
+        # session is really on in the refusal.
+        if not peer_model.already_selected(session, new_label):
+            raise ValueError(
+                peer_model.refusal_detail(
+                    f"the switch to {new_label} did not take effect", _effective_label(session)
+                )
+            ) from apply_error
+        await self._record_peer_model_switch(
+            peer_model.audit_body(old_label, new_label, sender, dropped_fallback=dropped),
+            sender or {},
+        )
+        if apply_error is not None:
+            return peer_model.partial_switch_detail(
+                old_label, new_label, apply_error, dropped_fallback=dropped
+            )
+        return peer_model.switched_detail(
+            old_label,
+            new_label,
+            busy=busy,
+            calling=calling,
+            running_subagents=peer_model.running_subagent_count(session),
+            dropped_fallback=dropped,
+        )
+
+    async def _record_peer_model_switch(self, body: str, sender: dict[str, Any]) -> None:
+        """The target-side audit card (design D6), best effort.
+
+        Record-only (``mailbox``, no wake) through the ordinary peer receive path,
+        so it lands as the peer card every front end already renders with the
+        sender's name, pid and model, and it never opens a turn. The switch has
+        ALREADY happened when this runs; a failed card must not turn a switch
+        into a reported failure, because the sender would then retry a switch
+        that stuck.
+        """
+        try:
+            await self.receive_peer_message(body, mode="mailbox", wake=False, sender=sender)
+        except Exception:  # noqa: BLE001 — the switch stands whatever the card does
+            logger.warning("the remote model switch's audit card was not recorded", exc_info=True)
+
+    @_on_session_loop
     async def set_effort(self, effort: str) -> str:
         self._check_loop_thread()
         spec = self._session.model
