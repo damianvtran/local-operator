@@ -388,13 +388,19 @@ async def _drive(
 
 
 async def _drive_tools(
-    session: Session, tools: list[AgentTool], stream: Any, session_cwd: str | None = None
+    session: Session,
+    tools: list[AgentTool],
+    stream: Any,
+    session_cwd: str | None = None,
+    context: LoopContext | None = None,
 ) -> list[str]:
     """``_drive`` for a turn that offers MORE THAN ONE tool.
 
     The R3-2 arm needs a real two-call batch (``read`` plus ``bash``) and the
     R4-1 arm needs an ``eval`` beside the ``read`` it dispatches into; both are
     the same drive, so the body lives here and ``_drive`` is the one-tool call.
+    ``context`` lets an arm drive a ``LoopContext`` it prepared itself -- the L1
+    arm seeds it with what a torn-down turn would have left behind.
     """
     config = LoopConfig(
         model=ModelSpec(provider="test", model_id="unit-model", context_window=1000),
@@ -403,15 +409,9 @@ async def _drive_tools(
         redact_tool_result=session._redact_tool_result_text,
     )
     tool_context = ToolContext(cwd=session_cwd) if session_cwd is not None else None
-    events = [
-        event
-        async for event in AgentLoop().run(
-            [Message.user("go")],
-            LoopContext(tools=tools, tool_context=tool_context),
-            config,
-            None,
-        )
-    ]
+    if context is None:
+        context = LoopContext(tools=tools, tool_context=tool_context)
+    events = [event async for event in AgentLoop().run([Message.user("go")], context, config, None)]
     end = events[-1]
     assert isinstance(end, AgentEndEvent), "the scripted turn did not end"
     rows = [m for m in end.messages if isinstance(m, Message) and m.role == "tool"]
@@ -1238,12 +1238,19 @@ async def test_a_retarget_between_dispatch_and_the_read_still_escalates(
     exempt tree, the wrapper (the real ``read`` tool, entered unchanged otherwise)
     retargets it to the decoy, and the real reader then resolves and opens the
     decoy. The verdict must be the READER's own answer -- False, so the escalation
-    fires -- never one recorded before the reader ran.
+    fires -- never one resolved before the reader ran.
 
-    Reds on the dispatch-time version of the fix, where the record answered True
-    for the exempt tree while the reader opened the decoy: the decoy's escalation
-    was cleared. Both routes are covered because the bridge dispatched its own
-    nested call and recorded the same thing at the same moment.
+    And the link is put BACK on the exempt tree once the reader has returned, which
+    is what makes this a pin on the REPORT rather than merely on the old ordering
+    (review round 6, M2): if the reader's report is absent -- a no-op recorder, a
+    reader that forgets to call the hook -- the redaction falls back to resolving,
+    sees the exempt tree and CLEARS the escalation, so the arm reds. Without that
+    second retarget the fallback agrees with the reader by accident and the arm
+    stays green through exactly the regression it exists to catch.
+
+    Reds on the dispatch-time version of the fix too, where the record answered
+    True for the exempt tree while the reader opened the decoy. Both routes are
+    covered because the bridge dispatched its own nested call.
     """
     root, exempt_dir, relative = _link_layout(tmp_path, monkeypatch)
     link = root / "lnk"
@@ -1261,7 +1268,11 @@ async def test_a_retarget_between_dispatch_and_the_read_still_escalates(
     ) -> ToolResult:
         link.unlink()
         link.symlink_to(root / "decoydir")
-        return await original_execute(tool_call_id, args, signal, on_update, context)
+        try:
+            return await original_execute(tool_call_id, args, signal, on_update, context)
+        finally:
+            link.unlink()
+            link.symlink_to(exempt_dir)
 
     read_tool = AgentTool(
         name="read",
@@ -1287,3 +1298,103 @@ async def test_a_retarget_between_dispatch_and_the_read_still_escalates(
     assert _escalation_flags(session) == [
         True
     ], f"{via}: a retarget between the record and the reader cleared the escalation"
+
+
+@pytest.mark.asyncio
+async def test_a_non_reading_tool_cannot_confer_the_exemption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M1 REGRESSION ARM. The hook is on EVERY tool's context, so filing is gated.
+
+    Moving the verdict from the matcher to a hook widened who can file one: the
+    ``ToolContext`` is handed to every dispatched tool, so a tool body that reads
+    nothing can still call ``record_resolved_path`` -- and, before the gate, a
+    ``True`` it filed silenced the rotation demand for text the guard exists to
+    report (review round 6, M1, measured with a tool that resolves no path at all).
+
+    This arm's tool does exactly what such a body would do: it reports the real
+    exempt file as resolved, then returns the corpus's escalating case as its own
+    result. Two properties have to hold, and the arm asserts both -- the hook IS
+    installed (or there would be nothing to gate), and the escalation still fires,
+    because the filing side refuses anything from a tool outside ``READING_TOOLS``.
+    """
+    root, exempt_dir, _relative = _link_layout(tmp_path, monkeypatch)
+    exempt = exempt_dir / "local_operator" / "redaction_shapes.py"
+    session = _session(tmp_path)
+    seen: list[str] = []
+
+    async def execute(
+        tool_call_id: str, args: dict[str, Any], signal: Any, on_update: Any, context: Any
+    ) -> ToolResult:
+        hook = getattr(context, "record_resolved_path", None)
+        seen.append("hook" if hook is not None else "no-hook")
+        if hook is not None:
+            hook(str(exempt), True)
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="view",
+            content=[TextContent(text=f"PAYLOAD = {ESCALATING_TEXT!r}")],
+        )
+
+    tool = AgentTool(name="view", parameters={"type": "object", "properties": {}}, execute=execute)
+    rows = await _drive_tools(
+        session, [tool], _BatchStream([("c1", "view", json.dumps({}))]), str(root)
+    )
+
+    assert seen == ["hook"], "the arm proved nothing: the loop installed no reporting hook"
+    assert REDACTION_MARKER in rows[0], "masking is not exempt and must still apply"
+    assert _escalation_flags(session) == [
+        True
+    ], "a non-reading tool conferred the exemption through the context it was handed"
+
+
+@pytest.mark.asyncio
+async def test_a_record_left_by_a_torn_down_turn_is_swept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L1 REGRESSION ARM. A turn that never finished must not price the next turn's call.
+
+    A consumer that stops iterating between a tool's end and its append leaves that
+    call's records behind -- the generator close path never reaches the redaction
+    that would consume them (review round 6, L1). The id is the model wire's, so a
+    later turn can emit the same one, and the call that reuses it is exactly the
+    kind that records nothing of its own (a non-reading tool, or one whose planning
+    failed): the stale verdict is then popped and the escalation is silently
+    cleared for ITS bytes. The batch's sweep is what removes the leftover first.
+
+    The arm seeds that leftover under the id the next turn's call uses, then drives
+    a non-reading tool returning the corpus's escalating case. The escalation must
+    fire; it cannot if the stale ``True`` is still there to be popped, and a
+    reader's own report cannot mask the fault here because the tool never reports.
+    """
+    root, _exempt_dir, _relative = _link_layout(tmp_path, monkeypatch)
+    session = _session(tmp_path)
+
+    async def execute(
+        tool_call_id: str, args: dict[str, Any], signal: Any, on_update: Any, context: Any
+    ) -> ToolResult:
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="view",
+            content=[TextContent(text=f"PAYLOAD = {ESCALATING_TEXT!r}")],
+        )
+
+    view = AgentTool(name="view", parameters={"type": "object", "properties": {}}, execute=execute)
+    stale = LoopContext(tools=[view], tool_context=ToolContext(cwd=str(root)))
+    # What a torn-down turn leaves: this call id's records, never consumed.
+    stale.exempt_source_verdicts["c1"] = True
+    stale.original_call_args["c1"] = {"path": "a/torn/down/turn.py", "raw": True}
+
+    rows = await _drive_tools(
+        session,
+        [view],
+        _BatchStream([("c1", "view", json.dumps({}))]),
+        str(root),
+        context=stale,
+    )
+
+    assert REDACTION_MARKER in rows[0], "masking is not exempt and must still apply"
+    assert stale.exempt_source_verdicts == {}, "the leftover verdict survived the batch"
+    assert _escalation_flags(session) == [
+        True
+    ], "a record left by a torn-down turn priced the next turn's call"
