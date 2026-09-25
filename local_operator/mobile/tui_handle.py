@@ -755,6 +755,77 @@ class TuiSessionHandle(SessionHandle):
         self._refresh_state()
         return f"model: {self._projection.model_label}"
 
+    async def receive_peer_model(
+        self,
+        provider: str,
+        model_id: str,
+        *,
+        sender: dict[str, Any] | None = None,
+    ) -> str:
+        """Another local session switching this TUI-hosted session's model.
+
+        The same four steps as ``ServingSessionHandle.receive_peer_model``
+        (design D1), with the TUI's own switch in the middle: ``/model`` run on
+        the Textual thread, so this owner's effort choice, fast mode, quota probe
+        and receipts all apply exactly as if its user had typed it.
+
+        THE ANSWER COMES FROM THE READ-BACK, NEVER FROM ``/model``. That command
+        reports refusals only as notices on this screen, so
+        :meth:`set_model_effort`'s ``model: <label>`` reads the same whether it
+        switched or not. The labels are read before and after the command IN THE
+        SAME HOP: for an owned session ``_run_slash_command`` reaches
+        ``_cmd_model`` → ``Session.set_model`` synchronously (a local ``Session``
+        has no ``route_shared_slash``, so nothing is scheduled), and reading in
+        that hop means no later command can land between the switch and the
+        answer. The one asynchronous path is a local-setup provider's capacity
+        probe, which the hop reports as ``accepted`` via
+        ``_model_activation_pending`` rather than guessing its outcome.
+        """
+        from local_operator.mobile import peer_model
+        from local_operator.model.configure import ModelSelectionRefused
+
+        provider, model_id = peer_model.normalise_pair(provider, model_id)
+        # Validated OFF both loops and before any hop: a refusal must cost the
+        # busy app nothing and mutate nothing.
+        try:
+            spec = await asyncio.to_thread(peer_model.validate_peer_selection, provider, model_id)
+        except ModelSelectionRefused as refused:
+            current = _effective_label(self._session())
+            raise ValueError(peer_model.refusal_detail(refused.message, current)) from refused
+        new_label = f"{spec.provider}/{spec.model_id}"
+
+        def apply() -> tuple[str, str, bool, bool, int]:
+            session = self._session()
+            before = _effective_label(session)
+            busy = bool(getattr(session, "is_streaming", False))
+            if before == new_label:
+                return before, before, busy, False, 0
+            self._app._run_slash_command(f"/model {new_label}")
+            pending = getattr(self._app, "_model_activation_pending", None) is not None
+            after = _effective_label(self._session())
+            return before, after, busy, pending, peer_model.running_subagent_count(session)
+
+        before, after, busy, pending, children = await self._on_app(apply)
+        self._refresh_state()
+        if before == new_label:
+            return peer_model.already_on_detail(new_label)
+        if after != new_label:
+            if pending:
+                return peer_model.accepted_detail(new_label)
+            raise ValueError(
+                peer_model.refusal_detail(f"the switch to {new_label} did not take effect", after)
+            )
+        # The audit card (design D6), record-only so it never opens a turn.
+        # Best effort: the switch has already happened, and reporting a failed
+        # card as a failed switch would invite a retry of a switch that stuck.
+        try:
+            await self.receive_peer_message(
+                peer_model.audit_body(before, after), mode="mailbox", wake=False, sender=sender
+            )
+        except Exception:  # noqa: BLE001 — the switch stands whatever the card does
+            logger.warning("the remote model switch's audit card was not recorded", exc_info=True)
+        return peer_model.switched_detail(before, after, busy=busy, running_subagents=children)
+
     async def set_effort(self, effort: str) -> str:
         def apply() -> None:
             self._app._run_slash_command(f"/effort {effort}")

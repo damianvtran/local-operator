@@ -11677,9 +11677,19 @@ class SendParams(BaseModel):
         default=None,
         description=("Exact session id of the peer. Use INSTEAD of target, never alongside it."),
     )
-    message: str = Field(
-        min_length=1,
+    # Optional at the SCHEMA level only because ``model`` is its alternative:
+    # exactly one of the two is required, which ``execute_send`` enforces with a
+    # sentence (a JSON-schema ``oneOf`` would cost more schema than the field).
+    message: str | None = Field(
+        default=None,
         description="The message body; it lands in the peer's transcript as an inbound card.",
+    )
+    model: str | None = Field(
+        default=None,
+        description=(
+            "Instead of a message: switch the peer's model to <provider>/<model-id> "
+            "(live sessions only)."
+        ),
     )
     wake: bool = Field(
         default=True,
@@ -11749,6 +11759,11 @@ def _describe_send_approval(args: dict[str, Any], cwd: str) -> str:
     an intended 60 and wrapped the prompt onto a second line (design round 1, D4).
     """
     who = peer_send_target_label(args)
+    model = " ".join(str(args.get("model") or "").split())
+    if model:
+        # A different commitment from a message, so it says so: the peer's
+        # billing moves with it (design §4).
+        return f"switch {who}'s model to {model} (changes that session's billing)"
     mode = peer_send_mode_label(args)
     body = _truncate_approval_body(" ".join(str(args.get("message") or "").split()))
     return f"to {who} ({mode}): {body}" if body else f"to {who} ({mode})"
@@ -11810,6 +11825,103 @@ def build_send_tool(context: ToolContext) -> AgentTool | None:
     )
 
 
+async def _send_sender_identity(context: ToolContext | None) -> dict[str, Any]:
+    """This session's identity for a peer's card: the registry, else the context.
+
+    Off the loop: the ancestry walk runs a registry scan and a ``ps`` per hop.
+    It matches on the first hop here (the tool IS the session process), but the
+    cost is not structurally bounded and must not sit on the loop. Shared by the
+    message and the model-switch paths so both name the sender identically.
+    """
+    from local_operator.mobile.peer_send import peer_sender_identity_async
+
+    sender = await peer_sender_identity_async(os.getpid())
+    if "session_id" not in sender and context is not None:
+        # No registry record named this process (a reduced host that never
+        # published one): fall back to the ToolContext identity so the peer's
+        # inbound indicator can still name the sender. The name maps to
+        # ``conversation_name`` because that is the key the indicator reads.
+        if context.session_id:
+            sender["session_id"] = context.session_id
+        name = _peer_sender_conversation_name(context)
+        if name:
+            sender["conversation_name"] = name
+    return sender
+
+
+async def _execute_send_model(
+    tool_call_id: str, params: SendParams, context: ToolContext | None
+) -> ToolResult:
+    """``send(model=…)``: switch a LIVE, engaged peer's model (design D4).
+
+    The sender checks syntax only; the target validates the pair against its own
+    config and credentials, applies it, reads back what is in force and answers
+    with its own sentence, which this echoes (design D3, §2). A stored or closed
+    session is refused rather than engaged: a cold switch would write into a
+    transcript no running owner holds (D1's overturn condition).
+    """
+    from local_operator.mobile.peer_send import (
+        MODEL_SWITCH_CAPABILITY,
+        PeerModelUnconfirmed,
+        candidate_lines,
+        cold_switch_target,
+        parse_model_selector,
+        resolve_peer_target,
+        switch_peer_model,
+    )
+
+    parsed = parse_model_selector(params.model or "")
+    if isinstance(parsed, str):
+        return _error(tool_call_id, "send", parsed)
+    provider, model_id = parsed
+    record, candidates, error = await asyncio.to_thread(
+        resolve_peer_target,
+        target=params.target,
+        pid=params.pid,
+        session=params.session,
+        capability=MODEL_SWITCH_CAPABILITY,
+    )
+    if candidates:
+        lines = [
+            f"{len(candidates)} sessions match; drop `target` and retry with pid=<n> "
+            f"instead (passing both is refused):"
+        ]
+        lines.extend(candidate_lines(candidates, indent="  ", prefix="pid="))
+        return _error(tool_call_id, "send", "\n".join(lines))
+    if record is None:
+        # Live only. A session only the store knows is named as NOT RUNNING,
+        # with the two ways to switch it, rather than as "no match".
+        cold = await asyncio.to_thread(
+            cold_switch_target, error, target=params.target, session=params.session
+        )
+        return _error(tool_call_id, "send", cold or error or "no target resolved")
+    if record.pid == os.getpid():
+        return _error(
+            tool_call_id,
+            "send",
+            "that target is this session; a session cannot switch its own model through "
+            "send — use /model",
+        )
+    sender = await _send_sender_identity(context)
+    name = record.conversation_name or record.session_id
+    try:
+        detail = await switch_peer_model(
+            record, provider=provider, model_id=model_id, sender=sender
+        )
+    except PeerModelUnconfirmed as exc:
+        return _error(tool_call_id, "send", str(exc))
+    except RuntimeError as exc:
+        # The peer ANSWERED no — a refusal, an unengaged or incapable handle, or
+        # an older build — so nothing changed and its sentence says why.
+        return _error(tool_call_id, "send", f"pid {record.pid} {name!r}: {exc}")
+    return _text(
+        tool_call_id,
+        "send",
+        f"pid {record.pid} {name!r}: {detail}",
+        details={"pid": record.pid, "model": f"{provider}/{model_id}"},
+    )
+
+
 def _peer_sender_conversation_name(context: ToolContext) -> str:
     """The name a peer's inbound card should show for THIS session.
 
@@ -11855,10 +11967,29 @@ async def execute_send(
     except ValidationError as exc:
         return _validation_error(tool_call_id, "send", exc)
 
+    if params.model is not None:
+        if params.message is not None:
+            # Two acts with two different receipts and two different failure
+            # modes; one call doing both could half-succeed (design §4).
+            return _error(
+                tool_call_id,
+                "send",
+                "pass either message or model, not both — send the note in a second call",
+            )
+        if params.now:
+            return _error(
+                tool_call_id,
+                "send",
+                "now=True does not apply to a model switch — it always lands at the peer's "
+                "next provider call",
+            )
+        return await _execute_send_model(tool_call_id, params, context)
+    if params.message is None:
+        return _error(tool_call_id, "send", "pass a message (or model= to switch the peer's model)")
+
     from local_operator.mobile.peer_send import (
         candidate_lines,
         live_scan_found_nothing,
-        peer_sender_identity_async,
         resolve_peer_target,
         session_id_unowned,
         skipped_clause,
@@ -11977,25 +12108,13 @@ async def execute_send(
             "fold the note into your own work instead",
         )
 
-    body_error = validate_peer_body(params.message)
+    message = params.message
+    body_error = validate_peer_body(message)
     if body_error:
         return _error(tool_call_id, "send", body_error)
 
     mode = "steer" if params.now else "mailbox"
-    # Also off the loop: the ancestry walk runs a registry scan and a ``ps`` per
-    # hop. It matches on the first hop here (the tool IS the session process),
-    # but the cost is not structurally bounded and must not sit on the loop.
-    sender = await peer_sender_identity_async(os.getpid())
-    if "session_id" not in sender and context is not None:
-        # No registry record named this process (a reduced host that never
-        # published one): fall back to the ToolContext identity so the peer's
-        # inbound indicator can still name the sender. The name maps to
-        # ``conversation_name`` because that is the key the indicator reads.
-        if context.session_id:
-            sender["session_id"] = context.session_id
-        name = _peer_sender_conversation_name(context)
-        if name:
-            sender["conversation_name"] = name
+    sender = await _send_sender_identity(context)
 
     from local_operator.mobile.peer_send import deliver_peer_message
 
@@ -12005,7 +12124,7 @@ async def execute_send(
         detail = await deliver_peer_message(
             record,
             session_id=(record.session_id if record is not None else cold_session_id),
-            text=params.message,
+            text=message,
             mode=mode,
             wake=bool(params.wake),
             sender=sender,

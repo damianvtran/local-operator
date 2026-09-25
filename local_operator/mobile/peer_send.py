@@ -51,7 +51,21 @@ STORED_DISCOVERY_LIMIT = 200
 PEER_MESSAGE_MAX_BYTES = 256 * 1024
 
 
-def unengaged_refusal(label: str, *, count: int = 1, cold: bool = False) -> str:
+#: What an unengaged session cannot do, in :func:`unengaged_refusal`'s sentence.
+#: The peer-message form is the default; a model switch names its own verb
+#: (:data:`MODEL_SWITCH_CAPABILITY`) so a sender is not told a switch was
+#: refused because the target "cannot receive peer messages".
+PEER_MESSAGE_CAPABILITY = "cannot receive peer messages"
+MODEL_SWITCH_CAPABILITY = "cannot be switched remotely"
+
+
+def unengaged_refusal(
+    label: str,
+    *,
+    count: int = 1,
+    cold: bool = False,
+    capability: str = PEER_MESSAGE_CAPABILITY,
+) -> str:
     """The ONE sentence that refuses a peer message to a never-engaged session.
 
     A session that has not run a real turn yet (``SessionRecord.started`` is
@@ -109,7 +123,7 @@ def unengaged_refusal(label: str, *, count: int = 1, cold: bool = False) -> str:
         )
     return (
         f"{label} {'have' if plural else 'has'} not been engaged yet ({sent}), "
-        f"so {'they' if plural else 'it'} cannot receive peer messages — {remedy}"
+        f"so {'they' if plural else 'it'} {capability} — {remedy}"
     )
 
 
@@ -183,6 +197,7 @@ def resolve_peer_target(
     include_wedged: bool = False,
     require_started: bool = True,
     skipped: "list[Any] | None" = None,
+    capability: str = PEER_MESSAGE_CAPABILITY,
 ) -> "tuple[Any | None, list[Any], str]":
     """Resolve a peer-send target to one live :class:`SessionRecord`.
 
@@ -246,6 +261,10 @@ def resolve_peer_target(
     claim to be the single source of truth and leave the ``send`` tool teaching
     a different rule from the command.
 
+    ``capability`` names what an unengaged target cannot do in its refusal;
+    the model switch passes :data:`MODEL_SWITCH_CAPABILITY` so its sender reads
+    about a switch, not about peer messages.
+
     Returns ``(record, candidates, error)``: exactly one of ``record`` or
     ``error`` is meaningful; ``candidates`` is populated on an ambiguous substring
     so the caller can list them for disambiguation. The shape is identical for the
@@ -300,7 +319,8 @@ def resolve_peer_target(
                         None,
                         [],
                         unengaged_refusal(
-                            unengaged_label(pid=requested_pid, session_id=rec.session_id)
+                            unengaged_label(pid=requested_pid, session_id=rec.session_id),
+                            capability=capability,
                         ),
                     )
                 return rec, [], ""
@@ -318,7 +338,13 @@ def resolve_peer_target(
                     # The label is the SESSION ID here, because that is the
                     # address this branch answers: an exact `--session` send
                     # named an id, not a pid.
-                    return None, [], unengaged_refusal(unengaged_label(session_id=session))
+                    return (
+                        None,
+                        [],
+                        unengaged_refusal(
+                            unengaged_label(session_id=session), capability=capability
+                        ),
+                    )
                 return rec, [], ""
         return None, [], f"no session found with session id {session!r}"
 
@@ -382,7 +408,11 @@ def resolve_peer_target(
                 label = f"the only live match for {needle_source!r} (pid {unengaged[0].pid})"
             else:
                 label = f"{len(unengaged)} live matches for {needle_source!r}"
-            return None, [], unengaged_refusal(label, count=len(unengaged))
+            return (
+                None,
+                [],
+                unengaged_refusal(label, count=len(unengaged), capability=capability),
+            )
         # Distinguish "matched but not live" from "no match at all" so the caller
         # knows whether to wait or to fix the name.
         wedged = [
@@ -1087,3 +1117,146 @@ def resolve_sender_identity(sender: "dict[str, Any] | None") -> "dict[str, Any]"
         # Broad on purpose (see above): a malformed record, an unexpected
         # attribute, or a scan fault must cost the label, never the message.
         return fallback
+
+
+# ---------------------------------------------------------------------------
+# Peer model switch — the send half of ``peer_set_model``
+# ---------------------------------------------------------------------------
+
+
+class PeerModelUnconfirmed(Exception):
+    """The switch was sent and no answer came back: it may or may not have landed.
+
+    A class of its own rather than a ``TimeoutError``/``OSError`` so neither
+    surface can fold it into "nothing changed". The receiver validates, applies
+    and only then acks, so a lost ack can hide an applied switch — the same
+    contract ``_dial_or_explain`` documents for a message.
+    """
+
+
+def parse_model_selector(selector: str) -> "tuple[str, str] | str":
+    """``provider/model_id`` split on the FIRST ``/``, or the refusal sentence.
+
+    Syntax only — the one check a sender can make without the target's config
+    (design D3). The split is on the first slash exactly as ``/model`` splits
+    it, so ``openrouter/deepseek/deepseek-chat`` keeps its own slash in the id.
+    The provider is lower-cased like ``/model`` does; the id keeps its case.
+    """
+    text = (selector or "").strip()
+    provider, sep, model_id = text.partition("/")
+    provider = provider.strip().lower()
+    model_id = model_id.strip()
+    if not sep or not provider or not model_id:
+        return (
+            f"model must be <provider>/<model-id> (e.g. deepseek/deepseek-flash), " f"not {text!r}"
+        )
+    return provider, model_id
+
+
+def older_peer_detail(label: str) -> str:
+    """What an ``unknown op`` from an older build means to the sender (design D7)."""
+    return (
+        f"{label} runs an older lop that cannot switch models remotely; nothing changed — "
+        "update it (lop update) or run /model in that session"
+    )
+
+
+def unconfirmed_switch_detail(label: str) -> str:
+    """A lost ack after the switch op was sent (design D7)."""
+    return (
+        f"no answer from {label} — the switch may or may not have landed; check "
+        "`lop sessions` before retrying"
+    )
+
+
+def not_running_detail(session: str) -> str:
+    """A stored/closed session: a cold switch has no owner to apply it (D1, D4)."""
+    return (
+        f"session {session!r} is not running — open it and use /model, or "
+        f"`lop --resume {session} --hosting <provider> --model <model-id>`"
+    )
+
+
+async def switch_peer_model(
+    record: "Any",
+    *,
+    provider: str,
+    model_id: str,
+    sender: "dict[str, Any]",
+) -> str:
+    """Ask ``record``'s LIVE session to switch model; return its receipt.
+
+    The receipt is the RECEIVER's own sentence (design §2): it validated the
+    pair against its own config and credentials, applied it through its own
+    switch, and read back what is actually in force. This side adds nothing but
+    the address.
+
+    Raises ``RuntimeError`` when the target answered no — a refusal (its
+    ``refused: …; still on …``), an unengaged or incapable handle, or an OLDER
+    build that does not know the op, which is translated here into
+    :func:`older_peer_detail` because its raw ``unknown op`` text says nothing
+    about what the sender should do. Raises :class:`PeerModelUnconfirmed` when
+    the dial or its ack was lost after the op may have been read.
+
+    Live, started records only: resolution already refused the rest, and this
+    re-checks ``started`` for a caller that bypassed it, exactly as
+    :func:`deliver_peer_message` does.
+    """
+    from local_operator.mobile.peer_client import send_control_op
+
+    label = unengaged_label(pid=record.pid, session_id=record.session_id)
+    if not getattr(record, "started", True):
+        raise RuntimeError(unengaged_refusal(label, capability=MODEL_SWITCH_CAPABILITY))
+    try:
+        return await send_control_op(
+            record,
+            "peer_set_model",
+            {"provider": provider, "model_id": model_id, "sender": sender},
+            default_detail=f"switched to {provider}/{model_id}",
+            default_error="the switch was refused",
+        )
+    except RuntimeError as exc:
+        # D7: an older registrant's dispatch raises ``unknown op: 'peer_set_model'``.
+        # Matched on the prefix AND the op name, so an unrelated refusal that
+        # happens to quote a word is not rewritten.
+        if str(exc).startswith("unknown op") and "peer_set_model" in str(exc):
+            raise RuntimeError(older_peer_detail(label)) from exc
+        raise
+    except (ConnectionError, OSError, ValueError) as exc:
+        # TimeoutError is an OSError subclass. Every arm here is "no acknowledged
+        # result", never "nothing changed": the op may already sit in the
+        # target's socket buffer.
+        raise PeerModelUnconfirmed(unconfirmed_switch_detail(label)) from exc
+
+
+def cold_switch_target(error: str, *, target: "str | None", session: "str | None") -> str:
+    """The "not running" refusal when the live resolver missed a STORED session.
+
+    A model switch is live-only (design D4), but "no live session matches" is a
+    false-sounding answer about a session the user can see in ``lop sessions
+    --all``: it exists, it merely has no owner to apply the switch. So the two
+    no-owner answers — an exact id nothing owns, a name only the store knows —
+    are re-asked of the store, and a hit becomes :func:`not_running_detail`
+    naming the two ways to switch it. Everything else (a wedged or unengaged
+    live match, a conflicting selector) stands as the live resolver's answer,
+    for the reasons :func:`live_scan_found_nothing` and
+    :func:`session_id_unowned` give.
+
+    Returns ``""`` when the store does not know the address either. Blocking
+    (directory scans): callers run it off the loop.
+    """
+    stored = ""
+    if session and session_id_unowned(error):
+        stored = resolve_cold_session(session) or ""
+    elif (target or "").strip() and live_scan_found_nothing(error):
+        stored_id, candidates, _withheld = resolve_stored_target(target or "")
+        if stored_id:
+            stored = stored_id
+        elif candidates:
+            # Several stored namesakes, none running: naming one would pick a
+            # recipient the call did not name, so the count is the answer.
+            return (
+                f"{len(candidates)} stored sessions match {target!r} and none is running — "
+                "open the one you mean and use /model"
+            )
+    return not_running_detail(stored) if stored else ""
