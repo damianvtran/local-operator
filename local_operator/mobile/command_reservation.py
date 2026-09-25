@@ -7,7 +7,11 @@ from typing import Any, Literal
 
 MAX_PENDING_STEERS = 32
 
-_CommandState = Literal["prompt", "steer", "prompt-transfer"]
+#: The two live states an undurable identity can be in. There is deliberately no
+#: third "refused, parked for a steer retry" state: a refused command is RELEASED
+#: (see :meth:`CommandReservations.reject`), because any state that answers
+#: "already admitted" for a message that is in no transcript and no queue is a
+#: silent drop — the retry the client makes to recover is swallowed.
 _CommandKind = Literal["prompt", "steer"]
 
 
@@ -17,6 +21,12 @@ class CommandReservations:
     The transcript's append-only index is the lifetime authority.  This map
     closes only the pre-append gap, so durable callbacks remove entries without
     TTLs or eviction that could make an accepted producer identity reusable.
+
+    THE INVARIANT every method keeps: :meth:`reserve` answers False ("already
+    admitted") only for an identity that is durably in the transcript or is LIVE
+    here — a prompt still on its way to the append, or a steer queued for the next
+    boundary. An identity whose attempt failed before admission is released, so
+    the producer's retry of the SAME id really admits it.
     """
 
     def __init__(self, session: Any) -> None:
@@ -33,7 +43,7 @@ class CommandReservations:
                 getattr(message, "id", None) == command_id for message in session.history()
             )
         self._session = session
-        self._commands: dict[str, _CommandState] = {}
+        self._commands: dict[str, _CommandKind] = {}
         self._pending_steers = 0
 
     def subscribe_durable(self) -> Callable[[], None]:
@@ -58,23 +68,11 @@ class CommandReservations:
         """Release the retry identity and its bounded steering capacity."""
         self.reject(command_id)
 
-    def reserve(
-        self,
-        command_id: str,
-        *,
-        kind: _CommandKind,
-        prompt_transfer: bool = False,
-    ) -> bool:
+    def reserve(self, command_id: str, *, kind: _CommandKind) -> bool:
         if self._has_admitted(command_id):
             self.mark_durable(command_id)
             return False
-        state = self._commands.get(command_id)
-        if prompt_transfer and state == "prompt-transfer":
-            self._reserve_steer_capacity()
-            self._commands[command_id] = "steer"
-            self._pending_steers += 1
-            return True
-        if state is not None:
+        if command_id in self._commands:
             return False
         if kind == "steer":
             self._reserve_steer_capacity()
@@ -95,14 +93,20 @@ class CommandReservations:
         if self._has_admitted(command_id):
             self.mark_durable(command_id)
 
-    def reject(self, command_id: str, *, transfer_to_steer: bool = False) -> None:
-        state = self._commands.get(command_id)
-        if transfer_to_steer:
-            if state == "steer":
-                self._pending_steers -= 1
-            self._commands[command_id] = "prompt-transfer"
-        else:
-            self._remove(command_id)
+    def reject(self, command_id: str) -> None:
+        """Release an identity whose attempt was refused before admission.
+
+        ALWAYS a full release, including for a prompt refused because a turn
+        held the session (``TurnInFlight``). That refusal used to PARK the id as
+        ``prompt-transfer`` so a client could retry it as a steer — but the
+        parked state also answered "already admitted" to a retry of the same id
+        as a PROMPT, which is exactly what the desktop's receipt journal and the
+        phone send after a 5xx. The message was in no transcript and no queue,
+        and the client was told it had landed: a silent drop (QA on PR #1528,
+        Q1-5; 2 of 19 race runs). A released id still serves the steer retry,
+        because a free id reserves as a steer like any other.
+        """
+        self._remove(command_id)
 
     def mark_durable(self, command_id: str) -> None:
         """Hand one reservation to the transcript-backed lifetime ledger."""

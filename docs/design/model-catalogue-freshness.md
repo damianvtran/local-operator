@@ -623,9 +623,86 @@ the `.fetching` lease gone.
 | `SOFT_TTL_S` | catalogue | 1h | staleness bound for the next call at zero on-path cost |
 | `MISS_REFETCH_MIN_AGE_S` | catalogue | 10 min | a young document that lacks an id is right; bounds typo refetches |
 | `REVALIDATE_BACKOFF_S` | catalogue | 5 min | one background attempt per key per five minutes while offline |
+| `LISTING_FAILURE_BACKOFF_S` | catalogue | 1 min | one SYNCHRONOUS attempt per document per minute after a fetch fails — the sibling of the row above for the path a caller waits on |
 | `PICKER_TTL_S` | controller | 15 min | the user is asking; sync fetch is already off-loop behind painted rows |
 | `_PRICE_CATALOGUE_TIMEOUT_S` | configure | 3s (= `_AGGREGATOR_TIMEOUT_S`) | same leg-2 budget rule; reachable from the executor thread of the 1 Hz poll |
 | `LISTING_CAPTURE_VERSIONS` | discovery | `anthropic 2, openrouter 2, radient 2` (+`xai 2` if the transport lands) | readers now need `cache_write_price` |
+
+The two backoffs are deliberately separate. `REVALIDATE_BACKOFF_S` bounds the
+BACKGROUND path, which never blocks a caller; `LISTING_FAILURE_BACKOFF_S` bounds
+the synchronous one, which is what a live read waits on — a failed fetch leaves
+no fresh document, so its age only ever grows and every later live read used to
+re-issue the request. Without it a provider answering 429/5xx was re-asked on
+every live read, and a surface that refetches on window focus let a user
+amplify their own rate limit by alt-tabbing.
+
+The synchronous memory is bound to the DOCUMENT it was recorded against
+(`st_ino` + `st_size` + `st_ctime_ns`), not to the path alone, and `invalidate` /
+`invalidate_documents` both clear it — the latter by the credential IDENTITY the
+document glob uses, not by the documents that glob can find, because a provider
+whose fetch failed with nothing cached has no document to find and is exactly the
+state this bound exists for. A path-only memory answered `stale` — with no attempt
+at all — for a document that had been removed or replaced since the failure, which
+a cache sweep, a peer process's `invalidate` or a hand-cleared cache dir does for
+real; and it is what pytest's reused `tmp_path` exposed in `test_deepseek.py`.
+`st_mtime_ns` is excluded on purpose: a copy or restore can carry it over
+(`rsync -a`, `cp -p`), and `st_ctime_ns` is the field `os.utime` cannot set back.
+
+**The window also covers the user's own explicit read, and that is why it is a
+minute rather than five.** `GET /v1/desktop/models?live=true` — the picker's
+Refresh, the TUI's — is the user asking NOW, and inside the window it is answered
+from the memory with no request. What clears it early: a credential change that
+reaches `_invalidate_cached_listing` — `invalidate_listing` →
+`invalidate_documents` → the identity clear, which is the path every login,
+logout and account removal in the desktop and CLI surfaces takes, and the path
+`_configure_local` takes when a local provider is re-pointed — and a document that
+changed or vanished under the memory. It does NOT clear on a
+`PATCH /v1/credentials` save (that route writes the store row and drops only the
+model-info cache) nor on the credential screen in `desktop_radient.py`, so a key
+repaired through either waits out the window or a restart. Both gaps are
+pre-existing, and the first is why a minute rather than five is doing real work
+here. The memory is also in-process only, so a restart retries at once — the
+property that keeps a short bound from becoming a state the user cannot clear by
+hand. The automation the bound actually defends
+against (the renderer refetching a live query on window focus) is bounded in
+`local-operator-ui`, so one minute pays for the round trips without making a
+person wait for a Refresh.
+
+**One engagement view, two readers.** The desktop path asks "has the user engaged
+this provider?" twice — `live_catalogue` to decide whether to fetch it WITH its
+credential, `catalogue_failures` to decide whether a failed listing is the user's
+to see — and both read the single helper
+`ProviderController._engaged_providers` (`local_operator/providers/controller.py`).
+For anything that is not a `local_setup` preset it answers `usable_providers()` ∪
+`persisted_providers()`: the second is where `PATCH /v1/credentials`, `lop
+credential update` and the desktop Settings / onboarding flows write a key, and the
+first cannot see those rows at all. An unreadable AUTH store makes the answer
+`None` and the credential axis does not narrow; the secret-store reader cannot say
+`None` — it degrades a damaged or unopenable store to an empty set and re-raises
+only `sqlite3.ProgrammingError`, which is a caller bug rather than an unreadable
+store. The cost is one `open_store()` per call, measured ~20.4 ms with a store on
+disk against ~0.022 ms for `usable_providers()` alone (~0.09 ms with no store):
+synchronous store I/O on the loop thread, and on a host whose store exists with no
+broker listening it can start a secret-broker daemon from a `GET`. It is
+deliberately NOT memoised — the store can change between the two calls a single
+request makes. Asking that question two ways is the round-2 defect (R2-1): the
+listing layer fetched by `usable_providers()` alone while this rule reported by the
+union, so a key saved in Settings made the listing 401 ANONYMOUSLY and the banner
+name that provider on every live read, forever, with the working key resolvable on
+disk the whole time.
+
+**`credentials_known` answers for the AUTH store, deliberately.** The picker's
+`Catalogue.credentials_known` is `usable_providers() is not None`, so on a request
+where the SECRET store cannot be read it is still `true` while no store credential
+was visible, and the providers whose keys live there read `connected: false`. That
+is the honest split rather than a gap: the flag exists so a caller does not badge
+rows whose `connected` is only a listing default, and it names exactly the store
+whose rows the picker groups on. Folding the secret half in was considered and
+rejected — with the store unreadable, a flag saying "credentials unknown" would
+invite exactly the badging the flag was added to prevent, and the alternative
+(naming every provider whose key just became unreadable) is a false accusation
+(Q3-2 — the asymmetry is documented here and on the field rather than re-interpreted
+on the wire).
 
 ---
 

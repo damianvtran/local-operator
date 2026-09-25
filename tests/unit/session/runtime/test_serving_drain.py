@@ -843,6 +843,10 @@ class PromptHost(DrainHost):
     # release that let a prompt through the refusal check but stalled in a re-implemented
     # drain would pass a weaker assertion than the one this file is making.
     _drain_prompt_queue = ServingSessionHandle._drain_prompt_queue
+    # The drain's wait for a turn it did not open; this double's session has no
+    # turn lock, so the real method is a no-op here — bound so the drain above
+    # runs its production body rather than a trimmed copy.
+    _await_turn_lock_free = ServingSessionHandle._await_turn_lock_free
     _observe_prompt_drain = ServingSessionHandle._observe_prompt_drain
 
     def __init__(self, session: PromptSession, *, busy: bool = True) -> None:

@@ -326,8 +326,19 @@ def _reveal(args: argparse.Namespace) -> int:
     buys nothing (same bytes, same key) and costs exactly the property that
     matters. Where no broker or session is reachable the seam degrades to the
     local decrypt, UNNOTIFIED, exactly as ``$(lop secret get NAME)`` does —
-    documented in ``access.py``, and visible in the trail as the retrieval row
-    with no session id.
+    documented in ``access.py``. **Neither signal is the one an earlier version
+    of this docstring named.** It pointed at "the retrieval row with no session
+    id", which identifies neither case: the `get` row reproduces whatever
+    ``LOCAL_OPERATOR_SESSION_ID`` its caller set (nothing verifies it, so an
+    unannounced read can carry a forged id, and one was measured doing it),
+    while a session registered without an id — how ``tui/__init__.py``
+    registers — makes an ANNOUNCED read write ``session=None`` from the
+    broker. What does discriminate is the PID: the unannounced read's `get` row
+    carries the reveal process's own pid, the announced one carries the
+    broker's, and a broker that was reachable enough to refuse the caller
+    leaves its ``deny:retrieve``/``deny:key`` rows from that same pid first.
+    The operator-facing version of this, which is the one to keep in step with
+    this paragraph, is the credentials guide's "What is recorded".
 
     Ordering, which is the point of the three steps: retrieve (announce), then
     record the reveal, then print. A failure in either store step prints nothing

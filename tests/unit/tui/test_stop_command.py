@@ -322,7 +322,8 @@ async def test_the_arm_listing_marks_a_target_the_press_will_decline(
         # session last), so the qualifier is asserted rather than the total —
         # the header half of the fix is the parenthesis, not the number.
         assert listing[0].startswith("will stop "), listing[0]
-        assert "(1 already leaving — asked again, then left alone):" in listing[0], listing[0]
+        # Its own line under the count: one layout whenever a qualifier exists (D2/Q-2).
+        assert "\n(1 already leaving — asked again, then left alone)\n" in listing[0], listing[0]
         assert re.search(r"pid +102  beta \(already leaving\)$", listing[0], re.M), listing[0]
         # The ordinary target is unmarked, so the mark means something.
         assert "alpha (already leaving)" not in listing[0], listing[0]
@@ -341,6 +342,122 @@ async def test_the_arm_listing_marks_a_target_the_press_will_decline(
                 break
         plain = [n for n in _notices(app) if n.startswith("will stop")][-1]
         assert "already leaving" not in plain, plain
+
+
+_HB = "it has not reported for 5h"
+
+#: Listing scenarios: name → (the ``_drain_stalled`` reason per leaving pid, with ``""``
+#: for a drain the press declines; the qualifier lines expected; the row tags expected).
+_LISTINGS = {
+    "mixed": (
+        {101: "", 102: _HB},
+        [
+            "(1 already leaving — asked again, then left alone)",
+            "(1 leaving, but it will be stopped, not left to finish)",
+        ],
+        {101: "already leaving", 102: "leaving, not reporting for 5h"},
+    ),
+    # A held drain IS reporting: the qualifier must not claim otherwise (D1 / Q-1).
+    "held-only": (
+        {103: control.STALL_HELD_REASON},
+        ["(1 leaving, but it will be stopped, not left to finish)"],
+        {103: "leaving, bound held"},
+    ),
+    "both-arms": (
+        {101: "", 102: _HB, 103: control.STALL_HELD_REASON},
+        [
+            "(1 already leaving — asked again, then left alone)",
+            "(2 leaving, but they will be stopped, not left to finish)",
+        ],
+        {101: "already leaving", 102: "leaving, not reporting for 5h", 103: "leaving, bound held"},
+    ),
+    # One layout: the drained-only qualifier leaves the header too (D2 / Q-2).
+    "drained-only": (
+        {101: "", 104: ""},
+        ["(2 already leaving — asked again, then left alone)"],
+        {101: "already leaving", 104: "already leaving"},
+    ),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", sorted(_LISTINGS))
+@pytest.mark.parametrize("size", [(110, 30), (80, 24)])
+async def test_the_arm_listing_does_not_promise_to_leave_a_stalled_drain_alone(
+    monkeypatch: pytest.MonkeyPatch, size: tuple[int, int], scenario: str
+) -> None:
+    """Agent review round 1 on #1527, m2: a drain the ladder no longer believes is stopped.
+
+    The press asks ``control._drain_stalled`` for every leaving target, and a stalled
+    one falls through to the ordinary ladder. So the listing must not group it under
+    "asked again, then left alone": it gets its own qualifier, and only the drains the
+    press really declines keep the old one.
+
+    Design and QA on #1527/#1541: the tag names each row's cause in the words ``lop
+    sessions``/``lop stop`` use, while the shared stalled qualifier is CAUSE-NEUTRAL,
+    because a held row is reporting and a not-reporting line above it would be false
+    (D1/Q-1). Every qualifier is its own line under a bare count, in every listing
+    that has one (D2/Q-2). The listing says "finish", never "drain". At 110 and 80
+    columns, no line may exceed the block's own body budget.
+    """
+    from dataclasses import replace as _replace
+
+    from local_operator.session.runtime.types import LEAVING_FOR_BUILD
+
+    reasons, qualifiers, tags = _LISTINGS[scenario]
+    names = {101: "alpha", 102: "beta", 103: "gamma", 104: "delta"}
+    targets = [_replace(_record(pid, names[pid]), leaving=LEAVING_FOR_BUILD) for pid in reasons] + [
+        _record(105, "plain")
+    ]
+    monkeypatch.setattr(control, "_stop_targets", lambda root, own_pid=None: targets)
+    monkeypatch.setattr(control, "_drain_stalled", lambda rec: reasons.get(rec.pid, ""))
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=size) as pilot:
+        await _booted(app, pilot, session)
+        app._run_slash_command("/stop all")
+        for _ in range(20):
+            await pilot.pause()
+            if any("will stop" in n for n in _notices(app)):
+                break
+        listing = [n for n in _notices(app) if "will stop" in n]
+        assert listing, _notices(app)
+        lines = listing[0].splitlines()
+        assert lines[0] == f"will stop {len(targets) + 1} sessions:", lines[0]
+        assert lines[1 : 1 + len(qualifiers)] == qualifiers, lines
+        assert "drain" not in listing[0] and "stalled" not in listing[0], listing[0]
+        if control.STALL_HELD_REASON in reasons.values():
+            assert "not reporting —" not in listing[0], listing[0]
+        for pid, tag in tags.items():
+            assert re.search(
+                rf"pid +{pid}  {names[pid]} \({re.escape(tag)}\)$", listing[0], re.M
+            ), listing[0]
+        assert re.search(r"pid +105  plain$", listing[0], re.M), listing[0]
+        budget = NoticeBlock.body_budget(max(0, app._transcript_view().size.width - 1))
+        too_wide = [line for line in lines if len(line) > budget]
+        assert not too_wide, f"wraps at {size[0]} columns (body budget {budget}): {too_wide}"
+
+
+@pytest.mark.asyncio
+async def test_the_qualifiers_fit_eighty_columns_at_two_digit_counts() -> None:
+    """QA Q-3 on #1541: the widest qualifier against the budget the listing really uses.
+
+    Measured on the real app at 80x24, through the same expression the listing sizes
+    rows with (the block's ``body_budget`` of the view width less its padding): 70
+    cells. The qualifiers are the listing's own wording at two-digit counts, and the
+    12-cell margin the ``app.py`` comment states is pinned here.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _booted(app, pilot, session)
+        budget = NoticeBlock.body_budget(max(0, app._transcript_view().size.width - 1))
+    assert budget == 70, budget
+    widest = [
+        "(10 already leaving — asked again, then left alone)",
+        "(10 leaving, but they will be stopped, not left to finish)",
+    ]
+    assert max(len(q) for q in widest) == budget - 12, widest
 
 
 @pytest.mark.asyncio

@@ -298,6 +298,32 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
         if not launchd.config_lives_in_real_home(base):
             return launchd.PlistRefresh(name=name, kind="not-addressable")
         outcome = launchd.rewrite_if_stale(name=name, path=path, rendered=render_plist(base))
+        if outcome.kind == "current":
+            # A CURRENT PLIST IS NOT A CURRENT BUILD: this unit names the stable
+            # shim, so its content is byte-identical across generations while a
+            # daemon started from an older one keeps serving it. See
+            # :func:`launchd.restart_if_build_moved`.
+            #
+            # THE CONSEQUENCE CLAUSE IS THE TUNNEL'S ALONE (design review round 1,
+            # D4): this is the one restart of the four the operator can feel — the
+            # phone link drops for a moment — and the summary already teaches that
+            # shape elsewhere (`mobile daemon restarted — refresh the phone UI`).
+            #
+            # IT IS BOUNDED TO WHAT THE SUMMARY CAN SEE (round 2, D5). "remote access
+            # reconnects by itself" was the first spelling and it promises an outcome
+            # this step cannot observe: a restarted connector can come up with the
+            # relay still down (`LOGIN_REQUIRED`, `REFUSED` on suspended billing,
+            # `LEASE_PENDING`), and the remedy then lives on a surface the reader has
+            # no reason to open. This says what to expect and nothing more — 79
+            # columns, so it is still one row at 80.
+            return launchd.restart_if_build_moved(
+                name=name,
+                label=LABEL,
+                path=path,
+                recovery="lop tunnel install",
+                run=_launchctl,
+                consequence="expect a brief remote-access blip",
+            )
         if outcome.kind != "repaired":
             return outcome
         # bootout + bootstrap through the shared helper, NOT kickstart -k: a

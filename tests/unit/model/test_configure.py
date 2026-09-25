@@ -142,16 +142,16 @@ def test_configure_model_missing_hosting(mock_credential_manager):
 @pytest.mark.parametrize(
     "hosting, default_model",
     [
-        ("openai", "gpt-4o"),
-        ("anthropic", "claude-3-5-sonnet-latest"),
-        ("deepseek", "deepseek-chat"),
-        ("kimi", "moonshot-v1-32k"),
-        ("alibaba", "qwen-plus"),
-        ("google", "gemini-2.0-flash-001"),
-        ("mistral", "mistral-large-latest"),
-        ("openrouter", "google/gemini-2.0-flash-001"),
+        ("openai", "gpt-6-astra"),
+        ("anthropic", "claude-opus-5-5"),
+        ("deepseek", "deepseek-flash"),
+        ("kimi", "kimi-k3"),
+        ("alibaba", "qwen3.8-max"),
+        ("google", "gemini-3.8-flash"),
+        ("mistral", "mistral-medium-latest"),
+        ("openrouter", "anthropic/claude-opus-5.5"),
         ("radient", "auto"),
-        ("xai", "grok-3"),
+        ("xai", "grok-4.7"),
     ],
 )
 def test_configure_model_default_names(hosting: str, default_model: str):

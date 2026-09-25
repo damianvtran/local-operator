@@ -137,6 +137,76 @@ class SessionRow(BaseModel):
     opened_by: OpenedBy | None = None
 
 
+class ScopedAsk(BaseModel):
+    """The scope a page was ASKED for, echoed back on the answer.
+
+    Echoed rather than inferred because a page can land after the operator
+    collapsed the group that asked for it: the client must be able to attribute
+    an answer to the request that produced it from the answer itself, not from
+    the ordering of its own promises (two scope fetches can be in flight, and the
+    one that returns first is not necessarily the one that asked first).
+
+    ``name`` is the display name the request carried -- NOT a live team or
+    profile: the operator renames and deletes teams, and a session's stored
+    ``attachment.json`` keeps the name it was attached under.
+    (``resume.read_session_attachment``'s docstring is explicit that the stored
+    name is a historical fact.)
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["team", "agent"]
+    name: str
+
+
+class ScopeTotal(BaseModel):
+    """One group's conversation count, for a collapsed row's badge.
+
+    ``active`` counts the group's rows that the listing files under Active
+    (``CatalogEntry.active``: pending, unseen, or live), so a group's badge can
+    carry both numbers without the client recomputing either.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["team", "agent"]
+    name: str
+    total: int
+    active: int
+
+
+class ScopeCounts(BaseModel):
+    """How many conversations the listing holds, in total and per group.
+
+    THE POPULATION IS THE ONE THE PANEL CAN DRAW: **visible sessions that are not
+    archived**. Every default list in the app hides archived conversations, and
+    the defect this whole change answers was a number that disagreed with the
+    rows it sat beside -- a badge inflated by rows no default list can show is a
+    badge that invites a person into an empty group. So ``total``, ``active``,
+    ``unbound`` and every ``scopes[]`` entry all describe that one population,
+    while the answer's ``sessions`` still obeys the request's own
+    ``include_archived``: a client that asked for archived rows gets them, and
+    the counts do not move.
+
+    Present only when the request asked for it (``with_counts=true``), because
+    the census costs one ``attachment.json`` read per visible session -- memoized
+    in ``session.catalog._BINDING_MEMO``, so a second call on an unchanged store
+    pays only stats, but a cold one is a real cost on a large store and a client
+    that does not draw counts must not pay it.
+
+    ``unbound`` is its own number rather than a ``scopes`` entry: a session with
+    no ``attachment.json`` binding belongs to no group, and folding it into one
+    would invent a group the renderer never draws.
+
+    ``scopes`` is sorted by ``(-total, kind, name)`` so two reads of one store
+    cannot order the same counts differently.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    total: int
+    active: int
+    unbound: int
+    scopes: list[ScopeTotal]
+
+
 class SessionList(BaseModel):
     """One page of conversations, plus what could NOT be read while building it.
 
@@ -183,6 +253,49 @@ class SessionList(BaseModel):
     truncated: bool = False
     limit: int = 100
     degraded: list[str] = Field(default_factory=list)
+    #: The position to resume this scope from, or ``None`` when this page is the
+    #: last one. OPAQUE to the client: it is the ranking tuple of the page's last
+    #: row plus the scope it was minted for, and the client only ever hands it
+    #: back.
+    #:
+    #: INVARIANT, asserted by tests: ``(next_cursor is not None) == truncated``.
+    #: ``next_cursor`` is not a restatement of ``truncated`` — ``truncated`` is a
+    #: boolean and this is the value needed to fetch the next page — which is why
+    #: no separate ``has_more`` was added beside it.
+    #:
+    #: Minted from the last row of the PAGE and never from an appended off-page
+    #: pin, because a pin below the page is not a position in the scope's
+    #: continuation: resuming from it would skip every row between the page's end
+    #: and that pin.
+    next_cursor: str | None = None
+    #: Your cursor could not be used, so THIS ANSWER IS THE SCOPE'S FIRST PAGE.
+    #:
+    #: Not an error: a malformed token, one from an unknown version, and one
+    #: minted for a different scope are all answered the same way, and the remedy
+    #: is the same for all three — re-read from the top. This mirrors
+    #: ``HistoryPage.cursor_missing`` exactly (``server.utils.desktop_sessions``),
+    #: including its reasoning that a client which lost its place must be able to
+    #: tell "the store moved" from "your token is unusable".
+    cursor_missing: bool = False
+    #: The scope this page was asked for, or ``None`` for the head listing.
+    scope: ScopedAsk | None = None
+    #: The per-group census, present only when ``with_counts=true`` asked for it.
+    counts: ScopeCounts | None = None
+
+    # THE FOUR FIELDS ABOVE ARE ADDITIVE AND ALWAYS PRESENT, which is the whole
+    # compatibility promise stated precisely: a request that sends none of
+    # ``scope_kind``/``scope_name``/``cursor``/``with_counts`` gets exactly the
+    # ``sessions``/``truncated``/``limit``/``degraded`` it has always got, and the
+    # four new fields sit at their defaults (``null``, ``false``, ``null``,
+    # ``null``). PRESENT rather than omitted, on the precedent the ``degraded``
+    # comment above states: a client must be able to tell "this answer is not
+    # paged" from "this server is too old to page it", and the capability map's
+    # ``session_catalogue_page`` key is what makes that question askable BEFORE
+    # the request rather than only after it.
+    #
+    # A DAEMON THAT PREDATES THESE FIELDS IS INDISTINGUISHABLE FROM AN ABSENT
+    # KEY: every one is defaulted, so a client that never learned the key sees the
+    # same listing it always saw.
 
 
 class SessionSearchRow(BaseModel):
@@ -305,6 +418,81 @@ class ChildTranscriptPage(HistoryPage):
     """
 
     state: ChildTranscriptState
+
+
+#: Why a child job's live window could not be handed over, when its absence
+#: needs naming. A TOKEN, not a sentence: the copy belongs to the surface.
+#:
+#: ``no-owner`` is the runtime half — no owner is attached, the owner is too old
+#: for the subscription op, or the connection dropped while the window was being
+#: fetched. It is RETRYABLE: the reader re-asks on its next pulse. ``unsupported``
+#: is the job half — this job type records no trajectory at all, so there is
+#: nothing to follow and the reader must stop asking. The two must not be folded
+#: into one: a reader cannot tell them apart from the rows alone (both are empty),
+#: and polling forever on ``unsupported`` is the same defect as giving up on
+#: ``no-owner``.
+ChildTrajectoryUnavailable = Literal["no-owner", "unsupported"]
+
+
+class ChildTrajectoryWindow(BaseModel):
+    """One child job's retained trajectory window, seeded by a subscribe.
+
+    The desktop reader's live path (design § 1, D1.1): ``POST``ing this route
+    both loads the window and subscribes the connection to its appends, so the
+    reply IS the seed rather than an acknowledgement of one. A client that had
+    to fetch and then subscribe would lose whatever landed between the two calls.
+
+    The fields are the runtime's own fetch op's (``job_trajectory``) plus the two
+    that only a failed load needs, and the identity rule is why ``base_seq`` is
+    here at all: the rows rotate out of the front of a bounded window, so list
+    position is not identity — ``base_seq`` is the ``_lo_seq`` stamp of
+    ``rows[0]``, and a reader applies an append iff its stamp is greater than the
+    watermark this seed established. That is what makes the seed/append
+    interleave safe without the reader having to care which arrived first.
+
+    ``total`` and ``trajectory_length`` BOTH count the window this reply carries,
+    and they are equal by construction: after a successful load the reply IS the
+    whole retained window (the pager loops until the owner's ``total`` is
+    reached), so "what this reply carries" and "what the runtime retains for the
+    job" are the same window — and the roster row's own ``trajectory_length``,
+    which is the follower's COPY of the runtime's number, is not reused for it.
+    That copy drifts in both directions and the reply must not: it lags the window
+    this call just read, and it is inflated by the duplicated rows the seed
+    deduplicates (measured: a reply publishing it reported a count matching
+    neither its rows nor the runtime's, in a window that was OVER-counted rather
+    than partial). A client that wants the runtime's own figure reads the roster
+    row it already has; the reply is about the rows it hands over.
+
+    ``watchers`` and ``joined`` say what this call did to the session's shared
+    count, because every POST increments and one DELETE releases one: a client
+    that re-seeds without unmounting (a rotation, a double mount) accumulates a
+    reference it cannot otherwise observe. ``joined`` is the boolean form of
+    ``watchers > 1``. An unavailable reply carries ``0`` and ``False``.
+    """
+
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+    base_seq: int | None = None
+    total: int = 0
+    trajectory_length: int = 0
+    watchers: int = 0
+    joined: bool = False
+    available: bool
+    reason: ChildTrajectoryUnavailable | None = None
+
+
+class ChildTrajectoryRelease(BaseModel):
+    """What one reader's release left behind for a child job's window.
+
+    ``watchers`` is the count still held on the session's shared bridge, and
+    ``watching`` is its nonzero form for a client that only wants the boolean.
+    Both are published because the count is the fact and the boolean is the
+    convenience: a client that had assumed its release was the last one can see
+    that another window is still reading the same child, which is the one case
+    where nothing about its own close is observable on screen.
+    """
+
+    watching: bool
+    watchers: int
 
 
 class SnapshotPayload(BaseModel):

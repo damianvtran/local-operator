@@ -80,6 +80,39 @@ def test_clear_and_resumed_goal_validation():
         apply_startup(session, ExecArgs(loop=1), None)
 
 
+def test_lop_goal_over_a_settled_goal_arms_a_judged_goal(tmp_path):
+    """Agent review round 2, MAJOR-5, on the `lop --goal` route.
+
+    `--goal` reaches the session as :meth:`Session.set_goal` (line 312 below), and
+    that call is the one the defect lived in: writing only the TEXT left the new
+    objective wearing the previous goal's `done`, so nothing judged it, the card
+    painted it as achieved, and the prompt withheld it — while `goal.json` still
+    held the settled goal. A REAL ``Session`` over a real transcript directory
+    here, because the two durable halves disagreeing is half of what went wrong.
+
+    The end-to-end half of this pin is the `exec --goal` cell in
+    ``tests/e2e/test_exec_startup_e2e.py``, which counts the judge's own calls.
+    """
+    from local_operator.resume import read_goal_record
+    from tests.e2e.harness import ScriptedStream, build_session
+
+    directory = tmp_path / "sessions" / "cli"
+    directory.mkdir(parents=True)
+    session = build_session(directory, ScriptedStream([]))
+    session.set_goal("Ship safely")
+    session.mark_goal_done("the judge said so")
+
+    apply_startup(session, ExecArgs(goal="Land the new billing migration"), None)
+
+    assert session.goal == "Land the new billing migration"
+    assert session.goal_status == "active", "the new objective is not a settled one"
+    assert session.goal_token, "the judge can run, which is what `--goal` promises"
+    record = read_goal_record(directory)
+    assert record is not None
+    assert record["goal"] == "Land the new billing migration"
+    assert record["status"] == "active"
+
+
 def test_startup_roundtrip_worker_arguments():
     from local_operator.exec_worker import build_parser
 

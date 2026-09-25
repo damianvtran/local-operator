@@ -300,8 +300,15 @@ def test_resolve_missing_values_raise_legacy_messages() -> None:
     with pytest.raises(HostingNotConfiguredError, match="Hosting platform is not configured."):
         resolve_hosting_model(None, _args(), config)
     # A hosting with a KNOWN default model no longer errors on the missing
-    # model — it resolves to that default (item 3).
-    assert resolve_hosting_model(None, _args(hosting="openai"), config) == ("openai", "gpt-4o")
+    # model — it resolves to that default (item 3). Compared against the table
+    # rather than a literal id: the subject is "falls back to the provider's
+    # default", and a pinned id broke this test the moment the suggested
+    # defaults moved on (PR #1507 review round 3, MAJOR 1).
+    from local_operator.model.defaults import default_model_for
+
+    expected = default_model_for("openai")
+    assert expected, "openai must keep a default for this case to test the fallback"
+    assert resolve_hosting_model(None, _args(hosting="openai"), config) == ("openai", expected)
 
 
 def test_resolve_known_hosting_no_default_still_raises_for_model() -> None:
@@ -3609,6 +3616,86 @@ def test_the_backfill_reaches_every_directory_not_just_the_first_page(tmp_path: 
     assert resume_mod.backfill_session_origins(tmp_path, limit=5) == 0
 
 
+def _seed_user_sessions(root: Path, names: list[str]) -> Path:
+    """User sessions in ``root``: a directory per name, one opening message."""
+    sessions = root / "sessions"
+    for name in names:
+        directory = sessions / name
+        directory.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "id": "e1",
+            "ts": 0,
+            "type": "message",
+            "payload": {"kind": "message", "role": "user", "content": [{"text": "my own work"}]},
+        }
+        (directory / resume_mod.TRANSCRIPT_NAME).write_text(
+            json.dumps(entry) + "\n", encoding="utf-8"
+        )
+    return sessions
+
+
+def _answered_origins(sessions: Path) -> list[Path]:
+    """Directories the origin sweep has finished with, by its own two markers."""
+    return [
+        directory
+        for directory in sessions.iterdir()
+        if (directory / resume_mod.ORIGIN_NAME).exists()
+        or (directory / resume_mod.ORIGIN_SCAN_SENTINEL_NAME).exists()
+    ]
+
+
+def test_the_origin_sweep_leaves_between_directories_when_a_runtime_is_leaving(
+    tmp_path: Path,
+) -> None:
+    """The cooperative halt is per DIRECTORY, and it leaves the store readable.
+
+    Per-pass granularity is what a leaving runtime used to be stuck with, and on
+    a real store that is minutes (10 737 directories at 16.7-38.4 ms each); this
+    check costs one predicate call against the directory it gates. The store
+    must also still ANSWER after a partial sweep — nothing here holds state
+    across directories, which is what makes stopping between them safe.
+    """
+    sessions = _seed_user_sessions(tmp_path, [f"mine{index:04d}" for index in range(4)])
+    checks: list[None] = []
+
+    def should_stop() -> bool:
+        checks.append(None)
+        return len(checks) > 2
+
+    # Nothing is stamped here (no directory is a subagent), so the ANSWERED set
+    # is the sentinel each visited directory receives on its way past.
+    assert resume_mod.backfill_session_origins(tmp_path, should_stop=should_stop) == 0
+    assert len(checks) == 3, "the predicate is not consulted once per directory"
+    assert len(_answered_origins(sessions)) == 2, "the stop did not leave between directories"
+    for directory in sessions.iterdir():
+        # Readers of a partly-swept store must answer, not raise.
+        assert resume_mod.is_user_session(directory) is True
+        assert resume_mod.session_name(directory) == "my own work"
+    assert resume_mod.backfill_session_origins(tmp_path) == 0
+    assert len(_answered_origins(sessions)) == 4
+
+
+def test_the_origin_sweep_without_a_predicate_finishes_even_while_a_runtime_leaves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI ``--resume`` sweep passes no predicate, so nothing can halt it.
+
+    ``cli.main``'s resume branch is a FOREGROUND command whose whole job is to
+    classify the store before the picker reads it, and it runs in a process that
+    may well have a maintenance walk in flight: the runtime's departure request
+    must not reach it. This pins the default — the request lives on the module's
+    event, and a sweep only looks at that event when a caller hands it in.
+    """
+    sessions = _seed_user_sessions(tmp_path, ["mine0000", "mine0001", "mine0002"])
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_STOP", threading.Event())
+    stop_event = session_factory._STORE_MAINTENANCE_STOP
+    assert stop_event is not None
+    stop_event.set()
+
+    assert resume_mod.backfill_session_origins(tmp_path) == 0
+    assert len(_answered_origins(sessions)) == 3
+
+
 def test_recent_sessions_returns_every_user_session_when_uncapped(tmp_path: Path) -> None:
     """The reported bug: sessions past the picker's cap were unreachable.
 
@@ -4571,6 +4658,361 @@ with asyncio.Runner() as runner:
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_the_runner_threads_its_stop_event_into_the_walking_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each store-walking pass is handed THIS run's event, as a live predicate.
+
+    A predicate rather than a boolean because a stop that lands WHILE a pass is
+    running has to be visible inside it: a snapshot decided once per pass could
+    only ever be honoured between passes, which is the granularity the defect
+    lived at. It is ``stop.is_set`` itself — bound to the same event the runner
+    checks between passes — so the two cannot disagree about whether the runtime
+    is leaving.
+    """
+    from local_operator.analytics import backfill as analytics_backfill
+    from local_operator.session import cleanup as cleanup_mod
+    from local_operator.tools import group_reaper
+
+    seen: dict[str, Any] = {}
+
+    def probe(name: str):
+        def callback(*_args: Any, **kwargs: Any) -> int:
+            seen[name] = kwargs.get("should_stop")
+            return 0
+
+        return callback
+
+    monkeypatch.setattr(cleanup_mod, "cleanup_from_config", lambda *_a, **_k: None)
+    monkeypatch.setattr(group_reaper, "sweep_orphan_groups", lambda *_a, **_k: None)
+    monkeypatch.setattr(resume_mod, "backfill_session_origins", probe("origins"))
+    monkeypatch.setattr(resume_mod, "backfill_session_titles", probe("titles"))
+    monkeypatch.setattr(
+        analytics_backfill, "backfill_analytics_session_names", probe("analytics-names")
+    )
+    monkeypatch.setattr(
+        analytics_backfill, "backfill_analytics_session_daily", probe("analytics-daily")
+    )
+
+    stop = threading.Event()
+    session_factory._run_store_maintenance(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None, stop_event=stop
+    )
+    assert sorted(seen) == ["analytics-daily", "analytics-names", "origins", "titles"]
+    for name, predicate in seen.items():
+        assert callable(predicate), f"{name} was not given a callable predicate"
+        assert predicate() is False, f"{name} read a stop that had not been requested"
+    stop.set()
+    for name, predicate in seen.items():
+        assert predicate() is True, f"{name} was not wired to this run's own event"
+
+
+def test_a_pass_that_stands_down_mid_walk_writes_no_completion_stamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A PARTIAL sweep is not a completed one: no stamp, and no later pass.
+
+    The walking passes RETURN their partial count when the stop lands, so the
+    runner cannot tell "finished" from "stood down" on the exception path alone.
+    A stamp written here would tell the next boot the whole sequence is done
+    while the directories this walk never reached wait out its 60-second TTL,
+    and the passes after it would never have run at all.
+    """
+    calls: list[str] = []
+    _patch_store_maintenance_passes(monkeypatch, calls)
+    stop = threading.Event()
+
+    def stand_down(*_args: Any, **_kwargs: Any) -> int:
+        calls.append("titles")
+        stop.set()
+        return 1
+
+    monkeypatch.setattr(resume_mod, "backfill_session_titles", stand_down)
+    session_factory._run_store_maintenance(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None, stop_event=stop
+    )
+    assert not (tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME).exists()
+    assert calls == ["cleanup", "groups", "origins", "titles"], "a pass ran after the stop"
+
+    # No stamp means the next run re-derives the worklist rather than trusting
+    # a completion record — the resume cost is bounded by the sentinels the
+    # partial walk already wrote, not by the stamp.
+    calls.clear()
+    session_factory._run_store_maintenance(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None
+    )
+    assert calls == [
+        "cleanup",
+        "groups",
+        "origins",
+        "titles",
+        "analytics-names",
+        "analytics-daily",
+    ]
+    assert (tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME).exists()
+
+
+def test_a_stop_landing_on_the_last_pass_still_refuses_the_stamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one shape where the completed-sequence guard is load-bearing.
+
+    A stop that lands mid-sequence is caught by the pre-pass check on the NEXT
+    pass, which is why the guard is not what refuses that stamp. With no next
+    pass there is nothing to catch it, and the decision rests on the guard alone
+    — not a hypothetical shape: the analytics rollup runs last, so a departure
+    arriving during it is a partial sweep like any other, and a stamp written
+    there would tell the next boot the whole sequence was completed.
+    """
+    from local_operator.analytics import backfill as analytics_backfill
+
+    calls: list[str] = []
+    _patch_store_maintenance_passes(monkeypatch, calls)
+    stop = threading.Event()
+
+    def stand_down(*_args: Any, **_kwargs: Any) -> int:
+        calls.append("analytics-daily")
+        stop.set()
+        return 1
+
+    monkeypatch.setattr(analytics_backfill, "backfill_analytics_session_daily", stand_down)
+    session_factory._run_store_maintenance(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None, stop_event=stop
+    )
+    assert calls[-1] == "analytics-daily"
+    assert not (tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME).exists()
+
+
+def test_the_stop_request_is_a_no_op_until_a_walk_is_dispatched() -> None:
+    """``request_store_maintenance_stop`` reports whether it had anything to ask.
+
+    The production caller runs on every departure, including the many that have
+    no walk left to stop — that is the common case, not an error, and it must
+    not be reported as one.
+    """
+    session_factory.reset_store_maintenance_for_tests()
+    assert session_factory.request_store_maintenance_stop() is False
+
+
+@pytest.mark.asyncio
+async def test_the_stop_request_reaches_the_dispatched_walk(tmp_path: Path, monkeypatch) -> None:
+    """The production setter sets the very event the pass sequence checks."""
+    calls: list[str] = []
+    _patch_store_maintenance_passes(monkeypatch, calls)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+    session_factory.reset_store_maintenance_for_tests()
+    try:
+        session_factory._start_store_maintenance(
+            cast("ConfigManager", FakeConfigManager()), tmp_path, None
+        )
+        assert session_factory.request_store_maintenance_stop() is True
+        assert session_factory._STORE_MAINTENANCE_STOP is not None
+        assert session_factory._STORE_MAINTENANCE_STOP.is_set()
+        await session_factory.await_store_maintenance_for_tests()
+    finally:
+        session_factory.reset_store_maintenance_for_tests()
+
+
+def test_a_leaving_runtime_stops_the_store_walk_at_a_directory(tmp_path: Path) -> None:
+    """Cell A: a real departure stops a real walk between two directories.
+
+    The shape being pinned (the path itself was closed by the daemon-thread
+    move): the four store-walking passes check the departure event once per
+    directory, so a runtime that has decided to leave pays ONE directory's work
+    — not the 3-7 minutes a pass of this store costs — and a partial sweep
+    publishes no completion stamp, which is what makes the next boot re-derive
+    its worklist instead of trusting a claim the walk did not earn.
+
+    A real child, a synthetic store (never the operator's), the production
+    dispatch, and the production departure seam (``_commit_to_leaving``) — the
+    assertions are all COUNTS read off the child's own report, so nothing here
+    depends on how long any of it took; the subprocess timeout is the only
+    clock, and it is a backstop.
+    """
+    count, lines = 60, 800
+    result_path = tmp_path / "cell-a.json"
+    script = r"""
+import asyncio, json, sys, time
+from pathlib import Path
+from types import SimpleNamespace
+
+root = Path(sys.argv[1])
+result_path = Path(sys.argv[2])
+count, lines = int(sys.argv[3]), int(sys.argv[4])
+
+from local_operator import resume
+from local_operator import session_factory as sf
+from local_operator.analytics import backfill
+from local_operator.session import cleanup
+from local_operator.session.runtime import process
+from local_operator.tools import group_reaper
+
+# A synthetic store: user sessions with a real opening, then filler so the FULL
+# title scan (the expensive step) is a real read rather than a formality.
+sessions = root / "sessions"
+sessions.mkdir(parents=True, exist_ok=True)
+opening = {"id": "u0", "ts": 0, "type": "message",
+           "payload": {"kind": "message", "role": "user",
+                       "content": [{"text": "find the parser fix"}]}}
+filler = "".join(json.dumps({"id": f"e{i}", "ts": i, "type": "message",
+                             "payload": {"kind": "message", "role": "assistant",
+                                         "content": [{"text": "w" * 40}]}}) + "\n"
+                 for i in range(lines))
+for index in range(count):
+    directory = sessions / f"{index:012x}"
+    directory.mkdir()
+    (directory / resume.TRANSCRIPT_NAME).write_text(
+        json.dumps(opening) + "\n" + filler, encoding="utf-8")
+
+# The two passes that do not walk the store succeed instantly, so a missing
+# completion stamp can only be the stop's doing.
+cleanup.cleanup_from_config = lambda *_a, **_k: None
+group_reaper.sweep_orphan_groups = lambda *_a, **_k: None
+
+# Every pass announces itself, and the walking ones stay REAL. Each walking call
+# records whether it was handed a callable predicate, so the wiring the runner
+# does is asserted inside this real walk rather than only in-process.
+passes = []
+predicate_wired = {}
+def logged(label, function):
+    def callback(*args, **kwargs):
+        passes.append(label)
+        predicate_wired[label] = callable(kwargs.get("should_stop"))
+        return function(*args, **kwargs)
+    return callback
+resume.backfill_session_origins = logged("origins", resume.backfill_session_origins)
+resume.backfill_session_titles = logged("titles", resume.backfill_session_titles)
+backfill.backfill_analytics_session_names = logged(
+    "analytics-names", backfill.backfill_analytics_session_names)
+backfill.backfill_analytics_session_daily = logged(
+    "analytics-daily", backfill.backfill_analytics_session_daily)
+
+# The instrument for "how much work does the NEXT run pay": the full transcript
+# read is what a resume costs, and it is only taken for a directory the sweep
+# has not answered yet.
+scans = []
+real_scan = resume._scan_all_titles
+def counting_scan(transcript):
+    scans.append(str(transcript))
+    return real_scan(transcript)
+resume._scan_all_titles = counting_scan
+
+def answered(which):
+    names = ((resume.ORIGIN_NAME, resume.ORIGIN_SCAN_SENTINEL_NAME) if which == "origins"
+             else (resume.TITLE_SIDECAR_NAME, resume.TITLE_SCAN_SENTINEL_NAME))
+    return sum(1 for d in sessions.iterdir() if any((d / name).exists() for name in names))
+
+class Handle:
+    _disposing = False
+    _draining = False
+    def begin_drain(self, cause, detail):
+        self._draining = True
+        return True
+
+class Runtime:
+    def __init__(self):
+        self.announcements = []
+    async def announce_retiring(self, label, *, to="", draining=False, leaving=""):
+        self.announcements.append(label)
+
+async def main():
+    sf._STORE_MAINTENANCE_IDLE_DELAY_SECONDS = 0
+    sf._start_store_maintenance(SimpleNamespace(), root, None)
+    # Wait for the TITLE pass to be under way (the origin walk runs first, so
+    # this means it finished), then commit to leaving: the stop lands MID-WALK,
+    # which is the case the defect is about.
+    deadline = time.monotonic() + 90
+    while answered("titles") < 1 and time.monotonic() < deadline:
+        await asyncio.sleep(0.001)
+    started = answered("titles")
+    if started < 1:
+        raise RuntimeError("the title walk never started")
+
+    handle, runtime = Handle(), Runtime()
+    drain = await process._commit_to_leaving(
+        handle, runtime, asyncio.Event(),
+        label="gen 2", reason="the build on disk changed",
+        detail="generation 20260924T000000Z-deadbeef", loaded="gen 1")
+    if drain is None:
+        raise RuntimeError("the departure did not commit")
+
+    await sf.await_store_maintenance_for_tests()
+    report = {
+        "count": count,
+        "before_titles": started,
+        "after_titles": answered("titles"),
+        "after_origins": answered("origins"),
+        "stop_set": bool(sf._STORE_MAINTENANCE_STOP and sf._STORE_MAINTENANCE_STOP.is_set()),
+        "done_set": bool(sf._STORE_MAINTENANCE_DONE and sf._STORE_MAINTENANCE_DONE.is_set()),
+        "stamp": (root / sf._STORE_MAINTENANCE_STAMP_NAME).exists(),
+        "passes": list(passes),
+        "predicate_wired": dict(predicate_wired),
+        "scan_calls_run1": len(scans),
+        "tmp_sidecars": sorted(p.name for d in sessions.iterdir() for p in d.glob("*.tmp")),
+        "reader_failures": [],
+    }
+
+    # Every directory must still answer its readers, and the store must be
+    # resumable: the next run's full-scan count is the directories this walk
+    # never answered.
+    for directory in sessions.iterdir():
+        try:
+            resume.session_origin(directory)
+            resume.stored_session_title(directory)
+            resume.session_name(directory)
+            resume.is_user_session(directory)
+        except Exception as error:  # noqa: BLE001 - reported, not raised
+            report["reader_failures"].append(f"{directory.name}: {error!r}")
+    scans.clear()
+    resume.backfill_session_origins(root)
+    resume.backfill_session_titles(root)
+    report["scan_calls_run2"] = len(scans)
+    report["after2_titles"] = answered("titles")
+    report["after2_origins"] = answered("origins")
+    result_path.write_text(json.dumps(report), encoding="utf-8")
+
+with asyncio.Runner() as runner:
+    runner.run(main())
+"""
+    env = os.environ.copy()
+    env.pop("XPC_FLAGS", None)
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path), str(result_path), str(count), str(lines)],
+        cwd=Path(__file__).parents[2],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result_path.read_text(encoding="utf-8"))
+
+    # The sweep observed the stop: it left with the event set, part-way through
+    # the walk, and the worker returned so its done event is set.
+    assert report["stop_set"] is True
+    assert report["done_set"] is True
+    assert 0 < report["before_titles"] < count
+    assert report["after_origins"] == count, "the origin pass should have finished before it"
+    assert report["after_titles"] < count, "the walk finished instead of standing down"
+    # DIRECTORY granularity: the overshoot past the last observed directory is a
+    # handful, not the rest of the pass.
+    assert report["after_titles"] - report["before_titles"] <= 15, report
+    assert not (tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME).exists()
+    assert report["stamp"] is False
+    assert "titles" in report["passes"], report
+    assert "analytics-names" not in report["passes"], "a pass ran after the stop"
+    # The runner handed EVERY swept pass a callable predicate, not a captured
+    # boolean and not nothing — the wiring, asserted inside a real walk.
+    assert report["predicate_wired"] == {"origins": True, "titles": True}, report["predicate_wired"]
+    # Resumable, not lucky: the next run pays exactly for the directories the
+    # partial walk never answered, and it finishes the store.
+    assert report["scan_calls_run2"] == count - report["after_titles"], report
+    assert report["after2_titles"] == count and report["after2_origins"] == count
+    assert report["reader_failures"] == []
+    assert report["tmp_sidecars"] == []
 
 
 @pytest.mark.asyncio
