@@ -570,21 +570,68 @@ def test_an_origin_id_that_is_a_path_is_refused_and_nothing_is_written(tmp_path:
     assert not (bare / "agents").exists() or list((bare / "agents").iterdir()) == []
 
 
-def test_the_agent_row_model_refuses_an_id_that_is_not_one_path_segment() -> None:
-    """The model-level half, which is what covers an imported EXPORT ARCHIVE.
+def test_the_read_rule_accepts_every_id_that_can_be_a_directory_name() -> None:
+    """The MODEL's id rule is the SAFETY one, and that split is the whole fix.
 
-    ``AgentRegistry.import_agent`` validates the archive's ``agent.yml`` through
-    ``AgentData`` and only then reserves ``agents_dir / agent_id``, so a validator on
-    the field closes that path in the same stroke as the mesh's. The accepted set is
-    deliberately ``teams.validate_team_id``'s: both registries name a directory under
-    the same config root, and a looser copy here would accept what the other refuses.
+    It runs on the read path (``_scan_agents_metadata`` builds every row through this
+    model), so it must accept anything that can BE a directory name under
+    ``agents_dir`` — otherwise a pre-existing row is unreadable, the scan counts it as
+    incomplete, and ``require_complete_metadata`` refuses every create on the device.
+    What it must still refuse is anything that is not one path segment.
     """
     from pydantic import ValidationError
 
-    from local_operator.agents import AgentData, validate_agent_id
+    from local_operator.agents import AgentData, validate_agent_id_segment
+
+    for good in (
+        "8db36f01-1695-446d-865e-563ba6846662",
+        "autosave",
+        # Legacy-but-legal ids: every one of these can be, and may already be, a
+        # directory under ``agents/``.
+        "legacy row",
+        "-leading",
+        ".dotfile",
+        "_under",
+        "Agent \u770b",
+        "x" * 129,
+    ):
+        assert validate_agent_id_segment(good) == good
+    for bad in ("../../../../escaped-agent", "a/b", "..", ".", ""):
+        with pytest.raises(ValueError):
+            validate_agent_id_segment(bad)
+        with pytest.raises(ValidationError):
+            AgentData.model_validate(
+                {
+                    "id": bad,
+                    "name": "x",
+                    "created_date": "2026-01-01T00:00:00+00:00",
+                    "version": "1.0.0",
+                }
+            )
+    # ...and a legacy id LOADS through the same model, which is the point.
+    legacy = AgentData.model_validate(
+        {
+            "id": "legacy row",
+            "name": "x",
+            "created_date": "2026-01-01T00:00:00+00:00",
+            "version": "1.0.0",
+        }
+    )
+    assert legacy.id == "legacy row"
+
+
+def test_the_write_rule_still_refuses_a_non_conforming_id() -> None:
+    """The STRICT rule is what a value arriving from OUTSIDE must pass.
+
+    ``teams.validate_team_id``'s charset, kept for the write boundaries: a create, an
+    import's generated id, and the mirrored-row apply (``definitions._apply_agent``,
+    which is where BLOCKER 1 was). Weakening the read rule did not move this one.
+    """
+    from local_operator.agents import is_conforming_agent_id, validate_agent_id
 
     for good in ("8db36f01-1695-446d-865e-563ba6846662", "autosave", "a.b_c-1"):
         assert validate_agent_id(good) == good
+        assert is_conforming_agent_id(good) is True
     for bad in (
         "../../../../escaped-agent",
         "a/b",
@@ -600,15 +647,7 @@ def test_the_agent_row_model_refuses_an_id_that_is_not_one_path_segment() -> Non
     ):
         with pytest.raises(ValueError):
             validate_agent_id(bad)
-    with pytest.raises(ValidationError):
-        AgentData.model_validate(
-            {
-                "id": "../../escaped",
-                "name": "x",
-                "created_date": "2026-01-01T00:00:00+00:00",
-                "version": "1.0.0",
-            }
-        )
+        assert is_conforming_agent_id(bad) is False
 
 
 # ---------------------------------------------------------------------------
@@ -816,3 +855,156 @@ def test_registry_has_id_does_not_read_a_registry_fault_as_an_absent_id() -> Non
     assert definitions.registry_has_id(_Empty(), "x") is False
     with pytest.raises(OSError):
         definitions.registry_has_id(_Broken(), "x")
+
+
+# ---------------------------------------------------------------------------
+# The read path, and the cadence's two floors (review round 2)
+# ---------------------------------------------------------------------------
+
+#: A peer device id for the syncer. Synthetic, and shaped like the real ones.
+_SYNC_PEER = "d_" + "9" * 32
+
+
+def _plant_legacy_row(root: Path, agent_id: str) -> Path:
+    """A row exactly as a pre-#643 import left it: its own id, preserved.
+
+    Built by renaming a REAL row and rewriting its ``id``, so the metadata shape is
+    the product's own (``import_agent`` preserved an archive's id until 2026-09-05,
+    and a hand-edited row can look the same). The id here is deliberately one that
+    is a legal directory name but not a conforming id: that is the population the
+    read path has to keep serving.
+    """
+    import yaml
+
+    registry = AgentRegistry(root)
+    agent = registry.create_agent(_edit_fields(name="legacy-source", description=""))
+    source = root / "agents" / str(agent.id)
+    target = root / "agents" / agent_id
+    source.rename(target)
+    payload = yaml.safe_load((target / "agent.yml").read_text(encoding="utf-8"))
+    payload["id"] = agent_id
+    (target / "agent.yml").write_text(yaml.safe_dump(payload), encoding="utf-8")
+    return target
+
+
+def test_a_pre_existing_non_conforming_row_still_lists_and_keeps_creates_working(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """REVIEW ROUND 2 (MAJOR): the id rule was on the READ path, and it took the registry.
+
+    Measured before this fix: a device holding one row whose id predates the current
+    rule lost that row from ``list_agents`` AND flipped the registry to incomplete, so
+    ``require_complete_metadata`` — the FIRST call ``resolve_create_identity`` makes —
+    raised ``ProfileRegistryUnavailable`` and an ordinary create against that device
+    failed with "the agent registry could not be read completely…". Nothing unsafe
+    happened, which is why it was a major: an affected install could not receive a
+    session at all, and was told to repair definitions that were fine before the
+    upgrade.
+
+    Three facts, which are the regression's whole shape: the row LISTS, the registry
+    stays COMPLETE, and a create's identity resolution still works. The rig proves the
+    same thing end to end over a real link, with a real create.
+    """
+    root = _root(tmp_path / "root")
+    _make_agent(root, "reviewer", prompt="A row written by the current build.")
+    _make_agent(root, "coder", prompt="Another one.")
+    _plant_legacy_row(root, "legacy row")
+
+    with caplog.at_level("WARNING"):
+        registry = AgentRegistry(root)
+        rows = registry.list_agents()
+    ids = sorted(str(row.id) for row in rows)
+    names = sorted(row.name for row in rows)
+    # LISTED, under the id that is on disk: that id is the offending value, and it is
+    # the registry's key (dropping it was the regression).
+    assert "legacy row" in ids, ids
+    assert names == ["coder", "legacy-source", "reviewer"], names
+
+    # NOT INCOMPLETE. This call is what a create makes first; before the fix it raised
+    # ``ProfileRegistryUnavailable``.
+    registry.require_complete_metadata()
+
+    # ...and the offending id is SURFACED, by name, with the remedy — a repair
+    # suggestion rather than a fault.
+    warnings = [str(record.message) for record in caplog.records if record.levelname == "WARNING"]
+    assert any("legacy row" in message and "mirror" in message for message in warnings), warnings
+
+    # A create's own resolution works with the legacy row present.
+    identity, refusal = definitions.resolve_create_identity(
+        root, profile="", agent_name="reviewer", agent_id="", team_name="", effort=""
+    )
+    assert identity is not None, refusal
+
+
+def test_a_new_row_cannot_be_saved_under_a_non_conforming_id(tmp_path: Path) -> None:
+    """The boundary rule, at the sink every writer goes through.
+
+    The strict rule did not move when the read rule was widened: a NEW directory is
+    only ever created for a conforming id, so a sender-chosen id still cannot become a
+    path (BLOCKER 1's fix). A row that is ALREADY on disk is the opposite case — it must
+    stay rewritable, or a legacy row could be read but never edited or renamed.
+    """
+    from local_operator.agents import AgentData
+
+    root = _root(tmp_path / "root")
+    registry = AgentRegistry(root)
+    # Built through ``model_validate`` like every other row in this module: the model
+    # ACCEPTS this id (it has to — see the read-rule cell), so the refusal has to come
+    # from the write boundary, which is what this cell pins.
+    row = AgentData.model_validate(
+        {
+            "id": "legacy row",
+            "name": "x",
+            "created_date": "2026-01-01T00:00:00+00:00",
+            "version": "1.0.0",
+        }
+    )
+    with pytest.raises(ValueError):
+        registry.save_agent(row)
+    assert not (root / "agents" / "legacy row").exists()
+    # And no phantom row: the refusal leaves the registry as it found it.
+    assert list(AgentRegistry(root).list_agents()) == []
+
+    _plant_legacy_row(root, "legacy row")
+    # Looked up the way a caller does — by NAME — while the row's id is the legacy one.
+    loaded = AgentRegistry(root).get_agent_by_name("legacy-source")
+    assert loaded is not None and str(loaded.id) == "legacy row", loaded
+    # A rewrite of the row that is already there is allowed (this is what a rename or a
+    # metadata edit does), and it lands in the same directory.
+    AgentRegistry(root).save_agent(loaded)
+    assert (root / "agents" / "legacy row" / "agent.yml").exists()
+
+
+def test_a_failed_push_is_retried_on_the_next_tick_not_a_minute_later(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REVIEW ROUND 2 (minor): one floor for both outcomes parked a recovered peer.
+
+    A single failed dial used to consume the member's whole ``STATE_MIN_INTERVAL_S``
+    window, so a peer that came back a second later waited ~59 s for nothing. The
+    failure floor is now the syncer's own tick; a SUCCESS still parks the member for
+    the full 60 s, which is what bounds the traffic. The shipped tick is asserted here
+    too, because the docstring claims a number and this feature keeps being caught on
+    docstrings that promise one cadence and deliver another.
+    """
+    from types import SimpleNamespace
+
+    root = _root(tmp_path / "root")
+    syncer = definitions.DefinitionsSyncer(SimpleNamespace(root=root))  # type: ignore[arg-type]
+    assert syncer._tick_s == 15.0, syncer._tick_s  # noqa: SLF001 — the shipped number
+    monkeypatch.setattr(syncer, "_targets", lambda: [_SYNC_PEER])
+    responses = [
+        {"ok": False, "code": "unreachable", "message": "not answering"},
+        {"ok": True, "code": "in_sync", "message": "same definitions"},
+        {"ok": True, "code": "in_sync", "message": "same definitions"},
+    ]
+    monkeypatch.setattr(
+        definitions, "push_to_peer", lambda server, device_id, **fields: responses.pop(0)
+    )
+
+    assert syncer.tick(now=1000.0) == [(_SYNC_PEER, "unreachable")]
+    # 16 s later: past the FAILURE floor (one tick) and far short of the probe floor.
+    assert syncer.tick(now=1016.0) == [(_SYNC_PEER, "in_sync")]
+    # 14 s after that: a success parks the member for the full minute.
+    assert syncer.tick(now=1030.0) == []
+    assert syncer.tick(now=1080.0) == [(_SYNC_PEER, "in_sync")]
