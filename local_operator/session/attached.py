@@ -994,6 +994,17 @@ class AttachedSession:
         self._desktop_visible = False
         self._desktop_can_notify = False
         self._desktop_seen = 0.0
+        #: Whether the last desktop state this viewer RECORDED was a
+        #: withdrawal (``withdraw_desktop_watch``) rather than a lease. The
+        #: dial replays it instead of re-asserting a lease, so a successor
+        #: runtime engaged under a closed pane starts detached rather than
+        #: resurrecting an attachment nobody holds (round 3, the
+        #: transport-bound hole). Cleared by the next real beat.
+        self._desktop_withdrawn = False
+        #: When this viewer's attach socket last died, for the re-dial gap the
+        #: bridge logs (C5, instrumentation only). ``None`` until a drop has
+        #: been seen; cleared when a dial reports the gap.
+        self._last_drop_at: float | None = None
         self._client: AttachClient | None = None
         #: The pid of the runtime this viewer is dialed into, ``None`` while
         #: cold or between owners. Read by the TUI's startup-cleanup notice to
@@ -2796,6 +2807,9 @@ class AttachedSession:
         self._desktop_visible = visible
         self._desktop_can_notify = can_notify
         self._desktop_seen = time.monotonic()
+        # A beat is an assertion: whatever withdrawal the last state recorded
+        # is superseded by this pair for the next dial to replay.
+        self._desktop_withdrawn = False
         client = self._client
         if client is None or not client.connected:
             # Nothing to re-assert to. The recording above is the whole job while
@@ -2811,6 +2825,53 @@ class AttachedSession:
             )
         except Exception:  # noqa: BLE001 — a lost re-assert is a cost, not a defect
             logger.debug("desktop watch re-assert failed", exc_info=True)
+
+    async def withdraw_desktop_watch(self, *, timeout: float | None = None) -> None:
+        """Withdraw the desktop attach lease: the pane has left, and it is final.
+
+        The bridge's explicit end-of-attachment signal (round 3, the
+        transport-bound hole), sent once its last live watch lease for this
+        session has run out (``server/utils/desktop_sessions.py::
+        _withdraw_last_lease``). On the runtime side this is the ONE frame that
+        clears the session-scoped attach memory (``server.py``'s
+        ``desktop_withdraw`` op) rather than renewing it -- and it must be its
+        own op, because no ``desktop_watch`` pair can carry that meaning: a
+        transient renderer stream end and a hidden no-notify pane both beat
+        ``(False, False)`` and both must keep the memory alive.
+
+        THE RECORDED STATE IS THE OTHER HALF. ``_desktop_withdrawn`` makes
+        :meth:`_dial` replay THIS op instead of re-asserting a lease, so a
+        successor runtime engaged after the pane left starts and STAYS detached
+        until a real beat says otherwise.
+
+        BOUNDED AND SWALLOWED exactly like ``update_desktop_watch``, and for
+        the same documented reason: this is a presence hint whose loss its own
+        TTL (or the next beat) corrects, so a READ must never be refused
+        because a withdrawal went unacknowledged; the asymmetry that once made
+        a silent-but-alive owner look dead is what the bound exists to avoid.
+        A CANCELLATION still propagates: that is not a lost hint, it is this
+        dial being abandoned, and ``_dial`` closes the half-open socket for it.
+        """
+        if self._surface != "desktop":
+            raise ValueError("only a desktop viewer can withdraw a desktop lease")
+        self._desktop_visible = False
+        self._desktop_can_notify = False
+        # 0.0, not ``now``: a withdrawal is not a renewal, and ``_dial``'s
+        # ``live`` gate must read it as lapsed even moments after a beat.
+        self._desktop_seen = 0.0
+        self._desktop_withdrawn = True
+        client = self._client
+        if client is None or not client.connected:
+            # Nothing to carry it to; the recording above is the whole job
+            # while cold, exactly as it is for the desired-presence pair.
+            return
+        bound = _DESKTOP_WATCH_ACK_BOUND_S
+        if timeout is not None:
+            bound = max(0.0, min(bound, timeout))
+        try:
+            await asyncio.wait_for(client.desktop_withdraw(), timeout=bound)
+        except Exception:  # noqa: BLE001 — a lost withdrawal is a cost, not a defect
+            logger.debug("desktop watch withdrawal failed", exc_info=True)
 
     async def answer_gate(
         self,
@@ -4215,6 +4276,18 @@ class AttachedSession:
             client.close()
             raise ConnectionError("viewer disposed while attaching")
         self._client = client
+        if self._surface == "desktop" and self._last_drop_at is not None:
+            # C5: ONE LINE NAMING THE GAP. The churn story reads as two sides
+            # that never met -- the runtime logged "dropped attach client", the
+            # app logged nothing -- so the time between the socket dying and
+            # this dial landing is logged here, where both facts exist at once.
+            # Instrumentation only; the re-asserts below are untouched.
+            logger.info(
+                "desktop attach re-dialed for %s %.2fs after the drop",
+                self._session_id,
+                time.monotonic() - self._last_drop_at,
+            )
+            self._last_drop_at = None
         # Re-assert a parking mute across a reconnect. A fresh connection is
         # unmuted, so without this a parked source that redialed would resume
         # paying full delivery for frames its controller discards. Best-effort
@@ -4249,7 +4322,14 @@ class AttachedSession:
             from local_operator.session.runtime.types import DESKTOP_WATCH_LEASE_S
 
             # Reconnecting the proxy must not resurrect a renderer's expired
-            # visibility/notification lease. Only another host heartbeat may.
+            # visibility/notification lease — and since round 3 it must not
+            # resurrect an ATTACHMENT either: a recorded withdrawal, or a lease
+            # that lapsed before this dial, replays the WITHDRAWAL OP, so a
+            # fresh successor runtime starts and stays detached until a real
+            # beat says otherwise. Only a recorded pair still inside its own
+            # TTL is re-asserted as a lease. (An empty record — ``seen`` 0.0 —
+            # reads as lapsed and takes the withdrawal arm; the op is a no-op
+            # against a runtime that never held the memory.)
             live = time.monotonic() - self._desktop_seen < DESKTOP_WATCH_LEASE_S
             # BOUNDED AND SWALLOWED, exactly like the mute re-assert above, and
             # the asymmetry was the reported bug: two best-effort re-asserts sit
@@ -4261,13 +4341,19 @@ class AttachedSession:
             # bounds now live in the one method the ``/watch`` beat also calls,
             # so the dial and the beat cannot come to disagree about whether a
             # lost presence hint is fatal; ``timeout`` carries this dial's own
-            # deadline so the hint can never lengthen a read.
+            # deadline so the hint can never lengthen a read. The withdrawal op
+            # follows the same envelope for the same reasons.
             try:
-                await self.update_desktop_watch(
-                    visible=live and self._desktop_visible,
-                    can_notify=live and self._desktop_can_notify,
-                    timeout=None if deadline is None else max(0.0, deadline - time.monotonic()),
-                )
+                if self._desktop_withdrawn or not live:
+                    await self.withdraw_desktop_watch(
+                        timeout=None if deadline is None else max(0.0, deadline - time.monotonic())
+                    )
+                else:
+                    await self.update_desktop_watch(
+                        visible=live and self._desktop_visible,
+                        can_notify=live and self._desktop_can_notify,
+                        timeout=None if deadline is None else max(0.0, deadline - time.monotonic()),
+                    )
             except BaseException:
                 # Cancellation, which is NOT a lost hint: the dial is being
                 # abandoned, so the half-open socket goes with it (same discipline
@@ -6262,7 +6348,15 @@ class AttachedSession:
 
     # -- owner loss ---------------------------------------------------------
 
-    def _on_disconnected(self, _reason: str) -> None:
+    def _on_disconnected(self, reason: str) -> None:
+        if self._surface == "desktop":
+            # C5 instrumentation, and the timestamp the NEXT dial's log reads
+            # its gap against. Placed before the early returns below on
+            # purpose: every way this socket can die is the same fact for the
+            # churn story, including the disposal and recovery paths that bail
+            # out of the rest of this method.
+            self._last_drop_at = time.monotonic()
+            logger.info("desktop attach socket lost for %s: %s", self._session_id, reason)
         self._fail_prompt_completion_waiters("owner connection lost while awaiting turn completion")
         self._runtime_pid = None
         if self._disposed or self._recovering:
@@ -6278,7 +6372,7 @@ class AttachedSession:
         # the cases the local flag cannot: another TUI's /stop all, or a shell
         # `lop stop`, hitting a session THIS viewer merely watches — including
         # a session with no wakes, which leaves no on-disk marker to consult.
-        if _reason == RETIRING_REASON:
+        if reason == RETIRING_REASON:
             # A planned refresh, not owner death and not a stop: the runtime
             # left so the next engage runs the build now on disk. Nothing to
             # recover — the successor does not exist yet, and chasing the
@@ -6288,7 +6382,7 @@ class AttachedSession:
             # the app so it can re-engage eagerly.
             self._go_cold(refresh=True)
             return
-        if _reason == STOPPED_REASON:
+        if reason == STOPPED_REASON:
             self._deliberate_stop = True
         if self._deliberate_stop:
             self._runtime_ready.set()  # prompts route to the stopped notice

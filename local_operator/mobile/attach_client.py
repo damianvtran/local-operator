@@ -1844,6 +1844,19 @@ class AttachClient:
         """Renew this attach connection's desktop lease, not the phone counter."""
         return await self._request("desktop_watch", visible=visible, can_notify=can_notify)
 
+    async def desktop_withdraw(self) -> str:
+        """Withdraw this attach connection's desktop lease: the pane has left.
+
+        THE ONE FRAME THAT CLEARS THE RUNTIME'S SESSION-SCOPED ATTACH MEMORY.
+        Not a pair of booleans on ``desktop_watch``, deliberately: a transient
+        renderer stream end and a hidden pane on a host with no notification
+        channel both beat ``(False, False)``, and both MUST keep the memory
+        alive. The op exists so "the attachment is over" is expressible at all;
+        the bridge sends it once the last live watch lease has run out, and
+        replays it on a re-dial so a successor does not resurrect the lease.
+        """
+        return await self._request("desktop_withdraw")
+
     async def viewer_watch(self, *, displaying: bool) -> str:
         """Tell the owner whether this terminal is still SHOWING its session.
 
