@@ -35,6 +35,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from local_operator.harness.approval import ApprovalUnavailableError
 from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
@@ -659,7 +660,14 @@ async def execute_lsp(
     path, inside, resolvable = _resolve_workspace_path(params.path, cwd)
     if not inside:
         description = _approval_description(path, inside, "lsp", resolvable)
-        if not await _check_approval(context, "read", description):
+        try:
+            approved = await _check_approval(context, "read", description)
+        except ApprovalUnavailableError as exc:
+            # The headless gate could not ask anyone: render its reason rather
+            # than the declined copy below, which is reserved for a user who
+            # answered (same rule as ``read``'s outside-workspace branch).
+            return _error(tool_call_id, "lsp", str(exc))
+        if not approved:
             return _error(tool_call_id, "lsp", "User declined to inspect this path.")
     if not path.exists():
         return _error(tool_call_id, "lsp", f"Path does not exist: {path}")

@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.config import ConfigManager
 from local_operator.session.protocol import RuntimeLocality
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.exec_control import (
@@ -208,6 +209,72 @@ async def test_start_publishes_an_exec_record(isolated_config: Path) -> None:
         assert str(control.port) in control.endpoint_line
         assert control.record_path in control.endpoint_line
         assert control.runtime.record.control_key not in control.endpoint_line
+    finally:
+        await control.aclose()
+
+
+@pytest.mark.asyncio
+async def test_the_gate_is_seeded_from_the_saved_mode(isolated_config: Path) -> None:
+    """A saved ``tool_approval_mode: auto`` is in force at t0 — the seed case.
+
+    ``lop exec --control --background`` under a config set to auto parked its
+    first bash call anyway, because the handle was built with
+    ``auto_approve=yolo`` and the config watcher only delivers changes that
+    happen LATER (``ConfigWatcher._prime`` does not notify subscribers), so
+    the park expired into a denial and the transcript read "User denied
+    approval for 'bash'." for a call nobody had seen. On the unfixed tree
+    this test fails at the first assertion; the gate call below fails too,
+    because without the seed it parks instead of answering inline.
+    """
+    ConfigManager(isolated_config).set_config_value("tool_approval_mode", "auto")
+    control = await start_exec_control(FakeSession(), cwd="/tmp")
+    try:
+        assert control.handle._auto_approve is True, "the boot value ignored the saved mode"
+        gate = control.handle._approval_gate
+        assert await gate("bash", "echo probe-ok") is True
+        # No card was ever queued — the answer came inline, before any park.
+        assert control.handle._fold.projection.pending is None
+    finally:
+        await control.aclose()
+
+
+@pytest.mark.asyncio
+async def test_ask_mode_still_parks_a_card(isolated_config: Path) -> None:
+    """Default (ask): the seed changes the BOOT VALUE, not the asking.
+
+    With no saved mode the gate must keep parking for a supervisor and settle
+    on their answer — the behaviour ``--control`` exists for.
+    """
+    control = await start_exec_control(FakeSession(), cwd="/tmp")
+    try:
+        assert control.handle._auto_approve is False
+        gate = control.handle._approval_gate
+        parked = asyncio.ensure_future(gate("write", "touch /tmp/x"))
+        await asyncio.sleep(0)
+        front = control.handle._fold.projection.pending
+        assert front is not None and front.title == "write"
+        await control.handle.approval_answer(front.request_id, False, False)
+        assert await parked is False
+    finally:
+        await control.aclose()
+
+
+@pytest.mark.asyncio
+async def test_yolo_pins_the_gate_against_the_key(isolated_config: Path) -> None:
+    """``--yolo`` keeps both of its properties: approve inline AND pin.
+
+    The pin is what stops a later ``tool_approval_mode`` edit from re-arming
+    the gate this run disabled. The follow/tighten semantics themselves are
+    pinned at the handle level in ``test_serving_approvals_live``; this pins
+    that ``start_exec_control`` still wires the flag into them — the value is
+    passed as a PIN only for ``--yolo``, while a config-seeded value must
+    keep following the file.
+    """
+    ConfigManager(isolated_config).set_config_value("tool_approval_mode", "ask")
+    control = await start_exec_control(FakeSession(), cwd="/tmp", yolo=True)
+    try:
+        assert control.handle._auto_approve is True
+        assert control.handle._approval_pinned is True
     finally:
         await control.aclose()
 

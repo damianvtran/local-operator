@@ -3837,6 +3837,38 @@ async def test_read_outside_workspace_requires_approval(tmp_path) -> None:
     assert blocked.is_error is True
 
 
+@pytest.mark.asyncio
+async def test_read_outside_workspace_names_an_unanswerable_gate(tmp_path) -> None:
+    """A gate that cannot ask anyone must not be quoted as the user's refusal.
+
+    The headless gate raises ``ApprovalUnavailableError`` (nobody was asked —
+    see ``harness.approval``); the result has to carry its reason and remedies
+    instead of "User declined to read this file.", which blamed a person who
+    never saw the call.
+    """
+    from local_operator.harness.approval import ApprovalUnavailableError
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    secret = tmp_path / "secret.txt"
+    secret.write_text("hush\n")
+
+    async def unanswerable(tool_name: str, description: str) -> bool:
+        raise ApprovalUnavailableError(tool_name, "no terminal is attached")
+
+    context = _RecordingContext(
+        cwd=str(workspace),
+        session_id="unit-test",
+        request_approval=unanswerable,
+        recorder=RecordingApproval(),
+    )
+    tools = {t.name: t for t in create_tools(context)}
+    blocked = await tools["read"].execute("c", {"path": str(secret)}, None, None, context)
+    assert blocked.is_error is True
+    assert "Approval unavailable for 'read'" in blocked.text
+    assert "User declined" not in blocked.text
+
+
 # ---------------------------------------------------------------------------
 # glob / grep
 # ---------------------------------------------------------------------------
@@ -3980,6 +4012,36 @@ async def test_grep_skips_oversized_files_with_footer(tools, context, tmp_path) 
 async def test_grep_invalid_regex_is_error(tools, context) -> None:
     result = await _call(tools, "grep", {"pattern": "(unclosed"}, context)
     assert result.is_error is True
+
+
+@pytest.mark.asyncio
+async def test_grep_outside_workspace_names_an_unanswerable_gate(tmp_path) -> None:
+    """Same rendering rule as ``read``: when the gate could not ask anyone,
+    the grep result names the reason and remedies rather than claiming a
+    user declined to search."""
+    from local_operator.harness.approval import ApprovalUnavailableError
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("needle\n")
+
+    async def unanswerable(tool_name: str, description: str) -> bool:
+        raise ApprovalUnavailableError(tool_name, "no terminal is attached")
+
+    context = _RecordingContext(
+        cwd=str(workspace),
+        session_id="unit-test",
+        request_approval=unanswerable,
+        recorder=RecordingApproval(),
+    )
+    tools = {t.name: t for t in create_tools(context)}
+    blocked = await tools["grep"].execute(
+        "c", {"pattern": "needle", "path": str(outside)}, None, None, context
+    )
+    assert blocked.is_error is True
+    assert "Approval unavailable for 'read'" in blocked.text
+    assert "User declined" not in blocked.text
 
 
 # ---------------------------------------------------------------------------

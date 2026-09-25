@@ -594,6 +594,14 @@ def _spawn_background(command: str, exec_args: ExecArgs) -> int:
         # `lop sessions` is the one command that shows what a run NEEDS, and it
         # was the one command this receipt never mentioned.
         print("Waiting on you? lop sessions shows what a run needs", file=sys.stderr)
+    elif status in ("starting", "running"):
+        # The receipt is where a launch is read back, so a run nobody can
+        # approve has to say so HERE rather than only in a transcript of
+        # denials (see ``_deny_trapped_advisory``). Printed only while the run
+        # is live: a launch that already failed carries its own reason above.
+        advisory = _deny_trapped_advisory(exec_args)
+        if advisory is not None:
+            print(advisory, file=sys.stderr)
     return 1 if status in ("failed", "cancelled", "interrupted") else 0
 
 
@@ -732,6 +740,41 @@ def reject_detached_supervisor_fd(args: ExecArgs) -> str | None:
     return None
 
 
+def _deny_trapped_advisory(args: ExecArgs) -> str | None:
+    """The launch advisory for a run whose approval calls nobody can answer.
+
+    A headless run has no terminal to prompt on, and ``--background``'s worker
+    is spawned with ``stdin=DEVNULL``, so every write/exec tool call is denied
+    by the CLI's headless gate unless one of the flags that makes the run
+    answerable is present: ``--control`` (cards park for a supervisor),
+    ``--yolo`` (approve every tier inline), or ``--tools`` (the declaration
+    stands as the approval for its own members exactly where nobody can be
+    asked — see ``exec_startup.apply_startup``). Before this advisory the
+    operator's first evidence of the trap was a transcript of denials for
+    calls no user had seen; this is the same news told BEFORE the run, which
+    is the half that was missing.
+
+    Returns the two-line advisory to print to stderr, or ``None`` when the run
+    can be approved on (a foreground tty) or a flag answers the gate. A tty
+    gets ``None`` because its y/N prompt IS the answer, and the advisory must
+    not decorate a run that already works.
+    """
+    if args.control or args.yolo:
+        return None
+    from local_operator.exec_startup import parse_tool_inventory
+
+    if parse_tool_inventory(getattr(args, "tools", None)):
+        return None
+    if not args.background and (sys.stdin is not None and sys.stdin.isatty()):
+        return None
+    return (
+        "Warning: this run cannot ask for approval (no terminal attached), so "
+        "write/exec tool calls will be denied.\n"
+        "  Remedies: --control parks cards for a supervisor; --yolo auto-approves "
+        "every tier; --tools NAME[,NAME] pre-approves the listed tools."
+    )
+
+
 def run_exec(command: str | None, args: ExecArgs) -> int:
     """Entry point for the ``exec`` subcommand (README contract: exit 0 on
     success, non-zero on error).
@@ -792,6 +835,14 @@ def run_exec(command: str | None, args: ExecArgs) -> int:
         return 1
     if args.background:
         return _spawn_background(command, args)
+
+    # Foreground, non-tty only: say what will happen before it does. The
+    # background half prints inside its launch receipt (see
+    # ``_spawn_background``); a tty run gets nothing because its y/N prompt is
+    # the answer the advisory would otherwise describe as missing.
+    advisory = _deny_trapped_advisory(args)
+    if advisory is not None:
+        print(advisory, file=sys.stderr)
 
     import asyncio
 
