@@ -1995,6 +1995,39 @@ def test_r7_3_a_non_canonical_device_spelling_is_the_device_it_names(
     assert rule in result.labels, (command, result.labels)
 
 
+@pytest.mark.parametrize(
+    ("command", "rule"),
+    [
+        # R8-1: a LEADING redirect must not decide the verdict. The `&>`/`&>>`
+        # arm left fd 1 alone when the word was unreadable, so the first
+        # redirect on the line was the last word on whether the value reached
+        # the result.
+        ("lop secret get NAME > /tmp/pre-amp &> $LOG", "shell.bare-source-in-command-position"),
+        ("lop secret get NAME > /tmp/pre-amp &>> $LOG", "shell.bare-source-in-command-position"),
+        ("lop secret get NAME >/dev/null &> $LOG", "shell.bare-source-in-command-position"),
+        (
+            'v=$(lop secret get NAME); echo "$v" > /tmp/pre-amp &> $LOG',
+            "shell.print-of-source",
+        ),
+    ],
+)
+def test_r8_1_a_leading_redirect_does_not_decide_an_unreadable_both_streams_word(
+    command: str, rule: str
+) -> None:
+    """R8-1: `&>WORD` rebinds fd 1 instead of inheriting whatever bound it.
+
+    `lop secret get NAME > /tmp/pre-amp &> $LOG` (`LOG=/dev/stderr`) read as a
+    contained write to `/tmp/pre-amp` while the raw value went to the descriptor
+    the `--- stderr ---` section IS. `_legacy_word_destination` refuses exactly
+    that hazard for the `>&WORD` spelling by answering `("result", "")` rather
+    than the current fd 1; both arms now answer the same way, which is REFUSED
+    rather than allowed.
+    """
+    result = scan_command(command)
+    assert result.refused, (command, result)
+    assert rule in result.labels, (command, result.labels)
+
+
 @pytest.mark.asyncio
 async def test_r6_1_a_redirect_to_stderr_is_refused_before_the_child_runs(
     tmp_path: Path, config_root: Path, stored_secret: str, shimmed_path: None
@@ -2113,3 +2146,39 @@ async def test_r7_a_closed_fd_or_an_unreadable_both_streams_word_never_reaches_t
             assert (
                 _SYNTHETIC in written.read_text()
             ), f"the contained write is not where the verdict says it is: {command}"
+
+
+@pytest.mark.asyncio
+async def test_r8_1_the_leading_redirect_never_reaches_the_result(
+    tmp_path: Path, config_root: Path, stored_secret: str
+) -> None:
+    """R8-1 through the REAL tool, with the leak it closes stated as a shape.
+
+    Before this fix the first command below RAN, `is_error` was False and the raw
+    value was sitting in the `--- stderr ---` section: the leading redirect bound
+    fd 1 to a contained file, the unreadable `&> $LOG` (`LOG=/dev/stderr`) left
+    that binding alone, and the value went to the very descriptor that section is.
+    Both sections are scanned rather than only the one the verdict names, because
+    "refused" has to mean nowhere, and the marker says whether the child ran.
+    """
+    refused = [
+        f"LOG=/dev/stderr; lop secret get {stored_secret} > {tmp_path}/pre-amp &> $LOG",
+        f"LOG=/dev/stderr; lop secret get {stored_secret} >/dev/null &> $LOG",
+        f"LOG=/dev/stderr; lop secret get {stored_secret} > {tmp_path}/pre-amp &>> $LOG",
+    ]
+    for command in refused:
+        marker = tmp_path / "ran-r8"
+        if marker.exists():
+            marker.unlink()
+        result = await builtin.execute_bash(
+            "bash-r8",
+            {"command": f"touch {marker}; {command}"},
+            AbortSignal(),
+            None,
+            _context(tmp_path),
+        )
+        stdout, stderr = _result_sections(result)
+        assert result.is_error, (command, _result_text(result))
+        assert not marker.exists(), f"the child ran anyway: {command}"
+        _assert_no_value(stdout)
+        _assert_no_value(stderr)

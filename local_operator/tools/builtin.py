@@ -3016,9 +3016,15 @@ class _PipeRedactor:
         BOUNDED BY THE CAP: only a block whose BEGIN-to-END-line span fits
         :data:`_PIPE_DEFERRAL_LIMIT` is treated as a unit — that is the size main can
         hold whole, and a larger one is split by the cap on main too, where the open
-        block's line state is what masks it. The extra hold is therefore at most one
-        cap. The same raw ``-----BEGIN``/``-----END`` literals as the hold above, so
-        the two rules cannot disagree about where a block starts.
+        block's line state is what masks it. The extra hold here is therefore at most
+        one cap, and it composes, in the same call, with the floor's own
+        line-boundary retreat, which moves the cut up to one cap further left before
+        this rule is asked. What the floor can retain is thus bounded by
+        ``self.hold + 2 * _PIPE_DEFERRAL_LIMIT`` rather than by ``hold + cap``
+        (round-4 review, R4-1): the number matters because that window is memory, and
+        a bound stated one cap short is a bound a future reader would trust. The same
+        raw ``-----BEGIN``/``-----END`` literals as the hold above, so the two rules
+        cannot disagree about where a block starts.
         """
         begin = text.rfind("-----BEGIN", 0, cut)
         if begin < 0:

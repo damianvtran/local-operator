@@ -1195,6 +1195,40 @@ def test_streamed_frames_fail_closed_when_the_ledger_is_unreadable(
     assert "would-be-secret" not in joined
     assert "a later write too" not in joined, "the withhold must be sticky"
     assert "withheld" in joined, "and it must say so rather than look empty"
+    # The copy is pinned, because both halves of it are load-bearing rather than
+    # decorative. A reader here is a model polling the job tail, and one that
+    # reads this as a lost result cancels a job whose result was never in
+    # question — so the notice states the common case (the read recovers and the
+    # result arrives filtered) and says the end can withhold it too, which is
+    # what the same fault actually does: the flag is set by a ledger read that
+    # raised, and the settle path walks the SAME ledger through `_scrub_secrets`.
+    # The absolute arrival claim that was here is asserted ABSENT for that
+    # reason. The withhold is sticky, so the second write adds no second notice
+    # from THIS sink.
+    assert joined == eval_worker._WITHHELD_FRAME_TEXT
+    assert "filtered by a second pass when the run finishes" in joined
+    assert "withheld if that pass fails too" in joined
+    assert "arrives when the run finishes" not in joined, (
+        "re-measured: the ledger fault that raises this notice also withholds the "
+        "settled text, so an unconditional arrival claim is false where it is read"
+    )
+    assert joined.endswith("\n"), "the notice ends on its own line"
+    assert len(joined.rstrip("\n")) <= 200, "outside the peek progress-line cut"
+
+    # And the newline's own reason, which one sink cannot show: the worker builds
+    # TWO of these (stdout and stderr) and both append to ONE shared job tail as
+    # raw text (`JobManager.append_output`), so without the trailing newline the
+    # two notices would run together into a single unreadable line.
+    frames = []
+    channels = [
+        eval_worker._StreamingTextIO(eval_worker.STREAM_CHAR_LIMIT, frames.append),
+        eval_worker._StreamingTextIO(eval_worker.STREAM_CHAR_LIMIT, frames.append),
+    ]
+    channels[0].write("out")
+    channels[1].write("err")
+    tail = "".join(frames)
+    assert tail == eval_worker._WITHHELD_FRAME_TEXT * 2, tail
+    assert tail.splitlines() == [eval_worker._WITHHELD_FRAME_TEXT.rstrip("\n")] * 2
 
 
 def test_worker_response_scrubs_every_model_visible_channel(isolated: Path) -> None:
