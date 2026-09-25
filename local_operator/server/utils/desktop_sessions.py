@@ -994,6 +994,11 @@ class DesktopSubscription:
     frontend_replace: bool = False
     expires: float = 0.0
     overflow: bool = False
+    #: False until ``events`` has finished the OPEN handshake -- i.e. until the
+    #: snapshot, and the frames published after its watermark, have been handed
+    #: to the transport. Before that the queue holds only frames the snapshot
+    #: supersedes, so a full queue is EVICTION, not failure (see ``publish``).
+    opened: bool = False
 
 
 class DesktopSessionBridge:
@@ -1434,6 +1439,42 @@ class DesktopSessionBridge:
             if self.users == 0:
                 await self._detach()
 
+    async def _arm_dwell(self, sub: DesktopSubscription) -> None:
+        """Hold the bridge open across one viewer's lost transport.
+
+        Called from ``events``'s ``finally`` when the generator ends for a
+        subscription the bridge did NOT revoke -- a dropped socket, a cancelled
+        ASGI scope, a relay watchdog. See ``RECONNECT_DWELL_S`` for why the
+        window exists and why zero disables it.
+        """
+        sub.dwell_until = time.monotonic() + RECONNECT_DWELL_S
+        self._dwell_tasks[sub.id] = asyncio.create_task(self._end_dwell(sub))
+
+    async def _end_dwell(self, sub: DesktopSubscription) -> None:
+        """Let go when the deadline passes, and detach if nobody came back."""
+        try:
+            # DEADLINE-DRIVEN, ON THE MODULE CLOCK, so an injected clock moves
+            # the expiry instead of a test sleeping the window out: the tick is
+            # what makes ``sub.dwell_until`` observable rather than a private
+            # sleep's business. See DWELL_TICK_S.
+            while True:
+                remaining = sub.dwell_until - time.monotonic()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(remaining, DWELL_TICK_S))
+            async with self.lock:
+                # Identity, not membership: a re-acquire inside the window keeps
+                # the SAME subscription registered (the viewer returned), and a
+                # pop by id would then evict a live viewer's own subscription.
+                if self.subscribers.get(sub.id) is sub:
+                    self.subscribers.pop(sub.id, None)
+                if self.users == 0 and not self.dwelling:
+                    await self._detach()
+            with contextlib.suppress(ConnectionError, RuntimeError):
+                await self.refresh_watch()
+        finally:
+            self._dwell_tasks.pop(sub.id, None)
+
     async def _detach(self) -> None:
         if self.watch_task is not None:
             self.watch_task.cancel()
@@ -1535,6 +1576,19 @@ class DesktopSessionBridge:
         sub.queued_bytes = 0
         sub.queue.put_nowait(None)
 
+    def _evict_oldest(self, sub: DesktopSubscription) -> None:
+        """Drop the OLDEST frame from ``sub``'s queue, freeing its bytes.
+
+        The pre-open half of the overflow policy: every frame such a subscriber
+        holds is at or below the watermark the snapshot it is still waiting for
+        will carry, so the oldest one is SUPERSEDED rather than lost. It can
+        never meet the ``None`` sentinel -- a disconnected subscriber has
+        ``overflow = True`` and is skipped by the caller.
+        """
+        frame, size = sub.queue.get_nowait()
+        assert frame is not None
+        sub.queued_bytes -= size
+
     def publish(self, kind: str, payload: dict[str, Any], *, replay: bool = True) -> None:
         """Put one frame on every live subscriber, and normally into replay.
 
@@ -1575,9 +1629,30 @@ class DesktopSessionBridge:
             if sub.overflow:
                 continue
             if sub.queue.full() or sub.queued_bytes + size > REPLAY_BYTES:
-                # Never silently discard a semantic event. Closing forces an
-                # authoritative gap snapshot on reconnect, and revokes presence.
-                self._disconnect(sub)
+                if sub.opened:
+                    # A READER that is behind: backpressure, unchanged. Closing
+                    # forces an authoritative gap snapshot on reconnect, and
+                    # revokes presence -- which is why a subscription the bridge
+                    # revoked this way must never dwell (see ``events``).
+                    self._disconnect(sub)
+                else:
+                    # A subscriber still waiting for its OPEN handshake. Every
+                    # frame it holds is at or below the watermark that snapshot
+                    # will carry, because ``snapshot()`` reads its state and its
+                    # sequence with nothing awaiting between them -- so the
+                    # oldest frame here is SUPERSEDED by the snapshot, not a
+                    # semantic event this policy silently discards.
+                    #
+                    # WITHOUT THIS, A COLD ENGAGE KILLS ITS OWN STREAM: the
+                    # subscriber is registered before the response headers exist
+                    # and nothing reads its queue until the handshake has built
+                    # its snapshot, so the engage's burst (hundreds to thousands
+                    # of frames) fills a 256-slot queue that has no reader, the
+                    # server disconnects, and the client's reconnect pays a fresh
+                    # cold engage that publishes the next burst.
+                    self._evict_oldest(sub)
+                    sub.queue.put_nowait((frame, size))
+                    sub.queued_bytes += size
             else:
                 sub.queue.put_nowait((frame, size))
                 sub.queued_bytes += size
@@ -2324,9 +2399,13 @@ class DesktopSessionBridge:
             self.attention_served_stale = True
         except (sqlite3.Error, OSError):
             pass
-        state = self.state()
-        seq, epoch = self.sequence, self.epoch
-        cursor = state["snapshot"].get("history_cursor")
+        # THE GATE READS THE STORE'S OWN FIELD RATHER THAN A STATE CLONE, because
+        # the clone is now taken LAST (see the watermark note above the return).
+        # ``self.remote.frontend_state`` is the store object itself
+        # (``session/attached.py``) and ``history_cursor`` is a real field on it,
+        # so this is the same predicate the clone answered.
+        remote = self.remote
+        cursor = remote.frontend_state.history_cursor if remote is not None else None
         history: dict[str, Any] = {"entries": [], "has_more": False, "cursor_missing": False}
         # The gate is about the STATE, not about bounding the page, and the empty
         # page it produces is a signal a reader ACTS on: "no history cursor, so
@@ -2345,7 +2424,6 @@ class DesktopSessionBridge:
         # that sees a non-empty page beside ``cold_reason`` knows this backend
         # fills it and skips the duplicate fetch, and an older one reconciles
         # on an empty page only, which a cold open with rows no longer is.
-        remote = self.remote
         if cursor or (remote is not None and remote.is_cold):
             # THE PAGE IS THE JOURNAL'S TAIL. Its upper bound is NOT the frontend
             # cursor above, and that is the fix rather than a detail: this is a
@@ -2379,6 +2457,22 @@ class DesktopSessionBridge:
             # ``read_transcript_page`` for the inclusive-boundary rule it still
             # applies when a caller asks for one.
             history = await self.history()
+        # THE WATERMARK IS READ WITH THE STATE IT DESCRIBES, AND NOTHING AWAITS
+        # BETWEEN THEM. Both reads used to sit ABOVE the ``history()`` await, so
+        # this frame's ``seq`` was a watermark older than the last suspension in
+        # its own construction -- and a subscriber that dropped everything at or
+        # below it would have dropped frames the snapshot does not contain.
+        #
+        # That ordering is what makes the pre-open supersession in :meth:`events`
+        # provably lossless rather than merely plausible: at the moment this
+        # returns, every frame still in a subscriber's queue was published before
+        # the ``self.state()`` below (no await follows it, so ``publish`` cannot
+        # interleave), hence every one of them has ``seq <= this frame's seq`` and
+        # is already inside ``frontend``. Do NOT introduce an await between these
+        # two lines and the ``return``; ``tests/unit/server/test_desktop_sessions.py``
+        # pins it.
+        state = self.state()
+        seq, epoch = self.sequence, self.epoch
         return {
             "session_id": self.session_id,
             "epoch": epoch,
@@ -3111,6 +3205,34 @@ class DesktopSessionBridge:
                 [f for f, _ in self.replay if after_seq < f["seq"] <= cutoff] if not gap else []
             )
             snapshot = await self.snapshot()
+            # THE PRE-OPEN WINDOW ENDS HERE, AND IT IS CLOSED SYNCHRONOUSLY.
+            # ``snapshot()``'s state and sequence are its last reads with nothing
+            # awaiting between them, so no frame can have been published after
+            # the watermark this loop compares against -- which is what makes the
+            # split below exact rather than a race: everything at or below the
+            # watermark is already inside ``frontend`` and is dropped as
+            # superseded, and anything above it is newer than the snapshot and
+            # must be delivered after it.
+            #
+            # The frames are drained BEFORE ``open`` is yielded, and ``opened``
+            # is set before the first yield of the handshake, so the overflow
+            # policy switches to backpressure at the same moment the subscriber
+            # stops being able to lose anything by eviction.
+            disconnected = False
+            pending: list[dict[str, Any]] = []
+            while True:
+                try:
+                    item = sub.queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if item is None:  # ``close()``/``_disconnect`` ran mid-build
+                    disconnected = True
+                    break
+                frame, size = item
+                sub.queued_bytes -= size
+                if frame["seq"] > snapshot["seq"]:
+                    pending.append(frame)
+            sub.opened = True
             yield {
                 "session_id": self.session_id,
                 "epoch": self.epoch,
@@ -3128,6 +3250,11 @@ class DesktopSessionBridge:
             for frame in replay:
                 yield frame
             yield snapshot
+            for frame in pending:
+                yield frame
+            if disconnected:
+                yield {"type": "gap", "session_id": self.session_id}
+                return
             while True:
                 try:
                     item = await asyncio.wait_for(sub.queue.get(), timeout=15)
