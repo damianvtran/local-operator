@@ -554,6 +554,49 @@ def _decode_leading_json(payload: str) -> tuple[Any, str, int]:
     return decoded, trailing, framing_bytes
 
 
+#: The decoder's own sentence for "no value could be read at the leading position
+#: at all", which is the ONE refusal that means a payload states no decision.
+#: Every other refusal :func:`_decode_leading_json` raises is about a decision it
+#: DID read -- a duplicate key inside one, a competing second batch after one --
+#: and must not be read as absence (see :func:`_states_a_decision`).
+_NO_DECISION_AT_ALL = "decision is not valid JSON"
+
+
+def _states_a_decision(payload: str) -> bool:
+    """Whether the payload states a decision, readable or refused.
+
+    The question the reply-channel widening is gated on. Reading an
+    arbitrarily-named tool call as the channel is a RECOVERY -- it exists for a
+    turn whose decision arrived on the call channel and would otherwise be lost
+    (measured: 178 of the arm's 204 ``leading-delimiter`` refusal artifacts,
+    recounted 2026-09-25 over ``~/worktrees/osworld/runs``, published no reply
+    text at all) -- and it must therefore never step over a decision the
+    model wrote in PROSE: a turn that answered on both channels would have its
+    prose discarded and the call's bytes judged in its place, turning an accepted
+    turn into a refusal.
+
+    Deliberately loose, and deliberately asked of the decoder rather than
+    re-derived here: any payload ``_decode_leading_json`` reads a value out of,
+    or refuses for a defect INSIDE a value it read, states one. Only "nothing
+    could be read at all" -- the decoder's own
+    :data:`_NO_DECISION_AT_ALL` sentence, which is also what an empty or
+    non-JSON prose reply produces -- answers ``False``.
+
+    The default is the conservative direction for the caller: a payload this
+    cannot classify as decisionless WITHHOLDS the widening, so the prose is
+    judged exactly as it was before the widening existed. A refusal reason added
+    to the decoder later is on that default side until it is named here.
+    """
+
+    if not payload.strip():
+        return False
+    try:
+        _decode_leading_json(payload)
+    except DecisionParseError as error:
+        return _NO_DECISION_AT_ALL not in str(error)
+    return True
+
+
 #: One line of a Markdown code fence: at least three backticks and, optionally,
 #: an info string (``json``, ``python``) -- and nothing else on the line. An
 #: anchor like ``\A``/``\Z`` rather than ``fullmatch`` with ``$`` so a trailing

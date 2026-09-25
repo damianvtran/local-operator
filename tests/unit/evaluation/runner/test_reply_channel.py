@@ -339,8 +339,10 @@ async def test_native_tool_syntax_in_prose_is_still_rejected() -> None:
 @pytest.mark.asyncio
 async def test_a_call_named_anything_is_the_reply_when_it_is_the_only_tool_offered() -> None:
     """The sole offered name IS the reply channel, so a call under any other name
-    is still the model answering -- and 174 of the arm's 199 ``leading-delimiter``
-    refusals were exactly this, refused with no reply text published at all.
+    is still the model answering -- and 178 of the arm's 204 ``leading-delimiter``
+    refusal artifacts were exactly this (recounted 2026-09-25 over
+    ``~/worktrees/osworld/runs``; see ``harness/reply_channel``), refused with no
+    reply text published at all.
 
     The widening rests on what the REQUEST advertised, which is why the reason
     the empty prose was refused before is now the reason the call is read: the
@@ -382,7 +384,7 @@ async def test_a_foreign_named_call_is_not_a_reply_when_other_tools_were_offered
 
     A request that put a real capability on the wire is one where a call under a
     name we did not choose may be that capability being invoked, so the strict
-    name test stays. This is the arm's own defect in reverse: the reason 174
+    name test stays. This is the arm's own defect in reverse: the reason 178
     refusals were misread is that nobody recorded what had been offered, so this
     pins the reading to the offer rather than to a guess about intent.
     """
@@ -571,8 +573,9 @@ async def test_no_call_and_no_text_still_refuses() -> None:
 async def test_a_refused_call_records_which_channel_was_read_and_what_it_was_called() -> None:
     """The one thing the sealed corpus could not answer, recorded from now on.
 
-    174 of the arm's 199 ``leading-delimiter`` refusals published no reply text
-    AND recorded no call name, so nothing in the bundle said the model had
+    178 of the arm's 204 ``leading-delimiter`` refusal artifacts published no
+    reply text AND recorded no call name (recounted 2026-09-25 over
+    ``~/worktrees/osworld/runs``), so nothing in the bundle said the model had
     answered on the tool channel at all -- every reader was sent down the
     framing path, and the class could not be diagnosed without paying for the
     run again. This pins that a refusal now states both.
@@ -597,8 +600,10 @@ async def test_a_refused_call_records_which_channel_was_read_and_what_it_was_cal
     assert rejected.channel_read is True
 
     artifact = _rejection_detail(rejected, RedactionSet.from_resolved_values([]))
-    assert "channel=read" in artifact
-    assert "tool_calls=[search]" in artifact
+    assert "channel=read(prose=0)" in artifact
+    # Quoted, so a name carrying the separator (``apply,apply``) cannot read as
+    # two calls -- see ``_bounded_call_names``.
+    assert 'tool_calls=["search"]' in artifact
     assert "class: leading-delimiter" in artifact
     # The call's own arguments are what was judged, and they are in the artifact:
     # the diagnostic alone could never say that.
@@ -615,7 +620,10 @@ async def test_a_call_name_cannot_forge_an_artifact_header_or_grow_it() -> None:
     """
 
     from local_operator.evaluation.receipts import RedactionSet
-    from local_operator.evaluation.runner.episode import _rejection_detail
+    from local_operator.evaluation.runner.episode import (
+        _header_value,
+        _rejection_detail,
+    )
     from local_operator.evaluation.runner.model import StreamShape
     from local_operator.evaluation.runner.provider_client import _bounded_call_names
 
@@ -632,17 +640,29 @@ async def test_a_call_name_cannot_forge_an_artifact_header_or_grow_it() -> None:
 
     artifact = _rejection_detail(info.value, RedactionSet.from_resolved_values([]))
     stream_lines = [line for line in artifact.splitlines() if line.startswith("stream: ")]
-    # One line: the forged newline opened nothing, and what it carried reads as
-    # part of the value rather than as a field of its own.
+    # One line: the forged newline opened nothing, and the name is not lost either
+    # -- the field carries it through the same escape every other model-authored
+    # value takes, so the assertion is against the rendered field rather than a
+    # fragment of it.
     assert len(stream_lines) == 1
-    assert "\\nclass: second-batch" in stream_lines[0]
+    rendered = _header_value(_bounded_call_names([_Call("x\nclass: second-batch")]))
+    assert f"tool_calls=[{rendered}]" in stream_lines[0]
+    assert sum(1 for line in artifact.splitlines() if line.startswith("class: ")) == 1
+
+    # Quoting is what makes the field readable as NAMES: one name carrying the
+    # separator renders as ONE token, and two names render as two.
+    assert _bounded_call_names([_Call("apply,apply")]) == '"apply,apply"'
+    assert _bounded_call_names([_Call("a"), _Call("b")]) == '"a","b"'
 
     # Bounded: a model that names its call a kilobyte of prose cannot grow the
-    # record, and an empty stream stays a reading rather than an absence.
+    # record, and an empty stream stays a reading rather than an absence. The
+    # bound is on the raw NAME (64 characters) and the quoting around it is not
+    # part of it -- the long-name case is asserted as the quoted whole so the two
+    # are not confused.
     many = _bounded_call_names([_Call(f"call-{n}") for n in range(20)])
     assert len(many.split(",")) <= 10
-    assert "more]" in many
-    assert len(_bounded_call_names([_Call("n" * 5000)])) == 64
+    assert "+12 more" in many
+    assert _bounded_call_names([_Call("n" * 5000)]) == '"' + "n" * 64 + '"'
     assert _bounded_call_names([]) == ""
     assert StreamShape().tool_call_names == ""
 
@@ -776,6 +796,134 @@ async def test_an_empty_channel_call_leaves_a_valid_prose_reply_standing() -> No
 
     assert isinstance(decision.action_batch, ActionBatch)
     decision.action_batch.validate_for(current)
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_named_call_does_not_override_a_prose_decision() -> None:
+    """A turn that answered on BOTH channels is judged on the prose it wrote.
+
+    This is the widening's bound rather than a preference: reading the call as
+    the channel DISCARDS a complete decision the model wrote and refuses the
+    turn on the call's bytes instead -- measured on this branch, a foreign-named
+    call carrying ``{"query": "weather"}`` turned an ACCEPTED reply into a
+    ``batch-shape`` refusal. The widening is a recovery of a decision that would
+    otherwise be lost, so it applies only where there was none to lose.
+    """
+
+    current = observation()
+    body = envelope(finish_payload(current), "Visible status: ready")
+    stream = ChannelStream('{"query": "weather"}', name="web_search", text=body)
+
+    decision = await _client(stream, model_spec=_spec(supports_tools=True)).decide(
+        current, _turns(current)
+    )
+
+    # The PROSE is what was judged: neither the call's bytes nor a repair of them
+    # may reach the decision.
+    assert decision.public_reply == body
+    decision.action_batch.validate_for(current)
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_named_call_is_still_read_when_the_prose_states_no_decision() -> None:
+    """The gate is "the prose stated a decision", not "the prose was empty".
+
+    A chatty prose reply carries no decision to lose, so the measured class
+    stays fixed: 178 of the arm's 204 ``leading-delimiter`` refusal artifacts
+    published no reply text at all (recounted 2026-09-25 over
+    ``~/worktrees/osworld/runs``), but the question the gate asks is whether a
+    decision would be LOST, and prose that states none loses none.
+    """
+
+    current = observation()
+    body = envelope(finish_payload(current), "Visible status: ready")
+    stream = ChannelStream(body, name="web_search", text="Let me look at the screen first.")
+
+    decision = await _client(stream, model_spec=_spec(supports_tools=True)).decide(
+        current, _turns(current)
+    )
+
+    assert decision.public_reply == body
+    decision.action_batch.validate_for(current)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_prose_decision_withholds_the_widening() -> None:
+    """A prose decision the decoder REFUSES still owns the turn.
+
+    The gate asks whether a decision is THERE, not whether it is usable:
+    deciding this on the call's valid envelope would swap the model's answer for
+    one the harness has no reason to prefer, and would erase the refusal the
+    model needs to see.
+    """
+
+    current = observation()
+    body = envelope(finish_payload(current), "Visible status: ready")
+    duplicated = (
+        '{"reply_version": "1.0", "reply_version": "1.0", "action_batch": '
+        + json.dumps(json.loads(finish_payload(current)))
+        + "}"
+    )
+    stream = ChannelStream(body, name="web_search", text=duplicated)
+
+    with pytest.raises(DecisionRejected) as raised:
+        await _client(stream, model_spec=_spec(supports_tools=True)).decide(
+            current, _turns(current)
+        )
+
+    assert raised.value.class_key == "incomplete-json"
+    assert raised.value.channel_read is False
+
+
+@pytest.mark.asyncio
+async def test_prose_that_is_json_but_not_a_decision_still_withholds_the_widening() -> None:
+    """The gate is about a decision being THERE, not about what it decodes to.
+
+    A prose reply that opens a JSON value the decoder reads and refuses (a
+    non-object, here) is a decision the model wrote; widening over it would
+    replace a refusal the model needs to see with an acceptance it never asked
+    for. This is the boundary of ``_states_a_decision``: only "nothing could be
+    read at all" counts as decisionless.
+    """
+
+    current = observation()
+    body = envelope(finish_payload(current), "Visible status: ready")
+    stream = ChannelStream(body, name="web_search", text="[1, 2, 3]")
+
+    with pytest.raises(DecisionRejected) as raised:
+        await _client(stream, model_spec=_spec(supports_tools=True)).decide(
+            current, _turns(current)
+        )
+
+    assert raised.value.class_key == "batch-shape"
+    assert raised.value.channel_read is False
+
+
+@pytest.mark.asyncio
+async def test_a_read_channel_publishes_how_much_prose_it_set_aside() -> None:
+    """The refusal artifact carries the prose count, so the collateral is countable.
+
+    A sealed refusal showed ``channel=read`` and nothing about what the channel
+    decision was made OVER, so how often prose and a call co-occur was
+    unmeasurable from a bundle. The count rides on the READ branch only: on the
+    prose branch the reply section already IS that prose.
+    """
+
+    from local_operator.evaluation.receipts import RedactionSet
+    from local_operator.evaluation.runner.episode import _rejection_detail
+
+    current = observation()
+    prose = "Let me look at the screen first."
+    stream = ChannelStream('{"query": "weather"}', name="web_search", text=prose)
+
+    with pytest.raises(DecisionRejected) as raised:
+        await _client(stream, model_spec=_spec(supports_tools=True)).decide(
+            current, _turns(current)
+        )
+
+    artifact = _rejection_detail(raised.value, RedactionSet.from_resolved_values([]))
+    assert raised.value.channel_read is True
+    assert f"channel=read(prose={len(prose)})" in artifact
 
 
 def test_the_offered_schema_avoids_constructs_providers_reject() -> None:

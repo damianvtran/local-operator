@@ -2596,6 +2596,9 @@ def _rejection_detail(rejected: Any, redactions: RedactionSet | None) -> str:
         sections.append(f"class: {_header_value(class_key)}")
     shape = getattr(rejected, "stream_shape", None)
     if shape is not None:
+        channel = "read" if getattr(rejected, "channel_read", False) else "prose"
+        if channel == "read":
+            channel += f"(prose={getattr(rejected, 'channel_prose_chars', 0)})"
         # ``stripped_reply_markers`` is not a provider event count, and it rides
         # on this line anyway: the line is the artifact's one per-ATTEMPT record,
         # and the reader needs it beside the counts because it explains them.
@@ -2614,15 +2617,25 @@ def _rejection_detail(rejected: Any, redactions: RedactionSet | None) -> str:
             # that say how much arrived. The counts alone cannot separate the two
             # refusals that look identical in a bundle and are not: the model's
             # PROSE not beginning with '{', and a complete decision arriving as a
-            # tool call under a name the harness did not read. The second was 174
-            # of this arm's 199 ``leading-delimiter`` refusals, and nothing in the
+            # tool call under a name the harness did not read. The second was 178
+            # of this arm's 204 ``leading-delimiter`` refusals (recounted
+            # 2026-09-25 over ``~/worktrees/osworld/runs``), and nothing in the
             # artifact named the channel or the call, so the class was
             # undiagnosable without paying for the run again. ``channel=read``
             # states the harness read the tool-call channel; ``tool_calls=[...]``
             # is what the stream called its calls, empty when it carried none.
             # Both are model-authored text and go through ``_header_value`` for
             # the reason ``stop`` does: a name is not a line of its own.
-            f"channel={'read' if getattr(rejected, 'channel_read', False) else 'prose'} "
+            #
+            # ``prose=<n>`` rides on the ``read`` branch and is the count of
+            # CHARACTERS of prose that branch set aside (see
+            # ``channel_prose_chars``). It is what makes the widening's collateral
+            # countable: ``read(prose=0)`` is the silent reply the widening exists
+            # for, while a later arm can ask how often a turn answered on BOTH
+            # channels and had its prose dropped -- a fact a sealed bundle could
+            # not show at all while ``content_deltas`` was the only count beside
+            # it, because that counts stream events, not the text judged.
+            f"channel={channel} "
             f"tool_calls=[{_header_value(shape.tool_call_names)}] "
             f"stripped_reply_markers={getattr(rejected, 'stripped_reply_markers', 0)}"
         )
