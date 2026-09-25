@@ -213,14 +213,29 @@ _ADVICE_TOOLS = ("wait", "jobs", "wake")
 def _block_message(seconds: float, offered: frozenset[str] | None = None) -> str:
     """The refusal, stated so the model can act on it rather than guess.
 
-    Two constraints shape this text, both measured on the operator's failed-call
-    card rather than reasoned about:
+    Who can read this, stated as measured rather than as intended:
 
-    * every bullet LEADS with its actionable token, because that card paints
-      each advice line as ONE cropped row (94 cells at a 100-column frame, 74 at
-      80, 54 at 60, 44 at 50) and the unhedged copy put ``wait`` at cells 86-92
-      and the hatch variable at 57-90, i.e. cut the two most useful tokens
-      exactly on the frames operators run (design review D1);
+    * the MODEL always gets every line, uncropped — the refusal rides the tool
+      result verbatim;
+    * the operator sees the bullets on the failed-call card, whose advice rows
+      are painted as ONE cropped row each (91 cells at a 100-column frame, 72 at
+      80, 52 at 60, 41 at 50 — design review round 2's measure);
+    * the operator does NOT see them on this refusal's LIVE row: a plan-time
+      refusal settles on the not-run ending, whose reason is clipped at
+      ``NOT_RUN_REASON_MAX_CHARS`` (200) by the producer and whose row cannot
+      expand, so the live frame carries ``blocked: this c…`` at every width.
+      That is a pre-existing property of the not-run surface, not of this copy,
+      and it is recorded as a follow-up on the PR rather than fixed here — the
+      row is a ``ToolCard``/loop change (design review D6).
+
+    So the two constraints below shape the copy that the MODEL reads and that
+    the operator reads once the card is rebuilt (a resumed session, a child's
+    trajectory):
+
+    * every bullet LEADS with its actionable token, because such a card crops
+      each advice line at the widths above, and the unhedged copy put ``wait``
+      at cells 86-92 and the hatch variable at 57-90, i.e. cut the two most
+      useful tokens exactly on the frames operators run (design review D1);
     * bullets name ONLY tools the reader holds (``offered``), because the
       hedge-everything middle ground asks the reader to audit its own inventory:
       with none of the three it says so and leads with the hatch, the one bullet
@@ -244,18 +259,30 @@ def _block_message(seconds: float, offered: frozenset[str] | None = None) -> str
     if offered is not None and not offered.intersection(_ADVICE_TOOLS):
         return (
             f"{head}\n"
-            "This session offers no `wait`, `jobs` or `wake`, so there is nothing "
-            "here to hand the waiting to. Do one of:\n"
+            # Short on purpose: this line is the one place the copy speaks in
+            # prose where the others put `Do one of:`, and at 108 cells it
+            # painted as `…so there is nothing he…` with the bullets' lead-in
+            # swallowed at every width (design review D8). 33 cells fits the
+            # 41-cell painted lane at 50 columns — the suggested wording
+            # ("This session has no `wait`, `jobs` or `wake`.") measures 45 and
+            # would still lose its own full stop there, so it is shortened to the
+            # same claim. No sentence here is worth losing the lead-in.
+            "No `wait`, `jobs` or `wake` here.\n"
+            "Do one of:\n"
             f"{hatch};\n"
             "  - write the command so nothing waits: this call holds until the last "
             "long sleep in it ends, whatever else the session offers."
         )
     bullets = []
     if offered is None or "wait" in offered:
+        # `wait` leads, not `background: true`: with the other order the second
+        # token ended at cell 52 against a 52-cell painted lane at 60 columns, so
+        # it rendered as `` then `wait… `` — an unclosed token is not the remedy
+        # (design review D7).
         bullets.append(
-            "  - `background: true` on the long work, then `wait` on its job id — "
-            "it returns on the job settling, on a note arriving while it is parked, "
-            "or when the wait is cancelled (size `wait_ms` in ms)"
+            "  - `wait` on the job id of a `background: true` long work — it returns "
+            "on the job settling, on a note arriving while it is parked, or when the "
+            "wait is cancelled (size `wait_ms` in ms)"
         )
     if offered is None or "jobs" in offered:
         bullets.append(
