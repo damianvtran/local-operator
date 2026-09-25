@@ -198,10 +198,11 @@ async def test_spawned_worker_seals_a_verified_bundle(
         provider={"provider": "fake", "scripted_score": 1.0},
         interpreter=spawn_interpreter,
     )
-    # The completion gate is not this test's subject, and it spends one extra
-    # provider cycle on the first ``done`` — which a scripted client sized for
-    # exactly one reply per turn does not have. Name the arm so the test keeps
-    # its own subject (see tests/unit/evaluation/runner/test_completion_gate.py).
+    # Name the arm explicitly. The gate only fires for a client that implements
+    # ``CompletionChallenger``, so these scripted clients cannot trigger it today
+    # — but this test drives an episode to a ``done``, and saying which arm it
+    # runs on keeps its subject its own if that coupling ever changes. The gate's
+    # own tests live in tests/unit/evaluation/runner/test_completion_gate.py.
     config = spawn_helpers.spawn_config(tmp_path, completion_gate=False)
 
     runner = EpisodeRunner(
@@ -275,7 +276,7 @@ async def test_spawned_worker_reports_a_partial_score(
     )
     runner = EpisodeRunner(
         _spec_for_spawn(episode_id),
-        spawn_helpers.spawn_config(tmp_path),
+        spawn_helpers.spawn_config(tmp_path, completion_gate=False),
         selector=selector,
         model=ScriptedModel(["finish"]),
         launch=AdapterSupervisor.launch,
@@ -424,10 +425,11 @@ async def test_real_wheel_simulator_answer_enters_public_artifact_and_next_reque
         provider={"provider": "fake", "has_user_simulator": True},
         interpreter=spawn_interpreter,
     )
-    # The completion gate is not this test's subject, and it spends one extra
-    # provider cycle on the first ``done`` — which a scripted client sized for
-    # exactly one reply per turn does not have. Name the arm so the test keeps
-    # its own subject (see tests/unit/evaluation/runner/test_completion_gate.py).
+    # Name the arm explicitly. The gate only fires for a client that implements
+    # ``CompletionChallenger``, so these scripted clients cannot trigger it today
+    # — but this test drives an episode to a ``done``, and saying which arm it
+    # runs on keeps its subject its own if that coupling ever changes. The gate's
+    # own tests live in tests/unit/evaluation/runner/test_completion_gate.py.
     config = spawn_helpers.spawn_config(tmp_path, completion_gate=False)
     model, stream = _offline_ask_client(config.artifact_root)
     outcome = await EpisodeRunner(
