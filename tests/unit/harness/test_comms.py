@@ -23,7 +23,10 @@ import pytest
 
 from local_operator.harness import comms as comms_module
 from local_operator.harness.comms import SubagentComms, extract_parent_message
-from local_operator.harness.message_types import HUB_MESSAGE_TYPE
+from local_operator.harness.message_types import (
+    HUB_MESSAGE_TYPE,
+    SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
+)
 from local_operator.harness.subagent import MCP_DENIED_ATTR
 from local_operator.harness.types import (
     AgentEvent,
@@ -2888,6 +2891,38 @@ def test_an_explicit_range_cannot_bypass_the_step_ceiling():
     # The clamp keeps the requested HEAD and pages forward from there.
     lo, hi, _error = _resolve_peek_range(200, start=100, end=200, steps=None)
     assert (lo, hi) == (100, 100 + PEEK_MAX_STEPS - 1)
+
+
+@pytest.mark.asyncio
+async def test_the_credential_redaction_row_peeks_with_a_human_heading(tmp_path):
+    """Agent review round 1 (F1-3): the peek view must not print a wire type.
+
+    ``_render_custom_step``'s generic arm uses the raw ``custom_type`` as the
+    step heading, which for this record read as
+    ``system / session_credential_redaction / …`` beside neighbours that all
+    carry a human phrase. The MCP types also ride that arm, but this record
+    lands in a peek far more often and is the one the operator is meant to
+    READ, so it gets the phrase the live receipt already uses. The body is
+    unchanged — only the heading.
+
+    Driven through a REAL transcript row (append, then render the steps the peek
+    builds from the entries) rather than a hand-built payload dict, so a drift
+    in ``encode_message_payload`` or in the entry shape fails here too.
+    """
+    from local_operator.harness.comms import _render_transcript_steps
+
+    transcript = Transcript(tmp_path / "child")
+    await transcript.append_message(
+        CustomMessage(
+            custom_type=SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
+            attribution="system",
+            details={"text": "[credential redaction] rotate it — a token reached bash"},
+        )
+    )
+    steps = _render_transcript_steps(transcript.entries())
+    assert [step.heading for step in steps] == ["credential masked"]
+    assert SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE not in steps[0].heading
+    assert "rotate it" in steps[0].body
 
 
 def test_hub_peek_and_list_are_read_tier_while_control_stays_write():

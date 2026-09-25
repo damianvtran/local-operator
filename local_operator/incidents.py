@@ -16,14 +16,21 @@ substring rules over the error text, ordered most-specific first, because
 the texts come from every provider's error envelope and no taxonomy covers
 them all. Unknown is a valid answer — the raw text always rides along.
 
-It also carries the formatters for the other model-visible session records
+It also carries the formatters for the other session records
 that are NOT classified failures — a credential change, a model switch, an MCP
-recovery, and an MCP server becoming unavailable. Each has its own custom type
+recovery, an MCP server becoming unavailable, and the credential-shape notice.
+Each has its own custom type
 and its own formatter for the same reason: running them through
 :func:`classify_incident` would attach a failure category and a "this is why the
-previous turn ended" tail to a message that is not about a failure at all.
+previous turn ended" tail to a message that is not about a failure at all. Their
+SURFACES differ too, and in the direction that matters here: the first four are
+model-visible by design, while the credential-shape notice is
+OPERATOR-only — its type is excluded from the renderer's allow-list, because the
+value it names was masked out of the text the model received and the notice
+carried nothing the model could act on (see
+:data:`~local_operator.harness.message_types.SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE`).
 
-The MARKERS those five records carry are no longer defined here. They moved to
+The MARKERS those six records carry are no longer defined here. They moved to
 :mod:`local_operator.harness.message_types`, the one neutral home that a
 surface barred from importing this module can reach: the shared renderer
 (``harness/render.py``) has to recognise a ``session_incident`` to replay it,
@@ -1074,15 +1081,24 @@ def format_shape_incident_message(
     *,
     reached_model: bool = True,
 ) -> str:
-    """Render the credential-SHAPE notice injected into the model's context.
+    """Render the credential-SHAPE notice for the OPERATOR's surfaces.
+
+    NOT injected into the model's context — the docstring used to say it was, and
+    that sentence is corrected here rather than deleted because the correction is
+    the change: on 2026-09-24 this text moved off ``session_incident`` onto
+    :data:`~local_operator.harness.message_types.SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE`,
+    which ``harness/render.py`` excludes, so the notice reaches the transcript and
+    the live operator receipt and stops there. Measured before it: 1,493 unnamed
+    notices across 1,080 sessions were injected as user turns, telling the model
+    about a value the guard had already masked out of the text it received.
 
     The counterpart to the shape pass in :mod:`local_operator.redaction_shapes`,
     and the reason it is its own formatter rather than a
     :func:`classify_incident` category: nothing FAILED. A tool carried a
     credential in a shape the table recognises, the harness handled it, and the
-    jobs this text has are to say what happened (so the model does not reason
-    about a value it cannot see, or re-run the command hoping for a different
-    result) and to make the event visible to the operator.
+    job this text has is to make the event visible to the operator — who is the
+    only reader who can act on it (rotate the credential, delete a plaintext
+    copy).
 
     **Two classifications, and only one of them is an emergency.**
 

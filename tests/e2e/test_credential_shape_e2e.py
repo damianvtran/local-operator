@@ -142,10 +142,11 @@ async def test_a_real_command_that_prints_a_dsn_never_reaches_the_model(
     notices = [e for e in events if isinstance(e, NoticeEvent)]
     assert not notices, [notice.text for notice in notices]
 
-    # 2. The transcript on disk: the persistence surface, and no incident row.
+    # 2. The transcript on disk: the persistence surface, and no notice row.
     body = _transcript_text(directory)
     assert SENTINEL_PW not in body, "the credential reached transcript.jsonl"
     assert "session_incident" not in body, "a contained value filed an incident"
+    assert "session_credential_redaction" not in body, "a contained value filed a notice"
 
     # 3. The instrument is not dead. The mask really was written into the
     #    transcript, so the absence above cannot be a session that never ran the
@@ -260,8 +261,8 @@ async def test_an_output_only_credential_files_nothing_when_it_is_masked_whole(
     body = (directory / "transcript.jsonl").read_text()
     assert SENTINEL_PW not in body, "the output-only credential reached the transcript"
     assert REDACTION_MARKER in body, "the mask did not happen at all"
-    rows = [line for line in body.splitlines() if "session_incident" in line]
-    assert not rows, "a contained output-only credential filed an incident"
+    rows = [line for line in body.splitlines() if "session_credential_redaction" in line]
+    assert not rows, "a contained output-only credential filed a notice"
     notices = [event for event in events if isinstance(event, NoticeEvent)]
     assert not notices, "a contained output-only credential produced a live notice"
 
@@ -307,12 +308,23 @@ async def test_an_output_only_EXPOSURE_still_files_its_incident(
         await dispose_quietly(session)
 
     body = (directory / "transcript.jsonl").read_text()
-    rows = [line for line in body.splitlines() if "session_incident" in line]
-    assert rows, "an output-only exposure filed no incident row"
+    rows = [line for line in body.splitlines() if "session_credential_redaction" in line]
+    assert rows, "an output-only exposure filed no notice row"
     notices = [event for event in events if isinstance(event, NoticeEvent)]
     assert notices, "an output-only exposure produced no live notice"
     assert notices[0].kind == "warning"
     assert "rotate" in notices[0].text, notices[0].text
+
+    # THE MODEL MUST NOT SEE IT, and this is the real-command half of the
+    # operator's instruction: the notice is the OPERATOR's ticket, and the value
+    # it names was masked out of the text the model reads on the next turn. The
+    # request the provider was handed is the strongest reading of "model-visible"
+    # (after the production converter), so a notice surviving in the next turn's
+    # context shows up here. Measured before this change: 1,493 unnamed notices
+    # across 1,080 sessions rode exactly this path into the model's context.
+    seen = _provider_saw(stream)
+    assert "[credential redaction]" not in seen, "the notice reached the model"
+    assert "rotate it" not in seen, "the notice reached the model"
 
 
 @pytest.mark.e2e
@@ -387,6 +399,9 @@ async def test_the_publish_script_an_agent_authors_reaches_the_model_readable(
 
     # 4. A whole mask is the contained case, so nothing is indicated and nothing is
     #    demanded: the failure this pins cost no incident, which is why only the
-    #    workflow found it.
+    #    workflow found it. Both spellings are asserted because BOTH records now
+    #    carry their own type: ``session_incident`` covers a real failed turn and
+    #    ``session_credential_redaction`` covers the shape notice that left it.
     assert not [event for event in events if isinstance(event, NoticeEvent)]
     assert "session_incident" not in body
+    assert "session_credential_redaction" not in body

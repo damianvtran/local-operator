@@ -3,8 +3,9 @@
 WHY THIS MODULE EXISTS
 ----------------------
 Every renderer that turns a transcript into an LLM-visible message list has to
-recognise the same handful of ``CustomMessage.custom_type`` markers: the five
-session records (``session_incident`` and its four siblings), a peer
+recognise the same handful of ``CustomMessage.custom_type`` markers: the six
+session records (``session_incident``, its four siblings, and the
+credential-redaction record added 2026-09-24), a peer
 delivery, a hub delivery, and a todo reminder. Each one used to be defined
 beside the subsystem that OWNS it — ``local_operator.incidents``,
 ``local_operator.session.peer``, ``local_operator.tools.builtin`` and
@@ -23,6 +24,17 @@ imports ``session.peer`` and ``session.transcript`` at module level for its own
 transcript-replay work. Moving six of the seven would still have leaked those
 8 through that one remaining import.
 
+One consequence of that rule arrived later and is worth naming here, because the
+marker it concerns is the one this module's allow-list argument does NOT apply
+to: ``SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE`` is the only marker here that a
+renderer recognises in order to DROP rather than render. It lives here for the
+same reason every other marker does — the renderer must be able to name it,
+because a marker it cannot name is one it silently treats as bookkeeping, which
+is not a decision worth leaving implicit. A marker whose home is this module does
+not thereby become model-visible: membership of the tuple in ``harness/render.py``
+is what decides that, and the note beside that tuple states why this one is out.
+Nothing added to this module is injected by default.
+
 WHY THE HARNESS PACKAGE
 -----------------------
 The home has to be importable by BOTH sides, which rules out every module that
@@ -30,7 +42,7 @@ owns one of these markers or lives in the owning package: ``local_operator.sessi
 and ``local_operator.tools`` are barred for a runner by that same denylist, so a
 marker left in either keeps ``harness/render.py`` unimportable and the hoist
 pointless. The harness is the layer both sides already share — the deliberately
-shared one, and the one the denylist allows — so these eight markers live here:
+shared one, and the one the denylist allows — so these nine markers live here:
 one definition each, imported by its owner rather than defined next to it.
 
 WHEN A MARKER BELONGS HERE, AND WHEN IT DOES NOT
@@ -60,8 +72,8 @@ Two consequences for whoever adds the next marker:
 does not clean the module, and the next marker added beside that owner
 re-opens the hole for every renderer that names it, quietly.
 * **A same-family marker living elsewhere is not an inconsistency** until its
-owner leaks. The invariant worth checking is therefore not "every marker is
-here" but "every module the renderer imports has a clean closure" — which is
+  owner leaks. The invariant worth checking is therefore not "every marker is
+  here" but "every module the renderer imports has a clean closure" — which is
 what ``tests/unit/evaluation/runner/test_isolation.py`` asserts, and why that
 assertion rather than a grep is the guard.
 
@@ -78,7 +90,7 @@ VALUES ARE WIRE FORMAT
 ----------------------
 These are marker strings persisted into transcripts and compared by equality
 across the session, the TUI, the phone projection and a resumed replay, and the
-``session_incident`` value is additionally pinned against a literal inside
+``SESSION_INCIDENT_MESSAGE_TYPE`` is additionally pinned against a literal inside
 ``local_operator.resume`` (which spells it out to keep its own import list
 empty). Each value below is byte-identical to the one its old home defined.
 Changing a character of one is a compatibility break — a resumed session, a
@@ -90,6 +102,66 @@ a rename.
 #: the shared renderer (``harness/render.py``) so both a live next-turn and a
 #: resumed replay see the same incident.
 SESSION_INCIDENT_MESSAGE_TYPE = "session_incident"
+
+#: Custom-message type journaled by the session when the credential-shape guard
+#: masked readable material that reached a tool result.
+#:
+#: DEDICATED, and deliberately NEVER rendered into the model's context — this is
+#: the one marker whose absence from ``harness/render.py``'s allow-list is the
+#: feature rather than an oversight. It rode ``SESSION_INCIDENT_MESSAGE_TYPE``
+#: until now, and that put a detection notice in front of the model: measured on
+#: this machine at the time of the change, **1,493 unnamed notices across 1,080
+#: sessions**, plus the named ones, every one of them injected as a user turn.
+#:
+#: WHY IT MUST NOT REACH THE MODEL. The notice is OPERATOR-facing, and the
+#: operator is the only reader who can act on it (rotate the credential, delete a
+#: plaintext copy). To the model it carries nothing actionable: the value it
+#: names was masked out of the text the model received, so the model never held
+#: it, cannot rotate it, and — because the guard's own false positives are
+#: well-documented in this tree (a usage COUNTER, a Bedrock cost-tracking line, a
+#: DSN whose username is its password) — was frequently told about a value that
+#: had not been leaked at all. Agents and their subagents ended turns to
+#: investigate notices that reported a leak which had not happened. The churn is
+#: the defect; the masking and the containment the notice reports are untouched.
+#:
+#: So it is NOT an ``Incident``: nothing FAILED, no turn died, and the same
+#: argument that made the MCP-unavailable and MCP-recovery records dedicated
+#: types (see :data:`SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE`) applies with more
+#: force here. What is different is the SURFACE, not the severity: where an
+#: incident is model-visible by design and an MCP warning is model-visible by
+#: design, this record is operator-only — which is why the renderer's allow-list
+#: excludes it (see ``harness/render.py``, and the comment there that says the
+#: exclusion is load-bearing).
+#:
+#: PERSISTED, like an incident and unlike a credential announcement: the
+#: transcript row is the operator's durable ticket, and the value stays contained
+#: across a resume because the store re-registers it from the transcript's own
+#: redaction. Replay of the row is therefore also a DISPLAY path, never a
+#: context path — see ``Session._flush_shape_incidents``. In this repo the row
+#: is surfaced by ``tui/session_presentation.py`` (its own ``NoticeBlock``
+#: branch, ``warning`` ink, unchanged text) and by ``harness/comms.py``'s peek
+#: view.
+#:
+#: THE CONSUMER THAT DOES NOT KNOW THIS LITERAL, AND THE CONSEQUENCE, ACCEPTED.
+#: The persisted ``custom_type`` is read back outside this repo, by the desktop
+#: app: ``local-operator-ui``,
+#: ``src/renderer/src/features/chat/canonical/transcript-reducer.ts``. Its
+#: ``customRow()`` branches on the literal ``"session_incident"`` and its
+#: ``INLINE_CUSTOM_TYPES`` set does not name this type, so a persisted row of
+#: THIS type takes the generic ``relayRow(text)`` arm and paints at
+#: ``level: "info"`` where it used to take ``incidentRow(text, details)`` at
+#: ``level: "error"``. That is a decided consequence, not an oversight: the row
+#: STILL RENDERS ITS FULL TEXT (it is a different arm, not an unrendered row),
+#: and a credential-shape notice that presents quietly rather than as an
+#: incident is what this change is FOR — the operator asked to stop these
+#: notices reading as failures. Keeping the persisted type as
+#: ``session_incident`` and discriminating at the render seam instead was
+#: rejected: a per-record opt-out flag is a wider mechanism than a record that
+#: simply is not an incident. A future reader who finds the reducer arm should
+#: expect the mismatch and change the reducer deliberately (add the type to its
+#: inline set and choose its ink) rather than "restore" the incident literal
+#: here, which would re-inject the notice into the model's context.
+SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE = "session_credential_redaction"
 
 #: Custom-message type journaled by the session when a session credential is
 #: stored or forgotten mid-conversation. The ONLY other advertisement of a
