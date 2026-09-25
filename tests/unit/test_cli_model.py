@@ -69,6 +69,8 @@ async def test_a_name_and_a_model_switch_the_peer(no_self, capsys) -> None:
             "its next turn runs on it",
             f"→ experiment one (pid {alias.pid})",
         ]
+        # NIT-1: a healthy switch prints nothing extra — no waiting line.
+        assert out.err == ""
     finally:
         runtime.close()
 
@@ -277,9 +279,71 @@ async def test_a_slow_target_is_announced_on_stderr_while_it_is_waited_for(
         out = capsys.readouterr()
         assert rc == 0, out.err
         assert out.err.strip().splitlines() == [
-            f"waiting for experiment one (pid {alias.pid}) to answer… (up to 15s)"
+            f"no answer yet from experiment one (pid {alias.pid})…"
         ]
         assert "waiting" not in out.out
         assert out.out.startswith("switched to deepseek/deepseek-flash")
     finally:
         runtime.close()
+
+
+def test_the_waiting_line_promises_no_total_and_fits_60_columns() -> None:
+    """MINOR-3: the ack deadline is an idle bound the target's pushes reset, so
+    the line quotes no total. D13: one row at 60 columns for a 25-char name."""
+    from types import SimpleNamespace
+
+    from local_operator.mobile.peer_send import waiting_for_switch_detail
+
+    record = SimpleNamespace(conversation_name="n" * 25, session_id="s", pid=4194304)
+    line = waiting_for_switch_detail(record)
+    assert "up to" not in line and "15" not in line, line
+    assert len(line) <= 60, (len(line), line)
+
+
+@pytest.mark.parametrize("command", ["model", "send"])
+def test_ctrl_c_while_waiting_is_one_honest_line_not_a_traceback(
+    command, no_self, monkeypatch, capsys
+) -> None:
+    """U1: Ctrl-C during the wait stops the WAIT, not an op that may already be
+    written. Exit 130 with one line saying it may still land."""
+    from local_operator.cli import send_command
+
+    record = registry.SessionRecord(
+        pid=os.getppid(),
+        kind="tui",
+        session_id="ctrlc-session",
+        conversation_name="experiment one",
+        cwd="/tmp",
+        model_label="test/model",
+        control_port=1,
+        control_key="k",
+        started=True,
+    )
+
+    def interrupted(coro):  # noqa: ANN001, ANN202
+        coro.close()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("asyncio.run", interrupted)
+    if command == "model":
+        monkeypatch.setattr(
+            "local_operator.mobile.peer_send.resolve_switch_target",
+            lambda **_k: (record, [], ""),
+        )
+        argv = ["model", "experiment", "deepseek/deepseek-flash"]
+        needle = "interrupted — the switch may or may not have landed"
+    else:
+        monkeypatch.setattr(
+            "local_operator.cli._resolve_peer_target", lambda *_a, **_k: (record, [], "")
+        )
+        argv = ["send", "experiment", "hello"]
+        needle = "interrupted — delivery is UNCONFIRMED"
+    handler = model_command if command == "model" else send_command
+    try:
+        rc = handler(build_cli_parser().parse_args(argv))
+    except KeyboardInterrupt:
+        # Caught HERE so a regression fails this test instead of aborting the run.
+        pytest.fail("Ctrl-C escaped as a traceback")
+    err = capsys.readouterr().err
+    assert rc == 130
+    assert needle in err and "Traceback" not in err, err

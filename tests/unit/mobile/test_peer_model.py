@@ -204,8 +204,13 @@ def test_the_back_on_receipt_fits_an_expanded_card_at_80_columns() -> None:
 def test_a_pending_reclaim_card_names_the_fallback_it_is_on() -> None:
     """N6: a pending re-selection of the displaced model is on the FALLBACK until
     it applies, not on the model it asked for."""
-    assert peer_model.pending_audit_body("a/x", "a/x", {}, dropped_fallback="b/y") == (
+    assert peer_model.pending_audit_body("a/x", "a/x", {}, fallback="b/y") == (
         "[remote model switch] switch back to a/x requested (on fallback b/y until it applies)"
+    )
+    # MINOR-1: a pending switch to ANY other model while pinned is on the
+    # fallback too, not on the displaced selection.
+    assert peer_model.pending_audit_body("a/x", "c/z", {}, fallback="b/y") == (
+        "[remote model switch] switch to c/z requested (on fallback b/y until it applies)"
     )
     assert peer_model.pending_audit_body("a/x", "c/z", {}) == (
         "[remote model switch] switch to c/z requested (on a/x until it applies)"
@@ -310,6 +315,21 @@ async def test_serving_refusal_mutates_nothing(monkeypatch) -> None:
     with pytest.raises(ValueError) as caught:
         await handle.receive_peer_model("nosuchprov", "x", sender={})
     assert str(caught.value) == "refused: 'nosuchprov' is not a known provider; still on test/mock"
+    assert applied == [] and cards == []
+
+
+@pytest.mark.asyncio
+async def test_serving_validation_refusal_names_whose_fallback_it_is_on(monkeypatch) -> None:
+    """NIT-5's validation arm on the serving host (review r1, MINOR-2)."""
+    handle, session, applied, cards = _pinned(
+        monkeypatch, selected="anthropic/claude-opus-5", fallback="deepseek/deepseek-flash"
+    )
+    with pytest.raises(ValueError) as caught:
+        await handle.receive_peer_model("nosuchprov", "x", sender={})
+    assert str(caught.value) == (
+        "refused: 'nosuchprov' is not a known provider; still on "
+        "deepseek/deepseek-flash (fallback for anthropic/claude-opus-5)"
+    )
     assert applied == [] and cards == []
 
 

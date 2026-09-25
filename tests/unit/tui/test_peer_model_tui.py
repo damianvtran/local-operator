@@ -304,9 +304,11 @@ async def test_a_tui_pending_local_switch_onto_the_pinned_fallback_stays_pending
             monkeypatch.setattr(app, "_run_slash_command", pending_only)
             detail = await handle.receive_peer_model("deepseek", "deepseek-flash", sender={})
             assert detail.startswith("pending: "), detail
+            # MINOR-1: until it applies the session is on the FALLBACK, not on the
+            # selection the fallback displaced, and the card names what serves.
             assert [text for text, _ in session.peer_cards] == [
                 "[remote model switch] switch to deepseek/deepseek-flash requested (on "
-                "anthropic/claude-opus-5 until it applies)"
+                "fallback deepseek/deepseek-flash until it applies)"
             ]
     finally:
         app._model_activation_pending = None
@@ -335,6 +337,28 @@ async def test_a_tui_pending_reclaim_card_says_it_is_on_the_fallback(tmp_path, m
             ]
     finally:
         app._model_activation_pending = None
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_tui_validation_refusal_names_whose_fallback_it_is_on(
+    tmp_path, monkeypatch
+) -> None:
+    """NIT-5's validation arm on the TUI host (review r1, MINOR-2): a pair refused
+    before anything ran still says which selection the serving fallback stands in for."""
+    session = _FallbackSession()
+    app, store = await _app(session, tmp_path, monkeypatch)
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            handle = await _handle(app, pilot)
+            with pytest.raises(ValueError) as caught:
+                await handle.receive_peer_model("deepseek", "not-a-model", sender={})
+            assert str(caught.value) == (
+                "refused: 'not-a-model' is not a model deepseek serves; still on "
+                "deepseek/deepseek-flash (fallback for anthropic/claude-opus-5)"
+            )
+            assert session.applied == [] and session.peer_cards == []
+    finally:
         store.close()
 
 
