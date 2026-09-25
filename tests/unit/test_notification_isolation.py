@@ -26,9 +26,18 @@ The last two tests are the drift guards: one sweeps every child-environment
 builder under ``tests/e2e/`` and ``scripts/`` for the gate, and one asserts the
 test tree and the script tree declare the same switch names.
 
-NOT COVERED HERE, deliberately: ad-hoc rigs written outside this repository.
-They cannot be reached by any test, which is why the load-bearing part of the
-fix is the product gate rather than the harness ones.
+THOSE TWO ARE DECLARATIONS, which is why they could not stop the SECOND
+incident (2026-09-24): a QA rig driving REAL sessions under ``env -i HOME=…``
+posted a banner every nine seconds, carrying its own synthetic tape text
+("Reply 1" / "reply 0"). It exported no switch — ``env -i`` is exactly what
+declares nothing — and it adopted no mock, so both gates answered "not a test
+process". Good rigs are still gated at their launcher, but the load-bearing
+part is now a third property, pinned in the section at the end of this file:
+**an OS toast is posted only by the user's OWN process**, decided from the
+passwd database rather than from the environment, because a notification is
+attributed by bundle identity and therefore cannot be isolated by a redirected
+path the way the store, the logs and the cache are. That gate is what reaches
+an ad-hoc rig written outside this repository, which no sweep here can find.
 """
 
 from __future__ import annotations
@@ -37,7 +46,9 @@ import ast
 import json
 import os
 import re
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -808,3 +819,312 @@ def test_the_capture_sandbox_turns_every_gate_on(monkeypatch: pytest.MonkeyPatch
         assert os.environ[name] == "1", name
     # HOME comes with it, which is the rest of the sandbox.
     assert "lop-visual-" in os.environ["HOME"]
+
+
+# ---------------------------------------------------------------------------
+# The third gate: whose desktop is this?
+# ---------------------------------------------------------------------------
+#
+# The gates above are DECLARATIONS — a process exports the switch, or it adopts
+# the mock wire — so a rig that does neither is invisible to both, and ``env -i``
+# (the isolation recipe this project prescribes, and what a rig that boots real
+# sessions actually runs) is precisely what makes the first one invisible. This
+# gate is not a declaration: it is asked of the passwd database, which a
+# redirected environment cannot answer on someone else's behalf.
+
+
+def test_a_redirected_home_refuses_the_os_toast(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The 2026-09-24 rig, reproduced: a real session under a throwaway HOME.
+
+    WHY THE PRODUCT HAS TO REFUSE, rather than the rig declaring itself. The
+    rig that reached the operator's desktop posted a banner roughly every nine
+    seconds — its drop-matrix runs drive a real session with a parked approval,
+    and the gate path announces one — while exporting nothing and adopting no
+    mock. Nothing in the harness could see it, and a rule the rig has to
+    remember is a rule the next rig forgets.
+
+    WHY ``HOME`` IS THE TELL, and not the config dir. A toast is attributed by
+    BUNDLE IDENTITY, which is the user's, so a bundle built inside a throwaway
+    home still delivers as ``me.damiantran.localoperator`` to the operator's one
+    real Notification Centre: the redirection that isolates the store, the logs
+    and the cache cannot isolate this. And the config dir is deliberately NOT
+    the signal — relocating it is a documented configuration whose user is still
+    the user.
+
+    The refusal is asserted with every route made AVAILABLE and the kill switch
+    off, so the only thing that can be doing the refusing is this gate: a
+    predicate that answered True here would spawn, and one that did nothing at
+    all would fail the control arm below.
+    """
+    from local_operator.tui import notify
+
+    monkeypatch.delenv(ENV_DISABLE, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "iso"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "iso"))
+    spawned: list[list[str]] = []
+
+    def spawn(argv: list[str]) -> bool:
+        spawned.append(argv)
+        return True
+
+    monkeypatch.setattr(notify, "_spawn_detached_ok", spawn)
+    monkeypatch.setattr(notify, "_identity_notifier", lambda *args, **kwargs: ["/fake/identity"])
+    monkeypatch.setattr(notify, "shutil", SimpleNamespace(which=lambda name: f"/usr/bin/{name}"))
+
+    assert notify.notifications_enabled() is True, "the kill switch must be off in this arm"
+    assert notify.desktop_belongs_to_this_process() is False
+    assert notify.detached_notify("Reply 1", "reply 0", session_id="abc123def456") is False
+    assert spawned == []
+
+
+def test_the_users_own_home_still_reaches_the_desktop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The control arm: the gate must not silence a real user's toasts.
+
+    Without this, a predicate that answered False unconditionally would pass the
+    test above and take the feature away. The passwd answer is pinned to agree
+    with ``$HOME`` (which is what a real interactive session looks like) and the
+    routes are then driven for real, so what is asserted is delivery, not the
+    shape of an argv.
+    """
+    from local_operator.tui import notify
+
+    monkeypatch.delenv(ENV_DISABLE, raising=False)
+    monkeypatch.setattr("local_operator.supervisors.real_home", lambda: Path.home().resolve())
+    spawned: list[list[str]] = []
+
+    def spawn(argv: list[str]) -> bool:
+        spawned.append(argv)
+        return True
+
+    monkeypatch.setattr(notify, "_spawn_detached_ok", spawn)
+    monkeypatch.setattr(notify, "_identity_notifier", lambda *args, **kwargs: None)
+    monkeypatch.setattr(notify, "shutil", SimpleNamespace(which=lambda name: f"/usr/bin/{name}"))
+
+    assert notify.desktop_belongs_to_this_process() is True
+    assert notify.detached_notify("Session", "Task complete") is True
+    assert len(spawned) == 1, spawned
+    if sys.platform == "darwin":
+        # `osascript` is spawned by NAME (it is on PATH); the D-Bus leg carries
+        # the path `which` resolved, which is the argv shape each backend wants.
+        assert spawned[0][0] == "osascript", spawned
+    else:
+        assert spawned[0][0].endswith("notify-send"), spawned
+
+
+def test_the_gate_asks_the_passwd_database_not_the_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """One environment, two answers — so the DECIDING input is the passwd one.
+
+    That is the whole reason a redirected rig cannot opt itself back in: it owns
+    ``$HOME`` and every variable beside it, and none of them is what this gate
+    reads. The agreeing arm is the inverse of the incident's, which is what makes
+    this a discriminator rather than a restatement.
+    """
+    from local_operator.tui import notify
+
+    home = tmp_path / "iso"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    monkeypatch.setattr("local_operator.supervisors.real_home", lambda: home.resolve())
+    assert notify.desktop_belongs_to_this_process() is True
+
+    monkeypatch.setattr(
+        "local_operator.supervisors.real_home", lambda: (tmp_path / "other").resolve()
+    )
+    assert notify.desktop_belongs_to_this_process() is False
+
+
+def test_an_undeterminable_home_fails_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No passwd database is not evidence of a rig, so it is not a refusal.
+
+    Failing closed here would take toasts away on a platform we merely cannot
+    interrogate, and every platform that CAN post a toast is one with a passwd
+    entry. Stated as a test rather than left to a reader of the ``try``.
+    """
+    from local_operator.tui import notify
+
+    monkeypatch.setattr("local_operator.supervisors.real_home", lambda: None)
+
+    assert notify.desktop_belongs_to_this_process() is True
+
+
+def test_the_dbus_leg_carries_the_same_gate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The Linux fallback is an OS surface too, and it is the one that would
+    otherwise survive: the two in-band legs write into THIS process's terminal —
+    a pty the rig owns — while ``notify-send`` reaches the session bus, which
+    belongs to the user and not to the run.
+
+    Both arms are driven through ``Notifier.send``, which is the door the TUI
+    uses: the refused arm must keep its BEL (the in-band nudge is still the
+    rig's own business) and spawn nothing, and the control arm must spawn the
+    toast. Asserting only the refusal would pass if the fallback were broken
+    outright.
+    """
+    from local_operator.tui import notify
+
+    bus = {"DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/bus", "TERM": "xterm"}
+    spawned: list[list[str]] = []
+    monkeypatch.delenv(ENV_DISABLE, raising=False)
+    monkeypatch.setattr(notify, "settings_get", lambda key, default: default)
+    monkeypatch.setattr(notify, "_spawn_detached", spawned.append)
+    monkeypatch.setattr(notify, "shutil", SimpleNamespace(which=lambda name: f"/usr/bin/{name}"))
+
+    def arm(home: Path) -> Any:
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        sink: list[str] = []
+        notifier = notify.Notifier(sink.append, env=bus, platform="linux")
+        notifier.set_focused(False)
+        return notifier, sink
+
+    notifier, sink = arm(tmp_path / "iso")
+    monkeypatch.setattr("local_operator.supervisors.real_home", lambda: Path.home().resolve())
+    assert notifier.send("complete") is True
+    assert spawned and spawned[0][0] == "/usr/bin/notify-send", spawned
+
+    spawned.clear()
+    notifier, sink = arm(tmp_path / "iso")
+    monkeypatch.setattr(
+        "local_operator.supervisors.real_home", lambda: (tmp_path / "elsewhere").resolve()
+    )
+    assert notifier.send("complete") is True
+    assert spawned == []
+    assert notify.BEL in "".join(sink), "the in-band nudge is the rig's own terminal"
+
+
+def test_a_redirected_home_refuses_the_cmux_toast(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The third leg, and the one whose marker is INHERITED rather than owned.
+
+    ``cmux notify`` does not write into this process's terminal — it spawns the
+    cmux binary, which raises the toast in the surface ``CMUX_SURFACE_ID`` merely
+    NAMES. That id arrives by inheritance, which is exactly how an inherited
+    ``CMUX_WORKSPACE_ID`` once let headless tests rename the operator's real
+    workspaces, and a rig that redirects ``HOME`` without ``env -i`` keeps every
+    ``CMUX_*`` variable — so the marker is present in precisely the runs that
+    must not use it. The control arm proves the leg still fires for a real run,
+    and that the refusal fell through to the IN-BAND write rather than dropping
+    the notification entirely: a run still gets told, on the surface it owns.
+    """
+    from local_operator.tui import notify
+
+    surface = "773d5e5e-1111-4222-8333-444455556666"
+    env = {
+        "GHOSTTY_RESOURCES_DIR": "/Applications/Ghostty.app/Contents/Resources",
+        "CMUX_SURFACE_ID": surface,
+    }
+    spawned: list[list[str]] = []
+    monkeypatch.delenv(ENV_DISABLE, raising=False)
+    monkeypatch.setattr(notify, "settings_get", lambda key, default: default)
+    monkeypatch.setattr(notify, "_spawn_detached", spawned.append)
+
+    def arm(home: Path) -> Any:
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        sink: list[str] = []
+        notifier = notify.Notifier(sink.append, env=env)
+        notifier.set_focused(False)
+        return notifier, sink
+
+    notifier, sink = arm(tmp_path / "iso")
+    monkeypatch.setattr("local_operator.supervisors.real_home", lambda: Path.home().resolve())
+    assert notifier.send("complete") is True
+    assert spawned and spawned[0][0] == "cmux", spawned
+    assert sink == []
+
+    spawned.clear()
+    notifier, sink = arm(tmp_path / "iso")
+    monkeypatch.setattr(
+        "local_operator.supervisors.real_home", lambda: (tmp_path / "elsewhere").resolve()
+    )
+    assert notifier.send("complete") is True
+    assert spawned == []
+    assert notify.BEL in "".join(sink) or notify.OSC9_PREFIX in "".join(sink), sink
+
+
+def test_the_refusal_is_reported_once_per_process(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A refusal that a USER can hit must not be silent, and must not nag.
+
+    The users this can cost a feature are not only rigs: a container, a
+    sandboxed shell, ``sudo -E`` or a dotfile that rewrites ``HOME`` reaches the
+    same branch. So the FIRST refusal says why, where a user will see it, and
+    every later one drops to debug rather than repeating the sentence per toast.
+    """
+    import logging
+
+    from local_operator.tui import notify
+
+    monkeypatch.setattr(notify, "_REFUSAL_REPORTED", False)
+    monkeypatch.setenv("HOME", str(tmp_path / "iso"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "iso"))
+    monkeypatch.setattr(
+        "local_operator.supervisors.real_home", lambda: (tmp_path / "elsewhere").resolve()
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="local_operator.tui.notify"):
+        assert notify.desktop_belongs_to_this_process() is False
+        assert notify.desktop_belongs_to_this_process() is False
+
+    warnings = [row for row in caplog.records if row.levelno == logging.WARNING]
+    assert len(warnings) == 1, [row.getMessage() for row in warnings]
+    assert "not this user's home" in warnings[0].getMessage()
+    assert any(row.levelno == logging.DEBUG for row in caplog.records), "the repeat is silent"
+
+
+def _files_that_spawn_a_cmux_toast() -> list[Path]:
+    """Modules outside ``tui/notify.py`` that build a ``cmux notify`` argv.
+
+    The argv builder is pure and stays that way; what this finds is every site
+    that would SPAWN it, which is where the identity gate has to be asked.
+    """
+    root = Path(__file__).resolve().parents[2] / "local_operator"
+    return [
+        path
+        for path in root.rglob("*.py")
+        if path.name != "notify.py" and "cmux_command(" in path.read_text(encoding="utf-8")
+    ]
+
+
+def test_every_cmux_toast_site_asks_the_gate() -> None:
+    """A cmux spawn whose gate was forgotten is a rig on the operator's screen.
+
+    TEXTUAL, and the PR must not read it as proof of behaviour — the behavioural
+    half is ``test_a_redirected_home_refuses_the_cmux_toast``, which drives the
+    leg the TUI uses. This is the drift tripwire for the NEXT spawn site: the
+    marker it keys on (``CMUX_SURFACE_ID``) is inherited, so the site that
+    forgets the gate is a site that posts into somebody else's cmux.
+    """
+    population = _files_that_spawn_a_cmux_toast()
+    assert population, "the sweep found no cmux sites; the predicate has rotted"
+    offenders = [
+        path for path in population if "desktop_belongs_to_this_process" not in path.read_text()
+    ]
+    assert (
+        not offenders
+    ), "these modules spawn a cmux toast and never ask whose desktop it is:\n" + "\n".join(
+        f"  {path}" for path in offenders
+    )
+
+
+def test_the_frame_sites_withhold_the_offer_from_a_run_that_is_not_yours() -> None:
+    """The two desktop-frame sites ask the same question, pinned by name.
+
+    A frame is raised by the ATTACHED APP under its own identity, so the backend
+    is the only place this repository can decline the banner — and the site that
+    drops the clause is invisible on this machine (no app attaches to a rig's
+    backend) while still being the offer that became a banner in the mock-store
+    incident this file's docstring records.
+    """
+    root = Path(__file__).resolve().parents[2] / "local_operator" / "server" / "utils"
+    for module in ("desktop_feed.py", "desktop_sessions.py"):
+        source = (root / module).read_text(encoding="utf-8")
+        assert "desktop_belongs_to_this_process" in source, module

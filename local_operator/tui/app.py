@@ -24781,6 +24781,7 @@ class OperatorApp(App[None]):
             background_digest_title,
             cmux_command,
             cmux_surface_id,
+            desktop_belongs_to_this_process,
             detached_notify,
             digest_subtitle,
         )
@@ -24793,7 +24794,16 @@ class OperatorApp(App[None]):
         subtitle = digest_subtitle(kinds)
         try:
             surface = cmux_surface_id()
-            if surface is not None:
+            # ASKED AT THE SPAWN SITE, not inside `cmux_command` (which stays
+            # pure argv). `cmux notify` does not write into this process's
+            # terminal: it spawns the cmux app, which raises the toast in the
+            # surface that `CMUX_SURFACE_ID` merely NAMES — and an inherited
+            # `CMUX_*` from a parent session is a known hazard here (an
+            # inherited `CMUX_WORKSPACE_ID` let headless tests rename the
+            # operator's real workspaces). A refused cmux toast falls through to
+            # `detached_notify`, which asks the same gate and is answered the
+            # same way.
+            if surface is not None and desktop_belongs_to_this_process():
                 return bool(
                     spawn_detached(cmux_command(surface, title, subtitle, BODY_BACKGROUND_DIGEST))
                 )
@@ -25059,6 +25069,7 @@ class OperatorApp(App[None]):
             argv_safe,
             cmux_command,
             cmux_surface_id,
+            desktop_belongs_to_this_process,
             detached_notify,
         )
 
@@ -25074,6 +25085,14 @@ class OperatorApp(App[None]):
         # as well — it is only the GLYPH that folds.
         kind = _announceable_kind(entry)
         surface = cmux_surface_id()
+        if surface is not None and not desktop_belongs_to_this_process():
+            # A run that is not the user's own must not raise a toast in THEIR
+            # cmux, so the surface is dropped before it is recorded as the
+            # backend — the claim below has to name the surface actually used,
+            # or the watermark asserts a banner nobody received. The delivery
+            # then takes the `detached_notify` branch, which refuses for the
+            # same reason and gives the claim back.
+            surface = None
         backend = "cmux" if surface is not None else "detached"
         store = AttentionStore(config_dir() / "attention.db")
         if not store.claim_delivery(identity, entry.completion_token, backend):

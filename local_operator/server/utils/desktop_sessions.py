@@ -2146,13 +2146,23 @@ class DesktopSessionBridge:
         the conversation was ever run on the mock — the case here being a
         session a rig left in a store this backend serves.
 
+        THE IDENTITY TEST IS ASKED HERE TOO, for the reason it is asked on the
+        feed: this frame becomes a banner under the ATTACHED APP's identity, so
+        a backend running under a redirected ``HOME`` must not extend the offer
+        at all (``desktop_belongs_to_this_process``).
+
         Guarded end to end: a notification is chrome, and this runs inside the
         1 s attention poll whose loop already treats a store error as costing
         one tick rather than the feature.
         """
-        from local_operator.tui.notify import notifications_enabled
+        from local_operator.tui.notify import (
+            desktop_belongs_to_this_process,
+            notifications_enabled,
+        )
 
         if not notifications_enabled():
+            return
+        if not desktop_belongs_to_this_process():
             return
         token = state.get("completion_token")
         if (

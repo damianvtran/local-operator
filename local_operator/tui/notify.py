@@ -83,6 +83,20 @@ systems rather than defensiveness:
   because the mock is only ever a test surface: whichever process adopts a
   mock spec is a test process, so the whole process — and every child it
   spawns, which inherits the environment — goes quiet.
+- **Never from a process that is not the user's own**
+  (:func:`desktop_belongs_to_this_process`). The two gates above are things a
+  process DECLARES, so a rig that neither exports the switch nor adopts the
+  mock reaches the desktop — and a redirect to a throwaway ``HOME``, which is
+  what isolates every other side effect in this project, cannot isolate this
+  one: the toast is attributed by bundle identity, which is the user's, not the
+  run's. So the question "is this the user's own session" is asked directly, of
+  the passwd database, and it is the gate that covers a rig nobody can reach.
+  It is asked by EVERY leg that presents a notification OUTSIDE this process:
+  the identity bundle and the ``osascript`` fallback, the Linux D-Bus fallback,
+  and ``cmux notify`` (which does not write into a terminal at all — it RPCs the
+  cmux app, which owns the surface its ``CMUX_SURFACE_ID`` merely names, an
+  inherited variable). The ONLY leg left ungated is the in-band OSC/BEL write,
+  because that one really does land in a terminal this process owns.
 
 Whose events count
 ------------------
@@ -111,6 +125,7 @@ import sys
 import threading
 import uuid
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Callable, Literal, Mapping
 
 from local_operator import terminals
@@ -497,6 +512,109 @@ def suppress_notifications_for_process(reason: str = "") -> None:
     )
 
 
+def desktop_belongs_to_this_process() -> bool:
+    """Whether an OS toast posted by THIS process would land on the user's screen.
+
+    THE THIRD GATE, and the one the first two structurally cannot be. The kill
+    switch and the test-hosting rule are both things a process *declares* — one
+    by exporting a variable, the other by adopting the mock wire — so a rig that
+    does neither reaches the operator's desktop. That is not hypothetical: on
+    2026-09-24 a QA rig driving real sessions under ``env -i HOME=…`` posted a
+    banner roughly every nine seconds, carrying its own synthetic tape text
+    ("Reply 1" / "reply 0"), until the operator asked why. ``env -i`` is exactly
+    what strips the suite's arm, and the rig is not a pytest process, so nothing
+    in the harness could have covered it.
+
+    WHY A REDIRECTED HOME IS THE TELL. A notification is attributed by BUNDLE
+    IDENTITY — a machine-wide, per-USER namespace — not by path, so unlike the
+    store, the logs and the cache a toast is not a run-scoped side effect: a copy
+    of our bundle built inside a throwaway home still delivers as
+    ``me.damiantran.localoperator`` to the operator's one real Notification
+    Centre. Every other redirection in this project isolates by path and this one
+    cannot, so "is this the user's own session" has to be asked directly, and the
+    answer a redirected environment cannot fake is the passwd database's
+    (``supervisors.real_home()``, which ``$HOME`` cannot reach). The reasoning is
+    the same one ``supervisors.unit_is_addressable`` uses for a launchd unit, and
+    the helper is shared rather than spelled twice.
+
+    Deliberately NOT asked: whether the CONFIG DIR is the default one.
+    Relocating it is a documented configuration and a user who has done it is
+    still the user, so refusing their toasts would silently take away a feature
+    they configured. A redirected HOME is the isolation recipe this project
+    prescribes for a rig, which is what makes it the signal that means "a run,
+    not a person".
+
+    Fails OPEN when the real home cannot be determined (no passwd database, no
+    ``getuid``): every platform that can post a toast is one that has a passwd
+    entry, so refusing there would buy nothing and take the feature away. The
+    refusal is NOT silent for the user it can genuinely cost a feature — a
+    container (``docker run -e HOME=/root``, a devcontainer), a sandboxed shell
+    (``bwrap``, ``firejail``, ``nix-shell``), ``sudo -E lop`` or a dotfile that
+    rewrites ``HOME`` all land here, and the first refusal in a process says so
+    at ``warning`` (see :func:`_report_a_refused_desktop`). Once per process,
+    not per toast, so a rig is told without having its log flooded.
+    """
+    try:
+        from local_operator.supervisors import real_home
+
+        home = real_home()
+        if home is None:
+            return True
+        allowed = Path.home().resolve() == home
+    except (ImportError, AttributeError, KeyError, OSError, RuntimeError, ValueError) as exc:
+        # The shapes this machine cannot answer IN: no `pwd` (ImportError), no
+        # uid (AttributeError), no passwd entry (KeyError), an unreadable or
+        # unresolvable home (OSError/RuntimeError/ValueError — `Path.home()`
+        # raises RuntimeError when it cannot resolve one at all). Anything
+        # OUTSIDE this tuple is a defect in the predicate rather than a platform
+        # without an answer, and it propagates to the caller deliberately: a
+        # `NameError` here must NOT be laundered into "cannot tell", which fails
+        # open in the direction that re-opens the leak this exists to close.
+        # `supervisors.unit_is_addressable` catches a comparable pair for the
+        # same reason.
+        logger.debug("could not tell whose desktop this is: %s", exc)
+        return True
+    if not allowed:
+        _report_a_refused_desktop()
+    return allowed
+
+
+#: Whether this process has already said out loud that its OS notifications are
+#: refused. One line per process is the whole budget: the refusal is a standing
+#: property of where the process runs, and a session that notifies often would
+#: otherwise repeat the sentence forever.
+_REFUSAL_REPORTED = False
+
+
+def _report_a_refused_desktop() -> None:
+    """Say ONCE, where a user will see it, why this process has gone quiet.
+
+    The first refusal is a ``warning``, because the users it can cost a feature
+    are not only rigs: a container, a sandboxed shell or a dotfile that rewrites
+    ``HOME`` reaches the same branch, and a feature that vanishes with nothing
+    on screen and nothing in the log is the failure mode this module's own copy
+    criticises elsewhere. Every later refusal drops to ``debug``.
+    """
+    global _REFUSAL_REPORTED
+    if _REFUSAL_REPORTED:
+        logger.debug("desktop notifications still refused (redirected HOME)")
+        return
+    _REFUSAL_REPORTED = True
+    try:
+        from local_operator.supervisors import real_home
+
+        real = real_home()
+    except Exception:  # noqa: BLE001 — the sentence is a nicety; the refusal is not
+        real = "unknown"
+    logger.warning(
+        "desktop notifications are off for this process: $HOME (%s) is not this "
+        "user's home (%s), so a banner raised here would land on THEIR desktop. "
+        "Run with your own HOME to get them back.",
+        Path.home(),
+        real,
+    )
+
+
 def session_names_in_notifications() -> bool:
     """Whether a toast may be TITLED with the conversation's own name.
 
@@ -800,6 +918,8 @@ def detached_notify(title: str, body: str, *, session_id: str = "", subtitle: st
     swallowed, and the return value reports only whether a child was STARTED.
     """
     if not notifications_enabled():
+        return False
+    if not desktop_belongs_to_this_process():
         return False
     try:
         if sys.platform == "darwin":
@@ -1228,7 +1348,7 @@ class Notifier:
         composed = body or house
 
         surface = cmux_surface_id(self._env)
-        if surface is not None:
+        if surface is not None and desktop_belongs_to_this_process():
             _spawn_detached(cmux_command(surface, title, subtitle, composed))
             return True
 
@@ -1252,7 +1372,19 @@ class Notifier:
         ):
             self._write(chunk)
 
-        if should_use_desktop_fallback(self._protocol, self._platform, self._env):
+        # The cmux leg and the D-Bus fallback are the two that leave this
+        # process, so both carry the identity test; the in-band writes above do
+        # not, because they land in a terminal this process owns. `cmux notify`
+        # is NOT one of those: it spawns the cmux binary, which raises the toast
+        # in the app that owns the surface, and the surface id it is aimed at is
+        # a purely INHERITED `CMUX_SURFACE_ID` — which is how an inherited
+        # `CMUX_WORKSPACE_ID` once let headless tests rename the operator's real
+        # workspaces (AGENTS.md). The fall-through when the gate refuses is the
+        # in-band write above, which is the right surface for such a run.
+        if (
+            should_use_desktop_fallback(self._protocol, self._platform, self._env)
+            and desktop_belongs_to_this_process()
+        ):
             notifier = shutil.which("notify-send")
             if notifier:
                 _spawn_detached(desktop_notify_command(notifier, title, composed, URGENCY))

@@ -760,6 +760,45 @@ the two therefore agreed, which is precisely why nothing caught it. When you
 isolate a run, verify where its writes actually go, not merely that its reads
 are redirected.
 
+**And a redirected `HOME` does not redirect a NOTIFICATION, because a toast is
+attributed by BUNDLE IDENTITY rather than by path.** Every other side effect in
+this section follows the redirect — the store, the logs, the cache, the plist
+path — and this one cannot: macOS delivers `me.damiantran.localoperator` to the
+user's one real Notification Centre whichever directory the bundle was built in.
+So a rig that drives real sessions under `env -i HOME=$ISO …` and parks a tool
+approval puts its own synthetic text on the operator's screen — measured
+2026-09-24, a banner every nine seconds carrying the rig's tape lines, until the
+operator asked why. The product now refuses every surface that leaves this
+process:
+
+- `tui.notify.desktop_belongs_to_this_process()` asks the uid's **passwd home**
+  (the answer `browser_bridge/install.py::_default_config_root()` derives for the
+  same purpose, and for the same reason — `Path.home()` would compare a
+  redirected home against itself and conclude it is the real one), and refuses
+  when `$HOME` is not it;
+- the legs that ask it are the identity bundle and the `osascript` fallback in
+  `detached_notify`, `Notifier.send`'s D-Bus fallback, the three `cmux notify`
+  spawn sites (`Notifier.send` and the TUI's two observer branches — `cmux
+  notify` RPCs the cmux app for a surface named by an INHERITED
+  `CMUX_SURFACE_ID`, so it is not this process's own terminal), and the two
+  desktop-frame sites (`server/utils/desktop_feed.py`, `desktop_sessions.py`),
+  where the offer is withheld because the banner would be raised by the attached
+  app under its own identity;
+- the ONLY leg left ungated is the in-band OSC/BEL write, which really does land
+  in a terminal this process owns.
+
+The refusal is `warning` for the first one in a process and `debug` after, and
+that is not decoration: a container (`docker run -e HOME=/root`, a devcontainer),
+a sandboxed shell (`bwrap`, `firejail`, `nix-shell`), `sudo -E lop` or a dotfile
+that rewrites `HOME` loses every banner too, and a feature that vanishes with
+nothing on screen and nothing in the log is the failure mode the rest of this
+file argues against. A rig that follows the isolation recipe above is therefore
+silent everywhere the operator could see it without doing anything else; a rig
+that runs with the REAL `HOME` (or on a host with no passwd entry) still needs
+the switch, which the harness paragraph under "What an agent may start" states
+outright. Relocating `LOCAL_OPERATOR_CONFIG_DIR` is deliberately NOT a refusal —
+that user is still the user.
+
 **`lop browser install` used not to be isolated by `HOME` at all, and the
 reason is worth keeping even though the hazard is now fixed.** `browser_bridge/
 install.py` hardcoded `LABEL = "com.local-operator.browser"` and derived only
@@ -1618,6 +1657,18 @@ starts one; the two capture sandboxes (`probe_isolation`, `visual_capture`)
 spell the switch literally, because they must act before any product import.
 The same applies to a manual QA run: that escape is for
 driving the real front end, never for opening a peer to hand work to.
+
+**Do not lean on the isolation to cover this.** Since 2026-09-24 a redirected
+`HOME` also makes every surface that LEAVES the process refuse on its own (see
+"Isolating a run" — a
+notification is the one side effect a path redirect cannot isolate), but a rig
+that runs a session with the operator's real `HOME` still reaches his desktop,
+and `env -i` is what strips the value the suite armed. Set the gate in the
+CHILD's environment at the launcher, so a rig that forgets is quiet rather than
+plausible: a launcher that drives the real CLI carries
+`LOCAL_OPERATOR_NO_NOTIFICATIONS=1` in its `env -i` block, and a launcher that
+runs a session in its own process calls
+`tui.notify.suppress_notifications_for_process()` before the first one starts.
 
 **The test-hosting rule is a SECOND gate, and a test whose subject is the
 notification path has to waive it.** `session_uses_test_hosting` suppresses any
