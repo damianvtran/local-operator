@@ -75,6 +75,7 @@ from typing import (
 from local_operator.harness.message_types import (
     HUB_MESSAGE_TYPE,
     PEER_MESSAGE_MESSAGE_TYPE,
+    SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
 )
 from local_operator.harness.types import (
     AgentEvent,
@@ -3063,4 +3064,12 @@ def _render_custom_step(index: int, payload: dict[str, Any]) -> PeekStep:
         who = str(sender.get("conversation_name") or sender.get("pid") or "another session")
         body = str(details.get("body") or details.get("text") or "")
         return PeekStep(index, "system", f"peer ← {who}", _clip(body))
+    if custom_type == SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE:
+        # The credential-shape notice, and the one custom row in this view the
+        # operator is meant to READ rather than skim: it lands in a peek far more
+        # often than the MCP notices do, so the raw wire type as a heading is
+        # machine noise exactly where a human phrase matters. The phrase is the
+        # one the live receipt already uses (``Session.journal_shape_incident``),
+        # so the peek and the receipt name the same thing the same way.
+        return PeekStep(index, "system", "credential masked", _clip(str(details.get("text", ""))))
     return PeekStep(index, "system", custom_type, _clip(str(details.get("text", ""))))

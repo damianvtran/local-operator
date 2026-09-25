@@ -873,6 +873,7 @@ _PERSISTABLE_CUSTOM_TYPES: frozenset[str] = frozenset(
         # notice a live-only receipt and drop the replay half of the row the
         # TUI fold paints; the MODEL is kept out of it by the RENDERER's
         # allow-list, not by this one.
+        SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
         # SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE IS persisted, unlike the
         # recovery record below: an MCP server going away is a historical fact
         # about the session, and every surface already renders the row, so a
