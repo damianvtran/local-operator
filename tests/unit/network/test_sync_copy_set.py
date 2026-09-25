@@ -395,6 +395,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``_MARKER``: a sentinel STRING embedded in a wrapper module's source, not a path",
     ),
     "local_operator/tui/terminal_modes.py": (1, "``_GATE_MARKER``: a terminal-mode latch's name"),
+    "local_operator/tui/host_theme.py": (
+        1,
+        "``NAME``: the theme NAME this module registers with the theme registry when it "
+        "derives the host terminal's colours (``theme.register_theme(name=NAME)``, and "
+        "``unregister_theme(NAME)`` on a re-entrant boot). An identifier in the theme "
+        "registry, not a file a session directory holds. Declared here rather than on "
+        "``main`` because this guard does not exist there: the module and the guard meet "
+        "only in a merge, which is exactly what the PR's CI runs, so the branch is where "
+        "it has to be answered",
+    ),
     "local_operator/tui/notifier_app/__init__.py": (
         1,
         "``_MARKER`` (``.build-stamp``): the notifier app's own build stamp, written into its "
