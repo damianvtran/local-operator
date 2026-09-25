@@ -1198,10 +1198,20 @@ def test_streamed_frames_fail_closed_when_the_ledger_is_unreadable(
     # The copy is pinned, because both halves of it are load-bearing rather than
     # decorative. A reader here is a model polling the job tail, and one that
     # reads this as a lost result cancels a job whose result was never in
-    # question; the notice therefore says the result still arrives. The withhold
-    # is sticky, so the second write adds no second notice from THIS sink.
+    # question — so the notice states the common case (the read recovers and the
+    # result arrives filtered) and says the end can withhold it too, which is
+    # what the same fault actually does: the flag is set by a ledger read that
+    # raised, and the settle path walks the SAME ledger through `_scrub_secrets`.
+    # The absolute arrival claim that was here is asserted ABSENT for that
+    # reason. The withhold is sticky, so the second write adds no second notice
+    # from THIS sink.
     assert joined == eval_worker._WITHHELD_FRAME_TEXT
-    assert "arrives when the run finishes" in joined
+    assert "filtered separately at the end" in joined
+    assert "withheld too if that filter fails there" in joined
+    assert "arrives when the run finishes" not in joined, (
+        "re-measured: the ledger fault that raises this notice also withholds the "
+        "settled text, so an unconditional arrival claim is false where it is read"
+    )
     assert joined.endswith("\n"), "the notice ends on its own line"
     assert len(joined.rstrip("\n")) <= 200, "outside the peek progress-line cut"
 

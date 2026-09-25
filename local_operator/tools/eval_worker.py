@@ -712,20 +712,23 @@ def _ledger_values() -> tuple[str, ...]:
 
 #: What a streamed frame carries when the withheld flag is set, so the operator
 #: reading the job tail can tell "this cell prints nothing" from "this cell's
-#: output could not be vouched for". The settled result is unaffected: it goes
-#: through :func:`_scrub_secrets`, which has its own fail-closed path. The text
-#: says so anyway, because the reader is a model polling ``jobs(op='peek')``:
-#: one that reads this as a lost result cancels a job that would have
-#: delivered, and the live view is the only thing this costs.
+#: output could not be vouched for". The notice speaks for the settled result
+#: CONDITIONALLY, because this fault can take that result with it: the flag is
+#: set by a ledger read that raised, and :func:`_scrub_secrets` walks the SAME
+#: ledger at settle, so when that read fails there too the settled text is the
+#: ``Re-run the cell`` notice and the cell's output never arrives. The reader is
+#: a model polling ``jobs(op='peek')``: one that reads this as a lost result
+#: cancels a job that would have delivered, so the common case — the read
+#: recovers and the result arrives filtered — is stated rather than promised.
 #:
 #: The trailing newline is load-bearing. Frames are appended to a job's shared
 #: tail as raw text (``JobManager.append_output``), so a stdout notice and a
 #: stderr notice would otherwise run together into one unreadable line. The
-#: notice is 128 characters before that newline, inside the 200-character
+#: notice is 150 characters before that newline, inside the 200-character
 #: progress-line cut in :mod:`local_operator.tools.eval`.
 _WITHHELD_FRAME_TEXT = (
     "[live output withheld: the secret redaction filter failed. The result is "
-    "filtered separately and arrives when the run finishes.]\n"
+    "filtered separately at the end, and withheld too if that filter fails there.]\n"
 )
 
 

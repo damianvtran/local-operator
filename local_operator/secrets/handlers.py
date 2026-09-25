@@ -1006,7 +1006,11 @@ def _audit(args: argparse.Namespace) -> int:
             f"{labels.get(entry.outcome, entry.outcome):<{width}} "
             f"pid={entry.pid or '-':<7} {entry.secret_id or ''}"
         )
-    if records:
+    # Scoped to a row that actually spells `tty` out, not to "there are rows":
+    # a store whose audit holds no reveal still renders `ok`/`refused` rows, and
+    # a legend for a word that appears nowhere in the output explains nothing
+    # while looking like it does.
+    if any(row.outcome in labels for row in records):
         print("  tty: a terminal was attached, not proof a person agreed.")
     return 0
 
