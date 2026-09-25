@@ -48,10 +48,13 @@ segment is refused only when ALL of these hold:
 The whole check is skipped for ``background: true`` calls (the caller does
 that): a sleep inside a background job holds no turn.
 
-Escape hatch: prefix the sleep with ``LOCAL_OPERATOR_ALLOW_LONG_SLEEP=1`` —
-read off the command itself, per segment, exactly like the search guard's
-grant, so it is visible in the transcript and never leaks from an inherited
-environment.
+Escape hatch: prefix EACH long sleep with
+``LOCAL_OPERATOR_ALLOW_LONG_SLEEP=1`` — read off the command itself, per
+segment, exactly like the search guard's grant, so it is visible in the
+transcript and never leaks from an inherited environment. Per segment is
+load-bearing and is what the copy must say: a command holding two long sleeps
+needs the prefix twice, and an ``export``ed value is not read at all (design
+review D3).
 """
 
 from __future__ import annotations
@@ -155,11 +158,15 @@ def _depth_delta(segment: str) -> int:
     return delta
 
 
-def check_long_sleep(command: str) -> str | None:
+def check_long_sleep(command: str, *, offered: frozenset[str] | None = None) -> str | None:
     """Return a refusal when ``command`` is dominated by a long foreground sleep.
 
     ``None`` means run it. The caller skips this entirely for
     ``background: true`` calls.
+
+    ``offered`` is the reader's live tool inventory when the caller has it — the
+    plan-time hook does, because ``_plan_call`` holds ``context.tools``. It
+    decides which replacements the refusal may name; see :func:`_block_message`.
     """
     total = 0.0
     depth = 0
@@ -183,7 +190,7 @@ def check_long_sleep(command: str) -> str | None:
             continue
         total += seconds
     if total > LONG_SLEEP_THRESHOLD_SECONDS:
-        return _block_message(total)
+        return _block_message(total, offered)
     return None
 
 
@@ -195,23 +202,69 @@ def _format_seconds(seconds: float) -> str:
     return f"{seconds:g} s"
 
 
-def _block_message(seconds: float) -> str:
-    """The refusal, stated so the model can act on it rather than guess."""
+#: The three tools the advice can hand the waiting to, in the order it names
+#: them, and the only names it may assert: a reader that does not hold one is
+#: the reader this copy must not route into ``Tool not found`` (design review
+#: D2 — a coder child has no ``wake``, a declared-inventory session has none of
+#: the three).
+_ADVICE_TOOLS = ("wait", "jobs", "wake")
+
+
+def _block_message(seconds: float, offered: frozenset[str] | None = None) -> str:
+    """The refusal, stated so the model can act on it rather than guess.
+
+    Two constraints shape this text, both measured on the operator's failed-call
+    card rather than reasoned about:
+
+    * every bullet LEADS with its actionable token, because that card paints
+      each advice line as ONE cropped row (94 cells at a 100-column frame, 74 at
+      80, 54 at 60, 44 at 50) and the unhedged copy put ``wait`` at cells 86-92
+      and the hatch variable at 57-90, i.e. cut the two most useful tokens
+      exactly on the frames operators run (design review D1);
+    * bullets name ONLY tools the reader holds (``offered``), because the
+      hedge-everything middle ground asks the reader to audit its own inventory:
+      with none of the three it says so and leads with the hatch, the one bullet
+      that works for such a reader (design review D2).
+
+    ``offered=None`` is the caller having no inventory to hand (the direct
+    ``execute`` path); that is the only case that names tools speculatively.
+    """
     limit = int(LONG_SLEEP_THRESHOLD_SECONDS)
-    return (
+    head = (
         f"blocked: this command sleeps {_format_seconds(seconds)} in the foreground "
-        f"(over {limit} s). A foreground bash call cannot be interrupted by a hub "
-        "message: a note from your parent or a peer waits until the sleep ends, "
-        "and the session looks busy while it does nothing.\n"
-        "Do one of:\n"
-        "  - start the long work itself with `background: true`, then block on its "
-        "job id with `wait` where this session offers that tool (size wait_ms to "
-        "the work) — it returns the moment the job finishes, a message arrives, or "
-        "you are steered;\n"
-        "  - check progress in between with `jobs op='peek'` (job_id, since=<seq>) "
-        "where this session offers that tool, instead of sleeping and tailing a "
-        "log;\n"
-        "  - to check back much later, schedule it with `wake` where this session "
-        "offers it;\n"
-        f"  - to run it exactly as written, prefix the sleep with `{ALLOW_ENV}=1`."
+        f"(over {limit} s), where it is deaf to a hub note — a note from your parent "
+        "or a peer waits until the sleep ends, while a steer does reach it and "
+        "detaches the command to a background job. Until one of those happens the "
+        "session looks busy while it does nothing."
     )
+    hatch = (
+        f"  - `{ALLOW_ENV}=1` prefixed on each long sleep — inline, per segment, "
+        "since an exported value is not read"
+    )
+    if offered is not None and not offered.intersection(_ADVICE_TOOLS):
+        return (
+            f"{head}\n"
+            "This session offers no `wait`, `jobs` or `wake`, so there is nothing "
+            "here to hand the waiting to. Do one of:\n"
+            f"{hatch};\n"
+            "  - write the command so nothing waits: this call holds until the last "
+            "long sleep in it ends, whatever else the session offers."
+        )
+    bullets = []
+    if offered is None or "wait" in offered:
+        bullets.append(
+            "  - `background: true` on the long work, then `wait` on its job id — "
+            "it returns on the job settling, on a note arriving while it is parked, "
+            "or when the wait is cancelled (size `wait_ms` in ms)"
+        )
+    if offered is None or "jobs" in offered:
+        bullets.append(
+            "  - `jobs op='peek'` (job_id, since=<seq>) to check progress instead of "
+            "sleeping and tailing a log"
+        )
+    if offered is None or "wake" in offered:
+        bullets.append("  - `wake` to check back much later")
+    lines = [head, "Do one of:"]
+    lines.extend(f"{bullet};" for bullet in bullets)
+    lines.append(f"{hatch}.")
+    return "\n".join(lines)

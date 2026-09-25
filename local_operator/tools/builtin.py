@@ -3580,7 +3580,14 @@ async def execute_bash(
     if not params.background:
         long_sleep = sleep_guard.check_long_sleep(params.command)
         if long_sleep is not None:
-            return _error(tool_call_id, "bash", long_sleep)
+            # The SAME fault marker the plan-time hook reports, so the two paths
+            # of one guard cannot land the same call in two different buckets —
+            # ``invalid_arguments`` is a MODEL fault and this path used to be an
+            # unmarked ``execution`` one (review A2 on #1546). Reachable with
+            # direct ``execute`` callers, where no planning hook runs.
+            return _error(
+                tool_call_id, "bash", long_sleep, details={FAULT_KEY: FAULT_INVALID_ARGUMENTS}
+            )
     # Approval for write/exec tiers is the LOOP's gate (it fires after
     # tool_execution_start so the UI shows the pending call). A second gate
     # here made the user answer twice per action, with the tier name rendered
@@ -4673,20 +4680,32 @@ def build_bash_tool() -> AgentTool:
     )
 
 
-def _long_foreground_sleep_refusal(args: dict[str, Any]) -> str | None:
+def _long_foreground_sleep_refusal(args: dict[str, Any], offered: frozenset[str]) -> str | None:
     """The plan-time half of the long-sleep guard (see ``tools/sleep_guard``).
 
-    ``background: true`` is exempt: a sleep inside a background job holds no
-    turn. Reads the arguments defensively — this runs before the tool body and
-    must never raise, since a hook that raises is skipped by the loop and the
-    call would then reach the approval gate it exists to pre-empt.
+    Reads the COERCED params, not the raw arguments, because the raw dict is
+    what the model wrote and a JSON ``false`` is not the only spelling of an
+    absent background flag: ``"false"``, ``"no"``, ``"0"``, ``"off"``, ``"n"``,
+    ``"f"``, ``"FALSE"`` all pass ``validate_tool_arguments`` and are TRUTHY as
+    strings — so reading ``args.get("background")`` let a foreground call through
+    the hook to the approval gate, which then asked the operator to approve work
+    ``execute_bash`` refuses (review A1 on #1546). ``BashParams`` is the same
+    coercion the body uses, so the two halves of this guard cannot disagree
+    about what ``background`` means.
+
+    Never raises: the loop skips a hook that throws, and a skipped hook means
+    the call reaches the gate this exists to pre-empt. A shape ``BashParams``
+    rejects is left to the body's own validation error.
     """
-    if args.get("background"):
+    try:
+        params = BashParams(**args)
+    except ValidationError:
         return None
-    command = args.get("command")
-    if not isinstance(command, str):
+    if params.background:
         return None
-    return sleep_guard.check_long_sleep(command)
+    # ``offered`` is the calling session's live inventory (the loop passes it),
+    # so the refusal names only replacements this reader actually holds.
+    return sleep_guard.check_long_sleep(params.command, offered=offered)
 
 
 # ---------------------------------------------------------------------------
