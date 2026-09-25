@@ -1016,6 +1016,64 @@ def _safe_cwd(context: ToolContext | None) -> str:
     return context.cwd if context and context.cwd else "."
 
 
+def normalise_path_argument(raw: str) -> str:
+    """The ONE normalisation a tool's ``path`` argument gets, by every reader.
+
+    Surrounding whitespace is not part of a path a caller means: a flattened
+    prompt line or a hand-typed call routinely carries a trailing space, and the
+    reader's own dispatch (scheme recognition, the empty check, spill handles) is
+    written against the stripped spelling.
+
+    This is a cross-module CONTRACT, not a convenience. The credential guard
+    exempts a reading call by resolving its ``path`` argument through THIS
+    module's resolver (``harness/guard_area.py``), so the guard and the reader
+    have to normalise IDENTICALLY for the guard's verdict to be about the file
+    the reader opens. They did not: ``execute_read`` stripped and ``execute_grep``
+    did not, so ``grep path="<exempt spelling> "`` matched the guard's stripped
+    spelling while the reader opened the whitespace-bearing name — an
+    agent-authored file that is not in ``EXEMPT_SOURCES``, with its rotation
+    demand suppressed (PR #1502 review round 2, R2-1). Routing all three through
+    one function is what makes a future asymmetry structurally impossible rather
+    than merely absent: there is no second spelling of "the normalised path" for
+    the smaller diff to forget.
+
+    Deliberately the ONLY transform here. ``expanduser``, ``~``, relative-vs-
+    absolute, symlink and ``..`` handling all belong to
+    :func:`_resolve_workspace_path`, which the guard also calls — one resolver,
+    one root, one normalisation. Any transform this function grew that the
+    resolver did not share would reintroduce exactly the class above.
+    """
+    return raw.strip()
+
+
+def _record_resolved_path(context: ToolContext | None, path: Path, resolvable: bool) -> None:
+    """Report the path a READER resolved, at the instant it resolved it.
+
+    The credential guard exempts a reading call whose ``path`` resolves to one of
+    the guard's own files, and the ONE place that resolution legitimately exists
+    is here -- inside the reader that is about to open the file. Every other place
+    it has been computed (at the redaction, then at dispatch) was a second MOMENT
+    as well as a second input: a symlink moved between that moment and this one
+    handed the redaction an exemption for bytes taken from a file the exemption
+    does not cover. Rounds 3-5 of PR #1502 are that sentence, three times, each
+    time with a smaller window; this seam is what removes the window rather than
+    narrowing it.
+
+    The hook takes NO call id: the loop's recorder is already bound to the call it
+    was installed for, so a tool body cannot file a verdict against another call's
+    id, and the filing side is gated to :data:`guard_area.READING_TOOLS` -- both
+    properties the pre-dispatch matcher had for free (PR #1502 review round 6, M1).
+
+    Absent hook -- a unit call, a host that builds its own ``ToolContext`` -- is a
+    no-op, and the guard then falls back to resolving, which ESCALATES. Nothing
+    here decides anything: the membership test lives with the exemption, in
+    ``harness/guard_area.py``, reached through the loop's recorder.
+    """
+    record = getattr(context, "record_resolved_path", None) if context is not None else None
+    if record is not None:
+        record(str(path), resolvable)
+
+
 def _resolve_workspace_path(raw: str, cwd: str) -> tuple[Path, bool, bool]:
     """Resolve a tool-supplied path to an absolute ``Path``.
 
@@ -5860,7 +5918,7 @@ async def execute_read(
         params = ReadParams(**args)
     except ValidationError as exc:
         return _validation_error(tool_call_id, "read", exc)
-    target = params.path.strip()
+    target = normalise_path_argument(params.path)
     if not target:
         return _error(tool_call_id, "read", "path must be a non-empty string")
 
@@ -5943,6 +6001,10 @@ async def execute_read(
 
     cwd = _safe_cwd(context)
     path, inside, resolvable = _resolve_workspace_path(target, cwd)
+    # The reader's OWN resolution, published where it happened: this is the only
+    # answer the guard-area exemption may consume (see
+    # ``_record_resolved_path``). Before ``_read_path``, which opens ``path``.
+    _record_resolved_path(context, path, resolvable)
     return await _read_path(
         tool_call_id, params, context, path=path, inside=inside, resolvable=resolvable
     )
@@ -10558,7 +10620,18 @@ async def execute_grep(
         return refusal
 
     cwd = _safe_cwd(context)
-    target, inside, resolvable = _resolve_workspace_path(params.path, cwd)
+    # Normalised by the SAME function ``execute_read`` uses, and by the same one
+    # the credential guard uses to decide whether this call is exempt — see
+    # ``normalise_path_argument``. ``grep`` used to hand the raw argument on while
+    # ``read`` stripped, so ``path = "<exempt spelling> "`` matched the guard's
+    # stripped spelling and opened the whitespace-bearing name in EXEMPT_SOURCES'
+    # place: an agent-authored file, rotation demand suppressed. Measured, PR
+    # #1502 review round 2 (R2-1).
+    target, inside, resolvable = _resolve_workspace_path(normalise_path_argument(params.path), cwd)
+    # The reader's own resolution, published where it happened -- the same seam
+    # ``execute_read`` uses, so the guard-area verdict is the reader's at both
+    # readers and never a second resolution at a second moment.
+    _record_resolved_path(context, target, resolvable)
     if not target.exists():
         # Deliberately NOT a model fault: a well-formed path that does not
         # exist is unsatisfiable, not malformed, and the file may have vanished
