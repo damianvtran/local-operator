@@ -164,14 +164,20 @@ def _standby_children(daemon_pid: int) -> list[int]:
     """
     from local_operator.session.runtime import standby
 
-    out = subprocess.run(["ps", "-eo", "pid=,ppid=,command="], capture_output=True, text=True)
+    # Same trap, same fix as ``bench_standby_engage._standby_child`` (round 8, R8-1):
+    # procps truncates ``command`` at the terminal width, so on Linux this recorded
+    # ``standby_children: 0`` as a MEASUREMENT and reaped nothing — a dead instrument
+    # returning a plausible zero. ``-eww`` for the width, ``-m <module>`` for the shape.
+    out = subprocess.run(
+        ["ps", "-eww", "-o", "pid=,ppid=,command="], capture_output=True, text=True
+    )
     found: list[int] = []
     for line in out.stdout.splitlines():
         fields = line.split(None, 2)
         if len(fields) < 3:
             continue
         pid, ppid, command = fields
-        if int(ppid) == daemon_pid and standby.STANDBY_MODULE in command:
+        if int(ppid) == daemon_pid and f"-m {standby.STANDBY_MODULE}" in command:
             found.append(int(pid))
     return sorted(found)
 
