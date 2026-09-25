@@ -7,7 +7,7 @@ an agent or a reviewer inspects the guard, and the notice it produced was about 
 test fixture — which is exactly the noise that teaches an operator to skip the
 notice that is real.
 
-Four limits are the whole of this module, and each one is load-bearing:
+Five limits are the whole of this module, and each one is load-bearing:
 
 * **Masking is NOT exempt.** :func:`reads_exempt_source` is consulted only where
   a shape hit is turned into a notice. The mask, the containment registration and
@@ -27,7 +27,10 @@ Four limits are the whole of this module, and each one is load-bearing:
   That distinction is this module's security property: a matcher that scanned the
   argument *summary* string instead — or the result text — would hand any caller
   the exemption for echoing a filename, which is why it does not, and the arms in
-  ``tests/unit/secrets/test_guard_area_exemption.py`` drive both directions.
+  ``tests/unit/secrets/test_guard_area_exemption.py`` drive both directions. The
+  filing side keeps that property after the verdict moved to the readers: the
+  loop's recorder refuses anything from a tool outside :data:`READING_TOOLS`, and
+  binds the id itself.
 * **The resolution is the READER's own, not a parallel one.** A relative
   ``path`` argument is handed to ``local_operator.tools.builtin._resolve_workspace_path``
   — the exact function ``read``/``grep`` resolve their arguments with — against
@@ -37,7 +40,19 @@ Four limits are the whole of this module, and each one is load-bearing:
   file the reader never opened whenever those two roots disagreed — the default
   shape of an installed ``lop`` run outside the repo. Agreeing with the reader by
   CONSTRUCTION (one resolver, one root) is what removes that class rather than
-  patching one instance of it.
+  patching one instance of it. The verdict is now taken at that resolution and
+  nowhere else: the reader reports the path it resolved, and every redaction
+  consumes that answer rather than resolving again (see
+  :func:`resolves_to_exempt_source`).
+* **The exemption is by PATH, not by inode or content — and that is a boundary.**
+  The decision names a resolved path, so what is read is whatever that path holds
+  at the moment the reader opens it: rebinding the exempt file itself (a symlink
+  swap or a hard-link replace at the same path) between the reader's ``resolve()``
+  and its ``open()`` is outside this mechanism's reach. Reaching it needs write
+  access to the guard's own file inside the checkout, it is identical for every
+  reading tool on ``main``, and it is stated here rather than implied away —
+  a change to inode identity (``os.path.samefile``) is the shape that would close
+  it, and it is deliberately not taken in this change.
 
 A resolution that misses — a nonexistent path, an unresolvable ``~user``, an
 embedded NUL, a lone surrogate — falls back to today's behaviour, a loud
