@@ -320,6 +320,22 @@ class SessionSearch(BaseModel):
     limit: int = 100
 
 
+class CreatedSessionModel(BaseModel):
+    """Whether the model a create ASKED for reached the runtime, and why not.
+
+    ONE PRODUCER'S PAIR, so one model: the peer's create reports ``applied`` together
+    with the sentence for whatever it could not do (a runtime that is still joining, a
+    ``set_model`` that refused), and ``detail`` is that device's own words passed
+    through verbatim — an empty ``detail`` is "nothing to report", never "no reason".
+
+    ``applied=False`` is an ORDINARY answer and not a failure of the create: with no
+    first prompt there is nothing that needs a runtime yet, which is the whole of Q4b.
+    """
+
+    applied: bool = False
+    detail: str = ""
+
+
 class CreatedSession(BaseModel):
     binding: dict[str, str | None] = Field(default_factory=dict)
     session_id: str
@@ -335,6 +351,41 @@ class CreatedSession(BaseModel):
     #: the client as nothing and the peer's honest half ("its instructions are not
     #: attachable") would have been silently lost.
     identity: dict[str, Any] | None = None
+    #: THE RUNTIME IS STILL JOINING (QA round 1, Q4b). The conversation exists, the id
+    #: is durable and the caller owns it, but no owner has come up to answer a prompt
+    #: yet: a prompt sent now is REFUSED by the peer (``OwnerUnreachable``), so a
+    #: surface that offers one is offering a failure.
+    #:
+    #: IT HAS TO BE DECLARED HERE TO EXIST AT ALL. This route declares
+    #: ``response_model=CRUDResponse[CreatedSession]``, so FastAPI validates the reply
+    #: against this model — a field the producer sends and this model does not declare
+    #: is SILENTLY DROPPED on the way out. The peer has answered with
+    #: ``warming: true, admitted: false, model: {applied: false}`` since Q4b and a
+    #: desktop client saw none of it: this class is the boundary where the whole
+    #: feature keeps losing fields, which is why every one of them is here.
+    warming: bool = False
+    #: Whether the device that HOSTS the conversation has an owner for it yet. READ IT
+    #: WITH ``warming``, because the two absences are not the same fact:
+    #:
+    #: * ``admitted=False, warming=True`` — still joining. Ask again shortly; the
+    #:   conversation is fine and the model will be applied when the runtime arrives.
+    #: * ``admitted=False, warming=False`` — the peer could not bring a runtime up at
+    #:   all, and ``detail`` is its own sentence about why.
+    #:
+    #: ``True`` is the LOCAL answer and every path that has no peer admission gate: a
+    #: conversation created here is held by this process and is promptable at once, so
+    #: a client that read the default as "not ready" would disable a composer that
+    #: works.
+    admitted: bool = True
+    #: The peer's OWN sentence about the create, verbatim and ``""`` when it reported
+    #: nothing. It carries the complaints ``warming``/``admitted`` cannot — an engage
+    #: that failed after the directory existed — which is the third field of the same
+    #: producer reply and would otherwise be dropped at this boundary too.
+    detail: str = ""
+    #: The model result (``applied``/``detail``), defaulting to "nothing was asked for
+    #: and nothing was applied" — which is what a local create with no ``model`` field
+    #: honestly reports.
+    model: CreatedSessionModel = Field(default_factory=CreatedSessionModel)
 
 
 class HistoryEntry(BaseModel):
