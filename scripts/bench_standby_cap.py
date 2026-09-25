@@ -133,7 +133,7 @@ STANDBY_MODULE = "local_operator.session.runtime.standby"
 RUNTIME_MODULE = "local_operator.session.runtime.process"
 
 
-def _read_report(path: Path, wait_s: float = 120.0) -> dict[str, Any] | None:
+def _read_report(path: Path, wait_s: float) -> dict[str, Any] | None:
     """A report JSON, or ``None`` if it never became readable.
 
     Tolerant on purpose (QA round 3, Q4-4): the writers publish atomically now, and
@@ -165,6 +165,41 @@ def _process_table() -> dict[int, tuple[int, str]]:
         if len(fields) >= 2 and fields[0].isdigit() and fields[1].isdigit():
             table[int(fields[0])] = (int(fields[1]), fields[2] if len(fields) > 2 else "")
     return table
+
+
+def _root_census(root: Path, exclude: set[int]) -> dict[int, str]:
+    """``pid -> command tail`` for every live process whose ENVIRONMENT names ``root``.
+
+    ATTRIBUTION IS BY ENVIRONMENT BECAUSE THAT IS WHERE THE ROOT IS (agent review round
+    5, R5-2). A real runtime's argv is ``Local Operator [session] id=… -P -m
+    local_operator.session.runtime.process --operator-fd N`` — the config root does not
+    ride in argv at all, it rides in ``LOCAL_OPERATOR_CONFIG_DIR`` — so an argv-shaped
+    predicate matched a probe built to be matched and missed every process that
+    actually occurs: two adopted runtimes alive at ppid 1, recorded as
+    ``descendants_recorded: []``. ``ps -Ee`` prints each process's environment after its
+    command, so this sees a process that inherited the root, including one re-parented
+    to ppid 1 after its console exited.
+
+    Shape-checked, not a bare substring (round 5, M-3): the needle is the variable NAME
+    together with this run's session-unique value, so a command that merely mentions the
+    path — a ``grep`` in someone else's census, a shell pipeline — is not a candidate.
+
+    Cost: one ``ps`` over the whole table, measured at 59-75 ms for ~900 processes.
+    """
+    needle = f"LOCAL_OPERATOR_CONFIG_DIR={root}"
+    out = subprocess.run(
+        ["ps", "-Ee", "-o", "pid=,ppid=,command="], capture_output=True, text=True
+    ).stdout
+    found: dict[int, str] = {}
+    for line in out.splitlines():
+        fields = line.split(None, 1)
+        if len(fields) < 2 or not fields[0].isdigit():
+            continue
+        pid = int(fields[0])
+        if pid in exclude or needle not in line:
+            continue
+        found[pid] = fields[1][-120:]
+    return found
 
 
 def _descendants(roots: set[int], table: dict[int, tuple[int, str]]) -> set[int]:
@@ -283,7 +318,22 @@ def _tail(command: str) -> str:
 def _one_run(consoles: int, mode: str, warm_wait: float) -> dict[str, Any]:
     from local_operator.config import ConfigManager
 
-    base = Path(tempfile.mkdtemp(prefix="lopsa-cap-"))
+    # WHERE THE ROOT GOES. ``tempfile`` falls back to ``/tmp`` when ``TMPDIR`` is
+    # absent, and an ``env -i`` invocation strips it — which is how 27 of this
+    # session's own roots ended up in ``/tmp`` while every check for leftovers looked
+    # in ``$TMPDIR`` and reported zero (agent review round 5, R5-1). So: prefer
+    # ``TMPDIR``, fall back to the session's scratchpad, and never silently ``/tmp``.
+    scratch = os.environ.get("LOCAL_OPERATOR_SCRATCHPAD", "")
+    parent = os.environ.get("TMPDIR") or scratch or None
+    base = Path(tempfile.mkdtemp(prefix="lopsa-cap-", dir=parent or None))
+    if parent in (None, "", "/tmp", "/private/tmp"):
+        # Say it out loud rather than leaving a root in a directory shared with every
+        # other session on this host and a claim that it was cleaned up.
+        print(
+            f"  (note: no TMPDIR/LOCAL_OPERATOR_SCRATCHPAD in this environment; the "
+            f"isolated root is in a shared temp directory: {base})",
+            flush=True,
+        )
     root = base / ".local-operator"
     root.mkdir(parents=True)
     ConfigManager(config_dir=root).update_config({"hosting": "test", "model_name": "test-model"})
@@ -374,6 +424,9 @@ def _one_run(consoles: int, mode: str, warm_wait: float) -> dict[str, Any]:
         row = {
             "consoles": len(slots),
             "mode": mode,
+            # Recorded so a leftover can be found from the artefact rather than from
+            # a guess about which temp directory this run used.
+            "root": str(base),
             # THE HEADLINE IS THIS RUN'S. ``host_wide_spares`` is kept for the
             # contamination check and is never the number to quote.
             "spares": len(mine),
@@ -418,61 +471,84 @@ def _one_run(consoles: int, mode: str, warm_wait: float) -> dict[str, Any]:
             row["cold_bind_ms_median"] = round(statistics.median(cold), 1)
         return row
     finally:
-        # THE TREE IS RECORDED BEFORE ANYTHING IS KILLED, AND SWEPT TO QUIESCENCE
-        # (agent review round 4, R4-1). The previous version attributed a process to
-        # this run by comparing its ppid against a LIVE console and then killed the
-        # consoles in its first pass, so every survivor was ppid 1 and unreachable by
-        # the predicate that was supposed to find it: eight of eight runs reported
-        # ``root_removed: true`` while an orphaned runtime mkdir'd the root back
-        # through ``registry.run_dir`` (publish/heartbeat, ``journal.clear_boot_record``).
-        # Two predicates now, both exact, and both re-evaluated every sweep:
-        #   * every descendant of this run's consoles, however deep — while the
-        #     consoles are alive, which is why the children go first;
-        #   * every live process whose argv names THIS root, which is session-unique,
-        #     so it still finds an orphan after its parent is gone.
+        # ATTRIBUTION, AND WHY IT IS BY ENVIRONMENT (agent review round 5, R5-2). The
+        # survivor that puts the root back is a RUNTIME, and its config root rides in
+        # the ENVIRONMENT rather than in argv — see ``_root_census``. Two predicates,
+        # both re-evaluated on every sweep:
+        #   * every descendant of this run's consoles, however deep — attributable only
+        #     while the consoles are alive, which is why the children go first;
+        #   * every live process whose ENVIRONMENT names this run's session-unique root,
+        #     which still finds an orphan after its parent is gone and after the console
+        #     that forked it has exited.
         console_pids = {proc.pid for proc in procs}
+        self_pid = os.getpid()
 
-        def _mine() -> set[int]:
+        def _mine() -> dict[int, str]:
+            """Live writers and descendants of this run: pid -> command tail.
+
+            The tail comes from the plain ``ps`` table (command only): the census below
+            reads ``ps -Ee``, whose line is command PLUS environment, so a short
+            ``python -c`` command would be recorded as a wall of env vars and the audit
+            the artefact exists for would have nothing to read.
+            """
             table = _process_table()
-            found = _descendants(console_pids, table)
-            found |= {pid for pid, (_ppid, cmd) in table.items() if str(base) in cmd}
-            return found - console_pids
+            found = {
+                pid: (table[pid][1] if pid in table else "")[-160:]
+                for pid, (_ppid, cmd) in table.items()
+                if pid in _descendants(console_pids, table)
+            }
+            for pid, tail in _root_census(base, exclude=console_pids | {self_pid}).items():
+                found[pid] = tail
+            for pid in list(found):
+                if pid in console_pids or pid == self_pid:
+                    del found[pid]
+            return found
 
-        recorded = sorted(_mine())
-        killed: set[int] = set()
-        for _round in range(8):  # a console can fork while its child is being killed
+        recorded = dict(_mine())
+        killed: dict[int, str] = {}
+        for _round in range(10):  # a console can fork while its child is being killed
             live = _mine()
             if not live:
                 break
-            for pid in sorted(live):
+            for pid, tail in sorted(live.items()):
                 try:
                     os.kill(pid, 9)
                 except OSError:
                     pass
-            killed |= live
+                killed[pid] = tail
             time.sleep(0.4)
-        # Children are quiescent, so the consoles can go now; then sweep once more by
-        # the root path alone, for anything a console forked as it died.
+        # Children are quiescent, so the consoles can go now; then sweep again by the
+        # environment alone, for anything a console forked as it died.
         for proc in procs:
             if proc.poll() is None:
                 proc.kill()
                 proc.wait(timeout=30)
-        for _round in range(4):
-            table = _process_table()
-            live = {pid for pid, (_ppid, cmd) in table.items() if str(base) in cmd}
+        for _round in range(6):
+            live = _root_census(base, exclude={self_pid})
             if not live:
                 break
-            for pid in sorted(live):
+            for pid, tail in live.items():
                 try:
                     os.kill(pid, 9)
                 except OSError:
                     pass
-            killed |= live
+                killed[pid] = tail
             time.sleep(0.4)
 
-        # Remove, and PRINT THE REASON when it fails (agent review round 4, R4-4):
-        # ``ignore_errors=True`` threw away the only evidence of why, which cost the
-        # reviewer eight runs and an audit hook to recover.
+        # IS ANYTHING LEFT TO PUT IT BACK? Recorded, because "we removed it" is only a
+        # sound claim when the writer set is empty at the moment of removal (R5-1).
+        writers_at_removal = _root_census(base, exclude={self_pid})
+
+        # LISTED BEFORE REMOVING (round 5, M-2): a listing taken after the removal can
+        # be legitimately empty while the root is present again, which reads as "nothing
+        # survived" beside a WARNING saying something did.
+        listing_before_removal = (
+            [str(item) for item in sorted(base.rglob("*"))[:8]] if base.exists() else []
+        )
+
+        # Remove, and PRINT THE REASON when it fails (round 4, R4-4): the failure that
+        # actually lands here is ENOTEMPTY from a writer putting the tree back, and
+        # ``ignore_errors`` threw away the only evidence of why.
         removal_error = ""
         for _round in range(4):
             try:
@@ -480,41 +556,57 @@ def _one_run(consoles: int, mode: str, warm_wait: float) -> dict[str, Any]:
             except FileNotFoundError:
                 break
             except OSError as error:
-                removal_error = str(error)
-                print(f"  (removal attempt {_round + 1} failed: {error})", flush=True)
+                removal_error = f"{type(error).__name__}: {error}"
+                print(f"  (removal attempt {_round + 1} failed: {removal_error})", flush=True)
                 time.sleep(0.5)
                 continue
             break
 
-        # SETTLE, do not read once (R4-1): ``not base.exists()`` immediately after the
-        # removal cannot see a writer that puts the root back a moment later, which is
-        # exactly how a run could print ``root_removed: true`` and still leave one. Two
-        # consecutive clean reads, a second apart, are what this claim can assert.
+        # SETTLE, AND NAME A REAPPEARANCE RATHER THAN PASS IT OFF (round 5, R5-1). With
+        # the writer set above empty a single read would be sound; the settle stays as
+        # the second line of defence, and a root that comes back is recorded — the
+        # mechanism is PRODUCT behaviour on the clean-exit path
+        # (``journal.clear_boot_record`` → ``registry.unpublish`` → ``record_path`` /
+        # ``run_dir`` doing ``mkdir(parents=True, exist_ok=True)`` unconditionally, then
+        # unlinking the record), so it is disclosed rather than hidden by a retry.
         root_removed = False
+        root_reappeared = False
         clean_reads = 0
         for _round in range(6):
             time.sleep(1.0)
             if base.exists():
+                root_reappeared = True
                 clean_reads = 0
-                shutil.rmtree(base, ignore_errors=True)
+                try:
+                    shutil.rmtree(base)
+                except FileNotFoundError:
+                    pass
+                except OSError as error:
+                    removal_error = f"{type(error).__name__}: {error}"
+                    print(f"  (settle removal failed: {removal_error})", flush=True)
             else:
                 clean_reads += 1
                 if clean_reads >= 2:
                     root_removed = True
                     break
         if row is not None:
-            # In the artefact as well as the log: "this script removes its root" is a
-            # claim, and a claim that only prints when it fails is not checkable.
+            # In the artefact as well as the log, and each entry carries a command tail
+            # so an audit is possible from the JSON (round 5, N-1).
             row["root_removed"] = root_removed
+            row["root_reappeared_after_removal"] = root_reappeared
             row["cleanup"] = {
-                "descendants_recorded": recorded,
-                "pids_killed": sorted(killed),
+                "descendants_recorded": {str(pid): tail for pid, tail in sorted(recorded.items())},
+                "pids_killed": {str(pid): tail for pid, tail in sorted(killed.items())},
+                "writers_at_removal": {
+                    str(pid): tail for pid, tail in sorted(writers_at_removal.items())
+                },
+                "listing_before_removal": listing_before_removal,
                 "removal_error": removal_error,
             }
         if not root_removed:
             print(
-                f"  WARNING: {base} survived the settle; still present: "
-                f"{[str(item) for item in sorted(base.rglob('*'))[:5]]}",
+                f"  WARNING: {base} survived the settle; listed before removal: "
+                f"{listing_before_removal or [str(base)]}",
                 flush=True,
             )
 
