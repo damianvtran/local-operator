@@ -253,10 +253,20 @@ def test_cmux_wins_over_the_in_band_escape(monkeypatch: Any) -> None:
     """cmux hosts Ghostty, so both paths would otherwise fire and the user
     would be told twice about one event. The env below is exactly that: a
     Ghostty terminal that is ALSO a cmux surface, which is the real shape of
-    the machine this is developed on."""
+    the machine this is developed on.
+
+    The identity gate is patched OPEN here, and that is the deliberate opt-in
+    every test whose subject is a delivered toast now makes: this suite runs
+    under a redirected ``HOME``, so ``desktop_belongs_to_this_process`` answers
+    False and the cmux leg declines before the precedence rule this test is
+    about is ever reached (``tests/notification_opt_in.py`` carries the same
+    waiver for the suites that share it). Leaving it unanswered would make this
+    test pass by silence.
+    """
     surface = "773d5e5e-1111-4222-8333-444455556666"
     spawned: list[list[str]] = []
     monkeypatch.setattr("local_operator.tui.notify._spawn_detached", spawned.append)
+    monkeypatch.setattr("local_operator.tui.notify.desktop_belongs_to_this_process", lambda: True)
     notifier, sink = unfocused({**GHOSTTY_ENV, "CMUX_SURFACE_ID": surface})
     assert notifier.send("complete") is True
     assert sink.writes == []

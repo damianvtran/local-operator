@@ -996,3 +996,135 @@ def test_the_dbus_leg_carries_the_same_gate(
     assert notifier.send("complete") is True
     assert spawned == []
     assert notify.BEL in "".join(sink), "the in-band nudge is the rig's own terminal"
+
+
+def test_a_redirected_home_refuses_the_cmux_toast(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The third leg, and the one whose marker is INHERITED rather than owned.
+
+    ``cmux notify`` does not write into this process's terminal — it spawns the
+    cmux binary, which raises the toast in the surface ``CMUX_SURFACE_ID`` merely
+    NAMES. That id arrives by inheritance, which is exactly how an inherited
+    ``CMUX_WORKSPACE_ID`` once let headless tests rename the operator's real
+    workspaces, and a rig that redirects ``HOME`` without ``env -i`` keeps every
+    ``CMUX_*`` variable — so the marker is present in precisely the runs that
+    must not use it. The control arm proves the leg still fires for a real run,
+    and that the refusal fell through to the IN-BAND write rather than dropping
+    the notification entirely: a run still gets told, on the surface it owns.
+    """
+    from local_operator.tui import notify
+
+    surface = "773d5e5e-1111-4222-8333-444455556666"
+    env = {
+        "GHOSTTY_RESOURCES_DIR": "/Applications/Ghostty.app/Contents/Resources",
+        "CMUX_SURFACE_ID": surface,
+    }
+    spawned: list[list[str]] = []
+    monkeypatch.delenv(ENV_DISABLE, raising=False)
+    monkeypatch.setattr(notify, "settings_get", lambda key, default: default)
+    monkeypatch.setattr(notify, "_spawn_detached", spawned.append)
+
+    def arm(home: Path) -> Any:
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        sink: list[str] = []
+        notifier = notify.Notifier(sink.append, env=env)
+        notifier.set_focused(False)
+        return notifier, sink
+
+    notifier, sink = arm(tmp_path / "iso")
+    monkeypatch.setattr("local_operator.supervisors.real_home", lambda: Path.home().resolve())
+    assert notifier.send("complete") is True
+    assert spawned and spawned[0][0] == "cmux", spawned
+    assert sink == []
+
+    spawned.clear()
+    notifier, sink = arm(tmp_path / "iso")
+    monkeypatch.setattr(
+        "local_operator.supervisors.real_home", lambda: (tmp_path / "elsewhere").resolve()
+    )
+    assert notifier.send("complete") is True
+    assert spawned == []
+    assert notify.BEL in "".join(sink) or notify.OSC9_PREFIX in "".join(sink), sink
+
+
+def test_the_refusal_is_reported_once_per_process(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A refusal that a USER can hit must not be silent, and must not nag.
+
+    The users this can cost a feature are not only rigs: a container, a
+    sandboxed shell, ``sudo -E`` or a dotfile that rewrites ``HOME`` reaches the
+    same branch. So the FIRST refusal says why, where a user will see it, and
+    every later one drops to debug rather than repeating the sentence per toast.
+    """
+    import logging
+
+    from local_operator.tui import notify
+
+    monkeypatch.setattr(notify, "_REFUSAL_REPORTED", False)
+    monkeypatch.setenv("HOME", str(tmp_path / "iso"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "iso"))
+    monkeypatch.setattr(
+        "local_operator.supervisors.real_home", lambda: (tmp_path / "elsewhere").resolve()
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="local_operator.tui.notify"):
+        assert notify.desktop_belongs_to_this_process() is False
+        assert notify.desktop_belongs_to_this_process() is False
+
+    warnings = [row for row in caplog.records if row.levelno == logging.WARNING]
+    assert len(warnings) == 1, [row.getMessage() for row in warnings]
+    assert "not this user's home" in warnings[0].getMessage()
+    assert any(row.levelno == logging.DEBUG for row in caplog.records), "the repeat is silent"
+
+
+def _files_that_spawn_a_cmux_toast() -> list[Path]:
+    """Modules outside ``tui/notify.py`` that build a ``cmux notify`` argv.
+
+    The argv builder is pure and stays that way; what this finds is every site
+    that would SPAWN it, which is where the identity gate has to be asked.
+    """
+    root = Path(__file__).resolve().parents[2] / "local_operator"
+    return [
+        path
+        for path in root.rglob("*.py")
+        if path.name != "notify.py" and "cmux_command(" in path.read_text(encoding="utf-8")
+    ]
+
+
+def test_every_cmux_toast_site_asks_the_gate() -> None:
+    """A cmux spawn whose gate was forgotten is a rig on the operator's screen.
+
+    TEXTUAL, and the PR must not read it as proof of behaviour — the behavioural
+    half is ``test_a_redirected_home_refuses_the_cmux_toast``, which drives the
+    leg the TUI uses. This is the drift tripwire for the NEXT spawn site: the
+    marker it keys on (``CMUX_SURFACE_ID``) is inherited, so the site that
+    forgets the gate is a site that posts into somebody else's cmux.
+    """
+    population = _files_that_spawn_a_cmux_toast()
+    assert population, "the sweep found no cmux sites; the predicate has rotted"
+    offenders = [
+        path for path in population if "desktop_belongs_to_this_process" not in path.read_text()
+    ]
+    assert (
+        not offenders
+    ), "these modules spawn a cmux toast and never ask whose desktop it is:\n" + "\n".join(
+        f"  {path}" for path in offenders
+    )
+
+
+def test_the_frame_sites_withhold_the_offer_from_a_run_that_is_not_yours() -> None:
+    """The two desktop-frame sites ask the same question, pinned by name.
+
+    A frame is raised by the ATTACHED APP under its own identity, so the backend
+    is the only place this repository can decline the banner — and the site that
+    drops the clause is invisible on this machine (no app attaches to a rig's
+    backend) while still being the offer that became a banner in the mock-store
+    incident this file's docstring records.
+    """
+    root = Path(__file__).resolve().parents[2] / "local_operator" / "server" / "utils"
+    for module in ("desktop_feed.py", "desktop_sessions.py"):
+        source = (root / module).read_text(encoding="utf-8")
+        assert "desktop_belongs_to_this_process" in source, module

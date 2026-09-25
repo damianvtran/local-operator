@@ -763,18 +763,36 @@ user's one real Notification Centre whichever directory the bundle was built in.
 So a rig that drives real sessions under `env -i HOME=$ISO …` and parks a tool
 approval puts its own synthetic text on the operator's screen — measured
 2026-09-24, a banner every nine seconds carrying the rig's tape lines, until the
-operator asked why. The product now refuses the OS legs itself:
-`tui.notify.desktop_belongs_to_this_process()` asks the uid's **passwd home**
-(the answer `label()` uses above, and for the same reason — `Path.home()` would
-compare a redirected home against itself and conclude it is the real one), and
-BOTH legs that reach the OS ask it: `detached_notify` (the identity bundle and
-the `osascript` fallback behind it) and `Notifier.send`'s D-Bus fallback.
-In-band OSC/BEL writes and `cmux notify` are deliberately untouched — they go to
-the terminal or pane the process itself owns, not to the user's desktop. A rig
-that follows the isolation recipe above is therefore silent on the desktop
-without doing anything else; a rig that runs with the REAL `HOME` (or on a host
-with no passwd entry) still needs the switch, which the harness paragraph under
-"What an agent may start" states outright.
+operator asked why. The product now refuses every surface that leaves this
+process:
+
+- `tui.notify.desktop_belongs_to_this_process()` asks the uid's **passwd home**
+  (the answer `browser_bridge/install.py::_default_config_root()` derives for the
+  same purpose, and for the same reason — `Path.home()` would compare a
+  redirected home against itself and conclude it is the real one), and refuses
+  when `$HOME` is not it;
+- the legs that ask it are the identity bundle and the `osascript` fallback in
+  `detached_notify`, `Notifier.send`'s D-Bus fallback, the three `cmux notify`
+  spawn sites (`Notifier.send` and the TUI's two observer branches — `cmux
+  notify` RPCs the cmux app for a surface named by an INHERITED
+  `CMUX_SURFACE_ID`, so it is not this process's own terminal), and the two
+  desktop-frame sites (`server/utils/desktop_feed.py`, `desktop_sessions.py`),
+  where the offer is withheld because the banner would be raised by the attached
+  app under its own identity;
+- the ONLY leg left ungated is the in-band OSC/BEL write, which really does land
+  in a terminal this process owns.
+
+The refusal is `warning` for the first one in a process and `debug` after, and
+that is not decoration: a container (`docker run -e HOME=/root`, a devcontainer),
+a sandboxed shell (`bwrap`, `firejail`, `nix-shell`), `sudo -E lop` or a dotfile
+that rewrites `HOME` loses every banner too, and a feature that vanishes with
+nothing on screen and nothing in the log is the failure mode the rest of this
+file argues against. A rig that follows the isolation recipe above is therefore
+silent everywhere the operator could see it without doing anything else; a rig
+that runs with the REAL `HOME` (or on a host with no passwd entry) still needs
+the switch, which the harness paragraph under "What an agent may start" states
+outright. Relocating `LOCAL_OPERATOR_CONFIG_DIR` is deliberately NOT a refusal —
+that user is still the user.
 
 **`lop browser install` used not to be isolated by `HOME` at all, and the
 reason is worth keeping even though the hazard is now fixed.** `browser_bridge/
@@ -1617,7 +1635,8 @@ The same applies to a manual QA run: that escape is for
 driving the real front end, never for opening a peer to hand work to.
 
 **Do not lean on the isolation to cover this.** Since 2026-09-24 a redirected
-`HOME` also makes the OS legs refuse on their own (see "Isolating a run" — a
+`HOME` also makes every surface that LEAVES the process refuse on its own (see
+"Isolating a run" — a
 notification is the one side effect a path redirect cannot isolate), but a rig
 that runs a session with the operator's real `HOME` still reaches his desktop,
 and `env -i` is what strips the value the suite armed. Set the gate in the

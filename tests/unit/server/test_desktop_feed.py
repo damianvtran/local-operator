@@ -2966,6 +2966,45 @@ def test_a_silenced_process_composes_no_banner(tmp_path, monkeypatch) -> None:
     assert _bannered(feed, subscription) == []
 
 
+def test_a_run_that_is_not_the_users_own_offers_no_banner(tmp_path, monkeypatch) -> None:
+    """The IDENTITY gate reaches the machine-wide channel as well.
+
+    The kill-switch cell above covers a backend a rig silenced; this one covers
+    the backend nobody silenced at all — a rig or a sandbox running under a
+    redirected ``HOME``, which is the shape that put a banner on the operator's
+    screen every nine seconds on 2026-09-24 through the TUI's own legs. The frame
+    here is raised by the ATTACHED APP under its own bundle identity, so the
+    offer is the only thing this repository can decline.
+
+    The predicate is answered for this body rather than patched open as the
+    module's own opt-in does, which is what makes the cell detect a lost clause:
+    the control arm proves the frame was otherwise coming, so this cannot pass by
+    the filter, the store or the subscription being broken.
+    """
+    root = tmp_path
+    sid = "f" * 12
+    _session(root, sid)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+
+    _publish(root, sid)
+    assert [frame["session_id"] for frame in _bannered(feed, subscription)] == [sid]
+
+    # Recorded as well as answered: the clause has to be ON this path, and a
+    # cell that only asserts the absence of a frame would pass if the filter
+    # stopped running at all.
+    asked: list[int] = []
+    monkeypatch.setattr(
+        "local_operator.tui.notify.desktop_belongs_to_this_process",
+        lambda: (asked.append(1), False)[1],
+    )
+    _publish(root, sid)
+    frames = _bannered(feed, subscription)
+    assert asked, f"the offer was never withheld by this gate; frames={frames}"
+    assert frames == []
+
+
 def test_the_stored_hosting_read_stays_off_the_event_loop(tmp_path, monkeypatch) -> None:
     """R1-2: the journal walk is 0.6 ms warm and up to ~745 ms cold, and this
     backend polls on its own loop.

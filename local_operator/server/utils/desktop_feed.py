@@ -1216,10 +1216,23 @@ class DesktopFeed:
         mock sessions in, from a process that never touched the mock itself.
         Without it, that store's conversations banner the operator with "Hello
         from the mock provider!" on the machine-wide channel.
+
+        AND A THIRD, WHICH IS NOT ABOUT THE MOCK: the identity test
+        (``desktop_belongs_to_this_process``) refuses the OFFER from a backend
+        that is not the user's own run. The banner this composes is raised by
+        another process — the desktop app attached here — under ITS bundle
+        identity, so withholding the frame is the only place this repository can
+        decline it, and a backend under a redirected ``HOME`` is a rig or a
+        sandbox by the same reasoning the TUI's own OS legs use.
         """
-        from local_operator.tui.notify import notifications_enabled
+        from local_operator.tui.notify import (
+            desktop_belongs_to_this_process,
+            notifications_enabled,
+        )
 
         if not notifications_enabled():
+            return
+        if not desktop_belongs_to_this_process():
             return
         bridged = set(self._bridged())
         candidates: list[tuple[str, str, str, str, int]] = []
