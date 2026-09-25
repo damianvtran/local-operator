@@ -1,0 +1,232 @@
+# Aida — the always-on review and triage agent for this repository.
+#
+# Read `.github/aida/README.md` first: it carries the design, the security
+# model, and the maintenance notes. The short version of the choices here:
+#
+# * `pull_request` (NOT `pull_request_target`): a fork PR never gets repository
+#   secrets on its own events. Fork PRs are excluded on EVERY path — the
+#   `pull_request` clause checks the head repo in the payload, and the
+#   comment/dispatch paths run a guard step that resolves the head repo (and
+#   the PR's state) through the API before anything is checked out, because an
+#   `@aida` comment or a dispatch is NOT a fork event and would otherwise run
+#   with secrets while the fork's code sits in the workspace.
+# * Pushes re-trigger via `synchronize`; drafts are skipped until marked
+#   ready for review. `cancel-in-progress` is true only for
+#   `pull_request`-event runs: a push must supersede the older head's review,
+#   while a comment- or dispatch-triggered run must not be able to cancel an
+#   in-flight review. (Aida's own comments cannot re-trigger anything at all:
+#   events created with the workflow GITHUB_TOKEN do not start new runs.)
+# * The jobs install a pinned `local-operator` from PyPI and the team from
+#   `.github/aida/`, then run `lop exec` headless. Approvals: the `--tools`
+#   declaration is the approval for exactly the names it lists where nobody
+#   can be asked — a non-TTY run without `--control`, which is this
+#   environment — and delegated children inherit both the bound and the
+#   approval (harness/subagent.py copies both to child sessions).
+name: Aida
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number to review
+        required: false
+        type: string
+      issue:
+        description: Issue number to triage
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  # `gh pr checks` reads statusCheckRollup (checks/statuses) and the workflow
+  # behind a run (actions). A scope not listed under an explicit `permissions:`
+  # block is `none`, not "default": without these three the prompts' `gh pr
+  # checks` call 403s with "Resource not accessible by integration".
+  actions: read
+  checks: read
+  statuses: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: aida-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr || inputs.issue || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  review:
+    name: Review pull request
+    # Runs for: a non-draft same-repo PR event; an `@aida` comment on a PR by
+    # someone with write access; a manual dispatch carrying a PR number.
+    if: >-
+      (github.event_name == 'pull_request'
+        && github.event.pull_request.draft == false
+        && github.event.pull_request.head.repo.full_name == github.repository
+        && github.event.pull_request.user.type != 'Bot')
+      || (github.event_name == 'issue_comment'
+        && github.event.issue.pull_request
+        && (contains(github.event.comment.body, '@aida') || contains(github.event.comment.body, '@Aida'))
+        && github.event.comment.user.type != 'Bot'
+        && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
+      || (github.event_name == 'workflow_dispatch' && inputs.pr != '')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RADIENT_API_KEY: ${{ secrets.RADIENT_API_KEY }}
+      NO_COLOR: "1"
+    steps:
+      # Fail fast, before anything is installed or checked out.
+      - name: Preflight the provider key
+        run: |
+          if [ -z "${RADIENT_API_KEY:-}" ]; then
+            echo "::error::RADIENT_API_KEY is not set. Add it under Settings -> Secrets and variables -> Actions so Aida can run."
+            exit 1
+          fi
+      # Comment and dispatch runs are not fork events: repository secrets ARE
+      # available and refs/pull/N/merge would deliver the fork's code. Resolve
+      # the head repo and the state through the API, and skip all of the job's
+      # work for anything that is not an open, same-repo PR. (On `pull_request`
+      # runs the job-level `if` has already checked this from the payload; a
+      # skipped step leaves `skip` empty, and empty != 'true'.)
+      - name: Guard the target (open, same-repo PR only)
+        if: github.event_name != 'pull_request'
+        id: guard
+        run: |
+          read -r head state < <(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '[.head.repo.full_name // "unknown", .state] | @tsv')
+          if [ "$head" != "$GITHUB_REPOSITORY" ] || [ "$state" != "open" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Aida skips PR #${PR_NUMBER}: head='${head}', state='${state}'."
+          fi
+      - name: Check out the pull request
+        if: steps.guard.outputs.skip != 'true'
+        uses: actions/checkout@v7
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}/merge
+          # Files, not history: diffs and commit context come from the API
+          # (`gh pr diff`, `gh api compare`); a full fetch of this repo's ~1 GB
+          # history is minutes of runner time for nothing.
+          fetch-depth: 1
+      - name: Set up Python
+        if: steps.guard.outputs.skip != 'true'
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install Aida (the pinned harness)
+        if: steps.guard.outputs.skip != 'true'
+        run: python -m pip install --disable-pip-version-check "local-operator==0.62.38"
+      - name: Install the Aida team and roles into the runner's lop config
+        if: steps.guard.outputs.skip != 'true'
+        run: bash .github/aida/setup.sh
+      - name: Run Aida's review
+        if: steps.guard.outputs.skip != 'true'
+        timeout-minutes: 35
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          {
+            cat .github/aida/prompts/pr-review.md
+            printf '\n\n## This run\n- Repository: %s\n- Pull request: #%s\n- Trigger: %s\n- Run log: %s/%s/actions/runs/%s\n' \
+              "$GITHUB_REPOSITORY" "$PR_NUMBER" "$GITHUB_EVENT_NAME" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            if [ -n "${COMMENT_BODY:-}" ]; then
+              printf '\nThe comment that triggered this run:\n\n%s\n' "$COMMENT_BODY"
+            fi
+          } > "$RUNNER_TEMP/aida-prompt.txt"
+          lop exec \
+            --hosting radient --model auto \
+            --team aida \
+            --tools bash,read,write,glob,grep,eval,todo,web_search,web_read,web_fetch,task,wait,jobs,hub,list_variables,read_variable \
+            --name "Aida review: PR #${PR_NUMBER}" \
+            "$(cat "$RUNNER_TEMP/aida-prompt.txt")"
+      - name: Report a failed run
+        if: failure() && env.RADIENT_API_KEY != '' && steps.guard.outputs.skip != 'true'
+        run: |
+          gh pr comment "${PR_NUMBER}" -R "${GITHUB_REPOSITORY}" --body "Aida's review run failed — see the run log: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+  triage:
+    name: Triage issue
+    # Runs for: an opened issue (any author except bots); an `@aida` comment on
+    # an issue by someone with write access; a manual dispatch with an issue
+    # number.
+    if: >-
+      (github.event_name == 'issues'
+        && github.event.issue.user.type != 'Bot')
+      || (github.event_name == 'issue_comment'
+        && !github.event.issue.pull_request
+        && (contains(github.event.comment.body, '@aida') || contains(github.event.comment.body, '@Aida'))
+        && github.event.comment.user.type != 'Bot'
+        && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
+      || (github.event_name == 'workflow_dispatch' && inputs.issue != '')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RADIENT_API_KEY: ${{ secrets.RADIENT_API_KEY }}
+      NO_COLOR: "1"
+    steps:
+      # Fail fast, before anything is installed or checked out.
+      - name: Preflight the provider key
+        run: |
+          if [ -z "${RADIENT_API_KEY:-}" ]; then
+            echo "::error::RADIENT_API_KEY is not set. Add it under Settings -> Secrets and variables -> Actions so Aida can run."
+            exit 1
+          fi
+      # A comment or dispatch on a closed issue would triage frozen content;
+      # resolve the state through the API first. (`issues` runs are the opening
+      # itself and need no guard.)
+      - name: Guard the target (open issue only)
+        if: github.event_name != 'issues'
+        id: guard
+        run: |
+          state="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}" --jq '.state')"
+          if [ "$state" != "open" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Aida skips issue #${ISSUE_NUMBER}: state='${state}'."
+          fi
+      - name: Check out the repository
+        if: steps.guard.outputs.skip != 'true'
+        uses: actions/checkout@v7
+      - name: Set up Python
+        if: steps.guard.outputs.skip != 'true'
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install Aida (the pinned harness)
+        if: steps.guard.outputs.skip != 'true'
+        run: python -m pip install --disable-pip-version-check "local-operator==0.62.38"
+      - name: Install the Aida team and roles into the runner's lop config
+        if: steps.guard.outputs.skip != 'true'
+        run: bash .github/aida/setup.sh
+      - name: Run Aida's triage
+        if: steps.guard.outputs.skip != 'true'
+        timeout-minutes: 20
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          {
+            cat .github/aida/prompts/issue-triage.md
+            printf '\n\n## This run\n- Repository: %s\n- Issue: #%s\n- Trigger: %s\n- Run log: %s/%s/actions/runs/%s\n' \
+              "$GITHUB_REPOSITORY" "$ISSUE_NUMBER" "$GITHUB_EVENT_NAME" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            if [ -n "${COMMENT_BODY:-}" ]; then
+              printf '\nThe comment that triggered this run:\n\n%s\n' "$COMMENT_BODY"
+            fi
+          } > "$RUNNER_TEMP/aida-prompt.txt"
+          lop exec \
+            --hosting radient --model auto \
+            --team aida \
+            --tools bash,read,write,glob,grep,eval,todo,web_search,web_read,web_fetch,task,wait,jobs,hub,list_variables,read_variable \
+            --name "Aida triage: issue #${ISSUE_NUMBER}" \
+            "$(cat "$RUNNER_TEMP/aida-prompt.txt")"
+      - name: Report a failed run
+        if: failure() && env.RADIENT_API_KEY != '' && steps.guard.outputs.skip != 'true'
+        run: |
+          gh issue comment "${ISSUE_NUMBER}" -R "${GITHUB_REPOSITORY}" --body "Aida's triage run failed — see the run log: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
