@@ -59,6 +59,37 @@ async def capabilities():
                 # and pays the cold engage on its first send, exactly as
                 # before. Gating nothing, it needs no key of its own.
                 "session_catalogue": 3,
+                # A catalogue that can be asked for ONE scope at a time, resumed
+                # by an opaque cursor, and counted per group: the
+                # `scope_kind`/`scope_name`/`cursor`/`with_counts` parameters on
+                # GET /v1/desktop/sessions, and `next_cursor`/`cursor_missing`/
+                # `scope`/`counts` on its answer.
+                #
+                # ITS OWN KEY, not a bump of `session_catalogue`, by the rule
+                # `session_pins` states below: a key exists so an EXISTING surface
+                # keeps working against a backend that lacks the new one, and the
+                # existing surface here is the whole chats list. The failure mode
+                # a bump would not fix is why this is not cosmetic: FastAPI
+                # SILENTLY IGNORES unknown query parameters, so an un-gated client
+                # that sent `scope_kind=team&scope_name=lopdev` to an older daemon
+                # would receive the UNSCOPED page and draw other teams'
+                # conversations under that team, and an un-gated `cursor` would
+                # receive page one again and duplicate it. The client must be able
+                # to ASK whether the daemon understands the parameters, before it
+                # sends them — which is the one thing a capability key can answer
+                # and a version bump of a working surface cannot.
+                #
+                # ONE KEY FOR THREE PROMISES (scoping, paging, the census),
+                # because they are one contract revision: a client that had the
+                # counts without the scope could not draw a group's count
+                # consistently with that group's paged rows.
+                #
+                # Absent ⇒ the client makes ONE unscoped request exactly as today
+                # (`limit=500`, no scope, no cursor, no counts) and renders exactly
+                # as today, with today's latency. `session_catalogue` and
+                # `session_pins` are untouched: no row changes shape, and the
+                # pin's own promise is unchanged.
+                "session_catalogue_page": 1,
                 # Searching past conversations by their CONTENT (name, id, exact
                 # body, bounded soft match) rather than by the page a client
                 # already holds. Its own key rather than a bump of

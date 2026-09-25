@@ -7315,3 +7315,446 @@ async def test_a_retiring_refusal_answers_its_code_on_the_message_route(
     # string: it loses nothing it was reading before.
     assert detail["message"] == str(refusal), detail
     assert detail["message"] == shipped, detail
+
+
+# --- the scoped, paged catalogue: the wire contract --------------------------
+
+
+def _bound_session(
+    root: Path,
+    session_id: str,
+    *,
+    team: str = "",
+    agent: str = "",
+    created: float = 1_000.0,
+) -> Path:
+    """A visible conversation carrying the binding the sidebar groups it by.
+
+    Through the REAL writer (``write_session_attachment``), because the binding
+    census reads what a session actually stores: a hand-written file could agree
+    with a wrong reader. ``created`` is stamped through ``created_at.json``
+    rather than left to ``st_birthtime``, which is macOS-only -- an order asserted
+    from the fallback would pass here and collapse to the id tie-break in CI.
+    """
+    from local_operator.resume import write_session_attachment
+    from local_operator.session.creation import ensure_session_created_at
+
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    ensure_session_created_at(directory, created)
+    (directory / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
+    if team or agent:
+        write_session_attachment(directory, team=team, agent=agent, goal="")
+    return directory
+
+
+def _ids(answer: Any) -> list[str]:
+    return [row["id"] for row in answer.json()["result"]["sessions"]]
+
+
+def _scoped(page: int = 2, name: str = "lopdev", kind: str = "team") -> str:
+    return f"/v1/desktop/sessions?limit={page}&scope_kind={kind}&scope_name={name}"
+
+
+@pytest.mark.asyncio
+async def test_a_request_without_the_paging_parameters_is_answered_as_before(draft_api) -> None:
+    """The compatibility promise, asserted against the listing it promises to keep.
+
+    A request that sends none of the new parameters must answer with the same
+    page, in the same order, that this route has always returned -- and the
+    authority for "the same page" is ``load_catalog``, which every other surface
+    (the TUI picker, the phone listing) shares and which the scan-cost tests pin
+    independently. The four new fields are PRESENT and at their defaults, which is
+    the half a client reads: it must be able to tell "this answer is not paged"
+    from "this server is too old to page it".
+    """
+    from local_operator.session.catalog import load_catalog
+
+    client, root = draft_api
+    for index in range(2):
+        _bound_session(root, f"chat{index:07d}", team="lopdev", created=1_000.0 + index)
+
+    answer = await client.get("/v1/desktop/sessions?limit=3")
+
+    assert answer.status_code == 200, answer.text
+    result = answer.json()["result"]
+    # The KEY SET, not its order: the four additions are the only difference and
+    # they are all at their defaults, but no client may rely on the ORDER of a
+    # JSON object -- asserting it would fail the first time a field is moved for
+    # an unrelated reason, and the compatibility claim here is about fields.
+    assert set(result) == {
+        "sessions",
+        "truncated",
+        "limit",
+        "degraded",
+        "next_cursor",
+        "cursor_missing",
+        "scope",
+        "counts",
+    }
+    assert result["next_cursor"] is None
+    assert result["cursor_missing"] is False
+    assert result["scope"] is None
+    assert result["counts"] is None
+    assert result["truncated"] is False
+    assert result["limit"] == 3
+    assert result["degraded"] == []
+    assert [row["id"] for row in result["sessions"]] == [
+        entry.id for entry in load_catalog(root, limit=3)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_no_counts_and_no_cursor_without_the_flags(draft_api) -> None:
+    """The opt-in half: neither new answer may arrive unasked for.
+
+    ``counts`` costs one ``attachment.json`` read per visible session, so a client
+    that does not draw counts must not pay it -- and ``next_cursor`` on a request
+    that holds no cursor is a position for a walk nobody started.
+    """
+    client, root = draft_api
+    for index in range(4):
+        _bound_session(root, f"chat{index:07d}", team="lopdev", created=1_000.0 + index)
+
+    answer = await client.get("/v1/desktop/sessions?limit=4")
+
+    result = answer.json()["result"]
+    assert result["counts"] is None
+    assert result["truncated"] is False
+    assert result["next_cursor"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_cursor_is_minted_exactly_when_the_listing_holds_more(draft_api) -> None:
+    """``(next_cursor is not None) == truncated``, on both sides of the boundary.
+
+    The head page is a scope too (the chat region's tail pages it), so the same
+    invariant has to hold for a request that named no scope.
+    """
+    client, root = draft_api
+    for index in range(4):
+        _bound_session(root, f"chat{index:07d}", created=1_000.0 + index)
+
+    short = await client.get("/v1/desktop/sessions?limit=2")
+    whole = await client.get("/v1/desktop/sessions?limit=4")
+
+    short_result = short.json()["result"]
+    whole_result = whole.json()["result"]
+    assert short_result["truncated"] is True
+    assert short_result["next_cursor"] is not None
+    assert (short_result["next_cursor"] is not None) == short_result["truncated"]
+    assert whole_result["truncated"] is False
+    assert whole_result["next_cursor"] is None
+    assert (whole_result["next_cursor"] is not None) == whole_result["truncated"]
+
+
+@pytest.mark.asyncio
+async def test_a_scoped_page_holds_only_that_groups_rows_and_echoes_the_scope(draft_api) -> None:
+    """One group's top N, and the answer says which group it is.
+
+    The echo is not decoration: a page can land after the operator collapsed the
+    group that asked for it, so the client has to attribute an answer to the
+    request that produced it from the answer itself rather than from the ordering
+    of its own promises.
+    """
+    client, root = draft_api
+    for index in range(3):
+        _bound_session(root, f"lop{index:07d}", team="lopdev", created=5_000.0 + index)
+    for index in range(3):
+        _bound_session(root, f"min{index:07d}", team="minervadev", created=9_000.0 + index)
+    _bound_session(root, f"solo{0:07d}", agent="reviewer", created=9_500.0)
+
+    page = await client.get(_scoped(page=10))
+    agents = await client.get(_scoped(page=10, name="reviewer", kind="agent"))
+
+    assert page.status_code == 200, page.text
+    assert page.json()["result"]["scope"] == {"kind": "team", "name": "lopdev"}
+    assert _ids(page) == [f"lop{index:07d}" for index in reversed(range(3))]
+    assert agents.json()["result"]["scope"] == {"kind": "agent", "name": "reviewer"}
+    assert _ids(agents) == ["solo0000000"]
+
+
+@pytest.mark.asyncio
+async def test_an_agent_scope_excludes_a_team_attached_session(draft_api) -> None:
+    """The ``not team`` half of the renderer's grouping rule, on the wire.
+
+    A session can carry both names, and the sidebar draws it under the TEAM only.
+    Without that half it would also appear in an agent group the UI never renders
+    it in -- a row in the wrong place, which is worse than a missing one.
+    """
+    client, root = draft_api
+    _bound_session(root, "bothteam0001", team="lopdev", agent="reviewer")
+    _bound_session(root, "soloagent001", agent="reviewer")
+
+    answer = await client.get(_scoped(name="reviewer", kind="agent"))
+
+    assert _ids(answer) == ["soloagent001"]
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_scope_name_is_an_empty_page_not_a_404(draft_api) -> None:
+    """A team with no conversations is a legitimate state.
+
+    The name is deliberately NOT validated against the live team/profile registry:
+    the operator renames and deletes teams, and their sessions' ``attachment.json``
+    keeps the name it was written under, so a registry check would 404 the very
+    conversations that still exist.
+    """
+    client, root = draft_api
+    _bound_session(root, "bound0000001", team="lopdev")
+
+    answer = await client.get(f"{_scoped(name='deleted-team', page=50)}&with_counts=true")
+
+    assert answer.status_code == 200, answer.text
+    result = answer.json()["result"]
+    assert result["sessions"] == []
+    assert result["truncated"] is False
+    assert result["next_cursor"] is None
+    assert result["counts"]["scopes"] == [
+        {"kind": "team", "name": "lopdev", "total": 1, "active": 0}
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("query", "code"),
+    [
+        ("scope_kind=team", "scope_name_required"),
+        ("scope_name=lopdev", "scope_kind_required"),
+        ("scope_kind=pod&scope_name=lopdev", "scope_kind_unknown"),
+        (f"scope_kind=team&scope_name={'n' * 65}", "scope_name_too_long"),
+    ],
+)
+async def test_a_bad_scope_is_refused_by_name(draft_api, query: str, code: str) -> None:
+    """Every malformed scope is a 422 that NAMES the offending half.
+
+    A half-scope is a client bug rather than an empty listing: answering it with
+    the whole catalogue would draw every team's rows under one team. The names are
+    part of the contract a client branches on, so renaming one is a wire break and
+    this is where that shows up.
+    """
+    client, _root = draft_api
+
+    answer = await client.get(f"/v1/desktop/sessions?limit=5&{query}")
+
+    assert answer.status_code == 422, answer.text
+    detail = answer.json()["detail"]
+    assert detail["code"] == code, detail
+    assert isinstance(detail["message"], str) and detail["message"]
+    # Nothing about the store leaked into the refusal, and no scope can be
+    # applied to a name the route would not accept.
+    assert "sessions" not in answer.text
+
+
+@pytest.mark.asyncio
+async def test_a_scope_name_at_the_bound_is_accepted(draft_api) -> None:
+    """64 characters is the bound the profile and team registries use."""
+    client, root = draft_api
+    longest = "n" * 64
+    _bound_session(root, "bound0000001", team=longest)
+
+    answer = await client.get(_scoped(name=longest, page=5))
+
+    assert answer.status_code == 200, answer.text
+    assert _ids(answer) == ["bound0000001"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("token", ["not a token at all", "e30", "a" * 300])
+async def test_an_unusable_cursor_is_answered_with_the_first_page(draft_api, token: str) -> None:
+    """Never an error: the remedy for a lost place is "re-read from the top".
+
+    This mirrors ``HistoryPage.cursor_missing`` exactly, including the reasoning:
+    a client whose token is unusable must be able to tell that apart from a store
+    that moved, and must not be handed a 4xx it can do nothing with.
+    """
+    from urllib.parse import quote
+
+    client, root = draft_api
+    for index in range(4):
+        _bound_session(root, f"chat{index:07d}", team="lopdev", created=1_000.0 + index)
+
+    answer = await client.get(f"{_scoped()}&cursor={quote(token, safe='')}")
+
+    assert answer.status_code == 200, answer.text
+    result = answer.json()["result"]
+    assert result["cursor_missing"] is True
+    assert _ids(answer) == ["chat0000003", "chat0000002"]
+
+
+@pytest.mark.asyncio
+async def test_a_cursor_minted_for_another_scope_is_answered_as_a_first_page(draft_api) -> None:
+    """A foreign position is refused rather than applied to a different list.
+
+    The scope is part of the token, so resuming one team's list from another
+    team's position would silently serve rows the scope does not contain --
+    worse than re-reading from the top, which is why the answer is the scope's
+    first page with the flag raised rather than a stricter slice.
+    """
+    from urllib.parse import quote
+
+    client, root = draft_api
+    for index in range(4):
+        _bound_session(root, f"lop{index:07d}", team="lopdev", created=5_000.0 + index)
+    for index in range(4):
+        _bound_session(root, f"min{index:07d}", team="minervadev", created=1_000.0 + index)
+
+    other = await client.get(_scoped(name="minervadev"))
+    other_cursor = other.json()["result"]["next_cursor"]
+    assert other_cursor is not None
+
+    answer = await client.get(f"{_scoped()}&cursor={quote(other_cursor, safe='')}")
+
+    result = answer.json()["result"]
+    assert result["cursor_missing"] is True
+    assert _ids(answer) == ["lop0000003", "lop0000002"]
+
+
+@pytest.mark.asyncio
+async def test_a_cursor_walk_covers_a_scope_exactly_once(draft_api) -> None:
+    """E4 at the route: a walk to exhaustion returns the scope's ids, once each.
+
+    Seven conversations at two per page is four pages, so the walk exercises a
+    middle page and a last page as well as the first. The two properties are
+    asserted together: no duplicate, no gap, and the invariant that ties
+    ``next_cursor`` to ``truncated`` on EVERY answer rather than only on the last.
+    """
+    from urllib.parse import quote
+
+    client, root = draft_api
+    for index in range(7):
+        _bound_session(root, f"lop{index:07d}", team="lopdev", created=1_000.0 + index)
+    for index in range(3):
+        _bound_session(root, f"min{index:07d}", team="minervadev", created=2_000.0 + index)
+
+    seen: list[str] = []
+    cursor: str | None = None
+    pages = 0
+    while True:
+        query = _scoped()
+        if cursor is not None:
+            query += f"&cursor={quote(cursor, safe='')}"
+        answer = await client.get(query)
+        assert answer.status_code == 200, answer.text
+        result = answer.json()["result"]
+        assert result["scope"] == {"kind": "team", "name": "lopdev"}
+        assert (result["next_cursor"] is not None) == result["truncated"]
+        seen += _ids(answer)
+        pages += 1
+        assert pages < 10, "a walk that does not terminate is the failure this pins"
+        cursor = result["next_cursor"]
+        if cursor is None:
+            break
+
+    assert pages == 4, pages
+    assert seen == [f"lop{index:07d}" for index in reversed(range(7))], seen
+    assert len(set(seen)) == len(seen), "a walk must not serve a row twice"
+
+
+@pytest.mark.asyncio
+async def test_with_counts_reports_the_groups_and_the_unbound_population(draft_api) -> None:
+    """The census a collapsed row's badge is drawn from.
+
+    ``unbound`` is its own number rather than a ``scopes`` entry: a session with no
+    binding belongs to no group, and folding it into one would invent a group the
+    renderer never draws.
+    """
+    client, root = draft_api
+    for index in range(3):
+        _bound_session(root, f"lop{index:07d}", team="lopdev", created=1_000.0 + index)
+    for index in range(2):
+        _bound_session(root, f"min{index:07d}", team="minervadev", created=2_000.0 + index)
+    _bound_session(root, "unbound00001", created=3_000.0)
+
+    answer = await client.get(
+        "/v1/desktop/sessions?limit=2&with_counts=true&scope_kind=team&scope_name=lopdev"
+    )
+
+    assert answer.status_code == 200, answer.text
+    counts = answer.json()["result"]["counts"]
+    assert counts["total"] == 6
+    assert counts["unbound"] == 1
+    # Descending size, then kind, then name -- the order two reads of one store
+    # cannot disagree about.
+    assert counts["scopes"] == [
+        {"kind": "team", "name": "lopdev", "total": 3, "active": 0},
+        {"kind": "team", "name": "minervadev", "total": 2, "active": 0},
+    ]
+    # The PAGE is still the scope's two newest, and the counts describe the whole
+    # listing rather than the page.
+    assert _ids(answer) == ["lop0000002", "lop0000001"]
+
+
+@pytest.mark.asyncio
+async def test_the_census_counts_only_the_rows_the_panel_can_draw(draft_api) -> None:
+    """``counts`` describes the population a default list shows: not archived rows.
+
+    The defect this whole change answers was a NUMBER that disagreed with the rows
+    beside it, and an archived row is one no default list draws -- the sidebar
+    filters them out of every list it renders -- so a badge that counted them
+    would invite a person into a group whose every row is hidden. The rows
+    themselves still obey the request: ``include_archived=true`` carries them, and
+    the counts do not move.
+    """
+    from local_operator.session.archived import set_archived
+
+    client, root = draft_api
+    _bound_session(root, "live0000001", team="lopdev", created=1_000.0)
+    _bound_session(root, "gone0000001", team="lopdev", created=2_000.0)
+    _bound_session(root, "gone0000002", team="lopdev", created=3_000.0)
+    _bound_session(root, "unbound00001", created=4_000.0)
+    assert set_archived(root, "gone0000001", True) is True
+    assert set_archived(root, "gone0000002", True) is True
+
+    answer = await client.get(f"{_scoped(page=10)}&include_archived=true&with_counts=true")
+
+    assert answer.status_code == 200, answer.text
+    result = answer.json()["result"]
+    # The ROWS are what the request asked for: the group's live row and its two
+    # archived ones, which are exactly what ``include_archived`` governs.
+    assert sorted(_ids(answer)) == ["gone0000001", "gone0000002", "live0000001"]
+    # The CENSUS is the population the panel can draw: the live row of the group
+    # plus the one live unbound row. ``active`` rides the same filtered loop, so a
+    # population change cannot move one number and leave the other behind.
+    counts = result["counts"]
+    assert counts["total"] == 2
+    assert counts["unbound"] == 1
+    assert counts["scopes"] == [
+        {"kind": "team", "name": "lopdev", "total": 1, "active": 0},
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [0, 501])
+async def test_the_route_refuses_a_limit_outside_its_bounds(draft_api, limit: int) -> None:
+    """The page bound itself, which had no coverage on this route.
+
+    ``le=500`` is load-bearing beyond this route: the TUI sidebar and the phone
+    listing ask for large pages, and the pinned off-page resolution is written
+    against a page that can hold them. A client that asks for more is refused
+    rather than silently clamped, so its own accounting of what it holds stays
+    true.
+    """
+    client, _root = draft_api
+
+    answer = await client.get(f"/v1/desktop/sessions?limit={limit}")
+
+    assert answer.status_code == 422, answer.text
+
+
+@pytest.mark.asyncio
+async def test_the_paging_capability_is_published_beside_untouched_neighbours(draft_api) -> None:
+    """The key a client gates on, and the two it must NOT read as bumped.
+
+    ``session_catalogue`` and ``session_pins`` stay where they are: no row changes
+    shape, and the only thing a client needs to know is whether the daemon
+    understands the new parameters -- which a version bump of a working surface
+    could not answer on its own.
+    """
+    client, _root = draft_api
+
+    features = (await client.get("/v1/capabilities")).json()["result"]["features"]
+
+    assert features["session_catalogue_page"] == 1
+    assert features["session_catalogue"] == 3
+    assert features["session_pins"] == 1
