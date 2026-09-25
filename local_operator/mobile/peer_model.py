@@ -303,7 +303,7 @@ def pending_audit_body(
     new: str,
     sender: dict[str, Any] | None = None,
     *,
-    dropped_fallback: str = "",
+    fallback: str = "",
 ) -> str:
     """The card for an ACCEPTED switch whose outcome is still being decided.
 
@@ -312,16 +312,15 @@ def pending_audit_body(
     exactly that; the switch notice that follows (or a refusal notice) says
     how it ended.
 
-    ``dropped_fallback`` is N5's case on this path (review round 3, N6): the
-    request re-selects the model a pinned fallback displaced, so ``old`` IS
-    ``new`` and ``on <old> until it applies`` named a model the session was
-    not on. It is on the fallback until the switch applies, and the card says so.
+    ``fallback`` is the pinned fallback serving right now, if any. Until the
+    switch applies that is the model the session is on, so it is what the card
+    names — never the selection it displaced (review round 3, N6; PR #1587
+    review round 1, MINOR-1). ``old == new`` is the reclaim of that displaced
+    selection, which reads ``switch back``.
     """
-    if dropped_fallback:
-        body = (
-            f"{AUDIT_PREFIX} switch back to {new} requested "
-            f"(on fallback {dropped_fallback} until it applies)"
-        )
+    if fallback:
+        verb = "switch back to" if old == new else "switch to"
+        body = f"{AUDIT_PREFIX} {verb} {new} requested (on fallback {fallback} until it applies)"
     else:
         body = f"{AUDIT_PREFIX} switch to {new} requested (on {old} until it applies)"
     return body + _terminal_tail(sender or {})

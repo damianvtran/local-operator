@@ -1168,6 +1168,31 @@ def unconfirmed_switch_detail() -> str:
     return "no answer — the switch may or may not have landed; check `lop sessions` before retrying"
 
 
+def interrupted_switch_detail() -> str:
+    """Ctrl-C while ``lop model`` waited (PR #1587 UX round 1, U1).
+
+    The same honesty as :func:`unconfirmed_switch_detail`: the op may already
+    sit in the target's socket buffer, and the target applies before it acks,
+    so stopping the wait is not stopping the switch.
+    """
+    return (
+        "interrupted — the switch may or may not have landed; "
+        "check `lop sessions` before retrying"
+    )
+
+
+def interrupted_send_detail() -> str:
+    """Ctrl-C while ``lop send`` waited: :func:`_unanswered_dial_detail`'s rule.
+
+    Once the dial may have written the op, delivery is unconfirmed rather than
+    failed, and a re-send is the duplicate steer or wake that sentence warns of.
+    """
+    return (
+        "interrupted — delivery is UNCONFIRMED: it may still arrive, so do not "
+        "send it again unless you know it did not land"
+    )
+
+
 def unreachable_switch_detail(error: BaseException) -> str:
     """The control socket never opened, so the op was never sent (review N3)."""
     # Both facts the reader acts on lead; the socket detail trails (design
@@ -1175,15 +1200,21 @@ def unreachable_switch_detail(error: BaseException) -> str:
     return f"could not reach that session; nothing changed ({error})"
 
 
-#: How long the sender waits for the target's answer to a switch. ABOVE the TUI
-#: host's own app-hop budget (``tui_handle._APP_HOP_TIMEOUT_S``, 10 s), because a
-#: target that is busy but succeeding must not read as "no answer" (review N2);
-#: the same figure as the attach client's ``ACK_TIMEOUT_S``.
+#: How long the sender waits with NOTHING arriving from the target before it
+#: gives up on a switch. ABOVE the TUI host's own app-hop budget
+#: (``tui_handle._APP_HOP_TIMEOUT_S``, 10 s), because a target that is busy but
+#: succeeding must not read as "no answer" (review N2); the same figure as the
+#: attach client's ``ACK_TIMEOUT_S``.
+#:
+#: AN IDLE BOUND, NOT A TOTAL (PR #1587 review round 1, MINOR-3): it is applied
+#: to each socket read (``peer_client._FrameReader.next_line``), and a target
+#: that pushes projection frames on the connection resets it, so the whole wait
+#: can run longer. No user-facing sentence may quote it as "up to 15s".
 PEER_MODEL_ACK_TIMEOUT_S = 15.0
 
 #: How long ``lop model`` stays silent before saying it is still waiting (UX
 #: round 3, U11). A healthy target answers in well under a second, but a stopped
-#: or wedged one holds the command for the whole :data:`PEER_MODEL_ACK_TIMEOUT_S`,
+#: or wedged one holds the command for at least :data:`PEER_MODEL_ACK_TIMEOUT_S`,
 #: and 15 s of nothing reads as a hang.
 PEER_MODEL_WAIT_NOTICE_S = 2.0
 
@@ -1191,14 +1222,14 @@ PEER_MODEL_WAIT_NOTICE_S = 2.0
 def waiting_for_switch_detail(record: "Any") -> str:
     """The one line ``lop model`` prints while the target has not answered yet.
 
-    Names the target in the receipt's own ``name (pid N)`` grammar, and the
-    bound, so the reader knows the wait ends on its own.
+    Names the target in the receipt's own ``name (pid N)`` grammar. It promises
+    NO total: the ack deadline is an idle bound that the target's own pushes
+    reset (see :data:`PEER_MODEL_ACK_TIMEOUT_S`), and "up to 15s" was measured
+    running to 20 s (review round 1, MINOR-3). Short on purpose: one row at 60
+    columns for a name up to 25 characters (design round 1, D13).
     """
     name = record.conversation_name or record.session_id
-    return (
-        f"waiting for {name} (pid {record.pid}) to answer… "
-        f"(up to {PEER_MODEL_ACK_TIMEOUT_S:.0f}s)"
-    )
+    return f"no answer yet from {name} (pid {record.pid})…"
 
 
 def not_running_detail(session: str) -> str:
@@ -1229,8 +1260,9 @@ async def switch_peer_model(
     :func:`older_peer_detail` because its raw ``unknown op`` text says nothing
     about what the sender should do, and when the socket could not be opened
     (nothing was sent, so nothing changed). Raises :class:`PeerModelUnconfirmed`
-    only when the op was written and no answer came back within
-    :data:`PEER_MODEL_ACK_TIMEOUT_S`.
+    only when the op was written and the target's socket then stayed silent for
+    :data:`PEER_MODEL_ACK_TIMEOUT_S` — an idle bound per read, not a total, so a
+    target that keeps pushing frames can hold the call longer.
 
     Live, started records only: resolution already refused the rest, and this
     re-checks ``started`` for a caller that bypassed it, exactly as

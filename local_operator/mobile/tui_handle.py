@@ -819,6 +819,7 @@ class TuiSessionHandle(SessionHandle):
                 "already": peer_model.already_selected(session, new_label),
                 "pending": False,
                 "displaced": "",
+                "serving_fallback": "",
                 "children": 0,
                 "error": None,
             }
@@ -843,6 +844,9 @@ class TuiSessionHandle(SessionHandle):
                 state["took"] = peer_model.already_selected(current, new_label)
                 state["after"] = _effective_label(current)
                 state["displaced"] = peer_model.displaced_selection(current)
+                # A pending switch has not applied: the pin, if any, is still
+                # what serves, and the card must name it (review r1, MINOR-1).
+                state["serving_fallback"] = peer_model.pinned_fallback_label(current)
                 state["children"] = peer_model.running_subagent_count(session)
             return state
 
@@ -859,7 +863,7 @@ class TuiSessionHandle(SessionHandle):
                 # sender. Worded as a request, because it can still fail.
                 await self._record_peer_model_card(
                     peer_model.pending_audit_body(
-                        before, new_label, sender or {}, dropped_fallback=dropped
+                        before, new_label, sender or {}, fallback=state["serving_fallback"]
                     ),
                     sender,
                 )

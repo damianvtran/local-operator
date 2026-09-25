@@ -3245,6 +3245,7 @@ def send_command(args: argparse.Namespace) -> int:
     from local_operator.mobile.peer_send import (
         candidate_lines,
         deliver_peer_message,
+        interrupted_send_detail,
         skipped_clause,
         validate_peer_body,
     )
@@ -3450,6 +3451,11 @@ def send_command(args: argparse.Namespace) -> int:
                 sender=sender,
             )
         )
+    except KeyboardInterrupt:
+        # Same wait, same rule as the timeout arm below: stopping it does not
+        # un-send an op that may already be written (PR #1587 UX round 1, U1).
+        _peer_red(interrupted_send_detail())
+        return 130
     except TimeoutError as exc:
         # NOT "could not deliver": a read deadline expiring means no
         # ACKNOWLEDGED result, not an undelivered message — the mutation op is
@@ -3493,6 +3499,7 @@ def model_command(args: argparse.Namespace) -> int:
         PEER_MODEL_WAIT_NOTICE_S,
         PeerModelUnconfirmed,
         candidate_lines,
+        interrupted_switch_detail,
         parse_model_selector,
         resolve_switch_target,
         switch_peer_model,
@@ -3587,6 +3594,13 @@ def model_command(args: argparse.Namespace) -> int:
 
     try:
         detail = asyncio.run(switch())
+    except KeyboardInterrupt:
+        # Ctrl-C during the wait is the natural answer to the waiting line, and
+        # it stops only the WAIT: the op may already be in the target's buffer
+        # (PR #1587 UX round 1, U1). One honest line and the shell's SIGINT
+        # status, not a traceback that says nothing about the switch.
+        _peer_red(switch_receipt(record, interrupted_switch_detail()))
+        return 130
     except (PeerModelUnconfirmed, RuntimeError) as exc:
         _peer_red(switch_receipt(record, str(exc)))
         return 1

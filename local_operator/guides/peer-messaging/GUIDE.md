@@ -216,10 +216,12 @@ collapsed row shows it as `switched`, `no change` or `pending`):
 - `could not reach that session; nothing changed (…)` — the socket never
   opened.
 - `no answer — the switch may or may not have landed; check lop sessions
-  before retrying` — the op was sent and no answer came back within 15 s.
-  `lop model` prints `waiting for <name> (pid N) to answer… (up to 15s)` on
-  stderr once 2 s pass with no answer, so a stopped target does not look like
-  a hang.
+  before retrying` — the op was sent and the target then sent nothing for
+  15 s. That is an idle limit, not a total: a target that keeps sending screen
+  updates can hold the wait longer. `lop model` prints `no answer yet from
+  <name> (pid N)…` on stderr once 2 s pass with no answer, so a stopped target
+  does not look like a hang. Ctrl-C ends the wait (exit 130) with `interrupted
+  — the switch may or may not have landed; …`; it does not cancel the switch.
 
 The target's transcript records the switch twice: the usual `[model switch]`
 notice, and a peer card whose header names the sender and whose body reads
@@ -227,9 +229,10 @@ notice, and a peer card whose header names the sender and whose body reads
 resume this card is the only trace of the switch. A `lop model` from a plain
 terminal is the sender `terminal`, and the body ends `— from a terminal in
 <dir>`; one run inside a lop session names that session. A pending local switch
-writes `switch to <new> requested (on <old> until it applies)` instead, or
-`switch back to <new> requested (on fallback <fallback> until it applies)` when
-it reclaims the model a fallback displaced. The card is record-only; it does
+writes `switch to <new> requested (on <old> until it applies)` instead. While a
+provider fallback is serving, it names the fallback, `(on fallback <fallback>
+until it applies)`, and reads `switch back to <new>` when `<new>` is the model
+that fallback displaced. The card is record-only; it does
 not start a turn.
 
 ## `lop sessions` — what is running and what it costs
