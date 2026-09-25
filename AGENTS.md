@@ -532,11 +532,17 @@ resolver or a lost edge fails a test rather than a CI job.
 
 **CI's five shards are the whole-tree gate. A local whole-tree run is not one, and
 no session should block on it.** Measured 2026-09-24 at load average 140-200, the
-whole tree is **~85 minutes at the 3 workers this hook usually resolves** (`-n 3`:
-0% to 12% in 13 min, 43% at 38 min, 69% at ~58 min) and **20 minutes for two TUI
-files alone at `-n 6`**; `tests/durations.json` carries 12,663 call-phase seconds
-of it, 82% under `tests/unit/tui`. Prefer the scoped inner loop above, and remember
-that the scoped `test` job narrows for nothing on this tree today.
+whole tree is **>85 minutes at the four workers this host's hook resolved** — the
+run's own line is `pytest worker cap: 4 (bound by memory, cpu arm 7, memory arm 4,
+…)`, and it reached 0% to 12% in 13 min, 43% at 38 min, then **69% at ~58 min,
+where its own `timeout: 3600` killed it**: the total is a LOWER BOUND projected from
+a run that never finished, not a measurement of one — and **20 minutes for two TUI
+files alone at `-n 6`**; `tests/durations.json` carries 12,663 call-phase seconds of
+it, **77.2% of that total under `tests/unit/tui`** (9,775 s). (The 82.3% in the
+Environment section above is a share of a different total — 108 test-minutes — and
+quoting one total with the other's percentage is how a number stops being
+evidence.) Prefer the scoped inner loop above, and remember that the scoped `test`
+job narrows for nothing on this tree today.
 
 **A local run now reports on itself, so silence is no longer ambiguous.** With
 `LOCAL_OPERATOR_SHARD_STALL_SECONDS` absent (i.e. anywhere but the CI shard job),
@@ -544,8 +550,13 @@ that the scoped `test` job narrows for nothing on this tree today.
 non-CI host and prints one stderr line saying so:
 
 ```
-local stall report: ON (900s of no completed test), reporting only. Silence it with LOCAL_OPERATOR_LOCAL_STALL_SECONDS=0.
+local stall report: ON (900s of no completed test), reporting only. Silence the report with LOCAL_OPERATOR_LOCAL_STALL_SECONDS=0 (a per-test bound survives that).
 ```
+
+That last clause is load-bearing: the report and the per-test hard bound below are
+INDEPENDENT, so `=0` silences the reporting and leaves a bound you set armed (it
+prints its own `local stall report: OFF (…=0); per-test hard bound <n>s still ON`
+line when that is the combination you asked for).
 
 When no test has COMPLETED for that long it prints, and repeats every 30 s, a block
 naming every test still in flight with its elapsed time, the run's rate, and the
@@ -587,7 +598,10 @@ sized from `tests/durations.json` (4x the whole FILE's measured total, floored a
 at that many seconds. It arms the same C timer with `exit=True`, so the process
 dies and xdist's own crash report names the item. It is off everywhere by default
 because a fired bound kills the worker carrying unrelated tests, which is the same
-reason the e2e stage runs `-n0`.
+reason the e2e stage runs `-n0`. It survives `LOCAL_OPERATOR_LOCAL_STALL_SECONDS=0`
+— that is the pairing the announcement above invites, and it is tested from both
+sides (`test_the_hard_bound_survives_the_reporter_being_silenced`,
+`test_a_silenced_report_still_says_the_bound_is_live`).
 
 **Two artifacts look exactly like a stall and are not.** First, **a run killed by
 its own wall-clock bound**: `-q` prints one progress line per 72 completed tests, so
@@ -598,24 +612,36 @@ the log can simply stop mid-dot with no summary and no `EXIT=` line when the
 written by WORKER processes whose controller was killed first (their
 `pytest_sessionfinish` tries to send `workerfinished` on a dead channel), so it
 means "someone killed the controller", not "a worker died" — measured on a run
-killed 9 s before those lines were written. A worker that really did go down is
-named now: the root conftest prints `DEAD WORKER: gw2 did not finish its session:
-Not properly terminated`, and a run that lost a worker while passing is turned into
-a FAILURE, because the tests that worker owned may not have run at all.
+killed 9 s before those lines were written. A worker that goes down **with an item
+in flight** is named now: the root conftest prints `DEAD WORKER: gw2 did not finish
+its session: Not properly terminated`, and a run that lost a worker while passing
+is turned into a FAILURE, because the tests that worker owned may not have run at
+all. Know the boundary, because it is xdist's and not ours: a worker that had
+already reported `workerfinished` — an idle worker whose queue had emptied, which is
+what an OOM or a process-group cap can take — is reported by xdist as a CLEAN
+finish (`pytest_testnodedown(error=None)`) and is invisible to anything on the
+pytest side; measured three times on a `-n 3` run with an idle worker SIGKILLed,
+rc=0 with no diagnostic. That is also correct, not a gap to close: that worker's
+tests really had completed.
 
-**A per-command memory ceiling is NOT what killed any of these runs, and that is
-measured rather than assumed.** A `-n 3` whole-tree run does not need anything
-near the 1,500 MB a `memory_mb=1500` bash call allows: measured 2026-09-24 by
+**A per-command memory ceiling is NOT what killed any of these runs — and that is a
+measurement of ONE SLICE, not a bound for the tree.** Measured 2026-09-24 by
 summing a real run's process TREE every second, a mixed slice
-(`tests/unit/analytics` + `test_eval_tool.py` + `test_slash_echo.py`) peaked at
-**455 MB at `-n 2` and 623 MB at `-n 3`**, against a heavy-corner peak of 441.5 MB
-for ONE worker's tree (the number `_MB_PER_WORKER` is built on). The hook's own
-`600 MB x N` charge is a deliberately conservative ENVELOPE, not a prediction, so
-reading "3 x 600 = 1,800 MB" as "a 1,500 MB cap kills `-n 3`" is wrong by ~3x on
-measured usage. No run in that incident ever printed a memory kill either. Nothing
-exports the cap to the child, so a hook could not size down from it if it wanted
-to; a warning for it would be an alarm the measurement does not support, which is
-why there is none.
+(`tests/unit/analytics` + `test_eval_tool.py` + `test_slash_echo.py`, 3 files of 720,
+~4% of the manifest) peaked at **455 MB at `-n 2`** and **612-623 MB at `-n 3`**,
+against a heavy-corner peak of 441.5 MB for ONE worker's tree (the number
+`_MB_PER_WORKER` is built on). The `-n 2` figure is cadence-sensitive and is
+therefore quoted as a range in this paragraph's spirit: an independent re-measure
+at 0.5 s cadence saw a **two-sample 735 MB transient settling to 377-490 MB**, while
+`-n 3` reproduced at 612 MB. So a 1,500 MB cap was not the binding constraint on
+THAT slice, and no run in that incident ever printed a memory kill. It is not a
+bound for a TUI-heavy run: the Environment section above records **~1,090 MB as the
+worst single worker ever observed**, and three of those plus the controller is
+~1.6 GB — over a `memory_mb=1500` call, which is exactly the arithmetic the charge's
+`600 MB x N` ENVELOPE exists to describe (an envelope over the median worker, not a
+ceiling on the worst). Nothing exports the cap to the child, so a hook could not
+size down from it if it wanted to; a warning for it would be an alarm one slice's
+measurement does not support, which is why there is none.
 
 **What a boot costs, and why the heavy files are heavy.** A `run_test` of the
 assembled app is ~1.2 s of real Textual work on this host (mount, stylesheet
@@ -623,10 +649,19 @@ assembled app is ~1.2 s of real Textual work on this host (mount, stylesheet
 card, so a property test that boots an app per matrix cell pays that per cell:
 `test_ask_picker.py`'s largest sweep spent 412 s of its 740 s booting 60 apps for
 12 terminals, and it now boots one per SIZE with a fresh card per cell (12 boots),
-kept honest by a parity test that re-reads the first and last cell on boots of
-their own. The same discipline — a shared app plus a guard that it behaves like a
-boot of its own — is what `test_word_caret_matrix.py` uses; read its module
-docstring before sharing an app in any new sweep. **`tests/durations.json` weights
+kept honest by a parity test that runs the SAME helper the sweep runs and requires
+its boundary cells' recorded observations to match a boot of their own. Measured
+independently on this fleet (QA round 1, interleaved base/head/head/base at load
+84→246): the sweep goes **142.0 s / 32.8 CPU s → 93.7 / 22.7** and **147.3 / 34.0 →
+91.2 / 22.5**, i.e. **wall -36%, CPU -32%**, and the sweep plus the parity test
+together cost less CPU than the sweep alone did before. So the observation is not
+only card-local readings: it carries the dock's mounted-card count and the
+transcript's block count, because a reuse defect that leaves a card mounted or
+re-seeds the transcript moves none of the card's own numbers (six single-site
+mutants of the arrangement stayed green against a card-local oracle). The same
+discipline — a shared app plus a guard that it behaves like a boot of its own — is
+what `test_word_caret_matrix.py` uses; read its module docstring before sharing an
+app in any new sweep. **`tests/durations.json` weights
 are per-file SUMS of call phases, not wall time**, so a file read at 159 s wall
 under `-n 4` is not evidence its entry is stale — measured 2026-09-24, that file's
 call-phase sum was 773 s against a recorded 765 s.

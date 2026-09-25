@@ -7041,69 +7041,154 @@ async def test_the_card_never_draws_more_lines_than_its_body_budget_in_lines(
     ``test_word_caret_matrix.py`` uses for its shared app (see its module
     docstring), because a restructured test that can no longer fail on the bug
     it was written to catch is a regression.
+
+    The cells live in :func:`_c1_sweep` so that oracle can run THIS arrangement
+    rather than a mirror of it.
     """
     question = _paragraph_options_question(12)
     for size in ((100, 30), (130, 30), (150, 40), (120, 24), (100, 20), (190, 50)):
-        app, _unused = await _real_app_card(size, [question])
-        async with app.run_test(size=size) as pilot:
-            # Seeded ONCE per boot, which is the state a fresh app is in: seeding
-            # per cell would stack twelve turns on top of each other as the size
-            # loop advanced, and the transcript's height is one of the rows the
-            # dock is measured against.
-            await _seed_conversation(app, pilot)
-            previous = None
-            for depth in (0, 3, 6, 9, 12):
-                for reveal in (False, True):
-                    if previous is not None:
-                        app._unmount_prompt(previous)
-                        await pilot.pause()
-                    card = AskPickerScreen([question])
-                    previous = card
-                    await _show(app, pilot, card, seed=False)
-                    # Walk the cursor deep into the list so several scroll
-                    # offsets are exercised — the overrun the design fears is
-                    # offset-dependent (a tall row entering the bottom edge).
-                    for _ in range(depth):
-                        await pilot.press("down")
-                        await pilot.pause()
-                    if reveal and card._reveal_hint() == ("^e", "more"):
-                        await pilot.press("ctrl+e")
-                        await pilot.pause()
-                    layout = card._layout()
-                    budget = card._body_rows(len(card._question_lines(layout.width, reveal=False)))
-                    lines = card.render_lines_for_test()
-                    # (a) the body never lays out more than it was given.
-                    assert len(lines) <= budget, (
-                        size,
+        await _c1_sweep(size, question)
+
+
+#: What one C1 cell observed: four card-local readings, then two that move with
+#: the DOCK. The dock-level pair is what makes the oracle able to see the defects
+#: it exists for (QA round 1, Q2): a cell that re-seeded the transcript, or one
+#: whose previous card was never unmounted, moves none of the card-local readings,
+#: so six single-site mutants of the reuse stayed green against an oracle built
+#: only from them. The order is fixed, and both implementations read it the same.
+C1Observation = tuple[int, int, int, bool, int, int]
+
+
+def _mounted_cards(app) -> int:  # type: ignore[no-untyped-def]
+    """How many prompt cards are mounted on the dock.
+
+    The leak the product's own ``_mount_prompt`` docstring names (two cards
+    competing for focus, the lower one unanswerable) is a fact about the DOCK, so
+    nothing the card says about itself can see it: measured at ten mounted cards
+    at record time under a reuse with the unmount removed.
+    """
+    return len(app.query(AskPickerScreen))
+
+
+def _seeded_assistant_blocks(app) -> int:  # type: ignore[no-untyped-def]
+    """How many transcript blocks the app is showing.
+
+    ``_seed_conversation`` is per-APP state, so a cell that let ``_show`` seed
+    again stacks another twelve blocks onto the transcript the dock is measured
+    against. The card cannot see that happening; the transcript can.
+    """
+    from local_operator.tui.widgets.assistant import AssistantBlock
+
+    return len(app.query(AssistantBlock))
+
+
+async def _c1_sweep(
+    size: tuple[int, int],
+    question: AskQuestion,
+    *,
+    record: dict[tuple[int, bool], C1Observation] | None = None,
+) -> None:
+    """One size of the C1 sweep: ONE app boot, one fresh card per cell.
+
+    Both halves of that are load-bearing. A boot is what a pilot test costs and
+    not an assertion here: measured in this worktree 2026-09-24, ``run_test`` to
+    a settled frame is ~1.2 s against ~1.0 s for mounting a card and settling it,
+    so the 60 cells this sweep used to boot cost ~120 s of boot alone (the whole
+    test measured 412 s under `-n 6`) for 12 distinct terminals. What each cell
+    actually needs is a KNOWN CURSOR, and that is a property of the CARD --
+    ``AskPickerScreen`` starts at its first option, so a fresh card per cell gives
+    a fresh cursor without a ``home`` key (arrows WRAP here, so there is no
+    in-place reset) and without letting a revealed row leak into the next cell.
+    The app is booted once per size and the previous card comes out through
+    ``_unmount_prompt``, the app's OWN answer-path, so each cell sees the dock in
+    the state a real answered-then-asked sequence produces rather than a
+    hand-cleared one.
+
+    ``record`` is the coupling the oracle needs: the caller passes a dict and every
+    cell's observation is stored under ``(depth, reveal)``. It is not a separate
+    recording pass -- the oracle calls THIS function -- because a mirrored
+    arrangement on the oracle's side is exactly how the guard stopped being
+    coupled to the sweep.
+    """
+    app, _unused = await _real_app_card(size, [question])
+    async with app.run_test(size=size) as pilot:
+        # Seeded ONCE per boot, which is the state a fresh app is in: seeding
+        # per cell would stack twelve turns on top of each other as the size
+        # loop advanced, and the transcript's height is one of the rows the
+        # dock is measured against.
+        await _seed_conversation(app, pilot)
+        previous = None
+        for depth in (0, 3, 6, 9, 12):
+            for reveal in (False, True):
+                if previous is not None:
+                    app._unmount_prompt(previous)
+                    await pilot.pause()
+                card = AskPickerScreen([question])
+                previous = card
+                await _show(app, pilot, card, seed=False)
+                # Walk the cursor deep into the list so several scroll
+                # offsets are exercised — the overrun the design fears is
+                # offset-dependent (a tall row entering the bottom edge).
+                for _ in range(depth):
+                    await pilot.press("down")
+                    await pilot.pause()
+                if reveal and card._reveal_hint() == ("^e", "more"):
+                    await pilot.press("ctrl+e")
+                    await pilot.pause()
+                layout = card._layout()
+                budget = card._body_rows(len(card._question_lines(layout.width, reveal=False)))
+                lines = card.render_lines_for_test()
+                # (a) the body never lays out more than it was given.
+                assert len(lines) <= budget, (
+                    size,
+                    card.state.selected,
+                    reveal,
+                    len(lines),
+                    budget,
+                )
+                # (b) the footer reached the terminal — nothing clipped it
+                # off the tail.
+                assert _footer_in_composite(app), (
+                    size,
+                    card.state.selected,
+                    reveal,
+                    "footer clipped off the composited screen",
+                    _painted_rows(app),
+                )
+                if record is not None:
+                    record[(depth, reveal)] = (
                         card.state.selected,
-                        reveal,
                         len(lines),
                         budget,
-                    )
-                    # (b) the footer reached the terminal — nothing clipped it
-                    # off the tail.
-                    assert _footer_in_composite(app), (
-                        size,
-                        card.state.selected,
-                        reveal,
-                        "footer clipped off the composited screen",
-                        _painted_rows(app),
+                        _footer_in_composite(app),
+                        _mounted_cards(app),
+                        _seeded_assistant_blocks(app),
                     )
 
 
-async def _c1_cell(size: tuple[int, int], depth: int, reveal: bool):
-    """One C1 sweep cell on a boot of its OWN, as an observation tuple.
+async def _c1_cell(size: tuple[int, int], depth: int, reveal: bool) -> C1Observation:
+    """One C1 sweep cell on a boot of its OWN, as an observation.
 
     The oracle :func:`test_a_reused_boot_measures_the_same_as_a_boot_of_its_own`
-    compares against, and deliberately a second implementation of the same three
-    reads (drawn lines, budget, footer-present) rather than a call into the
-    sweep: an oracle that shared the sweep's own code could agree with it while
-    both were wrong about the app.
+    compares against, and deliberately a second implementation of the same six
+    reads rather than a call into the sweep: an oracle that shared the sweep's
+    own reads could agree with it while both were wrong about the app.
+
+    Its arrangement is the sweep's for one cell -- seeded the same way, shown
+    through the same app path, with a previous card answered out of the dock
+    first -- because the question is whether REUSE changes what a cell observes,
+    so everything except the reuse has to be identical.
     """
     question = _paragraph_options_question(12)
     app, card = await _real_app_card(size, [question])
     async with app.run_test(size=size) as pilot:
-        await _show(app, pilot, card)
+        await _seed_conversation(app, pilot)
+        previous = AskPickerScreen([question])
+        app._mount_prompt(previous)
+        await pilot.pause()
+        app._unmount_prompt(previous)
+        await pilot.pause()
+        await _show(app, pilot, card, seed=False)
         for _ in range(depth):
             await pilot.press("down")
             await pilot.pause()
@@ -7116,6 +7201,8 @@ async def _c1_cell(size: tuple[int, int], depth: int, reveal: bool):
             len(card.render_lines_for_test()),
             card._body_rows(len(card._question_lines(layout.width, reveal=False))),
             _footer_in_composite(app),
+            _mounted_cards(app),
+            _seeded_assistant_blocks(app),
         )
 
 
@@ -7124,53 +7211,31 @@ async def test_a_reused_boot_measures_the_same_as_a_boot_of_its_own() -> None:
     """The sweep's boot reuse, checked against fresh boots at both extremes.
 
     C1 is the highest-risk guard in this file, so the thing that makes it cheap
-    has to be shown not to make it blind: the FIRST cell of the sweep (the
-    shortest-and-shallowest, no unmount before it) and the LAST one (the
-    deepest, the most revealed, after nine unmount-and-remount cycles on a
-    shared app) are both re-read on a boot of their own and compared, field for
-    field, with what the sweep's own arrangement produced for that cell.
+    has to be shown not to make it blind. This runs the SWEEP ITSELF for the two
+    boundary sizes (through :func:`_c1_sweep`, the same helper the sweep test
+    calls, so a defect in the arrangement cannot be present in one and absent
+    from the other) and compares what its boundary cells recorded against the
+    same cell observed on a boot of its own, field for field.
 
     Those two cells are the right oracle because the failures reuse could
     introduce are directional: state a previous cell left behind (only the last
     cell can see it), and a dock that never returns to its fresh-boot geometry
     after an unmount (which the first cell, with nothing before it, cannot see).
+    Both are also why the observation is not only card-local readings: the reads
+    that move with those defects are the dock's mounted-card count and the
+    transcript's block count, and an oracle made of card-local readings stayed
+    green under every one of six single-site mutants of the reuse (QA round 1,
+    Q2 -- the red half is re-run against those sites in the remediation round).
     """
     question = _paragraph_options_question(12)
     for size, depth, reveal in (
         ((100, 30), 0, False),
         ((190, 50), 12, True),
     ):
-        # Bound before the loop so the type gate can see it is always assigned by
-        # the time it is read: the cell under test is selected by an `if` inside
-        # the sweep, and pyright cannot know the cell exists in the matrix.
-        shared: tuple[int, int, int, bool] | None = None
-        app, _unused = await _real_app_card(size, [question])
-        async with app.run_test(size=size) as pilot:
-            await _seed_conversation(app, pilot)
-            previous = None
-            for cell_depth in (0, 3, 6, 9, 12):
-                for cell_reveal in (False, True):
-                    if previous is not None:
-                        app._unmount_prompt(previous)
-                        await pilot.pause()
-                    card = AskPickerScreen([question])
-                    previous = card
-                    await _show(app, pilot, card, seed=False)
-                    for _ in range(cell_depth):
-                        await pilot.press("down")
-                        await pilot.pause()
-                    if cell_reveal and card._reveal_hint() == ("^e", "more"):
-                        await pilot.press("ctrl+e")
-                        await pilot.pause()
-                    layout = card._layout()
-                    if (cell_depth, cell_reveal) == (depth, reveal):
-                        shared = (
-                            card.state.selected,
-                            len(card.render_lines_for_test()),
-                            card._body_rows(len(card._question_lines(layout.width, reveal=False))),
-                            _footer_in_composite(app),
-                        )
+        recorded: dict[tuple[int, bool], C1Observation] = {}
+        await _c1_sweep(size, question, record=recorded)
         own = await _c1_cell(size, depth, reveal)
+        shared = recorded.get((depth, reveal))
         assert shared is not None, "the sweep never measured the cell under test"
         assert shared == own, (
             f"the shared-boot cell {size} depth={depth} reveal={reveal} observed "

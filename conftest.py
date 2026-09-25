@@ -429,19 +429,28 @@ def pytest_runtest_logreport(report: pytest.TestReport) -> None:
 # (`worker 'gw2' crashed while running '<nodeid>'`) -- so the exit status was
 # non-zero THERE, because an item happened to be in flight. Nothing reports the
 # other case, and the exit status cannot be depended on for it: a worker killed
-# with no item in flight leaves one `Not properly terminated` line and no failure
+# WHILE HOLDING an item leaves one `Not properly terminated` line and no failure
 # at all, which is what `_fail_on_dead_workers` refuses to let pass.
 #
+# The reachable window of that other case is narrower than it sounds, and this is
+# measured rather than assumed -- an idle worker is idle only between its last
+# report and its next dispatch, and xdist has usually already ordered its clean
+# shutdown by then. A worker that had emitted `workerfinished` is reported with
+# `pytest_testnodedown(error=None)`; SIGKILLing one (three repeats on a `-n 3` run
+# with an empty dispatch queue) produced rc=0, `2 passed`, and no diagnostic --
+# the kill landing on a worker xdist had already finished with. That is the
+# correct reading, not a hole: the tests that worker owned really had completed.
+#
 # The other half of that measurement is what a reader needs in order NOT to
-# misread the artifact. Run C of `~/.local-operator/sessions/f7318cc06bdd` is the
-# case: its log ends with a `PluggyTeardownRaisedWarning` over an xdist plugin and
-# `OSError: cannot send (already closed?)`, which reads like a worker death. It is
-# not: those lines are written by WORKER processes whose controller had already
-# been killed by the operator 9 s earlier (their `pytest_sessionfinish` tried to
-# send `workerfinished` on a dead channel), and the controller's own process had
-# 6.56 s of CPU across 37 minutes because its workers were already gone. That
-# shape -- workers gone, controller parked, no line naming either -- is what this
-# block exists to replace.
+# misread the artifact. A 37-minute run whose controller had 6.56 s of CPU across
+# the whole window is that case: its log ends with a `PluggyTeardownRaisedWarning`
+# over an xdist plugin and `OSError: cannot send (already closed?)`, which reads
+# like a worker death. It is not: those lines are written by WORKER processes whose
+# controller had already been killed by the operator 9 s earlier (their
+# `pytest_sessionfinish` tried to send `workerfinished` on a dead channel), and
+# the controller's own process had 6.56 s of CPU because its workers were already
+# gone. That shape -- workers gone, controller parked, no line naming either -- is
+# what this block exists to replace.
 _DEAD_WORKERS: list[tuple[str, str]] = []
 
 
@@ -457,6 +466,13 @@ def pytest_testnodedown(node: object, error: object | None) -> None:
     ``optionalhook=True`` because xdist defines this hook, not pytest: without it
     a conftest imported by an environment that has no xdist raises on the unknown
     hook name, i.e. the diagnostic would take out the run it is watching.
+
+    This is the CLEAN path's mirror image, so be precise about what it covers: the
+    hook fires for a worker that did not emit ``workerfinished`` -- killed while
+    holding an item, or while waiting between dispatches for work it never got. A
+    worker killed AFTER its clean finish reaches here as ``error is None`` and is
+    invisible to everything on this side, which is also correct, because its tests
+    had completed.
     """
     if error is None:
         return
@@ -494,7 +510,7 @@ def _fail_on_dead_workers(session: pytest.Session, exitstatus: int) -> None:
         "would have been 0, which is not a result anything can be read from -- "
         "tests the dead worker owned may not have run at all."
     )
-    print(f"\n{message}", file=sys.stderr)
+    print(f"\n{message}", file=sys.stderr, flush=True)
     session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
