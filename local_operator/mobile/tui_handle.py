@@ -881,7 +881,7 @@ class TuiSessionHandle(SessionHandle):
         # session, so the BARE form is all a relayed caller may run there (round 4,
         # V4-1). Everything else falls through to the dispatcher below, which has no
         # ``stop`` branch and answers with its own sentence.
-        if not may_run_slash_in_the_owners_terminal(primary, locality, capabilities, args):
+        if not may_run_slash_in_the_owners_terminal(primary, locality, capabilities, args=args):
             # The dispatcher's own gate answers the delete-scoped verbs, but it
             # answers them with a typed receipt this caller would have to render;
             # the capability sentence is the same one both hosts give, so ask for it

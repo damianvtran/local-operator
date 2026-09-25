@@ -953,6 +953,16 @@ async def test_a_phone_shaped_slash_op_runs_its_commands_and_refuses_the_rest() 
     assert await handle.slash("archive", "", locality="local") == "ran /archive"
     assert ran == ["/move abc --to evil", "/archive"] and routed == []
 
+    # R5-2: THE SCOPE ARGUMENT IS KEYWORD-ONLY, so a future caller cannot reach the
+    # bare, session-scoped form by accident — the failure mode is a TypeError at the
+    # call site rather than a silently permissive lane, which is the class rounds 2-5
+    # kept finding in this feature. A default only some callers honour is how a
+    # forgotten forward goes unnoticed; this one cannot be omitted positionally.
+    from local_operator.network.types import may_run_slash_in_the_owners_terminal
+
+    with pytest.raises(TypeError):
+        may_run_slash_in_the_owners_terminal("stop", "remote", None, "all")  # type: ignore[misc]
+
     # THE DEFAULT IS STILL FAIL-CLOSED, and what it proves is narrower than
     # "a forgotten forward is refused" (round 3 R3-5, corrected in round 4 V4-5):
     # with no facts the caller is routed to the DISPATCHER rather than into the
