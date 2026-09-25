@@ -556,15 +556,31 @@ def secure_enclave_refusal_message(refusals: dict[tuple[str, int, str], list[str
 #: ``label : value`` shape ``status`` uses for its own report.
 #:
 #: ALIGNED LINES RATHER THAN ONE PARAGRAPH (design round 1, D4). The released copy was a
-#: 566-character sentence for the ``absent`` case — six wrapped lines at 100 columns,
-#: eight at 80 — whose first remedy token (``reinstall``) began on the FOURTH wrapped
-#: line, and the ``lop-update`` aside interrupted the command it was qualifying. A reader
-#: in this state is being told their install is broken; the remedy has to be reachable at
-#: a glance, not at the end of a wall of prose.
+#: 566-character sentence for the ``absent`` case — six display lines at 100 columns and
+#: eight at 80, measured character-for-character on the captured stderr, wrapped the way a
+#: tty wraps — whose first remedy token (``reinstall``) began on the THIRD line, and the
+#: ``lop-update`` aside interrupted the command it was qualifying. A reader in this state
+#: is being told their install is broken; the remedy has to be reachable at a glance, not
+#: at the end of a wall of prose.
+#:
+#: WHAT ACTUALLY IMPROVED IS THE SHAPE, NOT THE LINE COUNT (design round 2, D3). The
+#: remediation comment claimed the first remedy token "moves from wrapped line 4 to line
+#: 2"; measured, the block renders as one MORE display line than the paragraph at 100 and
+#: at 80 columns, and ``reinstall`` lands on the line its own label occupies. That claim is
+#: withdrawn here rather than left standing: the block earns its place because a reader
+#: SCANS IT BY LABEL instead of reading a paragraph in order, which is a property of the
+#: ``label : value`` shape and not of where a token falls.
+#:
+#: ONE PHYSICAL LINE PER FIELD (design round 2, D4). ``or`` was hand-wrapped into two
+#: physical lines of 85 and 88 characters — right at 100 columns and WRONG at 80, where
+#: both re-wrap and the continuation lands indented under a label column it no longer
+#: aligns with. Every other field in ``lop``'s output is one physical line and lets the
+#: terminal wrap (``status``' own block says so), so this field is one too: the text is
+#: shortened and NO indent is hand-set, which is what makes the shape width-independent.
 _KEYAGENT_REMEDY = (
     "  fix  : reinstall the macOS wheel — `uv tool install local-operator --force`\n"
-    "  or   : `lop operator init --backend file-only` — raises no presence prompt, and any\n"
-    "         process running as you can read it (reported as the level `operator-file-only`)\n"
+    "  or   : `lop operator init --backend file-only` — no presence prompt; any process "
+    "running as you can read it (level `operator-file-only`)\n"
     "  note : `lop-update` rebuilds a checkout"
 )
 
@@ -617,7 +633,17 @@ _KEYAGENT_STATES: dict[str, tuple[str, str]] = {
         _KEYAGENT_WHY + "the key agent ran but the OS refused its keychain call: its embedded "
         "provisioning profile is not in effect, so the entitlement that lets it create "
         "or use the operator key is not granted (errSecMissingEntitlement)\n" + _KEYAGENT_REMEDY,
-        "the key agent's keychain call was refused: its entitlement is not in effect",
+        # CAUSE-NEUTRAL ON PURPOSE (agent review round 2, R2-1). Since QA round 1 this kind
+        # covers the entitlement refusal AND a helper that declined the request itself
+        # (EXIT_USAGE) AND any failed generation, so a one-line field that named only the
+        # entitlement told an operator whose keychain was locked — or whose helper had
+        # merely refused a flag — that their entitlement was not in effect, with a
+        # reinstall as the fix for it. The cause is the helper's own sentence and comes
+        # from ``SecureEnclaveBackend.health``, which prints it beside this line; the copy
+        # therefore states only what is true of every cause. The LONG register above is
+        # not what ``init``/``sign`` print — those go through ``keyagent_refusal_message``,
+        # which builds its diagnosis from the helper's own refusals.
+        "the key agent refused its keychain call",
     ),
     "no-key": (
         "no operator key on this host: run `lop operator init`",
@@ -734,11 +760,32 @@ class SecureEnclaveBackend:
         return self.health()[0]
 
     def health(self) -> tuple[bool, str]:
-        """:meth:`supported` with the reason attached, for the report that must give it."""
+        """:meth:`supported` with the reason attached, for the report that must give it.
+
+        THE HELPER'S OWN SENTENCE IS PART OF THE REASON (agent review round 2, R2-1). The
+        state copy names the KIND, and since QA round 1 one kind — ``refused`` — covers
+        several causes: the OS refusing the keychain call for a missing entitlement
+        (``doctor``'s EXIT_REFUSED), the helper declining the request itself (EXIT_USAGE),
+        and any failed generation. Reporting the kind alone told an operator whose keychain
+        was locked, or whose helper had merely refused a flag, that their entitlement was
+        not in effect — and offered them the reinstall that follows that diagnosis.
+        ``helper_health`` already carries the helper's sentence, so for this kind it is
+        printed as the cause rather than dropped.
+
+        ONLY FOR ``refused``, deliberately: the other kinds' copies ARE their specific
+        cause (``absent`` names "not installed", ``unverified`` names "present but not
+        ours", ``killed`` names the kernel refusal), and an ``unverified`` detail can be a
+        tool's stderr tail, which must not be pasted into a one-line field.
+        """
         state = keyagent.helper_health()
         if state.ok:
             return True, state.detail
-        return False, keyagent_state_copy(state.kind, long=False)
+        copy = keyagent_state_copy(state.kind, long=False)
+        if state.kind != "refused" or not state.detail:
+            return False, copy
+        # ONE PHYSICAL LINE: the helper's whitespace is collapsed rather than passed
+        # through, because every field of this report is one line and the terminal wraps.
+        return False, f"{copy}: {' '.join(state.detail.split())}"
 
     def create(self) -> KeyHandle:
         """Create the operator key through the key agent, or return the one already here.

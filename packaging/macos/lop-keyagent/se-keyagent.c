@@ -453,6 +453,15 @@ static int cmd_create(CFDataRef tag) {
     refusal_t refusals[MAX_REFUSALS];
     int count = 0;
 
+    /* The query's own status is deliberately NOT surfaced (agent review round 2, R2-4).
+       A refused query is not the same fact as "no item": a locked keychain answers
+       errSecInteractionNotAllowed, and on the entitlement-gated path the answer can be
+       errSecMissingEntitlement. Both are harmless HERE because the find is an optimisation
+       and generation is the operation that diagnoses: the ladder below runs against the
+       same keychain and reports its own refusal, which is the sentence an operator can act
+       on. Carrying the query's status as a second refusal would put two diagnoses for one
+       cause in front of the reader, so the status is accepted here and deliberately not
+       reported. */
     OSStatus seen_status = errSecSuccess;
     SecKeyRef seen = find_key(tag, &seen_status);
     if (seen) {

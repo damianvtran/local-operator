@@ -287,6 +287,26 @@ jobs:
           echo "IDENTITY_SHA=$IDENTITY_SHA" >> "$GITHUB_ENV"
           security find-identity -v -p codesigning "$KEYCHAIN"
 
+      # THE SIGNATURE MUST CARRY A SECURE TIMESTAMP, AND THE SCRIPT READS IT BACK.
+      # Decision, so it is not re-litigated: the entitlement is checked against the
+      # signature at RUN TIME, so a Developer ID signature with no secure timestamp stops
+      # validating when the certificate expires — for every wheel already installed. The
+      # design document's rotation plan (§8) depends on the opposite, so the timestamp
+      # is cheap here and its absence is not. This is NOT about notarization, which this
+      # landing deliberately does not do (§9). `assemble_keyagent_bundle.sh` therefore signs
+      # with `--timestamp` EXPLICITLY (its default `secure` mode) and asserts a
+      # `Timestamp=` line is present, so an unreachable Apple timestamp authority FAILS
+      # this job rather than shipping an artefact that stops working in 2031. There is no
+      # fallback in this job and no `--timestamp=none`: that mode exists for a local build
+      # on a host that cannot reach the TSA, warns loudly, and must never reach a release.
+      #
+      # UNPROVEN, stated rather than implied: this job has never executed — it first runs
+      # on the next release — so timestamp retrieval in CI is unmeasured. Measured locally
+      # on 2026-09-25 with this identity: three fresh universal2 binaries and the assembled
+      # bundle all signed with a real `Timestamp=`, which is why QA round 2's report that a
+      # universal2 binary could not be timestamped on this host is recorded as a transient
+      # TSA outage and not as a property of fat binaries (the check above is what makes
+      # that distinction moot: either way it cannot ship silently).
       - name: Assemble and sign lop-keyagent.app
         env:
           PROFILE_BASE64: ${{ secrets.MACOS_SIGNING_PROFILE_BASE64 }}
@@ -294,6 +314,8 @@ jobs:
           set -euo pipefail
           umask 077
           printf '%s' "$PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/keyagent.provisionprofile"
+          # No --timestamp flag on purpose: the default is `secure`, and step 5c of the
+          # script fails this job if the signature comes back without a timestamp.
           packaging/macos/assemble_keyagent_bundle.sh \
             --out "$RUNNER_TEMP/lop-keyagent.app" \
             --identity "$IDENTITY_SHA" \
