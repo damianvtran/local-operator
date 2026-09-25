@@ -1450,6 +1450,78 @@ def test_the_local_path_runs_no_network_code(
     assert calls == [], f"the local facade touched the network: {calls}"
 
 
+def test_a_cold_engage_waits_the_published_bound_and_says_what_took_the_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q-INT-1: the first prompt after a peer's runtime idle-exited.
+
+    Measured (QA round 1 integration): the cold engage took 5.02 s against the
+    control socket's 5.0 s default, so the reply was ``None`` — which has one
+    meaning here, "no relay answered me" — and the caller published it as THIS
+    device's relay being down. This device's relay was answering and the peer was
+    spawning a runtime; the immediate retry succeeded in 2.0-3.1 s. Both halves are
+    pinned: the wait is the DERIVED engage bound rather than a literal, and the
+    sentence names what a no-answer at that bound actually means.
+    """
+    from local_operator.network import store as store_mod
+
+    seen: list[float] = []
+
+    def no_answer(record: Any, op: str, **fields: Any) -> Any:
+        seen.append(float(fields.get("timeout") or 0.0))
+        return None
+
+    # The record is faked so the control call is REACHED: with no relay record at
+    # all the refusal comes from a shorter path and would prove nothing about the
+    # wait (that path is the test above).
+    monkeypatch.setattr(store_mod, "find_own_relay", lambda root=None: object())
+    monkeypatch.setattr(relay, "control_request", no_answer)
+    row = projection.PeerRow(session_id=SESSION, device_id="dev_peer", device_name="build-box")
+    owner = projection.remote_owner_for(SESSION, config_dir=tmp_path, row=row)
+    with pytest.raises(projection.ProjectionRefusal) as caught:
+        asyncio.run(owner.engage(cwd="", warm=None))
+
+    published = relay.engage_client_bound_s()
+    assert seen == [published], seen
+    # AND THE CLIENT OUTLASTS THE HOP IT ASKED FOR, which is the whole defect: a
+    # client that equals or undercuts the relay's own budget for a spawn reports its
+    # own deadline for work the relay is still doing. The two margins are
+    # ``mobility``'s for the same two legs, so this cannot pass while either drifts.
+    from local_operator.network.mobility import (
+        MOVE_CLIENT_MARGIN_S,
+        MOVE_CONTROL_SLACK_S,
+    )
+
+    assert published == relay.engage_hop_bound_s() + MOVE_CONTROL_SLACK_S + MOVE_CLIENT_MARGIN_S
+    assert published > relay.engage_hop_bound_s()
+    assert published > 5.0, "the control socket's default is what this replaces"
+    sentence = caught.value.sentence
+    assert caught.value.code == projection.CODE_RELAY_UNAVAILABLE
+    assert "start a runtime" in sentence, sentence
+    assert "send it again" in sentence, sentence
+    assert f"in {published:.0f}s" in sentence, sentence
+    assert "build-box" in sentence, sentence
+    # It may only blame THIS device's relay as the thing to look at NEXT — never as
+    # the thing that was measured to be down.
+    assert "not answering, so" not in sentence, sentence
+
+
+def test_the_engage_hop_and_its_client_bound_cannot_drift() -> None:
+    """The hop's default and the client's bound come from one expression.
+
+    STRUCTURAL on purpose, for the reason the forced stop's budget test gives: the
+    defect was a relation between two numbers, so an inequality proves it.
+    ``_local_peer_call`` takes its default from ``engage_hop_bound_s`` and the
+    client bound is built on the same function, so a future edit to either one
+    either moves both or fails here.
+    """
+    assert relay.engage_hop_bound_s() == max(relay.wire.OP_WAIT_S, relay.ENGAGE_DEADLINE_S)
+    # A configured ``op_wait_s`` above the deadline still moves the hop, and the
+    # client follows it rather than staying at the default's arithmetic.
+    assert relay.engage_hop_bound_s(120.0) == 120.0
+    assert relay.engage_client_bound_s(120.0) > 120.0
+
+
 def test_a_remote_owner_refuses_closed_when_there_is_no_relay(tmp_path: Path) -> None:
     """A refusal carries a machine code and a sentence, and refuses CLOSED."""
     row = projection.PeerRow(session_id=SESSION, device_id="dev_peer", device_name="build-box")

@@ -558,6 +558,51 @@ def test_archive_on_a_peer_changes_the_owners_index_only(
     assert SESSION not in archived.archived_ids(server_a.root)
 
 
+def test_archive_and_restore_on_a_peer_report_the_change_they_made(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q-INT-4: the owner's receipt describes what the owner's index DID.
+
+    Measured (QA round 1 integration): ``--unarchive`` on a peer answered
+    ``{"changed": false, "message": "<id> was already restored here."}`` for a call
+    whose effect was the peer's ``archived-sessions.json`` going from one entry to
+    none. The receipt is built from ``archive_change``'s first element, which was
+    the state the caller ASKED for (``set_archived``'s echo, and correct for the
+    route that reconciles a row on it); it is now the FILE's own answer, and both
+    directions are driven here with the owner's index as the witness — the caller is
+    B, the owner A, exactly as the test above routes them.
+    """
+    from local_operator.session import archived
+
+    server_a, server_b, _host, _port = pair
+    _pair(pair, monkeypatch, role="admin")
+    _owned_session(server_a)
+
+    peak = server_a.identity.device_id
+    assert archived.archived_ids(server_a.root) == frozenset()
+
+    made = mobility.lifecycle(SESSION, action="archive", peer=peak, root=server_b.root)
+    assert made["ok"] is True, made
+    assert made["changed"] is True, made
+    assert made["message"] == f"Archived {SESSION} on this device.", made
+    assert archived.archived_ids(server_a.root) == frozenset({SESSION})
+
+    # THE RESTORE, which is the direction that reported nothing changed while the
+    # owner's index went from one entry to none.
+    restored = mobility.lifecycle(SESSION, action="unarchive", peer=peak, root=server_b.root)
+    assert restored["ok"] is True, restored
+    assert restored["changed"] is True, restored
+    assert restored["message"] == f"Restored {SESSION} on this device.", restored
+    assert archived.archived_ids(server_a.root) == frozenset()
+
+    # AND A NO-OP STILL READS AS ONE: a second restore changes nothing and says so,
+    # which is the receipt's half of the contract a retry lands on.
+    again = mobility.lifecycle(SESSION, action="unarchive", peer=peak, root=server_b.root)
+    assert again["ok"] is True, again
+    assert again["changed"] is False, again
+    assert again["message"] == f"{SESSION} was already restored here.", again
+
+
 def test_delete_on_a_peer_is_a_dry_run_without_confirmation(
     pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -674,6 +719,82 @@ def test_an_offload_returns_the_destinations_refusal_instead_of_waiting_it_out(
         f"the refusal took {elapsed:.1f}s of a {budget:.0f}s budget, so it waited for the "
         "deadline rather than being told: that is the finding this test exists for"
     )
+
+
+def test_an_offload_receipt_carries_every_phase_the_move_went_through(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q-INT-3: the receipt is the move's HISTORY, not what the disk can still prove.
+
+    Measured (QA round 1 integration): an offload's ``TransferReceipt.phases``
+    carried ``['committed']`` while a recall carried all four, so a renderer drawing
+    progress from the list showed every offload stuck at 75% against a model that
+    documents ``prepared`` 0.25 … ``done`` 1.0. The cause was a PREFERENCE between
+    two partial sources — disk whenever disk had anything — and the two assertions
+    below are the shape it was wrong about: the disk alone can only say
+    ``committed`` once a move has committed, and the receipt must still report what
+    the move went through.
+
+    The phase list is built from the two sources the move itself writes, with no
+    peer dial: an offload's rig needs A to reach B, and this file's fixture binds
+    only A (the sibling offload test is the one that dials, and it is load-flaky for
+    that reason). The end-to-end figure is taken on two bound devices instead.
+    """
+    server_a, _server_b, _host, _port = pair
+    # A PRIVATE ID, and forgotten at the end: ``_Progress`` is per-relay but lives in
+    # this process keyed by ``id(server)``, so a history left under the shared
+    # ``SESSION`` can outlive the test that wrote it.
+    private = "ab12cd34ef56"
+    progress = mobility.progress_for(server_a)
+    try:
+        # THE STATE A COMMITTED OFFLOAD LEAVES: every phase in memory (the source
+        # noted each as it happened), and only the tombstone left on disk.
+        for phase in ("prepared", "handing_off", "committed", "done"):
+            progress.note(private, phase)
+        monkeypatch.setattr(
+            mobility,
+            "_phases_from_disk",
+            lambda root, session_id: [{"phase": "committed", "at": 1.0}],
+        )
+
+        phases = mobility._move_phases(server_a, private)
+
+        assert [stamp["phase"] for stamp in phases] == [
+            "prepared",
+            "handing_off",
+            "committed",
+            "done",
+        ]
+        # …AND THE DISK ALONE IS WHY THE UNION EXISTS: reading the same state the way
+        # the receipt used to (disk whenever disk has anything at all) reports one
+        # phase — 0.75 of the progress a renderer draws from it.
+        disk_only = mobility._phases_from_disk(server_a.root, private)
+        assert [stamp["phase"] for stamp in disk_only] == ["committed"]
+    finally:
+        progress.forget(private)
+
+
+def test_the_phase_order_is_the_contracts_not_the_clock(pair: Devices) -> None:
+    """The union is ordered by ``MOVE_RESULT_PHASES``, never by ``at``.
+
+    A disk stamp is synthesised when it is READ (``_phases_from_disk``), so it can
+    carry a later time than a memory stamp for an EARLIER phase — sorting by time
+    would put ``committed`` after ``done`` and a renderer's bar would go backwards.
+    """
+    server_a, _server_b, _host, _port = pair
+    private = "cd34ef56ab12"
+    progress = mobility.progress_for(server_a)
+    try:
+        progress.note(private, "handing_off")
+        progress.note(private, "prepared")
+
+        phases = mobility._move_phases(server_a, private)
+
+        # NOTED ``handing_off`` FIRST: the contract's order is what the list reports,
+        # and ``prepared`` has to come back in front of it.
+        assert [stamp["phase"] for stamp in phases] == ["prepared", "handing_off"]
+    finally:
+        progress.forget(private)
 
 
 def test_the_move_bound_is_the_formula_a_client_can_derive() -> None:

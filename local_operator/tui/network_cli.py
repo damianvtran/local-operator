@@ -30,7 +30,7 @@ import re
 import signal
 import subprocess
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterable
 
 from local_operator.interpreter import python_argv
 
@@ -55,6 +55,11 @@ PEER_CALL_TIMEOUT_S = 260.0
 #: watching a terminal. A notice is the wrong place for an escape sequence — a
 #: captured string must be the sentence, not the sentence plus paint.
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+#: The label ``--create`` puts in front of the id it minted. The line is
+#: ``network/cli.py``'s own receipt (its first line is ``session: <id>``) and
+#: :func:`created_session_id` is the ONE reader of it.
+_CREATE_RECEIPT_ID_LABEL = "session"
 
 
 @dataclass(frozen=True)
@@ -100,6 +105,37 @@ class NetworkRun:
         except ValueError:
             return None
         return data if isinstance(data, dict) else None
+
+
+def created_session_id(lines: Iterable[str]) -> str:
+    """The id a ``--create`` receipt names, or ``""`` when it names none.
+
+    WHY A READER AND NOT A SECOND CALL. ``/new remote <peer>`` has to OPEN the
+    session it just created on the peer, and the create's receipt is the only
+    channel that carries the id back to this surface. Asking the CLI a second
+    time in ``--json`` for the same fact would either print a payload into the
+    transcript or make this front end re-render a receipt whose sentences are
+    ``network/cli.py``'s — which is the reason the verb is a subprocess here at
+    all (module docstring). So the line the CLI already prints is read.
+
+    THE LABEL IS THE WRITER'S, not a shape guessed at this end, and a test drives
+    the real CLI's create branch and asserts this reader recovers the id it
+    minted: a reworded receipt fails that test instead of silently leaving every
+    ``/new remote`` on the session it stood in before.
+
+    The value is checked against ``session_directory_name`` — the store's own id
+    admission — so a receipt line that carried something else cannot send a caller
+    looking for a session that cannot exist.
+    """
+    from local_operator.session.catalog import session_directory_name
+
+    for line in lines:
+        label, separator, value = line.partition(":")
+        if not separator or label.strip().casefold() != _CREATE_RECEIPT_ID_LABEL:
+            continue
+        candidate = value.strip()
+        return candidate if session_directory_name(candidate) else ""
+    return ""
 
 
 def run_network(

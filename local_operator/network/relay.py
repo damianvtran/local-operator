@@ -2480,6 +2480,54 @@ def stream_close_machine_cause(cause: str) -> str:
 #: and shorter than any front end's patience with a "starting" row.
 ENGAGE_DEADLINE_S = 60.0
 
+
+def engage_hop_bound_s(op_wait_s: float = wire.OP_WAIT_S) -> float:
+    """How long THIS relay waits for a peer to answer an engage (``_local_peer_call``).
+
+    ONE SPELLING, because a caller that has to OUTLAST this hop must be able to
+    derive it rather than guess it: the hop's own default is taken from here, and
+    the client bound below is built on this function. The two drifting apart is
+    exactly Q-INT-1 — the client half waited the control socket's 5 s default
+    against a hop bounded here at 60 s, so it gave up first and reported no answer.
+    """
+    return max(op_wait_s, ENGAGE_DEADLINE_S)
+
+
+def engage_client_bound_s(op_wait_s: float = wire.OP_WAIT_S) -> float:
+    """THE CLIENT BOUND FOR A COLD ENGAGE: how long a caller must be willing to wait.
+
+    A COLD WAKE IS THE ONE ENGAGE THAT IS NOT FAST. A session whose runtime has
+    idle-exited has to be SPAWNED on the peer before it can answer, and the hop
+    carrying that request is bounded at ``engage_hop_bound_s`` — 60 s by default —
+    while the control socket a client dials THIS device's relay on defaults to 5 s.
+    A caller shorter than the hop it asked for does not report a slow peer: it
+    reports NOTHING, and ``None`` has one meaning here — "no relay answered me" —
+    which is why a spawn that outran a default timeout was published as a wedged
+    local relay. Measured (QA round 1 integration, Q-INT-1): the first prompt after
+    a peer's runtime idle-exited answered ``session.relay_unavailable`` at 5.02 s
+    while the peer was still spawning, and the immediate retry succeeded in
+    2.0-3.1 s.
+
+    DERIVED, never re-typed, from the same two margins the move route uses for the
+    same two legs (``mobility.MOVE_CONTROL_SLACK_S`` for the answer's trip back over
+    the control socket, ``MOVE_CLIENT_MARGIN_S`` for the client's own slack):
+    **85 s** at the default ``op_wait_s``, and the reason it is not merely "large"
+    is below.
+
+    IT IS BOUNDED, and a peer that is genuinely gone does not wait this out: an
+    unreachable peer is refused by the hop in milliseconds (``peer_unreachable``,
+    carrying the reason the relay measured), so the only way to spend 85 s here is
+    for THIS device's own relay to stop answering mid-call — the condition the
+    caller's sentence is then actually about.
+    """
+    from local_operator.network.mobility import (
+        MOVE_CLIENT_MARGIN_S,
+        MOVE_CONTROL_SLACK_S,
+    )
+
+    return engage_hop_bound_s(op_wait_s) + MOVE_CONTROL_SLACK_S + MOVE_CLIENT_MARGIN_S
+
+
 #: Margin over the ladder's own rungs when this side budgets a FORCED stop.
 #:
 #: The two waits below are the bound; this covers what sits around them on the
@@ -8307,8 +8355,8 @@ class RelayServer:
         sentence table on this side is exactly how two devices come to disagree
         about the remedy (§8.2).
 
-        ``timeout`` is per-op and defaults to ``max(op_wait_s, ENGAGE_DEADLINE_S)``
-        — a spawn's budget. The one op that must outlast its own act on the far
+        ``timeout`` is per-op and defaults to ``engage_hop_bound_s`` — a spawn's
+        budget. The one op that must outlast its own act on the far
         side passes its own (``_ctl_peer_stop``'s forced mode: see
         :func:`forced_stop_deadline_s`), because a hop that gives up first does not
         report a slow stop, it reports NOTHING — and the guide reads that answer as
@@ -8323,9 +8371,7 @@ class RelayServer:
             )
         reply = link.request(
             {"op": op, "req": self._next_relay_req(), "locality": "remote", **fields},
-            timeout=(
-                max(self.settings.op_wait_s, ENGAGE_DEADLINE_S) if timeout is None else timeout
-            ),
+            timeout=(engage_hop_bound_s(self.settings.op_wait_s) if timeout is None else timeout),
         )
         if reply is None:
             raise MeshRefusal(

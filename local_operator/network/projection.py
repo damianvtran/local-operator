@@ -923,19 +923,35 @@ class RemoteOwner:
         own home when the frame omits it (§5.3 step 2). ``warm`` is ignored by
         design — its fields are the local spawn's model choice, and the peer
         decides its own.
+
+        A COLD WAKE IS SPAWNED, so this is the one engage with a wait worth
+        deriving rather than inheriting: ``relay.engage_client_bound_s()`` is the
+        relay's own hop budget for a spawn plus the trip back (85 s at the
+        defaults).
         """
+        from local_operator.network import relay
+
+        bound = relay.engage_client_bound_s()
         detail = _relay_call(
             self._root,
             OP_PEER_ENGAGE,
+            # AN ENGAGE-SHAPED BUDGET, never the control socket's 5 s default: a
+            # client that gives up FIRST reports NO ANSWER rather than a slow wake.
+            timeout=bound,
             peer=self._facts.device_id,
             session_id=self._session_id,
             cwd=cwd or "",
         )
         if detail is None:
+            peer_label = self._facts.device_name or self._facts.device_id
             raise ProjectionRefusal(
                 CODE_RELAY_UNAVAILABLE,
-                "This device's network relay is not answering, so the session on "
-                f"{self._facts.device_name or self._facts.device_id} cannot be started.",
+                f"No answer from this device's network relay in {bound:.0f}s, so the "
+                f"session on {peer_label} could not be started. A session that has "
+                "gone cold has to start a runtime on that device before it can "
+                "answer, and that is the slow half of this call — send it again, "
+                "which starts it. If the retry is silent too, that is this device's "
+                "relay: `/network doctor` diagnoses it.",
             )
         if not detail.get("engaged"):
             raise ProjectionRefusal(
