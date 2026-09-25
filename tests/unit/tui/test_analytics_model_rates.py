@@ -16,7 +16,11 @@ that asymmetry rather than one number twice.
 from __future__ import annotations
 
 from local_operator.analytics.model import ModelRateRow, UsageAggregate
-from local_operator.tui.widgets.analytics_panel import MODEL_RATES_PENDING, build_report
+from local_operator.tui.widgets.analytics_panel import (
+    MODEL_RATES_FAILED,
+    MODEL_RATES_PENDING,
+    build_report,
+)
 
 
 def _report_text(aggregate: UsageAggregate, *, model_rates, width: int = 120) -> str:
@@ -61,6 +65,37 @@ def test_an_empty_answer_has_its_own_sentence() -> None:
     assert "By model" in text
     assert "no per-model rows" in text
     assert "reading the ledger" not in text
+
+
+def test_a_failed_read_is_not_rendered_as_an_empty_ledger() -> None:
+    """A broken query must not claim the reader's ledger has no rows in it.
+
+    The two are different facts and only one of them is about the ledger: "no
+    per-model rows in this window" is a statement about what the operator ran,
+    while a failed read knows nothing about it (review round 1, minor 3).
+    """
+    text = _report_text(UsageAggregate(calls=1), model_rates=MODEL_RATES_FAILED)
+    assert "By model" in text
+    assert "per-model read failed" in text
+    assert "the rest of this report is unaffected" in text
+    assert "no per-model rows" not in text
+    assert "reading the ledger" not in text
+
+
+def test_the_section_names_a_scope_the_headline_shares() -> None:
+    """The meta must not leave the reader guessing which window they are on.
+
+    The Totals above this table come from an unbounded aggregate, so the table is
+    all-time too, and the meta says so — a 30-day table beside an all-time
+    headline invites a comparison that is quietly wrong (review round 1, MAJOR 2).
+    """
+    text = _report_text(UsageAggregate(calls=1), model_rates=[])
+    header = next(line for line in text.splitlines() if "By model" in line)
+    assert "all time" in header
+    # And the legend is NOT in the meta: the composed line is cropped at the
+    # widths this panel is used at, and the half that got cut was the explanation
+    # of the unknown marks (review round 1, minor 2).
+    assert "tok/s decode =" not in header
 
 
 def _model_row_line(text: str) -> str:
