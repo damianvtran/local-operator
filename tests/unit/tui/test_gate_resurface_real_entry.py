@@ -50,6 +50,13 @@ failure names the guard that dropped the card rather than a theory about one.
 * **I — the band over a returned card.** It yields to the card, in the muted
   ink, and stops instructing once the card is answered. See
   :func:`test_the_band_yields_to_a_returned_card_and_stops_when_it_is_answered`.
+* **L — the keyboard the card held at the suspend.** A card that took the
+  keyboard comes back WITH it, even when the switch away landed before the
+  app's focus MIRROR had been written. See
+  :func:`test_the_keyboard_it_held_comes_back_with_the_card`.
+* **M — the same claim on a card that had not mounted yet.** Both records are
+  empty there, so the suspend has to read the card itself. See
+  :func:`test_a_card_that_had_not_mounted_yet_still_claims_the_keyboard`.
 * **J — the undelivered channel's discriminators.** A refusal and a superseded
   race are not delivery failures, and a retraction is tied to the reply that
   failed. See the three ``test_a_refused_answer_is_not_reported_as_undelivered``
@@ -101,6 +108,7 @@ from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.session_interaction import SessionInteraction
 from local_operator.tui.widgets.approval import ApprovalBlock
+from local_operator.tui.widgets.ask_picker import AskPickerScreen
 from local_operator.tui.widgets.session_sidebar import SessionSidebar
 from local_operator.tui.widgets.transcript import NoticeBlock
 from tests.e2e.harness import ScriptedStream, build_session, seed_transcript
@@ -1616,6 +1624,267 @@ async def test_the_band_yields_to_a_returned_card_and_stops_when_it_is_answered(
                     )
                 finally:
                     release_sync.set()
+                    gate_task.cancel()
+                    await asyncio.gather(gate_task, return_exceptions=True)
+    finally:
+        await rig.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_keyboard_it_held_comes_back_with_the_card(tmp_path, monkeypatch) -> None:
+    """Condition L: the card the user comes BACK to is the card that answers keys.
+
+    THE DEFECT is in the record the suspend leaves behind, and it is not about
+    the band at all. ``_suspend_sidebar_gates`` decides whether the returning
+    card should take the keyboard back from what it knows NOW: it snapshots
+    ``source.draft.focus_id == "@gate"`` into ``AskPickerSnapshot.focused``, and
+    :meth:`AskPickerScreen.on_mount` reads that back as ``_restored_focus`` and
+    refuses to take focus when it is False.
+
+    ``focus_id`` IS A MIRROR, ONE MESSAGE HOP BEHIND THE FACT IT MIRRORS. It is
+    written by ``on_descendant_focus``, and that event is posted by
+    ``Widget._on_focus`` to the widget's PARENT and travels up one hop per node
+    (textual/widget.py:4766), while the widget's own ``has_focus`` reactive is
+    set on the same turn the event is posted. That handler is ALSO skipped
+    entirely while a swap is in flight (app.py:21078's ``_swapping_session``).
+    So a card that took the keyboard in the pump this suspend runs in reads ""
+    here while ``card.has_focus`` is already True — measured, not theorised: a
+    loaded run of the case above logged exactly that pair at the first suspend
+    (``focus_id=''`` with ``app.focused=AskPickerScreen``), recorded
+    ``focused=False``, and the card returned with ``_restored_focus=False`` and
+    never took the keyboard again.
+
+    WHAT THE USER SEES THEN is the pair this file exists to prevent: the band
+    says ``Saved · Answer the question above`` — it is computed from the card's
+    binding and never from focus — while the key that instruction names is dead,
+    because a bare Enter has no ``character`` and ``route_key_to_live_prompt``
+    declines it (app.py:21189), leaving it to a composer that would only submit
+    an empty buffer. The composer and the card contradict each other about the
+    same question.
+
+    THE RACE IS MADE INTO A STATE. Which of the two the suspend reads turns on
+    whether Textual had dispatched that hop before the click was pumped, which
+    is a scheduling accident; the STATE it produces is exact and so it is set
+    rather than raced for, after asserting the premise the whole thing turns on
+    (the card really does hold the keyboard). The mirror is the only thing set
+    — the click, the suspend, the re-arm and the keypress are all real.
+    """
+    rig = await _rig(tmp_path / "config", monkeypatch, "alpha", "beta")
+    app = _app(rig, "alpha")
+    try:
+        with patch("local_operator.mobile.attach_client.find_runtime_record", rig.find_owner):
+            async with app.run_test(size=(110, 32)) as pilot:
+                assert await _pump_until(pilot, lambda: app._session is not None, tries=300)
+                alpha, source = _attached(app._session), app._interaction
+                app._set_approve_all(False)
+                probe = _install_probe(monkeypatch, alpha)
+
+                gate_task = await _raise_ask(rig, "alpha", _one_question())
+                try:
+                    # PREMISE: the card mounts and takes the keyboard, observed
+                    # rather than assumed. `has_focus` is the card's own reactive
+                    # and is up one hop ahead of the app's mirror.
+                    assert await _pump_until(
+                        pilot,
+                        lambda: app._ask_screen is not None and app._ask_screen.has_focus,
+                        tries=_RESURFACE_TURNS,
+                    ), "the ask card never mounted, or never took the keyboard" + _state(
+                        app, alpha, source, probe
+                    )
+                    assert app.focused is app._ask_screen, (
+                        "the card reports `has_focus` but the app does not route keys "
+                        "to it, so the press below would prove nothing"
+                    )
+
+                    # The measured pre-dispatch state of the mirror: the
+                    # DescendantFocus hop has been posted and not yet received
+                    # (or was dropped by `_swapping_session`). DETERMINISTIC ON
+                    # PURPOSE -- see the docstring on why this is set and not
+                    # raced for.
+                    source.draft.focus_id = ""
+
+                    await _click(app, pilot, "beta")
+                    assert app._ask_screen is None, "the outgoing card is still on screen"
+                    await _click(app, pilot, "alpha", rounds=20)
+
+                    returned = await _pump_until(
+                        pilot,
+                        lambda: app._ask_screen is not None and app._ask_screen.has_focus,
+                        tries=_RESURFACE_TURNS,
+                    )
+                    assert returned, (
+                        "the card came back WITHOUT the keyboard it was holding when "
+                        "the switch away suspended it, so the band's `Answer the "
+                        "question above` names a key the composer declines"
+                        + _state(app, alpha, source, probe)
+                    )
+                    assert app.focused is app._ask_screen
+
+                    await pilot.press("enter")
+                    assert await _pump_until(
+                        pilot,
+                        lambda: app._ask_screen is None and alpha.pending_gate is None,
+                        tries=_RESURFACE_TURNS,
+                    ), "the returned card did not resolve on a real keypress" + _state(
+                        app, alpha, source, probe
+                    )
+                finally:
+                    gate_task.cancel()
+                    await asyncio.gather(gate_task, return_exceptions=True)
+    finally:
+        await rig.dispose()
+
+
+async def _turn_until(predicate: Any, *, turns: int = 1500, turn: float = 0.01) -> bool:
+    """Raw loop turns, for the one window ``_pump_until`` cannot reach.
+
+    ``pilot.pause()`` waits for EVERY message pump to go idle, and this file's
+    second keyboard case HOLDS a pump open on purpose (that is how the
+    attached-but-unmounted window is made into a state instead of an instant —
+    see the case below), so the pilot would sit there until it raised
+    ``WaitForScreenTimeout``. The APP's own queue is an ordinary task on the same
+    loop, so plain loop turns carry the click and the suspend without asking any
+    pump to become idle. A COUNT of turns, like ``_RESURFACE_TURNS`` is a count
+    of calls, and never a clock: ``turn`` is only what lets the loop schedule.
+    """
+    for _ in range(turns):
+        if predicate():
+            return True
+        await asyncio.sleep(turn)
+    return predicate()
+
+
+@pytest.mark.asyncio
+async def test_a_card_that_had_not_mounted_yet_still_claims_the_keyboard(
+    tmp_path, monkeypatch
+) -> None:
+    """Condition M: BOTH records are empty, so the suspend reads the card itself.
+
+    THE SECOND WINDOW, and the one that survived the first fix. ``focus_id`` is
+    written by ``on_descendant_focus``, a Textual MESSAGE, and the suspend runs
+    from one too — so when the switch away lands in the pump that carries the
+    card's own mount, NEITHER record has been written: ``on_mount`` (which calls
+    ``self.focus()``) has not run, so ``card.has_focus`` is False, and the mirror
+    is still "". A ``False`` recorded there is not "the user was typing", it is
+    "we do not know yet" — and :meth:`AskPickerScreen.on_mount` reads it back as
+    ``_restored_focus=False``, so the card returns declining the keyboard while
+    the band goes on saying ``Answer the question above``, an instruction whose
+    Enter the composer then declines (a bare Enter has no ``character``).
+
+    Measured, on a loaded run, before this case existed — the probe trace that
+    names the window:
+
+    ``SUSPEND gates: focus_id='' app.focused=Editor() ask=[has_focus=False …]``
+    then ``card.on_mount [has_focus=False … _restored_focus=False]`` and
+    ``press('enter',) BEFORE: focused=Editor()`` with ``route key='enter' -> False``.
+
+    THE WINDOW IS HELD OPEN, NOT RACED FOR. ``Mount`` is dispatched immediately
+    after ``Compose`` in the same ``MessagePump._pre_process``, so parking
+    ``AskPickerScreen._compose`` on an event IS a card that is attached and has
+    not mounted — the exact state, and stable until this test releases it. Only
+    the hold is synthetic: the ask gate, the click away, the re-arm, the mount of
+    the card that comes back and the keypress are all real, and the mirror is
+    left alone (it really is empty here).
+    """
+    rig = await _rig(tmp_path / "config", monkeypatch, "alpha", "beta")
+    app = _app(rig, "alpha")
+    release_compose = asyncio.Event()
+    parked: list[Any] = []
+    real_compose = AskPickerScreen._compose
+
+    async def held_compose(self: Any) -> None:
+        # The FIRST card only: the one that comes back must mount normally.
+        if not parked:
+            parked.append(self)
+            await release_compose.wait()
+        await real_compose(self)
+
+    monkeypatch.setattr(AskPickerScreen, "_compose", held_compose)
+    try:
+        with patch("local_operator.mobile.attach_client.find_runtime_record", rig.find_owner):
+            # No pilot until the hold is released: every wait above that point
+            # goes through `_turn_until` for the reason its docstring gives.
+            async with app.run_test(size=(110, 32)) as pilot:
+                assert await _turn_until(
+                    lambda: app._session is not None
+                ), "the app never adopted the alpha viewer"
+                alpha, source = _attached(app._session), app._interaction
+                app._set_approve_all(False)
+                probe = _install_probe(monkeypatch, alpha)
+
+                gate_task = await _raise_ask(rig, "alpha", _one_question())
+                try:
+                    # PREMISE: THE HOLD IS TAKEN, asked of `parked` rather than of
+                    # the card's own flags. A card is ALSO attached-and-unmounted for
+                    # the scheduling gap BEFORE its `Compose` is dispatched, and from
+                    # the outside that state is indistinguishable from this one -- the
+                    # hold does not cover it and no record is owed there yet. Measured:
+                    # a whole-file run of this case caught that earlier gap, skipped
+                    # the hold, and went on to assert a window it was not in
+                    # (`the hold was never taken; the premise is unmet`, `assert []`).
+                    assert await _turn_until(
+                        lambda: bool(parked)
+                        and app._ask_screen is parked[0]
+                        and parked[0].is_attached
+                        and not parked[0].is_mounted
+                    ), "the card never reached the held attached-and-unmounted window" + _state(
+                        app, alpha, source, probe
+                    )
+                    # Both records this window is named for, at the moment of
+                    # the suspend below: neither has anything to say about it.
+                    assert not parked[0].has_focus
+                    assert source.draft.focus_id != "@gate"
+
+                    app.post_message(SessionSidebar.Selected("beta"))
+                    assert await _turn_until(
+                        lambda: app._ask_screen is None
+                    ), "the click away did not take the card down" + _state(
+                        app, alpha, source, probe
+                    )
+                    assert source.gate_draft is not None, (
+                        "the suspend recorded nothing for a card it caught before its "
+                        "mount, so the card that comes back can never claim the "
+                        "keyboard it was about to take" + _state(app, alpha, source, probe)
+                    )
+                    assert source.gate_draft[1].focused is True, (
+                        "the suspend recorded `focused=False` for a card that had not "
+                        "mounted yet with an empty composer, which is `the user was "
+                        "typing` and not what this state says" + _state(app, alpha, source, probe)
+                    )
+
+                    # Released before any `pilot.pause()`: the caught card goes on
+                    # to mount, disabled and already settled by the switch, exactly
+                    # as it does in the measured run.
+                    release_compose.set()
+                    await _pump(pilot, 20)
+                    task = app._sidebar_navigation._task
+                    if task is not None and not task.done():
+                        await asyncio.wait_for(asyncio.shield(task), 30)
+
+                    await _click(app, pilot, "alpha", rounds=20)
+                    returned = await _pump_until(
+                        pilot,
+                        lambda: app._ask_screen is not None and app._ask_screen.has_focus,
+                        tries=_RESURFACE_TURNS,
+                    )
+                    assert returned, (
+                        "the card came back WITHOUT the keyboard after a suspend that "
+                        "caught it before its mount, so the band's `Answer the "
+                        "question above` names a key the composer declines"
+                        + _state(app, alpha, source, probe)
+                    )
+                    assert app.focused is app._ask_screen
+
+                    await pilot.press("enter")
+                    assert await _pump_until(
+                        pilot,
+                        lambda: app._ask_screen is None and alpha.pending_gate is None,
+                        tries=_RESURFACE_TURNS,
+                    ), "the returned card did not resolve on a real keypress" + _state(
+                        app, alpha, source, probe
+                    )
+                finally:
+                    release_compose.set()
                     gate_task.cancel()
                     await asyncio.gather(gate_task, return_exceptions=True)
     finally:
