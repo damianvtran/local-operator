@@ -8436,10 +8436,18 @@ def _preflight_api_key(
     try:
         import asyncio
 
-        from local_operator.providers.auth_store import AuthStore
+        from local_operator.network.credentials import build_auth_store
         from local_operator.providers.registry import credential_provider_id
 
-        auth_store = AuthStore(config_dir=config_dir)
+        # THE STORE THE SESSION WILL USE, not a plain ``AuthStore`` (mesh credentials,
+        # QA round 1, Q3). On a device that borrows a login from another device the
+        # plain store holds no row, so a foreground ``lop exec`` refused to start with
+        # "RADIENT_API_KEY is required" while ``exec --background`` and the TUI — which
+        # build the session's store — ran fine. ``build_auth_store`` returns the very
+        # same ``AuthStore`` on a device that borrows nothing, and lists a synthetic
+        # row for a borrowable key otherwise; either way this stays a presence check
+        # with no network call, which is the rule this function's docstring states.
+        auth_store = build_auth_store(config_dir)
         try:
             storage_provider = credential_provider_id(canonical)
             if auth_store.list_credentials(provider=storage_provider):
