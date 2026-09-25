@@ -419,6 +419,12 @@ class Handshake:
     auth_core: dict[str, Any] = field(default_factory=dict)
     shared: bytes = b""
     peer_device_id: str = ""
+
+    #: True once :meth:`verify_auth` has matched the peer's MAC — i.e. once the id in
+    #: ``peer_device_id`` is PROVEN rather than declared. Read by the refusal audit
+    #: (``relay._audit_handshake_refusal``), which may not name a device as the actor
+    #: on the strength of a claim: an attacker chooses the id it declares.
+    auth_verified: bool = False
     peer_instance_id: str = ""
     peer_public_key: str = ""
     peer_capabilities: list[str] = field(default_factory=list)
@@ -748,6 +754,14 @@ class Handshake:
                 REASON_MAC,
                 "the other device could not prove it holds this network's current secret",
             )
+        # THE PEER HAS NOW PROVED THE ID IT DECLARED: the MAC is over a transcript
+        # that carries ``device_id``, computed with the key of the epoch it named,
+        # so everything this side has accepted about the peer's identity is proven
+        # from here on. It is a flag rather than a re-derivation at the audit site
+        # because the audit asks a question the handshake's own state answers exactly
+        # once (relay._audit_handshake_refusal), and "was this id proven" must not
+        # become a second implementation of the MAC check.
+        self.auth_verified = True
         if self.mode == "member":
             self.phase = (
                 "reconcile"

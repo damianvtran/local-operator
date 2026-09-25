@@ -51,6 +51,27 @@ PAIR_OPS = frozenset(NET_PAIR_OPS)
 #: general-purpose one.
 RECONCILE_OPS = frozenset({"net_reconcile", "ping"})
 
+#: The frames that ANNOUNCE the new epoch: their own ``epoch`` field is the one the
+#: receiver does not hold yet, so it can never equal the record's epoch and the
+#: equality rule below refuses every one of them on arrival.
+#:
+#: BOTH INSTANCES OF THIS CLASS ARE MEASURED, and each cost the feature its whole
+#: purpose: ``net_epoch`` was the first (a rotation refused on every live link, so no
+#: member removal ever propagated — QA round 3, Q-R3-2), and ``net_panic`` the second
+#: (QA round 1 trust & operations, Q-R1-1: the operator's emergency control was
+#: refused by every peer with `epoch_stale` while the receipt said `ok: true` and
+#: named an epoch no peer ever reached — an admin panic is ALWAYS exactly one epoch
+#: ahead of every receiver, so it could never land). The set names the CLASS rather
+#: than the two names because the next frame that carries a new epoch belongs here,
+#: and a test walks its members asserting each one is admitted while one ahead.
+#:
+#: This is a carve-out from the EQUALITY rule, never from the gate: the LINK must
+#: still be at the epoch this record holds (checked below), which is what stops a
+#: frame from a link established against an older key. What the frame's own epoch
+#: MEANS is settled by the apply path, which owns that rule and is the only code that
+#: may re-key or re-trust this device.
+EPOCH_ANNOUNCING_OPS = frozenset({"net_epoch", "net_panic"})
+
 
 class NetworkState(Protocol):
     """What the authoriser may ask about the world.
@@ -235,30 +256,23 @@ class Authorizer:
             self._refused(link, op, refusal, frame)
             raise refusal
         recorded_epoch = int(frame.get("epoch") or link.epoch)
-        # A ROTATION ANNOUNCES THE NEW EPOCH, so its own ``epoch`` is the one we do not
-        # have yet. Requiring it to equal the record's epoch refused EVERY rotation
-        # that arrived over a live link — measured, on a real one: a rotation to epoch
-        # 2 reached a peer at epoch 1 and was refused `epoch_stale` ("the network has
-        # rotated (this device is at epoch 1); the link must be re-established"), so no
-        # member removal ever propagated over a live link to anybody, and the removed
-        # device was left reporting its old epoch, its old member list and
-        # `trust: active` while every attempt to reach the network failed (QA round 3,
-        # Q-R3-2; the same silence is why peer-b's epoch 3 never reached the Mac in
-        # that run's 90 s watch).
+        # THE EPOCH-ANNOUNCING FRAMES CARRY THE EPOCH WE DO NOT HOLD YET, so their own
+        # ``epoch`` can never equal the record's and the equality rule below refuses
+        # them all; see EPOCH_ANNOUNCING_OPS for both measured instances of that.
         #
         # The GATE'S PURPOSE IS KEPT: the LINK must be at the epoch this record holds,
         # which is what stops a frame from a link established against an older key from
-        # acting. What a rotation's own epoch MEANS is settled by the apply path, which
-        # is the code that owns the rule (§8.1 step 4: a strictly greater epoch,
+        # acting. What such a frame's own epoch MEANS is settled by the apply path,
+        # which is the code that owns the rule (§8.1 step 4: a strictly greater epoch,
         # attributed to the sender, internally consistent, digest-checked) — a second,
         # weaker copy of it here is how the two came to disagree.
-        if op == "net_epoch":
+        if op in EPOCH_ANNOUNCING_OPS:
             if link.epoch == record.epoch:
                 return
             refusal = Refusal(
                 "epoch_stale",
                 f"this link authenticated at epoch {link.epoch} and the network is at "
-                f"{record.epoch}, so a rotation on it is refused before it is read",
+                f"{record.epoch}, so {op} on it is refused before it is read",
             )
             self._refused(link, op, refusal, frame)
             raise refusal

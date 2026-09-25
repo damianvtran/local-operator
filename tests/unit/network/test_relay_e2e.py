@@ -885,7 +885,18 @@ def test_a_cap_drop_names_itself_in_the_local_audit(
         for row in rows:
             assert row["cause"] == "handshake_cap", row
             assert row["outcome"] == "refused", row
-            assert row["detail"] == {"cause": "handshake_cap", "mode": "unauthenticated"}, row
+            # THE ROW SAYS WHAT IT KNOWS AND WHY IT CANNOT NAME AN ACTOR (Q-R1-4).
+            # A cap drop happens before a single frame is read, so there is nothing to
+            # attribute — and `their_device` used to carry the socket ADDRESS, which
+            # read as a device id to every consumer of this log.
+            assert row["detail"]["cause"] == "handshake_cap", row
+            assert row["detail"]["mode"] == "unauthenticated", row
+            assert row["detail"]["their_addr"].startswith("127.0.0.1:"), row
+            # PRESENT AND EMPTY, because nothing is attributable; `unidentified` is what
+            # says so. The old row put the socket address here, which every reader of a
+            # field named for a device reads as an id.
+            assert row["detail"]["their_device"] == "", row
+            assert row["detail"]["unidentified"], row
     finally:
         for sock in held:
             sock.close()
@@ -1786,3 +1797,194 @@ def test_the_definitions_cadence_dials_a_member_it_holds_no_link_to(
     # The interval floor still holds ON THE SAME INSTANCE: a second tick a moment
     # later asks nobody, which is what bounds a mesh of many members.
     assert syncer.tick() == []
+
+
+# ---------------------------------------------------------------------------
+# The incident plane: what the PEERS did, on a real pair
+# ---------------------------------------------------------------------------
+
+
+def _live_link(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[types.NetworkRecord, relay.PeerLink]:
+    """A paired pair with B holding a live link to A, and the record."""
+    server_a, server_b, host, port = devices
+    record = _dialable_devices(devices, monkeypatch)
+    link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    assert link is not None, f"the member handshake failed: {reason}"
+    return record, link
+
+
+def test_a_panic_reaches_a_real_peer_and_the_receipt_says_what_it_did(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE BLOCKER, over a real socket (QA round 1 trust & operations, Q-R1-1).
+
+    Three things were wrong at once, and this cell pins all three because each one
+    alone produced the same operator-visible lie:
+
+    1. the receiver REFUSED the frame — an admin panic is always exactly one epoch
+       ahead of every peer, and the epoch gate had a carve-out for ``net_epoch`` and
+       none for ``net_panic``, so no peer ever acted;
+    2. the receiver's own ack was written AFTER it closed the link, so even a frame
+       it accepted reported nothing back;
+    3. the receipt counted links written to, so a broadcast nobody acted on read
+       exactly like one that landed.
+
+    What is asserted here is therefore the whole chain: the peer does not refuse it,
+    the peer ACTS (its epoch moves to the panicker's and it goes untrusted), and the
+    panicking device's receipt carries what the peer reported rather than what it
+    sent.
+    """
+    server_a, server_b, _host, _port = devices
+    record, link = _live_link(devices, monkeypatch)
+    assert link.network_id == record.network_id
+    assert store.load(record.network_id, server_b.root).epoch == 1
+
+    # ``control_dispatch`` answers the control socket's own envelope — the CLI's
+    # ``_relay_call`` is what unwraps ``detail`` — so the receipt is read from there.
+    receipt = server_a.control_dispatch("net_panic_local", {"network": record.network_id})["detail"]
+
+    # (c) THE RECEIPT DESCRIBES THE PEER. ``broadcast_to`` — a count of writes — is
+    # gone, and what replaced it is the peer's own report of what it did.
+    assert receipt["sent"] == 1, receipt
+    assert receipt["acked"] == 1, receipt
+    assert receipt["unacked"] == [] and receipt["refused"] == [], receipt
+    assert receipt["ok"] is True, receipt
+    row = receipt["peers"][0]
+    assert row["device_id"] == server_b.identity.device_id, row
+    assert row["outcome"] == "acked", row
+    assert row["reported"]["applied"] == "untrusted", row
+    assert row["reported"]["epoch_after"] == 2, row
+    assert row["reported"]["rotation"] == "untrusted:applied", row
+
+    # (b) THE PEER ACTED: its epoch moved to the panicker's, it holds the new secret,
+    # and it refuses peer traffic from now on — the transport's §8.2 duty, which used
+    # to be the ONLY half implemented and therefore left the fleet split.
+    peer = store.load(record.network_id, server_b.root)
+    assert peer.trust == "untrusted", peer.trust
+    assert peer.epoch == 2, peer.epoch
+    sender = store.load(record.network_id, server_a.root)
+    assert sender.trust == "untrusted"
+    assert sender.epoch == 2
+    assert (
+        store.load_secrets(record.network_id, server_b.root).secret
+        == store.load_secrets(record.network_id, server_a.root).secret
+    ), "the receiver kept the old secret, so recovery would need a reconcile grant"
+
+    # The rows both sides read afterwards.
+    received = [
+        event for event in server_b.audit.tail(limit=200) if event.get("event") == "panic_received"
+    ]
+    assert len(received) == 1, received
+    assert received[0]["detail"]["epoch_before"] == 1, received
+    assert received[0]["detail"]["epoch_after"] == 2, received
+    assert received[0]["detail"]["rotation"] == "untrusted:applied", received
+    delivered = [
+        event
+        for event in server_a.audit.tail(limit=200)
+        if event.get("event") in ("panic_delivered", "panic_undelivered")
+    ]
+    assert [event["event"] for event in delivered] == ["panic_delivered"], delivered
+    summary = [
+        event
+        for event in server_a.audit.tail(limit=200)
+        if event.get("event") == "panic_broadcast_result"
+    ]
+    assert summary and summary[-1]["detail"]["acked"] == 1, summary
+
+    # RECOVERY IS ONE LOCAL ACT PER DEVICE, and it needs no reconcile grant: after
+    # `trust --active` on both, a fresh handshake comes up AT THE SAME EPOCH. This is
+    # the design's §3.1 promise ("the network is coherent again immediately"), and it
+    # is what the old behaviour made impossible.
+    for server in (server_a, server_b):
+        server.control_dispatch(
+            "net_trust_local", {"network": record.network_id, "trust": "active"}
+        )
+    assert store.load(record.network_id, server_a.root).trust == "active"
+    assert store.load(record.network_id, server_b.root).trust == "active"
+    again, reason = server_b.dial(record.network_id, host=f"{_host}:{_port}", epoch=2)
+    assert again is not None, f"the post-panic handshake failed: {reason}"
+    assert again.epoch == 2, again.epoch
+    again.close("test")
+
+
+def test_a_panic_receipt_reports_a_member_it_could_not_ask(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A peer this device could not ask is an OUTCOME, not an absence (§2.2/§6.5).
+
+    QA measured the opposite contract: a receipt that read `ok: true` while a peer
+    refused the frame. The other half of that lie is silence — a member with no link
+    used to contribute NOTHING to the count, so a network of three reported one and
+    the third, which is still out there on the old epoch, was invisible.
+    """
+    server_a, server_b, _host, _port = devices
+    record, link = _live_link(devices, monkeypatch)
+    link.close("test")
+    server_b.stop()
+
+    receipt = server_a.control_dispatch("net_panic_local", {"network": record.network_id})["detail"]
+
+    assert receipt["sent"] == 1, receipt
+    assert receipt["acked"] == 0, receipt
+    assert receipt["unacked"] == [server_b.identity.device_id], receipt
+    assert receipt["ok"] is False, receipt
+    assert receipt["peers"][0]["reason"], receipt
+    rows = [
+        event
+        for event in server_a.audit.tail(limit=200)
+        if event.get("event") == "panic_undelivered"
+    ]
+    assert [event["detail"]["outcome"] for event in rows] == ["unacked"], rows
+
+
+def test_a_refused_leave_is_reported_as_a_refusal_not_as_a_reachable_peer(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE MEASURED RECEIPT (QA round 1 trust & operations, Q-R1-2), reproduced.
+
+    QA drove a `lop network disconnect` that printed ``reachable_peers: 2`` while the
+    peer's own log held a ``net_leave`` refused as ``policy`` in the reconcile phase
+    — the failure existed, on the peer, and no surface on the acting device said so.
+    The refusal is induced here the same way it arose there: this device is one epoch
+    behind, so its link authenticates into the reconcile phase, where only
+    ``net_reconcile`` and ``ping`` may dispatch.
+
+    Both halves are asserted: the receipt reports the refusal with the peer's OWN
+    sentence, and the local act still happens — leaving is never conditional on a
+    peer's agreement (design §2.1), it is the REPORT that must not claim otherwise.
+    """
+    server_a, server_b, host, port = devices
+    record = _dialable_devices(devices, monkeypatch)
+    state = store.load_secrets(record.network_id, server_a.root)
+    # A rotates and tells nobody: B's own record still says epoch 1.
+    with store.mutate(record.network_id, server_a.root) as live:
+        relay.rotate_epoch(
+            live,
+            state,
+            by=server_a.identity.device_id,
+            reason="test",
+            root=server_a.root,
+        )
+    link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=1)
+    assert link is not None, f"the reconcile handshake failed: {reason}"
+
+    receipt = server_b.control_dispatch("net_disconnect", {"network": record.network_id})["detail"]
+    assert receipt["sent"] == 1, receipt
+    assert receipt["acked"] == 0, receipt
+    assert receipt["refused"] == [server_a.identity.device_id], receipt
+    assert receipt["ok"] is False, receipt
+    assert receipt["reachable_peers"] == 0, receipt
+    row = receipt["peers"][0]
+    assert row["outcome"] == "refused", row
+    assert row["reason"], row
+    assert "reconcil" in row["reason"].lower(), row
+
+    # The local half, unconditionally: stopped trusting, secret gone, trail kept.
+    assert store.load(record.network_id, server_b.root).trust == "disconnected"
+    assert not store.secrets_path(record.network_id, server_b.root).exists()

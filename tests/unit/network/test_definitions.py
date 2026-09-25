@@ -29,7 +29,7 @@ from typing import Any
 import pytest
 
 from local_operator.agents import AgentEditFields, AgentRegistry
-from local_operator.network import definitions
+from local_operator.network import definitions, relay, store, types, wire
 from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
 
@@ -1008,3 +1008,118 @@ def test_a_failed_push_is_retried_on_the_next_tick_not_a_minute_later(
     # 14 s after that: a success parks the member for the full minute.
     assert syncer.tick(now=1030.0) == []
     assert syncer.tick(now=1080.0) == [(_SYNC_PEER, "in_sync")]
+
+
+def test_a_refused_push_is_parked_for_half_an_hour_not_retried_every_tick(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A POLICY REFUSAL IS NOT A FLAP (QA round 1, Q-R1-3).
+
+    Measured on a real pair: 300 s of idle network wrote 20 rows, every one of them
+    the 15 s retry of an op the peer had refused — on both sides, forever. The answer
+    to "may I write definitions here" does not change between ticks, so a refusal
+    parks the member; a FAILURE keeps the fast retry, because a peer that is briefly
+    down is exactly the case the one-tick floor exists for. Both halves are asserted
+    here, on the same syncer, so the two cannot be collapsed back into one floor.
+    """
+    from types import SimpleNamespace
+
+    syncer = definitions.DefinitionsSyncer(SimpleNamespace(root=root))  # type: ignore[arg-type]
+    monkeypatch.setattr(syncer, "_targets", lambda: [_SYNC_PEER])
+    responses = [
+        {"ok": False, "code": "unreachable", "message": "not answering"},
+        {"ok": False, "code": "refused", "message": "may not do that"},
+        {"ok": False, "code": "unreachable", "message": "not answering"},
+        {"ok": True, "code": "in_sync", "message": "same definitions"},
+    ]
+    monkeypatch.setattr(
+        definitions, "push_to_peer", lambda server, device_id, **fields: responses.pop(0)
+    )
+
+    # A transport failure: retried on the next tick, exactly as before.
+    assert syncer.tick(now=1000.0) == [(_SYNC_PEER, "unreachable")]
+    assert syncer.tick(now=1016.0) == [(_SYNC_PEER, "refused")]
+    # The refusal parks it: every tick in the next half hour asks nobody, which is
+    # what turns 240 refusal rows an hour into two.
+    assert syncer.tick(now=1032.0) == []
+    assert syncer.tick(now=2000.0) == []
+    # Half an hour later it asks again — a re-attempt, not a permanent skip, so a
+    # capability granted on the peer's side is discovered rather than hidden.
+    assert syncer.tick(now=1016.0 + definitions.REFUSED_MIN_INTERVAL_S) == [
+        (_SYNC_PEER, "unreachable")
+    ]
+    assert syncer.tick(now=1016.0 + definitions.REFUSED_MIN_INTERVAL_S + 16.0) == [
+        (_SYNC_PEER, "in_sync")
+    ]
+
+
+def test_a_member_that_cannot_hold_the_op_is_not_asked_on_a_timer(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE CAUSE, not the symptom: don't ask what the shared table already answers.
+
+    ``net_definitions`` requires ``admin`` on the receiving side, so a ``drive``
+    member's push can never succeed — and the cadence asked anyway, every 15 s,
+    forever, costing a dial, two envelopes and an audited refusal on the peer each
+    time (measured: +21 audit rows and +8,805 bytes in 300 idle seconds, 20 of them
+    this op). The requirement is read from ``types.OP_CAPABILITY`` — the same table
+    the receiving authoriser reads — so this cannot drift from the real rule.
+    """
+    record = types.NetworkRecord(
+        network_id="n_0123456789abcdef01234567",
+        name="home-net",
+        epoch=1,
+        self_device_id="d_" + "a" * 32,
+        self_role="drive",
+        self_capabilities=sorted(types.capabilities_for_role("drive")),
+    )
+    relay.admit(
+        record,
+        device_id="d_" + "a" * 32,
+        public_key=wire.b64u(b"a" * 32),
+        name="laptop",
+        role="drive",
+        capabilities=sorted(types.capabilities_for_role("drive")),
+        added_by="d_" + "c" * 32,
+        added_via="invite",
+        root=root,
+        persist=False,
+    )
+    relay.admit(
+        record,
+        device_id=_SYNC_PEER,
+        public_key=wire.b64u(b"b" * 32),
+        name="peer",
+        role="admin",
+        capabilities=sorted(types.capabilities_for_role("admin")),
+        added_by="d_" + "c" * 32,
+        added_via="invite",
+        root=root,
+        persist=False,
+    )
+    store.save(record, root)
+    from types import SimpleNamespace
+
+    syncer = definitions.DefinitionsSyncer(SimpleNamespace(root=root))  # type: ignore[arg-type]
+    monkeypatch.setattr(syncer, "_targets", lambda: [_SYNC_PEER])
+    asked: list[str] = []
+    monkeypatch.setattr(
+        definitions,
+        "push_to_peer",
+        lambda server, device_id, **fields: (
+            asked.append(device_id) or {"ok": True, "code": "in_sync", "message": ""}
+        ),
+    )
+
+    assert syncer.tick(now=1000.0) == [(_SYNC_PEER, "skipped:no_admin")]
+    assert syncer.tick(now=2000.0) == [(_SYNC_PEER, "skipped:no_admin")]
+    assert asked == [], "the cadence asked a peer it cannot possibly satisfy"
+
+    # AND THE SKIP IS NOT A LOCK-OUT: the same member, once THIS device holds the
+    # capability, is asked on the very next tick. The check reads the live record
+    # rather than caching, so a `member grant` here takes effect immediately.
+    with store.mutate(record.network_id, root) as live:
+        live.self_capabilities = sorted(types.capabilities_for_role("admin"))
+        store.save(live, root)
+    assert syncer.tick(now=2016.0) == [(_SYNC_PEER, "in_sync")]
+    assert asked == [_SYNC_PEER]

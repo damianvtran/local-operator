@@ -280,6 +280,39 @@ def test_a_rotation_on_a_link_that_is_not_at_our_epoch_is_still_refused() -> Non
     assert excinfo.value.code == "epoch_stale"
 
 
+@pytest.mark.parametrize("op", sorted(az.EPOCH_ANNOUNCING_OPS))
+def test_every_epoch_announcing_frame_is_admitted_while_one_epoch_ahead(op: str) -> None:
+    """WALKED OVER THE SET, because this defect has now shipped TWICE.
+
+    The rotation was the first (QA round 3, Q-R3-2) and the admin panic the second
+    (QA round 1 trust & operations, Q-R1-1: every peer refused it ``epoch_stale``
+    while the receipt said ``ok: true``). Both are frames whose own ``epoch`` field
+    is the one the receiver does not hold yet, so the equality rule refuses them by
+    construction — and the fix for the first was written as a name-by-name exception,
+    which is exactly how the second arrived unnoticed. Parametrizing over
+    ``EPOCH_ANNOUNCING_OPS`` means the next frame of this class is covered by adding
+    one name where the rule lives, and that a name removed from the set fails HERE.
+    """
+    authorizer, _audit = make(state=FakeState(epoch=1))
+    granted = authorizer.check(
+        link(epoch=1, capabilities={"admin", "list"}), {"op": op, "req": 1, "epoch": 2}
+    )
+    assert granted.action == op
+
+
+@pytest.mark.parametrize("op", sorted(az.EPOCH_ANNOUNCING_OPS))
+def test_an_epoch_announcing_frame_on_a_stale_link_is_refused(op: str) -> None:
+    """The gate keeps its teeth for the whole class: the LINK must be at the epoch the
+    record holds, whatever the frame announces. This is what stops a frame from a
+    link established against an older key from acting on this device."""
+    authorizer, _audit = make(state=FakeState(epoch=5))
+    with pytest.raises(types.Refusal) as excinfo:
+        authorizer.check(
+            link(epoch=4, capabilities={"admin", "list"}), {"op": op, "req": 1, "epoch": 6}
+        )
+    assert excinfo.value.code == "epoch_stale"
+
+
 def test_a_network_this_device_left_refuses_the_link() -> None:
     authorizer, _audit = make(state=FakeState(present=False))
     with pytest.raises(types.Refusal) as excinfo:
