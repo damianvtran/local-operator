@@ -64,8 +64,15 @@ def parse_replies(data: bytes) -> tuple[RGB | None, RGB | None, dict[int, RGB]]:
     return fg, bg, ansi
 
 
-def probe(timeout: float = 0.3) -> bytes:
-    """Query the controlling terminal; return its raw replies (b"" if none)."""
+def probe(timeout: float = 1.0) -> bytes:
+    """Query the controlling terminal; return its raw replies (b"" if none).
+
+    ``timeout`` is a hard cap, not a wait: a terminal that answers returns as
+    soon as its DA1 reply lands (milliseconds locally), so the cap is only paid
+    by one that stays silent. It is generous because a reply arriving AFTER we
+    stop reading reaches Textual's input parser, which has no OSC handling and
+    would type ``]11;rgb:...`` into the composer.
+    """
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         return b""
     try:
@@ -154,7 +161,9 @@ def derive(fg: RGB, bg: RGB, ansi: dict[int, RGB]) -> theme_mod.ThemeSpec:
     and darken on a light one); every ink is clamped to the same contrast
     floors the curated palettes are tested against.
     """
-    dark = _luminance(bg) < 0.18
+    # Polarity from the pair, not a fixed threshold: a mid-grey ground is dark
+    # or light according to which way the terminal's own text goes.
+    dark = _luminance(fg) > _luminance(bg)
     extreme: RGB = (255, 255, 255) if dark else (0, 0, 0)
 
     surface = _mix(bg, fg, 0.06)
@@ -219,12 +228,58 @@ def derive(fg: RGB, bg: RGB, ansi: dict[int, RGB]) -> theme_mod.ThemeSpec:
     )
 
 
-def install() -> bool:
-    """Probe the terminal and register the ``terminal`` theme; False if it did not answer."""
+def _hex_rgb(value: str) -> RGB:
+    return (int(value[1:3], 16), int(value[3:5], 16), int(value[5:7], 16))
+
+
+def readable(spec: theme_mod.ThemeSpec) -> bool:
+    """Whether ``spec`` clears the floors every curated palette is tested against.
+
+    A derived ramp can miss them on a mid-grey ground, where neither white nor
+    black reaches 7:1 and ``_ensure`` gives up; such a theme is refused rather
+    than registered, so a saved ``terminal`` falls back to the brand ramp.
+    """
+    t = {name: _hex_rgb(value) for name, value in spec.tokens.items()}
+    floors = {"fg": 7.0, "muted": 4.5, "dim": 3.4}
+    floors |= dict.fromkeys(("accent", "success", "warning", "danger", "signal", "label"), 4.0)
+    for token, floor in floors.items():
+        if any(_contrast(t[token], t[ground]) < floor for ground in ("bg", "surface")):
+            return False
+    ladder = [_luminance(t[step]) for step in ("bg", "surface", "raised", "overlay")]
+    return (
+        _contrast(t["danger"], t["tint-danger"]) >= 4.0
+        and _contrast(t["fg"], t["edge"]) >= 4.5
+        and ladder == sorted(ladder, reverse=not spec.dark)
+        and len(set(ladder)) == len(ladder)
+        and t["tint-select"] != t["tint-select-hi"]
+    )
+
+
+def _remote() -> bool:
+    return bool(os.environ.get("SSH_TTY") or os.environ.get("SSH_CONNECTION"))
+
+
+def install(theme_name: str) -> bool:
+    """Probe the terminal and register the ``terminal`` theme; False if not registered.
+
+    Probed when the user chose ``terminal``, and otherwise only on a LOCAL tty,
+    where the reply is near-instant: that is what lets ``/theme`` offer the
+    entry to a user who has not picked it yet, without charging a slow SSH
+    link a startup wait (or a late reply) for a theme nobody asked for.
+    """
+    if theme_name != NAME and _remote():
+        return False
     fg, bg, ansi = parse_replies(probe())
     if fg is None or bg is None:
         logger.debug("terminal theme: no OSC 10/11 reply, theme not registered")
         return False
+    spec = derive(fg, bg, ansi)
+    if not readable(spec):
+        logger.debug("terminal theme: derived ramp misses the contrast floors, not registered")
+        return False
     theme_mod.unregister_theme(NAME)  # a re-entrant boot re-derives it
-    theme_mod.register_theme(derive(fg, bg, ansi))
+    theme_mod.register_theme(spec)
+    from local_operator import settings_io
+
+    settings_io._theme_choices.cache_clear()  # its registry snapshot predates this theme
     return True
