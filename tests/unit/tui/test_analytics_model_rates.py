@@ -19,6 +19,7 @@ from local_operator.analytics.model import ModelRateRow, UsageAggregate
 from local_operator.tui.widgets.analytics_panel import (
     MODEL_RATES_FAILED,
     MODEL_RATES_PENDING,
+    AnalyticsScreen,
     build_report,
 )
 
@@ -137,3 +138,54 @@ def test_a_partial_ledger_states_coverage_per_row() -> None:
     partial = _row(decode_us=1_000_000, decode_tokens=1_000, decode_calls=4)
     text = _report_text(UsageAggregate(calls=10), model_rates=[partial])
     assert "4/10 calls" in text
+
+
+# ---------------------------------------------------------------------------
+# The WIRING: a fast read must still reach the table
+# ---------------------------------------------------------------------------
+
+
+def test_the_rates_worker_writes_to_a_screen_that_is_not_mounted_yet():
+    """The contract the race turns on: the write must not depend on mount state.
+
+    Deterministic on purpose. A timing-based repro of the race is a coin toss —
+    whether the read beats the mount depends on how fast the ledger answers, and
+    a first attempt at this test passed even with the guard back in place because
+    the mount happened to win. So this drives the worker DIRECTLY with a screen
+    that was never pushed: with an ``is_mounted`` guard the answer is discarded
+    and the section stays "pending" forever (design round 1 D1, review round 2
+    blocker, both reproduced in the real app); without one the value is stored and
+    the first paint shows it.
+    """
+    import asyncio
+
+    from local_operator.analytics.store import AnalyticsStore
+    from local_operator.paths import config_dir
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets.analytics_panel import MODEL_RATES_PENDING
+    from tests.unit.analytics.test_store import _snap
+    from tests.unit.tui.test_analytics_panel import FakeSession, _factory
+
+    store = AnalyticsStore(config_dir() / "analytics.db")
+    store.record_batch(
+        [_snap(session_id="s1", provider="anthropic", model_id="claude", output_tokens=40)]
+    )
+    store.close()
+
+    async def run() -> None:
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(110, 40)):
+            # Constructed EXACTLY as the app pushes it — pending, so the assertion
+            # below cannot pass vacuously on the default ``None``.
+            screen = AnalyticsScreen(UsageAggregate(calls=1), model_rates=MODEL_RATES_PENDING)
+            assert not getattr(screen, "is_mounted", False), "the point is that it is not mounted"
+            await app._read_model_rates_worker(screen)
+            assert (
+                screen._model_rates != MODEL_RATES_PENDING
+            ), "the worker dropped the answer because the screen was not mounted yet"
+            # And the report it would paint shows them, so the stored value is
+            # what the reader sees on the first frame after the mount.
+            text = _report_text(UsageAggregate(calls=1), model_rates=screen._model_rates)
+            assert "claude" in text
+
+    asyncio.run(run())

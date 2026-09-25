@@ -32,6 +32,7 @@ from local_operator.tui.widgets.analytics_panel import (
     ReportLayout,
     _forest_labels,
     _forest_rows,
+    _keeps_cache_column,
     _row_overhead,
     _row_prefix,
     _session_row_line,
@@ -1119,7 +1120,11 @@ def test_both_tables_budget_the_rate_column_so_no_width_can_clip_the_row():
                 f"{label} at content width {width}: the ``tok/s`` labels do not line "
                 "up, so the column cannot be read straight down"
             )
-            spends[label] = widths.pop() - _row_overhead(items[label], width)
+            spends[label] = widths.pop() - _row_overhead(
+                items[label],
+                width,
+                keep_cache=_keeps_cache_column(width, items["By provider"], items["By session"]),
+            )
             if width >= floor:
                 widest = max(cell_len(row) for row in rows)
                 assert widest <= width, (
@@ -1132,10 +1137,16 @@ def test_both_tables_budget_the_rate_column_so_no_width_can_clip_the_row():
                     f"{label} at content width {width}: the rate column is what falls "
                     f"off when the row is painted into the box — {box!r}"
                 )
-                if width >= _WIDE_TABLE_MIN:
+                if _keeps_cache_column(width, items["By provider"], items["By session"]):
                     assert box.endswith(" cache"), (
-                        f"{label} at content width {width}: the rightmost column is cut "
-                        f"when the row is painted into the box — {box!r}"
+                        f"{label} at content width {width}: the cache column is KEPT at "
+                        f"this width but is cut when the row is painted into the box — "
+                        f"{box!r}"
+                    )
+                else:
+                    assert " cache" not in box, (
+                        f"{label} at content width {width}: the cache column was dropped "
+                        f"from the budget but painted anyway — {box!r}"
                     )
         assert spends["By provider"] == spends["By session"], (
             "both tables share ONE name column, so what each spends on everything "
@@ -1145,16 +1156,33 @@ def test_both_tables_budget_the_rate_column_so_no_width_can_clip_the_row():
             "neither, or budgeted for both and painted in one"
         )
 
-    # ``_WIDE_TABLE_MIN`` is a cliff, not a slope: ``% cache`` switches on there,
-    # so the row gains cells in one step. The budget has to absorb them in both
-    # tables, which is exactly what the step being the cache term (and nothing
-    # else) proves.
-    narrow = painted(_WIDE_TABLE_MIN - 1)
-    wide = painted(_WIDE_TABLE_MIN)
+    # The cache column is now kept only where it FITS, and it is still a cliff in
+    # one step: find the first width that keeps it and assert the row gains
+    # exactly its budgeted cells, so the switch that turns the column on is the
+    # same term the budget reserves (design round 1 D2: a bare width threshold
+    # kept it on 2 cells past the box at a 100-cell terminal, so the column was
+    # painted and then clipped).
+    first_with_cache = next(
+        w
+        for w in range(_WIDE_TABLE_MIN - 12, 161)
+        if _keeps_cache_column(w, items["By provider"], items["By session"])
+    )
+    assert first_with_cache >= _WIDE_TABLE_MIN
+    narrow = painted(first_with_cache - 1)
+    wide = painted(first_with_cache)
     for label in narrow:
-        assert cell_len(wide[label][0]) - cell_len(narrow[label][0]) == 3 + 4 + len(" cache"), (
-            f"{label}: the cache column that appears at {_WIDE_TABLE_MIN} must cost its "
-            "budgeted cells and nothing more"
+        # AT MOST the cache term, and the row still fits. It is not exactly the
+        # term, because the shared name column is data-sized and can shrink in the
+        # same step: the budget's job is that the row fits, and that the column
+        # which arrives is the one the term reserves room for.
+        grew = cell_len(wide[label][0]) - cell_len(narrow[label][0])
+        assert grew <= 3 + 4 + len(" cache"), (
+            f"{label}: the cache column that appears at {first_with_cache} cost {grew} "
+            f"cells, more than its budget of {3 + 4 + len(' cache')}"
+        )
+        assert cell_len(wide[label][0]) <= first_with_cache, (
+            f"{label}: the row does not fit the box at the width that first keeps the "
+            "cache column"
         )
 
 
@@ -1609,8 +1637,17 @@ def test_nesting_does_not_cost_the_cache_column_on_a_narrow_frame():
     wide = _session_rows([line.plain for line in build_report(aggregate, 120)])
     narrow = _session_rows([line.plain for line in build_report(aggregate, 80)])
     assert all("cache" in r for r in wide)
-    assert all("cache" in r for r in narrow)
-    # Below the threshold cache sheds for every row equally, root and child.
+    # The decision is MEASURED now, not a bare threshold (design round 1 D2): the
+    # column is kept only where it fits beside the name floor, so the assertion is
+    # that every row of the table AGREES — root and indented child alike — which
+    # is what "nesting does not cost the cache column" means. A per-row difference
+    # is the defect; the width at which the table as a whole sheds it is a budget
+    # decision this test does not pin.
+    session_pairs = list(aggregate.by_session.items())
+    for width, rows in ((120, wide), (80, narrow)):
+        keeps = _keeps_cache_column(width, [], session_pairs)
+        assert all(("cache" in r) == keeps for r in rows), (width, rows)
+    # Below the floor it sheds for every row equally, root and child.
     tight = _session_rows([line.plain for line in build_report(aggregate, 60)])
     assert not any("cache" in r for r in tight)
     assert all("$" in r for r in tight)  # the cost column survives, as designed
