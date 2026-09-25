@@ -219,6 +219,15 @@ async def transfer_session(session_id: str, body: TransferSession, request: Requ
     generic short bound — the only bound is the one ``mobility.request_move`` sets for
     the work it does.
 
+    THE CLIENT'S DEADLINE IS DERIVED, NOT NEGOTIATED, and it depends on the SHAPE:
+    ``mobility.move_client_bound_s(wait_s, keep, to)``, whose three answers at the
+    default ``wait_s=0`` are **145 s** for an offload, **415 s** for a ``keep`` copy
+    and **415 s** for a recall. Both routes' defaults are ``wait_s=0``; a client that
+    gives up sooner reports its own timeout for a move this side was about to answer
+    (review round 1, MAJOR 1 — the desktop gave up at ``wait_s + 15`` against a route
+    answering at ``wait_s + 30``). A recall is a BUDGET rather than a promise (the copy
+    is transcript-sized), so a timeout on one is "unknown", never "refused".
+
     A REFUSAL IS A 409 CARRYING THE MOVE'S OWN SENTENCE, never a paraphrase: the
     renderer's S7 notice shows it, and the codes a caller can branch on
     (``busy``/``unreachable``/``not_authorised``/…) are the move's own.

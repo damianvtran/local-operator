@@ -420,3 +420,41 @@ def test_a_device_in_two_networks_contributes_one_row_per_session() -> None:
     reads = catalog.calls
     assert [row.id for row in peer_session_rows(catalog=catalog)] == ["s_1", "s_2"]
     assert catalog.calls == reads, "the second read is the cache's, not a new fan-out"
+
+
+def test_two_devices_reporting_one_id_stay_two_rows() -> None:
+    """Review round 1, MINOR 2: the de-duplication is keyed by DEVICE, not by id.
+
+    Keying on the id alone made the collapse global across devices, so a genuine
+    cross-device collision — the one routing ambiguity the mesh exists to prevent
+    (``relay._op_session_create`` mints on the destination for exactly this reason) —
+    dropped a row silently: measured as ``[('same-id', 'd_bbb\\u2026')]``, with the second
+    device's row gone and the survivor filed under the first device's heading, so two
+    conversations read as one. Everything this producer is FOR happens INSIDE one
+    device (its own answer repeated once per shared network), so the device in the key
+    keeps that fix and leaves the ambiguity visible as the two rows it is.
+    """
+    catalog = _Catalog(
+        [
+            _Facts("d_aa", "radiant-m4", reachable=True),
+            _Facts("d_bbb", "build-box", reachable=True),
+        ],
+        [
+            _Row("same-id", "d_aa", name="This device's copy"),
+            _Row("same-id", "d_bbb", name="The other device's copy"),
+        ],
+    )
+    rows = peer_session_rows(catalog=catalog)
+    assert [(row.id, row.owner_device) for row in rows] == [
+        ("same-id", "d_aa"),
+        ("same-id", "d_bbb"),
+    ], "a cross-device id collision is a routing ambiguity, not a row to drop"
+
+    # ...AND THE CASE THIS FIX IS FOR STILL COLLAPSES, asserted in the same test so a
+    # later relaxation of the key cannot trade one of the two behaviours for the other.
+    clear_cache()
+    repeated = _Catalog(
+        [_Facts("d_aa", "radiant-m4", reachable=True)],
+        [_Row("s_1", "d_aa"), _Row("s_1", "d_aa")],
+    )
+    assert [row.id for row in peer_session_rows(catalog=repeated)] == ["s_1"]

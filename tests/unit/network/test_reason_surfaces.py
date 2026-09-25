@@ -119,6 +119,18 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "this device's own runtime sentence, recorded in the local audit log",
     ),
+    # THE PEER'S OWN SENTENCES ABOUT THE CREATE IT JUST DID, carried as the reply's
+    # declared ``detail`` and ``model.detail`` fields (review round 1, MAJOR 2 — the two
+    # reads this declaration counts are the two fields that used to be DROPPED at this
+    # boundary). Prose rather than a token from the mesh's glossed vocabulary: only the
+    # hosting device knows why its runtime has not joined or why its model choice was
+    # not taken. The fields BESIDE them are what a renderer branches on
+    # (``warming``/``admitted``/``model.applied``), never these sentences, which is the
+    # same rule the relay's own audit record follows.
+    ("local_operator/server/routes/desktop_sessions.py", "create_session", "detail"): (
+        2,
+        "the peer's own sentences, carried as declared reply fields",
+    ),
     # Carried into ``SessionRow.unreachable_reason`` / ``UnansweredPeer.reason``. Both
     # readers are glossed or silent by design: the sidebar tooltip goes through
     # ``peer_reason_words``, and the silent-peer HEADING deliberately paints no reason

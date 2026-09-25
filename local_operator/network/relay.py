@@ -3067,6 +3067,17 @@ def _resolve_peer_cwd(cwd: str, *, owner: str) -> str:
     An EMPTY ``cwd`` is the documented "the peer decides" case (§5.3 step 2) and
     becomes this device's home.
 
+    A DIRECTORY THIS DEVICE CANNOT ENTER IS REFUSED HERE (review round 1, MINOR 1),
+    and `is_dir` is not enough to establish that: ``stat`` needs search permission on
+    the PARENTS only, so a ``chmod 000`` directory passed this check, the create
+    answered 200, and the failure surfaced later as a spawn error whose only trace was
+    a ``session.create.warm_failed`` audit record — leaving the user a row that could
+    never warm. Measured in the same process: `os.chdir` on the directory raises
+    ``PermissionError`` while `is_dir()` returns True. ``os.access`` with ``X_OK`` is
+    the same question the kernel will ask at spawn, and it must be asked HERE, because
+    a 200 from this route is the caller's signal that the peer will be able to open
+    the folder.
+
     Returns the RESOLVED path rather than the string it was handed, so the runtime
     starts in the directory this check proved: the desktop's own
     ``resolve_working_directory`` resolves for the same reason, and the two must name
@@ -3086,6 +3097,15 @@ def _resolve_peer_cwd(cwd: str, *, owner: str) -> str:
             "cwd_not_found",
             f"there is no folder {cwd!r} on {owner}, so the conversation was not created "
             "there; choose a folder that exists on that device",
+        )
+    # A DISTINCT CODE FROM ``cwd_not_found``, because it is a distinct cause with the
+    # same remedy: the folder is there and this device's user may not open it.
+    if not os.access(directory, os.X_OK):
+        raise MeshRefusal(
+            "cwd_not_enterable",
+            f"the folder {cwd!r} cannot be entered on {owner} — its permissions do not "
+            "allow it — so the conversation was not created there; choose a folder that "
+            "device can open",
         )
     return str(directory.resolve())
 

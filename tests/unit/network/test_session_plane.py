@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import socket
 import threading
 import time
@@ -1941,6 +1942,58 @@ def test_a_create_for_a_folder_the_peer_does_not_have_is_refused_by_the_peer(
         assert "device-b" in str(relative["message"]), relative
         assert not list((server_b.root / "sessions").glob("*"))
     finally:
+        link.close("test")
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="root can enter any directory, so a mode bit says nothing about it",
+)
+def test_a_folder_the_peer_cannot_enter_is_refused_before_anything_is_minted(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 1, MINOR 1: ``is_dir()`` is not "this device's user can open it".
+
+    ``stat`` needs search permission on the PARENTS only, so a ``chmod 000`` directory
+    passed the Q9 check: the create answered 200 and the failure surfaced later as a
+    spawn error whose only trace was a ``session.create.warm_failed`` audit record, so
+    the user was left a row that could never warm and the 200 was not the signal this
+    route claims it is. Measured in the same process: ``os.chdir`` on such a directory
+    raises ``PermissionError`` while ``is_dir()`` is True. The mode is restored in a
+    ``finally`` so the test root can still be cleaned up.
+    """
+    server_a, server_b, _host_a, _port_a = peer_pair
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    locked = server_b.root / "locked"
+    locked.mkdir()
+    locked.chmod(0o000)
+    link = _dial_to(server_a, record, host_b, port_b)
+    try:
+        reply = link.request(
+            {
+                "op": "net_session_create",
+                "req": 41,
+                "locality": "remote",
+                "cwd": str(locked),
+                "name": "locked",
+                "prompt": "",
+            }
+        )
+        assert reply is not None and reply["op"] == "error", reply
+        sentence = str(reply["message"])
+        # The sentence names the path and the device that checked it, the same two
+        # things the missing-folder refusal names — the remedy is the same and the
+        # cause is what differs.
+        assert str(locked) in sentence, sentence
+        assert "device-b" in sentence, sentence
+        assert "cannot be entered" in sentence, sentence
+        assert not list((server_b.root / "sessions").glob("*")), (
+            "a create refused for an unenterable folder must mint nothing: the row a "
+            "half-create leaves can never warm"
+        )
+    finally:
+        locked.chmod(0o700)
         link.close("test")
 
 

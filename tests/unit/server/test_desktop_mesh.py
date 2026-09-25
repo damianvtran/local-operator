@@ -738,6 +738,98 @@ async def test_create_on_a_peer_mints_there_and_keeps_the_id(
 
 
 @pytest.mark.asyncio
+async def test_a_promptless_create_on_a_peer_reports_the_warm_state_it_is_given(
+    mesh_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 1, MAJOR 2: the peer's warm state has to SURVIVE the boundary.
+
+    The peer's own reply for a promptless create is measured, not imagined: the session
+    directory exists, its row reads ``state=stored, pid=0``, and the runtime is still
+    joining, so the reply carries ``warming: true``, ``admitted: false`` and
+    ``model: {"applied": false, "detail": …}``. This route declares
+    ``response_model=CRUDResponse[CreatedSession]`` and ``CreatedSession`` was
+    ``binding``/``session_id``/``replayed``, so response validation DROPPED every one
+    of those fields — the desktop could not tell "joining" from "ready" and had no
+    field in which to tell the truth. The assertion therefore runs through the ROUTE,
+    which is the thing that drops fields; reading the model would have proved nothing.
+    """
+    client, root = mesh_api
+    (root / "network" / "networks").mkdir(parents=True, exist_ok=True)
+    relay = FakeRelay(
+        {
+            "peer_session_create": {
+                "session_id": OTHER,
+                "admitted": False,
+                "duplicate": False,
+                "warming": True,
+                "detail": "",
+                "model": {
+                    "applied": False,
+                    "detail": "the runtime is joining; the model is applied when it arrives",
+                },
+                "record": {"state": "stored", "pid": 0},
+            }
+        }
+    )
+    _join(monkeypatch, relay)
+    response = await client.post(
+        "/v1/desktop/sessions",
+        json={"request_id": REQUEST_ID, "cwd": str(root), "peer": PEER},
+    )
+    assert response.status_code == 200, response.text
+    created = response.json()["result"]
+    assert created["session_id"] == OTHER
+    # THE ONE FACT THE CALLER NEEDS is that the conversation is NOT ready yet, and the
+    # pair is what says which kind of not-ready: still joining, or never came up.
+    assert created["warming"] is True, created
+    assert created["admitted"] is False, created
+    assert created["model"]["applied"] is False, created
+    assert "joining" in created["model"]["detail"], created
+    assert created["detail"] == "", created
+
+
+@pytest.mark.asyncio
+async def test_an_absent_cwd_on_a_peer_create_means_the_peer_decides(
+    mesh_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 1, MINOR 3: "the peer decides" has to be EXPRESSIBLE.
+
+    ``relay._resolve_peer_cwd`` documents an empty ``cwd`` as the peer-decides case (the
+    peer's own home), but ``CreateSession.cwd`` was ``min_length=1``, so the documented
+    shape was unreachable through this route — and the renderer's untouched-field path
+    sends THIS machine's absolute path instead, which the peer now refuses with a 409
+    where it used to "succeed" quietly in the peer's home folder. Absence is now the
+    peer-decides case, forwarded empty because only the peer can resolve it.
+    """
+    client, root = mesh_api
+    (root / "network" / "networks").mkdir(parents=True, exist_ok=True)
+    relay = FakeRelay({"peer_session_create": {"session_id": OTHER, "admitted": True}})
+    _join(monkeypatch, relay)
+    response = await client.post(
+        "/v1/desktop/sessions", json={"request_id": REQUEST_ID, "peer": PEER}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["session_id"] == OTHER
+    _op, fields = relay.calls[0]
+    assert fields["cwd"] == "", "an absent cwd must reach the peer as the empty value"
+
+
+@pytest.mark.asyncio
+async def test_a_local_create_still_has_to_name_a_folder(mesh_api) -> None:
+    """The other half of MINOR 3, on the path where empty is NOT the peer's decision.
+
+    Without a peer there is nobody to decide, and ``Path("")`` resolves to the SERVER's
+    working directory — so accepting an empty value here would start a conversation in a
+    directory the user never named, one field away from the shape that legitimately
+    means "somebody else decides". It stays a 422, exactly as ``min_length=1`` gave.
+    """
+    client, _root = mesh_api
+    for body in ({"request_id": REQUEST_ID}, {"request_id": REQUEST_ID, "cwd": ""}):
+        response = await client.post("/v1/desktop/sessions", json=body)
+        assert response.status_code == 422, (body, response.text)
+
+
+@pytest.mark.asyncio
 async def test_create_on_a_peer_with_no_relay_is_unconfirmed_and_replayable(
     mesh_api, monkeypatch: pytest.MonkeyPatch
 ) -> None:
