@@ -1238,9 +1238,15 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # pane and never reached the owner — a distinction only a facade has, because
     # an owner ``Session`` answers its own gates with no wire to cross. Declared
     # in ``ViewerSessionProtocol`` in the same commit.
-    assert len(viewer_only) == 65, (
+    #
+    # 65 → 66 is the canonical collection revision (the TUI roster-coalescing
+    # change). ``frontend_revision`` lets the dock band and todo panel skip a
+    # re-derivation nothing moved under; an owner ``Session`` publishes through
+    # its own store and has no follower copy to diff. Declared in
+    # ``ViewerSessionProtocol`` in the same commit.
+    assert len(viewer_only) == 66, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 65, and the aggregate floor is set at 40 against that number. A "
+        "says 66, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )

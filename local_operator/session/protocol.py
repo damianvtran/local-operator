@@ -626,7 +626,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 128 public members and a POSITIVE
+    than stylistic. This protocol carries 129 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -661,7 +661,9 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     the sentence naming what a signature is about to authorise, 127 once a
     paint-first open needed ``attach_behind`` to narrate the attach behind its
     paint, 128 once an answer that was accepted at the pane and never reached its
-    owner needed a surface to say so (``set_gate_undelivered_handler``)), so
+    owner needed a surface to say so (``set_gate_undelivered_handler``), 129
+    once the dock band needed ``frontend_revision`` to skip a roster
+    re-derivation nothing moved under), so
     recompute it rather
     than adjusting it by the size of your own change.
 
@@ -1599,6 +1601,18 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         canonical state for one boolean — which is why it belongs beside
         ``pending_gate`` and ``epoch`` in this section rather than with the
         roster-returning members.
+        """
+        ...
+
+    def frontend_revision(self) -> Any:
+        """A token that moves whenever the roster, todos or wakes move.
+
+        Clone-free like the members above: the TUI's dock band and todo panel
+        compare it to skip re-deriving a view nothing moved under, which on a
+        loaded roster was a whole-state clone and a 252-row re-projection per
+        canonical delta. Typed ``Any`` here because the concrete
+        ``FrontendRevision`` lives with the store; callers compare it for
+        equality only (``FrontendStateStore.revision``).
         """
         ...
 
