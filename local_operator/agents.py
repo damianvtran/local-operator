@@ -153,6 +153,12 @@ def validate_agent_id(agent_id: str) -> str:
     Raises ``ValueError`` for anything a directory name must not be: a separator,
     a relative step (``.``/``..``), an empty string, a leading hyphen/dot/
     underscore, non-ASCII, or an over-long value.
+
+    THIS IS THE RULE FOR A VALUE ARRIVING FROM OUTSIDE (a create, an imported
+    archive, a row mirrored from a peer). The READ path uses
+    :func:`validate_agent_id_segment` instead -- see that function for why the two
+    must not be the same rule (review round 2: applying this one on the read path
+    made a pre-existing row unreadable, which took the whole registry down with it).
     """
     candidate = agent_id or ""
     if not _AGENT_ID_RE.fullmatch(candidate) or candidate in {".", ".."}:
@@ -162,6 +168,45 @@ def validate_agent_id(agent_id: str) -> str:
             "separators"
         )
     return candidate
+
+
+def validate_agent_id_segment(agent_id: str) -> str:
+    """Return an id that is exactly one path segment, with no charset rule.
+
+    WHY THIS IS NOT ``validate_agent_id``. A row that is already on disk cannot be
+    told to satisfy a rule invented after it was written, and refusing to READ one
+    is not a refusal -- it is a registry that cannot be read at all:
+    ``_scan_agents_metadata`` counts an unreadable definition as incomplete,
+    ``require_complete_metadata`` then raises ``ProfileRegistryUnavailable``, and
+    that is the first call ``resolve_create_identity`` makes, so a device holding
+    one pre-#643 row could not receive ANY session create (measured: 3 of 5 rows
+    dropped, every create refused).
+
+    The property the read path actually needs is the SAFETY one -- the value is one
+    segment, so nothing it is joined onto can leave ``agents_dir`` -- and every
+    directory that exists under ``agents_dir`` necessarily satisfies it, so this
+    rule cannot reject a row that is really there. The charset rule stays where a
+    value from OUTSIDE becomes a directory name (``save_agent``, the mirrored-row
+    apply, an import's fresh id); a legacy id that fails it is LISTED and reported
+    as a repair (see ``_scan_agents_metadata``'s warning) rather than dropped.
+
+    A backslash is NOT rejected here, deliberately: on this platform it is an
+    ordinary filename character, so a local directory may legitimately contain one,
+    and the strict rule (which excludes it) is what a mirrored row must pass.
+    """
+    candidate = agent_id or ""
+    if not candidate or candidate in {".", ".."} or "/" in candidate:
+        raise ValueError("agent id must be one path segment and cannot be '.' or '..'")
+    return candidate
+
+
+def is_conforming_agent_id(agent_id: str) -> bool:
+    """Does this id satisfy the CURRENT rule (the one a new write must satisfy)?"""
+    try:
+        validate_agent_id(agent_id)
+    except ValueError:
+        return False
+    return True
 
 
 class AgentData(BaseModel):
@@ -174,12 +219,11 @@ class AgentData(BaseModel):
     @field_validator("id")
     @classmethod
     def _validate_id(cls, value: str) -> str:
-        # Validated in BOTH directions on purpose: every construction site (a local
-        # create's uuid, the autosave row, the mesh's mirrored row, an archive's
-        # ``agent.yml``) goes through the model, so one validator closes the write
-        # path for all of them and a hostile id fails loudly at the boundary that
-        # read it rather than at a ``mkdir`` nobody is looking at.
-        return validate_agent_id(value)
+        # THE LENIENT RULE, on purpose: this validator runs on the READ path too
+        # (``_scan_agents_metadata`` builds every row through this model), so the
+        # strict charset rule belongs at the write boundaries, not here. See
+        # ``validate_agent_id_segment`` for the measurement behind that split.
+        return validate_agent_id_segment(value)
 
     name: str = Field(..., description="Agent's name")
     created_date: datetime = Field(..., description="The date when the agent was created")
@@ -580,6 +624,23 @@ class AgentRegistry:
 
                 agent = AgentData.model_validate(agent_data)
                 agents[agent.id] = agent
+                if not is_conforming_agent_id(agent.id):
+                    # A REPAIR SUGGESTION, NOT AN UNREADABLE DEFINITION (review round 2).
+                    # An id written before the current rule (``import_agent`` preserved
+                    # archive ids until 2026-09-05, #643) is still a directory under
+                    # ``agents_dir``, so it loads and it is listed here -- dropping it
+                    # took the whole registry down (incomplete -> ``ProfileRegistryUnavailable``
+                    # -> every create refused on a device whose definitions were fine).
+                    # What it does cost is mirroring: the strict rule at the receiving
+                    # boundary refuses it, so the row cannot cross to a peer until it is
+                    # repaired. Said here, by name, with the remedy.
+                    logging.warning(
+                        "Agent %r has an id that predates the current rule: it is listed "
+                        "and usable, but it cannot be mirrored to another device. Repair "
+                        "it by renaming %s and the 'id' in its agent.yml.",
+                        agent.id,
+                        agent_dir,
+                    )
             except Exception as e:
                 incomplete.append(agent_dir)
                 logging.error(f"Invalid agent metadata in {agent_dir.name}: {str(e)}")
@@ -651,17 +712,36 @@ class AgentRegistry:
         return self.save_agent(agent_metadata)
 
     def save_agent(self, agent_metadata: AgentData) -> AgentData:
-        """
-        Save an agent's metadata to the registry.
+        """Save an agent's metadata to the registry.
+
+        THE ID RULE IS APPLIED HERE, AT THE WRITE BOUNDARY, and its strictness is
+        keyed on whether this row is NEW to this device:
+
+        * a fresh id (a create, an import's generated id, a row mirrored from a peer)
+          must satisfy the full charset rule -- this is the rule that stops a
+          sender-chosen id from becoming a path, and the one ``definitions._apply_agent``
+          also applies before it gets here;
+        * a row this device ALREADY holds is judged by the safety rule alone
+          (:func:`validate_agent_id_segment`). Otherwise a legacy row could be read but
+          never rewritten -- renaming it in the UI, or any metadata edit, would fail --
+          which is the same trap this split exists to avoid.
 
         Args:
             agent_metadata (AgentData): The metadata of the agent to save
         """
+        # THE RULE, BEFORE ANYTHING REMEMBERS OR WRITES THIS ROW: a refusal must leave
+        # no trace, and the in-memory map is updated only once the id is accepted (a
+        # caller that catches the ValueError must not then find a phantom row).
+        agent_dir = self.agents_dir / agent_metadata.id
+        if agent_dir.exists():
+            validate_agent_id_segment(agent_metadata.id)
+        else:
+            validate_agent_id(agent_metadata.id)
+
         # Add to in-memory agents
         self._agents[agent_metadata.id] = agent_metadata
 
         # Create agent directory if it doesn't exist
-        agent_dir = self.agents_dir / agent_metadata.id
         if not agent_dir.exists():
             agent_dir.mkdir(parents=True, exist_ok=True)
 

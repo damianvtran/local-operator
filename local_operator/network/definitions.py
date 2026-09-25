@@ -264,6 +264,11 @@ def index_path(root: Path) -> Path:
 #: Keyed on the root as this process spells it, the same choice
 #: ``store._write_lock`` makes and for the same reason: every caller here builds its
 #: path from one relay's own root, so a ``realpath`` would only spend a syscall.
+#: The lock is RE-ENTRANT and the re-entrancy is used, not decorative:
+#: ``apply_bundle`` holds it for the whole apply and the row helpers
+#: (``_apply_agent``/``_apply_team``) take it again, so "every write to this root's
+#: definitions holds the lock" is enforced where the write happens rather than
+#: remembered at one entry point. A plain ``Lock`` would deadlock that composition.
 _DEFINITION_LOCKS: dict[str, threading.RLock] = {}
 _DEFINITION_LOCKS_GUARD = threading.Lock()
 
@@ -1008,7 +1013,22 @@ def _conflict(
 def _apply_agent(
     root: Path, row: Mapping[str, Any], origin: str, index: dict[str, Any]
 ) -> dict[str, Any]:
-    """Install or update ONE mirrored agent, or report why it was left alone."""
+    """Install or update ONE mirrored agent, holding this root's definition lock."""
+    with definition_lock(root):
+        return _apply_agent_locked(root, row, origin, index)
+
+
+def _apply_agent_locked(
+    root: Path, row: Mapping[str, Any], origin: str, index: dict[str, Any]
+) -> dict[str, Any]:
+    """``_apply_agent``'s body.
+
+    THE CALLER HOLDS THIS ROOT'S DEFINITION LOCK. Both this row helper and
+    ``_apply_team`` take it themselves rather than relying on ``apply_bundle`` to
+    remember: the invariant is "every write to this root's definitions holds the
+    lock", and a repair verb that calls a helper directly must inherit it. That
+    nested take is exactly what the lock's re-entrancy is for.
+    """
     from local_operator.agents import (
         AgentData,
         AgentEditFields,
@@ -1227,7 +1247,19 @@ def _portable_cwd() -> str:
 def _apply_team(
     root: Path, row: Mapping[str, Any], origin: str, index: dict[str, Any]
 ) -> dict[str, Any]:
-    """Install or update ONE mirrored team, or report why it was left alone."""
+    """Install or update ONE mirrored team, holding this root's definition lock."""
+    with definition_lock(root):
+        return _apply_team_locked(root, row, origin, index)
+
+
+def _apply_team_locked(
+    root: Path, row: Mapping[str, Any], origin: str, index: dict[str, Any]
+) -> dict[str, Any]:
+    """``_apply_team``'s body.
+
+    The caller holds this root's definition lock; see ``_apply_agent_locked`` for why
+    the helper takes it again rather than trusting the entry point to have done it.
+    """
     from local_operator.teams import Team, TeamEditFields, TeamMember, TeamRegistry
 
     name = str(row["name"])
@@ -1934,13 +1966,17 @@ class DefinitionsSyncer(threading.Thread):
     and run workloads" — the operator's stated direction.
 
     CADENCE: the session-sync slice's own ``network.sync.tick_s``, read through
-    the package's one config reader. The work per tick is a bundle build plus a
-    per-link ``state`` round trip; the bundle is memoised on a digest so an
-    unchanged install costs the local build once and nothing over the wire when
-    every peer reports it in sync. ``STATE_MIN_INTERVAL_S`` bounds how often any
-    one link is asked, so a mesh of many members cannot turn the tick into a
-    probe storm. The member records are the target list, not the links that happen
-    to exist: see :meth:`tick` for the measurement that made that the rule.
+    the package's one config reader. THE NUMBERS, because a doc that promises one
+    cadence and delivers another is the class of claim this feature keeps being
+    caught on (review round 2): the shipped ``sync.SYNC_TICK_S`` is **15 s**, and
+    ``STATE_MIN_INTERVAL_S`` (**60 s**) is the floor between two pushes to one
+    REACHABLE member — so a change reaches a reachable peer within about a minute
+    plus a tick, not on every tick. A failure is retried on the next tick instead
+    (see :meth:`tick`). The work per tick is a bundle build plus a ``state`` round
+    trip per member; the bundle is memoised on a digest, so an unchanged install
+    costs the local build once and nothing over the wire when every peer reports it
+    in sync. The member records are the target list, not the links that happen to
+    exist: see :meth:`tick` for the measurement that made that the rule.
     """
 
     def __init__(self, server: "RelayServer") -> None:
@@ -1948,7 +1984,11 @@ class DefinitionsSyncer(threading.Thread):
         self._server = server
         self._stop = threading.Event()
         self._lock = threading.Lock()
-        self._last_state_at: dict[str, float] = {}
+        #: When this member was last ATTEMPTED, and whether that attempt succeeded.
+        #: Two dicts rather than one because the two outcomes get different floors:
+        #: see :meth:`tick` for why a failed dial must not park a member for a minute.
+        self._last_attempt_at: dict[str, float] = {}
+        self._last_ok: dict[str, bool] = {}
         self._last_pushed: dict[str, str] = {}
         self._tick_s = _tick_seconds(server.root)
 
@@ -1973,9 +2013,21 @@ class DefinitionsSyncer(threading.Thread):
         the three benefits the class docstring claims were therefore inert unless a
         create happened to run. The member RECORDS are the durable list of who to keep
         current (``store.list_networks``), so the tick walks those and lets
-        ``push_to_peer``'s dial seam open the link. ``STATE_MIN_INTERVAL_S`` is what
-        bounds the cost: at most one ``state`` probe per member per interval, and a peer
-        that is down costs one dial in that window, on this thread.
+        ``push_to_peer``'s dial seam open the link.
+
+        TWO FLOORS, NOT ONE (review round 2): a REACHABLE member is pushed at most once
+        per ``STATE_MIN_INTERVAL_S`` (60 s), and a member whose attempt FAILED is retried
+        on the next tick. One floor for both meant a single failed dial parked that
+        member for a full minute — the peer that came back a second later waited 59 more
+        for nothing. The failure floor is this syncer's own ``tick_s`` (15 s shipped),
+        which is the bound the tick already is: a peer that is down costs at most one
+        dial per tick, on this thread, exactly as a peer that is up costs one probe per
+        minute.
+
+        THE SHIPPED INTERVAL IS 15 s, not the 2 s this feature's own earlier evidence
+        quoted: that 2 s was a rig's ``network.sync.tick_s`` override, and the constant
+        is the session-sync slice's (changing it would move a shared cadence, so the
+        number is corrected here rather than the constant).
 
         Driven with an injected clock rather than only by the thread, for the same
         reason ``sync.SyncWatcher.tick`` is: a test that had to wait 15 real
@@ -1985,14 +2037,17 @@ class DefinitionsSyncer(threading.Thread):
         outcomes: list[tuple[str, str]] = []
         for device_id in self._targets():
             with self._lock:
-                last = self._last_state_at.get(device_id, 0.0)
-                if moment - last < STATE_MIN_INTERVAL_S:
+                last = self._last_attempt_at.get(device_id, 0.0)
+                floor = STATE_MIN_INTERVAL_S if self._last_ok.get(device_id) else self._tick_s
+                if moment - last < floor:
                     continue
-                self._last_state_at[device_id] = moment
+                self._last_attempt_at[device_id] = moment
             result = push_to_peer(self._server, device_id)
+            ok = bool(result.get("ok"))
             outcomes.append((device_id, str(result.get("code") or "")))
             with self._lock:
-                if result.get("ok"):
+                self._last_ok[device_id] = ok
+                if ok:
                     self._last_pushed[device_id] = str(result.get("message") or "")
         return outcomes
 
@@ -2016,10 +2071,13 @@ class DefinitionsSyncer(threading.Thread):
         return targets
 
 
-#: The floor between two ``state`` probes on one link. The tick itself is the
-#: session-sync cadence, so this is what bounds the traffic a relay generates per
-#: peer: at most one two-envelope exchange per peer per this interval, and the
-#: bundle is only SENT when the peer's manifest says it is behind.
+#: The floor between two pushes to one REACHABLE member. The tick itself is the
+#: session-sync cadence (``sync.SYNC_TICK_S``, shipped at 15 s), so together with this
+#: floor the traffic a relay generates per peer is: at most one two-envelope exchange
+#: per minute per reachable member, and the bundle is only SENT when the peer's
+#: manifest says it is behind. A member whose last attempt FAILED is retried on the
+#: next tick instead of being parked for this whole interval — see
+#: ``DefinitionsSyncer.tick`` for why one floor for both outcomes was wrong.
 STATE_MIN_INTERVAL_S = 60.0
 
 

@@ -546,7 +546,17 @@ def _relay_call(
     if reply.get("op") == "error":
         from local_operator.network.types import MeshRefusal
 
-        raise MeshRefusal("relay_refused", str(reply.get("message") or "the relay refused"))
+        # THE INNER CODE CROSSES THIS HOP (review round 2). The local control path
+        # composes ``code``/``message`` for exactly this reason, and overwriting the
+        # code with a flat ``relay_refused`` threw the reason away: a surface could see
+        # that the relay refused but never which refusal it was (`definition_conflict`
+        # and `session_not_found` read identically), and the sentence was the only
+        # thing left to branch on. The fallback stays for an older relay that sends a
+        # sentence only.
+        raise MeshRefusal(
+            str(reply.get("code") or "relay_refused"),
+            str(reply.get("message") or "the relay refused"),
+        )
     detail = reply.get("detail")
     return detail if isinstance(detail, dict) else {"value": detail}
 

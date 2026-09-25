@@ -1435,3 +1435,45 @@ def test_a_push_receipt_names_the_row_and_says_the_summary_once(
     assert out.count("sent 1 agent and 0 team definition(s)") == 1, out
     assert out.count("1 of 1 device(s) hold this device's definitions") == 1, out
     assert "installed agent 'peer-only'" in out, out
+
+
+def test_the_local_control_hop_carries_the_refusal_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    """REVIEW ROUND 2 (minor): one line flattened every code to ``relay_refused``.
+
+    The relay composes ``{"op": "error", "code": …, "message": …}`` for a refusal it got
+    from a peer, and this hop re-raised it with a flat ``relay_refused`` — so a surface
+    could tell that *something* was refused but never WHICH refusal it was, and the
+    reason survived only as prose. Measured before the fix: a peer's
+    ``definition_conflict`` and an unknown session both arrived as ``relay_refused``.
+
+    The fallback stays for an older relay that sends a sentence only: a code that is not
+    on the frame is still a refusal, and inventing one would be worse than the flat code
+    this replaces.
+    """
+    from local_operator.network import cli as net_cli
+    from local_operator.network import relay, store, types
+
+    monkeypatch.setattr(store, "find_own_relay", lambda: object())
+    monkeypatch.setattr(
+        relay,
+        "control_request",
+        lambda record, op, **fields: {
+            "op": "error",
+            "code": "definition_conflict",
+            "message": "'mesh-reviewer' has local edits on that device",
+        },
+    )
+    with pytest.raises(types.MeshRefusal) as refused:
+        net_cli._relay_call("peer_create", target="d_" + "e" * 32)  # noqa: SLF001
+    assert refused.value.code == "definition_conflict"
+    assert "local edits" in refused.value.sentence
+
+    # An older relay: a sentence and no code.
+    monkeypatch.setattr(
+        relay,
+        "control_request",
+        lambda record, op, **fields: {"op": "error", "message": "the relay refused"},
+    )
+    with pytest.raises(types.MeshRefusal) as bare:
+        net_cli._relay_call("peer_create", target="d_" + "e" * 32)  # noqa: SLF001
+    assert bare.value.code == "relay_refused"
