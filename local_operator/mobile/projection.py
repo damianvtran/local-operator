@@ -381,6 +381,13 @@ def _reasoning_tail(text: str, limit: int = REASONING_PREVIEW_CHARS) -> str:
     return "…" + collapsed[-(limit - 1) :]
 
 
+#: The phone's own cap on a notice row's text. Named because TWO callers have to
+#: agree on it now: the shared held-delivery decision reserves the marker's room
+#: against it, and this fold applies it to the composed result (design round 3,
+#: D15). A second literal would let the two drift and cut the sentence away again.
+_NOTICE_CHARS = 400
+
+
 def _compact(text: str, limit: int) -> str:
     text = " ".join(text.split())
     return text if len(text) <= limit else text[: limit - 1] + "…"
@@ -1304,14 +1311,19 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 # A DELIVERED row keeps the generic fallback below, which is the
                 # phone's existing behaviour and not this change's business; only
                 # the held row takes the shared decision.
-                held = held_delivery_notice(message.details or {})
+                # ``report_budget`` is this fold's own 400-character cap, handed
+                # to the shared decision so the MARKER keeps its room (design round
+                # 3, D15): capping the composed string instead cut the sentence
+                # away on any realistic report, and at 400+ characters the held row
+                # and its delivered twin folded byte-identical.
+                held = held_delivery_notice(message.details or {}, report_budget=_NOTICE_CHARS)
                 if held is not None:
                     text, severity = held
                     entries.append(
                         TranscriptEntry(
                             id=message.id,
                             kind="notice",
-                            text=_compact(text, 400),
+                            text=_compact(text, _NOTICE_CHARS),
                             details={"severity": severity},
                         )
                     )

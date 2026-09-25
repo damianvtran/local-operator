@@ -4760,14 +4760,15 @@ async def test_a_delivery_that_cannot_be_made_durable_is_reported(tmp_path, monk
     # (design review round 2, D7 / UX U10): an earlier revision spent its first
     # clause on the hold it never achieved, which told the reader there was
     # nothing to go and read.
-    assert "could NOT be held" in text
+    assert "could not be held" in text
     # ...and names a route the reader can actually follow, by ID — the head used
     # to print labels only, so ``<job id>`` had nothing to substitute into it
     # (UX round 2, U9).
     assert "hub op='peek'" in text and "Jobs: j1" in text
+    assert "range='a-b'" in text, "the printed paging parameter must be the one HubParams accepts"
     # Both shapes are told the truth about their own store: a subagent child has
     # a transcript, a background bash command does not.
-    assert "bash command keeps only its job row" in text
+    assert "a background bash command has no transcript at all" in text
     assert any(
         "could not persist the result of job j1" in record.message for record in caplog.records
     )
@@ -4823,7 +4824,7 @@ async def test_a_failed_hold_is_still_durable_when_the_disposal_won(tmp_path, mo
         "a failure in the disposal-first ordering must still leave a durable row, "
         f"not only a log line: {incidents!r}"
     )
-    assert "could NOT be held" in incidents[0].payload["details"]["text"]
+    assert "could not be held" in incidents[0].payload["details"]["text"]
     assert any(
         "could not persist the result of job j1" in record.message for record in caplog.records
     )

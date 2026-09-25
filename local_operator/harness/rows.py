@@ -624,17 +624,23 @@ def wake_receipt_headline(text: str) -> str:
 #: The bracketed lead-in marks where the harness's own words begin (design review
 #: round 2, D11): the row is one block on one ink carrying the child's report and
 #: then this sentence, and the sibling rows in the same frame state their
-#: provenance with a ``[session …]`` head. It is NOT listed in
+#: provenance with a ``[session …]`` head. It says **warning**, not "note" (design
+#: round 3, D14): the row is painted on the warning tier with the ``!`` glyph, the
+#: sibling directly above it in the same frame is ``[session warning]`` on the same
+#: ink, and "note" is this product's word for the muted ``·`` tier — so a
+#: tier-free word would have contradicted the row's own paint. It is NOT listed in
 #: ``_HARNESS_NOTICE_HEADS`` and needs no entry: that list exists for texts a
 #: persisted row can prove provenance by (the pre-stamp era), while this sentence
 #: is composed at fold time and never persisted.
 HELD_DELIVERY_NOTICE = (
-    "[session note] held when it arrived — this report reached the session while its "
+    "[session warning] held when it arrived — this report reached the session while its "
     "runtime was leaving, so no turn ran for it at that point"
 )
 
 
-def held_delivery_notice(details: dict[str, Any]) -> tuple[str, NoticeSeverity] | None:
+def held_delivery_notice(
+    details: dict[str, Any], *, report_budget: int | None = None
+) -> tuple[str, NoticeSeverity] | None:
     """A child's report that was HELD for the next turn, and its ink — or None.
 
     ``None`` for every ``job_result`` row that was DELIVERED, and that is the
@@ -664,10 +670,24 @@ def held_delivery_notice(details: dict[str, Any]) -> tuple[str, NoticeSeverity] 
     """
     if not details.get("held"):
         return None
-    text = str(details.get("text") or "").strip()
-    if not text:
-        return None
-    return f"{text}\n{HELD_DELIVERY_NOTICE}", "warning"
+    report = str(details.get("text") or "").strip()
+    if report_budget is None:
+        # No budget: the caller bounds its own surface, so the sentence simply
+        # follows the report.
+        return (f"{report}\n{HELD_DELIVERY_NOTICE}" if report else HELD_DELIVERY_NOTICE), "warning"
+    # A BUDGETED CALLER TRUNCATES THE REPORT, NEVER THE MARKER (design review
+    # round 3, D15 = reviewer MAJOR-1 = UX U8-R). The phone composes the row and
+    # then caps the whole string, so with the marker appended last it was the part
+    # that got cut: intact to ~263 characters of report, cut mid-sentence from
+    # ~264, gone entirely beyond ~363, and at 400+ the held entry and its delivered
+    # twin were BYTE-IDENTICAL (only the severity differed). The job summary cap is
+    # 2000 characters, so the realistic case was the losing one. Reserving the
+    # marker's room first makes the sentence survive at every length, which is the
+    # only allocation that keeps the row distinguishable — the report is already
+    # truncated for the model at 2000, and this row's whole purpose is the marker.
+    room = max(0, report_budget - len(HELD_DELIVERY_NOTICE) - 1)
+    body = report[:room] if room else ""
+    return (f"{body}\n{HELD_DELIVERY_NOTICE}" if body else HELD_DELIVERY_NOTICE), "warning"
 
 
 def compaction_refused_notice(details: dict[str, Any]) -> tuple[str, NoticeSeverity]:
