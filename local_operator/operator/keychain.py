@@ -37,39 +37,65 @@ findings are easy to re-derive wrongly:
    reached a keychain. See :attr:`SecureEnclaveBackend.PRIVATE_KEY_USAGE`.
 
 2. A Secure Enclave key can only live in the DATA-PROTECTION keychain, and that
-   keychain refuses a process with no code signature: ``SecKeyCreateRandomKey``
-   then fails with ``errSecMissingEntitlement`` (-34018, "failed to add key to
-   keychain: <SecKeyRef:('com.apple.setoken')>"). Measured on this host with a
-   native C probe, in BOTH attribute shapes, and reproduced through this package's
-   own ``create`` — while a generic-password add to the same keychain succeeds from
-   a SIGNED process (Apple's own ``python3``, ``Identifier=com.apple.python3``), and
-   under it a real Enclave key is created, exported as a 65-byte uncompressed P-256
-   point, found again by tag and deleted. Ad-hoc signing is not a workaround: with
-   ``keychain-access-groups`` / ``application-identifier`` in an ad-hoc signature
-   the kernel kills the process (SIGKILL, 137). A runtime distributed as an
-   unsigned Python build therefore cannot create this key on any host; ``init``
-   reports that failure rather than a level it did not reach.
+   keychain admits a caller only when the caller's CODE SIGNATURE carries the
+   keychain entitlement AND a PROVISIONING PROFILE authorizes it. Measured on this
+   host, one shape per line, identity ``Developer ID Application``:
+
+   * bare tool, signed, no entitlement -> ``errSecMissingEntitlement`` (-34018);
+   * bare tool, signed, entitlement carried -> -34018 as well;
+   * app-like bundle, entitlement, NO embedded profile -> -34018 with only the
+     application identifier, and **SIGKILL (137)** once ``keychain-access-groups``
+     is added;
+   * app-like bundle, entitlement, profile embedded -> **PASS** (key created,
+     exported as a 65-byte uncompressed P-256 point, re-found by tag, deleted).
+
+   So -34018 does NOT mean "this process has no code signature" — the signed bare
+   tool gets it too. It means "no authorized keychain entitlement", and the profile
+   is what authorizes one; the one shape the kernel cannot even report is a bundle
+   that claims a keychain access group its profile does not grant, which is why
+   this build signs with ``com.apple.application-identifier`` only (see
+   ``packaging/macos/keyagent.entitlements``). Ad-hoc signing is not a workaround:
+   with ``keychain-access-groups`` / ``application-identifier`` in an ad-hoc
+   signature the kernel kills the process (SIGKILL, 137).
+
+   WHICH IS WHY THIS FILE NO LONGER MAKES THE NATIVE CALLS. A Python runtime cannot
+   carry that signature: the harness is installed by ``uv tool install`` / ``pip``,
+   at paths and on hosts that never see this repository. The Enclave verbs are made
+   by a signed one-shot helper that ships in the macOS wheel
+   (``local_operator/operator/macos/``, built from
+   ``packaging/macos/lop-keyagent/se-keyagent.c``), and the in-process ctypes
+   sequence that used to live here — which could never work, and no test on any host
+   could exercise — is gone rather than kept as a second implementation.
+
+   THE ENTITLEMENT GATES READING TOO, which is the finding that shapes this module:
+   a Secure Enclave key created by an entitled process is INVISIBLE to an unsigned
+   one, and the answer it gets is ``errSecItemNotFound`` (-25300, measured) — "not
+   found", not "refused". So every verb, including "is there a key?", is answered
+   by the helper (see :attr:`SecureEnclaveBackend.load`), and no code path here may
+   conclude "no operator key" from a query of its own.
 
 The consequence for TESTS is recorded here because it is easy to get wrong: a
 test can never exercise this backend without writing an item to the operator's
-login keychain, and on an unsigned host it cannot exercise it at all, so the
-backend's contract is exercised through :class:`FileKeyBackend` and through the
-CF-level tests in ``tests/unit/operator`` that assert structure and ownership
-without creating a key; the end-to-end path is left to ``lop operator init``,
-which the operator runs deliberately.
+login keychain, and an unsigned runtime cannot exercise it at all, so the
+backend's contract is exercised through :class:`FileKeyBackend`, through a FAKE
+helper speaking the JSON protocol (``tests/unit/operator/test_operator_keyagent.py``,
+no Secure Enclave and no keychain writes), and through the framework-level probes
+in ``tests/unit/operator/test_operator_authority.py`` that assert structure
+without creating a key; the end-to-end path is the signed helper itself, which the
+release job builds and does notarize-gate on, and which ``lop operator init``
+uses.
 """
 
 from __future__ import annotations
 
-import ctypes
-import ctypes.util
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from local_operator.operator.verify import decode_point, key_id_for
+from local_operator.operator.macos import keyagent
+from local_operator.operator.verify import key_id_for
 
 #: Backend names, in the order the presence ladder prefers them.
 #:
@@ -159,8 +185,14 @@ class Signer:
     def __init__(self, handle: KeyHandle) -> None:
         self.handle = handle
 
-    def sign(self, message: bytes) -> bytes:  # pragma: no cover — interface
-        raise NotImplementedError
+    def sign(self, message: bytes, *, timeout: float | None = None) -> bytes:
+        """Sign ``message``. ``timeout`` bounds the WAIT for a human, where one is needed.
+
+        Optional and keyword-only so the one call site every surface shares
+        (``sign.sign_message``) can bound a presence-gated signature without the file
+        backend, which returns immediately, having to care.
+        """
+        raise NotImplementedError  # pragma: no cover — interface
 
     def close(self) -> None:
         return None
@@ -249,7 +281,10 @@ class _SoftwareSigner(Signer):
         super().__init__(handle)
         self._private = private
 
-    def sign(self, message: bytes) -> bytes:
+    def sign(self, message: bytes, *, timeout: float | None = None) -> bytes:
+        # ``timeout`` is accepted and ignored: a software key costs no gesture, so there
+        # is nothing to wait for. The parameter exists so one call site serves both
+        # backends without asking which kind it holds.
         from cryptography.hazmat.primitives import hashes
         from cryptography.hazmat.primitives.asymmetric import ec
 
@@ -257,178 +292,20 @@ class _SoftwareSigner(Signer):
 
 
 # ---------------------------------------------------------------------------
-# macOS — Secure Enclave, presence-gated
+# macOS — Secure Enclave, presence-gated (through the signed key agent)
 # ---------------------------------------------------------------------------
-
-
-class _CF:
-    """The minimum CoreFoundation surface the Secure Enclave key needs.
-
-    Built with ``ctypes`` rather than PyObjC because the harness must keep its
-    dependency graph to what the repository already requires; the cost is this
-    class. Every CoreFoundation object created here is released by the caller
-    that created it — a leaked ``CFStringRef`` per signature is a real leak in a
-    process that signs once per loosening, and it is invisible until it is not.
-    """
-
-    def __init__(self) -> None:
-        security = ctypes.util.find_library("Security")
-        core = ctypes.util.find_library("CoreFoundation")
-        if not security or not core:  # pragma: no cover — macOS always has both
-            raise KeyBackendError("Security.framework is not present")
-        self.S = ctypes.CDLL(security)
-        self.C = ctypes.CDLL(core)
-        void = ctypes.c_void_p
-        self.S.SecKeyCreateRandomKey.restype = void
-        self.S.SecKeyCreateRandomKey.argtypes = [void, ctypes.POINTER(void)]
-        self.S.SecKeyCopyPublicKey.restype = void
-        self.S.SecKeyCopyPublicKey.argtypes = [void]
-        self.S.SecKeyCopyExternalRepresentation.restype = void
-        self.S.SecKeyCopyExternalRepresentation.argtypes = [void, ctypes.POINTER(void)]
-        self.S.SecKeyCreateSignature.restype = void
-        self.S.SecKeyCreateSignature.argtypes = [void, void, void, ctypes.POINTER(void)]
-        self.S.SecAccessControlCreateWithFlags.restype = void
-        self.S.SecAccessControlCreateWithFlags.argtypes = [
-            void,
-            void,
-            ctypes.c_uint64,
-            ctypes.POINTER(void),
-        ]
-        self.S.SecItemCopyMatching.restype = ctypes.c_int32
-        self.S.SecItemCopyMatching.argtypes = [void, ctypes.POINTER(void)]
-        self.S.SecItemDelete.restype = ctypes.c_int32
-        self.S.SecItemDelete.argtypes = [void]
-        self.S.CFErrorCopyDescription.restype = void
-        self.S.CFErrorCopyDescription.argtypes = [void]
-        self.S.CFErrorGetCode.restype = ctypes.c_long
-        self.S.CFErrorGetCode.argtypes = [void]
-        self.C.CFStringCreateWithBytes.restype = void
-        self.C.CFStringCreateWithBytes.argtypes = [
-            void,
-            ctypes.c_char_p,
-            ctypes.c_long,
-            ctypes.c_uint32,
-            ctypes.c_bool,
-        ]
-        self.C.CFDataCreate.restype = void
-        self.C.CFDataCreate.argtypes = [void, ctypes.c_char_p, ctypes.c_long]
-        self.C.CFDictionaryCreate.restype = void
-        self.C.CFDictionaryCreate.argtypes = [
-            void,
-            ctypes.POINTER(void),
-            ctypes.POINTER(void),
-            ctypes.c_long,
-            void,
-            void,
-        ]
-        self.C.CFDataGetLength.restype = ctypes.c_long
-        self.C.CFDataGetLength.argtypes = [void]
-        self.C.CFDataGetBytePtr.restype = ctypes.POINTER(ctypes.c_char)
-        self.C.CFDataGetBytePtr.argtypes = [void]
-        self.C.CFStringGetCString.restype = ctypes.c_bool
-        self.C.CFStringGetCString.argtypes = [void, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32]
-        self.C.CFRelease.argtypes = [void]
-        # kCFTypeDictionaryKeyCallBacks / kCFTypeDictionaryValueCallBacks, by
-        # ADDRESS. Each symbol is a struct whose first field is its version (0), so
-        # reading the symbol as a pointer would read that 0; the address is what
-        # CFDictionaryCreate takes. Declared here once because they never change.
-        self.TYPED_KEY_CALLBACKS = ctypes.addressof(
-            (ctypes.c_char * 0).in_dll(self.C, "kCFTypeDictionaryKeyCallBacks")
-        )
-        self.TYPED_VALUE_CALLBACKS = ctypes.addressof(
-            (ctypes.c_char * 0).in_dll(self.C, "kCFTypeDictionaryValueCallBacks")
-        )
-
-    def const(self, name: str) -> int:
-        value = ctypes.c_void_p.in_dll(self.S, name).value
-        if value is None:  # pragma: no cover — a missing symbol raises, it does not return None
-            raise KeyBackendError(f"Security.framework does not export {name}")
-        return int(value)
-
-    def cconst(self, name: str) -> int:
-        value = ctypes.c_void_p.in_dll(self.C, name).value
-        if value is None:  # pragma: no cover — as above
-            raise KeyBackendError(f"CoreFoundation does not export {name}")
-        return int(value)
-
-    def string(self, text: str) -> int:
-        raw = text.encode()
-        return int(self.C.CFStringCreateWithBytes(None, raw, len(raw), 0x08000100, False))
-
-    def data(self, raw: bytes) -> int:
-        return int(self.C.CFDataCreate(None, raw, len(raw)))
-
-    def boolean(self, value: bool) -> int:
-        return int(self.cconst("kCFBooleanTrue" if value else "kCFBooleanFalse"))
-
-    def dict(self, pairs: list[tuple[int, int]]) -> int:
-        """A ``CFDictionaryRef`` that RETAINS its keys and values.
-
-        Built with ``kCFTypeDictionaryKeyCallBacks`` / ``ValueCallBacks`` rather
-        than NULL callbacks. With NULL callbacks a dictionary holds BORROWED
-        pointers — it retains nothing and releases nothing — so every object put
-        into one must outlive it by hand, and that discipline is exactly what one
-        caller got wrong (a released ``CFDataRef`` was passed into a later
-        dictionary). With the typed callbacks a dictionary is self-sufficient and
-        the caller may release its own reference as soon as the dictionary is
-        built, which is the ownership rule :meth:`SecureEnclaveBackend.create`
-        follows.
-
-        Measured, and the reason this is not merely hygiene: on macOS 26.6.2 an
-        Enclave key-generation dictionary carrying the corrected flags SEGFAULTS
-        inside ``SecKeyCreateRandomKey`` when built with NULL callbacks (6 of 6
-        runs, from both a ctypes probe and a native C probe), and the identical
-        dictionary with these callbacks returns a clean OSStatus (6 of 6). NULL is
-        legal but means "these objects are not managed"; passing it asked the
-        framework to keep a promise nothing was keeping.
-        """
-        keys = (ctypes.c_void_p * len(pairs))(*[k for k, _ in pairs])
-        values = (ctypes.c_void_p * len(pairs))(*[v for _, v in pairs])
-        return int(
-            self.C.CFDictionaryCreate(
-                None,
-                keys,
-                values,
-                len(pairs),
-                self.TYPED_KEY_CALLBACKS,
-                self.TYPED_VALUE_CALLBACKS,
-            )
-        )
-
-    def release(self, *refs: int) -> None:
-        for ref in refs:
-            if ref:
-                self.C.CFRelease(ref)
-
-    def data_bytes(self, ref: int) -> bytes:
-        length = self.C.CFDataGetLength(ref)
-        return ctypes.string_at(self.C.CFDataGetBytePtr(ref), length)
-
-    def status(self, err: Any) -> int:
-        """The ``OSStatus`` inside a ``CFErrorRef``, WITHOUT releasing it.
-
-        Separate from :meth:`error`, which releases: the CODE picks the remedy the
-        operator is offered, while the DESCRIPTION is the precise detail, and
-        ``create`` needs both from the same error object.
-        """
-        if not err:
-            return 0
-        return int(self.S.CFErrorGetCode(err))
-
-    def error(self, err: Any) -> str:
-        """A CFErrorRef as text, releasing it. Never raises."""
-        if not err:
-            return "no error reported"
-        try:
-            description = self.S.CFErrorCopyDescription(err)
-            if not description:
-                return "error with no description"
-            buffer = ctypes.create_string_buffer(1024)
-            self.C.CFStringGetCString(description, buffer, 1024, 0x08000100)
-            self.release(description)
-            return buffer.value.decode("utf-8", "replace")
-        finally:
-            self.release(err)
+#
+# WHAT USED TO BE HERE, and why it is not. This section formerly held a ctypes
+# binding of the CoreFoundation + Security.framework call sequence that creates an
+# Enclave key: the access-control object, the typed-callback dictionaries, the ladder
+# over two protection classes. It was correct — its flag pair is asserted against the
+# SDK header below — and it could never work, because the entitlement that admits a
+# process to the data-protection keychain comes from the CODE SIGNATURE and an
+# embedded PROVISIONING PROFILE, and a Python runtime has neither. Two
+# implementations of one native sequence, one of which no test on any host can
+# exercise, is a second way of doing things rather than a fallback, so the sequence
+# lives only in the C helper now (packaging/macos/lop-keyagent/se-keyagent.c) and this
+# section is the client of it.
 
 
 #: ``OSStatus`` values from the presence store, named so the code below reads as prose
@@ -441,12 +318,28 @@ class _CF:
 #: (design round 1, D2/R1-1). ``-34018`` is ``errSecMissingEntitlement``.
 _ERR_SEC_PARAM = -50
 _ERR_SEC_MISSING_ENTITLEMENT = -34018
+#: ``errSecItemNotFound``. READ IT AS "the entitled process found nothing", never as
+#: "there is no key": an unsigned query returns this for a key that exists, which is the
+#: trap :meth:`SecureEnclaveBackend.load` is built to close.
+_ERR_SEC_ITEM_NOT_FOUND = -25300
+#: ``errSecUserCanceled``. The human dismissed the presence prompt: a normal outcome
+#: rather than a defect, and the one refusal that must not be reported as a failure of
+#: the machine.
+_ERR_SEC_USER_CANCELED = -128
 
 #: The two call sites a refusal can come from, as the vocabulary the diagnosis is keyed
 #: on. Named constants rather than a boolean because ``errSecParam`` is read differently
 #: at each (see above).
 ACCESS_CONTROL_REFUSED = "access control"
 KEY_GENERATION_REFUSED = "key generation"
+#: The signing call, which is where the presence prompt lives and therefore the only
+#: site that can answer ``errSecUserCanceled``.
+SIGNATURE_REFUSED = "signature"
+#: The lookup, which is where "there is no key stored under this tag" is answered. A
+#: site of its own because its ``errSecItemNotFound`` is a statement about the STORE
+#: (and, per the trap above, only believable from the entitled process), while the same
+#: code at key generation would be a create that could not get as far as the item.
+KEY_LOOKUP_REFUSED = "key lookup"
 
 #: ``(site, OSStatus) -> the lines that explain it``. The FIRST line is the diagnosis and
 #: LEADS the message; the rest say what it costs and what to do with it, one per line, in
@@ -488,10 +381,23 @@ _SECURE_ENCLAVE_DIAGNOSES: dict[tuple[str, int], tuple[str, ...]] = {
         "takes the next release, and `lop-update` rebuilds a checkout",
     ),
     (KEY_GENERATION_REFUSED, _ERR_SEC_MISSING_ENTITLEMENT): (
-        "this runtime cannot create a presence-gated operator key: the Secure Enclave "
-        "keeps its keys in the data-protection keychain, which needs a keychain "
-        "entitlement this process does not have (errSecMissingEntitlement)",
+        "the key agent could not reach the data-protection keychain: the Secure Enclave "
+        "keeps its keys there, and that keychain admits the caller only when its code "
+        "signature carries the keychain entitlement AND its embedded provisioning "
+        "profile authorizes the application identifier it claims "
+        "(errSecMissingEntitlement) — so this is a signature/profile pair to fix, not a "
+        "flag to change (`lop operator status` reports whether the key agent itself "
+        "verifies)",
         _FILE_ONLY_FALLBACK,
+    ),
+    (SIGNATURE_REFUSED, _ERR_SEC_USER_CANCELED): (
+        "the presence prompt was cancelled (errSecUserCanceled), so nothing was signed "
+        "and the operator key is unchanged",
+    ),
+    (KEY_LOOKUP_REFUSED, _ERR_SEC_ITEM_NOT_FOUND): (
+        "there is no operator key under this tag on this host: run `lop operator init` "
+        "(this is the KEY AGENT's answer, which is the only process that can see the "
+        "item)",
     ),
     (KEY_GENERATION_REFUSED, _ERR_SEC_PARAM): (
         "key generation was refused (errSecParam): the parameters are inconsistent for a "
@@ -549,6 +455,20 @@ def secure_enclave_diagnosis(site: str, status: int) -> tuple[str, ...]:
     return _SECURE_ENCLAVE_DIAGNOSES.get((site, int(status)), ())
 
 
+#: What the message says when the framework's refusal has no diagnosis this file can
+#: stand behind. Keyed by CALL SITE because the verb matters to the reader: a key that
+#: could not be created and a signature that was refused are different failures with
+#: different next steps, and one headline for both would have the message name an
+#: operation that did not happen (found while the key agent learned to report a
+#: signature site).
+_REFUSAL_HEADLINES: dict[str, str] = {
+    ACCESS_CONTROL_REFUSED: "the Secure Enclave refused to create an operator key",
+    KEY_GENERATION_REFUSED: "the Secure Enclave refused to create an operator key",
+    SIGNATURE_REFUSED: "the Secure Enclave refused the operator key's signature",
+    KEY_LOOKUP_REFUSED: "the operator key could not be read from the Secure Enclave",
+}
+
+
 def secure_enclave_refusal_message(refusals: dict[tuple[str, int, str], list[str]]) -> str:
     """The message for a refused key creation: DIAGNOSIS first, framework detail last.
 
@@ -569,9 +489,18 @@ def secure_enclave_refusal_message(refusals: dict[tuple[str, int, str], list[str
         written.add((site, status))
         lines.extend(secure_enclave_diagnosis(site, status))
     if not lines:
-        # No explanation we can stand behind: say the plain fact and let the framework's
-        # detail line below carry everything we actually know.
-        lines.append("the Secure Enclave refused to create an operator key")
+        # No explanation we can stand behind: say the plain fact, IN THE VERB OF THE
+        # SITE that refused, and let the framework's detail line below carry
+        # everything we actually know.
+        headline = next(
+            (
+                _REFUSAL_HEADLINES[site]
+                for site, _status, _detail in refusals
+                if site in _REFUSAL_HEADLINES
+            ),
+            "the Secure Enclave refused the operator key operation",
+        )
+        lines.append(headline)
     for (site, status, detail), classes in refusals.items():
         # The code is prefixed only when the framework's own text does not already state
         # it: ``CFErrorCopyDescription`` normally renders "… (OSStatus error -34018 - …)",
@@ -593,287 +522,250 @@ def secure_enclave_refusal_message(refusals: dict[tuple[str, int, str], list[str
     return "\n".join(lines)
 
 
-class SecureEnclaveBackend:
-    """The macOS presence-gated backend.
+#: The remedy sentence the key-agent states share, and the cost of the alternative it
+#: names: the SAME shape the table above uses for a `file-only` fallback, because it is
+#: the same offer with the same price.
+_KEYAGENT_REINSTALL = (
+    "reinstall the macOS wheel with `uv tool install local-operator --force` "
+    "(`lop-update` rebuilds a checkout) to get the key agent; to keep a file-backed key "
+    "instead run `lop operator init --backend file-only` — it raises no presence prompt, "
+    "and any process running as you can read it, which `lop operator status` reports as "
+    "the level `operator-file-only`"
+)
 
-    ``create`` is attempted with a ladder of protection constants and flags,
-    taking the first the framework accepts and reporting the last failure if
-    none does. That is deliberate: the protection class is an OS policy
-    (``WhenPasscodeSetThisDeviceOnly`` is refused on a host whose policy differs)
-    and the honest outcome for a host that refuses every one is a precise error,
-    not a silent downgrade to a file — a silent downgrade would make the level
-    report claim presence the host does not enforce.
+#: ``key-agent state -> (what `init` says, what `status` reports)``.
+#:
+#: TWO REGISTERS, ONE TABLE: `init` prints the state, the remedy and the cost of the
+#: alternative, while `status` has a one-line field to fill. Describing one broken
+#: install differently in the two commands is how a reader learns to trust neither, so
+#: both come from here. The keys are the ``kind`` values
+#: :class:`local_operator.operator.macos.keyagent.KeyagentError` raises.
+#:
+#: Note what is NOT here: any state that would let the runtime conclude "there is no
+#: key" on its own. ``no-key`` is the key agent's answer, and it is the only entry that
+#: reports absence.
+_KEYAGENT_STATES: dict[str, tuple[str, str]] = {
+    "absent": (
+        "the macOS key agent is not installed: this installation has no "
+        "`lop-keyagent.app` (an sdist install, or a wheel for another platform), so "
+        "nothing here can reach the operator key. " + _KEYAGENT_REINSTALL,
+        "the macOS key agent is not installed (broken install)",
+    ),
+    "unverified": (
+        "the macOS key agent is present but is not ours: its signature does not verify, "
+        "or it carries no embedded provisioning profile, so the kernel would refuse it "
+        "before it could run — the bundle is verified BEFORE it is executed for exactly "
+        "that reason. " + _KEYAGENT_REINSTALL,
+        "the key agent failed verification",
+    ),
+    "killed": (
+        "the kernel refused the key agent's keychain entitlement: its embedded "
+        "provisioning profile is missing, stale, or does not authorize its application "
+        "identifier, so the process was killed before it could run (measured shape: "
+        "SIGKILL, exit 137). " + _KEYAGENT_REINSTALL,
+        "the key agent was killed: bad or missing embedded profile",
+    ),
+    "no-key": (
+        "no operator key on this host: run `lop operator init`",
+        "no key on this host",
+    ),
+    "cancelled": (
+        "the presence prompt was cancelled: nothing was signed and the key is unchanged",
+        "the presence prompt was cancelled",
+    ),
+    "timeout": (
+        "the presence prompt was not answered in time: nothing was signed and the key is "
+        "unchanged",
+        "the presence prompt was not answered",
+    ),
+    "protocol": (
+        "the key agent does not match this runtime (its reply is not the protocol this "
+        "build speaks) — reinstall so both come from one wheel",
+        "the key agent does not match this runtime",
+    ),
+}
+
+
+def keyagent_state_copy(state: str, *, long: bool = True) -> str:
+    """The copy for one key-agent state, in the register ``init`` or ``status`` uses."""
+    entry = _KEYAGENT_STATES.get(state)
+    if entry is None:  # pragma: no cover — every kind is in the table, pinned by a test
+        return f"the key agent failed ({state}); reinstall the macOS wheel"
+    return entry[0] if long else entry[1]
+
+
+def keyagent_refusal_message(exc: "keyagent.KeyagentError") -> str:
+    """One ``KeyagentError`` as the message an operator reads.
+
+    A refusal that came from the framework carries the same ``site``/``status``/``detail``
+    triples the in-process refusal used to, so it goes through the SAME builder —
+    diagnosis first, framework detail last, one line per protection class — rather than
+    gaining a second, thinner explanation of the same OSStatus. Everything else is a
+    state of the installation, and gets :data:`_KEYAGENT_STATES`.
+    """
+    if exc.kind != "refused":
+        return keyagent_state_copy(exc.kind)
+    entries = list(exc.refusals) or [
+        {"site": exc.site or KEY_GENERATION_REFUSED, "status": exc.status, "detail": exc.detail}
+    ]
+    grouped: dict[tuple[str, int, str], list[str]] = {}
+    for entry in entries:
+        raw_status = entry.get("status")
+        status = int(raw_status) if isinstance(raw_status, (int, float)) else 0
+        site = str(entry.get("site") or KEY_GENERATION_REFUSED)
+        detail = without_run_addresses(str(entry.get("detail") or ""))
+        grouped.setdefault((site, status, detail), []).append(
+            str(entry.get("protection") or "(no protection class)")
+        )
+    return secure_enclave_refusal_message(grouped)
+
+
+class SecureEnclaveBackend:
+    """The macOS presence-gated backend: a CLIENT of the signed key agent.
+
+    Every verb is one short-lived subprocess of
+    ``local_operator/operator/macos/lop-keyagent.app/Contents/MacOS/lop-keyagent``,
+    invoked directly rather than through LaunchServices, because the entitlement that
+    admits a process to the keychain is a property of the CODE SIGNATURE — and this
+    process has none. Nothing in this class touches CoreFoundation, the keychain or the
+    Secure Enclave.
+
+    THE CONSTANTS BELOW STAY, and they are not decoration: the C source that now makes
+    these calls is asserted against the same SDK header, and against these values, by
+    ``tests/unit/operator/test_operator_authority.py``. Drift between the two copies of
+    one native sequence is the hazard this arrangement creates, so it is pinned.
     """
 
-    #: ``kSecAccessControlPrivateKeyUsage`` and ``kSecAccessControlUserPresence``,
-    #: as Apple's header defines them
-    #: (``Security.framework/Headers/SecAccessControl.h``:
-    #: ``kSecAccessControlUserPresence = 1u << 0``,
-    #: ``kSecAccessControlPrivateKeyUsage = 1u << 30``).
-    #:
-    #: DO NOT SIMPLIFY THESE BACK into a small shift pair. The two are not
-    #: interchangeable and the failure is not a subtle degradation:
-    #: ``SecAccessControlCreateWithFlags`` REFUSES a wrong pair with ``errSecParam``
-    #: (-50) — "kSecAccessControlUserPresence can be combined only with
-    #: kSecAccessControlApplicationPassword and kSecAccessControlPrivateKeyUsage" —
-    #: so every protection class in the ladder fails and ``create`` never reaches key
-    #: generation. This file shipped ``PRIVATE_KEY_USAGE = 1 << 0`` and
-    #: ``USER_PRESENCE = 1 << 2``: transposed, and two bits off Apple's
-    #: ``PrivateKeyUsage``. Measured with a native probe against this machine's SDK,
-    #: creating nothing and touching no keychain: the shipped pair returns NULL/-50
-    #: for both protection classes, Apple's pair returns a non-NULL access object for
-    #: both. ``tests/unit/operator/test_operator_authority.py`` asserts both constants
-    #: against the SDK header itself for exactly that reason.
+    #: The flag pair, from ``Security.framework/Headers/SecAccessControl.h``:
+    #: ``kSecAccessControlUserPresence = 1u << 0`` and
+    #: ``kSecAccessControlPrivateKeyUsage = 1u << 30``.
     PRIVATE_KEY_USAGE = 1 << 30
     USER_PRESENCE = 1 << 0
 
-    #: Tried in order; the strictest protection the host accepts wins.
+    #: The protection classes, STRICTEST FIRST. The key agent walks them in this order
+    #: and reports the class it achieved, so a host that accepts passcode-set never
+    #: settles for unlocked. Both rungs were measured accepted under an entitled
+    #: process; the second exists for a host whose keychain has no passcode to bind to.
     PROTECTION_LADDER = (
         "kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly",
         "kSecAttrAccessibleWhenUnlockedThisDeviceOnly",
     )
 
     def __init__(self) -> None:
-        self.cf = _CF()
+        """No native state: every verb is a process, and nothing is loaded here."""
+
+    def _client(self) -> "keyagent.KeyagentClient":
+        """A client for the installed helper, under the tag this module names.
+
+        The tag is read HERE rather than captured at construction: ``APPLICATION_TAG``
+        is a module constant, and a test replaces it to point the whole path at a test
+        item rather than at the operator's own key.
+        """
+        return keyagent.KeyagentClient(tag=APPLICATION_TAG)
 
     def supported(self) -> bool:
-        """Whether this host looks like it has a Secure Enclave.
+        """Whether THIS INSTALLATION can reach an entitled process.
 
-        ``arm64`` and ``x86_64`` Macs with a T2 both do; the check is deliberately
-        coarse, because a false positive costs one precise error at ``init`` and a
-        false negative would silently demote every Intel Mac with a T2.
+        NOT "is there a Secure Enclave on this host". On macOS the build can do this and
+        only the INSTALL can be wrong, so the honest predicate is about the key agent in
+        this installation: present, verifying as ours, and able to run with its
+        entitlement — the :class:`CngBackend` precedent read in the other direction
+        (there the BUILD cannot do it; here the build can and a broken install would
+        otherwise be indistinguishable from a host limitation).
+
+        A ``False`` here is NOT a licence to fall back. ``init`` and ``sign`` hard-fail
+        with the copy that names the remedy, because ``file-only`` is a different and
+        weaker level and has to be asked for by name.
         """
-        try:
-            return os.uname().machine in ("arm64", "x86_64")
-        except AttributeError:  # pragma: no cover — POSIX always has uname
-            return False
+        return self.health()[0]
+
+    def health(self) -> tuple[bool, str]:
+        """:meth:`supported` with the reason attached, for the report that must give it."""
+        state = keyagent.helper_health()
+        if state.ok:
+            return True, state.detail
+        return False, keyagent_state_copy(state.kind, long=False)
 
     def create(self) -> KeyHandle:
-        """Create the Enclave key, taking the first protection class the host accepts.
+        """Create the operator key through the key agent, or return the one already here.
 
-        OWNERSHIP RULE — every CoreFoundation object created here is released
-        exactly once, in the scope that created it. The dictionaries RETAIN what
-        they hold (see :meth:`_CF.dict`), so an object handed to one is released as
-        soon as the dictionary holding it exists. ``tag`` is the deliberate
-        exception: it is created here, used by every iteration, and released once in
-        the ``finally`` below.
-
-        The previous shape released ``tag`` INSIDE the loop, on the iteration that
-        failed to make a key, and then handed it to the next iteration's dictionary:
-        a released ``CFDataRef``, i.e. freed memory walked by ``CFDictionaryCreate``
-        / ``objc_retain``. That path is reachable exactly when the access control
-        SUCCEEDS and key creation then FAILS — the documented case is a host whose
-        policy refuses the strictest protection class — which is why it went
-        unnoticed while the flag bug made every iteration fail one step earlier. The
-        two defects are coupled: fixing only the flags would have turned a precise
-        error into a crash on such a host, so both are fixed together.
+        Idempotent by construction: the key agent answers ``reused`` when an item already
+        exists under the tag, which is what makes a second ``lop operator init`` a report
+        rather than a second key — and a second key would invalidate every device
+        certificate signed under the first anchor.
         """
-        cf = self.cf
-        tag = cf.data(APPLICATION_TAG.encode())
-        # ``(site, status, framework detail) -> the classes that produced it``. Grouped
-        # this way so a refusal that is identical for every protection class is recorded
-        # ONCE with the classes listed beside it, rather than repeating one sentence per
-        # class, and so the DIAGNOSIS is chosen from the call site that actually refused
-        # rather than from the status alone (design round 1, D2/D3).
-        refusals: dict[tuple[str, int, str], list[str]] = {}
-
-        def record(site: str, protection: str, err: Any) -> None:
-            """Record one refusal; read the code BEFORE ``cf.error`` releases the error."""
-            status = cf.status(err)
-            detail = without_run_addresses(cf.error(err))
-            refusals.setdefault((site, status, detail), []).append(protection)
-
         try:
-            for protection in self.PROTECTION_LADDER:
-                err = ctypes.c_void_p()
-                access = cf.S.SecAccessControlCreateWithFlags(
-                    None,
-                    cf.const(protection),
-                    self.PRIVATE_KEY_USAGE | self.USER_PRESENCE,
-                    ctypes.byref(err),
-                )
-                if not access:
-                    record(ACCESS_CONTROL_REFUSED, protection, err)
-                    continue
-                private_attrs = cf.dict(
-                    [
-                        (cf.const("kSecAttrIsPermanent"), cf.boolean(True)),
-                        (cf.const("kSecAttrApplicationTag"), tag),
-                        (cf.const("kSecAttrAccessControl"), int(access)),
-                    ]
-                )
-                cf.release(access)
-                number = self._cf_number(256)
-                # ``kSecUseDataProtectionKeychain`` is not in Apple's documented
-                # Enclave generation dictionary, and on macOS 26.6.2 it is not
-                # LOAD-BEARING either: measured under a signed interpreter, both
-                # shapes create and re-find a key identically for both protection
-                # classes, and with it the round trip through this module's own
-                # ``load`` query (which does not set it) finds the same key. It is
-                # kept because it changes nothing measurable and removing it would
-                # be an unvalidated change; what puts the key in the data-protection
-                # keychain is ``kSecAttrTokenIDSecureEnclave``, not this attribute.
-                attrs = cf.dict(
-                    [
-                        (cf.const("kSecAttrKeyType"), cf.const("kSecAttrKeyTypeECSECPrimeRandom")),
-                        (cf.const("kSecAttrKeySizeInBits"), number),
-                        (cf.const("kSecAttrTokenID"), cf.const("kSecAttrTokenIDSecureEnclave")),
-                        (cf.const("kSecUseDataProtectionKeychain"), cf.boolean(True)),
-                        (cf.const("kSecPrivateKeyAttrs"), private_attrs),
-                    ]
-                )
-                cf.release(number, private_attrs)
-                err = ctypes.c_void_p()
-                key = cf.S.SecKeyCreateRandomKey(attrs, ctypes.byref(err))
-                cf.release(attrs)
-                if not key:
-                    record(KEY_GENERATION_REFUSED, protection, err)
-                    continue
-                try:
-                    spki = self._public_point(int(key))
-                finally:
-                    cf.release(int(key))
-                return KeyHandle(
-                    backend=SECURE_ENCLAVE, key_id=key_id_for(spki), spki=spki, presence=True
-                )
-            # Every class refused. The message leads with the diagnosis and the next
-            # command, and keeps the framework's own words (minus per-run addresses) as
-            # the detail line; the status rides along for callers that must branch on it
-            # rather than read it — and only when the ladder AGREED, so a mixed-code
-            # ladder leaves it ``None`` rather than letting ladder order decide which
-            # remedy a caller is offered (agent review round 2, R2-1).
-            codes = {status for _site, status, _detail in refusals}
-            agreed = codes.pop() if len(codes) == 1 else None
-            raise KeyBackendError(
-                secure_enclave_refusal_message(refusals),
-                status=agreed or None,
-            )
-        finally:
-            cf.release(tag)
-
-    def _cf_number(self, value: int) -> int:
-        """A ``CFNumberRef`` holding ``value``. THE CALLER OWNS the +1 reference.
-
-        Small and deliberate: ``CFNumberCreate`` is not part of the surface
-        ``_CF`` declares, so it is wrapped here. The ownership is the ordinary
-        CoreFoundation rule and NOT what this docstring claimed before: a dictionary
-        built with ``kCFTypeDictionaryKeyCallBacks``/``ValueCallBacks`` (see
-        :meth:`_CF.dict`) RETAINS what it holds, so putting this number into one
-        does not consume the reference the caller holds. ``create`` releases it, and
-        its predecessor leaked one CFNumberRef per successful call.
-        """
-        cf = self.cf
-        cf.C.CFNumberCreate.restype = ctypes.c_void_p
-        cf.C.CFNumberCreate.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
-        # 3 is kCFNumberSInt32Type, which is what CFNumberConsume wants for a
-        # bit count; the c_int in the byref is the same width, deliberately.
-        return int(cf.C.CFNumberCreate(None, 3, ctypes.byref(ctypes.c_int(value))))
-
-    def _public_point(self, key: int) -> bytes:
-        cf = self.cf
-        public = cf.S.SecKeyCopyPublicKey(key)
-        if not public:
-            raise KeyBackendError("the Secure Enclave key has no public half")
-        try:
-            err = ctypes.c_void_p()
-            raw = cf.S.SecKeyCopyExternalRepresentation(public, ctypes.byref(err))
-            if not raw:
-                raise KeyBackendError(f"could not export the public key: {cf.error(err)}")
-            try:
-                point = cf.data_bytes(int(raw))
-            finally:
-                cf.release(int(raw))
-        finally:
-            cf.release(int(public))
-        if decode_point(point) is None:  # pragma: no cover — a malformed OS reply
-            raise KeyBackendError("the Secure Enclave returned a non-P-256 public key")
-        return point
-
-    def load(self) -> Signer | None:
-        cf = self.cf
-        tag = cf.data(APPLICATION_TAG.encode())
-        query = cf.dict(
-            [
-                (cf.const("kSecClass"), cf.const("kSecClassKey")),
-                (cf.const("kSecAttrApplicationTag"), tag),
-                (cf.const("kSecAttrKeyType"), cf.const("kSecAttrKeyTypeECSECPrimeRandom")),
-                (cf.const("kSecReturnRef"), cf.boolean(True)),
-                (cf.const("kSecMatchLimit"), cf.const("kSecMatchLimitOne")),
-            ]
-        )
-        out = ctypes.c_void_p()
-        status = cf.S.SecItemCopyMatching(query, ctypes.byref(out))
-        cf.release(query, tag)
-        if status != 0 or not out:
-            return None
-        key = int(out.value or 0)
-        if not key:  # pragma: no cover — defensive
-            return None
-        point = self._public_point(key)
-        handle = KeyHandle(
+            created = self._client().create()
+        except keyagent.KeyagentError as exc:
+            raise KeyBackendError(keyagent_refusal_message(exc), status=exc.status) from exc
+        return KeyHandle(
             backend=SECURE_ENCLAVE,
-            key_id=key_id_for(point),
-            spki=point,
+            key_id=key_id_for(created.point),
+            spki=created.point,
             presence=True,
         )
-        return _SecureEnclaveSigner(handle, key, cf)
 
+    def load(self) -> Signer | None:
+        """A signer for the key the KEY AGENT finds, or ``None`` when it finds none.
 
-class _SecureEnclaveSigner(Signer):
-    """Signs through the Secure Enclave. EVERY call raises the presence prompt."""
-
-    def __init__(self, handle: KeyHandle, key_ref: int, cf: _CF) -> None:
-        super().__init__(handle)
-        self._key = key_ref
-        self._cf = cf
-
-    def sign(self, message: bytes) -> bytes:
-        """Sign through the Secure Enclave. EVERY call raises the presence prompt.
-
-        THE PROMPT CANNOT CARRY OUR COPY, and that is a measured property of the
-        API rather than an omission (agent review round 6, D3/U3).
-        ``SecKeyCreateSignature`` takes no parameters dictionary, so there is
-        nowhere to pass a reason; ``kSecUseOperationPrompt`` was the key that
-        would have carried one, and Apple deprecated it in macOS 11
-        (availability 10.10-11.0). The human's information therefore comes from
-        the surface that can speak: ``effect_copy`` on stderr for the CLI, the
-        pane notice for an attached viewer, the log line otherwise — each wired
-        at its own call site, and ``docs/design/approval-authority.md`` records
-        the bound rather than claiming the sheet itself says it.
+        THE -25300 TRAP, closed here. An unsigned process asking for this item gets
+        ``errSecItemNotFound`` for a key that exists, so this method may never answer
+        from a query of its own: ``None`` means the ENTITLED process said the item is not
+        there, and that is the only source of an absence claim the runtime may believe.
+        A key agent that is missing, unverifiable or killed RAISES instead, because
+        "broken install" and "no key yet" have different remedies and converting the
+        first into the second is the silent failure this whole design exists to prevent.
         """
-        cf = self._cf
-        err = ctypes.c_void_p()
-        # The message is an OWNED ``CFDataRef``: ``CFDataCreate`` hands back a +1
-        # reference, and ``SecKeyCreateSignature`` does not take it — so it is released
-        # here, once the call has returned either way. It used to be created inline and
-        # dropped, leaking one CFData per signature (agent review round 1, R1-3).
-        payload = cf.data(message)
         try:
-            signature = cf.S.SecKeyCreateSignature(
-                self._key,
-                cf.const("kSecKeyAlgorithmECDSASignatureMessageX962SHA256"),
-                payload,
-                ctypes.byref(err),
-            )
-        finally:
-            cf.release(payload)
-        if not signature:
-            # The code is read BEFORE ``cf.error``, which RELEASES the error object —
-            # reading it afterwards would be a use-after-free on the very ref being
-            # reported on. Same treatment as ``create``'s copy, too: this line is meant
-            # to be pasted into a report, so the per-run address is stripped (D4).
-            status = (cf.status(err) if err else 0) or None
-            raise KeyBackendError(
-                "the Secure Enclave refused to sign: " + without_run_addresses(cf.error(err)),
-                status=status,
-            )
+            point = self._client().public()
+        except keyagent.KeyagentError as exc:
+            if exc.kind == "no-key":
+                return None
+            raise KeyBackendError(keyagent_refusal_message(exc), status=exc.status) from exc
+        return _KeyagentSigner(
+            KeyHandle(
+                backend=SECURE_ENCLAVE,
+                key_id=key_id_for(point),
+                spki=point,
+                presence=True,
+            ),
+            tag=APPLICATION_TAG,
+        )
+
+
+class _KeyagentSigner(Signer):
+    """Signs through the key agent. EVERY call raises the presence prompt.
+
+    The prompt is the tier: it is raised by the OS inside the entitled process, so no
+    caller of this — in-process, in a subprocess, or a model's tool child — can obtain a
+    signature without a human gesture. The sheet cannot carry this project's copy
+    (``SecKeyCreateSignature`` takes no parameters dictionary and ``kSecUseOperationPrompt``
+    was deprecated in macOS 11), so what names the session and the effect is the caller's
+    own line on stderr (``sign.py``); what this adds is the bound — past its ``timeout``
+    the helper is killed and nothing is signed.
+    """
+
+    def __init__(self, handle: KeyHandle, *, tag: str, timeout: float | None = None) -> None:
+        super().__init__(handle)
+        self._tag = tag
+        self._timeout = timeout if timeout is not None else keyagent.SIGN_TIMEOUT_SECONDS
+
+    def sign(self, message: bytes, *, timeout: float | None = None) -> bytes:
+        """Sign exactly these bytes through the entitled process. THIS PROMPTS."""
         try:
-            return cf.data_bytes(int(signature))
-        finally:
-            cf.release(int(signature))
+            return keyagent.KeyagentClient(tag=self._tag).sign(
+                message, timeout=timeout if timeout is not None else self._timeout
+            )
+        except keyagent.KeyagentError as exc:
+            raise KeyBackendError(keyagent_refusal_message(exc), status=exc.status) from exc
 
     def close(self) -> None:
-        self._cf.release(self._key)
+        """Nothing to release: the one-shot helper that held the key has exited.
+
+        Kept because :class:`Signer` requires it and every surface ends a signing session
+        with it — the file backend's signer does hold an object, and a caller must not
+        have to know which kind it is holding to know whether to close it.
+        """
 
 
 # ---------------------------------------------------------------------------
@@ -941,6 +833,14 @@ def choose_backend(preference: str, *, config_root: Path) -> Any:
     which one it got (:meth:`KeyHandle.level`) rather than assuming the ladder
     reached the top — that report is the difference between a security claim and
     a hope.
+
+    THE ONE PLACE THE PROMISE IS DELIBERATELY NOT KEPT, because keeping it would
+    be worse: on macOS the presence backend is returned whether or not its key agent
+    is usable, and it RAISES when it is not (design §6). "The first backend this host
+    has and can use" presumes the alternatives are equivalent ways to reach the same
+    level; a file-backed key is not — it is a key any process running as you can read
+    — so falling back to it silently would turn a broken install into a weaker key
+    that reports success. `--backend file-only` is the only route to that level.
     """
     if preference in (SECURE_ENCLAVE, CNG_PRESENCE, FILE_ONLY):
         return _named_backend(preference, config_root=config_root)
@@ -959,6 +859,14 @@ def choose_backend(preference: str, *, config_root: Path) -> Any:
     if os.name == "nt":  # pragma: no cover — Windows only; CI runs POSIX
         return CngBackend()
     if os.uname().sysname == "Darwin":  # pragma: no branch — POSIX always has uname
+        # NOT gated on `SecureEnclaveBackend().supported()`, and that is the whole
+        # point (design §6): on macOS the key agent is part of the INSTALL, so a
+        # missing or unverifiable one is a BROKEN INSTALLATION rather than a host
+        # limitation. Returning the file backend here would be the silent downgrade
+        # this design forbids — the operator would get a key any process running as
+        # them can read while `init` reported success. `create`/`load` raise with the
+        # remedy instead, and the only way to a file-backed key is to say
+        # `--backend file-only`.
         return SecureEnclaveBackend()
     return FileKeyBackend(default_file_path(config_root))
 

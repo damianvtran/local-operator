@@ -1,0 +1,14 @@
+# What an sdist must carry BEYOND the package itself.
+#
+# `packaging/macos/` is the macOS key agent's build input: the helper's C source, its
+# Info.plist, the entitlements file, the bundle assembly script and the wheel retag.
+# It is not package code — nothing in `local_operator/` imports it — but it is the
+# only way to BUILD the signed helper, and CI builds the macOS wheel from the wheel
+# rather than from this tree. Without this line an sdist would ship a package whose
+# macOS presence tier cannot be built by anyone who has the sdist but not the
+# repository, which is the opposite of "the build inputs are public, the signed
+# output is not committed" (docs/design/operator-key-agent.md §7).
+#
+# The signed artefact itself is never in an sdist or a wheel built from source: it
+# cannot be, since it needs the signing identity and the profile.
+graft packaging/macos
