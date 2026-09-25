@@ -1058,17 +1058,31 @@ async def test_an_answer_that_never_reached_the_owner_writes_no_receipt(
     transport's answer is, because a socket dying exactly between two awaits
     cannot be scheduled from a test: it is raised from ``client.approval_answer``,
     which is precisely the boundary the product itself treats as fallible —
-    ``ConnectionError`` out of it is swallowed two frames up by design.
+    ``ConnectionError`` out of it is swallowed two frames up by design. The socket
+    goes DOWN with it (``client._connected = False``), because that is what the
+    exception means and because a live socket here changes the OUTCOME under test
+    rather than the observation — see the next paragraph.
 
     WHAT THIS DOES NOT PIN. Whether a card is offered AGAIN after the notice. The
     gate is still unanswered, so the ladder may start a second bridge — correct
     while the viewer can still bind (the question is open, and the operator should
     be able to answer it once the session is back), and refused one level down by
     the ladder's G6 on ``can_ever_bind`` for a session whose owner is gone
-    (``test_a_source_that_can_never_bind_is_offered_no_gate_card``). This rig fakes
-    only the transport, so its owner still looks perfectly bindable and a second
-    card is expected here. The receipt, the sentence and the unanswered gate are
-    what must hold either way, and those are what this asserts.
+    (``test_a_source_that_can_never_bind_is_offered_no_gate_card``). Here the
+    second card is REFUSED, because the dead socket is ``can_ever_bind``'s false
+    term on this boot facade — and that refusal is load-bearing for this case
+    rather than incidental to it. THE SENTENCE IS PRESENT-PROGRESSIVE ABOUT THE
+    LINK (U5), so it is retired the moment the app believes the link is back, and
+    a live socket plus the still-pending gate is exactly that belief: the app
+    re-offers the card at once, reads its own re-offer as
+    ``_gate_card_is_answerable``, and takes the row down inside the same pump it
+    wrote it in. Measured on this rig at 2 runs in 5 (and 1 in 3 under load) with
+    a live socket — the same sequence the U5 case below names in its own comment,
+    where it was answered by taking the socket down for the same reason. Both
+    halves asserted here need the socket to be gone: a receipt retracted for a
+    reply that reached nobody, and a sentence reporting a link that is not there.
+    The receipt, the sentence and the unanswered gate are what must hold, and
+    those are what this asserts.
     """
     rig = await _rig(tmp_path / "config", monkeypatch, "alpha")
     app = _app(rig, "alpha")
@@ -1090,8 +1104,9 @@ async def test_an_answer_that_never_reached_the_owner_writes_no_receipt(
                 #: The posts the app attempted. One entry is how this test knows the
                 #: keypress was TAKEN and a delivery attempted — the fact the whole case
                 #: turns on, and one the card's own presence cannot tell us (see the
-                #: docstring: whether a card is offered again afterwards depends on
-                #: whether the viewer can still bind, which this rig leaves alone).
+                #: docstring: a card IS offered again under this rig's live socket,
+                #: which retires the sentence this case is about — the socket is
+                #: therefore taken down with the post).
                 posted: list[Any] = []
                 try:
                     # Mounted AND FOCUSED: the premise is a card the operator can
@@ -1107,15 +1122,45 @@ async def test_an_answer_that_never_reached_the_owner_writes_no_receipt(
 
                     async def dead_socket(*args: Any, **_kwargs: Any) -> Any:
                         posted.append(args[0] if args else None)
+                        # THE LINK GOES DOWN WITH THE POST, not just the post — the
+                        # rule the U5 case below states, and the reason this case was
+                        # green locally and red in CI. A `ConnectionError` out of a
+                        # socket that still reports `connected` is a state the
+                        # product cannot be in, and one it answers by re-offering the
+                        # still-pending gate at once and retiring the sentence in the
+                        # same pump it wrote it in (see the docstring).
+                        client._connected = False
                         raise ConnectionError("the owner's socket is gone")
 
                     monkeypatch.setattr(client, "approval_answer", dead_socket)
 
+                    def undelivered_blocks() -> list[Any]:
+                        return [
+                            b
+                            for b in app._transcript_view().blocks()
+                            if isinstance(b, NoticeBlock) and "Answer not delivered" in b.text()
+                        ]
+
                     await pilot.press("y")
-                    # The post happens one await after the settle, and the notice is
-                    # scheduled with `call_later`, so the correction lands on a later
-                    # turn than the keypress.
-                    await _pump(pilot, 40)
+                    # AWAITED ON THE NOTICE, not on a turn budget. The post happens
+                    # one await after the settle and the notice is scheduled with
+                    # `call_later`, so the correction lands on a later turn than the
+                    # keypress — and how many turns that takes is the runner's
+                    # business rather than this case's, which is the count-not-clock
+                    # rule `_RESURFACE_TURNS` already states.
+                    assert await _pump_until(
+                        pilot, lambda: bool(undelivered_blocks()), tries=_RESURFACE_TURNS
+                    ), (
+                        "no undelivered notice was written for an answer the owner never "
+                        "received, so this case has nothing to measure"
+                        + _state(app, alpha, source, probe)
+                        + f"\n  retained notices = {app._gate_reply_notices!r}"
+                        + f"\n  posts attempted = {len(posted)!r}"
+                    )
+                    # Turns under the written row, so a retirement that only fires
+                    # once the band refreshes has somewhere to happen (it must not,
+                    # here — the card is refused while this socket is down).
+                    await _pump(pilot, 30)
 
                     blocks = app._transcript_view().blocks()
                     receipts = [b for b in blocks if isinstance(b, ApprovalBlock)]
