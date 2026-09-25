@@ -3496,3 +3496,49 @@ def test_roster_index_agrees_with_get_and_the_ordered_resolver_on_a_swept_alias(
     assert comms.job("alias") is later_row
     # Leg 3: the roster pass's indexed lookup must answer the same row.
     assert comms.roster_pass().job("alias") is later_row
+
+
+def test_a_held_child_report_and_a_delivered_one_do_not_read_alike_on_the_phone() -> None:
+    """Review round 2 MINOR-B / design D9 / UX U8: the shared home has two callers.
+
+    ``harness/rows.py::held_delivery_notice`` states the rule this decision lives
+    by — "the phone and the TUI must agree on the words and the tier" — and Round 1
+    added only the TUI branch, so on the phone a held row and a delivered one
+    painted as identical ``notice``s. That is the U6 defect unfixed on the surface
+    where, by Round 1's own U2 reasoning, this row is load-bearing rather than a
+    duplicate of the assistant's answer.
+
+    Both rows are folded together on purpose: they differ by exactly one flag, so
+    an assertion on either alone would pass for the wrong reason. The delivered
+    row keeps the generic fallback (the phone's pre-existing behaviour); only the
+    held row takes the shared decision, and it takes its tier from it.
+    """
+    from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE
+    from local_operator.harness.rows import HELD_DELIVERY_NOTICE
+    from local_operator.harness.types import CustomMessage
+    from local_operator.mobile.projection import fold_messages_to_entries
+
+    def row(job_id: str, *, held: bool) -> CustomMessage:
+        details: dict[str, object] = {
+            "job_id": job_id,
+            "text": f"background job '{job_id}' completed:\nthe report",
+        }
+        if held:
+            details["held"] = True
+        return CustomMessage(
+            custom_type=JOB_RESULT_MESSAGE_TYPE, attribution="user", details=details
+        )
+
+    entries = fold_messages_to_entries([row("qa-r2", held=True), row("rev-r6", held=False)])
+    held, delivered = entries
+
+    assert held.kind == "notice" and delivered.kind == "notice"
+    assert held.text.endswith(HELD_DELIVERY_NOTICE.split("\n")[-1])
+    assert held.details.get("severity") == "warning", (
+        "the held row takes the tier the shared decision gives it"
+    )
+    # The delivered row carries the child's text and NO held marker, so the two
+    # are distinguishable — which is the whole finding.
+    assert HELD_DELIVERY_NOTICE.split("\n")[-1] not in delivered.text
+    assert "held when it arrived" in held.text
+    assert "held when it arrived" not in delivered.text
