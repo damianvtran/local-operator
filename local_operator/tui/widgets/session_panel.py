@@ -75,6 +75,7 @@ from local_operator.tui.widgets.analytics_panel import (
     format_cost,
     format_percent,
     format_tokens,
+    format_tps,
     proportion_bar,
     scope_needs_cost_legend,
     search_component_text,
@@ -502,6 +503,17 @@ def _group_rows(
     rows: list[_BarRow] = []
     for name, agg in ordered:
         note: list[tuple[str, str]] = [(f"{agg.calls} req", "dim")]
+        # The decode rate rides this row's NOTE rather than taking a column.
+        # Two reasons: this table's job is to say where the session's work went,
+        # so the rate is chrome beside the request count rather than the thing
+        # being compared down the column; and a note can simply say nothing when
+        # there is no measurement, where a column would have to print a dash in
+        # every row of a session that predates the metric. A model whose calls
+        # all answered in one frame reads the same as one with no window yet,
+        # which is the honest thing: neither has a measured generation rate.
+        if agg.decode_tps is not None:
+            note.append((" · ", "dim"))
+            note.append((f"{format_tps(agg.decode_tps)} tok/s", "dim"))
         failed = max(0, agg.calls - agg.ok_calls)
         if failed:
             # ``warning``, not ``dim``: a failed request is the one thing on this

@@ -37666,22 +37666,86 @@ class OperatorApp(App[None]):
         # ``push_screen`` (not the awaiting variant): the screen dismisses
         # itself on Esc and returns nothing to reconcile, exactly like the
         # other read-only overlays.
-        self.push_screen(
-            AnalyticsScreen(
-                aggregate,
-                daily=daily,
-                monthly=monthly,
-                window_totals=window_totals,
-                # Search spend is not in this ledger (``web_search`` bills
-                # separately), so the two halves are handed to the screen rather
-                # than derived from the aggregate. Read HERE, on the same pass
-                # that read the store, so the screen holds one snapshot of each
-                # and a repaint cannot show a search total from a different
-                # moment than the model one.
-                search_spend=self._process_search_spend(),
-                session_search_spend=self._session_search_spend(),
-            )
+        from local_operator.tui.widgets.analytics_panel import MODEL_RATES_PENDING
+
+        screen = AnalyticsScreen(
+            aggregate,
+            daily=daily,
+            monthly=monthly,
+            window_totals=window_totals,
+            # Search spend is not in this ledger (``web_search`` bills
+            # separately), so the two halves are handed to the screen rather
+            # than derived from the aggregate. Read HERE, on the same pass
+            # that read the store, so the screen holds one snapshot of each
+            # and a repaint cannot show a search total from a different
+            # moment than the model one.
+            search_spend=self._process_search_spend(),
+            session_search_spend=self._session_search_spend(),
+            # The per-model table is the ONE section with its own read, and it
+            # is NOT read on this pass: ``model_rates()`` groups the raw ledger
+            # (seconds on the operator's 1.95 M rows), and folding it in here
+            # would make every open of this screen pay it — including the opens
+            # that never scroll to the table. So the section starts in its
+            # "reading" state and the worker below fills it in. The screen shows
+            # the same snapshot of everything else either way.
+            model_rates=MODEL_RATES_PENDING,
         )
+        self.push_screen(screen)
+        self.run_worker(
+            self._read_model_rates_worker(screen),
+            thread=False,
+            group="analytics",
+            exclusive=True,
+            # The read is already isolated in a thread and cannot raise, but a
+            # screen a user opened to LOOK at their ledger must never be the
+            # thing that takes the session down (same rule as ``/info``).
+            exit_on_error=False,
+        )
+
+    async def _read_model_rates_worker(self, screen: Any) -> None:
+        """Fill in the per-model table's own read, after the screen is up.
+
+        Its own worker, and its own exception boundary: this read is slower than
+        everything else on the screen put together, so a failure here must cost
+        the table (and say so in that table) rather than the whole report. The
+        table is scoped to the same 30-day window the daily chart draws, so the
+        two sections describe one span even though they come from different
+        stores.
+        """
+        from local_operator.analytics.store import AnalyticsStore
+
+        def _read() -> list[Any]:
+            store = AnalyticsStore()
+            try:
+                return store.model_rates(since_ms=self._analytics_window_start_ms())
+            finally:
+                store.close()
+
+        try:
+            rows = await asyncio.to_thread(_read)
+        except Exception:  # noqa: BLE001 — a slow side table never breaks the screen
+            logger.debug("analytics: model rates failed", exc_info=True)
+            rows = []
+        # ``is_mounted`` because the user can dismiss the screen while a
+        # seconds-long read is in flight, and a detached screen has nothing to
+        # repaint.
+        if getattr(screen, "is_mounted", False):
+            screen.set_model_rates(rows)
+
+    @staticmethod
+    def _analytics_window_start_ms() -> int:
+        """Local midnight 29 days back: the 30-day window the panel charts.
+
+        Spelled here rather than taken from ``series_totals`` because the two are
+        different stores: the chart's window is a count of daily ROLLUP buckets,
+        while this one is a ``ts_ms`` bound on the raw ledger, and deriving the
+        second from the first would make a day with no calls shift the model
+        table's window off the chart's.
+        """
+        now = time.time()
+        local = time.localtime(now)
+        midnight = time.mktime((local.tm_year, local.tm_mon, local.tm_mday, 0, 0, 0, 0, 0, -1))
+        return int((midnight - 29 * 86400) * 1000)
 
     def _cmd_session(self, arg: str, notice: NoticeFn) -> None:
         """Read only this session's ledger, or copy its ID; never treat text as a prompt."""
