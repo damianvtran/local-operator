@@ -89,12 +89,12 @@ _CONSOLE = textwrap.dedent("""
     if won:
         deadline = time.monotonic() + float(budget)
         while time.monotonic() < deadline:
-            warm = standby._WARM[0]
+            warm = standby._POOL[0] if standby._POOL else None
             warmed = bool(warm is not None and warm.alive() and standby.adoption_possible())
             if warmed:
                 break
             time.sleep(0.2)
-    spare = standby._WARM[0]
+    spare = standby._POOL[0] if standby._POOL else None
 
     def _publish(path, payload):
         # ATOMIC (QA round 3, Q4-4): a plain write lets a reader observe a
