@@ -357,10 +357,11 @@ async def test_a_managers_worker_resumes_on_the_managers_recorded_model_after_re
     tmp_path, monkeypatch
 ):
     """Q1 across a restart, plus Q2: the manager is gone and its session is not
-    rebuilt, so the worker takes the model RECORDED for the manager. The tier is
-    re-pointed first, which proves the recorded model (not a re-resolved tier)
-    is read. The receipt names the worker's previous model from its saved record,
-    because the worker's own job row lived on the manager's job manager."""
+    rebuilt. It OWNED its model (a tier), so the worker takes that pin
+    re-resolved from current config, exactly as the manager's own resume would
+    (D9.4), and never the root's switched model. The receipt names the worker's
+    previous model from its saved record, because the worker's own job row lived
+    on the manager's job manager."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     stream = HangingThenDoneStream(hold="MANAGE-HOLD")
     root, manager, mgr_id, worker_id = await _manager_with_worker(tmp_path, stream)
@@ -370,8 +371,7 @@ async def test_a_managers_worker_resumes_on_the_managers_recorded_model_after_re
     await root.dispose()
 
     # Restarted: the manager ran on flash; the operator now switches the ROOT's
-    # model AND the manager's tier. Neither may move the worker off the model
-    # its manager actually ran on.
+    # model AND re-points the manager's tier. The tier decides, the root does not.
     _write_tiers(tmp_path / "config", lo="openrouter/moonshotai/kimi-k3")
     after = RecordingStream()
     revived = _parent(tmp_path, after)
@@ -382,8 +382,11 @@ async def test_a_managers_worker_resumes_on_the_managers_recorded_model_after_re
         text = await _hub_resume(revived, worker_id)
         new_id = _resumed_id(revived, text)
         await wait_for(lambda: _completed(revived, new_id))
-        assert after.selectors_for(RESUME_PROMPT) == [FLASH]
-        assert f"on its parent's model ({FLASH})" in text
+        assert after.selectors_for(RESUME_PROMPT) == ["openrouter/moonshotai/kimi-k3"]
+        assert (
+            "on its parent's model (openrouter/moonshotai/kimi-k3)"
+            f" (its previous run was on {FLASH})"
+        ) in text
     finally:
         await revived.dispose()
 
@@ -462,8 +465,9 @@ async def test_a_nested_child_whose_parent_is_lost_keeps_its_model_and_says_so(
         new_id = _resumed_id(revived, text)
         await wait_for(lambda: _completed(revived, new_id))
         assert after.selectors_for(RESUME_PROMPT) == [FLASH]
-        assert "its parent's model could not be found; kept its previous model" in text
-        assert f"on {FLASH}" in text
+        assert (
+            f"on {FLASH} (its parent's model could not be found; kept its previous model)" in text
+        )
     finally:
         await revived.dispose()
 
@@ -488,3 +492,247 @@ async def test_a_direct_child_still_takes_the_roots_model(tmp_path, monkeypatch)
         assert "could not be found" not in text
     finally:
         await parent.dispose()
+
+
+# ---------------------------------------------------------------------------
+# D9.4: walk up to the nearest ancestor that DECIDES a model
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_worker_of_an_inheriting_manager_follows_the_roots_switch(tmp_path, monkeypatch):
+    """Review round 2, R5. An UNPINNED manager's recorded label is only a snapshot
+    of the root's model when it launched. After the manager settles and the root
+    switches to flash, its worker must resume on flash, not on that stale Opus."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    stream = HangingThenDoneStream(hold="MANAGE-HOLD")
+    root = _parent(tmp_path, stream)
+    try:
+        mgr_id = root._launch_subagent(label="mgr", prompt="MANAGE-HOLD")
+        await wait_for(lambda: (r := root.subagent_comms._record(mgr_id)) is not None and r.child)
+        manager = root.subagent_comms._record(mgr_id).child
+        assert manager.model_label == OPUS
+        worker_id = manager._launch_subagent(label="worker", prompt="do the work")
+        await wait_for(lambda: _completed(manager, worker_id))
+        stream.release.set()
+        await wait_for(lambda: _completed(root, mgr_id))
+
+        root.set_model(SWITCHED, explicit=True)
+        text = await _hub_resume(root, worker_id)
+        new_id = _resumed_id(root, text)
+        await wait_for(lambda: _completed(root, new_id))
+
+        assert stream.selectors_for(RESUME_PROMPT) == [FLASH]
+        assert f"on this session's model ({FLASH}) (its previous run was on {OPUS})" in text
+        assert "its parent's model" not in text
+    finally:
+        stream.release.set()
+        await root.dispose()
+
+
+class _Both:
+    """Routes a request to the stream whose hold marker it carries, recording it
+    on the first so ``selectors_for`` sees every request in one place."""
+
+    def __init__(self, main: HangingThenDoneStream, other: HangingThenDoneStream) -> None:
+        self.main, self.other = main, other
+
+    def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+        text = " ".join(
+            block.text
+            for message in request.messages
+            for block in (getattr(message, "content", None) or [])
+            if isinstance(block, TextContent)
+        )
+        if self.other.hold in text:
+            self.main.requests.append(request)
+            return self.other(request, signal)
+        return self.main(request, signal)
+
+
+@pytest.mark.asyncio
+async def test_a_three_level_chain_resolves_to_the_pinned_grandparent(tmp_path, monkeypatch):
+    """Root (Opus) -> A pinned ``lo`` (flash) -> B inheriting -> C inheriting.
+    With A and B settled, the root switched, and ``lo`` re-pointed to kimi,
+    resuming C skips B (it inherited, so its flash label is a snapshot) and
+    stops at A, whose pin re-resolves to kimi."""
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    _write_tiers(config_dir, lo=FLASH)
+    stream = HangingThenDoneStream(hold="HOLD-A")
+    root = _parent(tmp_path, stream)
+    comms = root.subagent_comms
+    try:
+        a_id = root._launch_subagent(label="a", prompt="HOLD-A", effort="lo")
+        await wait_for(lambda: (r := comms._record(a_id)) is not None and r.child)
+        a = comms._record(a_id).child
+        # B's first turn is held too, on its OWN release, so it stays live to
+        # launch C and then settles BEFORE A does: a settling A disposes a
+        # still-running B with it (cancelled), which is not the shape under test.
+        hold_b = HangingThenDoneStream(hold="HOLD-B")
+        a._stream_fn = _Both(stream, hold_b)
+        b_id = a._launch_subagent(label="b", prompt="HOLD-B")
+        await wait_for(lambda: (r := comms._record(b_id)) is not None and r.child)
+        b = comms._record(b_id).child
+        assert b.model_label == FLASH
+        c_id = b._launch_subagent(label="c", prompt="do the work")
+        await wait_for(lambda: _completed(b, c_id))
+        assert stream.selectors_for("do the work") == [FLASH]
+        hold_b.release.set()
+        await wait_for(lambda: _completed(a, b_id))
+        stream.release.set()
+        await wait_for(lambda: _completed(root, a_id))
+
+        _write_tiers(config_dir, lo="openrouter/moonshotai/kimi-k3")
+        root.set_model(SWITCHED.model_copy(update={"model_id": "openai/gpt-6"}), explicit=True)
+        text = await _hub_resume(root, c_id)
+        new_id = _resumed_id(root, text)
+        await wait_for(lambda: _completed(root, new_id))
+
+        assert stream.selectors_for(RESUME_PROMPT) == ["openrouter/moonshotai/kimi-k3"]
+        assert (
+            "on its parent's model (openrouter/moonshotai/kimi-k3)"
+            f" (its previous run was on {FLASH})"
+        ) in text
+    finally:
+        stream.release.set()
+        await root.dispose()
+
+
+def _rewrite_sidecar(tmp_path, edit) -> None:
+    import json
+
+    from local_operator.session.session import SUBAGENT_ROSTER_SIDECAR
+
+    sidecar = tmp_path / "sess" / SUBAGENT_ROSTER_SIDECAR
+    details = json.loads(sidecar.read_text())
+    edit(details)
+    sidecar.write_text(json.dumps(details))
+
+
+async def _settled_nested_worker(tmp_path, *, effort: str | None = "lo"):
+    """A manager (pinned when ``effort`` is set) and its worker, both settled and
+    persisted, with the root disposed. Returns ``(mgr_id, worker_id, worker_dir)``."""
+    stream = HangingThenDoneStream(hold="MANAGE-HOLD")
+    root = _parent(tmp_path, stream)
+    comms = root.subagent_comms
+    mgr_id = root._launch_subagent(label="mgr", prompt="MANAGE-HOLD", effort=effort)
+    await wait_for(lambda: (r := comms._record(mgr_id)) is not None and r.child)
+    manager = comms._record(mgr_id).child
+    worker_id = manager._launch_subagent(label="worker", prompt="do the work")
+    await wait_for(lambda: _completed(manager, worker_id))
+    worker_dir = comms.session_dir_of(worker_id)
+    stream.release.set()
+    await wait_for(lambda: _completed(root, mgr_id))
+    await root._persist_subagent_roster()
+    await root.dispose()
+    return mgr_id, worker_id, worker_dir
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_ownership_breaks_the_chain_and_keeps_the_model(tmp_path, monkeypatch):
+    """D9.4 on a legacy sidecar: an UNPINNED manager record saved before
+    ``owns_model`` existed cannot say whether its label was a choice, so the
+    chain breaks and the worker keeps its own previous model (D9.2), never the
+    root's, and the receipt says so."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    _write_tiers(tmp_path / "config", lo=FLASH)
+    mgr_id, worker_id, _ = await _settled_nested_worker(tmp_path, effort=None)
+
+    def legacy(details):
+        for row in details["records"]:
+            row.pop("owns_model", None)
+
+    _rewrite_sidecar(tmp_path, legacy)
+    after = RecordingStream()
+    revived = _parent(tmp_path, after)
+    try:
+        revived.set_model(SWITCHED, explicit=True)
+        text = await _hub_resume(revived, worker_id)
+        new_id = _resumed_id(revived, text)
+        await wait_for(lambda: _completed(revived, new_id))
+        assert after.selectors_for(RESUME_PROMPT) == [OPUS]
+        assert f"on {OPUS} (its parent's model could not be found; kept its previous model)" in text
+    finally:
+        await revived.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_nested_child_still_reports_its_previous_model(tmp_path, monkeypatch):
+    """QA round 2, Q3. A sidecar from before labels were saved: the pinned
+    manager's stored tier still decides (a tier IS ownership), and the worker's
+    previous model comes from its own ``selected_model`` journal row."""
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    _write_tiers(config_dir, lo=FLASH)
+    mgr_id, worker_id, _ = await _settled_nested_worker(tmp_path)
+
+    def legacy(details):
+        for row in details["records"]:
+            row.pop("owns_model", None)
+            row.pop("model_label", None)
+
+    _rewrite_sidecar(tmp_path, legacy)
+    _write_tiers(config_dir, lo="openrouter/qwen/qwen3.8-max")
+    after = RecordingStream()
+    revived = _parent(tmp_path, after)
+    try:
+        text = await _hub_resume(revived, worker_id)
+        new_id = _resumed_id(revived, text)
+        await wait_for(lambda: _completed(revived, new_id))
+        assert after.selectors_for(RESUME_PROMPT) == ["openrouter/qwen/qwen3.8-max"]
+        assert (
+            "on its parent's model (openrouter/qwen/qwen3.8-max)"
+            f" (its previous run was on {FLASH})"
+        ) in text
+    finally:
+        await revived.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_nested_child_with_no_model_anywhere_runs_on_this_sessions_model(
+    tmp_path, monkeypatch
+):
+    """D9.3 (review R6, QA Q4): the chain breaks AND the child has no model of
+    its own (no saved label, no ``selected_model`` row, as for a child that never
+    ran a turn). It runs on the resuming session's model and the receipt says
+    so, naming the model once."""
+    import json
+
+    from local_operator.session.transcript import TRANSCRIPT_FILENAME
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    _write_tiers(tmp_path / "config", lo=FLASH)
+    mgr_id, worker_id, worker_dir = await _settled_nested_worker(tmp_path)
+
+    def orphan(details):
+        details["records"] = [r for r in details["records"] if r.get("job_id") != mgr_id]
+        details["jobs"] = [r for r in details["jobs"] if r.get("id") != mgr_id]
+        for row in details["records"]:
+            row.pop("model_label", None)
+
+    _rewrite_sidecar(tmp_path, orphan)
+    journal = worker_dir / TRANSCRIPT_FILENAME
+    kept = [
+        line
+        for line in journal.read_text().splitlines()
+        if json.loads(line).get("payload", {}).get("custom_type") != "selected_model"
+    ]
+    journal.write_text("\n".join(kept) + "\n")
+
+    after = RecordingStream()
+    revived = _parent(tmp_path, after)
+    try:
+        assert revived.subagent_comms.last_model_label(worker_id) == ""
+        revived.set_model(SWITCHED, explicit=True)
+        text = await _hub_resume(revived, worker_id)
+        new_id = _resumed_id(revived, text)
+        await wait_for(lambda: _completed(revived, new_id))
+        assert after.selectors_for(RESUME_PROMPT) == [FLASH]
+        assert (
+            f"on {FLASH} (its parent's model could not be found and no previous model "
+            "was recorded; using this session's model)"
+        ) in text
+        assert "this session's model (" not in text
+    finally:
+        await revived.dispose()
