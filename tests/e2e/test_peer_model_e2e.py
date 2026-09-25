@@ -19,8 +19,10 @@ What this file proves end to end: the idle switch and its receipt, the durable
 that changes nothing, the already-on answer, the stored-session refusal, and —
 on a busy target — that the provider call ALREADY in flight finishes on the old
 model while the next call in the SAME turn runs on the new one (read off the
-``model_id`` each assistant row's ``usage`` records). What it does not prove:
-D7's older-peer mapping, which rests on
+``model_id`` each assistant row's ``usage`` records). It also proves that
+``lop sessions`` carries the new model without waiting for a heartbeat (PR
+#1555's change-driven republish), polled on the record. What it does not
+prove: D7's older-peer mapping, which rests on
 ``tests/unit/mobile/test_peer_model_wire.py`` (a registrant that answers
 ``unknown op``) and on QA against a real older build.
 
@@ -43,6 +45,7 @@ from typing import Any
 import pytest
 
 from local_operator.session.runtime import registry
+from local_operator.session.runtime.types import HEARTBEAT_INTERVAL_S
 from tests.e2e.harness import NO_NOTIFY_ENV
 from tests.e2e.watchdog import bounded
 
@@ -176,6 +179,23 @@ def test_lop_model_switches_a_live_session_and_audits_it(headless_tui_env: Path)
             "its next turn runs on it",
             f"→ {name} (pid {record.pid})",
         ]
+
+        # `lop sessions` shows the new model promptly (PR #1555's republish on
+        # the push tick). Polled on the RECORD, never slept for. The bound is a
+        # structural one, not a speed claim: well inside the first 15 s heartbeat,
+        # so only the change-driven republish can have written it — the
+        # heartbeat floor that used to be the only writer cannot pass this.
+        with bounded(30, "peer model: the record carries the new model"):
+            _wait(
+                lambda: getattr(_record(config, SESSION_ID), "model_label", "")
+                == "deepseek/deepseek-flash",
+                HEARTBEAT_INTERVAL_S / 3,
+                "`lop sessions`'s record kept the old model until the heartbeat",
+            )
+        listed = _lop(config, "sessions", "--json")
+        assert listed.returncode == 0, listed.stderr
+        rows = [row for row in json.loads(listed.stdout) if row["session_id"] == SESSION_ID]
+        assert [row["model_label"] for row in rows] == ["deepseek/deepseek-flash"], rows
 
         with bounded(30, "peer model: transcript rows"):
             rows = _wait(
