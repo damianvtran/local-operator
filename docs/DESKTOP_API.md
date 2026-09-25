@@ -506,7 +506,7 @@ readings.
 
 | Endpoint | Request | Result inside `CRUDResponse.result` |
 | --- | --- | --- |
-| GET `/v1/desktop/sessions` | `limit` 1..500, default100 | `{sessions: [...]}` canonical rows plus explicit desktop drafts |
+| GET `/v1/desktop/sessions` | `limit` 1..500, default100; `include_archived`; and with the `session_catalogue_page` key `scope_kind`, `scope_name`, `cursor`, `with_counts` | `{sessions:[...],truncated,limit,degraded,next_cursor,cursor_missing,scope,counts}` - canonical rows plus explicit desktop drafts, then any off-page pinned rows (**first page of the head only**) |
 | GET `/v1/desktop/sessions/search` | `q` (<=256 chars), `limit` 1..500, default100 | `{sessions:[{id,name,mtime,forked,rank,body_match}],query,limit}`, best match first |
 | POST `/v1/desktop/sessions` | `{request_id, cwd, target?, model?}` | `{session_id}`; cwd must exist |
 | POST `/v1/desktop/sessions/preview` | `{request_id, cwd, target?, model?}` | `{frontend: <wire sync payload>}` for a session that does not exist |
@@ -521,6 +521,58 @@ readings.
 | POST `.../{id}/notified` | `{completion_token}` | `{claimed:bool}`; cold, never marks read |
 | POST `.../{id}/seen` | `{completion_token}` | `AttentionState`; 409 when the token is not this conversation's current completion |
 | POST `/v1/desktop/attention/seen` | `{items:[{session_id,completion_token}]}`, 1..500 items | `{read:[<store state>], superseded:[session_id], unknown:[session_id]}`; cold, 200 even when nothing cleared |
+
+
+### Scoping and paging the catalogue (`session_catalogue_page: 1`)
+
+A bare `GET `/v1/desktop/sessions`` answers the WHOLE listing: on a store of a few hundred
+sessions that is a multi-second read, and a large group's conversations can fall
+past the page entirely -- so a collapsed group's badge under-reports and
+expanding it draws "No chats yet" over real conversations. A client that sees
+`features.session_catalogue_page >= 1` may instead ask for one group's page and
+walk it by cursor:
+
+| parameter | type | default | meaning |
+| --- | --- | --- | --- |
+| `scope_kind` | `team` \| `agent` | - | filter the page to one binding; the two halves travel together |
+| `scope_name` | str <=64 | - | the team or profile display name |
+| `cursor` | str <=256 | - | an opaque position taken from a previous `next_cursor` |
+| `with_counts` | bool | false | include the per-group census |
+| `limit` | int 1..500 | 100 | unchanged: the page size **within** the scope |
+| `include_archived` | bool | false | unchanged |
+
+The answer carries four more fields, always present and defaulted -- which is how
+a client tells "this answer is not paged" apart from "this server is too old to
+page it":
+
+* **`next_cursor`** -- the resume position of the page's last row. It is non-null
+  **exactly when `truncated` is true**; the two are one fact.
+* **`cursor_missing`** -- true when the request carried a cursor this server could
+  not use: unreadable, minted for another scope, or from a token version this
+  server does not know. The answer is then the scope's FIRST page. An unusable
+  cursor is never an error, because a cursor can outlive the shape it names.
+* **`scope`** -- the scope the answer belongs to, echoed so a page landing after
+  the group was collapsed can still be attributed to the request that asked.
+* **`counts`** -- the census, present only with `with_counts=true`. Its POPULATION
+  is the one a default list can draw: **visible sessions that are not archived**.
+  Every default list in the app hides archived rows, and a badge inflated by rows
+  the panel cannot show is a badge that invites a person into an empty group. The
+  request's own `include_archived` still governs which ROWS come back; a client
+  that asks for archived rows gets them and the counts do not move.
+
+Refusals are named (422, `{code, message}`): `scope_name_required`,
+`scope_kind_required`, `scope_kind_unknown`, `scope_name_too_long`. An
+out-of-range `limit` keeps the framework's own generic validation detail, exactly
+as it did before this key existed. An empty scope is not an error: it is a 200
+with an empty page and a census entry of 0, because a team with no conversations
+yet is a legitimate state and a name in `attachment.json` outlives the registry
+entry it came from.
+
+Off-page pinned rows are appended to the **first page of the head** only: the
+pinned set as a whole rides the answer the Pinned section is drawn from, and a
+later page is merely the scope's continuation. A pinned row whose own rank the
+walk reaches still comes back there as an ordinary row -- the row union is
+id-keyed -- but it is never a second extra.
 
 `POST .../{id}/seen` is the read receipt, and **a 2xx from it means this
 conversation is read**: `unseen: false`, the receipt advanced through the token's
@@ -1859,6 +1911,7 @@ absent.
 | `mcp_catalog` | 1 | `GET|POST /v1/desktop/mcp` and `POST /v1/desktop/mcp/credentials`: MCP list, add, remove, test, sign-in and credentials with NO session and NO configured model, in the catalog vocabulary (`connected`/`needs_sign_in`/`not_started`/`connecting`/`error`, per-row `actions`, bounded refusal codes) — see [DESKTOP_CONTROLS.md](DESKTOP_CONTROLS.md) | the app keeps the session-scoped `/v1/desktop/sessions/{id}/mcp` path verbatim; it must NOT show "update the backend", because that path still works |
 | `tunnel` | 1 | `GET /v1/desktop/tunnel`, and `radient_login`/`tunnel_remedy` on `GET /v1/auth/status` | the app shows no tunnel state and no sign-in callout, and the account section keeps its current wording — it must not read the absent key as "the tunnel is fine" |
 | `subagent_trajectory` | 1 | `POST`/`DELETE /v1/desktop/sessions/{id}/children/{job}/trajectory` and the per-job `job_trajectory_appends`/`job_trajectory_replacements` fields they turn on | the child reader keeps its durable pager, opens no watch, and its session's frames carry the empty pair they always have (the opt-in is per session, so an app that opens no reader for ANY child gets exactly today's frames) |
+| `session_catalogue_page` | 1 | `scope_kind`/`scope_name`/`cursor`/`with_counts` on `GET `/v1/desktop/sessions``, and `next_cursor`/`cursor_missing`/`scope`/`counts` in its answer | the app keeps today's exact behaviour: one unscoped `limit=500` request is the only shape it may send. It must NOT send a scope or a cursor to a daemon that does not advertise this key -- unknown query parameters are IGNORED rather than refused, so a scope would be answered with the unfiltered listing drawn under that group's name, and a cursor with page one again |
 
 Neither bumps `notification_contract`, which stays 1: the payload is unchanged
 except for the derived `focus_policy` routing field, which the client already
