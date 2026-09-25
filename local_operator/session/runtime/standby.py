@@ -43,15 +43,17 @@ ownership, mode, path or handshake that could have the same strength.
 
 THE CONSEQUENCE, STATED PLAINLY: one standby per WARMING CONSOLE, not one per
 machine. On this host the desktop app's ``lop serve`` daemon is the singleton
-that warms (so the desktop surface keeps one spare per machine, exactly as
+that warms (so the desktop surface keeps its spares per machine, exactly as
 intended), while each interactive TUI that opens new conversations warms its
 own. The earlier machine-wide sharing is not recoverable by any means that keeps
 the capability out of a stranger's hands — see the trade-off section of the PR
 body — and the mitigations here are: warming is opt-in per process and only
-enabled at the TUI and ``serve`` launch points; it is triggered lazily AFTER an
-engage (never at boot, never on the critical path); every standby exits on idle
-(:data:`IDLE_REAP_S`), when its console goes away (EOF on the inherited
-descriptor, detected immediately), and when its root disappears.
+enabled at the TUI and ``serve`` launch points; a spare is warmed at the
+console's launch and refilled behind every engage by the supervisor thread
+(:func:`notify_engage`), never on an engage's critical path; every standby exits
+on adoption, when its console goes away (EOF on the inherited descriptor,
+detected immediately), when its root disappears, and on idle where the slot
+reaps (the daemon's keeps warm — see :data:`DAEMON_SPARE_DEPTH`).
 
 WHAT IT IS NOT — THE OPERATOR'S CONSTRAINTS, AND HOW EACH IS HELD
 ================================================================
@@ -105,9 +107,10 @@ WHAT IT IS NOT — THE OPERATOR'S CONSTRAINTS, AND HOW EACH IS HELD
       one step earlier makes both true for the whole construction window.
 
 (d) COST, measured: max RSS 47-158 MB (median ~130 MB) per standby, sitting at 0%
-    CPU in a blocking read. It is warmed on a daemon thread after an engage, so it
-    costs an engage nothing; it exits on adoption, on idle
-    (:data:`IDLE_REAP_S`), and when its console goes away.
+    CPU in a blocking read. It is warmed on the supervisor's thread, so it costs
+    an engage nothing; it exits on adoption, on idle where the slot reaps
+    (:data:`IDLE_REAP_S`; the daemon's spares keep warm), and when its console
+    goes away.
 
     HOW LONG THE WARM TAKES, AND WHY IT IS NOT PUT IN A NICER SCHEDULING CLASS
     (QA round 1 QW1, QA round 2 Q2-3). The first revision warmed inside Darwin's
@@ -151,14 +154,56 @@ WHAT IT IS NOT — THE OPERATOR'S CONSTRAINTS, AND HOW EACH IS HELD
     slot per root, kernel-released on death, holding TWO slots at most for the
     whole machine — the daemon's (a singleton, and the desktop surface must not
     lose its spare to whichever TUI started first) and one shared by every other
-    console. A console that cannot take its slot spawns cold every time; that is
-    the trade, and it is what turns ~20 spares at ~136 MB each into two.
+    console. Each holder keeps at most :data:`DAEMON_SPARE_DEPTH` /
+    :data:`TUI_SPARE_DEPTH` private spares. A console that cannot take its slot
+    retries at :data:`SLOT_RETRY_S` and spawns cold until it wins; that is the
+    trade, and it is what turns ~20 spares at ~136 MB each into two slots' worth.
 
     A CONSEQUENCE FOR THE CONSTRAINTS ABOVE: the desktop app's ``lop serve``
-    daemon keeps its own spare, and every TUI on the root shares the other, so
-    only the first TUI to warm gets the win and the rest spawn cold while it is
-    held. That is a per-console cost too — a time cost rather than a memory one —
-    and the body's cap section measures it rather than implying it.
+    daemon keeps its own spares, and every TUI on the root shares the other
+    slot, so only the first TUI to warm gets the win and the rest spawn cold
+    while it is held. That is a per-console cost too — a time cost rather than a
+    memory one — and the body's cap section measures it rather than implying it.
+
+THE SUPERVISOR — INVARIANT P, AND THE DEAD-ENDS IT CLOSES
+========================================================
+While a warming console is live (``_WARMING`` and not disabled and its root
+exists), at every instant either **(a)** a ready spare is in hand, **(b)** a warm
+is in flight, or **(c)** a retry is scheduled at a deadline ≤ ``RETRY_CEIL_S``.
+Every transition out of (a)/(b) ends in (c) BY CONSTRUCTION: every clear of a
+tracked spare funnels through :func:`note_spare_gone`, the one choke point, which
+schedules the refill. The first version of this module had no such owner, and
+five separate guards could each leave a live console with no spare and NOTHING
+scheduled — the production state this section was written for (the daemon held
+its slot with no ``[standby]`` child, indefinitely):
+
+    S1  a warm that FAILED cleared the slot and stopped; the next engage re-warmed.
+    S2  a standby that exited within ``REWARM_MIN_LIFE_S`` of its spawn was
+        "exited at once; not re-warming" — reproduced: 90 s with no replacement.
+    S3  a second such exit inside 60 s was refused, not deferred — permanent.
+    S4  a DECLINED spare (warm-sensitive environment mismatch) was kept alive
+        forever while ``ensure_warm`` refused to warm beside it.
+    S5  a slot held by another console was never re-claimed.
+    S6  ``_spawn_standby`` raising after the claim was swallowed; no retry.
+    S8  a consumed spare's replacement chain could land in S1/S2/S3 — and the
+        consumed entry itself stayed tracked, so the NEXT engage read EOF off
+        its closed channel and RETIRED it: opening a second chat SIGTERMed the
+        first chat's still-live runtime (measured on an isolated daemon: the
+        adopted runtime killed ~1 s into the next engage, which took 7.8 s
+        against 6.5 s cold).
+
+What replaces them: ONE supervisor thread per warming console owns every fork;
+``note_spare_gone`` schedules the refill for every clear; a young death or a
+failed attempt is RETRIED under a doubling backoff (1 s → 30 s, reset when a
+spare reaches READY or a refill lives a normal life) instead of being dropped; a
+warm that never finishes inside ``WARM_DEADLINE_S`` is retired by exact pid; a
+spare declined ``DECLINE_RETIRE_N`` times is retired and refilled (a standing
+mismatch means it can never serve its own console); a slot claim is retried at
+``SLOT_RETRY_S``; and an adopted spare LEAVES the pool immediately, so no path
+can signal a process that is now a session's runtime. The daemon keeps
+``DAEMON_SPARE_DEPTH`` spares and never idle-reaps them; every other console
+keeps one and keeps ``IDLE_REAP_S``. The idle policy travels to the child as
+``STANDBY_IDLE_ENV`` (additive; a child from an older build keeps its 900 s).
 
 RIG NOTE (agent review round 1, R1-6, and it is now structural rather than a
 policy): a rig never leaves a standby behind, because a standby's life is tied
@@ -220,11 +265,14 @@ STANDBY_MODULE = "local_operator.session.runtime.standby"
 #: found — a 12-byte ``--standby-fd`` cannot become a 13-byte ``--operator-fd``).
 STANDBY_FD_FLAG = "--operator-fd"
 
-#: How long a standby waits for an adoption before exiting on its own. Long
-#: enough that an operator who opens new conversations every few minutes always
-#: finds one warm; short enough that a console gives the memory back within the
-#: quarter hour. A standby is no longer shared between consoles, so this is now
-#: purely the memory bound rather than an availability policy.
+#: How long a standby waits for an adoption before exiting on its own, for the
+#: slots that reap on idle at all. Long enough that an operator who opens new
+#: conversations every few minutes always finds one warm; short enough that a
+#: console gives the memory back within the quarter hour. NOT universal any more:
+#: the desktop daemon's slot keeps its spares warm for the life of the console
+#: (see ``DAEMON_SPARE_DEPTH``), and the window travels to the child in
+#: ``STANDBY_IDLE_ENV``. A standby is no longer shared between consoles, so this
+#: is purely the memory bound rather than an availability policy.
 IDLE_REAP_S = 900.0
 
 #: How long the engage side waits for a standby's answer before giving up and
@@ -349,13 +397,45 @@ def _warm_sensitive(env: "dict[str, str] | os._Environ[str]") -> dict[str, str]:
 #: rather than rebound.
 _WARMING: list[bool] = [False]
 
-#: The live standby, or ``None``. At most one per process, and never replaced
-#: while it is alive.
-_WARM: list["_Standby | None"] = [None]
+#: The spares this process holds — READY, or warming with the supervisor on the
+#: clock — at most :data:`DAEMON_SPARE_DEPTH` / :data:`TUI_SPARE_DEPTH` of them.
+#: Only the supervisor (:func:`_spawn_one`, append) and :func:`note_spare_gone`
+#: (remove, for every clear) mutate it, under ``_LOCK``.
+_POOL: list["_Standby"] = []
 
-#: Serialises the spawn/consume transition between the warming thread and the
-#: engage path.
+#: The root this console warms for, set once by :func:`enable_warming`.
+_ROOT: list["Path | None"] = [None]
+
+#: Serialises the pool and the scheduling state between the engage path, the
+#: supervisor and the tests that drive them.
 _LOCK = threading.Lock()
+
+#: Serialises reads and writes on the spare CHANNELS (one lock for the whole
+#: pool: there are at most two spares, and an adoption owns its channel for the
+#: whole handshake). WHY IT EXISTS: readiness is a one-byte peek with a zero
+#: timeout, the supervisor peeks every tick, and without this lock a peek during
+#: an adoption could swallow the first byte of the adoption's REPLY — the reader
+#: then sees a torn frame and a healthy spare is retired.
+_CHANNEL_LOCK = threading.Lock()
+
+#: When (``time.monotonic``) the supervisor may next attempt a spawn. Every
+#: clear of a spare and every failed attempt pushes it; the invariant is that a
+#: console whose pool is empty and whose root exists always has a deadline of at
+#: most :data:`RETRY_CEIL_S` (or the root park probe) ahead — see the module
+#: docstring's invariant P.
+_NEXT_AT: list[float] = [0.0]
+
+#: Consecutive failed warm attempts, for the doubling backoff. Reset when a
+#: spare reaches READY or a refill lives out :data:`REWARM_MIN_LIFE_S`: the
+#: backoff exists for a root that cannot warm, not for the normal
+#: consume-and-replace cycle.
+_ATTEMPTS: list[int] = [0]
+
+#: Wakes the supervisor: the engage path's nudge, and the first fill.
+_NUDGE = threading.Event()
+
+#: The one supervisor thread, started by :func:`enable_warming`.
+_SUPERVISOR: list["threading.Thread | None"] = [None]
 
 #: The desktop daemon's slot. It is a singleton per root (``lop serve``), and it
 #: serves the surface the operator opens conversations from, so it never competes
@@ -407,10 +487,13 @@ class _Standby:
         #: Set once the child says it is warm. Kept as a cached answer so the
         #: engage path never blocks on a read that has not arrived yet.
         self.ready = False
-        #: Set when an adoption SUCCEEDS, i.e. this standby became a runtime. The
-        #: monitor thread reads it to tell "consumed" from "died and must be
-        #: replaced".
-        self.consumed = False
+        #: When the fork happened (``_now()``): the young-death backoff and the
+        #: wedged-warm deadline are both measured from it.
+        self.spawned_at = _now()
+        #: Consecutive declines from THIS spare, and the last reason, for the
+        #: S4 retirement (:data:`DECLINE_RETIRE_N`).
+        self.declines = 0
+        self.decline_reason = ""
 
     def alive(self) -> bool:
         return self.proc.poll() is None
@@ -424,17 +507,21 @@ class _Standby:
 
 
 def enable_warming(root: "Path | None" = None, *, daemon: bool = False) -> None:
-    """Make this process a warmer, and warm one standby now, off the caller's thread.
+    """Make this process a warmer, and start the supervisor that keeps a spare in hand.
 
-    Called by the TUI and the ``serve`` daemon at their launch points, so the
-    FIRST new conversation or cold switch already finds a standby. Never raises:
-    a console that cannot warm simply spawns cold.
+    Called by the TUI and the ``serve`` daemon at their launch points. From here
+    on the supervisor owns every fork: it fills the pool immediately (so the FIRST
+    new conversation already finds a standby), refills behind every engage, and
+    never leaves the pool empty with nothing scheduled (invariant P, module
+    docstring). Never raises: a console that cannot warm simply spawns cold.
 
-    ``daemon`` picks the slot (see :func:`_take_slot`): the daemon is a singleton
-    and keeps its own, every other console shares ``SLOT_TUI``. It is declared
-    HERE, once per process, rather than passed to each warm: the engage path warms
-    too (``launch.engage_runtime``), from both kinds of console, and a per-call
-    parameter would need every caller to remember which one it is.
+    ``daemon`` picks the slot AND with it the depth and idle policy (see
+    :func:`_take_slot`, :data:`DAEMON_SPARE_DEPTH`): the daemon is a singleton and
+    keeps its own spares for the life of the console, every other console shares
+    ``SLOT_TUI``, keeps one and reaps it on idle. It is declared HERE, once per
+    process, rather than passed to each warm: the engage path merely nudges
+    (:func:`notify_engage`), and a per-call parameter would need every caller to
+    remember which kind of console it is.
     """
     if disabled() or os.environ.get("LOP_MOBILE_CHILD_RESUME"):
         return
@@ -454,105 +541,324 @@ def enable_warming(root: "Path | None" = None, *, daemon: bool = False) -> None:
         # store.
         if Path(target) != config_dir():
             return
-        interpreter = _spawn_interpreter()
+        # Resolvable NOW, so a process that could not spawn at all stays off
+        # rather than starting a supervisor that fails every attempt. The
+        # supervisor re-resolves per attempt on purpose: after a ``lop-update``
+        # the next replacement must be the new generation's interpreter.
+        _spawn_interpreter()
     except Exception:  # noqa: BLE001 — a missing warm is a slower first engage
         logger.debug("could not resolve a standby target", exc_info=True)
         return
     _WARMING[0] = True
     _ROLE[0] = SLOT_DAEMON if daemon else SLOT_TUI
-    warm_in_background(Path(target), interpreter)
+    _ROOT[0] = Path(target)
+    _start_supervisor()
 
 
-def warm_in_background(root: Path, interpreter: str) -> None:
-    """:func:`ensure_warm` on a daemon thread: never on an engage's critical path."""
-    if not _WARMING[0]:
+def _start_supervisor() -> None:
+    """Start (or just wake) the one thread that owns every fork."""
+    thread = _SUPERVISOR[0]
+    if thread is not None and thread.is_alive():
+        _NUDGE.set()
         return
-    threading.Thread(
-        target=ensure_warm, args=(root, interpreter), name="lop-standby-warm", daemon=True
-    ).start()
+    thread = threading.Thread(target=_supervisor_main, name="lop-standby-supervisor", daemon=True)
+    _SUPERVISOR[0] = thread
+    thread.start()
+    # The first fill does not wait out a tick: a warm started now is warm sooner.
+    _NUDGE.set()
 
 
-#: How long a standby which exits without being adopted must have lived before a
-#: replacement is warmed for it. The loop breaker: a root that has been deleted
-#: (``root-gone``) makes a fresh standby exit immediately, and re-warming it
-#: forever would be a fork storm.
-REWARM_MIN_LIFE_S = 5.0
+def notify_engage() -> None:
+    """Wake the spare supervisor after an engage's spawn decision.
 
-#: Delay before a replacement spawn, so an exit that repeats cannot spin.
-REWARM_DELAY_S = 1.0
-
-#: The least time between two monitor-driven re-warms. What it bounds: a host whose
-#: tree is being edited (an editable checkout retires a standby as ``tree-moved``)
-#: would otherwise re-warm after every retirement, each one a fork plus a warm.
-#: An engage's own ``warm_in_background`` is not subject to it, because that one
-#: follows a spawn the operator asked for.
-REWARM_MIN_INTERVAL_S = 60.0
-
-#: When the last monitor-driven re-warm happened. A list so it is mutated, not
-#: rebound, matching ``_WARMING``'s shape.
-_LAST_REWARM: list[float] = [0.0]
-
-
-def _monitor(warm: _Standby) -> None:
-    """Wait on a standby and, if it left WITHOUT being adopted, warm another.
-
-    WHY THIS EXISTS (QA round 1, QW2). A standby retires itself whenever an input
-    it must be current on moved — measured: a TUI rewrote ``config.yml`` 5.9 s
-    after boot, which retired the standby as ``config-moved``. Without a monitor
-    the replacement waits for the next engage, so the FIRST new conversation
-    after a boot is exactly the one that goes cold: the warm would be spent on
-    the wrong session. Here the console notices the exit when it happens and
-    starts the replacement immediately, so the window is a warm rather than a
-    whole cycle.
-
-    A CONSUMED standby exits the same way and is not replaced here — the engage
-    path's own ``warm_in_background`` after the spawn does that, with the
-    interpreter the new session actually used.
+    Called from ``launch.engage_runtime`` where the old ``warm_in_background``
+    was, still AFTER the spawn and still off the critical path — but it no longer
+    forks: the supervisor owns every fork, so a refill has exactly one owner and
+    it is the one that holds invariant P (module docstring).
     """
-    started = time.monotonic()
-    try:
-        warm.proc.wait()
-    except Exception:  # noqa: BLE001 - a monitor must never take a thread down
-        return
-    if warm.consumed:
-        return
-    with _LOCK:
-        if _WARM[0] is not warm:
-            return
-        _WARM[0] = None
     if not _WARMING[0] or disabled():
         return
-    if not warm.root.is_dir():
+    _NUDGE.set()
+
+
+#: How long a standby which exits without being adopted must have lived before
+#: its replacement is warmed at once rather than under the backoff. A death
+#: younger than this is the shape a deleted root or a broken tree produces (a
+#: spare that cannot live), and it is the one class that must not spin: its retry
+#: is SCHEDULED under the backoff — never dropped, which is what the first
+#: version of this module did (one such death left a live console holding the
+#: slot with no spare and nothing scheduled until some later engage).
+REWARM_MIN_LIFE_S = 5.0
+
+#: Retry backoff, doubling from base to ceiling: 1, 2, 4, 8, 16, 30, 30…
+#: Applies to every failed attempt class (a young death, a failed warm, a wedged
+#: spare, a spawn that raised); a consumed spare and a refill that lived a normal
+#: life are replaced at once.
+RETRY_BASE_S = 1.0
+RETRY_CEIL_S = 30.0
+
+#: A spare not READY within this of its spawn is wedged: retired by exact pid and
+#: replaced. ~24x the measured worst warm (2.7 s p50 / 3.7 s max at load
+#: 153-166), so it cannot fire on a merely slow host; it bounds the exposure of a
+#: warm that will never finish.
+WARM_DEADLINE_S = 90.0
+
+#: Consecutive declines from the SAME spare before it is retired and refilled.
+#: One decline is normally about the requester (a foreign venv, a differing
+#: environment) and the spare must stay for its own console; a standing mismatch
+#: means this console's spare can never serve its console, which is the state the
+#: retirement exists for.
+DECLINE_RETIRE_N = 3
+
+#: How long before the supervisor re-attempts a slot another console holds, and
+#: before it re-probes a root that is gone (or warming that is switched off).
+SLOT_RETRY_S = 30.0
+ROOT_PROBE_S = 60.0
+
+#: How often the supervisor wakes between fills. The same thread detects a
+#: spare's death, so this bounds how much of a replacement's budget is detection
+#: (0.25 s against a warm of seconds).
+SUPERVISOR_TICK_S = 0.25
+
+#: Spares each console keeps in hand, per slot. The daemon keeps TWO: its spare is
+#: the desktop first-send budget, and a second new chat must not land in the
+#: replacement's warm window (measured: a send racing the replacement warm paid
+#: 2688-3119 ms). It is this module's one memory trade, +~130 MB (median spare
+#: RSS) while the second spare lives. Every other console keeps one.
+DAEMON_SPARE_DEPTH = 2
+TUI_SPARE_DEPTH = 1
+
+#: The env var carrying the idle window to the standby child (seconds; 0 or less
+#: = never reap on idle). Additive: a child from an older build ignores it and
+#: keeps :data:`IDLE_REAP_S`, and a console from an older build never sets it.
+#: Set at spawn; consumed only by ``_await_request``.
+STANDBY_IDLE_ENV = "LOP_STANDBY_IDLE_S"
+
+
+def _now() -> float:
+    """The console-side clock. One indirection so tests can drive the schedule."""
+    return time.monotonic()
+
+
+def _depth_for(slot: str) -> int:
+    """How many private spares a console warming ``slot`` keeps."""
+    return DAEMON_SPARE_DEPTH if slot == SLOT_DAEMON else TUI_SPARE_DEPTH
+
+
+def _idle_for(slot: str) -> float:
+    """The idle window a spare for ``slot`` is spawned with: 0 = keep warm."""
+    return 0.0 if slot == SLOT_DAEMON else IDLE_REAP_S
+
+
+def _supervisor_main() -> None:
+    """The supervisor loop: wake, reconcile, sleep until the next deadline or tick."""
+    while True:
+        _NUDGE.wait(_supervisor_wait())
+        _NUDGE.clear()
+        try:
+            _supervise_once()
+        except BaseException:  # noqa: BLE001 — the supervisor must never die
+            logger.debug("standby supervisor tick failed", exc_info=True)
+
+
+def _supervisor_wait() -> float:
+    """Seconds until the supervisor should run again."""
+    with _LOCK:
+        pool_short = len(_POOL) < _depth_for(_ROLE[0])
+        due = _NEXT_AT[0] - _now()
+    if pool_short:
+        return max(0.0, min(SUPERVISOR_TICK_S, due))
+    return SUPERVISOR_TICK_S
+
+
+def _supervise_once() -> None:
+    """One reconcile pass: prune and probe the pool, then fill it if due."""
+    if not _WARMING[0] or disabled():
+        # Parked: warming was switched off, or is off because this process is a
+        # runtime child. Re-probe rather than spin.
+        _push_deadline(ROOT_PROBE_S)
+        return
+    root = _ROOT[0]
+    if root is None:
+        return
+    if not root.is_dir():
         # ``root-gone``: a replacement would exit for the same reason, so the
-        # loop breaker here is the cause rather than a timer.
+        # loop breaker here is the CAUSE (re-probe), not a fork per backoff tick.
+        _push_deadline(ROOT_PROBE_S)
         return
-    if time.monotonic() - started < REWARM_MIN_LIFE_S:
-        logger.debug("standby for %s exited at once; not re-warming", warm.root)
-        return
-    now = time.monotonic()
-    if now - _LAST_REWARM[0] < REWARM_MIN_INTERVAL_S:
-        return
-    _LAST_REWARM[0] = now
-    time.sleep(REWARM_DELAY_S)
+    with _LOCK:
+        snapshot = list(_POOL)
+    for warm in snapshot:
+        if not warm.alive():
+            note_spare_gone(warm, "exited")
+            continue
+        if not warm.ready and _ready(warm):
+            logger.info("standby up for %s", root)
+        elif not warm.ready and _now() - warm.spawned_at > WARM_DEADLINE_S:
+            logger.warning(
+                "standby for %s never warmed in %.0fs; retiring and refilling",
+                root,
+                _now() - warm.spawned_at,
+            )
+            note_spare_gone(warm, "warm-wedged", terminate=True)
+    _fill(root, _ROLE[0])
+
+
+def _fill(root: Path, slot: str) -> None:
+    """Spawn spares up to the role's depth, no sooner than ``_NEXT_AT``.
+
+    Only the supervisor calls this, so there is no concurrent spawner to
+    serialise against; the loop re-reads the state each pass because spawning and
+    scheduling both move it.
+    """
+    depth = _depth_for(slot)
+    while True:
+        with _LOCK:
+            if len(_POOL) >= depth:
+                return
+            if _now() < _NEXT_AT[0]:
+                return
+        from local_operator.paths import config_dir
+
+        if Path(root) != config_dir():
+            # The same rule ``ensure_warm`` has always had: the child resolves its
+            # root from the environment it inherits, so warming for another store
+            # would warm the wrong one. Park and re-probe.
+            _push_deadline(ROOT_PROBE_S)
+            return
+        if not _claim_slot(root, slot):
+            return
+        _spawn_one(root, slot)
+
+
+def _claim_slot(root: Path, slot: str) -> bool:
+    """Take this root's slot if not held; a failed claim sets the slow retry.
+
+    RETRYABLE, not "cold for the lifetime" (the old S5 dead-end): the slot is the
+    kernel's ``flock`` and its holder is another console, which can die at any
+    time. A console that cannot take it re-probes at :data:`SLOT_RETRY_S`.
+    """
+    if _take_slot(root, slot):
+        return True
+    logger.info(
+        "the %s standby slot for %s is held by another console; retrying in %.0fs",
+        slot,
+        root,
+        SLOT_RETRY_S,
+    )
+    _push_deadline(SLOT_RETRY_S)
+    return False
+
+
+def _spawn_one(root: Path, slot: str) -> None:
+    """One spawn attempt: append a spare to the pool, or schedule the retry."""
+    from local_operator.session.runtime.launch import _spawn_interpreter
+
     try:
-        from local_operator.session.runtime.launch import _spawn_interpreter
+        interpreter = _spawn_interpreter()
+        warm = _spawn_standby(root, interpreter, slot, idle_s=_idle_for(slot))
+    except BaseException:  # noqa: BLE001 — a failed spawn is a retry, never a crash
+        # The claim came first, so it goes back (m3-2): a slot held by a console
+        # with no spare is a win nobody gets; the retry re-claims it.
+        _release_slot(root, slot)
+        _note_attempt_failure("spawn-failed")
+        return
+    with _LOCK:
+        _POOL.append(warm)
+        count = len(_POOL)
+    logger.info("warmed a standby for %s (%d/%d)", root, count, _depth_for(slot))
 
-        ensure_warm(warm.root, _spawn_interpreter(), warm.slot)
-    except Exception:  # noqa: BLE001 - a missing replacement is a slower engage
-        logger.debug("could not replace the standby for %s", warm.root, exc_info=True)
+
+def _note_attempt_failure(reason: str) -> float:
+    """Record a failed warm attempt, schedule the next one, return the delay.
+
+    Doubling from :data:`RETRY_BASE_S` to :data:`RETRY_CEIL_S` per consecutive
+    failure; the schedule RESETS when a spare reaches READY or a refill lives a
+    normal life, so the backoff is for a root that cannot warm, not for the
+    normal consume-and-replace cycle.
+    """
+    with _LOCK:
+        _ATTEMPTS[0] = min(_ATTEMPTS[0] + 1, 16)
+        delay = min(RETRY_BASE_S * (2 ** (_ATTEMPTS[0] - 1)), RETRY_CEIL_S)
+        _NEXT_AT[0] = _now() + delay
+    return delay
 
 
-def _start_monitor(warm: _Standby) -> None:
-    threading.Thread(target=_monitor, args=(warm,), name="lop-standby-monitor", daemon=True).start()
+def _push_deadline(delay: float) -> None:
+    """Set the next-attempt deadline at least ``delay`` from now.
+
+    A parking cadence for states that are not retryable failures (root gone,
+    warming switched off, a slot another console holds): it pushes the deadline
+    OUT rather than resetting it, so repeated ticks cannot pull a re-probe in.
+    """
+    with _LOCK:
+        _NEXT_AT[0] = max(_NEXT_AT[0], _now() + delay)
+
+
+def note_spare_gone(spare: "_Standby", reason: str, *, terminate: bool = False) -> None:
+    """THE ONE CHOKE POINT for every clear of a tracked spare.
+
+    This is where invariant P (module docstring) is held: every call ends with a
+    refill scheduled or already due, so no transition — an adoption, a death, a
+    failed warm, a retirement, a torn handshake — can leave the console with
+    nothing ready, nothing warming and nothing on the clock. The first version of
+    this module had no such owner; five separate guards could each drop a spare
+    without replacing it (S1-S6/S8).
+
+    The reason's CLASS picks the schedule. A spare that was consumed, or lived
+    out :data:`REWARM_MIN_LIFE_S`, is replaced AT ONCE (the normal
+    consume-and-replace cycle, and it resets the backoff). Everything else — a
+    young death, a failed warm, a wedged warm, a torn handshake, a thrice-declined
+    spare — goes through the doubling backoff, so a root that cannot keep a spare
+    cannot fork-storm either.
+
+    ``terminate`` ends the child by exact pid for the clears where it may still be
+    alive and unusable (a wedged warm, a failed handshake, a declined spare). It
+    is NEVER set for an adoption: that process is a session's runtime now, and
+    signalling it is the very defect this choke point exists to prevent.
+    """
+    if terminate:
+        _retire(spare)
+    spare.close()
+    with _LOCK:
+        try:
+            _POOL.remove(spare)
+        except ValueError:
+            pass
+    life = _now() - spare.spawned_at
+    retry_class = reason in (
+        "warm-failed",
+        "warm-wedged",
+        "bad-handshake",
+        "adoption-failed",
+        "declined-thrice",
+    ) or (reason == "exited" and life < REWARM_MIN_LIFE_S) or (
+        reason.startswith("retired") and life < REWARM_MIN_LIFE_S
+    )
+    if reason == "adopted":
+        with _LOCK:
+            _ATTEMPTS[0] = 0
+            _NEXT_AT[0] = min(_NEXT_AT[0], _now())
+        logger.info("standby adopted; a replacement is scheduled")
+        return
+    if not retry_class:
+        with _LOCK:
+            _ATTEMPTS[0] = 0
+            _NEXT_AT[0] = min(_NEXT_AT[0], _now())
+        logger.info("standby gone (%s) after %.1fs; replacing now", reason, life)
+        return
+    delay = _note_attempt_failure(reason)
+    logger.info("standby gone (%s) after %.1fs; retrying in %.1fs", reason, life, delay)
 
 
 def ensure_warm(root: Path, interpreter: str, slot: str | None = None) -> None:
-    """Start a standby for ``root`` unless one is already alive. Never raises.
+    """One synchronous fill attempt: spawn a spare now if the pool is short.
 
-    Called from ``launch.engage_runtime`` after each spawn decision, so the NEXT
-    cold engage finds one — never before the user's own engage, and never from a
-    runtime child (a runtime carries the spawn contract in its environment, and a
-    runtime that warmed spares would make every session a warmer).
+    The supervisor's per-attempt primitive, and the function the tests drive
+    directly. It is NOT on the engage path any more: ``launch.engage_runtime``
+    calls :func:`notify_engage` and the single supervisor thread forks, so a
+    refill has exactly one owner and it is the one that holds invariant P
+    (module docstring). Never raises.
     """
     if not _WARMING[0] or disabled() or os.environ.get("LOP_MOBILE_CHILD_RESUME"):
         return
@@ -562,29 +868,27 @@ def ensure_warm(root: Path, interpreter: str, slot: str | None = None) -> None:
         if Path(root) != config_dir():
             return
         slot = _ROLE[0] if slot is None else slot
-        # THE CAP, and it is a hard one: exactly one spare per slot per root for
-        # the whole machine, however many consoles are running. A console that
-        # cannot take its slot goes cold (2.15 s p50 at load 153-166, measured),
-        # which is the price this PR trades for a bounded memory ceiling.
+        with _LOCK:
+            if len(_POOL) >= _depth_for(slot):
+                return
+        # THE CAP, and it is a hard one: one warming console per slot per root
+        # for the whole machine, however many consoles are running; each holder
+        # keeps at most its role's depth of private spares. A console that cannot
+        # take its slot goes cold until the supervisor's next retry (2.15 s p50
+        # at load 153-166, measured), which is the price this module trades for a
+        # bounded memory ceiling.
         if not _take_slot(Path(root), slot):
             return
         try:
-            with _LOCK:
-                current = _WARM[0]
-                if current is not None and current.alive():
-                    return
-                if current is not None:
-                    current.close()
-                _WARM[0] = _spawn_standby(Path(root), interpreter, slot)
-                fresh = _WARM[0]
+            warm = _spawn_standby(Path(root), interpreter, slot, idle_s=_idle_for(slot))
         except BaseException:
             # The claim came first, so it goes back: a slot held by a console with
             # no spare is a win nobody gets, and nothing else releases it (m3-2).
             _release_slot(Path(root), slot)
             raise
-        # OUTSIDE the lock: the monitor immediately blocks in ``proc.wait()`` and
-        # only takes the lock if the child leaves without being adopted.
-        _start_monitor(fresh)
+        if warm is not None:
+            with _LOCK:
+                _POOL.append(warm)
     except Exception:  # noqa: BLE001 — a missing warm is a slower next engage, never a failure
         logger.debug("could not warm a standby for %s", root, exc_info=True)
 
@@ -695,7 +999,13 @@ def _release_slots() -> None:
             pass
 
 
-def _spawn_standby(root: Path, interpreter: str, slot: str = SLOT_TUI) -> "_Standby":
+def _spawn_standby(
+    root: Path,
+    interpreter: str,
+    slot: str = SLOT_TUI,
+    *,
+    idle_s: "float | None" = None,
+) -> "_Standby":
     """Fork the warming interpreter, handing it ONE end of a private socketpair.
 
     ``pass_fds`` is what makes the other end unreachable by anything else: it is
@@ -703,6 +1013,12 @@ def _spawn_standby(root: Path, interpreter: str, slot: str = SLOT_TUI) -> "_Stan
     every other one), and the console keeps its own end with ``O_CLOEXEC`` set so
     no later child of this process — a tool subprocess, an ``exec --background``
     worker — inherits it either.
+
+    ``idle_s`` is the child's idle window (0 = keep warm): the slot's policy
+    unless the caller overrides it. It travels in ``STANDBY_IDLE_ENV``, an
+    additive variable an older child ignores (keeping its 900 s) and the
+    requester's adopted environment drops (``_apply_environment`` replaces the
+    whole environment at adoption).
     """
     from local_operator import procname
     from local_operator.interpreter import SAFE_PATH_FLAG
@@ -719,6 +1035,7 @@ def _spawn_standby(root: Path, interpreter: str, slot: str = SLOT_TUI) -> "_Stan
     # config dir is read at call time, not by the warm, and adoption replaces
     # this whole environment with the requester's anyway (``_apply_environment``).
     env[CONFIG_DIR_ENV] = str(root)
+    env[STANDBY_IDLE_ENV] = str(int(_idle_for(slot) if idle_s is None else idle_s))
     # The label is the ANON session label with ``[standby]`` in place of
     # ``[session]`` and a placeholder id: same lengths as the real label, so the
     # adoption rename is in place.
@@ -798,19 +1115,22 @@ def adoption_possible() -> bool:
     A PURE probe for the caller that must decide BEFORE it builds anything: the
     engage path mints a capability handoff for whichever route it takes, and a
     console with no standby (the common case — ``lop exec``, a test, the phone
-    daemon) should not mint one it will not use. Never blocks: :func:`_ready`
-    reads a byte that was already written when the warm finished.
+    daemon) should not mint one it will not use. Never blocks past a zero-timeout
+    read: :func:`_ready` reads a byte that was already written when the warm
+    finished.
 
-    It can retire a standby whose warm failed, which is the only side effect and
-    is the same one :func:`try_adopt` would have caused a moment later.
+    It can clear a standby whose warm failed — and schedules the refill at the
+    same moment (invariant P) — which is the only side effect and is the same one
+    :func:`try_adopt` would have caused a moment later.
     """
     if disabled():
         return False
     with _LOCK:
-        warm = _WARM[0]
-    if warm is None:
-        return False
-    return _ready(warm)
+        snapshot = list(_POOL)
+    for warm in snapshot:
+        if _ready(warm):
+            return True
+    return False
 
 
 def try_adopt(
@@ -820,7 +1140,7 @@ def try_adopt(
     capture: Path,
     cap_fd: "int | None",
 ) -> "AdoptedRuntime | None":
-    """Hand a cold child's whole spawn to this console's standby, or ``None``.
+    """Hand a cold child's whole spawn to a ready standby, or ``None``.
 
     ``env`` is EXACTLY the environment ``launch._spawn_runtime`` would have given
     the cold child, and ``cap_fd`` is the child end of the operator-capability
@@ -834,6 +1154,14 @@ def try_adopt(
     The value reaches a process only through this process's own fork, so there is
     no peer to authenticate — and nothing to steal the capability with.
 
+    ON SUCCESS THE SPARE LEAVES THE POOL. The console clears its tracking entry
+    and schedules the replacement through :func:`note_spare_gone`, so nothing
+    that runs later can find — or signal — a process that is now a session's
+    runtime. The first revision kept the entry ("consumed") until the next engage
+    read EOF off its closed channel and RETIRED it: opening a second chat
+    SIGTERMed the first chat's live runtime, and the replacement the console
+    needed was the cold spawn of that second chat (invariant P's S8).
+
     Never raises: a standby that is not ready, one that declined, a torn reply,
     or a wedged one that misses :data:`ADOPT_TIMEOUT_S` all answer ``None``, and
     the caller does exactly what it did before this module existed.
@@ -841,89 +1169,132 @@ def try_adopt(
     if disabled():
         return None
     with _LOCK:
-        warm = _WARM[0]
-        if warm is None:
-            return None
+        candidates = list(_POOL)
+    for warm in candidates:
+        if Path(root) != warm.root:
+            continue
+        with _LOCK:
+            if warm not in _POOL:
+                continue
         if not warm.alive():
-            warm.close()
-            _WARM[0] = None
+            note_spare_gone(warm, "exited")
+            continue
+        adopted: "AdoptedRuntime | None" = None
+        #: Set when the standby answered a well-formed refusal that leaves it
+        #: ALIVE and waiting. A DECLINE IS NOT A FAILURE (QA round 2, Q2-2): the
+        #: standby declines requests whose venv, root or warm-sensitive
+        #: environment differ from what it warmed under, precisely so that it can
+        #: serve the right one later — and the console that declined is usually
+        #: the one that warmed it (a TUI and the desktop daemon on one root
+        #: legitimately differ). Killing it on the way out threw away the spare
+        #: its own host had paid for, measured twice: a foreign venv and a
+        #: differing ``PYTHONHASHSEED`` each retired the console's own standby.
+        declined = False
+        retired = ""
+        failed = False
+        reply: Any = None
+        # THE WHOLE HANDSHAKE IS ONE CRITICAL SECTION (``_CHANNEL_LOCK``): the
+        # supervisor peeks the same socket every tick, and a peek landing between
+        # the request and its reply would swallow a byte of the frame.
+        with _CHANNEL_LOCK:
+            if not _ready_locked(warm):
+                continue
+            try:
+                cwd = os.getcwd()
+            except OSError:
+                cwd = ""
+            request = {
+                "op": "adopt",
+                "root": str(root),
+                "interpreter": str(interpreter),
+                "env": dict(env),
+                "cwd": cwd,
+                "capture": str(capture),
+                "has_cap_fd": cap_fd is not None,
+            }
+            try:
+                # The request sets its own deadline (ADOPT_TIMEOUT_S): the reply
+                # is a real round trip to a process that may be mid-warm.
+                warm.sock.settimeout(ADOPT_TIMEOUT_S)
+                # ONE MESSAGE: the frame and the capability descriptor together,
+                # so the child's first read gets the length prefix and the fd in
+                # the same ``recvmsg`` (see :func:`_recv_request`). A separate
+                # marker byte would be indistinguishable from the start of that
+                # prefix.
+                body = json.dumps(request).encode("utf-8")
+                payload = len(body).to_bytes(4, "big") + body
+                if cap_fd is not None:
+                    socket.send_fds(warm.sock, [payload], [cap_fd])
+                else:
+                    socket.send_fds(warm.sock, [payload], [])
+                reply = _recv(warm.sock)
+                if isinstance(reply, dict) and reply.get("ok"):
+                    adopted = AdoptedRuntime(warm.proc, capture)
+                elif isinstance(reply, dict) and reply.get("reason"):
+                    # LOGGED, not swallowed (QA round 2, Q2-5): the reason is why
+                    # the standby's own docstrings promise a retirement reads as
+                    # ``config-moved`` rather than as an unexplained EOF, and
+                    # until this line existed the console logged nothing at all.
+                    if reply.get("retire"):
+                        retired = str(reply["reason"])
+                        logger.info(
+                            "runtime standby retired (%s); a replacement will be warmed",
+                            retired,
+                        )
+                    else:
+                        declined = True
+                        logger.info(
+                            "runtime standby declined this spawn (%s); it stays warm for its own host",
+                            reply["reason"],
+                        )
+                else:
+                    failed = True
+                    logger.debug("runtime standby answered %r; spawning cold", reply)
+            except (OSError, ValueError):
+                failed = True
+                logger.debug("standby adoption failed; spawning cold", exc_info=True)
+        # OUTSIDE the channel lock: every clear logs, schedules the refill, and
+        # the terminate path can block for its SIGTERM.
+        if adopted is not None:
+            note_spare_gone(warm, "adopted")
+            return adopted
+        if declined:
+            _note_decline(warm, str(reply.get("reason")) if isinstance(reply, dict) else "")
             return None
-    if Path(root) != warm.root:
-        return None
-    if not _ready(warm):
-        return None
-    try:
-        cwd = os.getcwd()
-    except OSError:
-        cwd = ""
-    request = {
-        "op": "adopt",
-        "root": str(root),
-        "interpreter": str(interpreter),
-        "env": dict(env),
-        "cwd": cwd,
-        "capture": str(capture),
-        "has_cap_fd": cap_fd is not None,
-    }
-    adopted: "AdoptedRuntime | None" = None
-    #: Set when the standby answered a well-formed refusal that leaves it ALIVE and
-    #: waiting. A DECLINE IS NOT A FAILURE (QA round 2, Q2-2): the standby declines
-    #: requests whose venv, root or warm-sensitive environment differ from what it
-    #: warmed under, precisely so that it can serve the right one later — and the
-    #: console that declined is usually the one that warmed it (a TUI and the
-    #: desktop daemon on one root legitimately differ). Killing it on the way out
-    #: threw away the spare its own host had paid for, measured twice: a foreign
-    #: venv and a differing ``PYTHONHASHSEED`` each retired the console's own
-    #: standby, with ``consumed`` set so nothing replaced it either.
-    declined = False
-    try:
-        warm.sock.settimeout(ADOPT_TIMEOUT_S)
-        # ONE MESSAGE: the frame and the capability descriptor together, so the
-        # child's first read gets the length prefix and the fd in the same
-        # ``recvmsg`` (see :func:`_recv_request`). A separate marker byte would be
-        # indistinguishable from the start of that prefix.
-        body = json.dumps(request).encode("utf-8")
-        payload = len(body).to_bytes(4, "big") + body
-        if cap_fd is not None:
-            socket.send_fds(warm.sock, [payload], [cap_fd])
-        else:
-            socket.send_fds(warm.sock, [payload], [])
-        reply = _recv(warm.sock)
-        if isinstance(reply, dict) and reply.get("ok"):
-            adopted = AdoptedRuntime(warm.proc, capture)
-        elif isinstance(reply, dict) and reply.get("reason"):
-            # LOGGED, not swallowed (QA round 2, Q2-5): the reason is why the
-            # standby's own docstrings promise a retirement reads as
-            # ``config-moved`` rather than as an unexplained EOF, and until this
-            # line existed the console logged nothing at all.
-            if reply.get("retire"):
-                logger.info(
-                    "runtime standby retired (%s); a replacement will be warmed", reply["reason"]
-                )
-            else:
-                declined = True
-                logger.info(
-                    "runtime standby declined this spawn (%s); it stays warm for its own host",
-                    reply["reason"],
-                )
-        else:
-            logger.debug("runtime standby answered %r; spawning cold", reply)
-    except (OSError, ValueError):
-        logger.debug("standby adoption failed; spawning cold", exc_info=True)
-    finally:
-        if adopted is None and not declined:
-            # The standby served its one session, or is no longer usable: drop the
-            # descriptor and stop tracking it, so the next engage warms a
-            # replacement with a FRESH handoff rather than reusing this one. A
-            # DECLINE keeps both: the socket, so the next engage can ask again, and
-            # the tracking entry, so nothing warms a second spare beside it.
-            with _LOCK:
-                if _WARM[0] is warm:
-                    warm.consumed = True
-                    _WARM[0] = None
-            warm.close()
-            _retire(warm)
-    return adopted
+        if retired:
+            note_spare_gone(warm, f"retired ({retired})")
+            return None
+        if failed:
+            # A torn channel, a wedged child, an answer that was not a frame:
+            # this spare cannot serve, so it goes — by exact pid — and the refill
+            # is scheduled (the old code retired it and warmed NOTHING until the
+            # next engage).
+            note_spare_gone(warm, "adoption-failed", terminate=True)
+            return None
+    return None
+
+
+def _note_decline(warm: "_Standby", reason: str) -> None:
+    """Count a decline from THIS spare; retire it at :data:`DECLINE_RETIRE_N`.
+
+    One decline is normally about the REQUESTER (a foreign venv, a differing
+    environment) and the spare must stay: the next engage may well be the right
+    one. But a console's own spare that keeps declining its own console can never
+    serve it — the warmer and the only requester are the same process — so past
+    the threshold it is retired and refilled against the CURRENT state instead
+    (S4: without this, a declined spare sat out its whole idle window while the
+    console held a slot it could not use).
+    """
+    warm.declines += 1
+    warm.decline_reason = reason
+    if warm.declines < DECLINE_RETIRE_N:
+        return
+    logger.info(
+        "standby declined %d times in a row (%s); retiring it and refilling",
+        warm.declines,
+        reason,
+    )
+    note_spare_gone(warm, "declined-thrice", terminate=True)
 
 
 def _ready(warm: _Standby) -> bool:
@@ -932,7 +1303,21 @@ def _ready(warm: _Standby) -> bool:
     A zero timeout, because this runs on the engage path: a standby whose warm is
     still in flight must cost the engage nothing at all. The byte was written
     when the warm finished, so a warm standby's answer is already in the socket
-    buffer and this read returns immediately.
+    buffer and this read returns immediately. Takes ``_CHANNEL_LOCK`` so the peek
+    can never swallow a byte of a concurrent adoption's reply (see :func:`try_adopt`).
+    """
+    if warm.ready:
+        return True
+    with _CHANNEL_LOCK:
+        return _ready_locked(warm)
+
+
+def _ready_locked(warm: "_Standby") -> bool:
+    """``_ready`` with ``_CHANNEL_LOCK`` already held (the adoption path's shape).
+
+    A clear from here schedules the refill like every other (invariant P). It does
+    NOT terminate: closing our end is the child's exit signal, and the terminate
+    path waits for a SIGTERM, which must not happen under the channel lock.
     """
     if warm.ready:
         return True
@@ -943,16 +1328,19 @@ def _ready(warm: _Standby) -> bool:
         return False
     if answer == _READY:
         warm.ready = True
+        with _LOCK:
+            _ATTEMPTS[0] = 0
         return True
     if answer == _FAILED:
-        logger.warning("the runtime standby could not warm; new sessions spawn cold")
+        logger.warning("the runtime standby could not warm; a replacement will be warmed")
+        note_spare_gone(warm, "warm-failed")
     elif answer:
         logger.debug("unexpected standby handshake %r", answer)
-    with _LOCK:
-        if _WARM[0] is warm:
-            _WARM[0] = None
-    warm.close()
-    _retire(warm)
+        note_spare_gone(warm, "bad-handshake")
+    else:
+        # EOF before READY: the child died, or its channel closed. Same class as
+        # an observed exit; the death may simply not be visible in poll() yet.
+        note_spare_gone(warm, "exited")
     return False
 
 
@@ -981,16 +1369,17 @@ def _retire(warm: _Standby) -> None:
 
 
 def reset_for_tests() -> None:
-    """End the tracked standby and clear the flags. Tests only — production never calls it."""
+    """End every tracked spare and clear the flags. Tests only — production never calls it."""
     with _LOCK:
-        warm = _WARM[0]
-        _WARM[0] = None
+        spares = list(_POOL)
+        _POOL.clear()
         _WARMING[0] = False
-        _LAST_REWARM[0] = 0.0
-    if warm is not None:
-        # ``consumed`` so the monitor does not start a replacement for a standby
-        # this call ended on purpose.
-        warm.consumed = True
+        _ATTEMPTS[0] = 0
+        _NEXT_AT[0] = 0.0
+    for warm in spares:
+        # No scheduling here: this call is the deliberate stop, not a clear that
+        # must be replaced (``_WARMING`` goes off first, and the supervisor parks
+        # on it).
         warm.close()
         _retire(warm)
     # The slots go with it, or a suite that disables warming and re-enables it
@@ -1242,6 +1631,25 @@ def _close_all(fds: "list[int]") -> None:
             pass
 
 
+def _idle_reap_seconds() -> float:
+    """This standby's idle window, from the console that forked it.
+
+    ``STANDBY_IDLE_ENV`` is set at spawn and consumed only here: 0 or less means
+    KEEP WARM (the daemon's slot, where the spare is the whole first-send
+    budget), any positive value is a deadline. Absent, empty or unparseable — an
+    older console, or a child newer than its console — keeps
+    :data:`IDLE_REAP_S`, so the mixed-generation fleet is indistinguishable from
+    the old behaviour on every path.
+    """
+    raw = os.environ.get(STANDBY_IDLE_ENV, "")
+    if not raw:
+        return IDLE_REAP_S
+    try:
+        return float(raw)
+    except ValueError:
+        return IDLE_REAP_S
+
+
 def _await_request(sock: socket.socket) -> "dict[str, Any] | None":
     """Warm, then wait for an adoption this standby may take.
 
@@ -1270,12 +1678,20 @@ def _await_request(sock: socket.socket) -> "dict[str, Any] | None":
     warmth = _Warmth(root)
     warm_env = _warm_sensitive(os.environ)
     _send_byte(sock, _READY)
-    deadline = time.monotonic() + IDLE_REAP_S
+    idle_s = _idle_reap_seconds()
+    # ``0`` or less is KEEP-WARM (the daemon's slot): no deadline at all, so an
+    # idle afternoon between conversations still finds this spare ready. Every
+    # other slot keeps the 900 s memory bound.
+    deadline = None if idle_s <= 0 else time.monotonic() + idle_s
     while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return None
-        sock.settimeout(min(remaining, 30.0))
+        if deadline is None:
+            wait = 30.0
+        else:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            wait = min(remaining, 30.0)
+        sock.settimeout(wait)
         try:
             request, fds = _recv_request(sock)
         except (TimeoutError, socket.timeout):
