@@ -680,19 +680,52 @@ def is_bye(frame: dict[str, Any]) -> bool:
     return frame.get("op") == "net_bye"
 
 
-def refusal_frame(req: Any, sentence: str) -> dict[str, Any]:
+def refusal_frame(req: Any, sentence: str, code: str = "") -> dict[str, Any]:
     """What a peer is told when something is refused.
 
     Deliberately vague at the boundary: never which of membership, epoch or
     capability failed. The real cause goes to the local audit log, where the
     operator can see it and a remote attacker cannot. ``MeshRefusal`` carries both
     halves for exactly this reason.
+
+    ``code`` is the exception, and it is set ONLY where a handler's own refusal is
+    carried (``error_from``): the handler's sentence already crosses verbatim, so the
+    code adds the machine-readable token beside it, which is what the local control
+    path has always sent and what ``relay._local_peer_call`` already reads. The
+    authoriser's refusals stay sentence-only and codeless on purpose — the code there
+    would be the "which guard fired" answer this docstring refuses to give.
     """
-    return {"op": "error", "req": req, "message": sentence}
+    frame: dict[str, Any] = {"op": "error", "req": req, "message": sentence}
+    if code:
+        frame["code"] = code
+    return frame
 
 
 def error_from(refusal: MeshRefusal, req: Any) -> dict[str, Any]:
-    return refusal_frame(req, refusal.sentence)
+    return refusal_frame(req, refusal.sentence, refusal.code)
+
+
+#: The spellings a client may use for a boolean frame flag: ``argparse`` and the
+#: desktop's JSON produce a real bool, and a hand-written or older client may send one
+#: of these strings. Nothing else counts as a request.
+_TRUTHY_SPELLINGS = frozenset({"1", "true", "yes", "on"})
+
+
+def yolo_requested(value: Any) -> bool:
+    """Does this frame's ``yolo`` key actually ASK for an unattended session?
+
+    EXACT ON PURPOSE, and the direction matters. Both ends of a peer create refuse
+    ``yolo``, and that refusal used to be a truthiness test — so a client sending the
+    boolean-as-string ``"false"`` (which JSON round trips make easy) was told it may
+    not run unattended: a refusal for a request it did not make. Nothing reads the key
+    after the guard, so no unattended session was reachable either way; a refusal that
+    names the wrong reason is still a wrong refusal. Unrecognised values are NOT
+    requests — the guard's job is to refuse an unattended session, the peer never sets
+    the flag itself, so an unknown spelling cannot become one.
+    """
+    if isinstance(value, str):
+        return value.strip().casefold() in _TRUTHY_SPELLINGS
+    return value is True or value == 1
 
 
 def phase_is_reconcile(phase: LinkPhase) -> bool:

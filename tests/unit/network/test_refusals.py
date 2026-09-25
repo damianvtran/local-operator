@@ -18,7 +18,7 @@ import pytest
 
 from local_operator.network import cli as net_cli
 from local_operator.network import invite as invite_mod
-from local_operator.network import relay, store, types
+from local_operator.network import relay, store, types, wire
 
 NETWORK = "n_0123456789abcdef01234567"
 
@@ -1261,3 +1261,173 @@ def test_a_stop_receipt_offers_the_remedy_and_never_a_rung(
     assert "outcome:" not in out, out
     # A clean stop needs no second line: the relay's sentence is the answer.
     assert out.strip() == "deadbeefcafe is not running on lop-mesh-peer-b.", out
+
+
+# ---------------------------------------------------------------------------
+# Review round 1 (MAJOR 4) and QA round 1 (Q1, Q2) — what reaches the user
+# ---------------------------------------------------------------------------
+
+
+def test_a_handlers_refusal_crosses_the_link_carrying_its_code(root: Path) -> None:
+    """MAJOR 4: the CREATE's own branch on a peer's code was dead.
+
+    ``_run_handler`` sent ``wire.refusal_frame(req, sentence)`` — sentence only — so
+    every remote refusal arrived as the fallback ``peer_refused``, and the create path's
+    "append the push's reason" gate (on ``definition_missing``/``definition_stale``)
+    could never be true. The handler's own refusals carry both halves now, exactly as the
+    local control path always has; the AUTHORISER's stay codeless, because its sentence
+    is deliberately vague about which of membership, epoch or capability failed, and a
+    code there would be the answer that vagueness exists to withhold.
+    """
+    from argparse import Namespace
+
+    server = relay.RelayServer(
+        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    frame = {"op": "net_session_create", "req": 9}
+
+    def _handler(_link: object, _frame: dict[str, object]) -> None:
+        raise types.MeshRefusal("definition_stale", "that device's copy is a different revision")
+
+    reply = server._run_handler(  # noqa: SLF001 — the one place a handler's reply is shaped
+        Namespace(device_id="d_" + "c" * 32, network_id="n_test", epoch=1),
+        frame,
+        _handler,
+        None,  # type: ignore[arg-type] — the refusal branch never reads it
+    )
+    assert reply == {
+        "op": "error",
+        "req": 9,
+        "code": "definition_stale",
+        "message": "that device's copy is a different revision",
+    }
+    # The authoriser's frame (``dispatch``'s and this function's own builder) has no
+    # code, by construction.
+    assert wire.refusal_frame(9, "this device refused that") == {
+        "op": "error",
+        "req": 9,
+        "message": "this device refused that",
+    }
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (True, True),
+        (1, True),
+        ("true", True),
+        (" TRUE ", True),
+        ("yes", True),
+        ("on", True),
+        # The spellings that are NOT a request: a JSON round trip makes "false" easy,
+        # and refusing THAT is a refusal for something the caller did not ask for.
+        ("false", False),
+        ("0", False),
+        ("no", False),
+        ("", False),
+        (False, False),
+        (0, False),
+        (None, False),
+        ([], False),
+        ({}, False),
+        ("maybe", False),
+    ],
+)
+def test_yolo_is_refused_for_an_actual_request_only(value: object, expected: bool) -> None:
+    """NIT 1: the guard was a truthiness test, so the string ``"false"`` was refused.
+
+    Nothing reads the key after the guard, so no unattended session was reachable
+    either way — but a refusal that names the wrong reason is still a wrong refusal, and
+    both ends of the create now ask this one question (``wire.yolo_requested``).
+    """
+    assert wire.yolo_requested(value) is expected
+
+
+def test_a_create_receipt_says_a_push_was_refused_and_which_revision_runs(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """QA round 1, Q1: the receipt reported the wrong instructions as a success.
+
+    QA's measured run: the peer's mirror had diverged, the push was refused by name, the
+    create came back rc=0 and the session ran THAT device's text — while the human output
+    said four cheerful lines and ``--json`` carried no push key at all. The relay now
+    carries the reconciliation in its reply and the receipt prints it whenever it is not
+    clean, including which revision the session will run (and, when a name has no copy
+    here, that the peer's own copy is what runs).
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    detail = {
+        "session_id": "deadbeefcafe",
+        "admitted": True,
+        "duplicate": False,
+        "detail": "prompt admitted",
+        "agent": {
+            "name": "mesh-reviewer",
+            "id": "8db36f01-1695-446d-865e-563ba6846662",
+            "kind": "role",
+            "digest": "0064e5c7",
+            "instructions_applied": True,
+        },
+        "definitions": {
+            "ok": False,
+            "code": "unreachable",
+            "message": "bare-peer is not answering right now, so its definitions were not synced",
+            "pinned": {"mesh-reviewer": "0064e5c7"},
+            "unpinned": ["mesh-release"],
+        },
+    }
+    monkeypatch.setattr(net_cli, "_relay_answer", lambda op, **fields: dict(detail))
+
+    assert (
+        net_cli.main(_sessions_args(peer="lop-mesh-peer-b", create=True, prompt="x", json=False))
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "not reconciled onto lop-mesh-peer-b" in out, out
+    assert "not answering right now" in out, out
+    assert "no copy of 'mesh-release' on this device" in out, out
+
+    assert net_cli.main(_sessions_args(peer="lop-mesh-peer-b", create=True, prompt="x")) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["definitions"]["ok"] is False, payload
+    assert payload["definitions"]["unpinned"] == ["mesh-release"], payload
+    assert payload["definitions"]["pinned"] == {"mesh-reviewer": "0064e5c7"}, payload
+
+
+def test_a_push_receipt_names_the_row_and_says_the_summary_once(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """QA round 1, Q2: the same sentence twice, and a row nobody named.
+
+    ``local_sync_handler`` composed the top-level message as ``"{device_id}: {per-peer
+    message}"`` and ``_cmd_definitions`` printed that AND the identical per-peer line, so
+    a one-peer mesh read the same sentence twice. And "sent 1 agent definition(s)" told
+    the operator something happened to a row they could not see — the row's NAME is the
+    fact they act on.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    detail = {
+        "ok": True,
+        "message": "1 of 1 device(s) hold this device's definitions",
+        "peers": [
+            {
+                "device_id": PEER,
+                "ok": True,
+                "code": "applied",
+                "message": "sent 1 agent and 0 team definition(s)",
+                "installed": [{"kind": "agent", "name": "peer-only"}],
+                "updated": [],
+                "conflicts": [],
+                "refused": [],
+            }
+        ],
+    }
+    monkeypatch.setattr(net_cli, "_relay_answer", lambda op, **fields: dict(detail))
+
+    args = _args(network_command="definitions", definitions_command="push", peer=PEER, json=False)
+    args.all_peers = False
+    assert net_cli.main(args) == 0
+    out = capsys.readouterr().out
+    assert out.count("sent 1 agent and 0 team definition(s)") == 1, out
+    assert out.count("1 of 1 device(s) hold this device's definitions") == 1, out
+    assert "installed agent 'peer-only'" in out, out

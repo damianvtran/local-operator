@@ -19,6 +19,7 @@ from typing import Any, cast
 
 import pytest
 
+from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.network import audit as audit_mod
 from local_operator.network import cli as net_cli
 from local_operator.network import identity
@@ -1379,3 +1380,152 @@ def test_a_stale_peer_record_is_reaped_and_the_relay_reports_its_links(
     status = server_a.status()
     assert status["device_id"] == server_a.identity.device_id
     assert isinstance(status["links"], list)
+
+
+# ---------------------------------------------------------------------------
+# Definitions over a REAL link (review round 1, BLOCKER 1 and MAJOR 5)
+# ---------------------------------------------------------------------------
+
+
+def _fresh_relay(server: relay.RelayServer) -> relay.RelayServer:
+    """A relay on an EXISTING root with nothing in memory — the production shape.
+
+    The process that paired is not the process that later pushes, and a restarted relay
+    holds no link at all: exactly the state QA measured after a completed pairing, and
+    the reason the old tick (which walked ``links``) never fired. Not started: a
+    push-only relay dials out and needs no listener, and a test that starts one more
+    listener than it stops is a leak.
+    """
+    return relay.RelayServer(
+        root=server.root,
+        settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1"),
+        identity=server.identity,
+        audit=audit_mod.AuditLog(server.root),
+    )
+
+
+def _dialable_devices(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> types.NetworkRecord:
+    """A paired pair whose records let EITHER side dial the other.
+
+    B is bound and started (and advertises that endpoint), so ``_ensure_link`` on A's
+    side can reach it from A's own membership row — the shape
+    ``test_a_paired_device_is_dialable_from_its_record_alone`` established, reused here
+    because every definitions push is a dial from the side that holds the rows.
+    """
+    server_a, server_b, _host, _port = devices
+    _host_b, port_b = server_b.bind()
+    server_b.bind_control()
+    server_b.start()
+    record, _host_a, _port_a = _pair(
+        devices,
+        monkeypatch,
+        settings=relay.NetworkSettings(port=port_b, listen_address="127.0.0.1"),
+    )
+    return record
+
+
+def test_a_hostile_row_id_over_a_real_link_installs_nothing_outside_the_root(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BLOCKER 1 through the REAL chokepoint, which is how it was reproduced.
+
+    The pure-function cell in ``test_definitions.py`` plants the same row; this one
+    sends it from an admin-capable peer over a real socket, because the reviewer's
+    repro was measured that way and the sender's ``origin_id`` is the whole attack.
+    Before the guard: a complete agent directory, with a sender-chosen
+    ``system_prompt.md``, four levels above ``config/agents/``, while the reply said
+    ``installed``.
+    """
+    from local_operator.network import definitions
+
+    server_a, server_b, _host, _port = devices
+    _dialable_devices(devices, monkeypatch)
+    dialer = _fresh_relay(server_a)
+    link, reason = dialer._ensure_link_with_reason(  # noqa: SLF001 — the production dial path
+        server_b.identity.device_id
+    )
+    assert link is not None, reason
+    try:
+        reply = link.request(
+            {
+                "op": "net_definitions",
+                "req": 91,
+                "locality": "remote",
+                "phase": "apply",
+                "bundle": {
+                    "kind": definitions.BUNDLE_KIND,
+                    "version": definitions.BUNDLE_VERSION,
+                    "origin_device": server_a.identity.device_id,
+                    "agents": [
+                        {
+                            "kind": "agent",
+                            "name": "wire-escape",
+                            "origin_id": "../../../../escaped-agent",
+                            "created_date": "2026-01-01T00:00:00+00:00",
+                            "system_prompt": "WRITER CONTROLLED",
+                            "fields": {
+                                "name": "wire-escape",
+                                "description": "",
+                                "tags": [],
+                                "categories": [],
+                            },
+                        }
+                    ],
+                    "teams": [],
+                },
+            },
+            timeout=30.0,
+        )
+    finally:
+        link.close("test")
+    assert reply is not None and reply.get("op") != "error", reply
+    detail = reply.get("detail") or {}
+    assert detail.get("installed") == [], detail
+    assert [row.get("name") for row in detail.get("refused") or []] == ["wire-escape"], detail
+    # NOTHING, ANYWHERE the receiving user can write: no escaped directory, no agent
+    # row, and no trace of the sender's prompt text.
+    assert list(server_b.root.rglob("escaped-agent")) == []
+    assert AgentRegistry(server_b.root).list_agents() == []
+    assert "WRITER CONTROLLED" not in "".join(
+        path.read_text(encoding="utf-8", errors="ignore") for path in server_b.root.rglob("*.md")
+    )
+
+
+def test_the_definitions_cadence_dials_a_member_it_holds_no_link_to(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MAJOR 5: the tick walked the LINK table, so a quiet mesh never synced.
+
+    QA measured the state this cell reproduces: after a completed pairing the inviter
+    held ZERO links (a link exists only because an op dialled one), a manual tick
+    returned ``[]``, and 150 s later the peer had received nothing — so two of the
+    class's three stated benefits were inert unless a create happened to run. It walks
+    the member RECORDS instead and lets the push's own dial seam open the link, which
+    is what makes "pair a bare node and run workloads" true without a create.
+    """
+    from local_operator.network import definitions
+
+    server_a, server_b, _host, _port = devices
+    _dialable_devices(devices, monkeypatch)
+    AgentRegistry(server_a.root).create_agent(
+        AgentEditFields(name="cadence-agent", description="Reaches the peer with no create.")
+    )
+    # NOTHING IN MEMORY, which is what a relay that paired and then restarted has.
+    fresh_a = _fresh_relay(server_a)
+    assert fresh_a.links == {}
+    assert AgentRegistry(server_b.root).get_agent_by_name("cadence-agent") is None
+
+    syncer = definitions.DefinitionsSyncer(fresh_a)
+    outcomes = syncer.tick()
+    assert outcomes, "the tick walked no member at all"
+    assert outcomes == [(server_b.identity.device_id, "applied")], outcomes
+    assert AgentRegistry(server_b.root).get_agent_by_name("cadence-agent") is not None
+
+    # The interval floor still holds ON THE SAME INSTANCE: a second tick a moment
+    # later asks nobody, which is what bounds a mesh of many members.
+    assert syncer.tick() == []

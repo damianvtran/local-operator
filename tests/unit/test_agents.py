@@ -2216,7 +2216,12 @@ def test_set_agent_system_prompt(temp_agents_dir: Path):
     original_open = open
 
     def mock_open_that_fails(*args, **kwargs):
-        if args[0] == system_prompt_path and "w" in args[1]:
+        # THE FAILURE IS MOCKED AT THE DIRECTORY, not at ``system_prompt.md`` itself:
+        # the write stages beside the target and swaps it in (``_write_text_atomically``,
+        # so a concurrent reader never sees a half-written prompt), which means the file
+        # handed to ``open`` is the staging name. What the test is about — a failed write
+        # surfaced as ``IOError`` — is unchanged, and it still fails the real write.
+        if args and "w" in args[1] and Path(args[0]).parent == agent_dir:
             raise IOError("Simulated write error")
         return original_open(*args, **kwargs)
 

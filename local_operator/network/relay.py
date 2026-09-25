@@ -4186,7 +4186,16 @@ class RelayServer:
         try:
             result = handler(link, frame)
         except MeshRefusal as refusal:
-            return wire.refusal_frame(req, refusal.sentence)
+            # THE CODE CROSSES THIS BOUNDARY, and it did not used to. ``refusal_frame``
+            # sent the sentence alone, so a client that branched on the inner code (the
+            # create path, which appends the push's reason only for a definition
+            # refusal) could never see it: everything read as the fallback
+            # ``peer_refused``. The local control path has always sent both halves
+            # (``_control_call``), and ``_local_peer_call`` already reads ``code`` — this
+            # is the same two-part discipline at the remote seam. The AUTHORISER's
+            # refusals stay codeless (see ``wire.refusal_frame``), so "which guard fired"
+            # is still not something a remote peer is told.
+            return wire.error_from(refusal, req)
         except Exception as exc:  # noqa: BLE001 — a handler bug must not close the link
             self.audit.record(
                 AuditEvent(
@@ -5196,7 +5205,7 @@ class RelayServer:
         # admin could hand out by accident; a name that is always refused makes the
         # boundary structural. The creator may still set it on the device the
         # session lives on, which is the only place its consequences are visible.
-        if frame.get("yolo"):
+        if wire.yolo_requested(frame.get("yolo")):
             raise MeshRefusal(
                 "not_permitted",
                 "a session created on another device cannot start unattended (yolo): that "
@@ -7406,15 +7415,22 @@ class RelayServer:
            (``docs/design/mesh-compute-pool.md`` R21). The push is by NAME, so a
            create ships the handful of rows it mentions rather than an install's
            whole configuration.
-        3. **A failed push does not abort the create.** It continues, and the peer's
-           own refusal is the one the user reads; the push's reason is APPENDED to
-           it. That ordering matters: the peer is the only party that can say what
-           it lacks, and swallowing its sentence to print this side's failure would
-           answer a question the user did not ask (why the push failed) while hiding
-           the one they did (what is missing). Append, never replace.
+        3. **A push that came back carrying rows the peer would not take STOPS the
+           create** (``definitions.create_refusal``), because continuing would let the
+           peer resolve its own same-named row and run that instead. A push that never
+           REACHED the peer is not that case: it does not abort, and its reason is
+           APPENDED to whatever the create then answers. That ordering matters: the
+           peer is the only party that can say what it lacks, and swallowing its
+           sentence to print this side's failure would answer a question the user did
+           not ask (why the push failed) while hiding the one they did (what is
+           missing). Append, never replace.
+
+        The frame is also PINNED to the revisions the user asked for
+        (``definitions.create_pins``), so a peer holding a foreign copy refuses with
+        ``definition_stale`` rather than resolving whatever it has.
         """
         peer = str(frame.get("peer") or "")
-        if frame.get("yolo"):
+        if wire.yolo_requested(frame.get("yolo")):
             raise MeshRefusal(
                 "not_permitted",
                 "a session created on another device cannot start unattended (yolo): that "
@@ -7429,18 +7445,74 @@ class RelayServer:
         named = bool(profile or agent_name or agent_id or team)
         push_reason = ""
         expect: dict[str, Any] = {}
+        reconciliation: dict[str, Any] = {}
         if named:
             from local_operator.network import definitions
 
+            target = self._resolve_peer(peer)
+            # AN ID-ONLY CREATE RECONCILES THE ROW ITS ID NAMES, resolved HERE. A bundle
+            # selects by name and ids are per-device (``_apply_agent`` re-installs a
+            # mirror under the origin's id only when it is free), so an id this device
+            # cannot resolve pushed nothing and pinned nothing — the same hole as a
+            # failed push, with no report at all. An id this device does not hold is
+            # refused in words rather than sent, because the peer would then resolve that
+            # name from its OWN row.
+            if agent_id and not agent_name:
+                agent_name = definitions.name_for_agent_id(self.root, agent_id)
+                if not agent_name:
+                    raise MeshRefusal(
+                        "definition_missing",
+                        f"no agent with the id {agent_id!r} on this device, so its "
+                        "definition could not be sent and nothing was run under it. Name "
+                        "the agent with --agent NAME, or push its definition from the "
+                        "device that holds it (`lop network definitions push`).",
+                    )
             wanted = [name for name in (profile, agent_name) if name]
             pushed = definitions.push_to_peer(
                 self,
-                self._resolve_peer(peer),
+                target,
                 names={"agents": wanted, "teams": [team] if team else []},
             )
-            expect = definitions.expect_from_push(pushed)
+            unreconciled = definitions.create_refusal(pushed, peer_label=self._peer_label(target))
+            if unreconciled:
+                # THE DIVERGENT COPY LIVES ON THAT DEVICE, and the sentence says so:
+                # the conflict's own reason ("the copy of that name here has local
+                # edits, so it was not overwritten") is composed there and carried in
+                # ``create_refusal``'s report, so the user knows which machine to go to.
+                raise MeshRefusal("definition_conflict", unreconciled)
+            # THE PIN IS THIS DEVICE'S OWN REVISION of every name the frame mentions —
+            # what the user ASKED for, not what a push happened to reconcile — and it
+            # falls back to the push's answer only when nothing named is held here (then
+            # that device's own row is the only revision there is).
+            pins = definitions.create_pins(
+                self.root,
+                agent_names=[profile, agent_name],
+                team_names=[team] if team else [],
+            )
+            expect = pins or definitions.expect_from_push(pushed)
+            pinned_names = {**(pins.get("agents") or {}), **(pins.get("teams") or {})}
+            # A NAME THIS DEVICE DOES NOT HOLD IS NOT REFUSED, IT IS REPORTED: the user
+            # asked for a name, and the only revision that name has on the other machine
+            # is that machine's own. That is a legitimate ask ("run reviewer where the
+            # reviewer lives"). What must not happen is the SILENT version of it, which
+            # is why the reply carries the fact and the receipt prints it.
+            unpinned = [
+                name for name in (profile, agent_name, team) if name and name not in pinned_names
+            ]
             if not pushed.get("ok"):
                 push_reason = str(pushed.get("message") or pushed.get("code") or "")
+            # WHAT THIS CREATE DID ABOUT DEFINITIONS, in the reply rather than only in
+            # a local variable: a caller that reads nothing else still learns that the
+            # push was refused and which revision the session will run, and ``--json``
+            # surfaces carry it without a second command. A silent divergence a script
+            # can read is still silent for the person who typed the create.
+            reconciliation = {
+                "ok": bool(pushed.get("ok")),
+                "code": str(pushed.get("code") or ""),
+                "message": push_reason,
+                "pinned": {name: digest for name, digest in sorted(pinned_names.items())},
+                "unpinned": unpinned,
+            }
         fields: dict[str, Any] = {
             "cwd": str(frame.get("cwd") or ""),
             "model": frame.get("model"),
@@ -7468,13 +7540,23 @@ class RelayServer:
         if expect:
             fields["expect"] = expect
         try:
-            return self._local_peer_call("net_session_create", peer, **fields)
+            detail = self._local_peer_call("net_session_create", peer, **fields)
         except MeshRefusal as refusal:
-            if push_reason and refusal.code in ("definition_missing", "definition_stale"):
+            if push_reason:
+                # APPENDED ON ``push_reason`` ALONE, and it used to be gated on the
+                # refusal's CODE — which never matched: a peer's code was not carried
+                # across the link (``wire.refusal_frame`` was sentence-only), so every
+                # remote refusal arrived as ``peer_refused`` and the user was told to send
+                # a definition by a message that never said why. The codes cross now, but
+                # this gate must not depend on that: a peer older than this build sends
+                # none.
                 # ``sentence`` is the human half of a refusal (``code`` is the machine
                 # half); ``message`` is the wire frame's name for it, not the exception's.
                 raise MeshRefusal(refusal.code, f"{refusal.sentence} ({push_reason})") from None
             raise
+        if reconciliation:
+            return {**detail, "definitions": reconciliation}
+        return detail
 
     def _ctl_peer_engage(self, frame: dict[str, Any]) -> dict[str, Any]:
         return self._local_peer_call(

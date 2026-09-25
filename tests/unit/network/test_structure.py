@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from local_operator.network import types
 
@@ -81,3 +82,48 @@ def test_the_network_group_is_registered_by_the_main_cli() -> None:
     from tests.unit.network import conftest as net_fixtures
 
     assert "network" in set(net_fixtures.subcommands_of(build_cli_parser()))
+
+
+def _leaf(prog: list[str]) -> Any:
+    """The parser for one verb, from the parser the USER runs."""
+    import argparse
+
+    from local_operator.cli import build_cli_parser
+    from tests.unit.network import conftest as net_fixtures
+
+    parser: Any = build_cli_parser()
+    for name in prog:
+        parser = net_fixtures.subcommands_of(parser)[name]
+    assert isinstance(parser, argparse.ArgumentParser)
+    return parser
+
+
+def _yolo_action(parser: Any) -> Any:
+    actions = [a for a in parser._actions if "--yolo" in a.option_strings]
+    assert len(actions) == 1, "one declaration, never two"
+    return actions[0]
+
+
+def test_the_sessions_verb_does_not_promise_yolo_it_refuses() -> None:
+    """QA round 1, Q3: the help advertised a flag this verb declines.
+
+    ``cli._propagate_global_flags`` gives every subcommand ``--yolo`` with its global
+    sentence ("Auto-approve all tool executions … without prompting"), and
+    ``network sessions --create`` REFUSES it on both ends — a session on another device
+    must not run unattended. The flag stays accepted (so a caller gets the refusal
+    sentence rather than "unrecognized arguments"); only the promise goes.
+    """
+    sessions = _leaf(["network", "sessions"])
+    action = _yolo_action(sessions)
+    help_text = action.help or ""
+    assert "Refused for this verb's peer create" in help_text, help_text
+    assert "Auto-approve" not in help_text, help_text
+    # Still parsed, and still a real bool: the guard reads it, it is not rejected by
+    # argparse.
+    assert sessions.parse_args(["--create", "--yolo"]).yolo is True
+
+
+def test_the_other_verbs_keep_the_global_yolo_wording() -> None:
+    """The marker is read per verb, so the override cannot leak into the rest."""
+    exec_help = _yolo_action(_leaf(["exec"])).help or ""
+    assert "Auto-approve all tool executions" in exec_help, exec_help

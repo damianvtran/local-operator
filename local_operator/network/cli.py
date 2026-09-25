@@ -211,6 +211,15 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
             "device holds. Local sessions are `lop sessions` and `lop stop`."
         ),
     )
+    # ``--yolo`` IS ACCEPTED HERE AND THEN DECLINED by this verb's ``--create`` (see
+    # ``_cmd_sessions`` and both relay guards), so the global help sentence — which
+    # ``cli._propagate_global_flags`` adds to every subcommand — advertised something
+    # this verb refuses (QA round 1, Q3). The flag is still DECLARED THERE, once, so
+    # that ``--create --yolo`` gets the refusal sentence instead of "unrecognized
+    # arguments"; only the sentence about it changes. ``setattr`` rather than the bare
+    # attribute form because ``ArgumentParser`` is a typed object and a direct
+    # assignment is a pyright error.
+    setattr(net_sessions, "yolo_is_refused", True)
     net_sessions.add_argument("--peer", default="", help="the device to ask (id or name)")
     net_sessions.add_argument(
         "--all-peers", action="store_true", help="list every peer's sessions, merged"
@@ -2009,6 +2018,24 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             model_detail = detail.get("model")
             if isinstance(model_detail, dict) and model_detail.get("detail"):
                 lines.append(str(model_detail["detail"]))
+        # WHAT THIS CREATE DID ABOUT DEFINITIONS (QA round 1, Q1). The receipt reported a
+        # session that ran the PEER's divergent copy as a plain success — no key in
+        # ``--json``, no word about a push that had been refused — which is the "it
+        # worked" report this slice exists to make impossible. The reconciliation block
+        # is the relay's (it is the half that saw the push) and is printed whenever it is
+        # not clean; ``--json`` carries the whole block either way (``**detail``).
+        notes = detail.get("definitions")
+        if isinstance(notes, dict) and not notes.get("ok"):
+            lines.append(
+                f"definitions: not reconciled onto {peer} — "
+                f"{notes.get('message') or notes.get('code') or 'the push did not complete'}"
+            )
+        if isinstance(notes, dict) and notes.get("unpinned"):
+            names = ", ".join(repr(str(name)) for name in notes["unpinned"])
+            lines.append(
+                f"no copy of {names} on this device: that device's own revision of it is "
+                "what runs there"
+            )
         if prompt:
             # ONE FACT, SAID ONCE (UX round 3, U21). This printed the boolean
             # ``first prompt admitted: True`` AND the relay's own sentence for the
@@ -3067,6 +3094,14 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
             # The per-peer sentence is the PUSH's own (it is the only party that saw
             # the state round trip), so it is printed rather than re-derived here.
             lines.append(f"{label}: {item.get('message') or item.get('code') or 'no answer'}")
+            # THE ROWS ARE NAMED, not counted (QA round 1, Q2). "sent 1 agent
+            # definition(s)" told the operator that something happened on a device whose
+            # row they could not see; the two facts they act on are WHICH row landed and
+            # that a re-install was a re-install.
+            for verb, key in (("installed", "installed"), ("updated", "updated")):
+                for row in item.get(key) or []:
+                    if isinstance(row, dict):
+                        lines.append(f"  {verb} {row.get('kind') or 'row'} {row.get('name')!r}")
             for conflict in item.get("conflicts") or []:
                 if isinstance(conflict, dict):
                     lines.append(
