@@ -33,6 +33,7 @@ from local_operator.tui.widgets.analytics_panel import (
     _forest_rows,
     _row_overhead,
     _row_prefix,
+    _session_row_line,
     _tps_col,
     build_report,
     format_cost,
@@ -42,6 +43,7 @@ from local_operator.tui.widgets.analytics_panel import (
     proportion_bar,
     rate_legend,
     scope_needs_rate_legend,
+    ReportLayout,
 )
 from local_operator.tui.widgets.tool_card import truncate_cells
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
@@ -1174,6 +1176,39 @@ def test_the_rate_column_is_sized_by_the_data_not_by_a_constant():
     mixed = [("a", _decode(None)), ("b", _decode(1_234.0))]
     assert _tps_col(mixed) == 4
     assert _row_overhead(mixed, 120) - _row_overhead([("a", _decode(None))], 120) == 1
+
+
+def test_a_single_row_repaint_takes_the_rate_column_from_the_layout():
+    """The rate column is PUBLISHED, so a hover repaint cannot re-measure it.
+
+    ``_session_row_line`` reads every column width from the layout for exactly
+    this reason: a row composed against its OWN figures gets a narrower column
+    and moves sideways. The rate column makes that trap wider than the others —
+    it is data-sized, so a repaint that measured the row's own ``314.9`` could
+    land a cell short of the table's ``1.2k`` — which is why this recomposes one
+    row through the patch path and asserts it is the cells the full paint drew.
+    """
+    agg = _rate_width_agg()
+    layout = ReportLayout()
+    build_report(agg, 120, layout=layout)
+    assert layout.tps_col == _tps_col(list(agg.by_session.items()))
+    assert layout.tps_col == 4, "the fixture holds the column at the scaled width"
+
+    painted = [
+        li
+        for li in "\n".join(line.plain for line in build_report(agg, 120))
+        .split("By session", 1)[-1]
+        .splitlines()
+        if " tok/s" in li
+    ]
+    assert len(painted) == len(layout.session_triples)
+    for index, row in enumerate(layout.session_triples):
+        patched = _session_row_line(layout, index, row, cursor=None, hover=None)
+        assert patched.plain == painted[index].rstrip(), (
+            "the patch path and the full paint must compose the same cells for row "
+            f"{index}; a repaint that re-measured the rate column would land "
+            f"{len(painted[index]) - len(patched.plain)} cells short"
+        )
 
 
 def test_no_content_width_overruns_its_box_and_clips_a_column():
