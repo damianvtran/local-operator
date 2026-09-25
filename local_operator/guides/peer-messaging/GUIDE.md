@@ -215,13 +215,16 @@ collapsed row shows it as `switched`, `no change` or `pending`):
   (lop update) or run /model in that session`.
 - `could not reach that session; nothing changed (…)` — the socket never
   opened.
-- `no answer — the switch may or may not have landed; check lop sessions
-  before retrying` — the op was sent and the target then sent nothing for
-  15 s. That is an idle limit, not a total: a target that keeps sending screen
-  updates can hold the wait longer. `lop model` prints `no answer yet from
+- `no answer — the switch is unconfirmed and may still apply` / `check lop
+  sessions before retrying` — the op was sent and the target then sent nothing
+  for 15 s. That is an idle limit, not a total: a target that keeps sending
+  screen updates can hold the wait longer. `lop model` prints `no answer yet from
   <name> (pid N)…` on stderr once 2 s pass with no answer, so a stopped target
-  does not look like a hang. Ctrl-C ends the wait (exit 130) with `interrupted
-  — the switch may or may not have landed; …`; it does not cancel the switch.
+  does not look like a hang. Ctrl-C ends the wait with `interrupted — the
+  switch is unconfirmed and may still apply`; it does not cancel the switch,
+  which can still land after `lop sessions` shows the old model. The command
+  then exits by SIGINT (`$?` 130), so a shell loop around it stops too; the
+  same holds for `lop send`.
 
 The target's transcript records the switch twice: the usual `[model switch]`
 notice, and a peer card whose header names the sender and whose body reads

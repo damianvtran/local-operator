@@ -1163,9 +1163,19 @@ def older_peer_detail() -> str:
     )
 
 
+#: The advice both unconfirmed-switch receipts end on.
+_CHECK_BEFORE_RETRYING = "check `lop sessions` before retrying"
+
+
 def unconfirmed_switch_detail() -> str:
-    """A lost ack AFTER the switch op was sent (design D7)."""
-    return "no answer — the switch may or may not have landed; check `lop sessions` before retrying"
+    """A lost ack AFTER the switch op was sent (design D7).
+
+    FORWARD-LOOKING, not "may or may not have landed" (PR #1587 UX round 2,
+    U3): the op can still be sitting unread in a stalled target's socket, so a
+    `lop sessions` run straight away shows the old model and the switch applies
+    afterwards. Two rows, each inside a 60-column terminal.
+    """
+    return f"no answer — the switch is unconfirmed and may still apply\n{_CHECK_BEFORE_RETRYING}"
 
 
 def interrupted_switch_detail() -> str:
@@ -1175,10 +1185,7 @@ def interrupted_switch_detail() -> str:
     sit in the target's socket buffer, and the target applies before it acks,
     so stopping the wait is not stopping the switch.
     """
-    return (
-        "interrupted — the switch may or may not have landed; "
-        "check `lop sessions` before retrying"
-    )
+    return f"interrupted — the switch is unconfirmed and may still apply\n{_CHECK_BEFORE_RETRYING}"
 
 
 def interrupted_send_detail() -> str:
