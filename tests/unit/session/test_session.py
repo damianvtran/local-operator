@@ -21,6 +21,7 @@ from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE
 from local_operator.harness.message_types import (
     HUB_MESSAGE_TYPE,
     SESSION_CREDENTIAL_MESSAGE_TYPE,
+    SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
     SESSION_INCIDENT_MESSAGE_TYPE,
     SESSION_MCP_RECOVERY_MESSAGE_TYPE,
     SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
@@ -5203,6 +5204,35 @@ def test_mcp_unavailable_is_persistable_and_the_recovery_is_not() -> None:
     )
     assert _is_persistable_message(warning) is True
     assert _is_persistable_message(recovery) is False
+
+
+def test_the_credential_redaction_row_is_persistable() -> None:
+    """The operator's ticket survives a resume, pinned as MEMBERSHIP.
+
+    Agent review round 1 (F1-1): the comment beside the literal claimed this
+    membership and the frozenset literal did not contain it — the member line
+    was never added. The row survived anyway, because ``journal_shape_incident``
+    writes it with an explicit ``append_message`` rather than through this
+    predicate, so the defect was latent: a comment asserting an invariant that a
+    future path relying on the predicate would silently break. Pinned here so a
+    comment cannot drift from the set again — this is the same shape the MCP
+    pair is pinned with, for the same reason.
+
+    Persisted rather than live-only because what the row records (a credential
+    reached a tool result, and it is readable in this context) is still true in
+    a resumed session. The MODEL half of the split is deliberately NOT this
+    predicate's business: the renderer's own allow-list excludes the type, which
+    is why adding it here does not put the notice back in front of the model.
+    """
+    from local_operator.session.session import _PERSISTABLE_CUSTOM_TYPES
+
+    assert SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE in _PERSISTABLE_CUSTOM_TYPES
+    row = CustomMessage(
+        custom_type=SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
+        attribution="system",
+        details={"text": "…", "tool": "bash", "shapes": [], "summary": ""},
+    )
+    assert _is_persistable_message(row) is True
 
 
 # ---------------------------------------------------------------------------

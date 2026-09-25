@@ -137,7 +137,30 @@ SESSION_INCIDENT_MESSAGE_TYPE = "session_incident"
 #: transcript row is the operator's durable ticket, and the value stays contained
 #: across a resume because the store re-registers it from the transcript's own
 #: redaction. Replay of the row is therefore also a DISPLAY path, never a
-#: context path — see ``Session._flush_shape_incidents``.
+#: context path — see ``Session._flush_shape_incidents``. In this repo the row
+#: is surfaced by ``tui/session_presentation.py`` (its own ``NoticeBlock``
+#: branch, ``warning`` ink, unchanged text) and by ``harness/comms.py``'s peek
+#: view.
+#:
+#: THE CONSUMER THAT DOES NOT KNOW THIS LITERAL, AND THE CONSEQUENCE, ACCEPTED.
+#: The persisted ``custom_type`` is read back outside this repo, by the desktop
+#: app: ``local-operator-ui``,
+#: ``src/renderer/src/features/chat/canonical/transcript-reducer.ts``. Its
+#: ``customRow()`` branches on the literal ``"session_incident"`` and its
+#: ``INLINE_CUSTOM_TYPES`` set does not name this type, so a persisted row of
+#: THIS type takes the generic ``relayRow(text)`` arm and paints at
+#: ``level: "info"`` where it used to take ``incidentRow(text, details)`` at
+#: ``level: "error"``. That is a decided consequence, not an oversight: the row
+#: STILL RENDERS ITS FULL TEXT (it is a different arm, not an unrendered row),
+#: and a credential-shape notice that presents quietly rather than as an
+#: incident is what this change is FOR — the operator asked to stop these
+#: notices reading as failures. Keeping the persisted type as
+#: ``session_incident`` and discriminating at the render seam instead was
+#: rejected: a per-record opt-out flag is a wider mechanism than a record that
+#: simply is not an incident. A future reader who finds the reducer arm should
+#: expect the mismatch and change the reducer deliberately (add the type to its
+#: inline set and choose its ink) rather than "restore" the incident literal
+#: here, which would re-inject the notice into the model's context.
 SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE = "session_credential_redaction"
 
 #: Custom-message type journaled by the session when a session credential is
