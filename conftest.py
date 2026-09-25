@@ -428,18 +428,23 @@ def pytest_runtest_logreport(report: pytest.TestReport) -> None:
 # each dead worker had been running was reported as a FAILED crash item
 # (`worker 'gw2' crashed while running '<nodeid>'`) -- so the exit status was
 # non-zero THERE, because an item happened to be in flight. Nothing reports the
-# other case, and the exit status cannot be depended on for it: a worker killed
-# WHILE HOLDING an item leaves one `Not properly terminated` line and no failure
-# at all, which is what `_fail_on_dead_workers` refuses to let pass.
+# case this guard exists for, and the exit status cannot be depended on for it: a
+# worker killed with NOTHING in flight -- between two dispatches, before xdist has
+# ordered its shutdown -- reaches xdist as `Not properly terminated` with no
+# failing item at all, which is what `_fail_on_dead_workers` refuses to let pass.
 #
-# The reachable window of that other case is narrower than it sounds, and this is
-# measured rather than assumed -- an idle worker is idle only between its last
-# report and its next dispatch, and xdist has usually already ordered its clean
-# shutdown by then. A worker that had emitted `workerfinished` is reported with
+# What separates those two is what the worker was doing, not who killed it: an item
+# in flight produces the crash item and a red run by itself, while an empty dispatch
+# queue produces no item to fail.
+#
+# The third case is why the window for the second is narrow, and this is measured
+# rather than assumed -- an idle worker is idle only between its last report and its
+# next dispatch, and xdist has usually already ordered its clean shutdown by then. A
+# worker that had emitted `workerfinished` is reported with
 # `pytest_testnodedown(error=None)`; SIGKILLing one (three repeats on a `-n 3` run
-# with an empty dispatch queue) produced rc=0, `2 passed`, and no diagnostic --
-# the kill landing on a worker xdist had already finished with. That is the
-# correct reading, not a hole: the tests that worker owned really had completed.
+# with an empty dispatch queue) produced rc=0, `2 passed`, and no diagnostic -- the
+# kill landing on a worker xdist had already finished with. That is the correct
+# reading, not a hole: the tests that worker owned really had completed.
 #
 # The other half of that measurement is what a reader needs in order NOT to
 # misread the artifact. A 37-minute run whose controller had 6.56 s of CPU across
