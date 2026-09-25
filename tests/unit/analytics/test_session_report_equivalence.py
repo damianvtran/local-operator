@@ -96,6 +96,16 @@ def legacy_session_report(
             "cost_micro",
             "cost_known",
             *(f"c_{key}" for key in COMPONENT_KEYS),
+            # The decode measures, appended after the component block. Written
+            # out LITERALLY rather than imported from the store: this oracle
+            # exists to catch a positional slip in production, and a name it
+            # took from production could not catch a reorder. The production
+            # projection appends the same three in the same order, and the
+            # seeded rows below carry non-zero values so a slip moves a real
+            # number rather than comparing 0 to 0.
+            "decode_us",
+            "decode_tokens",
+            "decode_calls",
         )
     ]
     measures = ", ".join(sums)
@@ -231,6 +241,15 @@ def _rows_for_one_session(count: int = 240) -> list[Any]:
             duration_ms=-1.0 if index % 5 == 0 else float(100 + index),
             ttft_ms=-1.0 if index % 4 == 0 else float(20 + index),
             preparation_ms=-1.0 if index % 7 == 0 else float(5 + index),
+            # NON-ZERO decode measures, and deliberately not a function of
+            # ``output_tokens`` alone: two thirds of the calls carry a window
+            # (the rest are the "no sample" population a rate must exclude), and
+            # the window varies independently of the token count so a producer
+            # that reads the wrong position moves a number rather than
+            # comparing 0 with 0.
+            decode_us=0 if index % 3 == 0 else 100_000 * (1 + index % 11),
+            decode_tokens=0 if index % 3 == 0 else 40 + (index % 7),
+            decode_calls=0 if index % 3 == 0 else 1,
         )
     return rows
 

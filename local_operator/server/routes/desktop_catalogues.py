@@ -304,6 +304,60 @@ async def analytics(
     return reply({"data": await asyncio.to_thread(read_report)})
 
 
+@router.get("/v1/desktop/analytics/models", response_model=CRUDResponse[Report])
+async def analytics_models(
+    request: Request,
+    since_ms: int | None = Query(default=None, ge=0),
+    until_ms: int | None = Query(default=None, ge=0),
+    session_id: str | None = Query(default=None, pattern=r"^[a-f0-9]{12}$"),
+    limit: int = Query(default=200, ge=1, le=1000),
+):
+    """Per-model throughput, on its OWN op rather than on ``analytics.get``.
+
+    The rows come from one grouped scan of the raw ledger, which is what makes
+    them cover the operator's whole retained window (the ``usage_daily`` rollup
+    is forward-fill, and ``session_daily`` has no model dimension at all). That
+    scan costs SECONDS on a multi-million-row ledger, so it is deliberately not
+    folded into ``analytics.get``: the panel's other sections would pay it on
+    every load, including the ones that never open this table. Its own op keeps
+    that cost isolated and separately measurable, and lets a client show a
+    loading state for this one section.
+
+    ``days`` is accepted for wire symmetry with ``analytics.get`` so a client can
+    build both requests from one window object. It is deliberately NOT used to
+    derive bounds here: a client that sends ``days`` also sends the exact
+    ``since_ms``/``until_ms`` its other sections were rendered from, and deriving
+    a second, drifting window from a day count is how two sections of one screen
+    end up describing different spans.
+    """
+    from local_operator.analytics.store import AnalyticsStore
+
+    if since_ms is not None and until_ms is not None and since_ms > until_ms:
+        raise HTTPException(422, "The start must precede the end")
+
+    def read_rates():
+        store = AnalyticsStore(request.app.state.config_manager.config_dir / "analytics.db")
+        try:
+            rows = store.model_rates(
+                since_ms=since_ms, until_ms=until_ms, session_id=session_id, limit=limit
+            )
+            # ``scope`` names the SOURCE, not the window: the client prints it on
+            # the section's meta line so a reader knows these rows were grouped
+            # from the ledger rather than from the rollup the headline came from.
+            # A server-side literal so a client cannot infer it and cannot
+            # disagree with the server about it.
+            return {
+                "rows": [dataclasses.asdict(row) for row in rows],
+                "scope": "ledger",
+                "since_ms": since_ms,
+                "until_ms": until_ms,
+            }
+        finally:
+            store.close()
+
+    return reply({"data": await asyncio.to_thread(read_rates)})
+
+
 #: The `info.get` fields `LiveState()` leaves at a dataclass DEFAULT and this
 #: read therefore never measured — the session-attached half of the snapshot.
 #: Each is a `0`/`False`/`[]` that is indistinguishable from a reading, and the
