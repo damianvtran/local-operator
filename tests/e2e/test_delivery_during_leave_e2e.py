@@ -276,6 +276,23 @@ async def test_a_settled_batch_survives_an_exit_that_already_committed(
         ), "a successor that re-verifies finished work is the wasted turn this fixes"
     finally:
         await successor.dispose()
+    # U7, ON THE REAL FLOW (review round 2): the held marker is written once and
+    # cleared nowhere, so the notice is painted on every later replay — and the
+    # first wording claimed "no turn has read it yet", which after THIS turn is a
+    # lie. The successor has now read and answered both reports; the notice is
+    # recomposed here from the DURABLE rows by the production decision, and it must
+    # still be a fact about the arrival rather than a claim about now.
+    from local_operator.harness.rows import HELD_DELIVERY_NOTICE, held_delivery_notice
+
+    for row in _job_result_rows(directory):
+        decided = held_delivery_notice(row)
+        assert decided is not None, "the row is still marked held, which is now harmless"
+        text, _severity = decided
+        assert "no turn ran for it at that point" in text
+        assert "has read it yet" not in text, (
+            "after the answering turn, the notice must not still claim nobody read it"
+        )
+    assert "no turn has read it yet" not in HELD_DELIVERY_NOTICE
 
 
 @pytest.mark.asyncio
