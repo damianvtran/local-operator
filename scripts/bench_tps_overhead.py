@@ -301,7 +301,9 @@ def _events_counting(n: int) -> list[Any]:
 
 def _fresh_recorder(db_path: Path):
     """Point the singleton recorder at a temp store, as the unit tests do."""
-    from local_operator.analytics.recorder import reset_recorder_for_test  # noqa: PLC0415
+    from local_operator.analytics.recorder import (  # noqa: PLC0415
+        reset_recorder_for_test,
+    )
     from local_operator.analytics.store import AnalyticsStore  # noqa: PLC0415
 
     store = AnalyticsStore(db_path)
@@ -539,6 +541,16 @@ def _connect_child(root: Path, db: Path, passes: int) -> dict[str, Any]:
 
     before = _db_files(db)
     times: list[float] = []
+    # Declared BEFORE the loop: a zero-pass run (or a future early exit) must
+    # still produce a report, and an unbound name here would crash the arm
+    # rather than say "nothing was measured".
+    calls_rows: int | None = None
+    sd_rows: int | None = None
+    sd_cols: list[str] = []
+    calls_cols: list[str] = []
+    has_rollup: bool | None = None
+    page_count: int | None = None
+    journal: str | None = None
     for i in range(passes):
         # A fresh store object per pass: the connection is per-thread and cached
         # on ``self._local``, so this is a genuine connect each time.
@@ -869,6 +881,14 @@ def _child_env(root: Path) -> dict[str, str]:
     ``CMUX_*``/``LOP_*`` prefixes a parent ``lop`` exports are dropped here too,
     because the child product reads them (a child runtime would otherwise
     inherit another session's provider and model).
+
+    The notification gate goes through ``agent_shell.harness_child_env`` rather
+    than being set here by hand, for the reason ``bench_base_overhead.py`` gives:
+    a bench child that drives a real session can otherwise put a mock
+    completion on the operator's lock screen, and one helper is what stops the
+    next bench from remembering half of it. It also declares the child a harness
+    child, so a bench run from inside an agent's own shell measures the arm
+    instead of failing on the agent-shell marker.
     """
     env = {
         k: v
@@ -877,7 +897,17 @@ def _child_env(root: Path) -> dict[str, str]:
     }
     env["PYTHONPATH"] = str(root) + os.pathsep + env.get("PYTHONPATH", "")
     env.setdefault("TERM", "xterm-256color")
-    return env
+    sys.path.insert(0, str(root))
+    try:
+        from local_operator.agent_shell import harness_child_env
+
+        return harness_child_env(env)
+    except Exception:  # noqa: BLE001 — a bench must not fail on a missing gate helper
+        # Fail SAFE rather than open: without the helper the gate is set by hand,
+        # because the one failure mode that matters here is a child putting a
+        # notification on the operator's screen.
+        env["LOCAL_OPERATOR_NO_NOTIFICATIONS"] = "1"
+        return env
 
 
 def _child_main(mode: str, args: argparse.Namespace) -> int:
@@ -915,7 +945,7 @@ def _clock_ns() -> dict[str, Any]:
     return {
         "samples_ns": samples,
         "ns_median": statistics.median(samples),
-        "ns_best": best / _CLOCK_BATCH,
+        "ns_best": (best / _CLOCK_BATCH) if best is not None else None,
         "samples": _CLOCK_SAMPLES,
         "batch": _CLOCK_BATCH,
     }
@@ -1326,7 +1356,7 @@ def _fixture_meta(fixture: Path) -> dict[str, Any]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("--root", type=Path, default=_DEFAULT_ROOT, help="checkout root to measure")
     parser.add_argument(
         "--fixture",
