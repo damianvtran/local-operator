@@ -4135,7 +4135,11 @@ class ServingSessionHandle(SessionHandle):
             spec = await asyncio.to_thread(peer_model.validate_peer_selection, provider, model_id)
         except ModelSelectionRefused as refused:
             raise ValueError(
-                peer_model.refusal_detail(refused.message, _effective_label(session))
+                peer_model.refusal_detail(
+                    refused.message,
+                    _effective_label(session),
+                    displaced=peer_model.displaced_selection(session),
+                )
             ) from refused
         new_label = f"{spec.provider}/{spec.model_id}"
         if peer_model.already_selected(session, new_label):
@@ -4164,7 +4168,9 @@ class ServingSessionHandle(SessionHandle):
         if not peer_model.already_selected(session, new_label):
             raise ValueError(
                 peer_model.refusal_detail(
-                    f"the switch to {new_label} did not take effect", _effective_label(session)
+                    f"the switch to {new_label} did not take effect",
+                    _effective_label(session),
+                    displaced=peer_model.displaced_selection(session),
                 )
             ) from apply_error
         await self._record_peer_model_switch(

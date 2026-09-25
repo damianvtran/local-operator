@@ -74,6 +74,7 @@ from local_operator.compaction.marker import (
 from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE, approx_text_tokens
 from local_operator.harness.approval import ApprovalGate, ask_approval
 from local_operator.harness.comms import SubagentComms
+from local_operator.harness.guard_area import source_is_exempt
 from local_operator.harness.jobs import (
     JOB_RESULT_MESSAGE_TYPE,
     AsyncJob,
@@ -10953,6 +10954,21 @@ class Session:
         said nothing.
         """
         if not reached_model:
+            return
+        # THE GUARD'S OWN AREA, EXEMPT FROM THE ESCALATION AND NOTHING ELSE.
+        # A read of ``redaction_shapes.py`` or of the shape corpus masks exactly
+        # as it always did — the mask, the containment registration and the
+        # ``reached_model`` classification are all upstream of this gate — and
+        # stops demanding a rotation: a rotate-it notice about the guard's own
+        # test fixture is the noise that teaches an operator to skip the one that
+        # is real. The verdict was settled from the CALL's own arguments when the
+        # tool ran (``harness/guard_area.py``), so it cannot be conferred by a
+        # command that merely names the path, nor by a result that prints it.
+        #
+        # Nothing is filed here, not even the quiet wording: this gate's only
+        # non-escalated path is CONTAINED, and the operator already silenced that
+        # one, so there is no third rendering to hand an exempt hit to.
+        if source_is_exempt():
             return
         try:
             tool, summary = current_tool_source()
