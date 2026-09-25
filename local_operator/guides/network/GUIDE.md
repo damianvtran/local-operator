@@ -1,6 +1,6 @@
 ---
 name: network
-description: Pair this device into a lop mesh network, see which peers are reachable, drive the network's lifecycle, and respond to a mesh incident such as disconnect or panic.
+description: Pair this device into a lop mesh network, see which peers answer, move a session between devices, drive the network's lifecycle, and answer a mesh incident.
 ---
 
 # Network: pair your devices, and see what is on the other end
@@ -61,6 +61,11 @@ rendering is not a contract.
    instead of the six digits: use it when the two machines do not share a
    private path. `--name` sets the name this device will be known by, `--host
    host:port` overrides the endpoint to dial.
+   THE INVITER'S HALF, when its relay runs under a daemon and has no terminal to
+   ask at, is `lop network confirm`: `--list` shows the parked pairing with both
+   codes, and answering it records the person's decision for the waiting pairing
+   loop. It refuses without a TTY — a foreground `lop network serve` is the
+   alternative on that side.
    **You cannot do this step.** There is deliberately no flag that completes a
    pairing, and the code is read at the joining device's own prompt — that is
    what makes the interlock real rather than a round trip. Hand over the file and
@@ -143,8 +148,8 @@ quietly dropped:
 
 ## Which device should run this session
 
-A session can be listed, created, warmed and stopped ON a peer over a paired
-mesh. From a shell:
+A session can be listed, created, warmed, stopped, archived or deleted ON a peer
+over a paired mesh. From a shell:
 
 | Command | Effect |
 |---|---|
@@ -155,6 +160,9 @@ mesh. From a shell:
 | `lop network sessions --peer <id> --engage <session>` | warm a stored session on the peer |
 | `lop network sessions --peer <id> --stop <session>` | stop it where it lives |
 | `lop network sessions --peer <id> --stop <session> --force` | the same stop on a target whose turn is in flight, or that will not answer its socket — it WAITS for the owner's ladder to resolve, which can be minutes (see below) |
+| `lop network sessions --peer <id> --archive <session>` | hide it on the device that holds it |
+| `lop network sessions --peer <id> --unarchive <session>` | restore it there |
+| `lop network sessions --peer <id> --delete <session> [--yes]` | delete it where it lives — a dry run until `--yes` |
 
 EVERY REFUSAL NAMES THE COMPONENT THAT CAUSED IT, so read the `code` before
 acting on one (QA round 5, Q-R5-1):
@@ -202,18 +210,22 @@ that arrives — it names the rung that actually acted (`sigterm` or `sigkill`) 
 failed. `--force` on a target whose socket does answer is unaffected and returns
 in about a second.
 
-WHAT IS **NOT** IN THIS BUILD, although the design names it: `lop exec --peer`,
-`lop send --peer`, `lop sessions move <id> --to <peer>|local`, and the TUI's
-`/move`. Do not promise a user that a session can be MOVED between devices, and
-do not retry those verbs hoping for a different answer —
-`--peer` is not a flag on `exec` or `send`, and `move` is not a `sessions`
-subcommand. **`/new remote <peer> [prompt]` IS in this build** (see "Which device
-should run this session"): it creates, lists, warms and stops a session on a peer,
-and it is the one WRITE this slice ships — it is named here because it used to be
-listed as unbuilt while it worked, and a guide that tells an agent a working verb
-does not exist is the same defect in the other direction. Credentials are the
-other gap (next section): a session created on a
-peer needs a model THAT PEER can reach, and this build does not broker one.
+MOVING A SESSION **IS** IN THIS BUILD. `lop sessions move <id> --to <peer>|local`
+moves a conversation between devices, `--keep` copies it instead of moving it, and
+the TUI's `/move <id> --to <peer|local> [--keep]` is the same act from inside a
+session — see "Moving a session between devices". They are named here because this
+paragraph used to list them as unbuilt while they worked, and a guide that tells an
+agent a working verb does not exist is the same defect in the other direction.
+
+WHAT IS **NOT** IN THIS BUILD, although the design names it: `lop exec --peer` and
+`lop send --peer`. Do not retry those two hoping for a different answer: `--peer`
+is a flag on `lop sessions` and on `lop network sessions`, never on `exec` or
+`send`. **`/new remote <peer> [prompt]` IS in this build** (see "Which device
+should run this session"): it creates, lists, warms and stops a session on a peer.
+Credentials are brokered too (next section): `lop network credential share` lends
+a short-lived token from the device that owns the login, so a session on a peer no
+longer needs its own login for that provider — `kimi` is the one provider that can
+never be lent.
 
 DIAL-ONLY DEVICES. A machine with no inbound path (behind NAT, or
 `network.listen_address: 127.0.0.1`) can reach a peer but cannot be reached by
@@ -242,10 +254,51 @@ to list them in cannot decide whether it looks reachable. `lop network doctor
 --json` reports the same per link, one row per address plus the handshake, and
 its top-level `ok` is FALSE whenever any check in its own array is false.
 
-The rule the design fixes: a session with a strong local dependency (a repository
-that exists only on this machine, an attached browser, a terminal the user is
-watching) should stay where it is. Mobility is for work that follows the person,
-not for work that follows the machine.
+## Moving a session between devices
+
+A conversation moves with its own id and its transcript:
+
+```bash
+lop sessions move <id> --to <peer>          # hand it to that device; the copy HERE is retired
+lop sessions move <id> --to local           # bring a remote conversation home to this device
+lop sessions move <id> --to <peer> --keep   # copy it and leave the original running
+```
+
+THE DIRECTION IS THE PROTOCOL: the device that will HOLD the conversation issues
+the move, so `--to <peer>` is this device asking the peer to pull and `--to local`
+is this device pulling. There is no push verb.
+
+THE DEFAULT IS A MOVE, NOT A COPY. Without `--keep` the conversation keeps its id
+and the copy on the device it left is deleted once the handoff commits — which is
+what a recall (`--to local`) means: the conversation comes home and is removed on
+the remote rather than left behind as a second divergent transcript. `--keep`
+forks instead: the destination mints a NEW id, copies the transcript, and leaves
+the source running untouched, with the copy's origin recorded as a fork; the two
+transcripts diverge from there.
+
+OTHER FLAGS. `--wait [SECONDS]` re-checks a conversation whose turn is in flight
+every five seconds, up to the design's thirty minutes (a bare `--wait`). A session
+with a turn in flight is otherwise REFUSED rather than interrupted, and the refusal
+changes nothing. `--from-replica` recovers THIS device's last synced copy of a
+conversation as a NEW session — the path when the device that held it is gone;
+`lop sessions sync <id>` is what keeps that copy fresh.
+
+IN THE TUI the same act is `/move [<id>] --to <peer|local> [--keep]`: it runs the
+CLI and renders its phase transcript. **TWO DIFFERENT THINGS ANSWER TO `/move`**
+and they must not be confused: bare `/move` opens the working-directory picker and
+`/move <path>` moves the SESSION'S DIRECTORY, both frontend-local. The mobility
+form is discriminated by `--to` and by nothing else (`mesh-ui.md` §1.7 — an id can
+look like a directory name and a directory name like an id, so the first token
+never decides). That surface takes `--keep` and no other flag: there is no `--wait`
+there, and a busy conversation is refused there too. Moving the session you are IN
+leaves it first, because a move cannot retire a runtime this terminal is attached
+to.
+
+WHAT MOBILITY IS NOT. The desktop app has no mesh surface yet (`mesh-ui.md` §2 is
+`local-operator-ui`'s). And the design's rule still holds: a session with a strong
+local dependency (a repository that exists only on this machine, an attached
+browser, a terminal the user is watching) should stay where it is — mobility is
+for work that follows the person, not for work that follows the machine.
 
 ## Credentials on a peer
 
@@ -398,6 +451,8 @@ lop network rename <network> <name> --json
 lop network rm <network> --json
 lop network invite --role drive --json
 lop network join @<token-file>
+lop network confirm --list          # a pairing parked on THIS device, with both codes
+lop network confirm <invite-id>     # answer it (--decline refuses; needs a TTY)
 lop network member rm <network> <device> --json
 
 # incident
@@ -426,13 +481,18 @@ is for a suspected key compromise, and the previous id is gone for good.
 **What is not implemented in this build**, so nothing above should be promised as
 existing:
 
-- Session MOBILITY — `lop sessions move <id> --to <peer>|local`, move-with-`--keep`
-  (fork), and the TUI's `/move`. Creating, listing, warming and
-  stopping a session ON a peer IS implemented — including the TUI's
-  `/new remote <peer> [prompt]` (see "Which device should run this
-  session"); moving one is not (`mesh-session-mobility.md`).
-- Credential brokering (`mesh-credentials.md`).
-- The console/relay UI surfaces (`mesh-ui.md` §1–2).
+- The DESKTOP half of the mesh surfaces (`mesh-ui.md` §2) — the networks-and-
+  devices view belongs to `local-operator-ui`, not to this build. The TUI half
+  (§1) is built: `/network`, `/network peers`, `/new remote <peer>` and
+  `/move --to` (see "Moving a session between devices").
+- `--peer` on `lop exec` and on `lop send` (see "Which device should run this
+  session").
+- `--wait` on the TUI's `/move --to`: the slash takes `--keep` only, so a busy
+  conversation is refused there and waited for through the CLI.
+
+Session mobility (`mesh-session-mobility.md`) and credential brokering
+(`mesh-credentials.md`) are BOTH in this build, as described above — they are
+listed here only to say where their missing halves are, not to deny them.
 
 `lop network uninstall --purge` removes this device's NETWORK records, invite
 token files, outbound queues, parked pairings and the audit log, and deliberately
