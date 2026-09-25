@@ -522,6 +522,37 @@ def test_a_stale_plan_is_refused_rather_than_spliced(tmp_path: Path) -> None:
     assert refusal.value.code == "stale_plan"
 
 
+def test_a_root_copy_set_file_that_is_a_link_is_refused_as_one(tmp_path: Path) -> None:
+    """The refusal names the SHAPE, not a writer that does not exist.
+
+    MEASURED (review round 3, NIT 2): ``title.json`` as a symlink refused with
+    ``stale_plan`` — "the conversation changed while it was being copied" — because the
+    stamp was taken through the link and the lstat comparison found the link's own size
+    against a stamp for the file it points at. It refused (no data loss, no following of the
+    link), so this is about the sentence: a person who reads "something changed" goes looking
+    for a writer, and the thing to change is the link.
+
+    A ``--keep`` copy and a replica take this path; a DELETING move is refused earlier, by the
+    copy set's own shape rule (``test_a_symlinked_content_tree_is_refused_and_reported`` and
+    ``test_a_move_of_a_session_whose_scratchpad_is_a_link_is_refused`` have that half).
+    """
+    source = tmp_path / "owner"
+    source.mkdir()
+    directory = seed(source, "abc123")
+    outside = tmp_path / "elsewhere.json"
+    outside.write_text('{"title": "not this session\'s"}\n', encoding="utf-8")
+    (directory / "title.json").unlink()
+    (directory / "title.json").symlink_to(outside)
+    plan = sync.build_manifest(source, "abc123")
+
+    with pytest.raises(sync.SyncRefused) as refusal:
+        sync.serve_fetch(source, "abc123", plan=str(plan["plan_id"]), name="title.json", offset=0)
+
+    assert "title.json" in refusal.value.message, refusal.value
+    assert "symlink" in refusal.value.message, refusal.value
+    assert "changed while it was being copied" not in refusal.value.message, refusal.value
+
+
 def test_a_fetch_cannot_reach_outside_the_copy_set(tmp_path: Path) -> None:
     """The deny-list is enforced on the SERVE side, not just by the planner."""
     source = tmp_path / "owner"

@@ -201,7 +201,53 @@ async def test_cleanup_exact_refuses_a_session_a_move_is_handing_over(
             "at": 1.0,
         },
     )
-    result = await cleanup_exact(directory, resource_generation)
+    result = await cleanup_exact(directory, resource_generation, config_dir=config_dir)
+
+    assert result.state == "unresolved", result
+    assert "pixel" in result.detail, result
+    assert not bridge.calls
+
+
+@pytest.mark.asyncio
+async def test_the_move_guard_is_consulted_through_a_requested_config_root(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    """A caller that knows its config root gets the guard whatever the path looks like.
+
+    MEASURED (review round 3, NIT 1): the root was ``directory.parent.parent``, so a caller
+    passing anything but ``<config>/sessions/<id>`` got a root belonging to no config at all —
+    no guard and no error, the one shape in which a safety check fails open. The product's one
+    caller (``cli``) now passes the root it already resolved; this cell asks for the guard
+    from a directory deliberately NOT in that layout, which is what the old derivation
+    silently mis-handled.
+    """
+    from local_operator.session.placement import write_handoff_entry
+
+    store = tmp_path / "store"
+    store.mkdir()
+    # ONE level below the store, deliberately: the derivation this replaces walked up TWO
+    # (`directory.parent.parent`), so a fixture at the conventional depth cannot tell the two
+    # implementations apart — and a cell that passes under both is not a cell for this fix.
+    directory = store / "the-session"
+    directory.mkdir()
+    resource = BrowserResource(directory, directory.name)
+    resource.initialize()
+    resource.record["terminal"] = "failed"
+    resource.remember("bridge:100:private")
+    write_handoff_entry(
+        store,
+        directory.name,
+        {
+            "role": "source",
+            "phase": "prepared",
+            "to_device": "d_other",
+            "to_name": "pixel",
+            "instance_id": "i_probe",
+            "at": 1.0,
+        },
+    )
+
+    result = await cleanup_exact(directory, resource.generation, config_dir=store)
 
     assert result.state == "unresolved", result
     assert "pixel" in result.detail, result

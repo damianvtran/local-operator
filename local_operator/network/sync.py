@@ -585,8 +585,22 @@ def unlisted_entries(directory: Path) -> list[str]:
     * a DIRECTORY — carried by ``content_trees`` (or excluded there by name);
     * a ``*.tmp`` leftover — the corpse of an atomic write, not content;
     * a cache directory (``CACHE_TREE_NAMES``);
-    * a symlink — reported by the tree walk if it is inside one, and refused here if it
-      is at the root, which is the one place no product writer puts one.
+    * a symlink — carried by the tree walk if it is inside a tree (its target rewritten
+      relative), and refused HERE if it sits at the root, whichever name it carries: the
+      root is the one place no product writer puts one, and a root link is a pointer to
+      something OUTSIDE the session that the destination would either lose or resolve
+      elsewhere.
+
+    THE SHAPE IS CHECKED BEFORE THE NAME LISTS, and that ordering is the fix for review
+    round 3's MAJOR. It used to be the other way round, on the reasoning that a classified
+    name needs no classification — and a session whose ``scratchpad`` was a SYMLINK then
+    fell through both the copy set (``content_trees`` does not walk a link, correctly) and
+    this function (the name was classified, so it was skipped). The plan reported
+    ``trees: []``, ``trees_skipped: []``, the move committed and the source directory was
+    removed WITH the link in it: the session's only pointer to the user's tree gone, and
+    nothing in the copy or the plan naming it. Names in ``NEVER_COPIED`` keep their
+    exclusion, because their reason is about whose state the file is rather than about its
+    shape.
     """
     listed = set(COPY_SET_NAMES) | set(NEVER_COPIED) | set(COPY_SET_TREES)
     directory = Path(directory)
@@ -597,6 +611,9 @@ def unlisted_entries(directory: Path) -> list[str]:
     found: list[str] = []
     for child in children:
         name = child.name
+        if child.is_symlink() and name in listed and name not in NEVER_COPIED:
+            found.append(name)
+            continue
         if name in listed or name in CACHE_TREE_NAMES:
             continue
         if name.endswith(TRANSIENT_SUFFIX) and child.is_file() and not child.is_symlink():
@@ -630,6 +647,23 @@ def excluded_cache_trees(directory: Path) -> list[str]:
         for child in children
         if child.name in CACHE_TREE_NAMES and child.is_dir() and not child.is_symlink()
     ]
+
+
+def symlinked_tree_entries(directory: Path) -> list[str]:
+    """``COPY_SET_TREES`` names that exist at the root as a SYMLINK (reported, refused).
+
+    Reported for the same reason ``transient_entries`` is: an entry a copy will not carry
+    must be visible in the plan, so "why is this session not moving?" has an answer in the
+    document rather than in the sentence of whichever refusal a person happens to hit.
+    ``content_trees`` does not walk a symlinked tree (see it), so without this list a plan
+    showed ``trees: []`` and ``trees_skipped: []`` for a session whose ``scratchpad`` was
+    a link — the exact blindness that let review round 3's MAJOR through.
+    """
+    try:
+        children = sorted(Path(directory).iterdir())
+    except OSError:
+        return []
+    return [child.name for child in children if child.name in COPY_SET_TREES and child.is_symlink()]
 
 
 def transient_entries(directory: Path) -> list[str]:
@@ -666,12 +700,24 @@ def assert_complete(directory: Path) -> None:
     named = sorted(set(unlisted_entries(directory)) | set(irregular_tree_entries(directory)))
     if not named:
         return
+    # A ROOT-LEVEL SYMLINK NEEDS ITS OWN SENTENCE. "This build does not carry it" is true
+    # of an unknown name and misleading for a name the copy set DOES carry, so the shape is
+    # named and the remedy is the one that works: the link is not the tree.
+    links = symlinked_tree_entries(directory)
+    shape = (
+        f" {', '.join(links)} is a symlink rather than a directory: a copy carries a "
+        "session's own trees, and a link points at one that a copy on another device would "
+        "not have. Replace the link with the directory, or copy the tree in by hand, then "
+        "try again."
+        if links
+        else ""
+    )
     raise SyncRefused(
         "unlisted_content",
         f"{Path(directory).name} holds {', '.join(named)}, which this build's copy set "
         "does not carry, so it was not moved. A symlink out of a session, or a file "
         "named for something this build does not know, would be deleted with nothing to "
-        "copy it from: move or remove it, or copy it across by hand, then try again.",
+        "copy it from: move or remove it, or copy it across by hand, then try again." + shape,
     )
 
 
@@ -845,6 +891,31 @@ def _member_stamps(
                 continue
             stamps[wire] = _MemberStamp(digest, stat.st_size, stat.st_size, stat.st_mtime_ns)
     return stamps
+
+
+#: The wire value a destination sends when it is taking a session OVER rather than
+#: keeping a replica of it. It is a string on the plan request, so both sides have to
+#: agree on it; spelling it once is what ``whole_transcript_for`` is for.
+COPY_PURPOSE_MOVE = "move"
+
+
+def whole_transcript_for(purpose: str) -> bool:
+    """Does a copy made for ``purpose`` carry the transcript WHOLE?
+
+    ONE SPELLING OF THE TAIL PROPERTY, which is spread over two modules and four call
+    sites (review round 3, MINOR 2). ``_plan`` keys it on the wire string the destination
+    sends, and the SOURCE's own prepare/commit comparison passes it directly from
+    ``mobility`` — where three ``whole_transcript=True`` arguments sit in the file a
+    maintainer reads first, none of which changes what the destination receives. Reverting
+    those three leaves every torn-tail cell green; reverting this predicate fails them
+    with ``digest_mismatch``. Deriving all four from here means "fixing the wrong one" is
+    no longer possible: there is only one.
+
+    A MOVE deletes its source, so there is no next sync to carry a torn tail and the
+    transcript travels whole (review round 2). A replica of a live session keeps the safe
+    region: the next sync carries the rest (see ``_safe_region``).
+    """
+    return purpose == COPY_PURPOSE_MOVE
 
 
 #: The last few plans this process built, keyed ``(root, session_id, plan_id)``.
@@ -1203,7 +1274,13 @@ def build_manifest(
         # surface or a test can read to see what a copy will move.
         "trees": tree_entry_names(directory),
         "links": tree_link_entries(directory),
-        "trees_skipped": irregular_tree_entries(directory),
+        # A symlinked content TREE is skipped by the walk rather than by `content_trees`,
+        # so it is reported here beside the links the walk did find: both are entries this
+        # copy will not carry, and a plan that stayed silent about the first was how the
+        # round-3 MAJOR escaped notice.
+        "trees_skipped": sorted(
+            set(irregular_tree_entries(directory)) | set(symlinked_tree_entries(directory))
+        ),
         "trees_unportable": unportable_tree_entries(directory),
         "transients": transient_entries(directory),
         "trees_excluded": excluded_cache_trees(directory),
@@ -1373,6 +1450,18 @@ def _stamp_refusal(
             # answering "" here is one failed copy, never a corrupt one.
             return ""
         expected_bytes, expected_mtime = stamp.stat_bytes, stamp.mtime_ns
+    if path.is_symlink() and "/" not in name:
+        # A ROOT-LEVEL LINK IS REFUSED AS ONE (review round 3, NIT 2). The stamp above was
+        # taken through the link (a copy-set name is a FILE whose bytes travel), so the
+        # lstat comparison below reported a size mismatch as "the conversation changed
+        # while it was being copied" — a sentence that sends a person looking for a writer
+        # that does not exist. This shape is refused the same way `unlisted_entries`
+        # refuses it for a deleting move, so a `--keep` copy and a replica get the same
+        # answer as the move does.
+        return (
+            f"{name} is a symlink rather than a file, and this build carries a session's "
+            "own files, not a link: replace it with the file it points at, then try again"
+        )
     try:
         stat = path.lstat() if path.is_symlink() else path.stat()
     except OSError:
@@ -1517,11 +1606,13 @@ def serve_fetch(
         {"plan_id": plan, "expect_bytes": expect_bytes, "expect_mtime_ns": expect_mtime_ns},
     )
     if stale:
-        raise SyncRefused(
-            "stale_plan",
-            "the conversation changed while it was being copied, so this part was not "
-            "sent; asking again picks up the new cut",
-        )
+        # THE REASON IS KEPT (review round 3, NIT 2). This raised with a fixed sentence,
+        # "the conversation changed while it was being copied", which is right for a rewrite
+        # and WRONG for the other shapes the same check answers — a member deleted mid-copy,
+        # or a copy-set FILE that is a symlink rather than a file. Both sent a person looking
+        # for a writer that does not exist; the sentence already computed names the member and
+        # the shape, so it is used, with the one piece of advice the fixed sentence added.
+        raise SyncRefused("stale_plan", f"{stale}; asking again picks up the new cut")
     try:
         span, file_bytes, eof = _served_span(
             path,
@@ -1586,11 +1677,13 @@ def serve_verify(
         {"plan_id": plan, "expect_bytes": expect_bytes, "expect_mtime_ns": expect_mtime_ns},
     )
     if stale:
-        raise SyncRefused(
-            "stale_plan",
-            "the conversation changed while it was being copied, so this part was not "
-            "sent; asking again picks up the new cut",
-        )
+        # THE REASON IS KEPT (review round 3, NIT 2). This raised with a fixed sentence,
+        # "the conversation changed while it was being copied", which is right for a rewrite
+        # and WRONG for the other shapes the same check answers — a member deleted mid-copy,
+        # or a copy-set FILE that is a symlink rather than a file. Both sent a person looking
+        # for a writer that does not exist; the sentence already computed names the member and
+        # the shape, so it is used, with the one piece of advice the fixed sentence added.
+        raise SyncRefused("stale_plan", f"{stale}; asking again picks up the new cut")
     whole = _plan_whole_transcript(Path(root), session_id, plan)
     try:
         payload = _served_bytes(path, name, whole_transcript=whole)
@@ -2248,14 +2341,31 @@ def _verify_replica_against_cursor(root: Path, session_id: str, source: Path) ->
     # and the carried links, and nothing else.
     recorded_raw = record.get("files")
     recorded: dict[str, Any] = recorded_raw if isinstance(recorded_raw, dict) else {}
+    # WHERE EACH MEMBER'S BYTES LAND: a blob lives in this device's own attachments
+    # directory, never inside the session directory (``_member_stamps`` reads its store
+    # through ``attachments_dir``), so resolving the name per member is what keeps a blob's
+    # absence from being read as a missing session member.
+    store = replica_dir(root, session_id) / ATTACHMENTS_DIRNAME
     for name, wanted in sorted(recorded.items()):
         if name == TRANSCRIPT_NAME:
             continue
-        landing = source / str(name)
+        landing = (
+            store / str(name)[len(ATTACHMENT_PREFIX) :]
+            if str(name).startswith(ATTACHMENT_PREFIX)
+            else source / str(name)
+        )
         if not landing.is_symlink() and not landing.is_file():
-            # A member the last verified cut does not include is not promoted either, so
-            # there is nothing to check: its absence is the honest state of this replica.
-            continue
+            # A MEMBER THE CURSOR ATTESTED AND THAT IS NO LONGER ON DISK IS A MISMATCH,
+            # NAMED (review round 3, MINOR 3). The whole-set digest below does refuse this
+            # recovery — the promoted copy is missing a member the sync verified — but it
+            # refuses it anonymously, and the sentence is what a person acts on: a
+            # rewritten ``title.json`` named its file, a deleted one did not.
+            raise SyncRefused(
+                "incomplete_replica",
+                f"this device's copy of {session_id} no longer matches the bytes that were "
+                f"verified when it was synced ({name} is missing), so it was not recovered "
+                "as a session; syncing it again replaces it with a complete copy",
+            )
         got = (
             sha256_bytes(os.readlink(landing).encode("utf-8"))
             if landing.is_symlink()
@@ -2838,7 +2948,7 @@ def _plan(server: "RelayServer", link: Any, frame: dict[str, Any]) -> dict[str, 
             server.root,
             session_id,
             have=have,
-            whole_transcript=purpose == "move",
+            whole_transcript=whole_transcript_for(purpose),
         )
     except SyncRefused as exc:
         raise _refusal(exc.code, exc.message) from exc

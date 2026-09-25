@@ -156,6 +156,21 @@ STARTED_UNKNOWN_S = 1.0
 AGE_UNKNOWN_S = float(PEER_NUMBER_CEILING)
 
 
+def _peer_age(value: Any) -> float:
+    """``age_s`` from a peer: unreadable, AND A CLAIMED ZERO, both mean UNKNOWN.
+
+    WHY ZERO IS ON THE STALE SIDE (review round 3, NIT 3). Every unreadable spelling lands
+    on ``AGE_UNKNOWN_S``, which renders as "last seen a very long time ago" — except ``0``,
+    which parses and renders as "just now", the one reading that makes a stale peer look
+    fresh. ``0`` is exactly what the pre-validator spelling ``float(value or 0.0)`` wrote
+    for an age it did not know, so a mixed fleet can still send it, and a device cannot
+    truthfully send it: the value is the age of the peer's process, and 0.0 s means it
+    started within this microsecond. Fail safe on the ambiguous value.
+    """
+    age = peer_number(value, default=AGE_UNKNOWN_S, maximum=AGE_UNKNOWN_S)
+    return AGE_UNKNOWN_S if age <= 0 else age
+
+
 # ---------------------------------------------------------------------------
 # The peer catalogue seam (the transport's network/catalog.py implements it)
 # ---------------------------------------------------------------------------
@@ -278,7 +293,7 @@ class PeerRow:
             detached=_bool("detached"),
             capabilities=tuple(str(item) for item in (data.get("capabilities") or ())),
             started=peer_number(data.get("started"), default=STARTED_UNKNOWN_S),
-            age_s=peer_number(data.get("age_s"), default=AGE_UNKNOWN_S, maximum=AGE_UNKNOWN_S),
+            age_s=_peer_age(data.get("age_s")),
             reachable=bool(data.get("reachable", True)),
             placement=SessionPlacement.from_json(data.get("placement")),
             origin=dict(data["origin"]) if isinstance(data.get("origin"), dict) else {},
@@ -394,7 +409,7 @@ class RelayPeerCatalog:
                 network_id=str(block.get("network_id") or ""),
                 reachable=bool(block.get("reachable")),
                 reason=str(block.get("reason") or ""),
-                age_s=peer_number(block.get("age_s"), default=AGE_UNKNOWN_S, maximum=AGE_UNKNOWN_S),
+                age_s=_peer_age(block.get("age_s")),
             )
             for device_id, block in peers.items()
             if isinstance(block, dict)

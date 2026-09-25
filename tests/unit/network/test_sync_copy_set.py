@@ -37,6 +37,7 @@ import ast
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -198,8 +199,9 @@ def test_the_measured_store_entries_are_all_classified() -> None:
 #
 # SO THE SET IS DERIVED FROM THE SOURCE, the way ``test_reason_surfaces.py`` derives the
 # renderers it guards: every module-level string constant under ``local_operator/`` whose
-# NAME ends in ``NAME``/``FILENAME``/``DIRNAME``/``FILE``/``DIR``/``SIDECAR`` and whose
-# VALUE is a single path-shaped segment is a candidate. Each one must either be
+# NAME ends in a path-shaped suffix (``NAME``, ``FILENAME``, ``DIRNAME``, ``FILE``,
+# ``DIR``, ``SIDECAR``, ``MARKER``, ``RECORD``, ``STEM``, ``PATH``, ``BASENAME``) and whose
+# VALUE is a relative path of one or more segments is a candidate. Each one must either be
 # classified by the copy set or be DECLARED below, per module, WITH THE COUNT. A new
 # constant anywhere in the product therefore fails this test until somebody classifies
 # it or writes down why that module's paths can never be an entry of a session directory.
@@ -208,12 +210,27 @@ def test_the_measured_store_entries_are_all_classified() -> None:
 # built at runtime (an f-string, a ``.with_suffix``, a concatenation) is invisible to it,
 # and so is a name spelled inline at its write site. It also cannot tell a file from an
 # identifier — ``ACTION_TOOL_NAME = "apply_actions"`` is a tool's name, not a path — which
-# is why the declarations exist rather than a longer analysis. What it DOES cover is the
-# exact failure that happened: a new constant with a literal value in a module that owns
-# session state.
-_PATH_SUFFIX = re.compile(r"(NAME|FILENAME|DIRNAME|FILE|DIR|SIDECAR)$")
+# is why the declarations exist rather than a longer analysis. And it is a SPELLING
+# rule: a constant it does not recognise by name, or whose value is not a relative path,
+# is not a candidate at all. Review round 3 (MINOR 1) measured two spellings that escaped
+# the round-2 lists — ``REVIEW_PROBE_MARKER = "judge.json"`` (a suffix the name list did
+# not carry) and ``REVIEW_PROBE_NESTED_PATH = "judge/index.json"`` (a value with a
+# separator in it) — and both are candidates now, with a cell each. A spelling OUTSIDE
+# this list is still invisible, which is why the hand-written classification list and the
+# store census stay BESIDE this derivation rather than being replaced by it. What it DOES
+# cover is the exact failure that happened: a new constant with a literal value in a
+# module that owns session state.
+_PATH_SUFFIX = re.compile(
+    r"(NAME|FILENAME|DIRNAME|FILE|DIR|SIDECAR|MARKER|RECORD|STEM|PATH|BASENAME)$"
+)
 _UPPER_NAME = re.compile(r"^_?[A-Z][A-Z0-9_]*$")
-_ONE_SEGMENT = re.compile(r"^[A-Za-z0-9._-]+$")
+#: A path-shaped VALUE: one or more RELATIVE segments — no leading ``/``, and no segment
+#: that is ``.`` or ``..``. One segment was the round-2 rule; widening it is what catches
+#: ``judge/index.json``. The product fails closed on such a name anyway (an unknown entry
+#: at a session root is refused before a byte is copied), so this was a gap in the guard's
+#: COVERAGE rather than in behaviour — and a guard with a known spelling that escapes it is
+#: a guard that will be trusted for exactly the case it misses.
+_PATH_SHAPED = re.compile(r"^(?!\.\.?(?:/|$))[A-Za-z0-9._-]+(?:/(?!\.\.?(?:/|$))[A-Za-z0-9._-]+)*$")
 
 #: ``module -> (how many of its constants are NOT classified, why none of them is an entry
 #: of a session directory)``. The count is part of the declaration on purpose: a new
@@ -238,6 +255,17 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     ),
     "local_operator/harness/reply_channel.py": (1, "the structured-reply TOOL's name"),
     "local_operator/evaluation/runner/action_tool.py": (1, "the action tool's name"),
+    "local_operator/agents.py": (
+        1,
+        "``_DEFAULT_EXPORT_STEM``: the stem an ``lop agents export`` file is written "
+        "under, chosen by that command rather than by a session",
+    ),
+    "local_operator/info/collect.py": (
+        1,
+        "``_ENV_CMUX_SOCKET_PATH``: an ENVIRONMENT VARIABLE's name — the identifier-not-a-"
+        "path case this file's own docstring names, which a value-shaped rule cannot tell "
+        "from a filename",
+    ),
     "local_operator/references.py": (1, "a THREAD name for reference reads"),
     "local_operator/providers/oauth/zai.py": (1, "a keychain entry's name, not a path"),
     "local_operator/providers/oauth/kimi.py": (
@@ -281,6 +309,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "pending and the networks directory",
     ),
     "local_operator/network/projection.py": (1, "the tombstone list under ``network/``"),
+    "local_operator/network/audit.py": (
+        1,
+        "``_ROTATION_MARKER`` (``.gz``): the suffix a rotated audit file carries under "
+        "``network/audit`` — a store file, never a session entry",
+    ),
+    "local_operator/network/types.py": (
+        1,
+        "``PEERS_RUN_DIRNAME`` (``run/peers``): the mesh's run directory under the store root",
+    ),
     "local_operator/network/sync.py": (
         4,
         "``network``, ``replicas`` and ``staging`` under the config root, plus "
@@ -291,10 +328,20 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``network`` again and the handoff journal inside it: both outside ``sessions/``",
     ),
     "local_operator/session/runtime/presence.py": (
-        2,
-        "the delivery record under ``run/desktop``: per-device runtime machinery",
+        3,
+        "the delivery record and its directory under ``run/desktop``: per-device runtime "
+        "machinery",
     ),
     "local_operator/session/runtime/registry.py": (1, "``reaped`` under the runtime's run dir"),
+    "local_operator/session/runtime/types.py": (
+        3,
+        "``run``'s per-runtime subdirectories (``run/mobile``, ``run/host``, ``run/serve``): "
+        "the runtime plane's own run directories under the store root",
+    ),
+    "local_operator/session/runtime/viewers.py": (
+        1,
+        "``run/viewers``: where a viewer's attachment record lands, under the store root",
+    ),
     "local_operator/tools/group_reaper.py": (1, "``proc-groups`` under the store root"),
     "local_operator/tools/spill.py": (1, "``spill``, where elided tool output is parked"),
     "local_operator/tools/builtin.py": (1, "the ripgrep excludes file under the agent home"),
@@ -305,14 +352,29 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/exec_mode.py": (1, "the exec job journal under the store root"),
     "local_operator/mcp/tool_cache.py": (1, "the MCP tool cache database"),
     # ---- the BROWSER surfaces (their own run directories) ----
-    "local_operator/browser_bridge/state.py": (1, "``run/browser``'s bridge record"),
+    "local_operator/browser_bridge/state.py": (
+        2,
+        "``run/browser`` and its bridge record ``bridge.json``",
+    ),
     "local_operator/browser_bridge/gen_ts.py": (1, "the generated protocol bundle's name"),
+    "local_operator/browser_bridge/daemon.py": (
+        2,
+        "the daemon's pairing record (``browser/pairing.json``) and the pending file beside "
+        "it (``run/browser/pairing-pending.json``): both under the store root",
+    ),
     "local_operator/browser_bridge/install.py": (
         1,
         "the default config dirname, as ``paths`` has it",
     ),
-    "local_operator/browser_files.py": (1, "the browser download audit log"),
-    "local_operator/ui_browser/state.py": (1, "``run/ui-browser``'s host record"),
+    "local_operator/browser_files.py": (
+        3,
+        "the browser download audit log, the downloads directory beside it, and the "
+        "fallback filename stem for a download with no name of its own",
+    ),
+    "local_operator/ui_browser/state.py": (
+        2,
+        "``run/ui-browser`` and its host record ``host.json``",
+    ),
     # ---- the desktop app's own feeds and the TUI's per-user state ----
     "local_operator/server/utils/desktop_feed.py": (
         2,
@@ -321,6 +383,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/tui/sidebar_pins.py": (1, "the sidebar's pinned-session list"),
     "local_operator/tui/move_targets.py": (1, "the move dialog's recent-targets list"),
     "local_operator/tui/resume_click.py": (1, "the desktop app's bundle/binary name"),
+    "local_operator/tui/input_decode.py": (
+        1,
+        "``_MARKER``: a sentinel STRING embedded in a wrapper module's source, not a path",
+    ),
+    "local_operator/tui/terminal_modes.py": (1, "``_GATE_MARKER``: a terminal-mode latch's name"),
+    "local_operator/tui/notifier_app/__init__.py": (
+        1,
+        "``_MARKER`` (``.build-stamp``): the notifier app's own build stamp, written into its "
+        "package directory",
+    ),
     # ---- an adapter's own scratch ----
     "local_operator/evaluation/adapters/supervisor.py": (
         1,
@@ -352,7 +424,7 @@ def _derived_constants(source: str) -> dict[str, str]:
                 continue
             if not _UPPER_NAME.match(target.id) or not _PATH_SUFFIX.search(target.id):
                 continue
-            if _ONE_SEGMENT.match(node.value.value):
+            if _PATH_SHAPED.match(node.value.value):
                 found[target.id] = node.value.value
     return found
 
@@ -449,6 +521,35 @@ def test_the_derivation_reports_a_new_constant_in_an_owning_module() -> None:
     # same module, pointing at a name the copy set already carries.
     classified = pristine + '\nREVIEW_PROBE_ALIAS_NAME = "goal.json"\n'
     assert _unclassified_in_module(classified, module) == []
+
+
+def test_the_derivation_sees_the_spellings_round_3_measured_escaping() -> None:
+    """TWO SPELLINGS THE ROUND-2 GUARD LET THROUGH, as cells rather than as a review note.
+
+    MEASURED (review round 3, MINOR 1): ``REVIEW_PROBE_MARKER = "judge.json"`` and
+    ``REVIEW_PROBE_NESTED_PATH = "judge/index.json"`` both left the derived guard green (3
+    passed) — the first because the name suffix was not in the list, the second because the
+    value had to be a single segment. Nothing was lost (the product refuses an unknown
+    ``judge.json`` at a session root before a byte is copied), but MAJOR 1's failure mode was
+    a session that could not be MOVED, and a constant using a spelling outside the list
+    arrives there with the guard quiet. Both are reported now.
+    """
+    module = "local_operator/resume.py"
+    pristine = (Path(__file__).resolve().parents[3] / module).read_text(encoding="utf-8")
+
+    marker = pristine + '\nREVIEW_PROBE_MARKER = "judge.json"\n'
+    assert _unclassified_in_module(marker, module) == ["REVIEW_PROBE_MARKER='judge.json'"]
+
+    nested = pristine + '\nREVIEW_PROBE_NESTED_PATH = "judge/index.json"\n'
+    assert _unclassified_in_module(nested, module) == [
+        "REVIEW_PROBE_NESTED_PATH='judge/index.json'"
+    ]
+
+    # THE BOUNDARY OF THE VALUE RULE, pinned so it is a decision rather than a surprise: an
+    # ABSOLUTE path and a ``..`` step are not entries of a session directory, and a name with
+    # none of the suffixes above is not a candidate (``ACTION_TOOL_NAME`` is a tool).
+    for ignored in ('REVIEW_PROBE_ABS_PATH = "/etc/hosts"', 'REVIEW_PROBE_UP_PATH = "../x.json"'):
+        assert _unclassified_in_module(pristine + "\n" + ignored + "\n", module) == []
 
 
 # ---------------------------------------------------------------------------
@@ -890,6 +991,78 @@ def test_a_store_directory_inside_a_session_is_refused(tmp_path: Path) -> None:
     with pytest.raises(sync.SyncRefused) as refusal:
         sync.assert_complete(directory)
     assert "attachments" in refusal.value.message
+
+
+def test_a_symlinked_content_tree_is_refused_and_reported(tmp_path: Path) -> None:
+    """A TREE NAME THAT IS A LINK IS REFUSED, and the plan says so.
+
+    MEASURED BEFORE THE FIX (review round 3, MAJOR). ``unlisted_entries`` decided by NAME
+    first, so a session whose ``scratchpad`` was a symlink was skipped there (the name is in
+    ``COPY_SET_TREES``) and never walked (``content_trees`` does not walk a link, correctly):
+    the plan reported ``trees: []`` and ``trees_skipped: []``, the deleting move committed,
+    and the source directory went WITH THE LINK INSIDE IT. Nothing needs to be live for that
+    to be loss — the link is the session's own pointer to the user's tree — and it is
+    reachable by pointing ``scratchpad`` at another volume, which is what somebody with a
+    1 GB scratchpad does.
+
+    REFUSED RATHER THAN CARRIED, deliberately: a copy carries a session's own trees, and this
+    link's target is by construction outside the session (a link INSIDE one is carried by the
+    tree walk, as its sibling cells measure). Carrying it would either write a link that
+    resolves to nothing on the destination, or copy a tree in under a name the user did not
+    choose — both worse than a sentence naming the link.
+    """
+    source = tmp_path / "owner"
+    source.mkdir()
+    directory = _seeded(source)
+    elsewhere = tmp_path / "other-volume"
+    (elsewhere / "scratchpad").mkdir(parents=True)
+    (elsewhere / "scratchpad" / "notes.md").write_text("the operator's notes\n", encoding="utf-8")
+    shutil.rmtree(directory / "scratchpad")
+    (directory / "scratchpad").symlink_to(elsewhere / "scratchpad")
+
+    with pytest.raises(sync.SyncRefused) as refusal:
+        sync.assert_complete(directory)
+    assert refusal.value.code == "unlisted_content", refusal.value
+    assert "scratchpad" in refusal.value.message
+    assert "symlink" in refusal.value.message, (
+        "the sentence must name the SHAPE: the copy set DOES carry scratchpad, so 'this "
+        "build does not carry it' sends a person to the wrong place"
+    )
+
+    # THE PLAN REPORTS IT, which is what made the hole invisible: a plan saying ``trees: []``
+    # and ``trees_skipped: []`` about a scratchpad cannot be read to find out why a session
+    # will not move.
+    plan = sync.build_manifest(source, "abc123")
+    assert plan["trees_skipped"] == ["scratchpad"], plan["trees_skipped"]
+    assert [name for name in plan["trees"] if name.startswith("scratchpad/")] == []
+
+    # The target is untouched, and so is the session's own pointer to it.
+    assert (elsewhere / "scratchpad" / "notes.md").is_file()
+    assert (directory / "scratchpad").is_symlink()
+
+
+def test_a_symlinked_store_file_keeps_its_exclusion(tmp_path: Path) -> None:
+    """The shape rule is about what a copy CARRIES, and an excluded name is not carried.
+
+    The narrow half of the fix, pinned so the next round cannot widen it by accident:
+    ``mesh.json`` is excluded because the destination writes its own (the ownership stamp),
+    so a session whose stamp happens to be a link is not refused — it is excluded for the
+    reason the exclusion already states. Refusing it would newly block a session for a name
+    whose bytes this build never copies.
+    """
+    source = tmp_path / "owner"
+    source.mkdir()
+    directory = _seeded(source)
+    outside = tmp_path / "stamp.json"
+    outside.write_text("{}\n", encoding="utf-8")
+    stamp = directory / "mesh.json"
+    if stamp.exists():
+        stamp.unlink()
+    stamp.symlink_to(outside)
+
+    sync.assert_complete(directory)
+    plan = sync.build_manifest(source, "abc123")
+    assert "mesh.json" not in plan["trees_skipped"]
 
 
 def test_a_fetch_does_not_re_hash_the_copy_set(
