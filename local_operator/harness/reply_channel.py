@@ -268,10 +268,14 @@ def envelope_from_tool_call(
     # ``MAX_TOLERATED_TRAILING_CHARS`` bounds only the quoting in that warning —
     # so nothing here is refused "on framing"; two batches for DIFFERENT
     # observations are ACCEPTED on both bindings, under the older-observation
-    # quotation rule; and the competing-batch refusal is keyed on
-    # ``observation_id`` and fires only on the LEGACY binding — under
-    # ``compact`` even two distinct envelopes both bound to the current
-    # observation are accepted. The arm's own path is legacy
+    # quotation rule; and the competing-batch refusal is DECODER-LEVEL and
+    # BINDING-FREE (``_competing_batch_offset``, called from
+    # ``_decode_leading_json``, never sees a binding) — what gates it is whether
+    # the batches name an observation id PER ACTION, because
+    # ``_batch_observation_ids`` deliberately reads the actions and not a
+    # top-level id. Compact traffic binds once at the TOP level, so a
+    # compact-shaped payload names no per-action ids and even two envelopes both
+    # bound to the current observation are accepted. The arm's own path is legacy
     # (``scripts/run_episode.py --action-binding`` defaults to ``legacy``), so
     # the same-observation bound this comment needs does hold where the widening
     # is used. Either way the channel inherits the decoder's verdict: this
