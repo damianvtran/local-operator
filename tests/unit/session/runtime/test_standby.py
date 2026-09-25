@@ -575,6 +575,158 @@ def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return config
 
 
+#: A warming CONSOLE, which is not the same thing as a standby: this process calls
+#: ``enable_warming`` for a slot and then HOLDS it (the test kills it to release).
+#: Two of these on one root is QA's d2 measurement; the cap is what replaced the
+#: three spares it produced.
+_CONSOLE_DRIVER = textwrap.dedent("""
+    import json, os, sys, time
+    from pathlib import Path
+
+    from local_operator.session.runtime import standby
+
+    root = Path(sys.argv[1])
+    slot = sys.argv[2]
+    out = Path(sys.argv[3])
+    budget = float(sys.argv[4])
+    os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(root)
+    os.environ.pop(standby.DISABLE_ENV, None)
+    standby.enable_warming(root, daemon=(slot == standby.SLOT_DAEMON))
+    # The slot is taken on the warming thread BEFORE anything is spawned, so its
+    # presence is the fast, deterministic answer to "did this console win?". Waiting
+    # the full budget here instead would make every LOSER take the whole budget to
+    # report an outcome that was decided in milliseconds.
+    taken_by = time.monotonic() + 5.0
+    while time.monotonic() < taken_by and slot not in standby._SLOTS:
+        time.sleep(0.05)
+    warmed = False
+    if slot in standby._SLOTS:
+        deadline = time.monotonic() + budget
+        while time.monotonic() < deadline:
+            warm = standby._WARM[0]
+            warmed = bool(warm is not None and warm.alive() and standby.adoption_possible())
+            if warmed:
+                break
+            time.sleep(0.2)
+    spare = standby._WARM[0]
+    out.write_text(json.dumps({
+        "pid": os.getpid(),
+        "slot": slot,
+        "slot_held": slot in standby._SLOTS,
+        "warmed": warmed,
+        "spare_pid": spare.proc.pid if spare is not None else None,
+    }))
+    # Alive until the test kills this process: the slot is held for exactly as long
+    # as this process lives, which is the mechanism under test. BOUNDED, though —
+    # a run that is interrupted (a timeout, a killed pytest: the fixture's reaper
+    # does not run) must not leave a warming console holding a slot on this machine
+    # forever. Measured before this bound existed: four of these outlived an
+    # interrupted run by 21-23 minutes, still holding the root's slots.
+    deadline = time.monotonic() + budget + 120.0
+    while time.monotonic() < deadline:
+        time.sleep(0.5)
+""")
+
+
+class _Console:
+    """One warming console process, and the report it wrote about its own spare."""
+
+    def __init__(self, proc: subprocess.Popen[bytes], report: Path, slot: str) -> None:
+        self.proc = proc
+        self.report = report
+        self.slot = slot
+
+    def result(self, timeout: float = 90.0) -> dict[str, Any]:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.report.exists():
+                text = self.report.read_text(encoding="utf-8")
+                if text:
+                    return json.loads(text)
+            assert self.proc.poll() is None, f"console exited rc={self.proc.returncode}"
+            time.sleep(0.2)
+        raise AssertionError("console never reported")
+
+
+def _warm_console(
+    root: Path, tmp_path: Path, started: dict[str, Any], slot: str, name: str
+) -> _Console:
+    """Start a console that warms ``slot`` on ``root`` and reports what it got."""
+    report = tmp_path / f"console-{name}.json"
+    proc = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+        [sys.executable, "-P", "-c", _CONSOLE_DRIVER, str(root), slot, str(report), "90"],
+        executable=sys.executable,
+        env=_base_env(root, tmp_path / f"probe-{name}.json"),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    console = _Console(proc, report, slot)
+    started["made"].append(console)
+    return console
+
+
+def _spare_children(pid: int) -> int:
+    """How many standby interpreters ``pid`` has as direct children."""
+    out = subprocess.run(
+        ["ps", "-eo", "pid=,ppid=,command="], capture_output=True, text=True
+    ).stdout
+    count = 0
+    for line in out.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) < 3:
+            continue
+        _child, parent, command = fields
+        if parent.isdigit() and int(parent) == pid and standby.STANDBY_MODULE in command:
+            count += 1
+    return count
+
+
+def test_one_spare_per_root_per_slot_however_many_consoles(
+    root: Path, tmp_path: Path, started: dict[str, Any]
+) -> None:
+    """Agent review round 3: the COUNT is capped, and a console that loses goes cold.
+
+    Before this, three consoles on one root warmed three spares at ~145 MB each
+    (QA's d2), which is the memory cost the operator's constraint existed to avoid.
+    One spare cannot be shared between consoles — it is a private descriptor to a
+    child of exactly one console, and a rendezvous path between two same-uid
+    processes is the escalation R1-1 proved — so the cap is an ``flock`` slot per
+    root, held for the life of the console and released by the KERNEL when it dies.
+    """
+    first = _warm_console(root, tmp_path, started, standby.SLOT_TUI, "a")
+    assert first.result()["warmed"] is True
+    assert _spare_children(first.proc.pid) == 1
+
+    second = _warm_console(root, tmp_path, started, standby.SLOT_TUI, "b")
+    loser = second.result()
+    assert (
+        loser["slot_held"] is False and loser["warmed"] is False
+    ), "the TUI slot was already taken"
+    assert _spare_children(second.proc.pid) == 0, "a console that lost the slot spawned anyway"
+
+    # The daemon's slot is the OTHER one: the desktop surface never competes with a
+    # TUI, which is why the cap is two rather than one.
+    daemon = _warm_console(root, tmp_path, started, standby.SLOT_DAEMON, "c")
+    assert daemon.result()["warmed"] is True
+    assert _spare_children(daemon.proc.pid) == 1
+
+    # A third spare is impossible, not merely discouraged: there is no slot left.
+    third = _warm_console(root, tmp_path, started, standby.SLOT_TUI, "d")
+    assert third.result()["warmed"] is False
+    assert _spare_children(first.proc.pid) + _spare_children(daemon.proc.pid) == 2
+
+    # Kernel-released on death, which is what ``flock`` buys over a pid file: kill
+    # the TUI slot's owner and the slot is free immediately, with no stale owner to
+    # misread and no cleanup path that can be missed.
+    first.proc.terminate()
+    first.proc.wait(timeout=60)
+    fourth = _warm_console(root, tmp_path, started, standby.SLOT_TUI, "e")
+    assert fourth.result()["warmed"] is True, "the slot did not come back after its owner died"
+    assert _spare_children(fourth.proc.pid) == 1
+
+
 class _Standby:
     """One driver process plus the console's end of its private channel."""
 
@@ -669,8 +821,13 @@ def _read_frame(sock: socket.socket) -> dict[str, Any]:
 
 @pytest.fixture
 def started(tmp_path: Path) -> Iterator[dict[str, Any]]:
-    """Track every driver this test starts, and reap them by exact pid."""
-    made: list[_Standby] = []
+    """Track every driver this test starts, and reap them by exact pid.
+
+    Both kinds come through here: the standby drivers (which hold a socket the test
+    closes) and the warming CONSOLE drivers the cap test starts (which hold no
+    socket, and keep their slot until this reaps them).
+    """
+    made: list[Any] = []
     yield {"made": made}
     for item in made:
         if item.proc.poll() is None:
@@ -680,7 +837,9 @@ def started(tmp_path: Path) -> Iterator[dict[str, Any]]:
             except subprocess.TimeoutExpired:
                 item.proc.kill()
                 item.proc.wait(timeout=10)
-        item.sock.close()
+        sock = getattr(item, "sock", None)
+        if sock is not None:
+            sock.close()
 
 
 def _base_env(root: Path, out: Path) -> dict[str, str]:

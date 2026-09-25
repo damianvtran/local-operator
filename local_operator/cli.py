@@ -8558,12 +8558,15 @@ def main() -> int:
             # The desktop daemon engages a runtime for every conversation the app
             # opens cold, so it keeps ONE pre-imported standby for its root (see
             # ``session/runtime/standby.py`` for the cost it removes and the
-            # guards). Here, at the CLI dispatch, rather than in ``serve_command``
-            # or the app's lifespan: those are what the suite drives in-process,
-            # and a test must never leave a warmed interpreter behind.
+            # guards). ``daemon=True`` puts it in the root's singleton slot: the
+            # count of spares per root is capped, and the app's surface must not
+            # lose its spare to whichever TUI happened to start first. Here, at the
+            # CLI dispatch, rather than in ``serve_command`` or the app's lifespan:
+            # those are what the suite drives in-process, and a test must never
+            # leave a warmed interpreter behind.
             from local_operator.session.runtime import standby
 
-            standby.enable_warming()
+            standby.enable_warming(daemon=True)
             # Use the provided host, port, and reload options for serving the API.
             return serve_command(args.host, args.port, args.reload, listener_fd=args.listener_fd)
         elif args.subcommand == "mobile":
@@ -9304,15 +9307,16 @@ def main() -> int:
                 tui_entry = functools.partial(tui_entry, resume_factory=resume_factory)
                 # Every /new and every cold sidebar switch engages a runtime; a
                 # pre-imported standby takes the import cost off that path (see
-                # ``session/runtime/standby.py``). ONE PER CONSOLE PROCESS, not
-                # one per machine: the standby is a child of whoever warmed it and
-                # is reached over a descriptor only that process holds, which is
-                # what keeps the operator capability out of a same-uid impostor's
-                # hands. So a host running N warming consoles holds N spares at
-                # ~145 MB each (measured with three consoles on one root), and the
-                # earlier per-root lock this comment used to describe is gone with
-                # the socket it was built on. Enabled at the CLI's launch point,
-                # never in ``run_tui`` or the app, which the suite drives.
+                # ``session/runtime/standby.py``). One spare per root per slot, for
+                # the whole machine: every TUI on this root shares the TUI slot and
+                # a TUI that cannot take it spawns cold, so ~20 TUIs hold ONE spare
+                # (~145 MB) rather than ~20 (measured with three consoles on one
+                # root before the cap). The slot is an ``flock`` rather than a
+                # shared spare because a spare is a private descriptor to a child
+                # of one console — sharing it across consoles needs a rendezvous
+                # path, which is exactly the escalation agent review round 1
+                # proved. Enabled at the CLI's launch point, never in ``run_tui``
+                # or the app, which the suite drives.
                 from local_operator.session.runtime import standby
 
                 standby.enable_warming(config_manager.config_dir)
