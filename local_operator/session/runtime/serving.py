@@ -4054,6 +4054,83 @@ class ServingSessionHandle(SessionHandle):
         return f"model: {self._projection.model_label}"
 
     @_on_session_loop
+    async def receive_peer_model(
+        self,
+        provider: str,
+        model_id: str,
+        *,
+        sender: dict[str, Any] | None = None,
+    ) -> str:
+        """Another local session switching this one's model (``peer_set_model``).
+
+        Four steps, in this order, all on the session's own loop (design D1):
+        validate against THIS runtime's config and credentials (off the loop —
+        the catalogue and the credential store are blocking reads), apply
+        through :meth:`set_model_effort` — the same switch the phone's model
+        sheet uses, so effort falls to the model's own default (effort is not on
+        the wire in v1) — read back the model actually in force, and record a
+        record-only peer card naming the sender, the old model and the new one.
+
+        A refusal raises ``ValueError`` BEFORE anything is mutated, so it cannot
+        half-switch; the dispatch turns it into the error frame the sender
+        prints. A switch that validated but did not take is also a refusal: the
+        answer comes from the read-back, never from the switch's own receipt.
+        """
+        self._check_loop_thread()
+        from local_operator.mobile import peer_model
+        from local_operator.model.configure import ModelSelectionRefused
+
+        provider, model_id = peer_model.normalise_pair(provider, model_id)
+        session = self._session
+        old_label = _effective_label(session)
+        try:
+            spec = await asyncio.to_thread(peer_model.validate_peer_selection, provider, model_id)
+        except ModelSelectionRefused as refused:
+            raise ValueError(peer_model.refusal_detail(refused.message, old_label)) from refused
+        new_label = f"{spec.provider}/{spec.model_id}"
+        if old_label == new_label:
+            return peer_model.already_on_detail(new_label)
+        # Read BEFORE the switch: the question is whether a call was in flight
+        # when the switch landed, which is what decides the "mid-turn" wording.
+        busy = self.is_conversationally_active()
+        await self.set_model_effort(spec.provider, spec.model_id, None)
+        in_force = _effective_label(session)
+        if in_force != new_label:
+            raise ValueError(
+                peer_model.refusal_detail(
+                    f"the switch to {new_label} did not take effect", in_force
+                )
+            )
+        await self._record_peer_model_switch(old_label, new_label, sender or {})
+        return peer_model.switched_detail(
+            old_label,
+            new_label,
+            busy=busy,
+            running_subagents=peer_model.running_subagent_count(session),
+        )
+
+    async def _record_peer_model_switch(
+        self, old_label: str, new_label: str, sender: dict[str, Any]
+    ) -> None:
+        """The target-side audit card (design D6), best effort.
+
+        Record-only (``mailbox``, no wake) through the ordinary peer receive path,
+        so it lands as the peer card every front end already renders with the
+        sender's name, pid and model, and it never opens a turn. The switch has
+        ALREADY happened when this runs; a failed card must not turn a switch
+        into a reported failure, because the sender would then retry a switch
+        that stuck.
+        """
+        from local_operator.mobile.peer_model import audit_body
+
+        try:
+            await self.receive_peer_message(
+                audit_body(old_label, new_label), mode="mailbox", wake=False, sender=sender
+            )
+        except Exception:  # noqa: BLE001 — the switch stands whatever the card does
+            logger.warning("the remote model switch's audit card was not recorded", exc_info=True)
+
+    @_on_session_loop
     async def set_effort(self, effort: str) -> str:
         self._check_loop_thread()
         spec = self._session.model

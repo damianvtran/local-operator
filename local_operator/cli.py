@@ -673,6 +673,33 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="if the target is idle, drive a turn now (mailbox mode only)",
     )
 
+    # `lop model`: switch ANOTHER live session's model (design D4). Its own
+    # subcommand rather than `lop send --model`, because a switch has no body and
+    # `send`'s positional/stdin binder would need a model-mode exception for every
+    # one of its rules. Same selector flags and the same resolver as `lop send`.
+    model_parser = subparsers.add_parser(
+        "model",
+        help="Switch another running lop session's model (like /model there)",
+        parents=[parent_parser],
+    )
+    model_parser.add_argument(
+        "target",
+        nargs="?",
+        help=(
+            "conversation-name / session-id / cwd substring (case-insensitive). "
+            "Omit when addressing with --pid/--session."
+        ),
+    )
+    model_parser.add_argument(
+        "selector",
+        nargs="?",
+        metavar="provider/model",
+        help="the model to switch to, e.g. deepseek/deepseek-flash",
+    )
+    model_selector = model_parser.add_mutually_exclusive_group()
+    model_selector.add_argument("--pid", type=int, help="target by exact pid")
+    model_selector.add_argument("--session", dest="session", help="target by exact session id")
+
     sessions_parser = subparsers.add_parser(
         "sessions",
         help=(
@@ -3443,6 +3470,107 @@ def send_command(args: argparse.Namespace) -> int:
         print(f"→ {name} (pid {record.pid}): {detail}{skipped_clause(skipped)}")
     else:
         print(f"→ {cold_session_id} (not running): {detail}{skipped_clause(skipped)}")
+    return 0
+
+
+def model_command(args: argparse.Namespace) -> int:
+    """``lop model [<target>] <provider>/<model> [--pid N | --session ID]``.
+
+    Switches ANOTHER live, engaged session's model, with ``/model`` semantics:
+    the switch lands at that session's next provider call. The target validates
+    the pair against its own config and credentials and answers with its own
+    sentence, which is printed as-is; every refusal exits non-zero, like
+    ``lop send``.
+
+    One positional is the MODEL when a selector flag names the target, and the
+    TARGET-then-model pair otherwise — the same "a selector fully determines
+    the recipient" rule ``lop send``'s binder applies, without its body/stdin
+    grammar, because a switch has no body.
+    """
+    import asyncio
+
+    from local_operator.mobile.peer_send import (
+        MODEL_SWITCH_CAPABILITY,
+        PeerModelUnconfirmed,
+        candidate_lines,
+        cold_switch_target,
+        parse_model_selector,
+        resolve_peer_target,
+        switch_peer_model,
+    )
+
+    has_selector = args.pid is not None or args.session is not None
+    target, selector = args.target, args.selector
+    if has_selector:
+        if selector is not None:
+            # Two positionals AND a selector name two recipients; refuse rather
+            # than guess which one was meant (the `lop send` rule).
+            _peer_red(
+                "pass the target as a name OR as --pid/--session, not both "
+                "(e.g. `lop model --pid 48213 deepseek/deepseek-flash`)"
+            )
+            return 1
+        target, selector = None, target
+    elif target and not selector:
+        # One positional and no selector: argparse slotted it as the TARGET, but
+        # a lone word is almost always the model someone meant to apply. Say
+        # what is missing rather than printing bare usage.
+        _peer_red(
+            "name the session to switch as well: `lop model <name> <provider>/<model>` "
+            "or `lop model --pid N <provider>/<model>`"
+        )
+        return 1
+    if not selector:
+        _peer_red("usage: lop model [<target>] <provider>/<model> [--pid N | --session ID]")
+        return 1
+    parsed = parse_model_selector(selector)
+    if isinstance(parsed, str):
+        _peer_red(parsed)
+        return 1
+    provider, model_id = parsed
+
+    record, candidates, error = resolve_peer_target(
+        target=target,
+        pid=args.pid,
+        session=args.session,
+        pid_hint="--pid",
+        session_hint="--session",
+        capability=MODEL_SWITCH_CAPABILITY,
+    )
+    if candidates:
+        print(
+            f"{len(candidates)} sessions match; replace the target with one of these:",
+            file=sys.stderr,
+        )
+        for line in candidate_lines(candidates, indent="  ", prefix="--pid"):
+            print(line, file=sys.stderr)
+        print(
+            f"  e.g. `lop model --pid {candidates[0].pid} {provider}/{model_id}`", file=sys.stderr
+        )
+        return 1
+    if record is None:
+        _peer_red(
+            cold_switch_target(error, target=target, session=args.session)
+            or error
+            or "no target resolved"
+        )
+        return 1
+    sender = _peer_sender_identity()
+    if record.pid == sender.get("pid"):
+        _peer_red("that target is this session; use /model in it")
+        return 1
+    name = record.conversation_name or record.session_id
+    try:
+        detail = asyncio.run(
+            switch_peer_model(record, provider=provider, model_id=model_id, sender=sender)
+        )
+    except PeerModelUnconfirmed as exc:
+        _peer_red(str(exc))
+        return 1
+    except RuntimeError as exc:
+        _peer_red(f"pid {record.pid} {name!r}: {exc}")
+        return 1
+    print(f"pid {record.pid} {name!r}: {detail}")
     return 0
 
 
@@ -8581,6 +8709,8 @@ def main() -> int:
             return browser_command(args)
         elif args.subcommand == "send":
             return send_command(args)
+        elif args.subcommand == "model":
+            return model_command(args)
         elif args.subcommand == "sessions":
             return sessions_command(args)
         elif args.subcommand == "stop":

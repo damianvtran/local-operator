@@ -130,6 +130,71 @@ Refusals are answers too, and each names its own fix:
   message **may or may not** have arrived rather than claiming failure — check
   with the peer instead of resending, or it lands twice.
 
+## Switching another session's model
+
+The same `send` tool switches a peer's model: pass `model="<provider>/<model-id>"`
+instead of `message`. Humans use `lop model` (below). Both have `/model`'s
+semantics in that session: the switch lands at its **next provider call**, so a
+call already streaming finishes on the old model and every later call, including
+the rest of a running turn, uses the new one.
+
+```
+send(target="experiment 1", model="deepseek/deepseek-flash")
+→ pid 64190 'experiment 1': switched to deepseek/deepseek-flash (was anthropic/claude-opus-5); its next turn runs on it
+```
+
+```
+lop model "experiment 1" deepseek/deepseek-flash
+lop model --pid 64190 deepseek/deepseek-flash
+lop model --session 7661a465019b deepseek/deepseek-flash
+```
+
+Rules:
+
+- **Exactly one of `message` or `model`.** Passing both is refused (send the
+  note in a second call); `now=True` does not apply to a switch, and `wake` is
+  ignored.
+- **The target validates, not the sender.** The pair is checked against the
+  TARGET's config, catalogue and credentials: a known provider, a model its
+  catalogue serves (an aggregator or local endpoint that cannot be listed
+  offline is accepted), and a credential it can run on. A refused pair changes
+  nothing.
+- **Live, engaged sessions only.** A closed or stored session is not switched
+  remotely: open it and use `/model`, or `lop --resume <id> --hosting <p>
+  --model <m>`. An unengaged `/new` is refused as for a message.
+- **Effort is not carried.** A TUI target applies its own effort choice; a
+  runtime-owned target uses the model's default level.
+- **Children keep their model.** A child's model is decided when it starts or
+  resumes. An inheriting child takes the parent's model at that moment; a
+  pinned child re-resolves its tier. Switching the parent — `/model`, the
+  phone, or another session — does not change children already running; pause
+  and resume one to move it. The result counts them.
+- The approval prompt reads `switch <target>'s model to <p/m> (changes that
+  session's billing)`.
+
+What the result tells you:
+
+- `switched to <new> (was <old>); its next turn runs on it` — the target was
+  idle.
+- `switched to <new> (was <old>) mid-turn; the call in flight finishes on
+  <old>, every later call uses <new>` — the target was working.
+- `…; <n> running subagent(s) keep their current model — new and resumed ones
+  use <new>` — appended when the target has running children.
+- `already on <new>; nothing changed`.
+- `accepted: checking local capacity for <new>; the switch applies when that
+  finishes` — a local-setup provider on a TUI target.
+- `refused: <reason>; still on <old>` — nothing changed (non-zero exit for
+  `lop model`).
+- `… runs an older lop that cannot switch models remotely; nothing changed —
+  update it (lop update) or run /model in that session`.
+- `no answer from … — the switch may or may not have landed; check lop
+  sessions before retrying`.
+
+The target's transcript records the switch twice: the usual `[model switch]`
+notice, and a peer card from the sender reading `[remote model switch]
+switched this session from <old> to <new>`. The card is record-only; it does
+not start a turn.
+
 ## `lop sessions` — what is running and what it costs
 
 ```

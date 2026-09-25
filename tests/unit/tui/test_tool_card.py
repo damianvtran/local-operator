@@ -2534,6 +2534,15 @@ def test_send_summary_marks_the_quiet_drop_and_now() -> None:
     assert "now" in row
 
 
+def test_send_summary_names_a_model_switch_not_a_delivery_mode() -> None:
+    """A switch starts no turn, so the row must not claim ``wake``; the leading
+    marker names the act and the target model follows the peer."""
+    card = ToolCard("t", "send", {"pid": 48213, "model": "deepseek/deepseek-flash"})
+    row = card._build_row(100).plain
+    assert "wake" not in row
+    assert row.index("model") < row.index("pid 48213") < row.index("deepseek/deepseek-flash")
+
+
 def test_send_modes_never_collide_at_narrow_widths() -> None:
     """The defect the leading marker fixes: with the mode to the RIGHT of a long
     target it was truncated away, so a wake, a quiet drop and a mid-turn steer

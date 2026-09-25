@@ -737,10 +737,15 @@ def _send_summary(args: dict[str, object]) -> str:
         peer_send_target_label,
     )
 
-    mode = peer_send_mode_label(args)
     # `who` may be a raw conversation substring, i.e. model-controlled text; it
     # goes through the same scalar flattening every other summary field does.
     who = _scalar_text(peer_send_target_label(args)) or "?"
+    model = _scalar_text(args.get("model"))
+    if model:
+        # A model switch carries no delivery mode — `wake` would claim a turn
+        # was started — so the leading marker names the act instead.
+        return " · ".join(("model", who, f"→ {model}"))
+    mode = peer_send_mode_label(args)
     message = _scalar_text(args.get("message"))
     parts = [part for part in (mode, who, message) if part]
     return " · ".join(parts)
