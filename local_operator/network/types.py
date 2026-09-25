@@ -22,6 +22,7 @@ capability strings below are for.
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
@@ -58,6 +59,98 @@ MESH_PROTOCOL_VERSION = 1
 #: not edit that module; the registry path is parameterised by dirname, so the
 #: namespace works identically from here. See ``store.py`` for the accessors.
 PEERS_RUN_DIRNAME = "run/peers"
+
+# ---------------------------------------------------------------------------
+# Numbers that arrived from a PEER
+# ---------------------------------------------------------------------------
+
+#: The largest number a peer may send for ANY field (``2**53``): the biggest integer a
+#: JSON number keeps exactly in every implementation, and far above any real value here
+#: (a millisecond timestamp is ~1.8e12). A value above it is not one this protocol
+#: produces, so it is treated as over the cap rather than trusted.
+PEER_NUMBER_CEILING = 2**53
+
+
+def peer_number(value: Any, *, default: float = 0, maximum: float | None = None) -> float:
+    """A number a PEER sent, or ``default`` — TOTAL: no input raises, none is out of range.
+
+    LIFTED, NOT REINVENTED: this is the credentials slice's ``peer_number`` (commit
+    ``8d001f254``, review round 4 on that branch), moved into the mesh's own vocabulary
+    module because two slices need it and a second spelling of the rule is exactly how the
+    tenth call site was missed the first time. Anything that changes here changes there.
+
+    WHY THIS EXISTS (QA round 2, and review round 2 m1 before it): every numeric field on
+    a broker frame, a grant, a refusal or a pulled placement document was read with a bare
+    ``int(...)``/``float(...)``, so one ``"abc"`` from a peer (or a build that spells a
+    field differently) raised ``ValueError`` in the handler — the reply came back ``null``
+    and the borrower read a crash as "owner offline". The boundary is where a value stops
+    being the peer's claim and becomes this device's input, so it is validated HERE, once,
+    for every field. The federated listing is the same boundary one slice over: a peer's
+    ``pid: "abc"`` used to raise into the listing's own reader, so a listed peer could
+    break the listing for every other peer in it.
+
+    AN ``int`` NEVER GOES THROUGH ``float`` (review round 4, R4-M1 and R4-n1).
+    ``json.loads`` turns a 309-digit number into an ``int``, and ``float()`` of that raises
+    ``OverflowError`` — which is not ``ValueError``, so it escaped every caller and brought
+    the ``null`` reply back. Comparing ints as ints also keeps them exact: the float
+    round-trip turned ``2**53 + 1`` into ``2**53``.
+
+    Accepted: a finite ``int``/``float`` or a numeric string in ``[0, 2**53]``. A ``bool``,
+    a container, ``NaN``, an infinity, a negative number or anything unparseable yields
+    ``default``. A value over ``maximum`` — or over :data:`PEER_NUMBER_CEILING` — yields
+    ``maximum`` when the field has one (a clamp, so an over-long timeout becomes the
+    LONGEST allowed, never the shorter default) and ``default`` when it has none (every
+    such field's default is its fail-safe: an expired grant, the floor revision, epoch 0).
+    """
+    if isinstance(value, bool) or value is None:
+        return default
+    number: int | float
+    if isinstance(value, (int, float)):
+        number = value
+    elif isinstance(value, str):
+        text = value.strip()
+        try:
+            # An integer string parses as an int, exactly; only a non-integer string takes
+            # the float path (where "1e400" is ``inf`` and refused below).
+            number = int(text)
+        except ValueError:
+            try:
+                number = float(text)
+            except ValueError:
+                return default
+    else:
+        return default
+    if isinstance(number, float) and not math.isfinite(number):
+        return default
+    if number < 0:
+        return default
+    if number > PEER_NUMBER_CEILING or (maximum is not None and number > maximum):
+        return maximum if maximum is not None else default
+    return number
+
+
+def peer_int(value: Any, *, default: int = 0, maximum: int | None = None) -> int:
+    """:func:`peer_number` for a field the protocol defines as an integer.
+
+    ``int()`` of the result cannot overflow: :func:`peer_number` returns nothing above
+    :data:`PEER_NUMBER_CEILING`, and it is already finite.
+    """
+    return int(peer_number(value, default=default, maximum=maximum))
+
+
+def peer_whole_int(value: Any, *, default: int = 0, maximum: int | None = None) -> int:
+    """:func:`peer_int` for a field the protocol defines as a WHOLE number.
+
+    ``peer_int`` floors a float, which is right for a duration and wrong for anything that
+    NAMES something: a peer's ``pid: 1.5`` floored to ``1`` fabricates a plausible process
+    id (and ``1`` is a real one), and a ``protocol: 2.5`` floored to ``2`` would SELECT the
+    newest path the attach gate guards — both are the "a bad value must not win" failure
+    this boundary exists to prevent. A whole number, or an integer string, is accepted; a
+    fractional one is not a value this protocol can have sent, so it falls to ``default``.
+    """
+    number = peer_number(value, default=float(default))
+    return int(number) if float(number).is_integer() else default
+
 
 # ---------------------------------------------------------------------------
 # Capabilities and roles
