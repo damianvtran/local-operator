@@ -199,8 +199,10 @@ spare reaches READY or a refill lives a normal life) instead of being dropped; a
 warm that never finishes inside ``WARM_DEADLINE_S`` is retired by exact pid; a
 spare declined ``DECLINE_RETIRE_N`` times is retired and refilled (a standing
 mismatch means it can never serve its own console); a slot claim is retried at
-``SLOT_RETRY_S``; and an adopted spare LEAVES the pool immediately, so no path
-can signal a process that is now a session's runtime. The daemon keeps
+``SLOT_RETRY_S``; and an adopted spare LEAVES the pool immediately — it carries
+a FLAG set from inside the adoption lock, so a concurrent attempt racing for the
+same spare finds the flag and moves to the next candidate — so no path can
+signal a process that is now a session's runtime. The daemon keeps
 ``DAEMON_SPARE_DEPTH`` spares and never idle-reaps them; every other console
 keeps one and keeps ``IDLE_REAP_S``. The idle policy travels to the child as
 ``STANDBY_IDLE_ENV`` (additive; a child from an older build keeps its 900 s).
@@ -487,6 +489,13 @@ class _Standby:
         #: Set once the child says it is warm. Kept as a cached answer so the
         #: engage path never blocks on a read that has not arrived yet.
         self.ready = False
+        #: Set the instant THIS spare's adoption handshake succeeded, under
+        #: ``_CHANNEL_LOCK``, before anything outside it can run (agent review
+        #: round 1, B1). From that moment the pid is a session's runtime, not a
+        #: spare: :func:`_retire` refuses it, :func:`note_spare_gone` can never
+        #: terminate it, and a concurrent attempt that still finds it tracked
+        #: sees this flag and moves on to the next candidate.
+        self.adopted = False
         #: When the fork happened (``_now()``): the young-death backoff and the
         #: wedged-warm deadline are both measured from it.
         self.spawned_at = _now()
@@ -758,9 +767,15 @@ def _spawn_one(root: Path, slot: str) -> None:
         interpreter = _spawn_interpreter()
         warm = _spawn_standby(root, interpreter, slot, idle_s=_idle_for(slot))
     except BaseException:  # noqa: BLE001 — a failed spawn is a retry, never a crash
-        # The claim came first, so it goes back (m3-2): a slot held by a console
-        # with no spare is a win nobody gets; the retry re-claims it.
-        _release_slot(root, slot)
+        # The claim goes back ONLY when nothing else is held (m3-2, refined by
+        # agent review round 1, M2). The m3-2 rationale — "a slot held by a
+        # console with no spare is a win nobody gets" — is exactly the EMPTY
+        # pool; at depth 2 a holder with a live spare keeps its slot, or another
+        # console wins the cap and warms beside a holder that already has one.
+        with _LOCK:
+            empty = not _POOL
+        if empty:
+            _release_slot(root, slot)
         _note_attempt_failure("spawn-failed")
         return
     with _LOCK:
@@ -817,6 +832,14 @@ def note_spare_gone(spare: "_Standby", reason: str, *, terminate: bool = False) 
     is NEVER set for an adoption: that process is a session's runtime now, and
     signalling it is the very defect this choke point exists to prevent.
     """
+    if terminate and spare.adopted:
+        # HARD RULE (B1): a spare that has been adopted IS a session's runtime —
+        # its pid is not a spare's any more, whatever reason a caller passes.
+        # The flag is checked HERE, at the one function that can reach
+        # ``_retire``, and again inside ``_retire`` itself, because this is the
+        # promise the module exists to keep.
+        logger.debug("not retiring an adopted spare (%s)", reason)
+        terminate = False
     if terminate:
         _retire(spare)
     spare.close()
@@ -887,9 +910,14 @@ def ensure_warm(root: Path, interpreter: str, slot: str | None = None) -> None:
         try:
             warm = _spawn_standby(Path(root), interpreter, slot, idle_s=_idle_for(slot))
         except BaseException:
-            # The claim came first, so it goes back: a slot held by a console with
-            # no spare is a win nobody gets, and nothing else releases it (m3-2).
-            _release_slot(Path(root), slot)
+            # Same refinement as ``_spawn_one`` (M2): release only when this was
+            # the console's only spare — then a slot that produced nothing is a
+            # win nobody gets; with a live spare in hand the slot is doing its
+            # job and stays.
+            with _LOCK:
+                empty = not _POOL
+            if empty:
+                _release_slot(Path(root), slot)
             raise
         if warm is not None:
             with _LOCK:
@@ -977,11 +1005,13 @@ def _take_slot(root: Path, slot: str) -> bool:
 def _release_slot(root: Path, slot: str) -> None:
     """Give up this root's slot — a claim that produced no spare is a wasted slot.
 
-    Called when the spawn itself fails (round 3, m3-2). The claim is taken BEFORE
-    the fork, so a console that claims and then cannot warm would hold the root's
-    only slot with nothing to offer, for the life of the process: ``_SLOTS`` is per
-    process and nothing else ever releases it. With this, the count is "at most one
-    spare per slot, and exactly one holder" — which is what the prose says.
+    Called when the spawn itself fails (round 3, m3-2) AND the pool is empty —
+    the empty pool is where the rationale holds: a console that claims the root's
+    slot and then cannot warm would hold it with nothing to offer, for the life
+    of the process, since ``_SLOTS`` is per process and nothing else ever releases
+    it. With a live spare in hand (depth 2) the slot stays (agent review round 1,
+    M2): what the count promises is "at most one HOLDER per slot, each holding at
+    most its role's depth of private spares".
     """
     with _SLOT_LOCK:
         descriptor = _SLOTS.pop((str(root), slot), None)
@@ -1167,6 +1197,13 @@ def try_adopt(
     SIGTERMed the first chat's live runtime, and the replacement the console
     needed was the cold spawn of that second chat (invariant P's S8).
 
+    THE FLAG IS FOR THE CONCURRENT CASE (agent review round 1, B1). Two attempts
+    can both pass the membership check before either finishes; the loser then
+    holds a channel whose child is a runtime. ``warm.adopted`` is set inside this
+    lock and read inside it, so the loser skips that spare — and tries the next
+    candidate — instead of reporting a torn handshake and retiring a live pid,
+    which is what ``note_spare_gone(..., terminate=True)`` used to do there.
+
     Never raises: a standby that is not ready, one that declined, a torn reply,
     or a wedged one that misses :data:`ADOPT_TIMEOUT_S` all answer ``None``, and
     the caller does exactly what it did before this module existed.
@@ -1202,6 +1239,14 @@ def try_adopt(
         # supervisor peeks the same socket every tick, and a peek landing between
         # the request and its reply would swallow a byte of the frame.
         with _CHANNEL_LOCK:
+            if warm.adopted:
+                # A CONCURRENT ATTEMPT WON THIS SPARE between our membership
+                # check above and this lock (agent review round 1, B1): the pid
+                # is a session's runtime now. Never handshake with it and never
+                # signal it — try the NEXT candidate instead. At depth 2 that is
+                # the other ready spare, so the loser of a race still adopts
+                # rather than falling back to a cold spawn.
+                continue
             if not _ready_locked(warm):
                 continue
             try:
@@ -1234,6 +1279,12 @@ def try_adopt(
                     socket.send_fds(warm.sock, [payload], [])
                 reply = _recv(warm.sock)
                 if isinstance(reply, dict) and reply.get("ok"):
+                    # THE FLAG IS SET INSIDE THE LOCK, at the instant the winner
+                    # is known (B1): every later reader — this thread's own
+                    # clear, the supervisor, a concurrent attempt that passed
+                    # membership before we did — must see one truth about this
+                    # pid, and it is "no longer a spare".
+                    warm.adopted = True
                     adopted = AdoptedRuntime(warm.proc, capture)
                 elif isinstance(reply, dict) and reply.get("reason"):
                     # LOGGED, not swallowed (QA round 2, Q2-5): the reason is why
@@ -1270,6 +1321,16 @@ def try_adopt(
             note_spare_gone(warm, f"retired ({retired})")
             return None
         if failed:
+            with _LOCK:
+                left_the_pool = warm not in _POOL
+            if warm.adopted or left_the_pool:
+                # THE LOSER OF A RACE, not a broken spare (B1): somebody else's
+                # adoption took this pid out of the pool while we held it, and
+                # our channel died because the child is a runtime now, not
+                # because the handshake failed. Nothing here is ours to clear or
+                # to signal — try the next candidate, and fall through to the
+                # caller's cold spawn only when there is none.
+                continue
             # A torn channel, a wedged child, an answer that was not a frame:
             # this spare cannot serve, so it goes — by exact pid — and the refill
             # is scheduled (the old code retired it and warmed NOTHING until the
@@ -1356,7 +1417,13 @@ def _retire(warm: _Standby) -> None:
     argv, and an unscoped kill has already taken out another session's process
     tree once. SIGTERM first because that is what a standby expects; SIGKILL only
     if it ignores one, and only for the pid this process forked.
+
+    A flagged spare is refused (B1): whatever path got here — a direct call from
+    a clear, a test teardown, a future caller — this pid is a session's runtime
+    now, and signalling it is the exact harm this module exists to remove.
     """
+    if getattr(warm, "adopted", False):
+        return
     try:
         if warm.proc.poll() is None:
             warm.proc.terminate()

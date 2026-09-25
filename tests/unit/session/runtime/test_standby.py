@@ -1715,6 +1715,71 @@ def test_post_adoption_trio(supervisor_harness: Any) -> None:
     assert proc.poll() is None
 
 
+def test_concurrent_adoptions_never_signal_the_adopted_runtime(
+    root: Path, started: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B1: two concurrent ``try_adopt`` calls on ONE real spare — the loser must never
+    SIGTERM the winner's adopted runtime.
+
+    The harm needs a REAL child: the loser's channel dies because the child is a
+    runtime now, not because the standby failed, and the first revision answered a
+    dead channel with ``note_spare_gone(..., terminate=True)``. Construction: one
+    real standby (``_spawn_standby``); both attempts released by a barrier, so each
+    passes the pool-membership check before either finishes its handshake — the
+    window the reviewer reproduced 5/5.
+    """
+    warm = standby._spawn_standby(root, sys.executable, standby.SLOT_TUI)
+    started["made"].append(warm)
+    deadline = time.monotonic() + 90.0
+    while time.monotonic() < deadline:
+        assert warm.proc.poll() is None, "the spare exited before it warmed"
+        if standby._ready(warm):
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("the spare never warmed")
+    standby._POOL.append(warm)
+
+    retires: list[tuple[int, bool]] = []
+    real_retire = standby._retire
+
+    def spy(spare: Any) -> None:
+        retires.append((spare.proc.pid, spare.proc.poll() is None))
+        return real_retire(spare)
+
+    monkeypatch.setattr(standby, "_retire", spy)
+    barrier = threading.Barrier(2)
+    results: dict[str, Any] = {}
+
+    def attempt(tag: str) -> None:
+        barrier.wait(timeout=30)
+        try:
+            results[tag] = standby.try_adopt(
+                root, sys.executable, dict(os.environ), root / f"capture-{tag}.log", None
+            )
+        except BaseException as exc:  # noqa: BLE001 - try_adopt promises never to raise
+            results[tag] = exc
+
+    threads = [threading.Thread(target=attempt, args=(tag,)) for tag in ("A", "B")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+
+    assert not any(
+        isinstance(result, BaseException) for result in results.values()
+    ), f"try_adopt raised: {results!r}"
+    winners = [r for r in results.values() if isinstance(r, standby.AdoptedRuntime)]
+    assert len(winners) == 1, f"expected exactly one adoption of one spare, got {results!r}"
+    adopted_pid = winners[0].pid
+    assert adopted_pid == warm.proc.pid
+    assert adopted_pid not in [pid for pid, _alive in retires], (
+        "B1: the loser retired the pid the winner had just adopted; the retire ledger "
+        f"is {retires!r}"
+    )
+    assert warm.adopted is True, "the winner must flag the spare the moment it adopts"
+
+
 @pytest.mark.parametrize(
     "reason",
     [
