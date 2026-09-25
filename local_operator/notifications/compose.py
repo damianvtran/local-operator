@@ -345,6 +345,15 @@ def _compose_body(
     D4). The text comes from the session's own ``session_incident`` record, so
     it describes the failure itself and cannot be mistaken for a claim about
     the work, which is precisely what made the last-assistant-line unsafe here.
+
+    The credential-redaction record (``session_credential_redaction``, which
+    stopped being a ``session_incident`` on 2026-09-24) does not affect this
+    branch in either direction, and that is a property of the FIELD rather than
+    of the type: :func:`session_failure_summary` reads ``details.raw``, and a
+    credential-redaction record has never carried ``raw`` — it carries ``text``,
+    ``tool``, ``shapes`` and ``summary``. So this path could not have composed a
+    banner body from one before the split and still cannot after it; the split
+    does not make it reachable or unreachable, it was simply never its input.
     """
     if kind in ("ask", "approval"):
         return gate_body(kind, gate_title, gate_detail), False, False

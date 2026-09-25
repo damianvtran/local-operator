@@ -50,6 +50,7 @@ from local_operator.harness.redaction import (
 from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
+    CustomMessage,
     LoopConfig,
     Message,
     ModelSpec,
@@ -69,7 +70,7 @@ from local_operator.redaction_shapes import (
     scrub_shapes,
     scrub_shapes_with_hits,
 )
-from local_operator.session.session import Session
+from local_operator.session.session import Session, _default_convert_to_llm
 from local_operator.session.transcript import Transcript
 from local_operator.tools import builtin
 from local_operator.variables import VariableStore, redact_secret_values
@@ -3182,13 +3183,20 @@ def test_an_exposed_hit_still_files_one_incident_per_tool_and_shape_set() -> Non
 
 @pytest.mark.asyncio
 async def test_the_queued_incident_reaches_the_transcript(tmp_path: Path) -> None:
-    """Flushed at the boundary, and PERSISTED: a resumed session still knows.
+    """Flushed at the boundary, and PERSISTED — on the OPERATOR's surface only.
 
     Persisted rather than live-only because what it records is still true
     tomorrow, which is the opposite of the MCP-recovery record's reason for not
     persisting. Driven with the EXPOSED case, which is the only one that files
     now: a contained hit has nothing to persist, and its own end-to-end absence
     test is below.
+
+    The row is asserted under its OWN type (``session_credential_redaction``),
+    which is the half this test has to keep proving now that the record left
+    ``session_incident``: a type that reached the transcript but no fold would
+    paint nowhere on a resume, and the operator's whole ticket would be lost.
+    The MODEL half of the split is
+    ``test_the_queued_incident_never_reaches_the_model`` below.
     """
     session = Session(
         model=ModelSpec(provider="test", model_id="unit-model", context_window=1000),
@@ -3204,9 +3212,81 @@ async def test_the_queued_incident_reaches_the_transcript(tmp_path: Path) -> Non
     await session._flush_shape_incidents()
 
     body = (tmp_path / "incident" / "transcript.jsonl").read_text()
-    assert "session_incident" in body
+    assert "session_credential_redaction" in body
     assert "rotate" in body
     assert REDACTION_MARKER not in body
+
+
+@pytest.mark.asyncio
+async def test_the_queued_incident_never_reaches_the_model(tmp_path: Path) -> None:
+    """The model-side half of the split, asserted on the RENDER — not the journal.
+
+    Measured live before this change: 1,493 unnamed credential notices across
+    1,080 sessions were injected as user turns, plus the named ones, so agents
+    and their subagents were being told about a value the guard had already
+    masked out of the text they received. The record now carries
+    ``session_credential_redaction``, a type the renderer's allow-list excludes.
+
+    **Asserted on the render output rather than on the journal row**, because
+    that is the surface the defect was on: a journal assertion would pass while
+    the renderer still injected, which is exactly the state the old tests pinned
+    in the wrong direction. Both halves are checked here so the assertion cannot
+    go vacuous — the row IS on disk (the operator keeps it, see the test above),
+    and it is NOT in what the provider would be handed.
+
+    Both call sites are covered, because they are different code paths and only
+    one of them is live:
+
+    * the LIVE context render (``_render_history`` over the real context the
+      notice was just parked in), which is every subsequent request, and
+    * the RESUME replay (``Transcript.build_llm_history`` rehydrates the
+      persisted row, then the same renderer runs over it), which is the half a
+      live-only test would miss.
+    """
+    session = Session(
+        model=ModelSpec(provider="test", model_id="unit-model", context_window=1000),
+        stream_fn=_never_streams,
+        tools=[],
+        transcript=Transcript(tmp_path / "incident"),
+        system_blocks_provider=lambda *_a: [],
+        yolo=True,
+        cwd=str(tmp_path),
+        variables=VariableStore(cwd=str(tmp_path)),
+    )
+    session._redact_tool_result_text(_exposed_text())
+    await session._flush_shape_incidents()
+
+    # The instrument is not dead: the live record really is in the context the
+    # renderer is about to be handed, so an empty render cannot mean "nothing
+    # was ever queued". ``isinstance`` rather than a ``getattr`` comparison: the
+    # context holds ``Message``s too, and only a ``CustomMessage`` carries
+    # ``details`` — the runtime never had a Message here, but the type of the
+    # list says it might, and a type-checker cannot see the inequality the
+    # string test relies on.
+    parked = [
+        message
+        for message in session._context.messages
+        if isinstance(message, CustomMessage)
+        and message.custom_type == "session_credential_redaction"
+    ]
+    assert parked, "the notice never reached the live context, so the render proves nothing"
+    assert "rotate" in str(parked[-1].details.get("text", ""))
+
+    # 1. The LIVE render: the notice is dropped as bookkeeping, like every other
+    #    allow-list miss, and nothing of its wording is anywhere in the request.
+    live = _default_convert_to_llm(list(session._context.messages))
+    live_text = "\n".join(str(getattr(message, "text", "")) for message in live)
+    assert "[credential redaction]" not in live_text, live_text
+    assert "rotate it" not in live_text
+    assert not any(
+        getattr(message, "custom_type", None) == "session_credential_redaction" for message in live
+    ), "the credential-redaction record was rendered into the model's context"
+
+    # 2. The RESUME replay: the same exclusion, through the persisted row.
+    resumed = _default_convert_to_llm(Transcript(tmp_path / "incident").build_llm_history())
+    resumed_text = "\n".join(str(getattr(message, "text", "")) for message in resumed)
+    assert "[credential redaction]" not in resumed_text, resumed_text
+    assert "rotate it" not in resumed_text
 
 
 def test_the_tool_identity_travels_with_the_redaction() -> None:
@@ -3760,7 +3840,9 @@ async def test_the_incident_row_reaches_the_operator_live_and_on_replay(
     new string on the same path and the failure mode this test exists for — a row
     that paints nowhere — does not care which wording it is carrying.
     """
-    from local_operator.harness.message_types import SESSION_INCIDENT_MESSAGE_TYPE
+    from local_operator.harness.message_types import (
+        SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
+    )
     from local_operator.harness.types import NoticeEvent
 
     session = Session(
@@ -3784,8 +3866,12 @@ async def test_the_incident_row_reaches_the_operator_live_and_on_replay(
     assert notices[0].kind == "warning"
     assert marker in notices[0].text
 
-    # Replay: the same record, folded through the real settlement path.
-    rows = _fold_incident_row(SESSION_INCIDENT_MESSAGE_TYPE, notices[0].text)
+    # Replay: the same record, folded through the real settlement path. The
+    # type is the record's OWN (``session_credential_redaction``, since
+    # 2026-09-24) — folding it as a ``session_incident`` would test a branch the
+    # shipped record no longer takes, and would leave the new type's own fold
+    # uncovered, which is the direction a resume breaks in.
+    rows = _fold_incident_row(SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE, notices[0].text)
     assert rows, "the incident row folded to nothing"
     assert any(marker in row for row in rows)
 
@@ -3801,7 +3887,6 @@ def _fold_incident_row(custom_type: str, text: str) -> list[str]:
     """
     from unittest.mock import MagicMock
 
-    from local_operator.harness.types import CustomMessage
     from local_operator.tui import session_presentation as presentation
 
     class _Target:

@@ -90,6 +90,7 @@ from local_operator.harness.message_types import (
     HUB_MESSAGE_TYPE,
     PEER_MESSAGE_MESSAGE_TYPE,
     SESSION_CREDENTIAL_MESSAGE_TYPE,
+    SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
     SESSION_INCIDENT_MESSAGE_TYPE,
     SESSION_MCP_RECOVERY_MESSAGE_TYPE,
     SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
@@ -860,6 +861,26 @@ _PERSISTABLE_CUSTOM_TYPES: frozenset[str] = frozenset(
         "session_state",
         SESSION_INCIDENT_MESSAGE_TYPE,
         SESSION_MODEL_SWITCH_MESSAGE_TYPE,
+        # SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE IS persisted, and it is the
+        # member whose persistence is easiest to mistake for an oversight: the
+        # record is operator-facing and enters no model context (see its own
+        # note in ``harness/message_types.py``, and the exclusion comment in
+        # ``harness/render.py``). Persisting it is what makes the OPERATOR's
+        # ticket durable — the row survives the process so a resumed session
+        # still shows what the guard masked and what to rotate — and the value
+        # stays contained across that resume because the store re-registers it
+        # from the redaction the transcript itself holds. Its writer
+        # (``journal_shape_incident``) appends through ``append_message``
+        # directly rather than routing through :func:`_is_persistable_message`,
+        # so membership is NOT what keeps the row persisted today, and its
+        # absence would not have made the notice live-only. The member line is
+        # kept for two reasons and only these: symmetry with its twin
+        # ``session_incident``, a member written by the same explicit-append
+        # shape, and so that a future path which DOES route through the
+        # predicate cannot silently drop the operator's ticket while every
+        # call site still looks right. The MODEL is kept out of this record by
+        # the RENDERER's allow-list, not by this one.
+        SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
         # SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE IS persisted, unlike the
         # recovery record below: an MCP server going away is a historical fact
         # about the session, and every surface already renders the row, so a
@@ -991,11 +1012,19 @@ def _pair_spliced_tool_results(messages: list[Message]) -> list[Message]:
     Relative order among several interlopers is preserved, and moving them is
     safe ONLY because everything that can land in that window is a
     harness-authored notice (``session_model_switch``, ``session_incident``,
-    ``session_mcp_unavailable``): reordering advisory chrome against a tool
+    ``session_credential_redaction``, ``session_mcp_unavailable``): reordering
+    advisory chrome against a tool
     batch changes nothing the user wrote. **If a custom type is ever added that
     carries user-authored text, this assumption needs revisiting** — moving a
     user's words past a tool batch would silently reorder the conversation they
     see.
+
+    ``session_credential_redaction`` is in that list and is the newest member:
+    it is appended to the LIVE context (``journal_shape_incident`` -
+    ``_append_or_park_journal``) exactly like the others, and it belongs on the
+    safe side of the assumption for the same reason — its text is the harness's
+    own sentence about a value the guard masked, and it carries nothing the
+    operator typed.
 
     Linear in ``len(messages)``, and that has to stay true because this sits on
     every provider call. Each batch's inner scan stops at the next assistant
@@ -10784,7 +10813,8 @@ class Session:
         that a credential the session never knew about reached a tool result: a
         live production DSN was found in a transcript with nothing anywhere saying
         it had happened, and every such miss today is discovered by accident. One
-        :data:`SESSION_INCIDENT_MESSAGE_TYPE` row names the tool and the shapes, so
+        :data:`SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE` row names the tool and
+        the shapes, so
         it becomes a ticket rather than a footnote — but ONLY for the case that is
         a ticket: readable material the model can see. A value the pass masked
         whole is contained, nothing was leaked to the transcript, and it files
@@ -10894,13 +10924,27 @@ class Session:
     async def journal_shape_incident(
         self, tool: str, labels: list[str], summary: str, *, reached_model: bool = True
     ) -> None:
-        """Tell the model (and the transcript) that READABLE material was masked.
+        """Tell the OPERATOR (transcript, live receipt) that READABLE material was masked.
 
         Rendered rather than classified: this is not a FAILURE, and running it
         through :func:`~local_operator.incidents.classify_incident` would attach
         a failure category and a "this is why the previous turn ended" tail to a
         turn that ended for its own reasons — the same reason a credential
         change and a model switch carry their own formatter.
+
+        **The MODEL is deliberately NOT told**, which is where this record now
+        differs from every other notice in :mod:`local_operator.incidents`: it
+        carries :data:`SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE`, a type the
+        renderer's allow-list excludes, so the row reaches the transcript and the
+        live operator receipt and never enters the model's context. It rode
+        ``session_incident`` until 2026-09-24, which injected it as a user turn —
+        measured at 1,493 unnamed notices across 1,080 sessions on this machine,
+        plus the named ones. The notice names a value the guard ALREADY masked out
+        of the text the model received, so the model never held it, cannot rotate
+        it, and the guard's own false positives (a usage counter, a DSN whose
+        username is its password) had agents ending turns over leaks that had not
+        happened. See ``harness/message_types.py`` for the full argument and
+        ``harness/render.py`` for the exclusion, which is load-bearing.
 
         ``reached_model`` is the severity, and its default is the ESCALATED one so
         that a caller which does not know cannot make the quieter claim. In-tree it
@@ -10924,7 +10968,7 @@ class Session:
             return
         text = format_shape_incident_message(tool, labels, summary, reached_model=reached_model)
         message = CustomMessage(
-            custom_type=SESSION_INCIDENT_MESSAGE_TYPE,
+            custom_type=SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
             attribution="system",
             details={
                 "text": text,
@@ -10946,7 +10990,8 @@ class Session:
             logger.warning("could not journal a credential-shape incident", exc_info=True)
             return
         # THE LIVE RECEIPT, and the reason this method exists in the shape it
-        # does: a row written to the transcript and to the model's context is not
+        # does: a row written to the transcript — and, until this change, to the
+        # model's context — is not
         # a ticket — the operator has to SEE it. Measured before this
         # emit: the row reached the model, persisted, and painted on no operator
         # surface at all, live or on replay.

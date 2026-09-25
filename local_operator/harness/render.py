@@ -157,6 +157,22 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             # supersedes it has to arrive on the same surface or the model
             # keeps believing the older, more emphatic claim that its tools are
             # gone.
+            #
+            # ``SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE`` IS DELIBERATELY
+            # ABSENT FROM THIS TUPLE, AND THAT ABSENCE IS THE FEATURE. Do not
+            # "fix" it by adding the type. That record reports a
+            # credential-shape guard hit to the OPERATOR, who is the only reader
+            # who can act on it; it rode ``session_incident`` until
+            # 2026-09-24 and put a detection notice in front of the model —
+            # measured at 1,493 unnamed notices across 1,080 sessions on this
+            # machine, plus the named ones. The model never held the value (the
+            # guard masked it out of the text the model got), so the notice told
+            # it nothing it could act on, and the guard's own false positives
+            # meant agents ended turns investigating leaks that had not
+            # happened. Unlisted custom types are dropped here as bookkeeping,
+            # which is exactly the intended treatment; the transcript row and
+            # the live operator receipt are unaffected and are asserted by
+            # ``tests/unit/secrets/test_credential_shapes.py``.
             out.append(_injected_user_message(message.details.get("text", ""), message.id))
         elif message.custom_type == GATE_TIMEOUT_CUSTOM_TYPE:
             # An unattended gate that expired is NOT a user decision, and the
