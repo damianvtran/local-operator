@@ -34,6 +34,10 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from local_operator.evaluation.evidence.models import (
+    ModelResponsePayload,
+    ReplyTolerancePayload,
+)
 from local_operator.evaluation.evidence.store import EvidenceWriter
 from local_operator.evaluation.evidence.verify import verify_bundle
 from local_operator.evaluation.receipts import RedactionSet
@@ -65,10 +69,15 @@ def test_a_bundle_sealed_before_the_reply_tolerance_counts_still_verifies(
     # The subject of the test, asserted so the fixture cannot quietly stop
     # discriminating: this bundle must carry the event whose payload model grew,
     # and it must predate the kind that carries those counts today.
-    responses = [event for event in report.events if event.kind == "model_response"]
+    # Selected by TYPE rather than by ``kind``: the event payload is a wide union,
+    # so a kind comparison narrows nothing and reading the field off it would
+    # neither type-check nor assert which model the test is talking about.
+    responses = [
+        event.payload for event in report.events if isinstance(event.payload, ModelResponsePayload)
+    ]
     assert len(responses) == 1
-    assert responses[0].payload.request_id == "request-0"
-    assert not any(event.kind == "reply_tolerance" for event in report.events)
+    assert responses[0].request_id == "request-0"
+    assert not any(isinstance(event.payload, ReplyTolerancePayload) for event in report.events)
     assert report.terminal_state == "open"
 
 
