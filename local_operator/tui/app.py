@@ -714,9 +714,14 @@ RESTORE_SEAM = "\n\n"
 #: told it was switching to a newer build, when the install had not moved and no
 #: successor was coming. See :data:`SIGNAL_DRAIN_NOTICE` and the ``leaving``
 #: phrase the frame now carries.
+#: The notice's last clause is its OWN SENTENCE rather than a semicolon appendage
+#: (design review round 2, D12): it is the half a skimming operator most needs —
+#: a child reporting in now arrives on the next turn — and appended it landed as
+#: the tail of a sentence already running to three rows at 76 columns.
 DRAIN_NOTICE = (
     "this session is switching to a newer build; it is finishing in-flight work "
-    "first, so a new message will not start a turn until the new build is up"
+    "first, so a new message will not start a turn until the new build is up. A "
+    "child that reports in after this point arrives on the next turn"
 )
 
 #: The same notice for a runtime that was TERMINATED while it had work in flight

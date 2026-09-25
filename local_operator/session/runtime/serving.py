@@ -1651,6 +1651,24 @@ class ServingSessionHandle(SessionHandle):
         self._retiring_cause = cause or "retiring"
         self._retiring_detail = detail
         self._exit_committed = True
+        # THE DEPARTURE LATCH'S THIRD ARRIVAL PATH, armed in the same synchronous
+        # step that commits the exit -- the placement rule ``begin_drain``
+        # documents for the wake divert, and for the same reason: a divert
+        # installed one await later would leave a settled child's result free to
+        # open the turn this exit can only abort (see
+        # ``Session.retire_job_deliveries_to_transcript`` for the measured
+        # incident). Inline rather than factored out, exactly like the wake
+        # divert next door: the cell harnesses in ``test_serving_drain`` and
+        # ``test_prompt_admission_race`` bind this class's methods one by one, so
+        # a new private helper would have to be bound there too before any of
+        # them could take this latch at all.
+        session = getattr(self, "_session", None)
+        divert = getattr(session, "retire_job_deliveries_to_transcript", None)
+        if callable(divert):
+            try:
+                divert()
+            except Exception:  # noqa: BLE001 -- a failed divert must not block an exit
+                logger.debug("could not divert job deliveries to the transcript", exc_info=True)
         # The exit's own LOG line, and the only reader this detail has. It is
         # logged HERE rather than at the departure site so every rung's reading
         # lands in one shape: the two build rungs log the pair they composed at
@@ -1735,7 +1753,14 @@ class ServingSessionHandle(SessionHandle):
           process leaves at the first instant the reaper finds the work done;
         * wakes that fire from now on are spooled for the successor rather than
           run against a build that is leaving — invariant (iv), see
-          ``Session.retire_wakes_to_inbox``.
+          ``Session.retire_wakes_to_inbox``;
+        * and a settled child's result is HELD durably for whoever turns next -
+          charged to the same invariant (i), which the refusals above only
+          appear to hold: a job delivery is harness-initiated and reached
+          ``Session._deliver_job_results`` directly, so it opened a turn this
+          runtime could only abort. See
+          ``Session.retire_job_deliveries_to_transcript`` for the measured
+          incident and the two spellings it was fixed as.
 
         Deliberately NOT ``note_cut_off``: no turn is being cut off. The turn
         running when this latches is expected to FINISH, and arming a cut-off
@@ -1759,6 +1784,17 @@ class ServingSessionHandle(SessionHandle):
                 divert()
             except Exception:  # noqa: BLE001 — a failed divert must not block the drain
                 logger.debug("could not divert wakes to the inbox", exc_info=True)
+        # The SECOND harness-initiated arrival, beside the wake divert above and
+        # for the same reason: the admission refusals this latch installs cover
+        # ``prompt``/``receive_peer_message`` only, so a settled child's result
+        # would otherwise open a turn on the runtime that is leaving -- the
+        # measured incident (``Session.retire_job_deliveries_to_transcript``).
+        divert = getattr(session, "retire_job_deliveries_to_transcript", None)
+        if callable(divert):
+            try:
+                divert()
+            except Exception:  # noqa: BLE001 — a failed divert must not block the drain
+                logger.debug("could not divert job deliveries to the transcript", exc_info=True)
         return True
 
     def end_drain(self) -> bool:
@@ -1785,6 +1821,18 @@ class ServingSessionHandle(SessionHandle):
         self._draining = False
         self._retiring_cause = ""
         self._retiring_detail = ""
+        # ...and the DELIVERY divert goes with the latch, which the wake divert
+        # deliberately does not: a kept runtime is serving again, so a child that
+        # settles for the rest of its life must reach it without someone having
+        # to type something first. The rows already held need no undoing -- they
+        # are durable and ride the next turn either way.
+        session = getattr(self, "_session", None)
+        resume = getattr(session, "resume_job_deliveries_to_turns", None)
+        if callable(resume):
+            try:
+                resume()
+            except Exception:  # noqa: BLE001 — a failed undo must not block the abandon
+                logger.debug("could not release the job-delivery divert", exc_info=True)
         return True
 
     # -- the update window -------------------------------------------------

@@ -606,6 +606,90 @@ def wake_receipt_headline(text: str) -> str:
     return head.strip()
 
 
+#: Painted under a child's report that arrived after this session's runtime had
+#: committed to leaving, so the row is durable and no turn ran for it at the time.
+#: The report above it is the child's own words (the same text a delivered row
+#: carries); this line is what says how it arrived, because without it a held row
+#: and a delivered one read identically (UX round 1, U6).
+#:
+#: A FACT ABOUT THE ARRIVAL, NEVER A PRESENT-TENSE CLAIM ABOUT NOW (design review
+#: round 2, D10; UX round 2, U7). The first wording said "held for your next turn …
+#: no turn has read it yet", which the durable row cannot ever retract: it is
+#: written once and painted on EVERY later replay, so after the successor's turn
+#: had read and answered the reports, a resumed session still told the operator a
+#: delegated report was owed — a permanent false alarm on the primary surface, in
+#: exactly the family this change exists to remove. "no turn ran for it at that
+#: point" stays true forever, and still separates the two rows.
+#:
+#: The bracketed lead-in marks where the harness's own words begin (design review
+#: round 2, D11): the row is one block on one ink carrying the child's report and
+#: then this sentence, and the sibling rows in the same frame state their
+#: provenance with a ``[session …]`` head. It says **warning**, not "note" (design
+#: round 3, D14): the row is painted on the warning tier with the ``!`` glyph, the
+#: sibling directly above it in the same frame is ``[session warning]`` on the same
+#: ink, and "note" is this product's word for the muted ``·`` tier — so a
+#: tier-free word would have contradicted the row's own paint. It is NOT listed in
+#: ``_HARNESS_NOTICE_HEADS`` and needs no entry: that list exists for texts a
+#: persisted row can prove provenance by (the pre-stamp era), while this sentence
+#: is composed at fold time and never persisted.
+HELD_DELIVERY_NOTICE = (
+    "[session warning] held when it arrived — this report reached the session while its "
+    "runtime was leaving, so no turn ran for it at that point"
+)
+
+
+def held_delivery_notice(
+    details: dict[str, Any], *, report_budget: int | None = None
+) -> tuple[str, NoticeSeverity] | None:
+    """A child's report that was HELD for the next turn, and its ink — or None.
+
+    ``None`` for every ``job_result`` row that was DELIVERED, and that is the
+    whole point (UX round 1, U6): the two are the same message in every other
+    respect, so the ONLY thing that can tell a reader "this one is still waiting
+    for you" from "this one was already answered" is the flag the holding arm
+    writes (``Session._job_result_message(..., held=True)``). A row without it
+    is the ordinary delivery, whose own turn is what acknowledged it.
+
+    The severity is derived HERE rather than at a renderer, by this module's rule
+    for the fold decisions the two surfaces share (see
+    ``docs/design/history-fold-convergence.md`` §3): the phone and the TUI must
+    agree on the words and the tier, and a tier decided inside one renderer is a
+    tier the other does not have. **Both folds call this**, which is what makes
+    that rule true of this row rather than aspirational: Round 1 added the TUI
+    branch alone and the rationale was measured false on the phone, where a held
+    row and a delivered one still read identically (review round 2 MINOR-B,
+    design D9, UX U8). A single caller would be a single opinion wearing a shared
+    home's name.
+
+    ``warning``, because the row is a state the operator has to know about and
+    cannot otherwise see: nothing ran, nothing acknowledged it, and the only
+    other trace is the model's own next turn — which has not happened yet. That
+    is the same tier the MCP-unavailable row takes for the same reason, and one
+    above the ``note`` tier of a receipt that answers something the user just
+    did.
+    """
+    if not details.get("held"):
+        return None
+    report = str(details.get("text") or "").strip()
+    if report_budget is None:
+        # No budget: the caller bounds its own surface, so the sentence simply
+        # follows the report.
+        return (f"{report}\n{HELD_DELIVERY_NOTICE}" if report else HELD_DELIVERY_NOTICE), "warning"
+    # A BUDGETED CALLER TRUNCATES THE REPORT, NEVER THE MARKER (design review
+    # round 3, D15 = reviewer MAJOR-1 = UX U8-R). The phone composes the row and
+    # then caps the whole string, so with the marker appended last it was the part
+    # that got cut: intact to ~263 characters of report, cut mid-sentence from
+    # ~264, gone entirely beyond ~363, and at 400+ the held entry and its delivered
+    # twin were BYTE-IDENTICAL (only the severity differed). The job summary cap is
+    # 2000 characters, so the realistic case was the losing one. Reserving the
+    # marker's room first makes the sentence survive at every length, which is the
+    # only allocation that keeps the row distinguishable — the report is already
+    # truncated for the model at 2000, and this row's whole purpose is the marker.
+    room = max(0, report_budget - len(HELD_DELIVERY_NOTICE) - 1)
+    body = report[:room] if room else ""
+    return (f"{body}\n{HELD_DELIVERY_NOTICE}" if body else HELD_DELIVERY_NOTICE), "warning"
+
+
 def compaction_refused_notice(details: dict[str, Any]) -> tuple[str, NoticeSeverity]:
     """A compaction that did NOT run, and the ink it deserves.
 
