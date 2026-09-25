@@ -1406,7 +1406,11 @@ async def test_public_answer_crosses_worker_into_next_model_request(
     from tests.unit.evaluation.runner.conftest import RecordingResponder, payloads
 
     (adapter_site / "tiny_ask_mode").write_text(owner)
-    config = _subprocess_config(tmp_path)
+    # Control arm: the subject here is the answer crossing the worker into
+    # the NEXT model request, so the episode ends on the declaration the
+    # fake scripts (the gate's own cycle is covered by
+    # tests/unit/evaluation/runner/test_completion_gate.py).
+    config = _subprocess_config(tmp_path, completion_gate=False)
     model, stream = _offline_ask_client(config.artifact_root)
     responder = RecordingResponder("host public answer") if owner == "host" else None
     outcome = await EpisodeRunner(

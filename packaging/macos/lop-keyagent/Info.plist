@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- The app-like wrapper TN3137 requires around a command-line tool that needs
+       an embedded provisioning profile. Measured on macOS 27.0: the SAME binary
+       with the same entitlement is refused with errSecMissingEntitlement (-34018)
+       as a bare Mach-O and PASSES inside this shape, so the bundle is not
+       packaging taste — it is what makes the entitlement mean anything.
+
+       NOTHING HERE OPENS A WINDOW. LSUIElement is true, there is no nib, no
+       storyboard and no CFBundleIconFile, and the product never launches this
+       bundle through LaunchServices: `local_operator/operator/macos/keyagent.py`
+       execs Contents/MacOS/lop-keyagent directly, precisely to avoid an
+       activation, a Dock icon and a window for what is a one-shot CLI call.
+
+       CFBundleIdentifier is the app id WITHOUT its team prefix, and it must stay
+       that way: the profile's `com.apple.application-identifier` is
+       `<team>.com.local-operator.lopkeyagent`, and `packaging/macos/keyagent.entitlements`
+       names that full string. A bundle identifier that does not match the
+       profile's app id is not a warning — measured, an entitled bundle whose
+       profile does not authorize it is SIGKILLed by the kernel before main()
+       runs. The build fails loudly on a mismatch (assemble_keyagent_bundle.sh);
+       the runtime verifies the pair before exec (keyagent.py).
+
+       A fork with its own App ID changes this string, the entitlement string and
+       the profile together; `local_operator/operator/macos/keyagent.py` pins the
+       expected identifier and team, so a wheel signed for another identity is
+       refused rather than silently trusted. -->
+  <key>CFBundleIdentifier</key>
+  <string>com.local-operator.lopkeyagent</string>
+  <key>CFBundleExecutable</key>
+  <string>lop-keyagent</string>
+  <key>CFBundleName</key>
+  <string>local-operator key agent</string>
+  <key>CFBundleDisplayName</key>
+  <string>local-operator key agent</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <!-- The COMPATIBILITY contract is PROTOCOL in se-keyagent.c, not this number:
+       the helper and the Python client that speaks to it ship in the same wheel,
+       and a reply whose "protocol" field is not the one the client expects is
+       refused as a broken install. These two are display metadata only. -->
+  <key>CFBundleShortVersionString</key>
+  <string>1.0.0</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <!-- The first macOS on which the entitlement/profile pair was measured. A floor
+       rather than a claim about older systems: below it the Secure Enclave token
+       and this provisioning-profile mechanism do not both exist. -->
+  <key>LSMinimumSystemVersion</key>
+  <string>11.0</string>
+  <key>LSUIElement</key>
+  <true/>
+</dict>
+</plist>

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import ctypes.util
 import json
 import os
 import time
@@ -53,6 +54,7 @@ from local_operator.operator import (
     verify,
 )
 from local_operator.operator.keychain import FILE_ONLY, FileKeyBackend
+from local_operator.operator.macos import keyagent
 from local_operator.operator.sign import (
     anchor_for_handle,
     create_key,
@@ -98,7 +100,11 @@ def keyed(tmp_path: Path) -> Any:
             staged.write_bytes(trust.anchor_bytes(self.anchor))
             self.signer = self.backend.load()
 
-        def sign(self, **fields: str) -> dict[str, str]:
+        def sign(self, **fields: Any) -> dict[str, str]:
+            # `Any` rather than `str`: this stub forwards whatever the caller passed,
+            # and ``sign_challenge`` now takes a numeric ``timeout`` as well as its
+            # string fields — a passthrough that narrowed the type would have to know
+            # every parameter of the function it exists to stand in for.
             challenge = fields.pop("challenge")
             return sign_challenge(
                 challenge=challenge,
@@ -671,6 +677,10 @@ def test_the_spawn_only_status_lines_are_wrapped_by_the_terminal_not_by_hand(
     from local_operator.operator import handlers
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    # NO KEY-AGENT FAULT IN THIS STATE: the probe asks the real key agent on this host,
+    # and a broken one changes the block's shape (the remedy is named instead of `init`,
+    # design round 1 D3) — which is a different subject from the wrapping asserted here.
+    monkeypatch.setattr(handlers, "_keyagent_state", lambda backend: None)
     monkeypatch.setattr(
         handlers,
         "operator_authority_report",
@@ -682,7 +692,7 @@ def test_the_spawn_only_status_lines_are_wrapped_by_the_terminal_not_by_hand(
             "backend": "",
             "presence_enforced_by_os": False,
             "capability_guarantee": "spawn-capability",
-            "reason": "no anchor installed",
+            "reason": "no anchor is installed, so the runtime trusts no key yet",
         },
     )
     assert handlers._status() == 0
@@ -721,14 +731,30 @@ def test_the_spawn_only_status_lines_are_wrapped_by_the_terminal_not_by_hand(
 #    because its docstring said the dictionary would do it while the dictionary was
 #    built with those NULL callbacks.
 #
-# Nothing in this section creates a key, raises a prompt, or writes to any keychain:
-# the ladder tests drive a fake ``_CF`` that models ownership by substituting the whole
-# CoreFoundation surface (the real one would reach the OS), so their subject is
-# OWNERSHIP — which ref exists, who releases it, and whether a released one is read.
-# The real ``dict()``'s callback ARGUMENTS are pinned separately, by the two dedicated
-# tests above it. The test that asks the real framework creates an access-control object
-# and nothing else. The one exception is the opt-in test at the end, gated on
-# ``LOP_OPERATOR_ENCLAVE_TEST=1``.
+# WHAT REPLACED THE OWNERSHIP NET, and why. This file used to drive a fake ``_CF``
+# that modelled CoreFoundation ownership across a Python implementation of the ladder.
+# That implementation is GONE from the product (it could never work — the entitlement
+# comes from a code signature and a provisioning profile, see ``keychain.py``), so a
+# fake for it would be a net under code that does not exist. What takes its place:
+#
+#   * the constants vs the SDK HEADER, below (unchanged, and still the one copy of the
+#     value that lives outside this repository);
+#   * THE C SOURCE, pinned symbol-for-symbol against those same constants — the native
+#     sequence now exists once, in ``packaging/macos/lop-keyagent/se-keyagent.c``, and
+#     drift between the two copies of it is the hazard this arrangement creates;
+#   * the KEY AGENT's OWN ``selftest`` verb, which asserts the release discipline with
+#     ``CFGetRetainCount`` against the very constructors ``create`` runs. It needs no
+#     entitlement and no keychain, and the release job runs it on the built binary
+#     (see ``.github/workflows/publish.yml``); from here it is exercised only when a
+#     built helper is pointed at by ``LOP_KEYAGENT_BINARY``;
+#   * a real framework call for the ONE assertion a fake cannot make — that
+#     ``SecAccessControlCreateWithFlags`` ACCEPTS the flag pair for both classes (the
+#     defect that shipped). It writes nothing and prompts nothing.
+#
+# Nothing in this section creates a key, raises a prompt, or writes to any keychain.
+# The one exception is the opt-in test at the end, gated on
+# ``LOP_OPERATOR_ENCLAVE_TEST=1``, which creates ONE item under a unique tag through the
+# signed key agent and deletes it again.
 
 #: A real uncompressed P-256 point, exported from a Secure Enclave key created on
 #: this machine (public data — the private half never leaves the Enclave). A fixed
@@ -799,6 +825,67 @@ def test_the_constants_match_the_sdk_header_that_defines_them() -> None:
         )
 
 
+def _framework() -> tuple[Any, Any]:
+    """CoreFoundation and Security, bound for the ONE call this file still makes.
+
+    Bound HERE rather than in shipped code on purpose: the product no longer touches
+    these functions from Python (the signed key agent does), so a binding in
+    ``keychain.py`` would be a second implementation of a native sequence — which is
+    exactly what was deleted. A test may hold one because its subject IS the framework.
+    """
+    cf = ctypes.CDLL(ctypes.util.find_library("CoreFoundation"))
+    security = ctypes.CDLL(ctypes.util.find_library("Security"))
+    security.SecAccessControlCreateWithFlags.restype = ctypes.c_void_p
+    security.SecAccessControlCreateWithFlags.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    cf.CFRelease.argtypes = [ctypes.c_void_p]
+    cf.CFStringGetCString.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.c_long,
+        ctypes.c_uint32,
+    ]
+    cf.CFStringGetCString.restype = ctypes.c_bool
+    cf.CFErrorCopyDescription.restype = ctypes.c_void_p
+    cf.CFErrorCopyDescription.argtypes = [ctypes.c_void_p]
+    return cf, security
+
+
+def _framework_constant(lib: Any, name: str) -> int:
+    """The ``CFTypeRef`` a framework global HOLDS, as the address of the global.
+
+    ``in_dll`` gives the ADDRESS of the symbol; for a ``CFStringRef`` constant the
+    value that belongs in a dictionary is what is stored THERE, which is what the
+    dereference reads. This is the shape ``keychain._CF.const`` used before it was
+    deleted, kept here because the call it feeds needs it.
+    """
+    value = ctypes.c_void_p.from_address(
+        ctypes.addressof((ctypes.c_char * 0).in_dll(lib, name))
+    ).value
+    assert value is not None, f"{name} holds no pointer"
+    return value
+
+
+def _framework_error(cf: Any, err: Any) -> str:
+    """The framework's own sentence for a failed call, releasing the error object."""
+    import ctypes
+
+    if not err.value:
+        return "no error object was published"
+    text = cf.CFErrorCopyDescription(err)
+    if not text:
+        return "the error had no description"
+    buffer = ctypes.create_string_buffer(512)
+    cf.CFStringGetCString(text, buffer, 512, 0x08000100)
+    cf.CFRelease(text)
+    cf.CFRelease(err.value)
+    return buffer.value.decode("utf-8", "replace")
+
+
 @pytest.mark.skipif(os.uname().sysname != "Darwin", reason="SecAccessControl is macOS-only")
 def test_every_protection_class_accepts_the_flag_pair_this_build_uses() -> None:
     """THE TEST THAT WOULD HAVE CAUGHT THE RELEASED BUG — so it asks the framework.
@@ -809,745 +896,27 @@ def test_every_protection_class_accepts_the_flag_pair_this_build_uses() -> None:
     and it fails loudly on the pre-fix constants with the framework's own sentence.
 
     COVERAGE SPLIT — this is a DEV-HOST GUARD, not a CI gate: it is gated on Darwin and
-    the framework call cannot be exercised on Linux at all, so a green CI does NOT cover
-    the framework boundary. What CI does cover with certainty is the constants, the SDK
-    header read and the whole fake-``_CF`` ownership net, none of which need an OS.
+    the framework call cannot be exercised on Linux at all, so a green Linux CI does not
+    cover this boundary. What CI covers with certainty is the constants, the SDK header
+    read and the C source that makes the same two calls (``keyagent-selftest``).
     """
-    cf = keychain._CF()
-    backend = keychain.SecureEnclaveBackend.__new__(keychain.SecureEnclaveBackend)
-    for protection in keychain.SecureEnclaveBackend.PROTECTION_LADDER:
+    import ctypes
+
+    cf, security = _framework()
+    backend = keychain.SecureEnclaveBackend
+    for protection in backend.PROTECTION_LADDER:
         err = ctypes.c_void_p()
-        access = cf.S.SecAccessControlCreateWithFlags(
+        access = security.SecAccessControlCreateWithFlags(
             None,
-            cf.const(protection),
-            keychain.SecureEnclaveBackend.PRIVATE_KEY_USAGE
-            | keychain.SecureEnclaveBackend.USER_PRESENCE,
+            _framework_constant(security, protection),
+            backend.PRIVATE_KEY_USAGE | backend.USER_PRESENCE,
             ctypes.byref(err),
         )
-        if not access:
-            pytest.fail(f"{protection} was refused by the framework: {cf.error(err)}")
-        cf.release(int(access))
-    assert backend is not None  # the ladder is a class attribute; no instance needed
-
-
-class _FakeCF:
-    """A ``_CF`` stand-in that models OWNERSHIP, not the operating system.
-
-    Every CoreFoundation call the backend makes is answered with a synthetic ref, and
-    the fake tracks which refs are alive. The part that matters: it REFUSES to read a
-    ref that has been released, raising a sentence that names the call site. That is
-    the check the real framework cannot give us — the same mistake is a SIGSEGV inside
-    ``SecKeyCreateRandomKey`` on this host (measured, 6 of 6 runs), which no unit suite
-    can assert against. Borrowed refs (``const``/``boolean``) are negative and never
-    tracked, exactly like the framework's singletons.
-    """
-
-    def __init__(
-        self,
-        *,
-        access_accepted: dict[str, bool] | None = None,
-        keygen: list[tuple[int, str] | None] | None = None,
-        point: bytes = _A_REAL_P256_POINT,
-        sign_refused: bool = False,
-    ) -> None:
-        self._next = 1
-        self.kinds: dict[int, str] = {}
-        self.live: set[int] = set()
-        self.created: list[tuple[str, int]] = []
-        self.released: list[tuple[str, int]] = []
-        self.reuse: list[tuple[str, int]] = []
-        self.blobs: dict[int, bytes] = {}
-        self.names: dict[int, str] = {}
-        self.errors: dict[int, tuple[int, str]] = {}
-        self.access_accepted = access_accepted or {
-            name: True for name in keychain.SecureEnclaveBackend.PROTECTION_LADDER
-        }
-        self.keygen = keygen if keygen is not None else [None]
-        self.attempts = 0
-        self.flags_seen: list[int] = []
-        self.point = point
-        #: Whether ``SecKeyCreateSignature`` refuses, so the signing path's failure exit is
-        #: reachable without an OS: the payload release lives on both exits.
-        self.sign_refused = sign_refused
-        #: A DER-shaped ES256 signature, so a successful sign returns something real.
-        self.signature = b"\x30\x44\x02\x20" + bytes(range(32)) + b"\x02\x20" + bytes(range(32))
-        self.S = _FakeSecurity(self)
-        self.C = _FakeCoreFoundation(self)
-
-    # -- ownership plumbing -------------------------------------------------
-    def _make(self, kind: str) -> int:
-        ref = self._next
-        self._next += 1
-        self.kinds[ref] = kind
-        self.live.add(ref)
-        self.created.append((kind, ref))
-        return ref
-
-    def _touch(self, ref: Any, where: str) -> int:
-        value = int(ref or 0)
-        if value in self.kinds and value not in self.live:
-            self.reuse.append((where, value))
-            raise AssertionError(
-                f"{where} read {self.kinds[value]} ref {value} after it was released — this "
-                "is the freed-memory path the tag-lifetime fix removes"
-            )
-        return value
-
-    def release(self, *refs: Any) -> None:
-        """Release each owned ref once; borrowing a const is a no-op, as in ``_CF``.
-
-        A second release of the same ref raises through :meth:`_touch`, which is what
-        makes "released exactly once" a real assertion rather than a counting one.
-        """
-        for ref in refs:
-            value = int(ref or 0)
-            if value in self.kinds:
-                self._touch(value, "release")
-                self.live.discard(value)
-                self.released.append((self.kinds[value], value))
-
-    def _fail(self, out: Any, status: int, text: str) -> None:
-        """Publish an error the way the framework does: an out-param the caller owns.
-
-        A status of 0 means the framework refused WITHOUT publishing an error — the out
-        param is left untouched, so ``status`` and ``error`` see no error object at all.
-        That is the state QA round 2 (Q2-1) is about, and modelling it is what makes the
-        "no success code in a failure line" assertion mean something.
-        """
-        if not status:
-            return
-        ref = self._make("error")
-        self.errors[ref] = (status, text)
-        if out is not None:
-            out._obj.value = ref
-
-    # -- the surface the backend uses --------------------------------------
-    def const(self, name: str) -> int:
-        for ref, known in self.names.items():
-            if known == name:
-                return ref
-        ref = -(len(self.names) + 1)
-        self.names[ref] = name
-        return ref
-
-    def boolean(self, value: bool) -> int:
-        return self.const(f"bool:{value}")
-
-    def data(self, raw: bytes) -> int:
-        ref = self._make("data")
-        self.blobs[ref] = raw
-        return ref
-
-    def data_bytes(self, ref: Any) -> bytes:
-        return self.blobs[self._touch(ref, "data_bytes")]
-
-    def dict(self, pairs: list[tuple[int, int]]) -> int:
-        """Assert the contents are ALIVE at build time, then record an owned ref.
-
-        LIMIT, stated because it is the one thing this fake cannot model: it does not
-        RETAIN what it is given, so it cannot catch a value released after the
-        dictionary was built and then read THROUGH it. That half is not left untested —
-        it is asserted where it lives, in the typed-callbacks tests, which is also why
-        those read Apple's own callback tables rather than a flag on this fake.
-        """
-        for key, value in pairs:
-            self._touch(key, "CFDictionaryCreate key")
-            self._touch(value, "CFDictionaryCreate value")
-        return self._make("dict")
-
-    def status(self, err: Any) -> int:
-        value = int(err.value or 0)
-        # Touch it: reading a code out of an error object that has already been RELEASED is
-        # the use-after-free the real ``cf.error`` would hide, and the signing path relies
-        # on the order (status first, then the call that releases it).
-        self._touch(value, "CFErrorGetCode")
-        return self.errors.get(value, (0, ""))[0]
-
-    def error(self, err: Any) -> str:
-        value = int(err.value or 0)
-        if not value:
-            # ``_CF.error`` renders a missing error as "no error reported" and releases
-            # nothing, so the fake says the same rather than inventing a code.
-            return "no error reported"
-        self._touch(value, "CFErrorCopyDescription")
-        code, text = self.errors.pop(value, (0, ""))
-        if value in self.live:  # _CF.error releases the CFErrorRef; so does the fake
-            self.live.discard(value)
-            self.released.append((self.kinds[value], value))
-        return f"OSStatus error {code} - {text}"
-
-    def counts(self) -> dict[str, tuple[int, int]]:
-        """``kind -> (created, released)``, for the accounting test."""
-        kinds = sorted(set(self.kinds.values()))
-        return {
-            kind: (
-                sum(1 for k, _ in self.created if k == kind),
-                sum(1 for k, _ in self.released if k == kind),
-            )
-            for kind in kinds
-        }
-
-
-class _FakeSecurity:
-    """The ``.S`` half: the calls ``create``, ``load`` and ``sign`` make.
-
-    ``SecKeyCreateSignature`` is here so the signing path has a guard that runs in every
-    CI job rather than only under this host's by-hand probes: it was the one changed line
-    in the round-1 remediation with nothing exercising it (agent review round 2, R2-3 /
-    QA round 2, Q2-3).
-    """
-
-    def __init__(self, cf: _FakeCF) -> None:
-        self.cf = cf
-
-    def SecAccessControlCreateWithFlags(
-        self, allocator: Any, protection: Any, flags: Any, out: Any
-    ) -> int:
-        cf = self.cf
-        cf.flags_seen.append(int(flags))
-        name = cf.names.get(int(protection or 0), "")
-        if cf.access_accepted.get(name, True):
-            return cf._make("access")
-        cf._fail(out, -50, "the access control was refused")
-        return 0
-
-    def SecKeyCreateRandomKey(self, attrs: Any, out: Any) -> int:
-        cf = self.cf
-        cf._touch(attrs, "SecKeyCreateRandomKey")
-        plan = cf.keygen[min(cf.attempts, len(cf.keygen) - 1)]
-        cf.attempts += 1
-        if plan is None:
-            return cf._make("key")
-        cf._fail(out, plan[0], plan[1])
-        return 0
-
-    def SecKeyCopyPublicKey(self, key: Any) -> int:
-        cf = self.cf
-        cf._touch(key, "SecKeyCopyPublicKey")
-        return cf._make("public")
-
-    def SecKeyCopyExternalRepresentation(self, public: Any, out: Any) -> int:
-        cf = self.cf
-        cf._touch(public, "SecKeyCopyExternalRepresentation")
-        # The bytes live in the ref, so `data_bytes` reads something real: the point is
-        # the one a Secure Enclave key on this host actually exported.
-        raw = cf._make("raw")
-        cf.blobs[raw] = cf.point
-        return raw
-
-    def SecKeyCreateSignature(self, key: Any, algorithm: Any, payload: Any, out: Any) -> int:
-        """Sign, or publish a refusal the caller must report.
-
-        ``payload`` is TOUCHED, so a message ref that was released before the call raises
-        here — which is exactly the leak's inverse and the reason the payload is bound.
-        """
-        cf = self.cf
-        cf._touch(key, "SecKeyCreateSignature key")
-        cf._touch(payload, "SecKeyCreateSignature payload")
-        if cf.sign_refused:
-            cf._fail(out, -34018, "a signature needs a presence prompt this process cannot raise")
-            return 0
-        signature = cf._make("signature")
-        cf.blobs[signature] = cf.signature
-        return signature
-
-    def SecItemCopyMatching(self, query: Any, out: Any) -> int:
-        cf = self.cf
-        cf._touch(query, "SecItemCopyMatching")
-        return -25300  # errSecItemNotFound: this store holds nothing
-
-
-class _FakeSymbol:
-    """One stand-in ctypes function object.
-
-    A plain bound method cannot play this role: the backend sets ``restype`` and
-    ``argtypes`` on the symbol before calling it, exactly as it must on a real
-    ``_FuncPtr``, and setting an attribute on a bound method raises. This carries those
-    two attributes and does nothing with them, so the ownership test exercises the
-    real call site rather than a relaxed copy of it.
-    """
-
-    def __init__(self, impl: Any) -> None:
-        self.restype: Any = None
-        self.argtypes: Any = None
-        self._impl = impl
-
-    def __call__(self, *args: Any) -> Any:
-        return self._impl(*args)
-
-
-class _FakeCoreFoundation:
-    """The ``.C`` half. Only ``CFNumberCreate`` is used, and it counts as an owned ref."""
-
-    def __init__(self, cf: _FakeCF) -> None:
-        self.CFNumberCreate = _FakeSymbol(lambda allocator, kind, byref_value: cf._make("number"))
-
-
-def _enclave_with(monkeypatch: pytest.MonkeyPatch, fake: _FakeCF) -> Any:
-    """The real backend, wired to the fake CoreFoundation surface."""
-    monkeypatch.setattr(keychain, "_CF", lambda: fake)
-    return keychain.SecureEnclaveBackend()
-
-
-def test_the_dictionaries_are_built_with_the_typed_callbacks() -> None:
-    """The dictionary's callbacks are the difference between a clean call and a crash.
-
-    ``CFDictionaryCreate(..., None, None)`` is legal but means "this dictionary manages
-    nothing", and the framework's copy/release paths inside key generation do not honour
-    that (see the section header). Asserted on the two ARGUMENTS, because they are the
-    whole difference — a test that only drove the fake could pass with NULL callbacks,
-    since the fake never touches the OS.
-    """
-    cf = keychain._CF.__new__(keychain._CF)
-    cf.TYPED_KEY_CALLBACKS = 0xCA11
-    cf.TYPED_VALUE_CALLBACKS = 0xCA22
-    seen: list[tuple[Any, ...]] = []
-
-    class _Recorder:
-        restype: Any = None
-        argtypes: Any = None
-
-        def CFDictionaryCreate(self, *args: Any) -> int:
-            seen.append(args)
-            return 4242
-
-    # ``Any`` because this stands in for the loaded dylib: the point is the ARGUMENTS
-    # ``dict`` passes, and the real ``_CF.C`` is a ``CDLL`` the recorder deliberately
-    # is not.
-    recorder: Any = _Recorder()
-    cf.C = recorder
-    assert cf.dict([(1, 2)]) == 4242
-    assert len(seen) == 1, seen
-    allocator, keys, values, count, key_callbacks, value_callbacks = seen[0]
-    assert allocator is None and count == 1 and keys is not None and values is not None
-    assert (key_callbacks, value_callbacks) == (0xCA11, 0xCA22), (
-        "a dictionary built without the typed callbacks is the second crash: "
-        f"got {(key_callbacks, value_callbacks)!r}"
-    )
-
-
-@pytest.mark.skipif(os.uname().sysname != "Darwin", reason="CoreFoundation is macOS-only")
-def test_the_typed_callbacks_are_a_live_corefoundation_table_not_a_null_pair() -> None:
-    """...and they are Apple's OWN table, not merely two addresses that differ.
-
-    A NULL pair passes any "the arguments are not None" check on the wrong object, so
-    this reads the memory the address points at: ``CFDictionaryKeyCallBacks`` /
-    ``ValueCallBacks`` begin ``{CFIndex version; void *retain; void *release; ...}``, and
-    a wrong or NULL address cannot present version 0 with a live retain/release pair.
-
-    COVERAGE SPLIT — a DEV-HOST GUARD like the framework test above: it needs the loaded
-    dylib, so it skips (and proves nothing) on Linux. The callback ARGUMENTS are checked
-    portably by ``test_the_dictionaries_are_built_with_the_typed_callbacks``, which is
-    the half CI runs everywhere.
-    """
-    cf = keychain._CF()
-    for name, address in (
-        ("key", cf.TYPED_KEY_CALLBACKS),
-        ("value", cf.TYPED_VALUE_CALLBACKS),
-    ):
-        assert address, f"the {name} callbacks are NULL — the released defect"
-        assert ctypes.c_long.from_address(address).value == 0, f"{name} callbacks version"
-        retain = ctypes.c_void_p.from_address(address + 8).value
-        release = ctypes.c_void_p.from_address(address + 16).value
-        assert retain and release, f"the {name} callback table has no retain/release pair"
-
-
-def test_a_failed_first_attempt_hands_the_next_one_a_live_tag(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """THE USE-AFTER-FREE, and why it is coupled to the flag fix.
-
-    The released ladder released ``tag`` on the attempt that failed to make a key —
-    and then built the next attempt's dictionary around it. With the shipped flags
-    that path was unreachable, because the access control failed one step earlier;
-    fixing the flags alone would make it reachable exactly where it matters (a host
-    whose policy refuses the strictest protection class), turning a precise error
-    into a crash. Modelled in that order deliberately: access control ACCEPTED,
-    key generation FAILED on the first attempt, and the second attempt must receive a
-    live tag.
-    """
-    fake = _FakeCF(keygen=[(-34018, "failed to add key to keychain"), None])
-    backend = _enclave_with(monkeypatch, fake)
-
-    handle = backend.create()
-    assert handle.backend == keychain.SECURE_ENCLAVE
-    assert fake.attempts == 2, "the ladder should have taken the second class"
-    assert fake.reuse == [], f"a released ref was used again: {fake.reuse}"
-
-
-def test_every_ref_the_ladder_creates_is_released_exactly_once(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Accounting per object class, over a two-attempt ladder, a success, and an access refusal.
-
-    The CFNumber is the one that leaked: its docstring claimed the dictionary would
-    release it while the dictionary was built with NULL callbacks and retained
-    nothing. The tag is the one that was released twice. Both are invisible to a
-    functional test that only checks the OSStatus, which is why they are asserted as
-    counts over the same fake that refuses a stale ref.
-
-    Three branches, because they hold three different sets of objects: the ladder that
-    falls through, the ladder that succeeds, and the ACCESS-REFUSED branch, whose
-    ``CFErrorRef`` is created by the framework and released by ``_CF.error`` — with the
-    lifetime nobody would notice leaking (agent review round 1, R1-7).
-    """
-    ladder = _FakeCF(keygen=[(-34018, "failed to add key to keychain"), None])
-    _enclave_with(monkeypatch, ladder).create()
-    for kind, (created, released) in ladder.counts().items():
-        assert created == released, f"{kind}: created {created}, released {released}"
-    assert ladder.live == set(), f"still live after a two-attempt ladder: {ladder.live}"
-
-    success = _FakeCF(keygen=[None])
-    _enclave_with(monkeypatch, success).create()
-    for kind, (created, released) in success.counts().items():
-        assert created == released, f"{kind}: created {created}, released {released}"
-    assert success.live == set(), f"still live after a success: {success.live}"
-    # ...and the CFNumber really is among them, so "no leak" is not vacuous.
-    assert success.counts()["number"] == (1, 1)
-
-    refusal = _FakeCF(
-        access_accepted={name: False for name in keychain.SecureEnclaveBackend.PROTECTION_LADDER}
-    )
-    with pytest.raises(keychain.KeyBackendError):
-        _enclave_with(monkeypatch, refusal).create()
-    for kind, (created, released) in refusal.counts().items():
-        assert created == released, f"{kind}: created {created}, released {released}"
-    assert refusal.live == set(), f"still live after an access refusal: {refusal.live}"
-    # The error refs are the point of this branch: one per class, each released once.
-    assert refusal.counts()["error"] == (2, 2)
-
-
-def test_the_flags_the_ladder_actually_builds_are_apple_s_pair(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """What the framework is HANDED, not what the module says about itself.
-
-    ``test_the_access_control_flags_...`` pins the constants; this pins the value
-    that reaches the call, so an OR/AND slip between them cannot pass both.
-    """
-    fake = _FakeCF(keygen=[None])
-    _enclave_with(monkeypatch, fake).create()
-    expected = keychain.SecureEnclaveBackend.USER_PRESENCE | (
-        keychain.SecureEnclaveBackend.PRIVATE_KEY_USAGE
-    )
-    assert fake.flags_seen == [expected]
-
-
-def test_both_classes_failing_is_a_precise_error_and_never_a_crash(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """No silent downgrade, no traceback, and both attempts named.
-
-    The two outcomes a caller must tell apart are "this host has no presence store"
-    and "the presence store refused", and only the second has a gesture the operator
-    can make — so a failure that collapsed them, or that dropped one attempt's text,
-    would cost the operator the only sentence they can act on.
-
-    With DIFFERENT framework detail per class the detail cannot be merged, so this is
-    also the branch that pins one detail line PER refusal — the merge case is asserted
-    in ``test_the_refusal_message_leads_with_the_diagnosis...``. This is the
-    ``errSecParam``-at-key-generation site, which is a class this host refused, NOT the
-    build defect the same code means at the access-control site (design round 1, D2).
-    """
-    fake = _FakeCF(keygen=[(-50, "first class refused"), (-50, "second class refused")])
-    backend = _enclave_with(monkeypatch, fake)
-
-    with pytest.raises(keychain.KeyBackendError) as refused:
-        backend.create()
-    message = str(refused.value)
-    assert "first class refused" in message and "second class refused" in message
-    assert "kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly" in message
-    assert "kSecAttrAccessibleWhenUnlockedThisDeviceOnly" in message
-    assert message.count("framework detail:") == 2, message
-    assert "inconsistent" in message, "the key-generation site, not the flag-pair one"
-    assert refused.value.status == -50
-    assert fake.attempts == 2
-
-
-def test_the_refusal_is_classified_by_call_site_and_not_by_the_code_alone() -> None:
-    """The same ``OSStatus`` means something different at the two call sites.
-
-    ``errSecParam`` (-50) is the framework's GENERIC parameter refusal. At the
-    access-control call it means a flag pair Apple will not accept — a build defect no
-    host can work around; at key generation it means "inconsistent private key
-    parameters", whose usual cause is a protection class THIS HOST refuses. Reading the
-    code alone would tell an operator on a host that merely refuses a class that their
-    BUILD is broken (design round 1, D2 / agent review round 1, R1-1).
-
-    ``errSecMissingEntitlement`` (-34018) is about the CALLER, and the measured gate is
-    the keychain ENTITLEMENT rather than "being code-signed" in the abstract: a
-    signed-but-unentitled caller gets the same code (R1-2).
-    """
-    access = keychain.secure_enclave_diagnosis(keychain.ACCESS_CONTROL_REFUSED, -50)
-    assert "errSecParam" in access[0]
-    assert "kSecAccessControlApplicationPassword" in access[0]
-    # The site must name a next command, and NOT the one that cannot help there: a
-    # file-backed key is a different key, and `file-only` never calls
-    # SecAccessControlCreateWithFlags, so pointing at it would send the operator to a
-    # command that does not address what failed (design round 2, D2-1). The command it
-    # names must be one the READER has, and must say which build carries the fix: this
-    # copy ships in a wheel, where only `local-operator` and `lop` exist — `lop-update`
-    # is the operator's own host script and is not installed by anything here (design
-    # round 1, D1-2).
-    assert "lop update" in " ".join(access), "the access-control site names no action"
-    assert "from `main`" in " ".join(access), "the copy must say which build has the fix"
-    assert "file-only" not in " ".join(access), "file-only does not help at this site"
-    keygen = keychain.secure_enclave_diagnosis(keychain.KEY_GENERATION_REFUSED, -50)
-    assert keygen and keygen[0] != access[0], "one code read the same way at two sites"
-    assert "inconsistent" in keygen[0]
-    # Its next action used to be `lop operator status` alone, and on the state a keygen
-    # refusal leaves that report's own way out is `lop operator init` — the command that
-    # just refused. It is now the downgrade, byte-identical to the sibling entry's, so the
-    # two sites cannot drift into describing one fallback two ways (design round 1, D1-1).
-    assert keygen[1] == keychain._FILE_ONLY_FALLBACK, keygen
-    assert (
-        keygen[1]
-        == keychain.secure_enclave_diagnosis(
-            keychain.KEY_GENERATION_REFUSED, keychain._ERR_SEC_MISSING_ENTITLEMENT
-        )[1]
-    )
-    # A status nobody has classified contributes nothing, rather than a guessed cause.
-    assert keychain.secure_enclave_diagnosis(keychain.KEY_GENERATION_REFUSED, -9999) == ()
-    assert keychain.secure_enclave_diagnosis("a site that does not exist", -50) == ()
-    # ...and an unclassified refusal still reaches the operator, with the code stated by
-    # US because the framework's text did not state it.
-    unclassified = keychain.secure_enclave_refusal_message(
-        {("key generation", -9999, "something new"): ["kSecAttrAccessibleX"]}
-    )
-    assert unclassified.startswith("the Secure Enclave refused to create an operator key")
-    assert unclassified.endswith(
-        "framework detail: key generation — kSecAttrAccessibleX: OSStatus -9999 - something new"
-    ), unclassified
-
-
-def test_the_entitlement_diagnosis_names_the_cost_of_the_fallback_it_offers() -> None:
-    """``file-only`` may be the fallback, and may not be sold as the good path.
-
-    The first cut ended "…`--backend file-only` creates the level this runtime can
-    enforce", which is the overclaim ``docs/design/approval-authority.md`` exists to
-    prevent: ``file-only`` is exactly what this product refuses to call a boundary —
-    ``describe_level`` says "This is NOT a boundary", and the file-only WARNING says any
-    process running as you can read the key. So the sentence names what is GIVEN UP (no
-    presence prompt, readable by any process running as you), names the fallback and the
-    level ``lop operator status`` will report, and follows the shape ``CngBackend``
-    already established for the same situation (design round 1, D1).
-    """
-    lines = keychain.secure_enclave_diagnosis(
-        keychain.KEY_GENERATION_REFUSED, keychain._ERR_SEC_MISSING_ENTITLEMENT
-    )
-    joined = " ".join(lines)
-    assert "errSecMissingEntitlement" in joined
-    assert "entitlement" in joined and "data-protection keychain" in joined
-    assert "code-signed" not in joined, "the measured gate is the entitlement"
-    assert "file-only" in joined and "operator-file-only" in joined
-    assert "raises no presence prompt" in joined
-    assert "any process running as you can read it" in joined
-    assert "enforce" not in joined, "file-only is a fallback, not an enforced level"
-
-
-def test_the_refusal_message_leads_with_the_diagnosis_and_says_each_thing_once(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """What the operator reads: diagnosis, next command, then the framework's detail.
-
-    Three things the first cut got wrong (design round 1, D3/D4): the CLI prefix and the
-    exception restated each other ("could not create the operator key: the Secure Enclave
-    refused to create an operator key"), the framework's identical clause was printed
-    once per protection class, and the recommendation sat at the end of an ~850-character
-    line — so this pins the LAYOUT, not just the content.
-
-    The framework's own words are kept as the last line, and its per-run object address
-    is removed there because this text is meant to be pasted into a report.
-    """
-    fake = _FakeCF(
-        keygen=[
-            (
-                -34018,
-                "failed to add key to keychain" " <SecKeyRef:('com.apple.setoken')> 0x7f86b0d240",
-            ),
-            (
-                -34018,
-                "failed to add key to keychain" " <SecKeyRef:('com.apple.setoken')> 0x7f86b0d3f0",
-            ),
-        ]
-    )
-    with pytest.raises(keychain.KeyBackendError) as refused:
-        _enclave_with(monkeypatch, fake).create()
-    message = str(refused.value)
-    first, *rest = message.splitlines()
-    assert first.startswith("this runtime cannot create a presence-gated operator key"), first
-    assert first.count("errSecMissingEntitlement") == 1, "the diagnosis is said once, first"
-    assert any("lop operator init --backend file-only" in line for line in rest[:2]), rest[:2]
-    # ONE detail line, with both classes beside it: the same clause is not repeated per
-    # class, and the per-run address did not reach the copy.
-    assert message.count("framework detail:") == 1, message
-    assert (
-        "kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly, "
-        "kSecAttrAccessibleWhenUnlockedThisDeviceOnly"
-    ) in message, message
-    assert "0x" not in message, f"a per-run object address reached the copy: {message}"
-    assert message.count("-34018") == 1, f"the status is stated once: {message}"
-    assert "OSStatus -34018 - OSStatus error" not in message, "our prefix was added on top"
-    assert refused.value.status == keychain._ERR_SEC_MISSING_ENTITLEMENT
-    # ONE LINE PER SENTENCE, AT COLUMN 0, with no hand-set indent and no interior run of
-    # spaces for a terminal to strand mid-wrap: the sibling status block's convention,
-    # which design round 2 (D2-2) asked this message to follow rather than introduce a
-    # second one. Only the product's lines are checked for double spaces — the framework's
-    # own words are kept verbatim and may contain them.
-    for line in message.splitlines():
-        assert not line.startswith(" "), f"a hand-set indent came back: {line!r}"
-        if not line.startswith("framework detail:"):
-            assert "  " not in line, f"a doubled space for a terminal to strand: {line!r}"
-
-    # When the framework's own description already states the code — its usual
-    # "(OSStatus error -N - …)" shape — the framework's words are kept VERBATIM and ours
-    # are not prefixed on top of them: the point of the detail line is that it is what a
-    # report should quote (design round 1, D4).
-    real_shape = _FakeCF(
-        keygen=[
-            (
-                -34018,
-                "The operation couldn\u2019t be completed. (OSStatus error -34018 - failed to "
-                "add key to keychain: <SecKeyRef:('com.apple.setoken')>)",
-            )
-        ]
-    )
-    with pytest.raises(keychain.KeyBackendError) as refused_real:
-        _enclave_with(monkeypatch, real_shape).create()
-    detail_line = str(refused_real.value).splitlines()[-1]
-    assert detail_line.endswith(
-        "(OSStatus error -34018 - failed to add key to keychain: <SecKeyRef:('com.apple.setoken')>)"
-    ), detail_line
-    assert "OSStatus -34018 - The operation" not in detail_line, "our prefix was added anyway"
-
-
-def test_a_printed_failure_carries_no_per_run_object_address() -> None:
-    r"""The framework's ``> 0x…`` address goes; nothing else does.
-
-    ``0x75929d8380`` differs every run, and stripping it is also what lets two protection
-    classes' otherwise identical refusals collapse into one detail line (design round 1,
-    D4). The first cut used ``\s*0x[0-9a-fA-F]+``, which ALSO deleted a small hex literal,
-    truncated a hex path segment and — because ``\s*`` matches a newline — could join two
-    lines. So the rule is anchored to the shape the framework actually prints, and the
-    cases below are its contract rather than an aspiration (agent review round 2, R2-2 /
-    QA round 2, Q2-2).
-    """
-    raw = "failed to add key to keychain: <SecKeyRef:('com.apple.setoken')> 0x7F86B0D240"
-    cleaned = keychain.without_run_addresses(raw)
-    assert "0x" not in cleaned and "7F86B0D240" not in cleaned
-    assert cleaned == "failed to add key to keychain: <SecKeyRef:('com.apple.setoken')>"
-    # Nine digits is the SHORTEST address the framework has printed on this host
-    # (`0x10137ede0`), and it must still go: a threshold of eight would have spared the
-    # parameters below instead (agent review round 1, R1-1).
-    nine = "keychain: <SecKeyRef:('com.apple.setoken')> 0x10137ede0"
-    assert keychain.without_run_addresses(nine) == "keychain: <SecKeyRef:('com.apple.setoken')>"
-    # NOT run addresses — every one of these was altered by the first rule.
-    for kept in (
-        "id=0x7f8 ref=0x1",  # short hex literals: `id= ref=` before
-        "invalid parameter 0x00000008 for kSecAttrKeyType",  # a length-8 PARAMETER (R1-1)
-        "token 0xdeadbeef is a parameter, not an address",  # ...and another: both were deleted
-        "could not read /tmp/0x9f/probe.pem",  # a hex path segment: `/tmp//probe.pem` before
-        "OSStatus error -50",  # no hex at all
-        "0x75929d8380 begins the description",  # no separator, so nothing to anchor on
-        "first line\n    0x1000 second line",  # a small literal AND a line break: must not join
-    ):
-        assert keychain.without_run_addresses(kept) == kept, kept
-    # ...and the two classes' texts DO become identical, which is the dedup benefit: two
-    # addresses that differ per run and per class now read the same, so the refusals merge.
-    class_a = "keychain: <SecKeyRef:('com.apple.setoken')> 0x75929d8380"
-    class_b = "keychain: <SecKeyRef:('com.apple.setoken')> 0x75929d8840"
-    assert keychain.without_run_addresses(class_a) == keychain.without_run_addresses(class_b)
-
-
-def test_the_refusal_status_is_unanimous_or_none_and_never_a_success_code(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A caller branching on ``status`` must fail CLOSED.
-
-    The attribute exists so the opt-in hardware test can skip without reading prose, so a
-    ladder whose classes refused with DIFFERENT codes must not hand it whichever class
-    happened to run first — that silently chooses which remedy a caller is offered, and
-    the ladder's order would decide it (agent review round 2, R2-1). A refusal that
-    published NO error object carries ``0``, a SUCCESS code, and is reported as no code at
-    all rather than as "OSStatus 0" (QA round 2, Q2-1).
-    """
-    mixed = _FakeCF(keygen=[(-50, "inconsistent params"), (-34018, "no entitlement")])
-    with pytest.raises(keychain.KeyBackendError) as refused:
-        _enclave_with(monkeypatch, mixed).create()
-    assert refused.value.status is None, "a mixed ladder decided which code to report"
-    # Both refusals are still on the message: failing closed must not lose the detail.
-    assert str(refused.value).count("framework detail:") == 2, str(refused.value)
-    # ...and swapping the ladder's order cannot change the answer.
-    swapped = _FakeCF(keygen=[(-34018, "no entitlement"), (-50, "inconsistent params")])
-    with pytest.raises(keychain.KeyBackendError) as refused_swapped:
-        _enclave_with(monkeypatch, swapped).create()
-    assert refused_swapped.value.status is None
-
-    agreed = _FakeCF(keygen=[(-34018, "no entitlement"), (-34018, "no entitlement")])
-    with pytest.raises(keychain.KeyBackendError) as unanimous:
-        _enclave_with(monkeypatch, agreed).create()
-    assert unanimous.value.status == -34018, "a unanimous ladder must still report its code"
-
-    # A refusal the framework reports WITHOUT an error object: no code to state, and the
-    # number 0 must not reach the line as if it were one.
-    silent = _FakeCF(keygen=[(0, "ignored — nothing was published"), (0, "ignored")])
-    with pytest.raises(keychain.KeyBackendError) as wordless:
-        _enclave_with(monkeypatch, silent).create()
-    message = str(wordless.value)
-    assert wordless.value.status is None
-    assert "OSStatus 0 - " not in message, f"a success code in a failure line: {message}"
-    assert message.splitlines()[-1].endswith("no error reported"), message
-
-
-def test_the_signing_payload_is_released_on_both_paths_and_the_status_outlives_the_error() -> None:
-    """The one changed line of the round-1 remediation that had no guard anywhere.
-
-    ``_SecureEnclaveSigner.sign`` used to create the message ``CFDataRef`` inline and drop
-    it — one leaked CoreFoundation object per signature — and the fix binds it and releases
-    it in a ``finally``. Nothing exercised that: ``SecKeyCreateSignature`` appeared in the
-    tree only inside docstrings, so a future re-inline would have passed CI exactly as the
-    leak did (agent review round 2, R2-3 / QA round 2, Q2-3).
-
-    No OS is needed for this, which is why it belongs in the default suite: the fake now
-    carries ``SecKeyCreateSignature``, refuses a released ref, and refuses to answer
-    ``status`` out of an error object that has already been released — so the ORDER the
-    signing path relies on (code first, then the call that releases the error) is
-    asserted rather than assumed.
-    """
-    handle = keychain.KeyHandle(
-        backend=keychain.SECURE_ENCLAVE,
-        key_id=verify.key_id_for(_A_REAL_P256_POINT),
-        spki=_A_REAL_P256_POINT,
-        presence=True,
-    )
-
-    # Success: the payload is created once and released once, and so is the signature.
-    # ``Any`` for the fake, as elsewhere in this file: it stands in for the loaded dylib,
-    # and the real parameter is typed as the ``_CF`` it deliberately is not.
-    signed_cf: Any = _FakeCF()
-    signed_key = signed_cf._make("key")
-    signer = keychain._SecureEnclaveSigner(handle, signed_key, signed_cf)
-    assert signer.sign(b"a message") == signed_cf.signature
-    assert signed_cf.counts()["data"] == (1, 1), signed_cf.counts()
-    assert signed_cf.counts()["signature"] == (1, 1), signed_cf.counts()
-    assert signed_cf.live == {signed_key}, "only the key the signer still holds may be live"
-    signer.close()
-    assert signed_cf.live == set()
-
-    # Failure: the payload is still released exactly once, and the status is read while
-    # the error ref is live (a read after `error()` would raise in this fake).
-    refused_cf: Any = _FakeCF(sign_refused=True)
-    refused_key = refused_cf._make("key")
-    refusing = keychain._SecureEnclaveSigner(handle, refused_key, refused_cf)
-    with pytest.raises(keychain.KeyBackendError) as raised:
-        refusing.sign(b"a message")
-    assert raised.value.status == -34018
-    assert refused_cf.counts()["data"] == (1, 1), refused_cf.counts()
-    assert refused_cf.counts()["error"] == (1, 1), refused_cf.counts()
-    assert "0x" not in str(raised.value), str(raised.value)
-    assert refused_cf.live == {refused_key}
-    refusing.close()
-    assert refused_cf.live == set()
+        assert access, (
+            f"{protection} was refused by the framework with the flag pair "
+            f"{backend.USER_PRESENCE} | {backend.PRIVATE_KEY_USAGE}: {_framework_error(cf, err)}"
+        )
+        cf.CFRelease(access)
 
 
 class _StubEnclaveBackend:
@@ -1677,55 +1046,180 @@ def test_a_real_secure_enclave_key_round_trips_and_is_deleted(
     Gated on ``LOP_OPERATOR_ENCLAVE_TEST=1`` because a Secure Enclave key can only live
     in the data-protection keychain, i.e. the operator's login keychain (see the module
     docstring). It uses a UNIQUE application tag so it can never touch the operator's own
-    operator key, creates the key through the product's own ``create``, and deletes that
-    item in teardown so the machine is left exactly as found.
+    operator key, creates the key through the product's own ``backend.create()``, and
+    purges that item in teardown so the machine is left exactly as found.
 
-    On a runtime with no keychain entitlement this SKIPS rather than fails: the measured
-    answer there is ``errSecMissingEntitlement`` (-34018) from the OS, which is a fact
-    about the CALLER's signature (an ad-hoc/linker-signed interpreter gets it, Apple's
-    signed ``python3`` does not), not a defect in this code. A test cannot sign itself,
-    so the honest outcome is a skip naming the measurement.
+    On an installation with no usable key agent this SKIPS rather than fails: without the
+    signed helper there is no process that could hold this key at all, which is a fact
+    about the INSTALL (and the reason ``health()`` exists), not a defect in this code.
 
-    COVERAGE SPLIT — this is the ONLY test that could prove the real key path end to end,
-    and it is opt-in, so NO CI job covers the framework boundary: it skips everywhere CI
-    runs. The by-hand round trip in this PR's evidence is what stands in for it, run under
-    the one signed interpreter on this machine. CI's guarantee is the
-    constants/header/fake-``_CF`` net, which needs no OS and does cover this file's logic.
+    The purge is the interesting half. Deletion is gated by the SAME entitlement as
+    creation — measured: an unsigned process asking to delete an item that exists gets
+    errSecItemNotFound (-25300) — so the cleanup has to go through the entitled process
+    too, which is why the key agent has a ``purge`` that refuses the operator's own tag.
     """
     unique = f"com.local-operator.operator.test.{os.getpid()}"
     monkeypatch.setattr(keychain, "APPLICATION_TAG", unique)
-    cf = keychain._CF()
-    tag = cf.data(unique.encode())
-    query = cf.dict(
-        [
-            (cf.const("kSecClass"), cf.const("kSecClassKey")),
-            (cf.const("kSecAttrApplicationTag"), tag),
-        ]
-    )
+    backend = keychain.SecureEnclaveBackend()
+    healthy, why = backend.health()
+    if not healthy:
+        pytest.skip(f"this installation cannot reach an entitled key agent: {why}")
     try:
-        backend = keychain.SecureEnclaveBackend()
+        handle = backend.create()
+        assert len(handle.spki) == 65 and handle.spki[0] == 0x04
+        assert verify.decode_point(handle.spki) is not None
+        signer = backend.load()
+        assert signer is not None, "load() did not find the key create() just made"
         try:
-            handle = backend.create()
-        except keychain.KeyBackendError as refused:
-            # Branch on the STATUS the OS returned, not on the message text: the message is
-            # prose that may be reworded, and this skip must keep working through that
-            # (agent review round 1, R1-6).
-            if refused.status == keychain._ERR_SEC_MISSING_ENTITLEMENT:
-                pytest.skip(f"this interpreter cannot use the data-protection keychain: {refused}")
-            raise
-        try:
-            assert len(handle.spki) == 65 and handle.spki[0] == 0x04
-            assert verify.decode_point(handle.spki) is not None
-            signer = backend.load()
-            assert signer is not None, "load() did not find the key create() just made"
-            try:
-                assert signer.handle.key_id == handle.key_id
-                assert signer.handle.spki == handle.spki
-            finally:
-                signer.close()
+            assert signer.handle.key_id == handle.key_id
+            assert signer.handle.spki == handle.spki
         finally:
-            # The product ships no delete verb on purpose (see the keychain module
-            # docstring); removing the item this TEST created is the test's job.
-            cf.S.SecItemDelete(query)
+            signer.close()
     finally:
-        cf.release(query, tag)
+        deleted = keyagent.KeyagentClient(tag=unique).purge()
+        assert deleted in (
+            0,
+            keychain._ERR_SEC_ITEM_NOT_FOUND,
+        ), f"the test's own key was not removed: SecItemDelete={deleted}"
+
+
+# ---------------------------------------------------------------------------
+# 12. The native sequence now lives in C: pin it against this module
+# ---------------------------------------------------------------------------
+
+#: The helper's source, in-tree. Its ABSENCE would make this file's checks vacuous, so
+#: the path is asserted to exist rather than skipped on.
+_HELPER_C = (
+    Path(__file__).resolve().parents[3] / "packaging" / "macos" / "lop-keyagent" / "se-keyagent.c"
+)
+
+
+def _helper_code() -> str:
+    """The C source with its comments removed, so a prose mention cannot pass a check."""
+    import re
+
+    source = _HELPER_C.read_text()
+    assert "se-keyagent.c" in source or source, "the helper source is empty"
+    return re.sub(r"/\*.*?\*/", "", source, flags=re.S)
+
+
+def test_the_c_helper_uses_the_same_native_sequence_as_this_module() -> None:
+    """Drift between the two copies of one native sequence is this design's hazard.
+
+    The Python implementation of the Secure Enclave sequence is gone — it could never
+    work, and two implementations of one sequence, one of which no test on any host can
+    exercise, is a second way of doing things rather than a fallback. What remains is the
+    C helper, so the constants this module still defines are pinned to what THAT file
+    compiles and to the same SDK header the values came from.
+    """
+    assert _HELPER_C.is_file(), f"no helper source at {_HELPER_C}"
+    code = _helper_code()
+    backend = keychain.SecureEnclaveBackend
+
+    # 1. THE LADDER, in the order this module documents: strictest first, so a host that
+    #    accepts passcode-set never settles for unlocked.
+    order = [code.index(protection) for protection in backend.PROTECTION_LADDER]
+    assert order == sorted(
+        order
+    ), f"the helper's ladder order differs from {backend.PROTECTION_LADDER}"
+
+    # 2. APPLE'S SYMBOLS, never a shift literal: the released pair was 1<<0 | 1<<2 and
+    #    every protection class was refused with errSecParam.
+    assert "kSecAccessControlUserPresence" in code
+    assert "kSecAccessControlPrivateKeyUsage" in code
+    for wrong in ("1 << 0", "1 << 2", "1 << 30", "1u << 0", "1u << 30"):
+        assert wrong not in code, f"a shift literal ({wrong}) crept into the flag pair"
+
+    # 3. THE GENERATION DICTIONARY: EC P-256 on the Enclave token, 256 bits.
+    for symbol in (
+        "kSecAttrKeyType",
+        "kSecAttrKeyTypeECSECPrimeRandom",
+        "kSecAttrKeySizeInBits",
+        "kSecAttrTokenID",
+        "kSecAttrTokenIDSecureEnclave",
+        "kSecPrivateKeyAttrs",
+        "kSecAttrIsPermanent",
+        "kSecAttrApplicationTag",
+        "kSecAttrAccessControl",
+    ):
+        assert symbol in code, f"the helper no longer names {symbol}"
+    assert "int bits = 256;" in code
+
+    # 4. TYPED CALLBACKS BY ADDRESS. NULL callbacks retain nothing and release nothing,
+    #    and a generation dictionary so built SIGSEGVs inside SecKeyCreateRandomKey
+    #    (measured, 6 of 6 runs). This is the one thing a rewrite must not "simplify".
+    assert "&kCFTypeDictionaryKeyCallBacks" in code
+    assert "&kCFTypeDictionaryValueCallBacks" in code
+    assert "NULL, 0, NULL, NULL" not in code
+
+    # 5. THE ALGORITHM, which is exactly what ``verify_signature`` consumes (DER ECDSA
+    #    over SHA-256).
+    assert "kSecKeyAlgorithmECDSASignatureMessageX962SHA256" in code
+
+    # 6. NO kSecUseDataProtectionKeychain: not in Apple's documented Enclave generation
+    #    dictionary, not load-bearing (the passing probe does not set it), and measured
+    #    identical with and without it. The helper is built without it.
+    assert "kSecUseDataProtectionKeychain" not in code
+
+    # 7. THE TAG IS CREATED ONCE, BY main, AND THE LADDER ONLY BORROWS IT. That is the
+    #    structural answer to the use-after-free (#1547): a tag created and released
+    #    INSIDE the loop handed the next iteration a released CFDataRef. Asserted as
+    #    "exactly one creation, exactly one release, neither inside cmd_create".
+    assert code.count("CFDataCreate(NULL, (const UInt8 *)tagtext") == 1
+    assert code.count("CFRelease(tag);") == 1
+    ladder = code[
+        code.index("static int cmd_create(CFDataRef tag) {") : code.index(
+            "static int cmd_public_or_exists"
+        )
+    ]
+    assert "CFDataCreate" not in ladder, "the ladder creates a tag of its own"
+    assert "CFRelease(tag)" not in ladder, "the ladder releases the tag main owns"
+
+    # 8. THE SITE VOCABULARY and the exit codes the client maps to copy, so a reply
+    #    cannot arrive in a dialect this module does not speak.
+    for site in (
+        keychain.ACCESS_CONTROL_REFUSED,
+        keychain.KEY_GENERATION_REFUSED,
+        keychain.SIGNATURE_REFUSED,
+        keychain.KEY_LOOKUP_REFUSED,
+    ):
+        assert f'"{site}"' in code, f"the helper does not report the site {site!r}"
+    import re
+
+    for name, value in (
+        ("EXIT_CANCELLED", 2),
+        ("EXIT_NO_KEY", 3),
+        ("EXIT_REFUSED", 4),
+        ("EXIT_USAGE", 5),
+    ):
+        assert re.search(rf"#define {name} {value}\b", code), f"{name} != {value} in C"
+    protocol = re.search(r"#define PROTOCOL (\d+)", code)
+    assert protocol is not None, "the helper has no PROTOCOL define"
+    assert int(protocol.group(1)) == keyagent.PROTOCOL
+
+
+@pytest.mark.skipif(
+    not os.environ.get("LOP_KEYAGENT_BINARY"),
+    reason="set LOP_KEYAGENT_BINARY to a built lop-keyagent to run its ownership selftest",
+)
+def test_the_built_helper_asserts_its_own_ownership_model() -> None:
+    """The C-side ownership check the release job runs, reachable for a local build.
+
+    It needs no entitlement and no keychain, so a plain ``clang`` build is enough —
+    which is what makes it usable in a workflow that has not imported an identity yet.
+    Every check it reports must agree: a mismatch is a reference this program created
+    and did not give back, or gave back twice.
+    """
+    import subprocess
+
+    result = subprocess.run(
+        [os.environ["LOP_KEYAGENT_BINARY"], "selftest", "--tag", keyagent.HEALTH_TAG],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.stdout.strip(), result.stderr
+    report = json.loads(result.stdout)
+    mismatched = [check for check in report["checks"] if check["expected"] != check["actual"]]
+    assert report["ok"] is True and result.returncode == 0, mismatched
+    assert len(report["checks"]) >= 10, "the selftest stopped asserting the model"
