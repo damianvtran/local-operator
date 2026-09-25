@@ -580,9 +580,9 @@ async def test_a_cancelled_admission_future_reads_as_not_ours(tmp_path: Path) ->
         waiter = asyncio.ensure_future(handle.prompt("race hi", command_id="cancel-2"))
         for _ in range(20):
             await asyncio.sleep(0)
-        assert waiter is not None and not waiter.done(), (
-            "the prompt must still be queued behind the delivery turn"
-        )
+        assert (
+            waiter is not None and not waiter.done()
+        ), "the prompt must still be queued behind the delivery turn"
         command = handle._prompt_commands["cancel-2"]
         command.admitted.cancel()
         stream.release.set()
