@@ -828,15 +828,16 @@ def project_settled_rows(
         COMPACTION_REFUSED_TYPE,
     )
     from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
+
+    # ``job_result`` is declared beside the job manager that writes it, not with
+    # the harness markers above — imported from its own home so this fold cannot
+    # drift from the type the writer stamps on the row.
+    from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE
     from local_operator.harness.message_types import (
         PEER_MESSAGE_MESSAGE_TYPE,
         SESSION_INCIDENT_MESSAGE_TYPE,
         SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
     )
-    # ``job_result`` is declared beside the job manager that writes it, not with
-    # the harness markers above — imported from its own home so this fold cannot
-    # drift from the type the writer stamps on the row.
-    from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE
 
     # The row DECISIONS this fold shares with the phone's. Held outside both
     # hosts so neither owns them: every divergence the convergence review
