@@ -190,10 +190,16 @@ def exempt_from_escalation(
     ``verdict`` is an ALREADY-DECIDED answer, handed in by a caller that decided
     it where the READER decided it (the loop records it at dispatch) so that a
     re-resolution here cannot land on a filesystem a same-batch mutation has
-    already changed -- the divergence R3-2 fixes on PR #1502. ``None``, the
-    default, keeps today's behaviour exactly: the verdict is resolved here, and
-    that fallback is deliberate -- a call that never dispatched (a planning
-    failure, a synthetic result) has nothing recorded and must still resolve.
+    already changed -- the divergence R3-2 fixes on PR #1502, and R4-1 on the
+    eval bridge. ``None``, the default, resolves HERE, and that fallback is
+    deliberate and narrow: a call that never dispatched (a planning failure, a
+    synthetic result) has nothing recorded and must still answer something.
+    What it is NOT is equivalent to the recorded route. The only arguments such
+    a caller can supply are the STORED, scrubbed copy, so the fallback
+    reproduces R3-1's input at R3-2's moment; it has never been shown to
+    suppress a notice (a failure text names the argument, not its value, so it
+    carries no shaped material of its own), but a caller that HAS a record must
+    consume it rather than fall through to here.
     """
     if verdict is None:
         verdict = reads_exempt_source(tool_name, arguments, session_cwd)

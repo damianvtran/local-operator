@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.harness import guard_area
 from local_operator.harness.guard_area import EXEMPT_SOURCES, READING_TOOLS
 from local_operator.harness.guard_area import exempt_from_escalation as exempt
 from local_operator.harness.guard_area import reads_exempt_source, source_is_exempt
@@ -383,6 +384,18 @@ async def _drive(
     exactly when this root differs from the process CWD: an arm that never
     varies the two agrees with itself and proves nothing about that class.
     """
+    return await _drive_tools(session, [tool], stream, session_cwd)
+
+
+async def _drive_tools(
+    session: Session, tools: list[AgentTool], stream: Any, session_cwd: str | None = None
+) -> list[str]:
+    """``_drive`` for a turn that offers MORE THAN ONE tool.
+
+    The R3-2 arm needs a real two-call batch (``read`` plus ``bash``) and the
+    R4-1 arm needs an ``eval`` beside the ``read`` it dispatches into; both are
+    the same drive, so the body lives here and ``_drive`` is the one-tool call.
+    """
     config = LoopConfig(
         model=ModelSpec(provider="test", model_id="unit-model", context_window=1000),
         convert_to_llm=lambda messages: [m for m in messages if isinstance(m, Message)],
@@ -393,7 +406,10 @@ async def _drive(
     events = [
         event
         async for event in AgentLoop().run(
-            [Message.user("go")], LoopContext(tools=[tool], tool_context=tool_context), config, None
+            [Message.user("go")],
+            LoopContext(tools=tools, tool_context=tool_context),
+            config,
+            None,
         )
     ]
     end = events[-1]
@@ -860,3 +876,321 @@ async def test_a_malformed_path_returns_an_ordinary_result_and_the_turn_survives
         assert (
             "Does not exist" in rows[0] or "does not exist" in rows[0]
         ), f"expected the ordinary missing-path result for {raw!r}, got {rows[0][:120]!r}"
+
+
+# --- R3-1 / R3-2 / R4-1: the remediation's own regression arms -----------------
+#
+# Round 3 blocked this PR on two defects and the remediation that closed them
+# shipped WITHOUT an arm for either: rebinding both fixes off in memory left this
+# whole module green (review round 4, R4-2), which is the shape AGENTS.md warns
+# about -- a guard that cannot observe the defect it names. These arms are the
+# pins, one per class, plus the second site the same class survived on:
+#
+#   * the redaction hook must be handed the ORIGINAL arguments; the stored copy in
+#     ``context.messages`` is the scrubbed one (R3-1);
+#   * the guard must CONSUME the verdict recorded at dispatch and never re-resolve
+#     it at redaction time -- on the native path (R3-2) and on the eval bridge
+#     (R4-1).
+#
+# Every arm asserts its own premise (the reader really opened the agent's file,
+# the retarget really would have flipped a fresh resolution), so none can pass by
+# reading something that never carried a shape, or by a mutation that changed
+# nothing. None of them writes anything into this checkout: ``EXEMPT_SOURCES`` is
+# rebound to a temp file, which is also what keeps each arm's "exempt" side a real
+# resolved path rather than a spelling.
+
+#: A bare credential-shaped token the shape pass replaces WHOLESALE, DERIVED from
+#: the corpus rather than spelled here. It is the path SEGMENT in the R3-1 arm,
+#: and that arm's premise is that scrubbing it rewrites the spelling the guard
+#: would otherwise resolve.
+SHAPED_SEGMENT = next(
+    case.text for case in POSITIVE_CASES if case.reason == "a GitHub personal access token"
+)
+
+
+class _BatchStream:
+    """Several tool calls in ONE assistant turn -- i.e. ONE batch.
+
+    ``_OneCallStream`` cannot express the R3-2 attack: what makes it work is that
+    a batch's calls are gathered together before any result is appended, so a
+    sibling's mutation always lands before the redaction.
+    """
+
+    def __init__(self, calls: list[tuple[str, str, str]]) -> None:
+        self.calls = calls
+        self.requests: list[ChatRequest] = []
+
+    def __call__(self, request: ChatRequest, signal: Any) -> AsyncIterator[Any]:
+        self.requests.append(request)
+        turn: list[Any] = (
+            [
+                StreamToolCallDelta(index=index, id=call_id, name=name, argument_delta=arguments)
+                for index, (call_id, name, arguments) in enumerate(self.calls)
+            ]
+            if len(self.requests) == 1
+            else [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")]
+        )
+
+        async def gen() -> AsyncIterator[Any]:
+            for event in turn:
+                yield event
+
+        return gen()
+
+
+def _bash_tool() -> AgentTool:
+    """The REAL ``bash`` tool -- the only thing that can move a link mid-batch."""
+    return AgentTool(
+        name="bash",
+        parameters={"type": "object", "properties": {"command": {"type": "string"}}},
+        execute=builtin.execute_bash,
+    )
+
+
+def _shaped_layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, str]:
+    """The R3-1 layout, and the spelling that makes one argument name two files.
+
+    ``<shaped>/../local_operator/redaction_shapes.py`` resolves THROUGH the
+    symlink to the agent's decoy, while the scrubbed spelling
+    ``[redacted]/../local_operator/redaction_shapes.py`` cancels lexically to the
+    exempt file. One argument, two files: the whole defect.
+    """
+    root = tmp_path / "root"
+    exempt = root / "local_operator" / "redaction_shapes.py"
+    exempt.parent.mkdir(parents=True)
+    exempt.write_text("# the exempt file\n", encoding="utf-8")
+    (root / "a" / "b" / "c").mkdir(parents=True)
+    decoy = root / "a" / "b" / "local_operator" / "redaction_shapes.py"
+    decoy.parent.mkdir(parents=True)
+    decoy.write_text(f"{ATTACKER_BODY}\nPAYLOAD = {ESCALATING_TEXT!r}\n", encoding="utf-8")
+    (root / SHAPED_SEGMENT).symlink_to(root / "a" / "b" / "c")
+    monkeypatch.setattr(guard_area, "EXEMPT_SOURCES", frozenset({exempt.resolve()}))
+    return root, f"{SHAPED_SEGMENT}/../local_operator/redaction_shapes.py"
+
+
+def _link_layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, str]:
+    """The R3-2 layout: a link the caller can retarget, and an exempt tree beside it."""
+    root = tmp_path / "root"
+    exempt_dir = root / "exemptdir"
+    exempt = exempt_dir / "local_operator" / "redaction_shapes.py"
+    exempt.parent.mkdir(parents=True)
+    exempt.write_text("# the exempt file\n", encoding="utf-8")
+    decoy_dir = root / "decoydir" / "local_operator"
+    decoy_dir.mkdir(parents=True)
+    (decoy_dir / "redaction_shapes.py").write_text(
+        f"{ATTACKER_BODY}\nPAYLOAD = {ESCALATING_TEXT!r}\n", encoding="utf-8"
+    )
+    (root / "lnk").symlink_to(root / "decoydir")
+    monkeypatch.setattr(guard_area, "EXEMPT_SOURCES", frozenset({exempt.resolve()}))
+    return root, exempt_dir, "lnk/local_operator/redaction_shapes.py"
+
+
+@pytest.mark.parametrize("tool", sorted(READING_TOOLS))
+@pytest.mark.asyncio
+async def test_the_hook_is_handed_the_original_arguments_not_the_scrubbed_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool: str
+) -> None:
+    """R3-1 REGRESSION ARM, both readers. The hook's input is the CALLER's string.
+
+    ``_call_arguments`` used to recover a call's arguments from
+    ``context.messages``, which holds the SCRUBBED assistant turn. A
+    credential-SHAPED path segment was therefore rewritten before the hook saw
+    it, and every consumer of that string -- the guard's fallback resolution, and
+    the ``tool_source`` identity a notice is built from -- described a different
+    call than the one that ran. The arm asserts the property the fix restores,
+    on the arguments the hook is actually handed.
+
+    Reds on the pre-remediation code: the hook then receives the masked spelling,
+    with ``SHAPED_SEGMENT`` already gone (measured: rebinding
+    ``_call_arguments`` back to the ``messages`` search turns this arm red).
+    """
+    root, relative = _shaped_layout(tmp_path, monkeypatch)
+    # The premise, stated as two readings: the shaped spelling resolves to the
+    # DECOY, and the scrubbed spelling -- the same string after the shape pass --
+    # resolves to the exempt file. Without both, the arm would be about nothing.
+    assert reads_exempt_source(tool, {"path": relative}, str(root)) is False
+    assert (
+        reads_exempt_source(
+            tool, {"path": relative.replace(SHAPED_SEGMENT, REDACTION_MARKER)}, str(root)
+        )
+        is True
+    )
+
+    session = _session(tmp_path)
+    seen: list[dict[str, Any]] = []
+    original = AgentLoop._redact_content
+
+    async def spy(
+        content: list[Any],
+        redact: Any,
+        tool_name: str,
+        arguments: Any,
+        session_cwd: str | None = None,
+        exempt_verdict: bool | None = None,
+    ) -> list[Any]:
+        seen.append(dict(arguments or {}))
+        return await original(content, redact, tool_name, arguments, session_cwd, exempt_verdict)
+
+    monkeypatch.setattr(AgentLoop, "_redact_content", staticmethod(spy))
+    args = {"path": relative, "raw": True} if tool == "read" else {"pattern": ".", "path": relative}
+    rows = await _drive_tools(
+        session,
+        [_read_tool() if tool == "read" else _grep_tool()],
+        _BatchStream([("c1", tool, json.dumps(args))]),
+        str(root),
+    )
+
+    assert seen, "the redaction hook never ran"
+    assert (
+        seen[0].get("path") == relative
+    ), f"{tool}: the hook was handed a scrubbed spelling, not the one the reader resolved"
+    assert ATTACKER_BODY in rows[0], f"{tool} did not open the agent's file"
+    assert REDACTION_MARKER in rows[0], "masking is not exempt and must still apply"
+    assert _escalation_flags(session) == [True], f"{tool}: the decoy read did not escalate"
+
+
+@pytest.mark.asyncio
+async def test_a_batch_that_retargets_the_read_path_still_escalates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3-2 REGRESSION ARM. A same-batch mutation must not decide the verdict.
+
+    A batch GATHERS its results before any are appended, so a ``read`` plus a
+    ``bash ln -sfn`` in ONE batch always lands the mutation before the redaction.
+    A guard that resolved the exemption at redaction time therefore decided about
+    a file the reader never opened -- clearing the rotation demand for the
+    agent's own bytes, 3/3 deterministic on the pre-remediation head (QA round 3).
+
+    The read is FIRST in the batch, so its verdict is recorded at dispatch --
+    before the mutation -- and the reader opens the decoy. Reds when the recorded
+    verdict is not consumed: the redaction-time resolution then sees the
+    retargeted link (the exempt file) and answers exempt.
+    """
+    root, exempt_dir, relative = _link_layout(tmp_path, monkeypatch)
+    link = root / "lnk"
+    session = _session(tmp_path)
+
+    rows = await _drive_tools(
+        session,
+        [_read_tool(), _bash_tool()],
+        _BatchStream(
+            [
+                ("c1", "read", json.dumps({"path": relative, "raw": True})),
+                ("c2", "bash", json.dumps({"command": f"ln -sfn {exempt_dir} {link}"})),
+            ]
+        ),
+        str(root),
+    )
+
+    assert ATTACKER_BODY in rows[0], "the reader did not open the agent's file"
+    assert link.resolve() == exempt_dir.resolve(), "the batch never retargeted the link"
+    assert _escalation_flags(session) == [
+        True
+    ], "a same-batch mutation cleared the escalation for the bytes the reader read"
+
+
+@pytest.mark.asyncio
+async def test_the_eval_bridge_consumes_the_verdict_recorded_at_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4-1 REGRESSION ARM: the same class, on the eval bridge.
+
+    The bridge redacts a nested call's result with ``planned.args`` and used to
+    leave the guard to re-resolve the exemption at THAT moment -- the R3-2 defect
+    one surface along, and reachable without a batch (measured 7 of 30 attempts
+    clearing the escalation for a NON-exempt file, review round 4).
+
+    The mutation WINDOW is injected rather than raced: a wrapper around
+    ``_redact_content`` retargets the link exactly between the nested READER's
+    resolution and that redaction, and the arm asserts the retarget really would
+    have flipped a fresh resolution (the isolating control) while the escalation
+    for the agent's file still fires. Deterministic on purpose -- a raced flipper
+    would make this arm the flaky thing it exists to prevent.
+
+    Reds while the bridge passes no verdict: the guard then re-resolves, finds
+    the exempt tree the retarget installed, and files nothing.
+    """
+    root, exempt_dir, relative = _link_layout(tmp_path, monkeypatch)
+    link = root / "lnk"
+    session = _session(tmp_path)
+    nested_text: list[str] = []
+    control: list[bool] = []
+    original = AgentLoop._redact_content
+
+    async def retarget_at_the_window(
+        content: list[Any],
+        redact: Any,
+        tool_name: str,
+        arguments: Any,
+        session_cwd: str | None = None,
+        exempt_verdict: bool | None = None,
+    ) -> list[Any]:
+        if tool_name == "read" and not control:
+            link.unlink()
+            link.symlink_to(exempt_dir)
+            control.append(reads_exempt_source("read", {"path": relative}, str(root)))
+        return await original(content, redact, tool_name, arguments, session_cwd, exempt_verdict)
+
+    monkeypatch.setattr(AgentLoop, "_redact_content", staticmethod(retarget_at_the_window))
+
+    async def execute(
+        tool_call_id: str, args: dict[str, Any], signal: Any, on_update: Any, context: Any
+    ) -> ToolResult:
+        nested = await context.dispatch_tool("read", {"path": relative, "raw": True})
+        nested_text.append("".join(part.get("text", "") for part in nested.get("content", [])))
+        # A fixed, shape-free row: what is under test is the NESTED call's
+        # escalation, so the outer row must contribute none of its own.
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="eval",
+            content=[TextContent(text="nested dispatch done")],
+        )
+
+    rows = await _drive_tools(
+        session,
+        [
+            AgentTool(
+                name="eval", parameters={"type": "object", "properties": {}}, execute=execute
+            ),
+            _read_tool(),
+        ],
+        _BatchStream([("c1", "eval", json.dumps({}))]),
+        str(root),
+    )
+
+    assert (
+        nested_text and ATTACKER_BODY in nested_text[0]
+    ), "the nested reader did not open the agent's file"
+    assert control == [True], "the retarget did not move the spelling onto the exempt file"
+    assert rows == ["nested dispatch done"], "the outer row is not the one under test"
+    assert _escalation_flags(session) == [
+        True
+    ], "the bridge let a mutation between the reader and the redaction decide the verdict"
+
+
+def test_a_handed_in_verdict_is_consumed_and_never_re_resolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE SEAM both fixes rest on: an answer in hand means no resolution at all.
+
+    The arms above assert OUTCOMES; this one asserts the property those outcomes
+    depend on, and it reds if ``exempt_from_escalation`` starts resolving when it
+    was handed a verdict -- the shape a later "optimisation" would take. The
+    second half is the guard against over-correcting: with NO verdict the
+    fallback must still resolve, or a never-dispatched call would answer False
+    for a genuine read of the exempt file.
+    """
+    calls: list[str] = []
+    original = guard_area._resolve_workspace_path
+
+    def counting(raw: str, cwd: str) -> tuple[Path, bool, bool]:
+        calls.append(raw)
+        return original(raw, cwd)
+
+    monkeypatch.setattr(guard_area, "_resolve_workspace_path", counting)
+    with guard_area.exempt_from_escalation("read", {"path": "a/b.py"}, ".", True):
+        assert source_is_exempt() is True
+    assert calls == [], "a handed-in verdict was re-resolved anyway"
+    with guard_area.exempt_from_escalation("read", {"path": "a/b.py"}, "."):
+        assert source_is_exempt() is False
+    assert calls == ["a/b.py"], "the no-verdict fallback stopped resolving"
