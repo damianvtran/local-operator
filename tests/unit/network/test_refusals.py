@@ -1477,6 +1477,8 @@ def test_the_local_control_hop_carries_the_refusal_code(monkeypatch: pytest.Monk
     with pytest.raises(types.MeshRefusal) as bare:
         net_cli._relay_call("peer_create", target="d_" + "e" * 32)  # noqa: SLF001
     assert bare.value.code == "relay_refused"
+
+
 # Cross-host Q-XH-7: `lop sessions --all-peers` listed a live local session twice
 # ---------------------------------------------------------------------------
 
