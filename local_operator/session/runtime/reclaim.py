@@ -124,6 +124,7 @@ from pathlib import Path
 from typing import Any
 
 from local_operator.paths import CONFIG_DIR_ENV, DEFAULT_CONFIG_DIRNAME, config_dir
+from local_operator.procstate import current_process_table
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.types import (
     HOST_RUN_DIRNAME,
@@ -528,7 +529,22 @@ def parse_process_row(line: str) -> RuntimeProcess | None:
     fields = line.split(None, 4)
     if len(fields) < 5:
         return None
-    pid_text, ppid_text, age_text, cpu_text, command = fields
+    return _runtime_from_fields(*fields)
+
+
+def _runtime_from_fields(
+    pid_text: str, ppid_text: str, age_text: str, cpu_text: str, command: str
+) -> RuntimeProcess | None:
+    """The census's five columns as a candidate, with the spawn contract applied.
+
+    SPLIT OUT OF :func:`parse_process_row` so the batched reader reaches the same
+    interpreter. ``runtime_processes`` has two sources now — its own ``ps`` fork,
+    and the ``pid``/``ppid``/``etime``/``time``/``command`` columns of the
+    process-table read in :mod:`local_operator.procstate` — and the second must
+    not grow a second copy of the argv match, of the int casts or of the
+    ``etime_seconds`` conversions. The columns arrive as TEXT either way, so both
+    sources call this, and a runtime is recognised by one rule.
+    """
     # THE MATCH IS THE SPAWN CONTRACT, not a substring. ``launch`` starts a
     # runtime as ``<interpreter> -P -m local_operator.session.runtime.process``,
     # so the ``-m`` immediately before the module name is what identifies one.
@@ -586,9 +602,33 @@ def runtime_processes(
     the field being matched are words an env var could put there, and admitting a
     stranger as a runtime is the one misidentification this module's parser comment
     exists to forbid.
+
+    INSIDE a ``procstate.process_table_scope`` the census costs NO fork at all:
+    the read that scope already made carries these five columns (it is the same
+    ``ps`` invocation with two more appended), so the rows are built from that one
+    sample instead of a second read of the same moving table. The interpreter is
+    the same (:func:`_runtime_from_fields`) over the same rendering, so the two
+    paths cannot report different runtimes — only different fork counts.
+
+    An EMPTY table is not evidence that the machine has no runtimes: that is a
+    read that failed, or a Windows host (see ``procstate.process_table``), and the
+    fallback keeps the census it has always taken rather than answering "nothing
+    is running" from a probe that did not run. That is the direction
+    ``parse_process_row``'s callers already fail in.
     """
+    table = current_process_table()
+    if table is not None:
+        found: list[RuntimeProcess] = []
+        for row in table.rows.values():
+            candidate = _runtime_from_fields(
+                str(row.pid), str(row.ppid), row.etime, row.cpu, row.command
+            )
+            if candidate is not None:
+                found.append(candidate)
+        return found
+
     output = run(["ps", "-ww", "-eo", "pid=,ppid=,etime=,time=,command="], timeout_s)
-    found: list[RuntimeProcess] = []
+    found = []
     for line in output.splitlines():
         row = parse_process_row(line)
         if row is not None:
@@ -879,19 +919,38 @@ def ancestor_pids(
     that asked, so the whole chain is excluded, read from ``ps`` in one fork (the
     walk uses ``ppid=`` per hop because there is no stdlib call for it, and it is
     bounded because a cycle would otherwise spin).
+
+    INSIDE a ``procstate.process_table_scope`` the hops are read out of that
+    scope's ONE whole-table read — the same ``ps`` invocation the census already
+    spent, which prints every process's ``ppid`` — instead of one fork PER HOP.
+    Measured on the reference host: five forks per roster poll for a chain of five
+    (this process, four parents, and pid 1), which is the largest single group of
+    stray forks on that path.
+
+    THE FALLBACK IS PER HOP, NOT PER CALL, and that is the fail-closed rule this
+    function needs rather than a nicety. ``own_pids`` is the set a sweep may not
+    signal, so a chain that comes back SHORT is the dangerous direction: a table
+    read that timed out half way, or a parent that is genuinely gone, must not turn
+    into "this process has no ancestors". Any hop the table cannot answer is asked
+    of ``ps`` exactly as it is today, and the walk stops only where the per-hop
+    form would have stopped — at pid 1, at a cycle, or at a parent the process
+    table itself no longer has.
     """
-    chain: set[int] = {os.getpid() if pid is None else pid}
     current = os.getpid() if pid is None else pid
+    chain: set[int] = {current}
+    table = current_process_table()
     for _ in range(64):
-        output = run(["ps", "-o", "ppid=", "-p", str(current)], CENSUS_TIMEOUT_S).strip()
-        try:
-            parent = int(output.splitlines()[0]) if output else 0
-        except (IndexError, ValueError):
+        parent_pid = None if table is None else table.ppid_of(current)
+        if parent_pid is None:
+            output = run(["ps", "-o", "ppid=", "-p", str(current)], CENSUS_TIMEOUT_S).strip()
+            try:
+                parent_pid = int(output.splitlines()[0]) if output else 0
+            except (IndexError, ValueError):
+                break
+        if parent_pid <= 0 or parent_pid in chain:
             break
-        if parent <= 0 or parent in chain:
-            break
-        chain.add(parent)
-        current = parent
+        chain.add(parent_pid)
+        current = parent_pid
     return frozenset(chain)
 
 

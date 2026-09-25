@@ -1003,15 +1003,17 @@ def process_table_scope(table: ProcessTable | None = None) -> Iterator[ProcessTa
 
     The table is yielded so a caller that wants it directly (the census, and the
     tests) can hold it; every reader picks it up through
-    :func:`current_process_table`. Yields ``None`` when neither the caller nor any
-    reader inside the block supplied or needed a table.
+    :func:`current_process_table`. What is yielded is what those accessors would
+    return, EMPTY READS INCLUDED: ``None`` when no table was supplied or needed, and
+    ``None`` for a table that came back with no rows, so a caller cannot mistake a
+    failed read for a machine with no processes.
     """
     outer = getattr(_SCOPE, "active", None)
     scope = outer if (outer is not None and table is None) else _TableScope(table)
     previous = outer
     _SCOPE.active = scope
     try:
-        yield scope.peek()
+        yield _readable(scope.peek())
     finally:
         if previous is None:
             try:
