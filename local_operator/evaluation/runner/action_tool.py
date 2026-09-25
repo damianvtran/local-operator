@@ -63,7 +63,10 @@ from local_operator.evaluation.runner.provider_client import (
     rejection_hint,
     validation_diagnostic,
 )
-from local_operator.evaluation.runner.public_reply import _inlined_action_schema
+from local_operator.evaluation.runner.public_reply import (
+    _inlined_action_schema,
+    drop_sibling_action_fields,
+)
 from local_operator.harness.types import (
     FAULT_INVALID_ARGUMENTS,
     FAULT_KEY,
@@ -452,6 +455,14 @@ def _build_batch(arguments: Mapping[str, Any], observation: Observation) -> Acti
     the same property the absence of those keys from the schema buys, stated a
     second time at the one boundary where a non-compliant client could ignore
     the schema and send them anyway.
+
+    The one thing read OUT of an action is the field the reply tolerance drops
+    (``drop_sibling_action_fields``): a field belonging to a SIBLING action kind
+    states nothing the required ``kind`` tag did not already state, and the prose
+    path drops it for the same reason and with the same report. Applied here too
+    because the two channels converge on this one validated structure -- a
+    tolerance that lived on only one of them would make the same reply acceptable
+    or not depending on which channel the model happened to answer on.
     """
     raw_actions = arguments.get("actions")
     actions: Any = raw_actions
@@ -464,6 +475,7 @@ def _build_batch(arguments: Mapping[str, Any], observation: Observation) -> Acti
             )
             for action in raw_actions
         ]
+        actions = drop_sibling_action_fields(actions)
     return ActionBatch.model_validate(
         {
             "protocol_version": PROTOCOL_VERSION,
