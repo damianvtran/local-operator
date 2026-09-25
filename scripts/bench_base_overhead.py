@@ -114,10 +114,17 @@ args = argparse.Namespace(
 
 
 async def build():
+    # THREE positional arguments, matching the live signature (args, config
+    # manager, registry). This call is inside a STRING, so pyright cannot see it
+    # and nothing type-checks the arity: when the credential manager was removed
+    # from the factory, this probe kept passing the old third positional and the
+    # benchmark died with `create_session() takes 3 positional arguments but 4
+    # were given` -- a silent breakage nobody notices until they run it, because
+    # the headline numbers are quoted from it. tests/unit/scripts/
+    # test_probe_arity.py is the guard that now goes red on this instead.
     session = await create_session(
         args,
         ConfigManager(Path(config_dir)),
-        Path(config_dir),
         AgentRegistry(Path(config_dir)),
     )
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -163,10 +170,11 @@ args = argparse.Namespace(
 
 async def boot():
     async def factory():
+        # Same three positionals as the session probe above; `has_ui` is the
+        # TUI's own keyword-only opt-in.
         return await create_session(
             args,
             ConfigManager(Path(config_dir)),
-            Path(config_dir),
             AgentRegistry(Path(config_dir)),
             has_ui=True,
         )
