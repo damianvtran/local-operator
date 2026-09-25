@@ -19,6 +19,40 @@ update action rather than call a route the backend does not have. See
 all-command acceptance matrix and the new control routes. A missing route means an older backend;
 show an update/setup action rather than falling back to an unprotected write.
 
+`features.references` is the ONE key whose presence is a runtime fact rather than a
+build fact, so it is the one key the map may omit on a current backend. `@path` in an
+ordinary submitted message is expanded into an `<operator-references>` block by
+`Session.prompt` — the single expansion site every NON-ASIDE surface reaches (the CLI,
+headless runs, the server, the scheduler, the mobile service and every subagent), with
+the TUI's aside worker as the one other expanding caller `references.py`'s docstring
+names — and `LOCAL_OPERATOR_AT_REFERENCES` (`references.AT_REFERENCES_ENV`, read per
+call rather than cached at import) is the kill switch for it.
+
+**It means PROMPT, not "any text a client sends".** The messages route takes
+`mode: "prompt" | "steer"`, and a STEER bypasses `prompt`: `Session.steer` queues the
+message and expands nothing (`session/session.py` lists `steer`, a wake delivery and an
+aside FORK as the three entry paths that predate the feature and leave an `@path` as
+inert prose — and the aside half of that is true only of the adopted ROW, since the
+TUI's own aside worker expands the text it hands the model). A client that can send
+either must withhold the `@` affordance for the steer half — the shipped desktop
+composer does exactly that — because the key would otherwise be read as a promise about
+a draft the backend delivers as literal text.
+
+A process told not to expand therefore advertises nothing: the app gates its `@`
+picker, its inline chips and its composer tip on this key, so advertising it from a
+process that would send the literal `@path` would show the user a reference the model
+never receives. Clients read it exactly as they read any other key — present at `>= 1`
+means the composer may offer the affordance, absent means the draft is sent as typed
+and no affordance is drawn.
+
+**The omission has TWO causes, and a client cannot tell them apart.** Absent covers
+both a backend older than the key and a current one whose operator turned the expansion
+off, and for the gate the two are identical (`0` would read the same way, which is why
+omitting it costs a client nothing). A client should therefore answer both with one
+statement of the state and may name the update as the way out: that is the cause a user
+can act on, the other is a switch the operator set deliberately, and neither is worth a
+second sentence the client has no evidence to choose between.
+
 `features.commands` versions the messages endpoint's slash policy: **2** means a draft
 that merely BEGINS with a command word is a message, and only a text that as a whole
 IS a command is refused; **1** means every leading slash was refused. Nothing is gated
