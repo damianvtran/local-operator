@@ -367,6 +367,49 @@ class DecisionRejected(Exception):
 
 
 @runtime_checkable
+class CompletionChallenger(Protocol):
+    """A model client that can re-present the end state on request.
+
+    THE RUNNER'S GATE ASKS FOR THIS AND THIS ALONE, and it is a SEPARATE
+    protocol rather than a member of :class:`EpisodeModelClient` on purpose. The
+    gate has to survive a client that cannot do it -- that is the whole reason
+    the driver refuses to seal a gate-on run whose client has no
+    ``challenge_completion`` -- and a REQUIRED member would make that case
+    impossible to express: every double, scripted client and third-party client
+    would have to implement a method whose only job is to say something the
+    client may have no way to say. Membership is therefore optional, declared
+    here, and asked for by ``isinstance``.
+
+    The contract, for an implementation (see
+    ``ProviderModelClient.challenge_completion`` for the shipped one):
+
+    * ``batch`` is the terminal batch the model just declared -- one
+      ``FinishAction``, alone in its batch -- and ``instruction`` is the task
+      text as the reset observation published it.
+    * Append the model's OWN declaration as the assistant message it would have
+      been replayed as, then a user message carrying the challenge AND the
+      current observation's frames, read through the same ``verify_artifact``
+      reader the observation itself was rendered with. The
+      ``append_rejection`` shape, reused: an APPEND, never a rewrite, because
+      the prefix cache is keyed on the bytes already sent.
+    * Return the challenge text as appended, so the runner can publish exactly
+      what the model was shown.
+    * Raising is the contract for an unrecoverable failure, exactly as in
+      ``decide``: the challenge is appended in-process and the provider is not
+      called until the next ``decide``.
+    """
+
+    async def challenge_completion(
+        self,
+        observation: Observation,
+        history: Sequence[EpisodeTurn],
+        *,
+        batch: ActionBatch,
+        instruction: str,
+    ) -> str: ...
+
+
+@runtime_checkable
 class EpisodeModelClient(Protocol):
     """Chooses the next action batch for an episode.
 
@@ -389,6 +432,13 @@ class EpisodeModelClient(Protocol):
       and finalizes the episode unscored on a still-live session. Internal
       retries for transport faults therefore belong inside the implementation,
       below this boundary.
+
+    A client MAY also implement :class:`CompletionChallenger`. The runner's
+    completion gate asks the model once to check a ``done`` declaration against
+    the observation it is bound to, and a client that cannot re-present the end
+    state simply does not satisfy that protocol -- so the gate does not fire and
+    ``scripts/run_episode.py`` refuses to seal a gate-on run rather than record a
+    manifest claiming a gate that never ran.
     """
 
     async def decide(
