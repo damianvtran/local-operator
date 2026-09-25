@@ -24,6 +24,7 @@ from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.analytics_panel import (
     _MAX_NAME_COL,
     _MIN_NAME_COL,
+    _NAME_COL_HARD_FLOOR,
     _ROW_CURSOR,
     _WIDE_TABLE_MIN,
     METRIC_COST,
@@ -1085,9 +1086,11 @@ def test_both_tables_budget_the_rate_column_so_no_width_can_clip_the_row():
         "By session": list(agg.by_session.items()),
     }
     # From here the frame, not the 30-cell label floor, decides the name column.
-    # Below it the floor wins by design and the row may overrun (the
-    # pre-existing narrow-width behaviour the module records as out of scope).
-    floor = _MIN_NAME_COL + max(
+    # Below it the HARD floor wins by design and the row may overrun — no longer
+    # the COMFORT floor: the name column shrinks past that to fit, so the band
+    # this sweep starts at is ``_NAME_COL_HARD_FLOOR`` + the overhead (review
+    # round 3 measured the boundary moving from 86 to 67 for this fixture).
+    floor = _NAME_COL_HARD_FLOOR + max(
         _row_overhead(items["By provider"], _WIDE_TABLE_MIN),
         _row_overhead(items["By session"], _WIDE_TABLE_MIN),
     )
@@ -1258,12 +1261,14 @@ def test_no_content_width_overruns_its_box_and_clips_a_column():
     of them whichever constant is chosen.
 
     The sweep starts where the name budget is actually free to move. Below
-    ``_MIN_NAME_COL`` + the row overhead the FLOOR wins by design — a frame too
-    narrow to hold both a readable label and every column keeps the label and
-    lets the row overrun, which is the pre-existing narrow-width behaviour the
-    review confirmed as out of scope and which is byte-identical across this
-    fix. This pins the band the budget controls; it is not a claim that a
-    60-cell card fits.
+    ``_NAME_COL_HARD_FLOOR`` + the row overhead the HARD floor wins by design — a
+    frame too narrow to hold even a 12-cell label and every column keeps the
+    label and lets the row overrun, because a name shorter than that identifies
+    nothing and the columns to its right are worth more. Above that line the
+    budget is complete at every width: the name column shrinks past its
+    ``_MIN_NAME_COL`` comfort floor rather than pushing a column off the frame
+    (design round 2 D6, whose boundary review round 3 measured at 67 for this
+    fixture, down from 86).
 
     SEVERAL sessions, deliberately. One row alone does not reproduce: the name
     column is sized to the widest label present, so a lone long name is cut to
@@ -1316,7 +1321,7 @@ def test_no_content_width_overruns_its_box_and_clips_a_column():
             setattr(agg, "session_names", dict(names))
             return agg
 
-        floor = _MIN_NAME_COL + _row_overhead(
+        floor = _NAME_COL_HARD_FLOOR + _row_overhead(
             list(_build(_WIDE_TABLE_MIN).by_session.items()), _WIDE_TABLE_MIN
         )
         for width in range(floor, 161):
@@ -1341,7 +1346,14 @@ def test_no_content_width_overruns_its_box_and_clips_a_column():
             # would prove nothing. Applying the box width is what turns the
             # cell count into the thing the reader actually loses: at 96 the
             # old rule painted 99 cells and the row ended in ``cach``.
-            assert truncate_cells(rows[0], width).endswith(" cache"), (
+            # Presence follows the MEASURED rule, not the old threshold: the
+            # cache column is kept where it fits beside the comfort name floor
+            # (design round 1 D2 / round 2 D6), so this asserts agreement rather
+            # than a width at which the column must exist.
+            keeps_cache = _keeps_cache_column(
+                width, list(agg.by_provider.items()), list(agg.by_session.items())
+            )
+            assert truncate_cells(rows[0], width).endswith(" cache") == keeps_cache, (
                 f"{label} ledger at content width {width}: the % cache column is "
                 f"cut off when the row is painted into the box — "
                 f"{truncate_cells(rows[0], width)!r}"
