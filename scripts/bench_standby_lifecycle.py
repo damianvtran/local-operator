@@ -14,8 +14,10 @@ This script warms ONE real console (this process, ``daemon=True``: the desktop
 daemon's slot) with real standby children, and drives every way the spare can be
 lost:
 
-  boot-warm               a spare must be READY within READY_BUDGET_S of
-                          ``enable_warming``.
+  boot-warm               a spare must be READY within the readiness budget
+                          (strict 10 s via ``--ready-budget 10``; the default
+                          ``auto`` scales it to this host's load -- see below)
+                          of ``enable_warming``.
   kill>5s -> replace      SIGTERM a spare that lived past REWARM_MIN_LIFE_S: a
                           replacement must FORK within warm_p95+1 s of the exit
                           and be READY within READY_BUDGET_S.
@@ -32,6 +34,12 @@ lost:
                           signal the first chat's runtime (the measured defect:
                           the next engage SIGTERMed the still-live adopted
                           runtime ~1 s in, 7.8 s engage against 6.5 s cold).
+  concurrent engages      TWO engages at the same instant (two threads released
+                          by one barrier -- the daemon's own overlapping shape):
+                          neither adopted runtime may be signalled, and neither
+                          may appear in the retire ledger (agent review round 1,
+                          B1); with two ready spares the loser of the first race
+                          moves to the second, so BOTH engages adopt.
   daemon idle-keep        the daemon slot's spare carries
                           ``STANDBY_IDLE_ENV=0`` (keep warm; read back from the
                           live child's environment) and survives an idle window.
@@ -43,8 +51,11 @@ THE INVARIANT, MEASURED: a 0.5 Hz census samples which standby children of this
 console exist, plus the console's own pool, and the run fails when any interval
 with NO spare (nothing ready and nothing warming) exceeds
 ``RETRY_CEIL_S + warm_p95``. "Replacement within warm_p95+1 s" is measured to
-the FORK (the new child exists): readiness is asserted separately against
-READY_BUDGET_S, and folding the warm into the fork bound would charge it twice.
+the FORK (the new child exists): readiness is asserted separately against the
+readiness budget -- strict 10 s with ``--ready-budget 10``, the default ``auto``
+scaled to this host's load at start -- and folding the warm into the fork bound
+would charge it twice. Runtime liveness is read from the runtime's own Popen
+EXIT STATUS, never from ``kill(pid, 0)``, which a zombie answers (Q1).
 ``warm_p95`` is computed from THIS run's observed warm times (max() for n<5, so
 a small sample is not flattered).
 
@@ -88,7 +99,11 @@ from scripts import bench_tree  # noqa: E402
 
 _STRIPPED_PREFIXES = ("LOP_", "CMUX_")
 
-#: The acceptance number: a READY spare within this of "boot" and of every refill.
+#: The STRICT acceptance number: a READY spare within this of "boot" and of every
+#: refill. The bench's DEFAULT scales it to this host's load at start
+#: (``--ready-budget auto``): warm times of 14.7-34.8 s were measured at fleet
+#: load >= 120 (agent review round 1, M1/Q2), and a red check for weather tells
+#: nobody anything. Quote this number WITH the load whenever it is the claim.
 READY_BUDGET_S = 10.0
 
 #: Census cadence for the child samples and the dead-window measurement.
@@ -103,6 +118,11 @@ def _strip_inherited() -> None:
     for key in list(os.environ):
         if key.startswith(_STRIPPED_PREFIXES):
             del os.environ[key]
+    # NIT1 (agent review round 1): this docstring said XPC_FLAGS is stripped and
+    # only the usage line made that true. An inherited XPC_FLAGS breaks
+    # getaddrinfo for CHILDREN (the fleet fact), so the console this bench IS
+    # would hand it to every standby and runtime it forks; drop it here too.
+    os.environ.pop("XPC_FLAGS", None)
 
 
 def _load1() -> float:
@@ -165,6 +185,80 @@ def _alive(pid: int) -> bool:
         return True
     except OSError:
         return False
+
+
+class _RuntimeLedger:
+    """Every ``subprocess.Popen`` this process forks for a spare or a runtime.
+
+    WHY (QA round 1, Q1): ``os.kill(pid, 0)`` answers happily for a
+    dead-but-unreaped child (a zombie), so the old liveness check false-passed on
+    zombies and false-failed once an unidentified observer reaped one first.
+    Holding the Popen lets a check read the EXIT STATUS — ``None`` while running,
+    ``0`` for the runtime's own clean exit, negative for a signal — which is the
+    evidence the check's name promises, and it leaves exactly one owner to reap
+    the child.
+
+    SPARES ARE RECORDED ON PURPOSE: an adopted runtime STARTS as a standby — it
+    is forked during warming, long before any engage — so the only moment its
+    Popen is ours to keep is its spawn as a spare. Patches ``subprocess.Popen``
+    for its lifetime; every call passes through, and only receivers whose argv
+    names the standby or runtime module word are retained.
+    """
+
+    #: The two module words the real spawns carry.
+    _MODULE_WORDS = ("runtime.process", "runtime.standby")
+
+    def __init__(self) -> None:
+        self.popens: dict[int, subprocess.Popen[Any]] = {}
+        self._real = subprocess.Popen
+
+    def start(self) -> "_RuntimeLedger":
+        subprocess.Popen = self._recording  # type: ignore[assignment]
+        return self
+
+    def stop(self) -> None:
+        subprocess.Popen = self._real  # type: ignore[assignment]
+
+    def __enter__(self) -> "_RuntimeLedger":
+        return self.start()
+
+    def __exit__(self, *exc: object) -> bool:
+        self.stop()
+        return False
+
+    def _recording(self, *args: Any, **kwargs: Any) -> Any:
+        pop = self._real(*args, **kwargs)
+        argv = args[0] if args else kwargs.get("args") or []
+        try:
+            joined = " ".join(str(word) for word in argv)
+        except TypeError:  # a str/bytes argv rather than a sequence of words
+            joined = str(argv)
+        if any(word in joined for word in self._MODULE_WORDS):
+            self.popens[pop.pid] = pop
+        return pop
+
+    def status(self, pid: int | None) -> tuple[str, bool]:
+        """``(evidence, ok)`` for one runtime pid.
+
+        ``ok`` is False only for a SIGNAL (rc < 0) — the harm the check exists
+        for. A clean self-exit (rc 0, no viewer/lease yet) is not a signal and
+        passes with its evidence named; a pid with no Popen on file says so
+        instead of guessing from a liveness read that cannot see zombies.
+        """
+        if pid is None:
+            return "no runtime pid recorded", False
+        pop = self.popens.get(pid)
+        if pop is None:
+            return (
+                f"status unavailable (no Popen captured; kill(pid,0)={_alive(pid)})",
+                False,
+            )
+        rc = pop.poll()
+        if rc is None:
+            return f"alive at check (popen.poll()=None; kill(pid,0)={_alive(pid)})", True
+        if rc == 0:
+            return "exited cleanly before the check (popen rc=0) -- not signalled", True
+        return f"SIGNALLED (popen rc={rc})", False
 
 
 def _warm_p95(warms: list[float]) -> float:
@@ -341,8 +435,16 @@ def _cleanup(state: dict[str, Any], root: Path) -> None:
             except OSError:
                 pass
     standby.reset_for_tests()
-    time.sleep(0.5)
+    # NIT2 (agent review round 1): the "never leaves a standby behind" rule has to
+    # be SELF-ENFORCING, not a printed map everyone reads past. Wait out the
+    # SIGTERMs just sent, then assert emptiness — this console's own children only,
+    # since another session's standby is neither this rig's to kill nor to judge.
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and _standby_pids(console_pid):
+        time.sleep(0.2)
+    leftovers = _standby_pids(console_pid)
     print(f"  ...   cleanup: children now {_children(console_pid)}", flush=True)
+    assert not leftovers, f"the bench left standby children alive: {leftovers}"
 
 
 def main() -> int:
@@ -356,13 +458,15 @@ def main() -> int:
     )
     parser.add_argument(
         "--ready-budget",
-        type=float,
-        default=READY_BUDGET_S,
+        default="auto",
         help=(
-            "seconds a spare must be READY within, after boot and after every loss; "
-            "the acceptance number is 10 -- raise it only to keep the lifecycle checks "
-            "runnable on a host too starved to warm in 10 s, and say so wherever the "
-            "numbers are quoted"
+            "seconds a spare must be READY within, after boot and after every loss. "
+            "'auto' (the default) scales the strict 10 s acceptance to this host's "
+            "load at start: max(10, 0.30 * load). A starved host warms in tens of "
+            "seconds (14.7-34.8 s measured at load >= 120), and a red check for "
+            "weather tells nobody anything -- but a PASS at auto is not the design "
+            "claim: pass --ready-budget 10 for the strict number, and quote the load "
+            "beside it"
         ),
     )
     parser.add_argument(
@@ -373,6 +477,17 @@ def main() -> int:
     )
     parser.add_argument("--measured-tree", default="", help="commit whose tree this ran against")
     args = parser.parse_args()
+
+    # The readiness budget: 'auto' scales the strict acceptance to the load this
+    # run starts under, and the source string travels into every check detail so
+    # a PASS can never be quoted as the 10 s claim without the caveat attached.
+    load_at_start = _load1()
+    if str(args.ready_budget).strip().lower() == "auto":
+        budget = max(READY_BUDGET_S, round(0.30 * load_at_start, 1))
+        budget_source = f"auto: max(10, 0.30 * {load_at_start})"
+    else:
+        budget = float(args.ready_budget)
+        budget_source = "explicit"
 
     tree = bench_tree.describe(args.measured_tree)
     print(bench_tree.format_banner(tree), flush=True)
@@ -398,20 +513,32 @@ def main() -> int:
     state: dict[str, Any] = {"sids": [], "runtime_pids": [], "seen": set()}
     census: _Census | None = None
 
-    print(f"console pid {os.getpid()} root {root} load {_load1()}", flush=True)
+    print(
+        f"console pid {os.getpid()} root {root} load {_load1()} "
+        f"ready-budget {budget}s ({budget_source})",
+        flush=True,
+    )
+    # The ledger is installed BEFORE the first fork and stays for this process's
+    # lifetime (Q1): an adopted runtime STARTS as a standby spare — forked during
+    # warming, long before any engage — so the only moment its Popen is ours to
+    # keep is its spawn. Holding it is what lets the checks read an exit STATUS
+    # later; nothing else in this bench reaps those children.
+    ledger = _RuntimeLedger()
+    ledger.start()
     try:
         # ---- boot-warm ----------------------------------------------------
         t0 = time.monotonic()
         standby.enable_warming(root, daemon=True)
         census = _Census(os.getpid())
         census.start()
-        ready_s = _wait_ready(args.ready_budget)
+        ready_s = _wait_ready(budget)
         _check(
             checks,
             "boot_warm_ready_within_budget",
             ready_s is not None,
             ready_s=None if ready_s is None else round(ready_s, 2),
-            budget_s=args.ready_budget,
+            budget_s=budget,
+            budget_source=budget_source,
             load=_load1(),
         )
         boot_pids = _standby_pids(os.getpid())
@@ -444,7 +571,7 @@ def main() -> int:
             )
             if fork_pid is not None:
                 state["seen"].add(fork_pid)
-            ready_after = _wait_pid_ready(fork_pid, args.ready_budget) if fork_pid else None
+            ready_after = _wait_pid_ready(fork_pid, budget) if fork_pid else None
             _check(
                 checks,
                 "aged_kill_replacement_ready_in_budget",
@@ -508,7 +635,7 @@ def main() -> int:
             )
             if got_pid is not None:
                 state["seen"].add(got_pid)
-            ready_after = _wait_pid_ready(got_pid, args.ready_budget) if got_pid else None
+            ready_after = _wait_pid_ready(got_pid, budget) if got_pid else None
             _check(
                 checks,
                 "young_kill_replacement_ready_in_budget",
@@ -522,7 +649,11 @@ def main() -> int:
 
         # ---- adoption -> replacement, and the next engage must be safe ------
         _record(notes, "pre-adoption", ready_after_s=_wait_ready(args.spare_wait))
-        _adoption_scenarios(root, checks, notes, state, args.ready_budget, args.spare_wait)
+        # ---- adoption -> replacement, and the next engage must be safe ------
+        _adoption_scenarios(root, checks, notes, state, budget, args.spare_wait, ledger)
+
+        # ---- concurrent engages (B1 regression) -----------------------------
+        _concurrent_engage_scenario(root, checks, notes, state, budget, args.spare_wait, ledger)
 
         # ---- config-touch -> retire -> replace ------------------------------
         _record(notes, "pre-config-touch", ready_after_s=_wait_ready(args.spare_wait))
@@ -559,7 +690,7 @@ def main() -> int:
             )
             if fork_pid is not None:
                 state["seen"].add(fork_pid)
-            ready_after = _wait_pid_ready(fork_pid, args.ready_budget) if fork_pid else None
+            ready_after = _wait_pid_ready(fork_pid, budget) if fork_pid else None
             _check(
                 checks,
                 "config_touch_replacement_ready_in_budget",
@@ -623,6 +754,9 @@ def main() -> int:
 
         report = {
             "tree": tree,
+            "ready_budget_s": budget,
+            "ready_budget_source": budget_source,
+            "load_at_start": load_at_start,
             "checks": checks,
             "notes": notes,
             "warms_s": census.warms,
@@ -664,6 +798,7 @@ def _adoption_scenarios(
     state: dict[str, Any],
     budget: float,
     spare_wait: float,
+    ledger: _RuntimeLedger,
 ) -> None:
     """A real engage adopts; the replacement must arrive with no further engage;
     the next engage must adopt a spare and never signal the first runtime."""
@@ -731,15 +866,22 @@ def _adoption_scenarios(
         state["sids"].append(sid2)
         if runtime2:
             state["runtime_pids"].append(runtime2)
-        first_alive = runtime1 is not None and _alive(runtime1)
+        # Q1 (agent review round 1): the verdict must come from the runtime's EXIT
+        # STATUS, not from ``kill(pid, 0)`` — a dead-but-unreaped child answers
+        # kill(0) happily, so the old read false-passed on zombies and false-failed
+        # once an observer reaped one first (both seen on this head). The ledger has
+        # held the runtime's Popen since before the engage, so the status survives
+        # either way, and the evidence string names which reading decided.
+        first_status, first_ok = ledger.status(runtime1)
         _check(
             checks,
             "second_engage_adopts_and_never_signals_the_first_runtime",
-            runtime2 is not None and runtime2 in standbys_before and first_alive,
+            runtime2 is not None and runtime2 in standbys_before and first_ok,
             runtime2=runtime2,
             adopted=runtime2 in standbys_before if runtime2 else False,
             first_runtime_pid=runtime1,
-            first_runtime_alive_after=first_alive,
+            first_runtime_status=first_status,
+            first_runtime_evidence="popen exit status (rc<0 == signalled)",
             load=_load1(),
         )
         _record(notes, "adoption", runtime1=runtime1, runtime2=runtime2, sid1=sid1, sid2=sid2)
@@ -748,6 +890,129 @@ def _adoption_scenarios(
         await remote2.dispose()
 
     asyncio.run(_run())
+
+
+def _concurrent_engage_scenario(
+    root: Path,
+    checks: dict[str, Any],
+    notes: dict[str, Any],
+    state: dict[str, Any],
+    budget: float,
+    spare_wait: float,
+    ledger: _RuntimeLedger,
+) -> None:
+    """B1 regression: TWO engages at the same instant on one warming console.
+
+    The race needs two attempts overlapping inside ``try_adopt``. The daemon gets
+    that shape for free (engages run via ``asyncio.to_thread``, one per session);
+    here two threads each run their own loop, released by one barrier. At depth 2
+    both spares can be ready, which is also the shape that proves the loser's
+    fix: pre-fix, the loser of the first spare's handshake SIGTERMed the winner's
+    runtime and fell back to a cold spawn; post-fix it moves to the second spare
+    and BOTH engages adopt.
+
+    The verdict reads two ledgers: per-runtime Popen exit status (never a
+    signal) and the wholesale ``_retire`` ledger (no runtime pid may appear, no
+    matter which thread or pass did the retiring).
+    """
+    from local_operator.mobile.attach_client import find_runtime_record
+    from local_operator.session.attached import AttachedSession
+    from local_operator.session.runtime import standby
+
+    def _ready_pids() -> set[int]:
+        return {w.proc.pid for w in _pool() if w.ready}
+
+    _wait_ready(spare_wait)
+    deadline = time.monotonic() + budget
+    while time.monotonic() < deadline and len(_ready_pids()) < 2:
+        time.sleep(0.2)
+    ready_before = _ready_pids()
+    awaited_two = len(ready_before) >= 2
+
+    retires: list[dict[str, Any]] = []
+    real_retire = standby._retire
+
+    def spy_retire(spare: Any) -> None:
+        retires.append({"pid": spare.proc.pid, "alive_at_retire": spare.proc.poll() is None})
+        return real_retire(spare)
+
+    standby._retire = spy_retire
+    results: list[dict[str, Any]] = []
+    release = threading.Event()
+    barrier = threading.Barrier(2)
+
+    async def _engage_hold(slot: int) -> None:
+        async def _no_takeover() -> None:
+            raise RuntimeError("benchmark has no takeover")
+
+        sid = uuid.uuid4().hex[:12]
+        remote = await AttachedSession.cold(
+            sid,
+            config_dir=root,
+            cwd=str(root.parent),
+            takeover_factory=_no_takeover,
+            surface="desktop",
+        )
+        await remote.bind_runtime()
+        record, _owner = await asyncio.to_thread(find_runtime_record, root, sid)
+        pid = getattr(record, "pid", None)
+        results.append(
+            {
+                "slot": slot,
+                "sid": sid,
+                "runtime": pid,
+                "adopted": pid in ready_before if pid else False,
+            }
+        )
+        state.setdefault("sids", []).append(sid)
+        if pid:
+            state.setdefault("runtime_pids", []).append(pid)
+        # Hold the remote — and this loop — until the caller has read the
+        # evidence: the runtime's Popen lives in the ledger, and disposing the
+        # remote on THIS loop is the only clean teardown.
+        await asyncio.to_thread(release.wait, 60)
+        await remote.dispose()
+
+    def _thread(slot: int) -> None:
+        barrier.wait(timeout=60)
+        try:
+            asyncio.run(_engage_hold(slot))
+        except BaseException as exc:  # noqa: BLE001 — the verdict is the checks, not a crash
+            results.append({"slot": slot, "error": repr(exc)})
+
+    threads = [threading.Thread(target=_thread, args=(slot,)) for slot in (1, 2)]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(240)
+    finally:
+        release.set()
+        for thread in threads:
+            thread.join(30)
+        standby._retire = real_retire
+
+    runtime_pids = [r["runtime"] for r in results if r.get("runtime")]
+    statuses = {pid: ledger.status(pid) for pid in runtime_pids}
+    admitted = [r["runtime"] for r in results if r.get("adopted")]
+    signalled = {pid: st for pid, (st, ok) in statuses.items() if not ok}
+    retired = [r for r in retires if r["pid"] in set(runtime_pids)]
+    _check(
+        checks,
+        "concurrent_engages_never_signal_an_adopted_runtime",
+        len(runtime_pids) == 2
+        and not signalled
+        and not retired
+        and (len(admitted) == 2 or not awaited_two),
+        runtimes=runtime_pids,
+        adopted=admitted,
+        ready_before=sorted(ready_before),
+        awaited_two_ready=awaited_two,
+        statuses={str(pid): st for pid, (st, _ok) in statuses.items()},
+        retire_ledger=retires,
+        load=_load1(),
+    )
+    _record(notes, "concurrent-engage", results=results, retires=retires)
 
 
 if __name__ == "__main__":
