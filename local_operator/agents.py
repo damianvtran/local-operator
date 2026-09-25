@@ -4,6 +4,7 @@ import inspect
 import json
 import logging
 import os  # Added os
+import re
 import shutil
 import tempfile
 import time
@@ -59,6 +60,35 @@ def _dill() -> Any:
 _DEFAULT_EXPORT_STEM = "agent"
 
 
+def _write_text_atomically(target: Path, text: str) -> None:
+    """Replace ``target`` in one step, so no reader ever sees a half-written file.
+
+    WHY THIS EXISTS, and why it is not decoration: a definition's two content files
+    are read by OTHER THREADS AND OTHER PROCESSES while they are being rewritten —
+    the relay's worker pool serves a mirrored row while a second peer's row lands,
+    and a session booting reads ``system_prompt.md`` — and ``open("w")`` truncates
+    before it writes. A reader in that window gets a short file: an empty
+    ``agent.yml`` marks the whole definition unreadable (``_scan_agents_metadata``
+    counts that as incomplete, and the strict path then refuses to launch ANY
+    profile), and a half-written ``system_prompt.md`` is instructions the user never
+    wrote. Staged beside the target — same directory, so ``os.replace`` is a rename
+    on one filesystem and cannot be observed midway.
+    """
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        # ``open`` (builtins) rather than ``Path.open``: a test that simulates a write
+        # failure patches the builtin, and ``pathlib`` reaches the io module directly,
+        # so a Path.open here would quietly stop that seam from working.
+        with open(temporary, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    finally:
+        if temporary.exists():
+            temporary.unlink(missing_ok=True)
+
+
 def _export_archive_filename(agent_name: str) -> str:
     """Build a safe, human-readable ZIP filename from an agent name.
 
@@ -100,12 +130,57 @@ def _export_archive_filename(agent_name: str) -> str:
     return f"{stem}.zip"
 
 
+#: An agent id is a DIRECTORY NAME under ``agents_dir``: ``save_agent`` does
+#: ``agents_dir / agent_metadata.id`` with ``mkdir(parents=True)``, and the twelve
+#: other reads/writes in this module join the same value onto the same root. So an
+#: id is not a label, it is a path — and it arrives from outside this process in
+#: two places the user never types: the mesh's definition sync (`network/
+#: definitions.py` installs a peer's row under the ORIGIN's id) and an imported
+#: export archive. ``"../../../../escaped-agent"`` is a complete agent directory
+#: four levels above ``agents/``, which is why this is a validator on the model
+#: rather than a convention at the call sites.
+#:
+#: The rule is ``teams.validate_team_id``'s, deliberately the same characters and
+#: the same bounds: both registries name a directory under the same config root,
+#: both are fed by the same wire, and a stricter or looser copy here would mean one
+#: of the two accepts a value the other refuses.
+_AGENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def validate_agent_id(agent_id: str) -> str:
+    """Return an id that is exactly one safe filesystem path segment.
+
+    Raises ``ValueError`` for anything a directory name must not be: a separator,
+    a relative step (``.``/``..``), an empty string, a leading hyphen/dot/
+    underscore, non-ASCII, or an over-long value.
+    """
+    candidate = agent_id or ""
+    if not _AGENT_ID_RE.fullmatch(candidate) or candidate in {".", ".."}:
+        raise ValueError(
+            "agent id must be 1-128 characters of letters, digits, dot, "
+            "underscore or hyphen, start with a letter or digit, and contain no path "
+            "separators"
+        )
+    return candidate
+
+
 class AgentData(BaseModel):
     """
     Pydantic model representing an agent's metadata.
     """
 
     id: str = Field(..., description="Unique identifier for the agent")
+
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, value: str) -> str:
+        # Validated in BOTH directions on purpose: every construction site (a local
+        # create's uuid, the autosave row, the mesh's mirrored row, an archive's
+        # ``agent.yml``) goes through the model, so one validator closes the write
+        # path for all of them and a hostile id fails loudly at the boundary that
+        # read it rather than at a ``mkdir`` nobody is looking at.
+        return validate_agent_id(value)
+
     name: str = Field(..., description="Agent's name")
     created_date: datetime = Field(..., description="The date when the agent was created")
     version: str = Field(..., description="The version of the agent")
@@ -592,8 +667,10 @@ class AgentRegistry:
 
         # Save agent metadata to agent.yml
         try:
-            with (agent_dir / "agent.yml").open("w", encoding="utf-8") as f:
-                yaml.dump(agent_metadata.model_dump(), f, default_flow_style=False)
+            _write_text_atomically(
+                agent_dir / "agent.yml",
+                yaml.dump(agent_metadata.model_dump(), default_flow_style=False),
+            )
         except Exception as e:
             # Remove from in-memory if file save fails
             self._agents.pop(agent_metadata.id)
@@ -2323,8 +2400,7 @@ class AgentRegistry:
         system_prompt_path = agent_dir / "system_prompt.md"
 
         try:
-            with open(system_prompt_path, "w", encoding="utf-8") as f:
-                f.write(system_prompt)
+            _write_text_atomically(system_prompt_path, system_prompt)
 
             # Reset the refresh timer to force other processes to refresh soon
             self._last_refresh_time = 0

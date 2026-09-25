@@ -71,11 +71,15 @@ team files and NOTHING ELSE — it never opens a config value, an environment
 variable or a secret store, so there is no channel for one to arrive down. On top
 of that structural fact there is a check, because a user CAN paste a token into
 a role's instructions (that has happened: the incident ``redaction_shapes``
-opens with is a DSN captured from a remote host into a transcript). Every free
-text field of every row is passed through the shape table
+opens with is a DSN captured from a remote host into a transcript). EVERY field
+a row CARRIES is passed through the shape table
 (``redaction_shapes.match_shape_names``), and a row that trips it is WITHHELD
 from the bundle and reported by name — never sent, and never installed if an
-older or hostile peer sends it.
+older or hostile peer sends it. "Every field" is derived from the tuples that say
+what a row carries (:func:`_row_texts`), so a field added to the payload is scanned
+the moment it travels: the first version scanned the long prose only, and a DSN in
+``tags`` and a ``ghp_…`` token in ``hosting`` both reached the receiver unchecked
+(measured).
 ``tests/unit/network/test_definitions.py`` asserts both halves: that no value
 from a session's credential store can appear in a built bundle, and that a row
 carrying a credential-shaped value is withheld at the sender and refused at the
@@ -110,6 +114,33 @@ is **the author owns the row, and a mirror follows its origin**:
 Last-writer-wins is deliberately NOT the policy. It converges, and it is exactly
 wrong for a name: two devices editing ``reviewer`` would each silently clobber the
 other, and the loser would have no way to see it happened.
+
+WHAT A SENDER CHOOSES, AND WHAT THIS MODULE WILL NOT BELIEVE
+============================================================
+
+A bundle is written by ANOTHER DEVICE, so every field in it is untrusted input —
+and the fields that matter are the ones that become a PATH or an IDENTITY rather
+than text:
+
+* **A row id is a directory name.** ``AgentRegistry.save_agent`` does
+  ``agents_dir / id`` with ``mkdir(parents=True)``, and a mirror is deliberately
+  installed under the ORIGIN's id so both devices agree on it. A sender-chosen
+  ``"../../../../escaped-agent"`` therefore wrote a complete agent directory
+  outside the config root (reproduced over a real link, with a sender-controlled
+  ``system_prompt.md``, and the ack said it had installed an agent). The id is
+  validated as exactly one safe path segment — at the model, so every construction
+  site is covered, and again at this boundary — by ``agents.validate_agent_id``,
+  the same rule ``teams.validate_team_id`` has always applied to team ids.
+* **A name is matched exactly, and near-duplicates may coexist.** ``reviewer`` and
+  ``Reviewer`` install side by side, because that is what the authoring device does:
+  the product's own ``--agent`` resolves by exact name and nothing dedupes, so a
+  case-folding rule here would be this module inventing a second name identity and
+  refusing to install a legitimately different name. The consequence is reviewable
+  (a list showing both spellings), which is what the local product already shows.
+* **A create is pinned to the revision that was ASKED FOR**, not to whatever a push
+  happened to reconcile (:func:`create_pins`), and a push that came back carrying
+  rows the peer would not take ABORTS the create (:func:`create_refusal`) instead of
+  leaving the peer free to resolve its own same-named row.
 """
 
 from __future__ import annotations
@@ -165,11 +196,28 @@ AGENT_DEFINITION_FIELDS: tuple[str, ...] = (
     "seed",
 )
 
-#: Free text of a row that the credential-shape check runs over. Named as its own
-#: tuple so "what is scanned" cannot drift from "what is carried": a field added
-#: above and forgotten here would be sent unchecked.
-AGENT_TEXT_FIELDS: tuple[str, ...] = ("description", "system_prompt")
-TEAM_TEXT_FIELDS: tuple[str, ...] = ("description", "instructions", "project")
+#: Every field a row CARRIES, which is also what the credential-shape check runs
+#: over (:func:`_row_texts`). DERIVED FROM THE BUILDER'S OWN TUPLE so "what is
+#: scanned" cannot drift from "what is carried": adding a field to
+#: :data:`AGENT_DEFINITION_FIELDS` makes it scanned in the same commit, where a
+#: hand-written list of prose fields silently excluded ``hosting``/``model``/
+#: ``name``/``tags`` (all measured carrying a credential shape to a peer).
+AGENT_CARRIED_FIELDS: tuple[str, ...] = (
+    *AGENT_DEFINITION_FIELDS,
+    "origin_id",
+    "created_date",
+    "system_prompt",
+)
+TEAM_CARRIED_FIELDS: tuple[str, ...] = (
+    "id",
+    "name",
+    "created_date",
+    "description",
+    "manager",
+    "members",
+    "instructions",
+    "project",
+)
 
 #: Bounds, all of them the ones the product already applies locally where one
 #: exists: a definition rides in front of a session's prompt on every turn, so an
@@ -201,6 +249,40 @@ def index_path(root: Path) -> Path:
     from local_operator.network import sync as sync_mod
 
     return sync_mod.network_dir(root) / INDEX_NAME
+
+
+#: One lock per config root, held for the WHOLE of an ``apply_bundle``: the
+#: provenance index is a read-modify-write (read it, decide per row, write it back)
+#: and ``net_definitions`` is served off the link's reader on a multi-worker pool,
+#: so two peers' bundles interleave two of those spans. Measured before this lock:
+#: twenty rounds of two concurrent applies landed BOTH rows on disk while the index
+#: recorded ONE — and from then on the losing row's true origin can never update it
+#: again (the rule reads "that row was authored here"), a permanent silent state
+#: with no verb anywhere that clears an entry. An ``RLock`` because the row writes
+#: inside the span take it again.
+#:
+#: Keyed on the root as this process spells it, the same choice
+#: ``store._write_lock`` makes and for the same reason: every caller here builds its
+#: path from one relay's own root, so a ``realpath`` would only spend a syscall.
+_DEFINITION_LOCKS: dict[str, threading.RLock] = {}
+_DEFINITION_LOCKS_GUARD = threading.Lock()
+
+
+def definition_lock(root: Path) -> threading.RLock:
+    """The one lock every write to this root's definitions takes.
+
+    Re-entrant, and never dropped while an entry is held: unlike the store's outbox
+    (one file per frame, so its registry has to shrink), the keys here are CONFIG
+    ROOTS — a handful per process — and dropping an entry would hand a waiting
+    thread a second lock for the same root.
+    """
+    key = os.fspath(root)
+    with _DEFINITION_LOCKS_GUARD:
+        lock = _DEFINITION_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _DEFINITION_LOCKS[key] = lock
+    return lock
 
 
 def read_index(root: Path) -> dict[str, Any]:
@@ -435,16 +517,50 @@ def _team_row_from_bundle(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _flatten_text(value: Any) -> list[str]:
+    """Every string inside ``value``, whatever its nesting.
+
+    A LIST IS FLATTENED RATHER THAN SKIPPED because the carried fields include three
+    of them (``tags``, ``categories``, a team's ``members``) and a token pasted into
+    a tag is the same credential as one pasted into a description.
+    """
+    if isinstance(value, Mapping):
+        out: list[str] = []
+        for item in value.values():
+            out.extend(_flatten_text(item))
+        return out
+    if isinstance(value, (list, tuple, set)):
+        out = []
+        for item in value:
+            out.extend(_flatten_text(item))
+        return out
+    if value is None:
+        return []
+    return [str(value)]
+
+
 def _row_texts(row: Mapping[str, Any]) -> list[str]:
-    if row.get("kind") == "team":
-        return [str(row.get(name) or "") for name in TEAM_TEXT_FIELDS]
-    texts = [str(row.get("system_prompt") or "")]
+    """Everything this row carries, as strings: the credential scan's whole input.
+
+    Reads the CARRIED fields, so a row cannot travel with a field the check never
+    looked at. An agent's definition fields live under ``fields`` (the row's own
+    shape: ``name``/``system_prompt``/``origin_id`` sit beside it), a team's sit at
+    the top level — see :func:`_agent_row_from_bundle`/:func:`_team_row_from_bundle`.
+    """
+    out: list[str] = []
+    if str(row.get("kind") or "") == "team":
+        for name in TEAM_CARRIED_FIELDS:
+            out.extend(_flatten_text(row.get(name)))
+        return out
+    for name in ("origin_id", "system_prompt", "created_date"):
+        out.extend(_flatten_text(row.get(name)))
     fields = row.get("fields")
     if isinstance(fields, Mapping):
-        texts.extend(
-            str(fields.get(name) or "") for name in AGENT_TEXT_FIELDS if name != "system_prompt"
-        )
-    return texts
+        for name in AGENT_CARRIED_FIELDS:
+            if name in ("origin_id", "system_prompt", "created_date"):
+                continue
+            out.extend(_flatten_text(fields.get(name)))
+    return out
 
 
 def _withheld(row: Mapping[str, Any]) -> str:
@@ -681,6 +797,76 @@ def expect_from_push(result: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
+def create_pins(
+    root: Path, *, agent_names: Iterable[str], team_names: Iterable[str]
+) -> dict[str, Any]:
+    """The create frame's ``expect``: OUR revision of every name it mentions.
+
+    BUILT FROM THIS DEVICE'S OWN ROWS, NOT FROM THE PUSH'S ANSWER, which is the
+    difference between a pin and a wish. ``expect_from_push`` could only pin what a
+    push had already reconciled, so a push the peer half-accepted — or one that never
+    reached it — left the create UNPINNED, and an unpinned create naming a name the
+    peer holds a different revision of was created anyway, running the PEER's copy
+    under the name the user chose (measured: the receipt's digest matched the peer's
+    own row and the session's instructions were that device's text). The pin is
+    therefore the revision that was ASKED FOR; the peer's ``check_expected`` is what
+    refuses when it holds anything else.
+
+    A name this device does not hold is left out rather than pinned to nothing: the
+    peer answers that case itself with ``definition_missing``, which names the name.
+    """
+    out: dict[str, Any] = {}
+    agents = {
+        str(row["name"]): digest_of(row)
+        for row in _read_agents(root)
+        if str(row["name"]) in set(agent_names)
+    }
+    teams = {
+        str(row["name"]): digest_of(row)
+        for row in _read_teams(root)
+        if str(row["name"]) in set(team_names)
+    }
+    if agents:
+        out["agents"] = agents
+    if teams:
+        out["teams"] = teams
+    return out
+
+
+def create_refusal(pushed: Mapping[str, Any], *, peer_label: str) -> str:
+    """Why a create must STOP because the push could not reconcile a row, or ``""``.
+
+    THE PUSH'S FAILURE HAS TO REACH THE CREATE, and this is the half a digest pin
+    cannot cover: a row the peer would not take is a row it will resolve from its OWN
+    copy, so continuing means running a different definition under the name the user
+    chose — the exact failure this slice exists to forbid, reached through the
+    feature's nominal case (a definition edited here after it was mirrored there).
+    The trigger is the push's own answer, which already NAMES the rows; the sentence
+    carries that report plus the remedy.
+
+    A push that never REACHED the peer is not this, and returns ``""``: there is no
+    half-state to report, the peer's own sentence is the one the user should read, and
+    the create's own ``expect`` pin still refuses a peer holding a foreign revision.
+    """
+    stubborn = [*list(pushed.get("conflicts") or []), *list(pushed.get("refused") or [])]
+    withheld = list(pushed.get("withheld") or [])
+    if withheld:
+        return (
+            f"{peer_label} cannot be given everything this create names, so the session "
+            f"was not created: {_describe_rows(withheld)} is shaped like a credential, "
+            "and a definition is never sent with one. Edit that row so it carries no "
+            "literal secret, or name a different one."
+        )
+    if not stubborn:
+        return ""
+    return (
+        f"{peer_label} would not take every definition this create names, so the session "
+        f"was not created: {_describe_rows(stubborn)}. Running that device's own copy "
+        "under the same name would be a different definition than the one you chose. "
+        "Settle it there (edit or remove that name) and create again."
+    )
+
+
 class DefinitionsRefused(Exception):
     """A refusal this module composed, carrying the code a surface branches on."""
 
@@ -739,7 +925,20 @@ def apply_bundle(root: Path, bundle: Mapping[str, Any], *, origin_device: str) -
     docstring. Every outcome is a list of named rows, because the caller (a
     create, or ``lop network definitions push``) has to be able to tell the user
     WHICH name did not land.
+
+    ONE APPLY HOLDS THIS ROOT'S DEFINITION LOCK FOR ITS WHOLE SPAN: the index read,
+    every row write and the index write-back. See :func:`definition_lock` for the
+    measured race (two concurrent applies, both rows on disk, one index entry) and
+    for the half-written ``agent.yml`` a concurrent reader saw in the same window.
     """
+    with definition_lock(root):
+        return _apply_bundle_locked(root, bundle, origin_device=origin_device)
+
+
+def _apply_bundle_locked(
+    root: Path, bundle: Mapping[str, Any], *, origin_device: str
+) -> dict[str, Any]:
+    """``apply_bundle``'s body. The caller holds this root's definition lock."""
     agents, teams = bundle_rows(bundle)
     origin = str(origin_device or bundle.get("origin_device") or "")
     index = read_index(root)
@@ -810,7 +1009,12 @@ def _apply_agent(
     root: Path, row: Mapping[str, Any], origin: str, index: dict[str, Any]
 ) -> dict[str, Any]:
     """Install or update ONE mirrored agent, or report why it was left alone."""
-    from local_operator.agents import AgentData, AgentEditFields, AgentRegistry
+    from local_operator.agents import (
+        AgentData,
+        AgentEditFields,
+        AgentRegistry,
+        validate_agent_id,
+    )
 
     name = str(row["name"])
     registry = AgentRegistry(root)
@@ -886,6 +1090,24 @@ def _apply_agent(
     # create (there is no verb that clears an index entry).
     fields = dict(row.get("fields") or {})
     agent_id = local_id or str(row.get("origin_id") or "")
+    if agent_id and not local_id:
+        # THE ID CAME OFF THE WIRE AND IT IS A DIRECTORY NAME. ``save_agent`` joins
+        # it onto ``agents_dir`` with ``mkdir(parents=True)``, so an id the SENDER
+        # chose is a write anywhere this user can write: reproduced over a real link,
+        # ``"../../../../escaped-agent"`` landed a complete agent directory four
+        # levels above ``agents/`` — with a sender-controlled ``system_prompt.md`` —
+        # while the reply said it had installed an agent. Refused here, at the
+        # boundary that read it, so the reason names the row and nothing is created.
+        # ``AgentData`` validates the id too (``agents.validate_agent_id``); this is
+        # the second application, because the field validator runs deep inside a
+        # constructor this function would otherwise have to trust.
+        try:
+            validate_agent_id(agent_id)
+        except ValueError as exc:
+            return {
+                "outcome": "refused",
+                "extra": {"reason": f"its id is not usable as one: {exc}"},
+            }
     if agent_id and registry_has_id(registry, agent_id) and not local_id:
         # The origin's id is taken here by another row: install under a fresh id
         # rather than overwrite a stranger. Name resolution is by name, so the
@@ -963,9 +1185,18 @@ def _apply_agent(
 
 
 def registry_has_id(registry: Any, agent_id: str) -> bool:
+    """Is this id already taken HERE? ``KeyError`` is the registry's own not-found.
+
+    Narrowed from ``except (KeyError, Exception)`` — which is just ``except
+    Exception`` — because a REGISTRY FAULT (an unreadable ``agents_dir``, a row that
+    will not parse) used to read as "the id is free": a mirror was then installed
+    over a row this device could not see. A fault propagates now and is reported as
+    that row's refusal, which is the honest answer to "I could not tell whether this
+    id is taken".
+    """
     try:
         registry.get_agent(agent_id)
-    except (KeyError, Exception):  # noqa: BLE001 — absent id is the answer we want
+    except KeyError:
         return False
     return True
 
@@ -1278,7 +1509,16 @@ def _describe_rows(rows: Iterable[Mapping[str, Any]]) -> str:
     parts = []
     for row in rows:
         name = str(row.get("name") or "?")
-        parts.append(f"{row.get('kind') or 'row'} {name!r} ({row.get('reason') or 'refused'})")
+        # ``shape`` is what a WITHHELD row carries instead of ``reason`` (the label the
+        # credential table matched). Reading only ``reason`` printed "refused" beside a
+        # name and hid the one fact the author needs to fix the row. The read stays IN
+        # the rendered expression on purpose: ``test_reason_surfaces`` finds a raw
+        # reason read by walking the nodes that build a line, so routing it through a
+        # local would slip a peer's sentence past that guard.
+        parts.append(
+            f"{row.get('kind') or 'row'} {name!r} "
+            f"({row.get('reason') or row.get('shape') or 'refused'})"
+        )
     return "; ".join(parts) or "no reason given"
 
 
@@ -1510,6 +1750,24 @@ def _agent_digest(root: Path, name: str) -> str:
     return ""
 
 
+def name_for_agent_id(root: Path, agent_id: str) -> str:
+    """The NAME of the row ``agent_id`` names on THIS device, or ``""``.
+
+    A create may name an agent by id alone, and the bundle selects by NAME (ids are
+    per-device: ``_apply_agent`` installs a mirror under the ORIGIN's id only when it
+    is free, so one definition can legitimately hold different ids on two devices). An
+    id-only create therefore reconciled NOTHING and pinned NOTHING — the same hole as a
+    failed push, with no report at all — so the id is resolved here, on the device that
+    typed it, and its name joins the push's selector. An id this device does not hold
+    resolves to ``""``: the caller refuses by name rather than sending a frame whose
+    definition could resolve to that device's own copy.
+    """
+    for row in _read_agents(root):
+        if str(row.get("origin_id") or "") == agent_id:
+            return str(row.get("name") or "")
+    return ""
+
+
 def check_expected(root: Path, expect: Any) -> str:
     """Compare a create frame's ``expect`` with what this device holds.
 
@@ -1632,11 +1890,18 @@ def local_sync_handler(server: "RelayServer") -> Any:
         return {
             "ok": ok,
             "peers": results,
+            # AN AGGREGATE, NOT THE PER-DEVICE SENTENCES JOINED (QA round 1, Q2). The
+            # message used to be ``"; ".join(f"{device_id}: {item['message']}")`` and
+            # every caller that also renders the per-device rows printed the identical
+            # sentence twice for a one-peer mesh. The DETAIL is still the per-device
+            # rows (``peers``), which is where a person reads which row was installed
+            # and a consumer reads the reasons; this line answers "how did it go" once.
             "message": (
                 "nothing to push to: this device is in no network with another member"
                 if not results
-                else "; ".join(
-                    f"{item.get('device_id')}: {item.get('message')}" for item in results
+                else (
+                    f"{sum(1 for item in results if item.get('ok'))} of {len(results)} "
+                    "device(s) hold this device's definitions"
                 )
             ),
         }
@@ -1674,7 +1939,8 @@ class DefinitionsSyncer(threading.Thread):
     unchanged install costs the local build once and nothing over the wire when
     every peer reports it in sync. ``STATE_MIN_INTERVAL_S`` bounds how often any
     one link is asked, so a mesh of many members cannot turn the tick into a
-    probe storm.
+    probe storm. The member records are the target list, not the links that happen
+    to exist: see :meth:`tick` for the measurement that made that the rule.
     """
 
     def __init__(self, server: "RelayServer") -> None:
@@ -1697,7 +1963,19 @@ class DefinitionsSyncer(threading.Thread):
                 logger.debug("definitions: sync tick failed", exc_info=True)
 
     def tick(self, *, now: float | None = None) -> list[tuple[str, str]]:
-        """One pass over the live member links. Returns ``(device, outcome)``.
+        """One pass over the network's MEMBERS. Returns ``(device, outcome)``.
+
+        IT DIALS, and that is what makes this a cadence rather than a decoration. The
+        first version walked ``server.links`` — the links that happen to exist because
+        some op dialled one — so on the quiet mesh this class was written for it fired
+        NEVER: measured after a completed pairing, the inviter held ZERO links, a manual
+        tick returned ``[]``, and 150 s later the peer had still received nothing. Two of
+        the three benefits the class docstring claims were therefore inert unless a
+        create happened to run. The member RECORDS are the durable list of who to keep
+        current (``store.list_networks``), so the tick walks those and lets
+        ``push_to_peer``'s dial seam open the link. ``STATE_MIN_INTERVAL_S`` is what
+        bounds the cost: at most one ``state`` probe per member per interval, and a peer
+        that is down costs one dial in that window, on this thread.
 
         Driven with an injected clock rather than only by the thread, for the same
         reason ``sync.SyncWatcher.tick`` is: a test that had to wait 15 real
@@ -1705,20 +1983,37 @@ class DefinitionsSyncer(threading.Thread):
         """
         moment = time.time() if now is None else now
         outcomes: list[tuple[str, str]] = []
-        for link in list(self._server.links.values()):
-            if not link.alive or link.phase != "member":
-                continue
+        for device_id in self._targets():
             with self._lock:
-                last = self._last_state_at.get(link.device_id, 0.0)
+                last = self._last_state_at.get(device_id, 0.0)
                 if moment - last < STATE_MIN_INTERVAL_S:
                     continue
-                self._last_state_at[link.device_id] = moment
-            result = push_to_peer(self._server, link.device_id)
-            outcomes.append((link.device_id, str(result.get("code") or "")))
+                self._last_state_at[device_id] = moment
+            result = push_to_peer(self._server, device_id)
+            outcomes.append((device_id, str(result.get("code") or "")))
             with self._lock:
                 if result.get("ok"):
-                    self._last_pushed[link.device_id] = str(result.get("message") or "")
+                    self._last_pushed[device_id] = str(result.get("message") or "")
         return outcomes
+
+    def _targets(self) -> list[str]:
+        """Every other ACTIVE member of every network this device is in.
+
+        The records rather than the links (see :meth:`tick`), de-duplicated by device
+        because two networks can share a peer. A member that is not ``active`` is
+        skipped: the operator removed it, or it left, and a cadence that kept pushing
+        to it would be this device quietly re-announcing a peer the user retired.
+        """
+        from local_operator.network import store
+
+        targets: list[str] = []
+        for record in store.list_networks(self._server.root):
+            for member in record.active_members():
+                if member.device_id == record.self_device_id:
+                    continue
+                if member.device_id not in targets:
+                    targets.append(member.device_id)
+        return targets
 
 
 #: The floor between two ``state`` probes on one link. The tick itself is the
