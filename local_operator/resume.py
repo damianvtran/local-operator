@@ -20,7 +20,7 @@ import json
 import logging
 import os
 import re
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -331,6 +331,12 @@ ORIGIN_SCAN_SENTINEL_NAME = "origin-scan.json"
 #: runs during construction, before any replay, so a value it had to scan the
 #: JSONL for would arrive too late to reach the first prompt's tail.
 ATTACHMENT_SIDECAR_NAME = "attachment.json"
+
+#: The judged-goal record's own sidecar, beside the attachment rather than
+#: inside it (see :func:`write_goal_record`). New in the judged-goal feature:
+#: older builds neither read nor write it, which is what lets a record survive a
+#: downgrade round trip.
+GOAL_SIDECAR_NAME = "goal.json"
 
 #: The two openings only the subagent runner can produce, used ONLY by the
 #: one-time backfill for directories that predate the marker.
@@ -823,7 +829,77 @@ def write_session_attachment(session_dir: Path, *, team: str, agent: str, goal: 
         return
 
 
-def backfill_session_origins(config_dir: Path, limit: int = 500) -> int:
+def read_goal_record(session_dir: Path) -> dict[str, Any] | None:
+    """Parse ``goal.json``, or ``None`` when absent or unusable.
+
+    Tolerant on exactly the same terms as :func:`read_session_attachment`, and
+    for the same load-bearing reason: a process killed mid-write can cut the
+    file inside a multi-byte character, and a strict decode raises
+    ``UnicodeDecodeError`` — a ``ValueError`` that would sail past an
+    ``except OSError`` and take down the whole RESUME. An unreadable record must
+    cost the record, never the conversation.
+
+    The caller (``Session._restore_goal_record``) treats ``None`` as the
+    pre-lifecycle state, which is exactly what a session whose record was never
+    written is: a goal text and nothing else.
+    """
+    try:
+        raw = (session_dir / GOAL_SIDECAR_NAME).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def write_goal_record(session_dir: Path, payload: dict[str, Any]) -> None:
+    """Journal the goal record beside the transcript.
+
+    A SIBLING of ``attachment.json`` rather than a key inside it, and the reason
+    is the writer, not the reader: ``write_session_attachment`` REBUILDS its
+    whole payload from its three arguments and replaces the file atomically, so
+    the moment an older ``lop`` build (or a different install on this machine)
+    touches that session's attachment for any reason, anything this build had
+    added to it would be destroyed. ``goal.json`` is invisible to every existing
+    writer, so the record survives a downgrade round trip. The cost is a file.
+
+    Called on TRANSITION only — a status change, a history append, a judge state
+    change — never on a tick: the judge moves on every turn end, and journalling
+    that would be pure I/O for a value that did not move (the rule
+    ``_persist_attachment`` states for the attachment, which binds harder here).
+
+    Best-effort and ATOMIC by the same contract as its sibling: never raises into
+    a turn, pid-named temp + ``replace`` (two processes can hold the same session
+    directory), and **the directory mtime is preserved**, because journalling a
+    goal transition is bookkeeping ABOUT a session and never activity IN it — a
+    mark-done must not reorder the ``/resume`` picker.
+    """
+    try:
+        try:
+            previous = session_dir.stat().st_mtime
+        except OSError:
+            previous = None
+        session_dir.mkdir(parents=True, exist_ok=True)
+        sidecar = session_dir / GOAL_SIDECAR_NAME
+        tmp = sidecar.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(sidecar)
+        if previous is not None:
+            os.utime(session_dir, (previous, previous))
+    except (OSError, TypeError, ValueError):
+        return
+
+
+def backfill_session_origins(
+    config_dir: Path,
+    limit: int = 500,
+    *,
+    should_stop: Callable[[], bool] | None = None,
+) -> int:
     """Stamp pre-existing subagent directories once, and return how many.
 
     Without this the fix only applies to sessions created after the upgrade,
@@ -853,6 +929,23 @@ def backfill_session_origins(config_dir: Path, limit: int = 500) -> int:
     the cut stamped 0 on three consecutive startups. Deciding a session's
     origin by where its random name falls in an alphabet is not a policy
     anyone would choose deliberately.
+
+    ``should_stop`` is a cooperative halt for a runtime that is LEAVING, and it
+    defaults to ``None`` so every existing caller is byte-identical in
+    behaviour: the CLI ``--resume`` sweeps call this to FINISH, and a predicate
+    they do not pass cannot change what they do. The store-maintenance thread
+    passes the same event that halts the pass sequence (see
+    :func:`local_operator.session_factory.request_store_maintenance_stop`),
+    which is what turns a walk worth minutes (measured on the fleet's own store:
+    10,737 directories at 16.7-38.4 ms each, i.e. 3-7 minutes per pass) into one
+    that leaves within a directory of the request — one step of this loop. It is
+    checked once per ITERATION rather than once per call because the pass IS the
+    expensive unit: every directory between one check and the next is a
+    directory a departing runtime paid to stat. Stopping between directories is
+    safe at any point — the two writes below are atomic and idempotent, and
+    nothing is carried across iterations — and the caller's completed-sequence
+    guard reads the same event, so a partial sweep is never published as a
+    completed one (``_run_store_maintenance``).
     """
     stamped = 0
     sessions = config_dir / "sessions"
@@ -861,6 +954,8 @@ def backfill_session_origins(config_dir: Path, limit: int = 500) -> int:
     except OSError:
         return 0
     for directory in directories:
+        if should_stop is not None and should_stop():
+            break
         if stamped >= limit:
             break
         try:
@@ -993,7 +1088,12 @@ def _write_title_scan_sentinel(session_dir: Path) -> None:
         return
 
 
-def backfill_session_titles(config_dir: Path, limit: int = 500) -> int:
+def backfill_session_titles(
+    config_dir: Path,
+    limit: int = 500,
+    *,
+    should_stop: Callable[[], bool] | None = None,
+) -> int:
     """Write the title sidecar for sessions that predate it, and return how many.
 
     Mirrors :func:`backfill_session_origins` exactly, and for the same reason:
@@ -1032,6 +1132,13 @@ def backfill_session_titles(config_dir: Path, limit: int = 500) -> int:
     list instead would leave any session sorting past the cut unvisited on
     every run forever, because the list sorts by hex name and the same prefix
     is recomputed each startup.
+
+    ``should_stop`` is the cooperative halt :func:`backfill_session_origins`
+    documents at length, checked once per directory for the same reason: this
+    is the sweep a teardown dump most often caught mid-walk, and the title scan
+    is the most expensive single step here (``_scan_all_titles`` reads a whole
+    transcript), so a departing runtime must not have to finish one. Defaults to
+    ``None``, which is the byte-identical behaviour every existing caller has.
     """
     written = 0
     sessions = config_dir / "sessions"
@@ -1040,6 +1147,8 @@ def backfill_session_titles(config_dir: Path, limit: int = 500) -> int:
     except OSError:
         return 0
     for directory in directories:
+        if should_stop is not None and should_stop():
+            break
         if written >= limit:
             break
         try:

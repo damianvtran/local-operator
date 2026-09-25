@@ -16,6 +16,7 @@ from starting when it is not.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from typing import Any
@@ -89,6 +90,312 @@ def test_a_failed_fetch_with_no_cache_returns_none(tmp_path) -> None:
         raise RuntimeError("no network")
 
     assert cached_listing("openrouter", boom, cache_dir=tmp_path) is None
+
+
+# -- the failure backoff (LISTING_FAILURE_BACKOFF_S) -------------------------
+#
+# A failed fetch leaves no fresh document, so its age only grows and every later
+# read re-issued the request. Bounded is not the same as hidden: the assertions
+# below use a COUNTING fetch thunk and never the clock, and the two escapes that
+# must still retry at once — the window elapsing, and an explicit invalidate —
+# are asserted by steering the window rather than by sleeping through it.
+
+
+def test_a_second_read_inside_the_failure_window_does_not_refetch(tmp_path) -> None:
+    """The 429 in a loop: a provider that just refused is not asked again."""
+    calls = []
+
+    def boom():
+        calls.append(1)
+        raise RuntimeError("429 Too Many Requests")
+
+    first = catalogue.read_listing("openrouter.listing", boom, cache_dir=tmp_path)
+    assert first.failed and first.payload is None
+    # `ttl_s=-1` is the hardest possible demand for a live read: everything on
+    # disk is expired, so without the backoff this is a second round trip.
+    second = catalogue.read_listing("openrouter.listing", boom, ttl_s=-1, cache_dir=tmp_path)
+    assert len(calls) == 1, "a failed fetch inside the window must not be re-asked"
+    assert second.failed and second.payload is None
+
+
+def test_the_backoff_serves_the_stale_document_it_already_has(tmp_path) -> None:
+    """Stale beats absent, on the backed-off path as on the failed one."""
+    calls = []
+    cached_listing("openrouter.listing", lambda: _payload(window=999), cache_dir=tmp_path)
+
+    def boom():
+        calls.append(1)
+        raise RuntimeError("503 Service Unavailable")
+
+    failed = catalogue.read_listing("openrouter.listing", boom, ttl_s=-1, cache_dir=tmp_path)
+    assert failed.failed
+    assert failed.payload is not None and failed.payload["data"][0]["context_length"] == 999
+    again = catalogue.read_listing("openrouter.listing", boom, ttl_s=-1, cache_dir=tmp_path)
+    assert len(calls) == 1
+    assert again.failed
+    assert again.payload == failed.payload
+
+
+def test_a_removed_document_is_fetched_not_reported_stale(tmp_path) -> None:
+    """The memory is about a DOCUMENT, and it dies with it.
+
+    Reproduced as a real failure before the stamp check: pytest reuses one
+    `tmp_path` across the parametrizations of a long-named test (the `[param]`
+    suffix is truncated out of the directory prefix, so several cases share a
+    directory that is then recreated empty), and `test_deepseek.py`'s malformed
+    inventory case then got `static` where it asserts `stale` — every read in
+    that fresh directory was answered from a failure recorded against the
+    PREVIOUS occupant of the path, so no attempt was ever made. The same shape
+    happens for real when a cache sweep, a peer process's `invalidate` or a
+    hand-cleared cache dir drops a document this process watched fail.
+    """
+    calls = []
+
+    def boom():
+        calls.append(1)
+        raise RuntimeError("503 Service Unavailable")
+
+    cached_listing("openrouter.listing", lambda: _payload(), cache_dir=tmp_path)
+    document = catalogue._cache_path("openrouter.listing", tmp_path)
+    catalogue.read_listing("openrouter.listing", boom, ttl_s=-1, cache_dir=tmp_path)
+    assert catalogue._failure_backoff_active(document)
+    # Removed WITHOUT going through `invalidate` (which is the app's explicit
+    # forget): this is the document vanishing underneath the memory.
+    document.unlink()
+    assert catalogue._failure_backoff_active(document) is False
+    catalogue.read_listing("openrouter.listing", boom, ttl_s=-1, cache_dir=tmp_path)
+    assert len(calls) == 2
+
+
+def test_a_replaced_document_is_fetched_too(tmp_path) -> None:
+    """A different document at the same path is not the one that failed."""
+    calls = []
+
+    def boom():
+        calls.append(1)
+        raise RuntimeError("429")
+
+    cached_listing("openrouter.listing", lambda: _payload(window=999), cache_dir=tmp_path)
+    document = catalogue._cache_path("openrouter.listing", tmp_path)
+    catalogue.read_listing("openrouter.listing", boom, ttl_s=-1, cache_dir=tmp_path)
+    assert catalogue._failure_backoff_active(document)
+    # A newer document lands at the same path, written the way the cache writes
+    # one: a peer process's fetch, or a background revalidate.
+    catalogue._write_cache(document, _payload(window=1234))
+    assert catalogue._failure_backoff_active(document) is False
+    fresh = catalogue.read_listing("openrouter.listing", boom, ttl_s=-1, cache_dir=tmp_path)
+    assert len(calls) == 2
+    assert fresh.payload is not None
+    assert fresh.payload["data"][0]["context_length"] == 1234
+
+
+def test_the_window_elapsing_retries_at_once(tmp_path, monkeypatch) -> None:
+    """The bound, not a blacklist: the very next read after it tries again.
+
+    Steered through the constant rather than by sleeping through the window, so
+    this asserts the RULE (failures inside the window are skipped, and no longer)
+    and not the wall clock."""
+    calls = []
+
+    def boom():
+        calls.append(1)
+        raise RuntimeError("no network")
+
+    catalogue.read_listing("openrouter.listing", boom, cache_dir=tmp_path)
+    monkeypatch.setattr(catalogue, "LISTING_FAILURE_BACKOFF_S", -1.0)
+    catalogue.read_listing("openrouter.listing", boom, cache_dir=tmp_path)
+    assert len(calls) == 2
+
+
+def test_a_successful_fetch_clears_the_failure_memory(tmp_path, monkeypatch) -> None:
+    """The memory is about the LAST attempt, not a lingering accusation.
+
+    The provider coming back is the case a user cares about most, so a successful
+    fetch must leave nothing behind: made observable by letting the window lapse
+    for ONE read (the success) and then re-arming it, so a stale timestamp from
+    the earlier failure would show up as a skipped fetch here."""
+    calls = []
+
+    def boom():
+        calls.append("fail")
+        raise RuntimeError("no network")
+
+    def ok():
+        calls.append("ok")
+        return _payload()
+
+    window = catalogue.LISTING_FAILURE_BACKOFF_S
+    catalogue.read_listing("openrouter.listing", boom, cache_dir=tmp_path)
+    monkeypatch.setattr(catalogue, "LISTING_FAILURE_BACKOFF_S", -1.0)
+    fresh = catalogue.read_listing("openrouter.listing", ok, cache_dir=tmp_path)
+    assert fresh.fetched
+    monkeypatch.setattr(catalogue, "LISTING_FAILURE_BACKOFF_S", window)
+    assert (
+        catalogue._failure_backoff_active(catalogue._cache_path("openrouter.listing", tmp_path))
+        is False
+    )
+    assert len(calls) == 2
+
+
+def test_invalidate_forgets_the_failure_so_the_next_read_retries(tmp_path) -> None:
+    """A credential change or a newly configured endpoint must not wait.
+
+    `invalidate` is the app's "forget what you know about this document" call and
+    is what `_configure_local` and a completed login reach, so leaving the window
+    standing would answer a just-repaired connection with the previous failure.
+    """
+    calls = []
+
+    def boom():
+        calls.append(1)
+        raise RuntimeError("401 Unauthorized")
+
+    catalogue.read_listing("openrouter.listing", boom, cache_dir=tmp_path)
+    catalogue.invalidate("openrouter.listing", cache_dir=tmp_path)
+    catalogue.read_listing("openrouter.listing", boom, cache_dir=tmp_path)
+    assert len(calls) == 2
+
+
+def test_invalidating_every_document_of_a_credential_forgets_them_all(tmp_path) -> None:
+    """The login path drops one credential's documents by GLOB, so the memory has
+    to be dropped the same way or the account's next listing stays blocked."""
+    calls = []
+
+    def boom():
+        calls.append(1)
+        raise RuntimeError("401 Unauthorized")
+
+    # A document first, so the glob has something to drop: `invalidate_documents`
+    # reports the documents it removed, and the fetch below must NOT remove one.
+    cached_listing("openai.oauth.abcd.listing", lambda: _payload(), cache_dir=tmp_path)
+    catalogue.read_listing("openai.oauth.abcd.listing", boom, ttl_s=-1, cache_dir=tmp_path)
+    dropped = catalogue.invalidate_documents("openai", cache_dir=tmp_path)
+    assert dropped == 1
+    catalogue.read_listing("openai.oauth.abcd.listing", boom, ttl_s=-1, cache_dir=tmp_path)
+    assert len(calls) == 2
+
+
+def test_a_credential_repair_re_arms_the_backoff_with_no_document_on_disk(tmp_path) -> None:
+    """THE REPAIR PATH, in the state the backoff exists for: nothing cached.
+
+    ``invalidate_documents`` has to clear the memory by the credential IDENTITY
+    the document glob uses, not by the documents that glob can find — a provider
+    whose fetch failed before it ever succeeded has none. Measured before this:
+    ``dropped 0``, the memory survived, and the next live read made NO attempt and
+    still reported the failure, so a user who had just logged in was told "Model
+    listing unavailable" for the rest of the window. QA reached the same thing
+    end to end through `DELETE /v1/auth/accounts/<row>` and through a corrected
+    `radient-key` key, both of which land here via `invalidate_listing`.
+    """
+    calls = []
+
+    def boom():
+        calls.append(1)
+        raise RuntimeError("401 Unauthorized")
+
+    # NO document: the very first fetch fails, so nothing was ever cached.
+    catalogue.read_listing("openai.listing", boom, cache_dir=tmp_path)
+    document = catalogue._cache_path("openai.listing", tmp_path)
+    assert catalogue._failure_backoff_active(document)
+    dropped = catalogue.invalidate_documents("openai", cache_dir=tmp_path)
+    assert dropped == 0, "no document existed — that is the case under test"
+    assert catalogue._failure_backoff_active(document) is False
+    catalogue.read_listing("openai.listing", boom, cache_dir=tmp_path)
+    assert len(calls) == 2, "the repair must be followed by an ATTEMPT, not a skip"
+
+
+def test_the_identity_prefix_does_not_reach_a_prefixed_provider_id(tmp_path) -> None:
+    """`openai.*` must not match `openai-device.listing.json` — the glob's dot.
+
+    The document sweep's docstring calls the dot separator load-bearing, because
+    `openai` and `openai-device` are two credential identities that share one
+    document only where the registry says so. The memory follows the same rule.
+    """
+    calls = []
+
+    def boom():
+        calls.append(1)
+        raise RuntimeError("401 Unauthorized")
+
+    catalogue.read_listing("openai-device.listing", boom, cache_dir=tmp_path)
+    document = catalogue._cache_path("openai-device.listing", tmp_path)
+    assert catalogue.invalidate_documents("openai", cache_dir=tmp_path) == 0
+    assert catalogue._failure_backoff_active(document)
+    catalogue.read_listing("openai-device.listing", boom, cache_dir=tmp_path)
+    assert len(calls) == 1, "the surviving memory still bounds this document"
+
+
+def test_an_equal_length_replacement_with_a_pinned_back_mtime_is_still_fetched(tmp_path) -> None:
+    """A copy or restore can carry an mtime over; the stamp must not be fooled.
+
+    Reproduced by the reviewer: with `(mtime_ns, size)` alone, a replacement of
+    IDENTICAL length whose mtime was pinned back to the failed document's passed
+    for it — 0 fetches, and the fresh document was reported `stale`. `st_ino`
+    catches the rename a cache write makes; `st_ctime_ns` catches this in-place
+    shape, which `os.utime` cannot set back.
+    """
+    calls = []
+
+    def boom():
+        calls.append(1)
+        raise RuntimeError("429")
+
+    cached_listing("openrouter.listing", lambda: _payload(window=999), cache_dir=tmp_path)
+    document = catalogue._cache_path("openrouter.listing", tmp_path)
+    before = document.stat()
+    catalogue.read_listing("openrouter.listing", boom, ttl_s=-1, cache_dir=tmp_path)
+    assert catalogue._failure_backoff_active(document)
+
+    raw = document.read_text(encoding="utf-8")
+    replacement = raw.replace('"context_length": 999', '"context_length": 888')
+    assert replacement != raw and len(replacement) == len(
+        raw
+    ), "the case under test needs an equal-length replacement that really differs"
+    document.write_text(replacement, encoding="utf-8")  # same inode, same size
+    os.utime(document, ns=(before.st_atime_ns, before.st_mtime_ns))  # mtime pinned back
+    assert document.stat().st_size == before.st_size
+    assert document.stat().st_mtime_ns == before.st_mtime_ns
+
+    assert catalogue._failure_backoff_active(document) is False
+    fresh = catalogue.read_listing("openrouter.listing", boom, ttl_s=-1, cache_dir=tmp_path)
+    assert len(calls) == 2
+    assert fresh.payload is not None
+    assert fresh.payload["data"][0]["context_length"] == 888
+
+
+def test_the_soft_window_still_schedules_its_background_refresh(tmp_path, monkeypatch) -> None:
+    """The backoff is the SYNC path's, and the background path keeps its own.
+
+    A document in the soft window is served immediately and refreshed without the
+    caller waiting, so a remembered failure must not freeze it: freezing it would
+    turn a slow provider into a permanently stale one. `soft_ttl_s=0` puts a
+    document of any age in that state without touching the clock."""
+    scheduled = []
+
+    def _fake_schedule(*args, **kwargs):
+        scheduled.append(args)
+        return True
+
+    monkeypatch.setattr(catalogue, "_schedule_revalidate", _fake_schedule)
+    calls = []
+
+    def boom():
+        calls.append(1)
+        raise RuntimeError("429")
+
+    # A failure is remembered first, so the soft-window read below runs against a
+    # live backoff rather than a clean slate.
+    catalogue.read_listing("openrouter.listing", boom, cache_dir=tmp_path)
+    assert catalogue._failure_backoff_active(catalogue._cache_path("openrouter.listing", tmp_path))
+    (tmp_path / "openrouter.listing.json").write_text(
+        json.dumps({"fetched_at": time.time(), "payload": _payload()}), encoding="utf-8"
+    )
+    served = catalogue.read_listing(
+        "openrouter.listing", boom, soft_ttl_s=0.0, ttl_s=3600.0, cache_dir=tmp_path
+    )
+    assert served.refreshing
+    assert len(scheduled) == 1, "the soft window must still revalidate in the background"
+    assert len(calls) == 1, "the background path is not the sync fetch"
 
 
 @pytest.mark.parametrize(

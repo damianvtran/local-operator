@@ -499,7 +499,11 @@ KILL_CAUSE = "runtime-killed"
 #: death in this taxonomy whose author is the victim itself.
 #:
 #: WHY IT NEEDED A NAME, and what its absence cost. ``stall_watchdog`` arms a C
-#: timer that, past its bound, dumps every thread and ``_exit(1)s``; the dump
+#: timer that, past its bound, dumps every thread — and on the builds that shipped
+#: before 2026-09-23 it then ``_exit(1)``ed from that same C thread, which is the
+#: ending this class was coined for. Production expiry is DUMP-ONLY now, so a fire
+#: ends nothing and only a LEGACY dump can still witness such a death
+#: (:func:`stall_watchdog.fire_outcome`). What holds for both eras is that the dump
 #: names the pid and the arming time and nothing else, and until this token
 #: existed there was no class anywhere that said the bound had done it. Measured
 #: 2026-09-21: a peer session (pid 4698) died with its dump present and its death

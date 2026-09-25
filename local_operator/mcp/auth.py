@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import logging
 import os
 import sys
@@ -53,7 +54,7 @@ import time
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol, runtime_checkable
 from urllib.parse import parse_qs, urlparse
 
 from pydantic import AnyUrl
@@ -80,6 +81,21 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: Who, if anyone, is watching the interactive grant this task started.
+#:
+#: The desktop's sessionless sign-in runs the grant in a server task with no
+#: terminal: the authorization URL and "did a browser actually open" were only
+#: ever PRINTED (``LoopbackAuthFlow._notify``), which under a daemon lands in a
+#: log nobody reads. A settings page that cannot say "we opened your browser" or
+#: offer the link when no browser opened leaves the user staring at a spinner.
+#: A context variable rather than a constructor argument because the flow is
+#: built deep inside the manager's connect path; the operation task sets it and
+#: every task the SDK spawns beneath it inherits the value. Called with
+#: ``(authorization_url, browser_opened)``; it must not raise.
+AUTHORIZATION_OBSERVER: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "mcp_authorization_observer", default=None
+)
+
 # Logical credential id prefix for managed MCP OAuth credentials (URL-keyed).
 MCP_OAUTH_CREDENTIAL_PREFIX = "mcp_oauth:"
 
@@ -99,6 +115,135 @@ DEFAULT_CALLBACK_PATH = "/callback"
 #: token was issued. Not part of the SDK's ``OAuthToken`` — see
 #: :meth:`McpTokenStorage.stored_token_expiry` for why we have to record it.
 TOKENS_OBTAINED_AT_KEY = "tokens_obtained_at"
+
+#: Payload key that gives the stored grant an IDENTITY, as distinct from the
+#: timestamps that only say when something was written. Value is
+#: ``{"issued_at": <float>, "attested_at": <float>}``.
+#:
+#: Why a second field is needed at all: ``tokens_obtained_at`` is moved by BOTH
+#: writers that can produce a grant — an interactive login (a NEW chain) and our
+#: own refresh rotation (the SAME chain) — so "the row got newer" cannot tell a
+#: peer's ``/mcp reauth`` from a rotation this process performed itself. The
+#: retry decision needs that distinction in BOTH directions: a peer's new grant
+#: must lift an auth block (a block taken against a grant we never presented is
+#: unfalsifiable, and the server then stays dead on a perfectly good
+#: credential), while our own rotation must not (an attempt that re-arms its own
+#: block spends a refresh token per tick, in every process, against a provider
+#: where re-presenting a rotated token can revoke the whole family — see
+#: :data:`GRANT_DEAD_AT_KEY`). Measured before this key existed, two real
+#: processes over one ``auth.db``: 31 rotations per process over 30 polls.
+#:
+#: The stamp is CARRIED, never minted. :meth:`McpTokenStorage.store_refresh_result`
+#: copies the row's previous chain stamp forward, so a rotation continues the
+#: chain it came from; :meth:`McpTokenStorage.set_tokens` POPS the key, because an
+#: interactive grant is a new chain by definition and nothing else may remove it.
+#:
+#: Why a PAIR rather than just ``issued_at``: the write that mints the stamp also
+#: records ``attested_at``, the ``tokens_obtained_at`` that same write produced.
+#: It is what makes a pair self-describing ("this chain was the row's chain when
+#: the row said this") and what a future rule about stale pairs would need. The
+#: READ does not consult it — see the F rule below, and
+#: :func:`_chain_stamp_of` — deliberately: any rule input a chain-unaware writer
+#: can move is a rule input a chain-unaware writer can storm on.
+#:
+#: THE F RULE, and why attestation is not a rule input. The stamp is
+#: ``issued_at`` whenever the row carries a readable pair, and the raw
+#: ``tokens_obtained_at`` ONLY when the pair is ABSENT (a legacy row, or our own
+#: :meth:`McpTokenStorage.set_tokens` pop). A STALE pair is deliberately not read
+#: as a chain change. The previous revision did read it that way, on the claim
+#: that such a write "costs ONE unearned retry and never a storm" — that claim
+#: is FALSE, and the reason is that a chain-unaware writer is a PROCESS, not one
+#: write. A real old build moves ``tokens_obtained_at`` on every rotation and
+#: leaves the pair behind; the new side then read each of its rotations as a new
+#: grant and retried, and the old side read each of the new side's rotations as
+#: movement in turn, so the two fed each other. Measured, two real processes over
+#: one ``auth.db``, 30 polls each, rotations per process — **main+main: 2/1**;
+#: **main+head: 26/26** (independently reproduced by the reviewer at 27/27,
+#: 21/21, 14/14 and by QA at 14/14, 12/11); **head+head: 1/1**; and with this
+#: rule **main+this tree: 1/1**. At the production 60 s poll that is one refresh
+#: POST per minute per process for every server blocked in BOTH versions, for the
+#: whole rollout window, on every release.
+#:
+#: The price of the F rule is one cell, recorded rather than argued away: a grant
+#: replaced IN PLACE by an old build's ``/mcp login`` is invisible to a new-build
+#: peer, because that writer leaves the pair as it found it and the stamp
+#: therefore does not move. It is narrow and it is mixed-fleet only — an old
+#: build's ``/mcp reauth`` CLEARS the row (the pair goes with it, so the stamp
+#: moves to ``0.0`` and the heal happens), a new-build login or reauth heals, and
+#: an old build's rotation proves nothing either way — and it ends when the last
+#: old process restarts. The alternative (a retry on any ``tokens_obtained_at``
+#: movement, rate-limited or not) keeps the reciprocal loop alive at a lower rate,
+#: spending a rotation per window per blocked server against a credential that
+#: may be dead, which is worse than 0.
+#:
+#: Not secret-derived, deliberately: both floats are copies of a wall-clock stamp
+#: the row already holds, in the same ``data`` column of the same row, under the
+#: same readers. Nothing here is a token, a digest or anything derived from one
+#: (unlike :data:`GRANT_UNCONFIRMED_SEND_KEY`'s digest).
+#:
+#: Contract — only these two writers may touch it, and adding a third is how
+#: this whole mechanism breaks: ``mark_grant_dead``,
+#: ``mark_send_unconfirmed``, ``clear_send_unconfirmed``, ``set_client_info``,
+#: ``seed_client_info``, ``clear`` and ``_write`` must NOT write, move or remove
+#: this key. Each of them can run during a rotation-free write (``wire_oauth_auth``
+#: re-seeds ``client_info`` on EVERY connect, the send marker is armed around
+#: one POST), so a write there would move the marker without a new grant,
+#: re-arming a block nobody earned a retry on. The ``set_tokens`` pop is not
+#: optional either — see that method, where it is the only thing that stops a new
+#: interactive grant from inheriting the failed chain's stamp.
+GRANT_CHAIN_KEY = "grant_chain"
+
+#: Payload key holding POSITIVE evidence that a connect STOOD UP on the grant
+#: this row holds. Value is ``{"at": <epoch seconds>, "chain": <float>}``, where
+#: ``chain`` is the chain stamp the successful connect ran on and ``at`` is when
+#: the witness was written.
+#:
+#: Why positive evidence is needed on top of a chain stamp, which cannot
+#: substitute for it: :data:`GRANT_CHAIN_KEY` can only ever say the grant was
+#: REPLACED, and a refresh rotation — including a sibling process's, and
+#: including one performed while a temporary provider-side rejection is on —
+#: CARRIES the chain forward. So a session blocked by a transient 401 sees a chain
+#: that never moves while the credential demonstrably works elsewhere. Measured
+#: (QA round 1, Q1; real processes, a real authorization server and a real
+#: ``AuthStore``): the blocked session stayed ``auth-required`` through 60 polls
+#: while its sibling connected and served a request. ``main`` healed that case,
+#: and it healed it only because EVERY blocked session retried on every tick —
+#: which is the family-revoking storm this subsystem exists to prevent (measured
+#: on ``main``, two real processes: 17/17 and 8/8 rotations per process over 30
+#: polls). The heal therefore has to rest on a fact about the chain WORKING, not
+#: on the row changing.
+#:
+#: Why that cannot decay into a timer, which is the objection any retry must
+#: answer: a witness VALUE exists only because some connect succeeded, and a
+#: successful connect clears that session's own block
+#: (``_register_connection`` → ``_clear_auth_block``). The retry rule is "a
+#: witness NEWER than the one this attempt consumed", so a session woken by a
+#: witness either heals and stops polling, or fails and writes no witness of its
+#: own; retries are bounded by EVENTS, not by ticks. Measured: 6 witness values
+#: bought 6 retries over 60 polls rather than 60, a stale or already-consumed
+#: value buys nothing, and two blocked sessions plus one success cost one extra
+#: attempt each with no ping-pong.
+#:
+#: NOT secret-derived, exactly like the chain stamp: two wall-clock floats on the
+#: same row, in the same ``data`` column, under the same readers. Nothing here is
+#: a token, a digest, or anything derived from one, so this key cannot leak
+#: anything the row does not already hold.
+#:
+#: Only :meth:`McpTokenStorage.record_grant_ok` writes it, and that write happens
+#: ONLY after a connect stood up end to end (the transport entered, the session
+#: initialized, the tools listed) and is conditioned on the row not having moved
+#: underneath it — a whole-payload read-modify-write that skipped that compare
+#: would put a SPENT refresh token back. A failure writes nothing, because a
+#: failed connect is evidence about nothing.
+#:
+#: Residual loss, stated here rather than discovered later: if EVERY session is
+#: blocked, nobody connects, so nobody writes a witness and the block stands until
+#: a session stands up or the operator re-auths. That is not a regression against
+#: this feature's own head (which behaved identically) but it is not what ``main``
+#: did; the fix would be a periodic resource-side probe, which puts a network
+#: request on a timer in every blocked session and needs a never-refresh mode in
+#: the auth flow, and it is deliberately not in this change.
+GRANT_OK_KEY = "grant_ok"
 
 #: Payload key marking THIS row's refresh token as one the authorization server
 #: has already rejected with ``invalid_grant``. Set only by the parsed-body
@@ -858,6 +1003,34 @@ def _resolve_store(store: StructuralAuthStore | None) -> StructuralAuthStore | N
         return None
 
 
+class GrantMarker(NamedTuple):
+    """The identity of the grant in one ``mcp-oauth`` row, as one atomic read.
+
+    ``stamp`` is the CHAIN stamp (:func:`_chain_stamp_of`) and ``is_dead`` is the
+    row's tombstone: the two halves :meth:`McpTokenStorage.grant_marker` has
+    always returned together, from ONE fetch, because a marker assembled out of
+    two reads could straddle a write and describe no instant that ever existed.
+
+    ``witness_at`` is the third half, added for QA round 1's Q1: the ``at`` of
+    :data:`GRANT_OK_KEY`, or ``None`` when the row carries no witness. It rides in
+    the same tuple — and therefore in the same fetch — for exactly the reason
+    ``is_dead`` does, and it is what lets a session that blocked over a TEMPORARY
+    provider rejection see a sibling's successful connect, which moves no stamp at
+    all because a sibling's rotation continues the chain.
+
+    A NamedTuple rather than a bare tuple so each position has a NAME at every
+    use site: three positional fields of which two are floats and one is a bool
+    would otherwise make ``marker[2]`` read as ``is_dead`` to the next person to
+    touch a comparison, which is the silent-swap class of defect this subsystem
+    has already paid for twice. It still compares equal to an equal plain tuple,
+    so a caller that builds one by hand — tests do — keeps working.
+    """
+
+    stamp: float
+    is_dead: bool
+    witness_at: float | None
+
+
 class McpTokenStorage:
     """SDK ``TokenStorage`` over the shared credential store.
 
@@ -1095,6 +1268,19 @@ class McpTokenStorage:
         # suppress the FIRST refresh of the brand-new grant — a false positive
         # the user pays for with another browser visit.
         creds.pop(GRANT_UNCONFIRMED_SEND_KEY, None)
+        # An interactive grant is a NEW chain by definition, so the carried stamp
+        # goes with the rest of the old grant's state. Removing this line is NOT
+        # a tidiness question — the pop is LOAD-BEARING: the read rule honours a
+        # present pair's ``issued_at`` unconditionally (see
+        # :data:`GRANT_CHAIN_KEY`'s F rule), so a pair left behind here would be
+        # read as THIS brand-new grant's stamp, the row's next rotation would
+        # carry the PREVIOUS chain forward, and the key's whole contract (a peer's
+        # new grant lifts a block, a rotation does not) would invert. Guarded by
+        # ``test_a_new_interactive_grant_is_a_new_chain``. Popped rather than
+        # recomputed because that is what keeps one rule: the read then falls back
+        # to the ``tokens_obtained_at`` written above, which is this chain's own
+        # stamp.
+        creds.pop(GRANT_CHAIN_KEY, None)
         self._write(creds)
 
     def store_refresh_result(self, tokens: OAuthToken, *, presented_refresh_token: str) -> bool:
@@ -1156,6 +1342,14 @@ class McpTokenStorage:
         row that already held the token it presented, so absence here always
         means a REMOVAL that raced us, never a first grant.
 
+        A NEW CHAIN MUST GO THROUGH :meth:`set_tokens`, never through here. This
+        method is the only writer that CARRIES a chain stamp forward
+        (:data:`GRANT_CHAIN_KEY`), so an interactive grant routed through it
+        would be classified as a continuation of the chain the session failed
+        on. The cost is a missed heal (the block stays, no storm) — it fails
+        safe, which is why the funnel split is documented here rather than
+        enforced.
+
         The return value is NOT acted on by its only caller,
         (:func:`_perform_refresh_exchange` discards it and reports
         ``"refreshed"`` either way — see the comment at that call), so what a
@@ -1202,8 +1396,29 @@ class McpTokenStorage:
             )
             return False
         creds = creds or {}
+        # The chain stamp is READ BEFORE the write that consumes both of the
+        # values it is derived from. A rotation CONTINUES the chain it came
+        # from, so the new stamp is {issued_at: <the stamp this row already
+        # carried>, attested_at: <the tokens_obtained_at written just below>} —
+        # see :data:`GRANT_CHAIN_KEY`. Computing it after this write would mint
+        # a fresh stamp on every rotation, which is exactly the self-write storm
+        # the key exists to stop — and it is now the ONLY thing that keeps our own
+        # rotation from reading as a new chain, because the read no longer has an
+        # attestation check to fall back on: a rotation that minted instead of
+        # carrying would re-arm every block on every tick (measured on the tree
+        # before the carry existed: 30 connects over 30 polls).
+        #
+        # The dropped-write cases above (a removed row, a grant that moved on)
+        # never reach here and are correct as they stand: the row still holds the
+        # token we presented, i.e. the same chain, with the same stamp.
+        previous_chain = _chain_stamp_of(creds)
         creds["tokens"] = tokens.model_dump(mode="json")
-        creds[TOKENS_OBTAINED_AT_KEY] = time.time()
+        obtained_at = time.time()
+        creds[TOKENS_OBTAINED_AT_KEY] = obtained_at
+        creds[GRANT_CHAIN_KEY] = {
+            "issued_at": previous_chain,
+            "attested_at": obtained_at,
+        }
         # The exchange DID get an answer, so any write-ahead send marker is
         # resolved by construction: the response is the acknowledgement.
         creds.pop(GRANT_UNCONFIRMED_SEND_KEY, None)
@@ -1331,12 +1546,32 @@ class McpTokenStorage:
         self.clear_send_unconfirmed()
         return False
 
-    def grant_marker(self) -> tuple[float, bool] | None:
-        """``(tokens_obtained_at, grant_is_dead)``, or ``None`` if unreadable.
+    def grant_marker(self) -> GrantMarker | None:
+        """``(chain_stamp, grant_is_dead, witness_at)``, or ``None`` if unreadable.
 
         The identity of the grant currently stored for this server, read in ONE
         row fetch. Callers use it to answer "has somebody obtained a different
         grant since I last looked?" without caring what the grant is.
+
+        The float is the CHAIN stamp (:func:`_chain_stamp_of`), not the row's
+        raw ``tokens_obtained_at``: a refresh rotation carries its chain's stamp
+        forward, so only a NEW grant — an interactive login, a logout, or a row
+        removal — moves it. The distinction is what lets an auth block mean "the
+        grant I failed on was replaced" instead of "the row got newer", which is
+        the difference between a session that heals on a peer's ``/mcp reauth``
+        and a fleet that re-arms its own block on every rotation it performs.
+
+        ``witness_at`` is the THIRD element and it was added on purpose rather
+        than bolted on: a chain stamp can only report a REPLACED grant, and a
+        sibling's refresh continues the chain, so a session blocked by a
+        temporary provider rejection needs positive evidence that the chain WORKS
+        (:data:`GRANT_OK_KEY`). It is read from the SAME fetch as the other two,
+        which is the property that matters — a witness read separately could
+        describe a different instant than the stamp it is compared against, and
+        the rule that consumes it compares exactly those two. ``None`` means the
+        row carries no witness, which is every row written before this key
+        existed and every row whose only activity has been failures; the retry
+        rule may not move from it or to it.
 
         ``None`` means the store could not be read, and is deliberately NOT a
         tuple: a sentinel VALUE would compare unequal to the real marker either
@@ -1350,7 +1585,9 @@ class McpTokenStorage:
         from one fetch costs a third of what calling ``_read_row`` and
         :meth:`grant_is_dead` separately does, and it means the two halves
         describe the SAME instant rather than two reads a write may fall
-        between.
+        between. The chain stamp is derived from that same fetch's payload for
+        the same reason — a stamp read separately from the deadline it attests
+        could straddle a rotation.
 
         It reads the store directly rather than through :meth:`_read_row`, which
         cannot serve this caller: ``_read_row`` deliberately converts a store
@@ -1366,7 +1603,10 @@ class McpTokenStorage:
         if store is None:
             # No store configured is a KNOWN state, not a failed read: there is
             # no grant, and there never will be one until a store appears.
-            return (0.0, False)
+            # Every return is a GrantMarker, never a bare tuple: the manager's
+            # retry rule reads the fields by NAME, so a two-element tuple here
+            # raised AttributeError in the poll the first time it was compared.
+            return GrantMarker(0.0, False, None)
         try:
             rows = store.list_credentials(MCP_OAUTH_PROVIDER)
         except Exception:  # noqa: BLE001 — an unreadable store is "unknown", never a value
@@ -1375,16 +1615,10 @@ class McpTokenStorage:
         row = next((r for r in rows if r.identity_key == self.server_url), None)
         data = row.data if row is not None and isinstance(row.data, dict) else {}
         if not isinstance(data, dict):
-            return (0.0, False)
-        obtained = data.get(TOKENS_OBTAINED_AT_KEY)
-        obtained_at = (
-            float(obtained)
-            if isinstance(obtained, (int, float)) and not isinstance(obtained, bool)
-            else 0.0
-        )
+            return GrantMarker(0.0, False, None)
         dead = data.get(GRANT_DEAD_AT_KEY)
         is_dead = isinstance(dead, (int, float)) and not isinstance(dead, bool) and dead > 0
-        return (obtained_at, is_dead)
+        return GrantMarker(_chain_stamp_of(data), is_dead, _grant_witness_at(data))
 
     def grant_is_dead(self) -> bool:
         """Whether this row's refresh token is a known-dead grant.
@@ -1436,6 +1670,12 @@ class McpTokenStorage:
         the whole exchange. The gap used to be bounded by
         :data:`REFRESH_LATE_RESPONSE_GRACE_S`, not by microseconds, because the
         detached exchange wrote with no lock at all; it does not any more.
+
+        Deliberately does NOT touch :data:`GRANT_CHAIN_KEY`. A tombstone is a
+        verdict about the chain the row already holds, not a new chain, so
+        moving the chain stamp here would make a rejected grant look like a
+        replacement and buy a retry nobody earned. See that key's contract for
+        the full list of writers that must leave it alone.
         """
         try:
             if self._row_was_removed():
@@ -1462,6 +1702,69 @@ class McpTokenStorage:
         except Exception:  # noqa: BLE001 — marking is an optimisation, never a gate
             logger.debug(
                 "MCP dead-grant marker write failed for %s", self.credential_id, exc_info=True
+            )
+            return False
+
+    def record_grant_ok(self) -> bool:
+        """Record that a connect STOOD UP on the grant this row holds.
+
+        The only writer of :data:`GRANT_OK_KEY`, and the only POSITIVE signal
+        this subsystem has: every other persisted fact about a grant is a verdict
+        about its failure (a tombstone, a send marker) or a statement that it was
+        replaced (the chain stamp). A session blocked over a temporary
+        provider-side rejection has neither — a sibling's rotation carries the
+        chain, so the stamp never moves, and measured with real processes the
+        blocked session stayed ``auth-required`` through 60 polls while its
+        sibling served a request on that very row (QA round 1, Q1).
+
+        Returns ``True`` when the witness was written and ``False`` when it was
+        skipped — no row, no grant in the row, or the row moved under us — or
+        when the write was refused.
+
+        Why the write is CONDITIONED on ``tokens_obtained_at``: this is a
+        whole-payload read-modify-write, like every other writer here, so a
+        rotation landing between our read and our write would be undone by our
+        snapshot. For a witness that means putting the SPENT refresh token back —
+        the one thing a rotation is never allowed to lose, because the next
+        refresh then re-presents it and a reuse-detecting provider revokes the
+        whole family (see :data:`GRANT_DEAD_AT_KEY`). Re-reading and writing only
+        when the timestamp is unchanged is the same check-then-write convention
+        :meth:`mark_grant_dead` already uses, rather than a second write
+        primitive. Skipping costs one witness, which buys nobody a retry and
+        costs nobody a rotation. Guarded by
+        ``test_the_success_witness_never_clobbers_a_racing_rotation``.
+
+        Why it never raises: the witness exists for OTHER processes, and every
+        caller is a connect that has already succeeded. A store failure here must
+        not turn a working server into a failed connect, so it degrades to
+        writing nothing — the same best-effort contract as the marker writes.
+        """
+        try:
+            creds = self._read()
+            if creds is None or not payload_carries_grant(creds):
+                # Nothing to attest: no row, or a registration-only row. Unlike
+                # the tombstone this cannot re-create a row the user just deleted
+                # — the payload written below is the one we READ, so a racing
+                # removal leaves us with nothing to write.
+                return False
+            stamp = _chain_stamp_of(creds)
+            obtained = _as_float(creds.get(TOKENS_OBTAINED_AT_KEY))
+            fresh = self._read()
+            if fresh is None or not payload_carries_grant(fresh):
+                return False
+            if _as_float(fresh.get(TOKENS_OBTAINED_AT_KEY)) != obtained:
+                logger.debug(
+                    "MCP success witness for %s was NOT written: the row rotated between "
+                    "the read and the write, and our payload is older than the rotation "
+                    "[writer: McpTokenStorage.record_grant_ok]",
+                    self.server_url,
+                )
+                return False
+            fresh[GRANT_OK_KEY] = {"at": time.time(), "chain": stamp}
+            return self._write(fresh)
+        except Exception:  # noqa: BLE001 — a witness is never worth failing a live connect
+            logger.debug(
+                "MCP success witness write failed for %s", self.credential_id, exc_info=True
             )
             return False
 
@@ -1637,6 +1940,22 @@ def record_oauth_challenge(server_url: str, *, oauth_available: bool) -> None:
         OAUTH_CHALLENGES[server_url] = oauth_available
 
 
+def forget_refused_challenge(server_url: str) -> None:
+    """Drop a "401/403 with no OAuth" observation once it stops being true.
+
+    The desktop catalog reads a ``False`` entry as "this server needs a key it
+    has nowhere to put" (``catalog._needs_unbound_key``) and says so on the row
+    (``signed_in: false`` + ``add_key``). Nothing else ever removes the entry,
+    so after a later connect SUCCEEDED — a transient WAF or rate-limit 403 that
+    cleared — the row kept claiming it for the life of the daemon (review
+    round 3, R3-m2). Only a ``False`` entry is dropped: a ``True`` one is
+    evidence an authorization server exists, which a success does not disprove
+    and :func:`record_oauth_challenge` deliberately never downgrades.
+    """
+    if OAUTH_CHALLENGES.get(server_url) is False:
+        del OAUTH_CHALLENGES[server_url]
+
+
 def server_has_stored_grant(server_url: str, store: StructuralAuthStore | None = None) -> bool:
     """True when an OAuth credential row already exists for ``server_url``.
 
@@ -1681,6 +2000,90 @@ def payload_carries_grant(payload: dict[str, Any] | None) -> bool:
     if not isinstance(tokens, dict):
         return False
     return bool(tokens.get("access_token") or tokens.get("refresh_token"))
+
+
+def _as_float(value: Any) -> float | None:
+    """``value`` as a float, or ``None`` when it is not a usable number.
+
+    ``bool`` is excluded on purpose: it is an ``int`` in Python, so a stray
+    ``True`` would otherwise read as the timestamp ``1.0`` and be accepted as a
+    marker — the one shape where a malformed row would silently look valid.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _chain_stamp_of(data: dict[str, Any] | None) -> float:
+    """The CHAIN stamp of a row payload: carried by a rotation, moved by a new grant.
+
+    The single place the read rule for :data:`GRANT_CHAIN_KEY` lives, kept next
+    to :func:`payload_carries_grant` for the same reason that predicate is kept
+    in one place: it is a rule about what a payload MEANS, and a second copy of
+    it is how the write in :meth:`McpTokenStorage.store_refresh_result` and the
+    read in :meth:`McpTokenStorage.grant_marker` drift apart.
+
+    THE F RULE. Returns the pair's ``issued_at`` whenever the payload carries a
+    grant AND the pair holds a readable ``issued_at``; returns
+    ``tokens_obtained_at`` when the pair is ABSENT (a legacy row, or the pop in
+    :meth:`McpTokenStorage.set_tokens`) or unreadable. A pair that is PRESENT but
+    STALE — one a chain-unaware writer moved ``tokens_obtained_at`` out from
+    under — is deliberately NOT a chain change, and ``attested_at`` is
+    deliberately not consulted: see :data:`GRANT_CHAIN_KEY` for the measured
+    mixed-fleet storm that rule produced (main+head 26/26 rotations per process
+    over 30 polls, against 1/1 with this rule), and for the one cell this rule
+    gives up (an old build's in-place login).
+
+    The failure direction is still chosen, just moved to the case that can still
+    be told apart: a NEW chain misread as a continuation leaves an auth block
+    that only an interactive grant lifts, whereas a continuation misread as a new
+    chain spends a refresh token per tick in every process — and a chain-unaware
+    writer makes that second reading MUTUAL, which is why the old rule's
+    "bounded-and-extra beats dead-until-restart" arithmetic does not hold against
+    an old build. The stuck case has a positive-evidence answer in
+    :data:`GRANT_OK_KEY` and an operator remedy; the storm has neither.
+
+    Never raises: a caller comparing markers is deciding whether to spend a
+    refresh token, and a malformed row must degrade to "treat it as its own
+    chain" rather than propagate into a poller.
+    """
+    if not payload_carries_grant(data):
+        # No grant at all: the stable "absent" marker, and the same value the
+        # pre-chain read returned for an empty row — so an empty row keeps never
+        # moving a marker rather than appearing to change on every write.
+        return 0.0
+    assert data is not None  # narrowed by the predicate above
+    obtained = _as_float(data.get(TOKENS_OBTAINED_AT_KEY)) or 0.0
+    raw = data.get(GRANT_CHAIN_KEY)
+    if isinstance(raw, dict):
+        issued = _as_float(raw.get("issued_at"))
+        if issued is not None:
+            return issued
+    return obtained
+
+
+def _grant_witness_at(data: dict[str, Any] | None) -> float | None:
+    """The ``grant_ok.at`` a row carries, or ``None`` when it carries none.
+
+    Kept next to :func:`_chain_stamp_of` for the same reason that function is
+    kept in one place: it is the read half of a rule about what a payload MEANS,
+    and its writer (:meth:`McpTokenStorage.record_grant_ok`) must not be able to
+    drift away from it.
+
+    ``None`` is deliberately not a value the retry rule may move from or to. It
+    means "this row has never had a recorded success", which is the state of
+    every row written before this key existed, of every row whose only activity
+    has been failures, and of the row a version of this code that predates the
+    key would write. A witness of ``0.0`` would compare equal to the payload of a
+    row that never had one, so absence has to be its own value rather than a
+    default.
+    """
+    if not isinstance(data, dict):
+        return None
+    raw = data.get(GRANT_OK_KEY)
+    if not isinstance(raw, dict):
+        return None
+    return _as_float(raw.get("at"))
 
 
 def _payload_holds_refresh_token(payload: dict[str, Any] | None, refresh_token: str) -> bool:
@@ -2469,8 +2872,15 @@ class LoopbackAuthFlow:
             "\nMCP OAuth authorization required. Open this URL in a browser:",
             f"  <{authorization_url}>",
         ]
-        if await open_browser_quietly(authorization_url):
+        opened = await open_browser_quietly(authorization_url)
+        if opened:
             lines.append("(opened in your default browser)")
+        observer = AUTHORIZATION_OBSERVER.get()
+        if observer is not None:
+            try:
+                observer(authorization_url, opened)
+            except Exception:  # noqa: BLE001 — an observer must never break a grant
+                logger.debug("MCP authorization observer raised", exc_info=True)
         if self._server is not None:
             lines.append(f"Waiting for the redirect to {self.redirect_uri} …")
         self._notify(*lines)
@@ -4754,6 +5164,21 @@ def _make_refresh_coordinating_provider(
                                 except StopAsyncIteration:
                                     return
                                 continue
+                            # Deliberately NO success witness here (agent review
+                            # round 4, major-1). A recovered retry that is not a
+                            # 401 — a 403, a 503, or a 200 followed by a later 401
+                            # — happens INSIDE a connect that can still fail on
+                            # auth, and that connect's block records its baseline
+                            # at the seam, before this point. A witness written
+                            # here was therefore always newer than the failing
+                            # attempt's own baseline, so every poll retried,
+                            # rotated and minted another: 31 connects over 30
+                            # polls. Filtering to 2xx does not close the
+                            # 200-then-401 shape. The connect seam
+                            # (``McpManager._record_grant_ok``) is the only writer,
+                            # because only there has the connect already stood up.
+                            # Guarded by
+                            # ``test_a_recovery_inside_a_failing_connect_never_buys_a_retry``.
                             try:
                                 outgoing = await inner.asend(retry_response)
                             except StopAsyncIteration:

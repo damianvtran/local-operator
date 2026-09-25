@@ -100,8 +100,20 @@ class _AdapterSupervisorShim:
     async def terminate(self) -> None:
         self.terminated = True
 
-    async def _call_raw(self, method: str, params: Any, result_type: Any, *, timeout: float) -> Any:
-        del timeout
+    async def _call_raw(
+        self,
+        method: str,
+        params: Any,
+        result_type: Any,
+        *,
+        timeout: float,
+        # Accepted for signature parity with ``AdapterSupervisor._call_raw`` and
+        # deliberately unused: this double calls the adapter IN PROCESS, so there
+        # is no RPC deadline for the per-action overhead to fund. Dropping the
+        # keyword would be a TypeError the moment a caller sets a rate.
+        execution_overhead_seconds_per_action: float = 0.0,
+    ) -> Any:
+        del timeout, execution_overhead_seconds_per_action
         handler = getattr(self._adapter, method)
         try:
             return await handler(params)
@@ -199,6 +211,43 @@ async def test_fake_provider_episode_seals_a_valid_bundle(tmp_path: Path, episod
     assert provider.allocated is True
     assert provider.evaluate_calls == 1
     assert provider.terminated_refs == [f"lop-ep-{episode_id}"]
+
+
+@pytest.mark.asyncio
+async def test_a_required_absent_value_fails_the_episode_by_name_without_allocating(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The operator-visible shape of the refusal, through the real runner.
+
+    The adapter's own tests watch the provider factory; this one watches the
+    EPISODE, because that is what an operator reads. The measured defect was
+    the same task in the opposite order: a guest allocated, then vendor code
+    raising ``ValueError: WEBSITE_HOST_SUFFIX must be set in environment
+    variables`` with a traceback that named no adapter. Here the diagnostic
+    must name the absent REF and the provider must never have been allocated.
+    """
+
+    provider = FakeProvider(scripted_score=1.0)
+    adapter = _adapter(tmp_path, provider)
+    (adapter._workspace_root / "tasks" / "task_website.py").write_text(fixtures.WEBSITE)
+    selector = _selector(tmp_path, adapter._workspace_root, adapter)
+    shim = _AdapterSupervisorShim(adapter, selector)
+    spec = _spec_with_task(episode_id)
+    object.__setattr__(spec, "task_id", "task_website")
+
+    runner = EpisodeRunner(
+        spec,
+        build_config(tmp_path),
+        selector=selector,
+        model=ScriptedModel(["finish"]),
+        launch=lambda _selector: shim,
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status == "failed", outcome.diagnostic
+    assert "WEBSITE_HOST_SUFFIX" in (outcome.diagnostic or "")
+    assert provider.allocated is False
 
 
 @pytest.mark.asyncio

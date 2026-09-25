@@ -453,3 +453,85 @@ async def test_a_fast_mode_refusal_switches_the_sessions_own_dial_off(tmp_path):
     # Idempotent: a second report on a dial already off changes nothing.
     await stream.fast_refused_handler("anthropic/claude-opus-5", "again")
     assert session.model.fast_mode is False
+
+
+async def _drain_background(session: Session) -> None:
+    """Every spawned task settled, so an event that WOULD have been emitted has
+    been — the no-duplicate and no-event assertions below are only meaningful
+    once nothing is still in flight."""
+    await wait_for(lambda: not any(not task.done() for task in session._background_tasks))
+
+
+@pytest.mark.asyncio
+async def test_a_genuine_switch_announces_the_new_model_once(tmp_path):
+    """D5: a deliberate switch emits ONE ``ModelChangeEvent``.
+
+    Before this, a genuine switch emitted none, so every host that keys its
+    model display off the event — the runtime projection, and through it the
+    discovery record `lop sessions` reads — kept the old model until the next
+    turn's route event. On an idle session that is never.
+    """
+    stream = RoutedStream()
+    session = _session(tmp_path, stream)
+    events: list[Any] = []
+    session.subscribe(events.append)
+
+    session.set_model(
+        ModelSpec(
+            provider="deepseek",
+            model_id="deepseek-flash",
+            context_window=128_000,
+            reasoning_effort="high",
+        ),
+        explicit=True,
+    )
+    await _drain_background(session)
+
+    changes = [event for event in events if isinstance(event, ModelChangeEvent)]
+    assert [(c.provider, c.model_id, c.reason, c.is_fallback) for c in changes] == [
+        ("deepseek", "deepseek-flash", "model switched", False)
+    ]
+    assert changes[0].effort == "high"
+    assert changes[0].context_window == 128_000
+
+
+@pytest.mark.asyncio
+async def test_a_switch_that_withdraws_a_pin_does_not_announce_twice(tmp_path):
+    """The pin withdrawal already announces the new primary; the switch must not
+    repeat it, or a front end that narrates the edge would say it twice."""
+    stream = RoutedStream()
+    session = _session(tmp_path, stream)
+    events: list[Any] = []
+    session.subscribe(events.append)
+
+    await stream.route_handler(FallbackTarget("zai/glm-5.3", None), "provider failure")
+    events.clear()
+
+    session.set_model(
+        ModelSpec(provider="deepseek", model_id="deepseek-flash", context_window=128_000),
+        explicit=True,
+    )
+    await _drain_background(session)
+
+    changes = [event for event in events if isinstance(event, ModelChangeEvent)]
+    assert [(c.provider, c.model_id, c.reason, c.is_fallback) for c in changes] == [
+        ("deepseek", "deepseek-flash", "model switched", False)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_knob_change_announces_nothing(tmp_path):
+    """`/effort` and sampling overrides take the same-pair early return: the
+    model in force did not change, so there is nothing for a display to follow."""
+    stream = RoutedStream()
+    model = MODEL.model_copy(
+        update={"reasoning_efforts": ["low", "high"], "reasoning_effort": "low"}
+    )
+    session = _session(tmp_path, stream, model=model)
+    events: list[Any] = []
+    session.subscribe(events.append)
+
+    session.set_model(model.model_copy(update={"reasoning_effort": "high"}))
+    await _drain_background(session)
+
+    assert not [event for event in events if isinstance(event, ModelChangeEvent)]

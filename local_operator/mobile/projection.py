@@ -2417,7 +2417,12 @@ class ProjectionFold:
         fourth walk added below would put it straight back.
         """
         read = comms.roster_pass()
-        roster = {item.job_id: item for item in read.roster()}
+        # ``lifecycles()`` rather than ``roster()``: this runs per root event,
+        # and ``roster()``'s resumable verdict (a transcript ``stat()`` per
+        # record) is a field this fold never reads. Called directly, with no
+        # ``roster()`` fallback: a fallback is a second path only test doubles
+        # would reach, and the doubles are what must match production.
+        roster = read.lifecycles()
         nodes = read.nodes()
         by_id = {node.job_id: node for node in nodes}
         children: dict[str | None, list[Any]] = {}

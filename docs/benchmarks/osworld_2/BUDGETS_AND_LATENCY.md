@@ -4,9 +4,25 @@ Why the run limits are what they are, and what the per-step latency is made
 of. Written after a 26-task Kimi K3 cohort spent 22.8 h of wall time and had
 9 of 30 episodes truncated by a limit this harness invented.
 
-## The standard is 500 steps and NO wall clock
+## OSWorld v2.1 comparison protocol: 500 steps, no official wall cap
 
-OSWorld 2.0 bounds an episode by **model steps only**. There is no
+OSWorld v2.1 is the current recommended release. Its headline result is at
+**500 decision steps** (the paper also reports 150/300-step results). The
+upstream benchmark loop bounds an episode by model steps only; there is no
+official wall-clock limit. One step is one model call, however many actions it
+carries.
+
+This checkout's ordinary `run_episode.py` defaults are 25 steps and the older
+`osworld-v2-2026.08.08` release, so those defaults do not reproduce the current
+headline protocol. For a comparable headline run, select the release and budget
+explicitly with `--benchmark-release osworld-v2.1 --max-steps 500`.
+
+The runner's five-hour `--max-wall-s` default is an operational watchdog, not an
+OSWorld rule. Any episode truncated by it is non-comparable to an uncapped
+benchmark result and must be disclosed as a protocol deviation. Do not confuse
+an operational cloud lease/TTL with a benchmark wall-time limit.
+
+OSWorld 2.0 also bounds an episode by **model steps only**. There is no
 time limit anywhere in the upstream harness:
 
 - `lib_run_single.py` bounds the loop with `while not done and step_idx <
@@ -20,8 +36,9 @@ time limit anywhere in the upstream harness:
   function in the file carries a decorator** — dead code inherited from
   WebArena. The `"Time limit exceeded"` string in `run.py` is the generic
   `except Exception` message, not a timeout path.
-- The argparse default of `--max_steps 15` is a vestigial OSWorld-1.0 value;
-  the documented run commands, not the defaults, carry the standard.
+- The vendored adapter's upstream argparse default is 15 (a vestigial
+  OSWorld-1.0 value); the Local Operator wrapper separately defaults to 25.
+  Neither default substitutes for the current v2.1/500-step comparison command.
 
 Our runner already counts steps the same way: `_steps_taken += 1` once per
 action batch, with `_guest_actions` tracked separately. So `--max-steps 500`
@@ -62,9 +79,12 @@ reproduce the table rather than conclude it is wrong:
 
 ### What the limits are now
 
-`--max-wall-s` now defaults to **18000** (5 h) in `scripts/run_episode.py` and
-exists only as a runaway guard; it is sized so the 500-step budget always binds
-first.
+`--max-wall-s` currently defaults to **18000** (5 h) in
+`scripts/run_episode.py` and exists only as a local runaway guard; it is not an
+official OSWorld budget. A run that reaches this watchdog must be reported as
+wall-truncated and is not directly comparable to an official uncapped score.
+For an official-style comparison, keep the step budget explicit and report any
+watchdog truncation rather than treating it as an official stopping condition.
 
 The cloud lease is now **derived from the wall** in `run_episode.py`
 (`_ensure_lease_outlasts_wall`, wall + 900 s) rather than left to the
@@ -120,28 +140,32 @@ promising:
 So ~59% of the run is the provider generating tokens, and the largest
 remaining harness-side lever is **output volume**, not harness CPU.
 
-### One settle per batch, not one per run
+### Settle policy: throughput default, paper opt-in
 
-Honouring order splits a batch into several guest runs, and the provider pauses
-`action_delay_s` after each `execute()`. Settling per run would multiply that
-pause AND stack it on the wait the model asked for -- a requested 2 s becoming
-5 s. Measured on the 2026-09 cohort, naive settling would have added 533
-execute calls and ~0.44 h (2% of 22.76 h) of pure sleeping.
+The runner exposes `OSWORLD_ACTION_SETTLE_POLICY` as an episode-scoped,
+manifest-sealed infra value. `throughput` is the default and preserves the
+existing behavior: ordered guest runs are grouped where possible and one 3.0 s
+settle is paid per model batch. This is the policy behind the historical cohort
+measurements above.
 
-So `execute` takes `settle=`, and only the final guest run of a batch settles.
-A batch costs exactly one settle however many runs it took, which is what it
-cost before ordering was honoured.
+For paper-style pacing, opt in with
+`--infra OSWORLD_ACTION_SETTLE_POLICY=paper`. It applies the same fixed 3.0 s
+settle after each compiled nonterminal semantic action. A `WAIT` first receives
+its requested duration, then its separate 3.0 s settle before the next action.
+A compound compiled `ScrollAction` remains one semantic action. This can add
+several seconds and provider executes to a multi-action batch, so paper-mode
+latency/cost is expected to be higher than throughput mode.
 
-### The 3.0 s settle value itself is deliberate and stays
+The adapter still performs exactly one readback/observation after the whole
+model batch. Upstream OSWorld's `env.step` can return/log intermediate states
+between primitive actions, so this is settle-timing parity, **not exact
+trajectory or observation parity** with upstream. Keep the policy sealed with
+results and do not compare throughput and paper runs as if their timing
+apparatus were identical.
 
-`providers/aws.py` sleeps `action_delay_s = 3.0` after each batch. Upstream's
-`sleep_after_execution` defaults to `0.0` and the official script does not pass
-it, but the paper states "A 3 s pause is inserted after each action", so 3.0 s
-is the documented behaviour rather than an accident. Cutting it would save
-about a second per step and risks screenshotting a half-painted UI — a score
-risk taken to chase a latency win that the wall-clock fix dwarfs. Not changed.
-If it is ever revisited, ship it as its own run and watch the
-`UNCHANGED_FRAMES_NOTE` rate.
+The 3.0 s value follows the paper's stated pause; policy selects its frequency,
+not its duration. Upstream's separate `sleep_after_execution` argument defaults
+to 0.0 and is not the source of this adapter's settle.
 
 ## Known remaining inefficiency: the echoed observation_id
 

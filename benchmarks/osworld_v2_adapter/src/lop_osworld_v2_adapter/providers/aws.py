@@ -70,6 +70,7 @@ from lop_osworld_v2_adapter.cleanup import (
 )
 from lop_osworld_v2_adapter.observation import SCREENSHOT_CAUSE_KEY
 from lop_osworld_v2_adapter.providers.base import (
+    DEFAULT_ACTION_DELAY_S,
     GUEST_COMMAND_TIMEOUT_S,
     bounded_observation_cause,
     guest_deadline_for,
@@ -467,7 +468,7 @@ class AwsProvider:
         lease_ref: str,
         ttl_seconds: int = DEFAULT_TTL_SECONDS,
         readiness_timeout_s: float = 600.0,
-        action_delay_s: float = 3.0,
+        action_delay_s: float = DEFAULT_ACTION_DELAY_S,
         terminate_timeout_s: float = 55.0,
         clients: _Clients | None = None,
         desktop_env_factory: Callable[..., Any] | None = None,

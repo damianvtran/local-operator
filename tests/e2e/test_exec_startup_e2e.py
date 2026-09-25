@@ -20,7 +20,7 @@ import pytest
 
 from local_operator.config import ConfigManager
 from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
-from tests.e2e.harness import NO_NOTIFY_ENV
+from tests.e2e.harness import NO_NOTIFY_ENV, provider_call_kinds, user_turns
 
 
 @pytest.fixture
@@ -118,6 +118,10 @@ def exec_server(tmp_path, monkeypatch):
                     ],
                 }
                 finish_reason = "tool_calls"
+            elif "You are judging" in wire and "CONTINUE_FIXTURE" in wire:
+                # A goal that names this marker is judged NOT achieved, so the
+                # CONTINUE path of a headless run can be driven end to end.
+                delta = {"role": "assistant", "content": "VERDICT: CONTINUE\nMore to do"}
             elif "You are judging" in wire:
                 delta = {"role": "assistant", "content": "VERDICT: ACHIEVED\nFixture verified"}
             self.send_response(200)
@@ -214,6 +218,28 @@ def exec_server(tmp_path, monkeypatch):
         serving.join(timeout=5)
 
 
+def _running_status(job_status: Any, job_id: str, timeout: float = 20.0) -> dict[str, Any]:
+    """The job's status once its detached worker has left ``starting``.
+
+    ``--background`` returns as soon as the job record exists, and the worker
+    marks it ``running`` from its own process some time later. A cell that
+    asserts ``running`` on the next line is asserting a wall-clock race: it held
+    on a quiet host and failed under load (QA round 2 on #1475, Q5, which saw
+    ``'starting' == 'running'`` in three cells with a different set failing on
+    each of three runs). This is the deadline-bounded wait
+    ``test_dash_leading_values_reach_the_detached_worker`` already used, so a
+    worker that never boots still fails, on the caller's own assertion.
+    """
+    import time
+
+    deadline = time.monotonic() + timeout
+    state = job_status(job_id)
+    while time.monotonic() < deadline and state.get("status") == "starting":
+        time.sleep(0.05)
+        state = job_status(job_id)
+    return state
+
+
 def test_exec_team_count_loop_and_resume(exec_server):
     run, requests, root = exec_server
     result = run(
@@ -233,7 +259,18 @@ def test_exec_team_count_loop_and_resume(exec_server):
         stdin="",
     )
     assert result.returncode == 0
-    assert len(requests) == 3
+    # A CENSUS, not a total. This command starts ONE user turn, and the standing
+    # goal's judge rides beside it: the judge is armed by ``--goal`` and NOT by
+    # ``--loop`` (a count loop judges nothing — ``GoalLoop.run``'s ``if goal:``
+    # guards that), so it fires ONCE, at the first turn end, and then stops
+    # because its verdict settled the goal. The loop then contributes its own two
+    # iterations. A bare ``== 3`` was written before the judge existed and cannot
+    # tell this from a command that re-submitted its argument, which is what the
+    # census below is for (see ``provider_call_kinds``).
+    kinds = provider_call_kinds(requests, goal="Ship safely")
+    assert user_turns(kinds) == 1, "one user-authored turn, submitted once"
+    assert kinds.count("judge") == 1, "the goal judge's forked aside, exactly once"
+    assert kinds.count("loop") == 2, "the count loop's own two iterations"
     wire = json.dumps(requests[0])
     for expected in ("COLLABORATION_SENTINEL", "PROJECT_SENTINEL", "manager", "coder", "reviewer"):
         assert expected in wire
@@ -246,16 +283,121 @@ def test_exec_team_count_loop_and_resume(exec_server):
         "exec", "Resume without replay", "--resume", session_id, "--clear-goal", "--json", stdin=""
     )
     assert resumed.returncode == 0
-    assert len(requests) == 4
+    # One more user turn and NOTHING else: ``--clear-goal`` is what stops a
+    # judge riding this turn end, so the goal's aside is still the single call
+    # the first command made.
+    kinds = provider_call_kinds(requests, goal="Ship safely")
+    assert user_turns(kinds) == 2, "the exec turn and the resume's own turn"
+    assert kinds.count("judge") == 1, "a cleared goal is not judged"
+    assert kinds.count("loop") == 2
+    before = len(requests)
     missing_goal = run("exec", "--resume", session_id, "--loop", "1", stdin="")
     assert missing_goal.returncode != 0
-    assert len(requests) == 4
+    # A REFUSED run reaches no provider at all, and this is the refusal the
+    # cleared goal must produce: ``--loop`` needs a goal and this resume has
+    # none. It is the regression the cell exists for — clearing only the
+    # attachment left the text in ``goal.json``, so this resume read the goal
+    # back out of the sidecar and STARTED a loop instead of refusing.
+    assert len(requests) == before
     assert "COLLABORATION_SENTINEL" in json.dumps(requests[-1])
     persisted = (directory / "transcript.jsonl").read_text()
     assert "Headless audit" in persisted
     assert '"status": "completed"' in json.dumps(
         [json.loads(line) for line in persisted.splitlines()]
     )
+
+
+def test_exec_goal_over_a_settled_goal_is_judged_again(exec_server):
+    """Agent review round 2, MAJOR-5, end to end through the real CLI.
+
+    The unit half is ``tests/unit/test_exec_startup.py``'s ``apply_startup`` pin.
+    What only the real thing can show is that a SECOND ``--goal`` over a goal the
+    judge already settled is actually JUDGED: the judge's own provider call, the
+    ``<goal>`` block on the wire, and the two durable halves still naming the same
+    objective. Before the fix the new objective kept the settled goal's ``done``,
+    so the judge's aside never came and the block was withheld — a goal silently
+    inert on a documented CLI path.
+    """
+    run, requests, root = exec_server
+    first = run("exec", "Ship the first objective", "--goal", "Ship safely", "--json", stdin="")
+    assert first.returncode == 0
+    kinds = provider_call_kinds(requests, goal="Ship safely")
+    assert kinds.count("judge") == 1
+    session_id = first.stderr.split("session_id=", 1)[1].split()[0]
+    directory = root / "sessions" / session_id
+    # The state MAJOR-5 is about, asserted rather than assumed: the goal this run
+    # set is SETTLED, so the next objective lands on top of a settled record.
+    settled = json.loads((directory / "goal.json").read_text())
+    assert settled["goal"] == "Ship safely"
+    assert settled["status"] == "done"
+
+    before = len(requests)
+    second = run(
+        "exec",
+        "Land the new objective",
+        "--resume",
+        session_id,
+        "--goal",
+        "Land the new billing migration",
+        "--json",
+        stdin="",
+    )
+    assert second.returncode == 0
+    second_requests = requests[before:]
+    kinds = provider_call_kinds(second_requests, goal="Land the new billing migration")
+    assert kinds.count("judge") == 1, "the new objective gets its own verdict"
+    wire = json.dumps(second_requests[0])
+    assert "Land the new billing migration" in wire, "the new objective is the one in the prompt"
+    assert "The user's standing objective" in wire, "the <goal> block is not withheld"
+    record = json.loads((directory / "goal.json").read_text())
+    # The judge's ACHIEVED verdict settled the NEW goal, and the goal it replaced
+    # is kept as history — the two halves of the record agree about which goal is
+    # current, which is what the attachment used to contradict.
+    assert record["goal"] == "Land the new billing migration"
+    assert record["status"] == "done"
+    assert [row["text"] for row in record["history"]] == [
+        "Land the new billing migration",
+        "Ship safely",
+    ]
+    attachment = json.loads((directory / "attachment.json").read_text())
+    assert attachment["goal"] == "Land the new billing migration"
+
+
+def test_exec_goal_continue_verdict_is_recorded_and_admits_no_turn(exec_server):
+    """A headless run waits for its judge's verdict but starts no new turn.
+
+    `lop exec --goal` used to dispose while the judge was still deciding the
+    run's only turn: the verdict was paid for, dropped, and bought again on the
+    next resume (goal.json read `judging`). exec now waits for the verdict and
+    closes continuations first. So a CONTINUE is RECORDED, as `waiting` with its
+    reason, and turns into no extra paid turns. The ACHIEVED half is the cell
+    above, whose `status == "done"` assertion is only deterministic because of
+    the same wait.
+    """
+    run, requests, root = exec_server
+    result = run(
+        "exec",
+        "Start the work",
+        "--goal",
+        "CONTINUE_FIXTURE ship it",
+        # Named so the title call does not ride the census as a user turn.
+        "--name",
+        "Continue fixture",
+        "--json",
+        stdin="",
+    )
+    assert result.returncode == 0
+    kinds = provider_call_kinds(requests, goal="CONTINUE_FIXTURE ship it")
+    assert user_turns(kinds) == 1, kinds
+    assert kinds.count("judge") == 1, "the verdict was asked for exactly once"
+    assert kinds.count("continuation") == 0, "a finished headless run admits no continuation"
+    session_id = result.stderr.split("session_id=", 1)[1].split()[0]
+    record = json.loads((root / "sessions" / session_id / "goal.json").read_text())
+    assert record["status"] == "active", "CONTINUE does not settle the goal"
+    assert record["judge"]["state"] == "waiting", record["judge"]
+    assert record["judge"]["verdict"] == "continue"
+    assert record["judge"]["reason"] == "More to do"
+    assert record["judge"]["run"] == 0, "no continuation was counted"
 
 
 def test_exec_unknown_and_goal_only_do_not_call_provider(exec_server):
@@ -440,7 +582,7 @@ async def test_exec_supervisor_approval_ui(exec_server, tmp_path, approve):
         stdin="",
     )
     job_id = result.stderr.split("Background job ", 1)[1].split(":", 1)[0]
-    state = job_status(job_id)
+    state = _running_status(job_status, job_id)
     assert state["status"] == "running"
     assert not (tmp_path / "written.txt").exists()
 
@@ -549,7 +691,7 @@ def test_exec_loop_lifecycle_outcomes(exec_server, termination, expected):
     )
     assert result.returncode == 0
     job_id = result.stderr.split("Background job ", 1)[1].split(":", 1)[0]
-    status = job_status(job_id)
+    status = _running_status(job_status, job_id)
     assert status["status"] == "running"
     assert status["process_generation"]
     if termination == "stop":
@@ -722,7 +864,7 @@ def test_detached_worker_outliving_its_launcher_stays_running(exec_server):
     assert result.returncode == 0
     job_id = result.stderr.split("Background job ", 1)[1].split(":", 1)[0]
 
-    status = job_status(job_id)
+    status = _running_status(job_status, job_id)
     assert status["status"] == "running"
     # The worker's generation is live; the launcher is provably gone.
     assert _owner_is_dead(status["pid"], status["process_generation"]) is False

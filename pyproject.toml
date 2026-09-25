@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.62.22"
+version = "0.62.32"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Radient Inc.", email = "contact@radienthq.com" }]
@@ -472,12 +472,14 @@ exclude = ["**/node_modules", "**/__pycache__", "**/.*", "**/__editable__.*", "d
 # from the default run and gets its own CI job. Two reasons, both about the
 # fact that its failure mode is a HANG rather than an assertion:
 #
-#   1. It is bounded by `faulthandler.dump_traceback_later(exit=True)`, which
-#      is the only watchdog that survives the kernel-level deadlock it exists
-#      to catch (see tests/e2e/watchdog.py). When it fires it takes the whole
-#      process down — acceptable in a dedicated job, but in the unit run under
-#      xdist that would kill a worker carrying unrelated tests and report them
-#      as an infrastructure error rather than as the freeze they actually are.
+#   1. It is bounded by `faulthandler.dump_traceback_later(exit=False)`, the
+#      only instrument that survives the kernel-level deadlock it exists to
+#      catch (see tests/e2e/watchdog.py): it runs in a C thread and needs no
+#      GIL. That timer is diagnostic — it dumps every thread and ends nothing —
+#      and the fast-fail is the harness's own kernel-level SIGALRM a 5 s grace
+#      later. Keeping the stage out of the unit run is about the TIMER rather
+#      than an exit: `faulthandler`'s timer is process-global, so under xdist a
+#      `bounded` block would take a worker's stacks for the rest of the item.
 #   2. It contends real `flock` lock files and drives whole app lifecycles, so
 #      it is wall-clock bound work that does not belong in the fast inner loop.
 #

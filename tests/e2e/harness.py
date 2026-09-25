@@ -27,10 +27,11 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncIterator, Iterable, Sequence
+from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from local_operator.harness.rows import is_harness_notice_text
 from local_operator.harness.types import (
     AbortSignal,
     ChatRequest,
@@ -42,6 +43,8 @@ from local_operator.harness.types import (
     StreamToolCallDelta,
     TextContent,
 )
+from local_operator.session.goal_judge import goal_continuation_prompt
+from local_operator.session.goal_loop import LOOP_JUDGE_PROMPT, LOOP_PROMPT
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from local_operator.tui.notify import ENV_DISABLE, ENV_DISABLE_VALUE
@@ -104,6 +107,170 @@ E2E_ORACLE_MODEL = ModelSpec(provider="openai", model_id="e2e-oracle-model", con
 ADOPT_TIMEOUT_S = 20.0
 
 
+def _user_row_texts(request: ChatRequest | Mapping[str, Any]) -> list[str]:
+    """The text of every USER-role row in one recorded call, in order.
+
+    TWO SHAPES, because two harnesses record different things. The in-process
+    cells hold ``ChatRequest``s. The exec cells drive a real ``lop`` subprocess
+    against a real loopback provider, so the call happened in ANOTHER PROCESS
+    and all there is to read is the raw wire body — there is no request object
+    to hold. One reader for both, so the census below labels them identically.
+
+    Only TEXT blocks are read, and the two skips are separate facts. ``Content``
+    is ``TextContent | ImageContent`` and an image block carries no ``text`` at
+    all, so a user row holding a pasted attachment is skipped by SHAPE — asked of
+    the type rather than probed for the attribute, because a text-free block is
+    the expected case and not a malformed one. A ``TextContent`` whose ``text``
+    is empty is then skipped by VALUE: it would contribute no words while still
+    costing a separator. Both are load-bearing for the census that labels calls
+    by their question, so neither may be folded into the other.
+    """
+    if isinstance(request, Mapping):
+        rows = [
+            message
+            for message in request.get("messages") or ()
+            if isinstance(message, Mapping) and message.get("role") == "user"
+        ]
+        texts: list[str] = []
+        for row in rows:
+            content = row.get("content")
+            if isinstance(content, str):
+                texts.append(content)
+                continue
+            texts.append(
+                " ".join(
+                    block.get("text") or ""
+                    for block in content or ()
+                    if isinstance(block, Mapping) and block.get("type") == "text"
+                )
+            )
+        return texts
+    return [
+        " ".join(
+            block.text for block in message.content if isinstance(block, TextContent) and block.text
+        )
+        for message in request.messages
+        if message.role == "user"
+    ]
+
+
+def last_user_text(request: ChatRequest | Mapping[str, Any]) -> str:
+    """The question a provider call is ASKING: its last user-role row that is not STATE.
+
+    A provider call carries the whole conversation, so the last user row is what
+    distinguishes the calls a goal-owning session makes from one another — the
+    human's own words for their turn, the judge's forked question for its aside,
+    one of the two loop prompts for a self-continuation. Reading the WHOLE
+    message list instead would match the goal transcript every time and label
+    every call the same.
+
+    STATE ROWS ARE SKIPPED, and that is a correction rather than a nicety: the
+    runtime appends its ``[session-state]`` records, todo reminders and notices
+    AFTER the turn's own prompt, so on those calls the raw last row is a state
+    record and the question sits one row above it. Measured: both of the count
+    loop's iterations in the exec cell end with ``[session-state]``, and a reader
+    that took the raw last row labelled them user turns. The heads come from
+    ``harness.rows`` — the module that already decides what counts as a
+    harness-minted row — rather than from a second list here, because a second
+    list is how a relabelled call goes unnoticed.
+
+    A call whose rows are ALL state (or that has none) still reads as its last
+    row, so the skip can only ever sharpen a label, never blank one.
+    """
+    texts = _user_row_texts(request)
+    if not texts:
+        return ""
+    questions = [text for text in texts if not is_harness_notice_text(text)]
+    return (questions or texts)[-1]
+
+
+def provider_call_kinds(
+    requests: Sequence[ChatRequest | Mapping[str, Any]],
+    *,
+    goal: str,
+    extra: Mapping[str, str] | None = None,
+) -> list[str]:
+    """Label every provider call by WHAT IT IS, not by how many there were.
+
+    ``/goal <text>`` no longer costs one provider call. It starts the user's own
+    turn, and beside it the judged-goal machinery forks a judge AND may admit a
+    continuation turn — all of it on the OWNER's host, so all of it lands in the
+    same scripted stream. A bare ``len(stream.requests)`` therefore cannot tell a
+    second user turn (the bug these cells exist to catch: an argument submitted
+    twice, or a command that re-asks) from the harness legitimately working the
+    goal. The property that survives the feature is that a command starts exactly
+    ONE user-authored turn and that every other call is attributable, and this is
+    the instrument that can state it. It reads EITHER recorded shape — a
+    ``ChatRequest`` or a raw wire body — so the exec cells, which drive a real
+    ``lop`` subprocess and can only see the wire, are censused by this instrument
+    rather than by a second one.
+
+    Labels, from the question each call asks:
+
+    * ``goal`` — the row IS the standing goal text, i.e. the ``/goal`` argument
+      submitted as an ordinary turn. Counting THIS is how a cell states that a
+      command submits its argument once, and a retry does not submit it again;
+    * ``judge`` — ``LOOP_JUDGE_PROMPT.format(goal=...)``, the forked aside. The
+      goal judge and the ``/loop`` driver's judge ask the SAME question (one
+      policy, two triggers), so they share a label on purpose;
+    * ``continuation`` — ``goal_continuation_prompt(goal)``, the turn the judge
+      admitted;
+    * ``loop`` — ``LOOP_PROMPT``, the count loop's own next iteration, which is
+      app-authored chrome rather than anybody's words;
+    * whatever ``extra`` names, for the questions a cell drives itself (a
+      goal-mode loop's ``LOOP_GOAL_PROMPT``, an aside's own text);
+    * ``user`` — THE DEFAULT: a provider call whose question is none of the
+      above is a human's own turn, because the harness's questions are the few
+      texts this module knows by name and a person's turn is whatever they
+      typed. A cell that needs an absolute census therefore asserts its exact
+      counts (how many user turns it drove, and how many of each harness call)
+      rather than a floor.
+    """
+    judge_question = LOOP_JUDGE_PROMPT.format(goal=goal)
+    continuation = goal_continuation_prompt(goal)
+    known = {
+        goal: "goal",
+        judge_question: "judge",
+        continuation: "continuation",
+        LOOP_PROMPT: "loop",
+    }
+    if extra:
+        known.update(extra)
+    return [known.get(last_user_text(request), "user") for request in requests]
+
+
+def user_turns(kinds: Sequence[str]) -> int:
+    """The user-authored turns in a census: the ``/goal`` argument and the rest.
+
+    Named rather than inlined because the pair is easy to get subtly wrong at a
+    call site: a ``/goal`` turn is a user turn, it just happens to be the one
+    whose text a cell also asserts separately.
+    """
+    return sum(kind in {"user", "goal"} for kind in kinds)
+
+
+class ScriptedStreamExhausted(RuntimeError):
+    """A provider call arrived that the script had no turn for.
+
+    Raised in place of an ``IndexError``, and the difference is not cosmetic.
+    The session's turn machinery CATCHES an exception out of the stream and
+    continues on a failed turn ("model stream failed: …"), so an exhausted
+    script does not fail the test — it silently shifts every LATER call's
+    conversation, which is precisely how a census label goes wrong while the
+    cell's assertions stay green. Naming the call, the script's length and the
+    question it was asking is what makes the mis-script diagnosable at all; the
+    stream also records the exhaustion in ``exhausted_at``, so a cell can assert
+    its tape held (``assert stream.exhausted_at is None``).
+    """
+
+    def __init__(self, index: int, scripted: int, question: str) -> None:
+        super().__init__(
+            f"provider call #{index} has no scripted turn ({scripted} scripted), "
+            f"and it asked {question[:120]!r} — the tape is short, so every call "
+            "after this one would be answered from the wrong turn"
+        )
+
+
 class ScriptedStream:
     """Replays one canned event list per model call; records the requests.
 
@@ -115,15 +282,27 @@ class ScriptedStream:
     def __init__(self, turns: Sequence[Sequence[StreamEvent]]) -> None:
         self.turns = [list(turn) for turn in turns]
         self.requests: list[ChatRequest] = []
+        #: The call index a script ran out at, or ``None`` while it held. Recorded
+        #: as well as raised (see :class:`ScriptedStreamExhausted`): the raise is
+        #: swallowed by the turn machinery, so this is the only thing a cell can
+        #: assert on.
+        self.exhausted_at: int | None = None
 
     def __call__(
         self, request: ChatRequest, signal: AbortSignal | None = None
     ) -> AsyncIterator[StreamEvent]:
         self.requests.append(request)
         # A call past the end of the script is a test bug (the loop re-entered
-        # when the author expected it to stop), and an IndexError names it
-        # exactly. Answering with a bare stop would hide the extra turn.
-        turn = self.turns[len(self.requests) - 1]
+        # when the author expected it to stop, or the tape missed a harness call
+        # like a judge), and answering with a bare stop would hide the extra
+        # turn. The tape is indexed by CALL rather than by how many turns the
+        # conversation happened to need, so the error names the call that had
+        # nothing scripted for it.
+        index = len(self.requests)
+        if index > len(self.turns):
+            self.exhausted_at = index
+            raise ScriptedStreamExhausted(index, len(self.turns), last_user_text(request))
+        turn = self.turns[index - 1]
 
         async def gen() -> AsyncIterator[StreamEvent]:
             for event in turn:

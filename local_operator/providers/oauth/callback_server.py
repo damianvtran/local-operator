@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import inspect
 import json
 import logging
@@ -516,6 +517,45 @@ class LoginCallbacks:
     # Endpoint setup is a sequence of explicit fields, not an OAuth code. The
     # host decides how to capture them; the controller never touches stdin.
     on_setup_input: Callable[[str, str, bool], Awaitable[str | None] | str | None] | None = None
+    #: Structured facts about the flow a host renders as CONTROLS rather than
+    #: prose: ``user_code`` (a device flow's code), ``launch_url`` (the short
+    #: loopback ``/launch`` alias) and ``expires_in`` (seconds until the flow's
+    #: own deadline). Each flow calls it once, with whatever it knows, BEFORE
+    #: ``on_auth_url``, so a host that publishes on the URL has the details already.
+    #:
+    #: Separate from ``instructions`` on purpose. ``instructions`` is display text a
+    #: terminal prints verbatim ("Enter code: ABCD-1234"), and the desktop renderer
+    #: used to regex the code back OUT of it to show a copyable chip -- a contract
+    #: nobody had written down, broken by any rewording. The text stays for the
+    #: hosts that print it; this hook is the typed channel for the ones that do
+    #: not. Optional and reporting-only (``report_safely``), so no host has to
+    #: implement it and a raising sink cannot cost a sign-in.
+    on_flow_details: Callable[..., Awaitable[None] | None] | None = None
+
+
+async def report_flow_details(
+    callbacks: LoginCallbacks,
+    *,
+    user_code: str | None = None,
+    launch_url: str | None = None,
+    expires_in: float | None = None,
+) -> None:
+    """Tell the host the flow's structured details, if it asked for them.
+
+    One helper so every flow calls the hook with the same keyword shape; a flow
+    passes only what it knows and the rest arrive as ``None``.
+    """
+    hook = callbacks.on_flow_details
+    if hook is None:
+        return
+    await report_safely(
+        functools.partial(
+            hook,
+            user_code=user_code or None,
+            launch_url=launch_url or None,
+            expires_in=expires_in,
+        )
+    )
 
 
 _T = TypeVar("_T")
@@ -767,10 +807,7 @@ class OAuthCallbackFlow(ABC):
         cancel_attempted = False
         for attempt in range(attempts):
             try:
-                self._server = await asyncio.start_server(
-                    self._handle_connection, "127.0.0.1", port
-                )
-                self._bound_port = self._socket_port()
+                await self._listen(port)
                 return True
             except OSError:
                 if not required:
@@ -809,10 +846,45 @@ class OAuthCallbackFlow(ABC):
             raise ConfigurationError(self._port_unavailable_message(candidates, holders))
 
         try:
-            self._server = await asyncio.start_server(self._handle_connection, "127.0.0.1", 0)
+            await self._listen(0)
         except OSError as exc:
             raise ConfigurationError(f"Could not bind a loopback callback server: {exc}") from exc
+
+    async def _listen(self, port: int) -> None:
+        """Bind ``port`` and serve on it, recording the server BEFORE any yield.
+
+        Why not ``self._server = await asyncio.start_server(...)``: that call
+        binds and listens, then yields once (``create_server``'s trailing
+        ``sleep(0)``) BEFORE it returns the server. A cancellation landing on
+        that yield -- a desktop sign-in superseded inside its first steps, which
+        a burst of starts produces -- raises out of the ``await`` with the
+        socket already listening and no reference to it anywhere, so ``run``'s
+        ``_stop_server`` had nothing to close. The listener then held the fixed
+        callback port for the life of the process, and every later sign-in
+        silently advertised an ephemeral redirect port instead (QA round 2, Q1;
+        reproduced deterministically by cancelling at each yield in turn).
+
+        ``start_serving=False`` makes ``create_server`` return with no await
+        between the bind and the return, so the server is on ``self._server``
+        before anything can cancel us; ``start_serving`` then accepts
+        connections, and a cancel on ITS yield leaves a recorded server that
+        ``_stop_server`` closes.
+        """
+        self._server = await asyncio.start_server(
+            self._handle_connection, "127.0.0.1", port, start_serving=False
+        )
         self._bound_port = self._socket_port()
+        try:
+            await self._server.start_serving()
+        except OSError:
+            # ``start_serving`` is where ``listen()`` actually runs, so it can
+            # fail on a socket that is already bound. The caller retries or falls
+            # back to ``_listen(0)``, both of which overwrite ``self._server`` --
+            # so close this one now or its bound socket leaks for the life of the
+            # process (review round 3, NIT 1).
+            server, self._server, self._bound_port = self._server, None, None
+            server.close()
+            raise
 
     def _port_unavailable_message(self, candidates: tuple[int, ...], holders: str = "") -> str:
         """Explain a failed bind in terms the user can act on.
@@ -1197,6 +1269,11 @@ class OAuthCallbackFlow(ABC):
             auth_url = await self.generate_auth_url(state, redirect_uri)
             self._pending_auth_url = auth_url
 
+            await report_flow_details(
+                self.callbacks,
+                launch_url=self._launch_url(),
+                expires_in=self.options.timeout_seconds,
+            )
             if self.callbacks.on_auth_url is not None:
                 await maybe_await(
                     self.callbacks.on_auth_url(auth_url, instructions=self._instructions())

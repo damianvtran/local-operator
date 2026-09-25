@@ -56,6 +56,7 @@ from local_operator.tui.widgets.tool_card import (
     EXPAND_MAX_LINES,
     ICON_ERROR,
     ICON_INTERRUPTED,
+    ICON_PARTIAL,
     ICON_SUCCESS,
     LIVE_ADVISORY_GLYPH,
     LIVE_HEADER_PENDING,
@@ -2111,6 +2112,10 @@ def test_expanded_output_never_widens_the_card() -> None:
 #: on an error card (both resolve to `tint-danger`) — so ink separates nothing,
 #: and on a colourless terminal it would say nothing either.
 REASON_LEAD = f"{ICON_ERROR} "
+#: Every lead a promoted block can open with: an error's cause, and — design
+#: review round 1, D1 — a partial result's disclosure. Same mechanism, so the
+#: helpers below locate the block by either rather than by one card's state.
+_REASON_LEADS = (REASON_LEAD, f"{ICON_PARTIAL} ")
 
 
 def _collapsed(text: str) -> str:
@@ -2122,14 +2127,21 @@ def _reason_rows(body: list[str]) -> list[str]:
     """The reason block's text: the body indent and the D1 lead removed.
 
     Also asserts the lead SHAPE, because it is the one thing telling these rows
-    from the tool's captured bytes on a monochrome terminal.
+    from the tool's captured bytes on a monochrome terminal. Either state glyph
+    is accepted (:data:`_REASON_LEADS`): the block is the same mechanism for an
+    error's cause and for a partial result's disclosure, and the continuations
+    carry blanks of the same width whichever opened it.
     """
     rows: list[str] = []
+    lead = ""
     for index, line in enumerate(body):
         assert line.startswith(" " * OUTPUT_INDENT), (index, line)
         text = line[OUTPUT_INDENT:]
-        lead = REASON_LEAD if index == 0 else " " * len(REASON_LEAD)
-        assert text.startswith(lead), (index, line)
+        if index == 0:
+            lead = next((c for c in _REASON_LEADS if text.startswith(c)), "")
+            assert lead, (index, line)
+        else:
+            assert text.startswith(" " * len(lead)), (index, line)
         rows.append(text[len(lead) :])
     return rows
 
@@ -2146,7 +2158,7 @@ def _reason_block(rows: list[str]) -> list[str]:
     start = next(
         index
         for index, line in enumerate(rows)
-        if line.startswith(" " * OUTPUT_INDENT + REASON_LEAD)
+        if any(line.startswith(" " * OUTPUT_INDENT + lead) for lead in _REASON_LEADS)
     )
     end = start + 1
     while end < len(rows) and rows[end].startswith(" " * OUTPUT_INDENT + " " * len(REASON_LEAD)):
@@ -3654,3 +3666,130 @@ def test_a_cut_off_turn_names_its_cards_cut_off() -> None:
     deliberate = ToolCard("t", "bash", {"command": "pytest tests/unit -q"})
     deliberate.mark_interrupted()
     assert "interrupted" in deliberate._build_row(100).plain, "a stop still says so"
+
+
+# --- partial results (a search budget cut the answer short) -----------------
+#
+# Design review round 1: D1 (the collapsed row could not show the state) and D2
+# (the disclosure rode a line the card crops at every width). The texts below are
+# the shipped shapes; `test_builtin_tools.py` asserts them against the real tools,
+# so these tests are about where they LAND rather than about their wording.
+#
+# The disclosure the tools compose, in the form D2 measured: on a ripgrep walk
+# cut, the header was 329 cells and the first words about truncation landed at
+# cell 99 — past the 94-cell crop at 100 columns.
+
+_PARTIAL_MATCHES = (
+    "Partial results: 1 match(es) for 'needle_marker' of 1386 "
+    "(use skip=200 for the next page) — the walk stopped at 30 s after 12 files; "
+    "narrow path=<subdirectory> or include=<glob> to search further (ripgrep):\n"
+    "src/a.py:1:needle_marker = 1\n"
+    "src/b.py:2:needle_marker = 2"
+)
+
+
+def test_a_partial_result_is_marked_in_the_collapsed_row() -> None:
+    """The row an operator scans must answer "is this answer whole?" (D1).
+
+    Design review round 1 measured the alternative on the real card: nine cards
+    in one frame, six of them truncated searches, every one painting `✓ 0.4s`
+    beside its arguments — row-for-row identical to the complete search for the
+    same pattern. The partial state now carries its own glyph, the theme's
+    warning ink, and the result's lead line promoted into the row exactly as an
+    error's cause is.
+    """
+    card = ToolCard("t", "grep", {"pattern": "needle_marker"})
+    card.mark_done(_PARTIAL_MATCHES, {"partial_result": True, "partial_stops": []})
+    row = card._build_row(100)
+
+    assert ICON_PARTIAL in row.plain
+    assert ICON_SUCCESS not in row.plain, "a partial answer must not paint as a complete one"
+    # The claim itself survives the crop at every width: that is the half of the
+    # state a glance has to be able to catch.
+    assert "Partial" in row.plain
+    assert _triplet(_style_at(row, ICON_PARTIAL).color) == _triplet(
+        Style(color=theme_mod.semantic_color("warning")).color
+    )
+    _assert_fits(card)
+
+    for width in WIDTHS:
+        row = card._build_row(width)
+        assert ICON_PARTIAL in row.plain, (width, row.plain)
+        assert ICON_SUCCESS not in row.plain, (width, row.plain)
+        _assert_fits(card)
+
+    # The control: the same result WITHOUT the flag keeps the quiet ✓ row, so
+    # the marker tracks the state and not the text.
+    complete = ToolCard("t2", "grep", {"pattern": "needle_marker"})
+    complete.mark_done(_PARTIAL_MATCHES.split(":")[0] + ":\nsrc/a.py:1:needle_marker = 1")
+    assert ICON_SUCCESS in complete._build_row(100).plain
+
+
+def test_a_partial_result_wraps_its_disclosure_in_the_body() -> None:
+    """The claim and the remedy must both survive the expanded card (D2).
+
+    The card paints a captured output line CROPPED to its measure — 94 cells at
+    100 columns, 73 at 80, 54 at 60 — so the disclosure used to show its
+    bookkeeping and lose what happened and what to do next. It is the promoted
+    lead line instead, which wraps, and it paints in the state's ink rather than
+    the captured rows' `dim` (D9: both sampled `#837C6D` on `#301E1A` before, so
+    the frame carried no signal that the line was the state).
+    """
+    card = ToolCard("t", "grep", {"pattern": "needle_marker"})
+    card.mark_done(_PARTIAL_MATCHES, {"partial_result": True})
+    card.toggle_expanded()
+    lines = card._build_content(80).plain.splitlines()
+    body = _collapsed("\n".join(lines))
+
+    assert "narrow path=<subdirectory> or include=<glob> to search further" in body
+    assert "src/b.py:2:needle_marker = 2" in body, "the answer itself still paints"
+    # Located by its lead rather than by index, and only the BLOCK is handed to
+    # the shape helper: the captured rows below it keep the ordinary crop.
+    rows = _reason_rows(_reason_block(lines))
+    assert rows and rows[0].startswith("Partial results: 1 match(es)"), rows
+    # `_reason_rows` asserted the lead itself (either state glyph, blanks after),
+    # so the block is the partial card's promoted disclosure and not a captured
+    # row that happens to start with a glyph.
+
+    # The captured rows keep the one-line-per-row crop: the exemption is the
+    # claimed lead, not the body.
+    wide = ToolCard("t2", "grep", {"pattern": "n"})
+    wide.mark_done(
+        "Partial results: 1 match(es) for 'n' — the walk stopped at 30 s after 1 file;"
+        " narrow path=<subdirectory> or include=<glob> to search further:\n" + "x" * 400,
+        {"partial_result": True},
+    )
+    wide.toggle_expanded()
+    lines = wide._build_content(80).plain.splitlines()
+    assert all(cell_len(line) <= 80 for line in lines)
+    assert not any(len(line.strip()) > 80 for line in lines)
+
+
+def test_a_partial_flag_without_a_lead_line_still_names_the_state() -> None:
+    """The flag says the RESULT is partial, so the row must say so too (D2-3).
+
+    A partial result whose text carries no disclosure promotes nothing — it must
+    not claim a sentence that is not the claim — but a bare `◐` with no words is a
+    state mark the operator cannot read, which design review round 2 caught in a
+    synthetic frame. The row therefore falls back to the label both shipped leads
+    open with. Both halves are required: ``details["partial_result"]`` says the
+    RESULT is partial, ``_PARTIAL_LEADS`` says whether THIS LINE is the claim.
+    """
+    card = ToolCard("t", "grep", {"pattern": "needle"})
+    card.mark_done("1 match(es) for 'needle':\nsrc/a.py:1:needle", {"partial_result": True})
+    row = card._build_row(100)
+    assert ICON_PARTIAL in row.plain, "the state mark is the flag's"
+    assert "Partial" in row.plain, "and the state is named, not only marked"
+    assert ICON_SUCCESS not in row.plain
+    _assert_fits(card)
+
+    card.toggle_expanded()
+    lines = card._build_content(80).plain.splitlines()
+    body = "\n".join(lines[1:])
+    # Nothing is claimed, so nothing is promoted: no glyph lead on any body row
+    # and no row dropped from the captured output. Asserted over the WHOLE block
+    # rather than at an index, which is what made this brittle (review R2-7).
+    assert not any(
+        line.lstrip().startswith((f"{ICON_PARTIAL} ", f"{ICON_ERROR} ")) for line in lines[1:]
+    )
+    assert "src/a.py:1:needle" in body, "the ordinary result still paints"

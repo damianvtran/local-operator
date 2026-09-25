@@ -59,7 +59,9 @@ def test_invalid_or_conflicting_entries_never_echo_input(items: list[str], purpo
 @pytest.mark.parametrize("prefix", ["", "benchmark_compute:"])
 def test_scope_normalization_cannot_bypass_policy_disclosure(prefix: str) -> None:
     assert run_episode._infra_disclosure_metadata([f"{prefix}OSWORLD_ENABLE_PROXY=false"]) == {
-        "osworld_enable_proxy_override": "false"
+        "osworld_enable_proxy_override": "false",
+        "osworld_action_settle_policy": "throughput",
+        "osworld_action_settle_seconds": 3.0,
     }
     assert run_episode._infra_disclosure_metadata(
         [
@@ -70,6 +72,80 @@ def test_scope_normalization_cannot_bypass_policy_disclosure(prefix: str) -> Non
     ) == {
         "osworld_enable_proxy_override": "false",
         "aws_root_volume_size_override": "80",
+        "osworld_action_settle_policy": "throughput",
+        "osworld_action_settle_seconds": 3.0,
+    }
+
+
+def test_missing_settle_policy_is_pinned_for_episode_and_manifest() -> None:
+    parsed = run_episode._parse_infra(["AWS_REGION=us-east-1"], "benchmark_compute")
+    normalized = run_episode._ensure_action_settle_policy(parsed, "benchmark_compute")
+
+    assert [
+        (value.name, value.value) for value in normalized if value.name.endswith("SETTLE_POLICY")
+    ] == [("OSWORLD_ACTION_SETTLE_POLICY", "throughput")]
+    assert run_episode._infra_disclosure_metadata(normalized) == {
+        "osworld_action_settle_policy": "throughput",
+        "osworld_action_settle_seconds": 3.0,
+    }
+    assert run_episode._infra_disclosure_metadata(normalized)[
+        "osworld_action_settle_policy"
+    ] == next(value.value for value in normalized if value.name == "OSWORLD_ACTION_SETTLE_POLICY")
+
+
+def test_invalid_settle_policy_fails_during_preflight_normalization() -> None:
+    parsed = run_episode._parse_infra(["OSWORLD_ACTION_SETTLE_POLICY=fast"], "benchmark_compute")
+    with pytest.raises(ValueError, match="unsupported OSWORLD_ACTION_SETTLE_POLICY"):
+        run_episode._effective_action_settle_policy(parsed)
+
+
+def test_invalid_settle_policy_exits_preflight_from_the_real_run_path(capsys, tmp_path) -> None:
+    """The policy is resolved INSIDE the guarded preflight, not after it.
+
+    ``_effective_action_settle_policy`` used to be called from ``build_config``'s
+    argument list, outside the one handler that turns bad ``--infra`` input into
+    ``EXIT_PREFLIGHT`` (that ``try`` catches ``VolatileRootError`` alone), so
+    ``--infra OSWORLD_ACTION_SETTLE_POLICY=fast`` left ``run`` as an uncaught
+    ``ValueError`` traceback raised by an ordinary command-line flag. Pinning the
+    helper's raise cannot see that -- it passes while the CLI dies -- so this
+    drives the real parser and the real ``run`` and asserts the exit status, the
+    rendered message and the absence of a traceback.
+    """
+
+    import asyncio
+
+    args = run_episode.build_parser().parse_args(
+        [
+            "--selector",
+            str(tmp_path / "selector.json"),
+            "--task-id",
+            "synthetic",
+            "--route",
+            "test/model",
+            "--run-root",
+            str(tmp_path / "must-not-exist"),
+            "--infra",
+            "OSWORLD_ACTION_SETTLE_POLICY=fast",
+            "--no-store",
+        ]
+    )
+
+    assert asyncio.run(run_episode.run(args)) == run_episode.EXIT_PREFLIGHT
+
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "unsupported OSWORLD_ACTION_SETTLE_POLICY" in output.err
+    assert "Traceback" not in output.err
+    # Refused before anything was created, like the other preflight refusals:
+    # this is a bad flag, not a run that got as far as minting a run root.
+    assert not (tmp_path / "must-not-exist").exists()
+
+
+def test_paper_settle_delay_metadata_is_derived_not_an_override() -> None:
+    parsed = run_episode._parse_infra(["OSWORLD_ACTION_SETTLE_POLICY=paper"], "benchmark_compute")
+    assert run_episode._infra_disclosure_metadata(parsed) == {
+        "osworld_action_settle_policy": "paper",
+        "osworld_action_settle_seconds": 3.0,
     }
 
 
@@ -130,6 +206,47 @@ def test_an_explicit_lease_override_is_never_overwritten() -> None:
     values = run_episode._ensure_lease_outlasts_wall(given, args)
 
     assert [v.value for v in values if v.name == "OSWORLD_TTL_SECONDS"] == ["99"]
+
+
+def test_settle_policy_validation_is_bound_to_the_preflight_before_allocation() -> None:
+    """An unknown policy is refused by the PREFLIGHT, before anything exists.
+
+    The adapter validates the settle policy too, but an adapter is reached only
+    once a worker has been spawned and a resource may exist, so its refusal is a
+    late failure. The runner-side check is the one that has to happen for every
+    adapter build -- including one that does not check the value at all -- and it
+    has to happen where the other ``--infra`` refusals happen: in the guarded
+    preflight, exiting as ``EXIT_PREFLIGHT`` instead of as a traceback. That exit
+    is driven end to end by
+    ``test_invalid_settle_policy_exits_preflight_from_the_real_run_path``; this
+    test pins the value contract and the PLACEMENT of the call that enforces it.
+
+    Deliberately runner-side only. Reaching into ``lop_osworld_v2_adapter`` from
+    this file made it fail whenever it ran without the osworld package's
+    conftest, which is what puts the adapter source tree on ``sys.path``: a test
+    that only passes in the presence of another suite is a defect in the test,
+    not evidence about the runner.
+    """
+
+    parsed = run_episode._parse_infra(["OSWORLD_ACTION_SETTLE_POLICY=unknown"], "benchmark_compute")
+    with pytest.raises(ValueError, match="unsupported OSWORLD_ACTION_SETTLE_POLICY"):
+        run_episode._effective_action_settle_policy(parsed)
+
+    # Placement, because "validated somewhere" is not the contract: it must be
+    # resolved BEFORE a config or a spec exists, i.e. before the selector is read
+    # and long before any allocation (which happens inside a spawned worker).
+    # Reading the source is the honest check here -- driving run() past this point
+    # needs a selector, credentials and a cloud provider.
+    import inspect
+
+    source = inspect.getsource(run_episode.run)
+    assert "_effective_action_settle_policy(" in source, (
+        "run() must resolve the settle policy itself; without this call an unknown "
+        "value reaches the adapter, where the refusal is late"
+    )
+    assert source.index("_effective_action_settle_policy(") < source.index(
+        "build_config("
+    ), "the policy must be resolved in the guarded preflight, before build_config"
 
 
 def test_the_run_path_actually_applies_the_lease_derivation() -> None:

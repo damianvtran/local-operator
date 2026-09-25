@@ -605,6 +605,161 @@ async def _page_ids(client, limit: int) -> list[str]:
 
 
 @pytest.mark.asyncio
+async def test_a_scoped_answer_carries_no_off_page_pin(pins_api) -> None:
+    """A scoped page speaks for its GROUP; only the head speaks for the pins.
+
+    ``pinned_off_page`` exists so a client holding one page can still draw a pin
+    made on an older conversation, and that argument is about the listing as a
+    whole -- which is the one thing a scoped request does not ask about. The
+    client gates its pin facts on the head answer for the same reason
+    (``pinFacts`` settled by a scope answer would erase a pin made outside that
+    scope), so an extra here would be a row belonging to another team arriving
+    under this team's name.
+    """
+    from local_operator.resume import write_session_attachment
+
+    client, root = pins_api
+    for index in range(4):
+        session_id = f"lop{index:07d}"
+        _session(root, session_id)
+        write_session_attachment(root / "sessions" / session_id, team="lopdev", agent="", goal="")
+    # Ranked LAST, so a page bound of 2 cannot carry it: the fixture stamps every
+    # session with the same `created_at`, so the id break-tie decides, and
+    # ``oldpin000001`` sorts after every ``lop...`` id.
+    older = "oldpin000001"
+    _session(root, older)
+    write_session_attachment(root / "sessions" / older, team="lopdev", agent="", goal="")
+    assert toggle_pin(root, older) is True
+
+    head = (await _json(client.get("/v1/desktop/sessions", params={"limit": 2})))["result"]
+    assert [row["id"] for row in head["sessions"]] == [
+        "lop0000000",
+        "lop0000001",
+        older,
+    ], "the head page still appends a pinned row it does not carry"
+
+    scoped = (
+        await _json(
+            client.get(
+                "/v1/desktop/sessions",
+                params={"limit": 2, "scope_kind": "team", "scope_name": "lopdev"},
+            )
+        )
+    )["result"]
+
+    assert [row["id"] for row in scoped["sessions"]] == ["lop0000000", "lop0000001"]
+    assert all(row["binding"]["team"] == "lopdev" for row in scoped["sessions"])
+    assert scoped["scope"] == {"kind": "team", "name": "lopdev"}
+    # ``truncated`` still means "this SCOPE held more than the page", and the
+    # cursor is the position that more can be read from -- the two are one fact
+    # (see ``SessionList.next_cursor``), so they agree on every answer.
+    assert scoped["truncated"] is True
+    assert scoped["next_cursor"] is not None
+
+
+@pytest.mark.asyncio
+async def test_the_extras_ride_one_page_of_a_walk(pins_api) -> None:
+    """A pinned row is an EXTRA once, on the first page -- not on every page.
+
+    ``pinned_off_page`` is a promise about the page the client paints first: the
+    whole pinned set rides the answer the Pinned section is drawn from. Built from
+    ``ranked[limit:]``, that list was appended on EVERY page of a walk that still
+    had the pin below it -- so one pinned row came back as a surplus row page after
+    page (QA measured the same id twice over a seven-page walk), and the further
+    down the listing the pin ranked, the more duplicates a walk accumulated. The
+    design sanctions the row's OWN later position (the row union is id-keyed and a
+    pinned row "may additionally be in the head"); what it does not sanction is a
+    second EXTRA.
+    """
+    client, root = pins_api
+    for index in range(6):
+        _session(root, f"lop{index:07d}")
+    # Ranked LAST: the fixture stamps one ``created_at`` on every session, so the
+    # id breaks the tie and ``oldpin...`` sorts after every ``lop...`` id -- which
+    # is what puts it below a page bound of 2 for the whole walk.
+    older = "oldpin000001"
+    _session(root, older)
+    assert toggle_pin(root, older) is True
+
+    cursor: str | None = None
+    surpluses: list[list[str]] = []
+    seen: list[str] = []
+    while True:
+        params: dict[str, Any] = {"limit": 2}
+        if cursor is not None:
+            params["cursor"] = cursor
+        result = (await _json(client.get("/v1/desktop/sessions", params=params)))["result"]
+        rows = [row["id"] for row in result["sessions"]]
+        # The client splits on ``limit``: the page, then whatever was appended.
+        surpluses.append(rows[2:])
+        seen += rows
+        assert result["truncated"] == (result["next_cursor"] is not None)
+        cursor = result["next_cursor"]
+        if cursor is None:
+            break
+
+    assert len(surpluses) == 4, seen
+    assert surpluses == [[older], [], [], []], surpluses
+    # Once as the extra, once at its own rank -- and no third time.
+    assert seen.count(older) == 2, seen
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_cursor_on_the_head_still_carries_the_extras(pins_api) -> None:
+    """A token that DECODES but is not usable here is still this scope's first page.
+
+    ``cursor_missing`` is the disjunction the extras gate reads, and it has two
+    halves that have to be treated alike: an unreadable token, and a decodable
+    FOREIGN one (a group's cursor sent on the head request -- the client bug the
+    flag exists to absorb). Gating on ``position is None`` covered only the first:
+    a foreign token decodes, so the resume filter was skipped and the answer WAS
+    the head's first page, but the pinned extras were omitted from it. That is the
+    one shape where the Pinned section could lose the rows this list exists to
+    keep, since the same answer is what settles ``pinFacts``.
+    """
+    from local_operator.resume import write_session_attachment
+
+    client, root = pins_api
+    for index in range(4):
+        session_id = f"lop{index:07d}"
+        _session(root, session_id)
+        write_session_attachment(root / "sessions" / session_id, team="lopdev", agent="", goal="")
+    # Ranked LAST (one shared `created_at`, so the id breaks the tie), and pinned,
+    # so a page bound of 2 cannot carry it and only the extras half can.
+    older = "oldpin000001"
+    _session(root, older)
+    write_session_attachment(root / "sessions" / older, team="lopdev", agent="", goal="")
+    assert toggle_pin(root, older) is True
+
+    scoped = (
+        await _json(
+            client.get(
+                "/v1/desktop/sessions",
+                params={"limit": 2, "scope_kind": "team", "scope_name": "lopdev"},
+            )
+        )
+    )["result"]
+    foreign = scoped["next_cursor"]
+    assert foreign is not None, "the scoped page must be truncatable for this shape"
+
+    cursorless = (await _json(client.get("/v1/desktop/sessions", params={"limit": 2})))["result"]
+    resumed = (
+        await _json(client.get("/v1/desktop/sessions", params={"limit": 2, "cursor": foreign}))
+    )["result"]
+
+    # The foreign token is refused the way an unreadable one is -- and the answer
+    # is the first page, so it carries the extras exactly as the cursorless one.
+    assert resumed["cursor_missing"] is True
+    assert [row["id"] for row in cursorless["sessions"]] == [
+        "lop0000000",
+        "lop0000001",
+        older,
+    ]
+    assert resumed["sessions"] == cursorless["sessions"]
+    assert resumed["next_cursor"] == cursorless["next_cursor"]
+
+
+@pytest.mark.asyncio
 async def test_a_pinned_conversation_beyond_the_page_is_carried_in_the_answer(pins_api) -> None:
     """THE FIX. A pin outside the page is a ROW in the answer, with its name and
     `pinned: true`, so the client's pinned section has something to draw."""
