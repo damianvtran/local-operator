@@ -194,6 +194,18 @@ class _Rig:
             return (None, None)
         return (server._record, server._record.pid)
 
+    def close_owner(self, session_id: str) -> None:
+        """Shut one session's owner down, leaving the rig's usual no-owner answer.
+
+        ``server.close()`` is what ``dispose`` already calls, and it latches the
+        server closed — which is the state ``find_owner`` reports as
+        ``(None, None)`` — so a case that needs an owner that is GONE uses the
+        rig's own seam rather than a second one. The handle is deliberately left
+        alone: a gate already parked on that owner is still parked, and still
+        observable as unanswered, which is what the undelivered case turns on.
+        """
+        self.servers[session_id].close()
+
     async def dispose(self) -> None:
         for session_id, server in self.servers.items():
             server.close()
@@ -979,7 +991,34 @@ async def test_a_second_question_in_the_same_ask_resurfaces_across_a_switch(
                         + _state(app, alpha, source, probe)
                     )
 
-                    # ANSWER Q1 for real, on screen, with the keyboard.
+                    # ANSWER Q1 for real, on screen, with the keyboard — AND ON A CARD
+                    # THAT HAS THE KEYBOARD, which is what the assertion above does
+                    # not say. `_ask_screen` is assigned one pump BEFORE
+                    # `_mount_prompt` attaches the card, and `AskPickerScreen.on_mount`
+                    # is what takes the keyboard, so a press sent the moment the field
+                    # is set can land while nothing can take it: `_live_prompt` refuses
+                    # an unattached picker, `route_key_to_live_prompt` refuses a bare
+                    # Enter (`character is None`, app.py:21423), and the composer
+                    # swallows it — the owner never advances and this case reports an
+                    # index-latch failure it never observed (the state it left behind
+                    # carries a mounted card, a live ask bridge and
+                    # `_gate_answered_key = None`). Stated as a premise, exactly as
+                    # every other real keypress in this file states it.
+                    assert await _pump_until(
+                        pilot,
+                        lambda: app._ask_screen is not None and app.focused is app._ask_screen,
+                        tries=_RESURFACE_TURNS,
+                    ), (
+                        "the returning question never took the keyboard, so the press "
+                        "below cannot answer it and this case could not speak to the "
+                        "index latch" + _state(app, alpha, source, probe)
+                        # Which widget has the keyboard is the first thing a reader
+                        # needs here and the one fact `_state` does not carry: an
+                        # answer given on this card only exists if the card has it,
+                        # and a composer holding it instead is a different defect
+                        # from a card that never took it.
+                        + f"\n  app.focused = {app.focused!r}"
+                    )
                     await pilot.press("enter")
                     advanced = await _pump_until(
                         pilot,
@@ -1067,27 +1106,50 @@ async def test_an_answer_that_never_reached_the_owner_writes_no_receipt(
     cannot be scheduled from a test: it is raised from ``client.approval_answer``,
     which is precisely the boundary the product itself treats as fallible —
     ``ConnectionError`` out of it is swallowed two frames up by design. The socket
-    goes DOWN with it (``client._connected = False``), because that is what the
-    exception means and because a live socket here changes the OUTCOME under test
-    rather than the observation — see the next paragraph.
+    then goes DOWN with it THROUGH THE PRODUCT'S OWN DISCONNECT PATH, and not by
+    blanking a flag (the rig half of #1551's review MINOR, folded in here):
+    ``client._on_disconnected`` IS the facade's ``on_disconnected`` closure that
+    ``_dial`` hands the client (attach_client.py:878 → attached.py:4128), so
+    calling it with the reason the pump's ``OSError`` arm passes
+    (attach_client.py:1364) runs the real ``AttachedSession._on_disconnected``:
+    the ``_recovering`` flip, the cleared ``_runtime_ready``, and the real
+    ``_recover_runtime`` task. ``_connected = False`` alone left the facade
+    answering ``can_ever_bind`` FALSE, so the case pinned a ladder refusal (G6)
+    that a dead socket never produces — a facade in owner recovery answers that
+    predicate TRUE. See the next paragraph for what actually holds the card off,
+    and ``_Rig.close_owner`` for the other half of the world this models.
 
     WHAT THIS DOES NOT PIN. Whether a card is offered AGAIN after the notice. The
     gate is still unanswered, so the ladder may start a second bridge — correct
     while the viewer can still bind (the question is open, and the operator should
     be able to answer it once the session is back), and refused one level down by
     the ladder's G6 on ``can_ever_bind`` for a session whose owner is gone
-    (``test_a_source_that_can_never_bind_is_offered_no_gate_card``). Here the
-    second card is REFUSED, because the dead socket is ``can_ever_bind``'s false
-    term on this boot facade — and that refusal is load-bearing for this case
-    rather than incidental to it. THE SENTENCE IS PRESENT-PROGRESSIVE ABOUT THE
-    LINK (U5), so it is retired the moment the app believes the link is back, and
-    a live socket plus the still-pending gate is exactly that belief: the app
-    re-offers the card at once, reads its own re-offer as
-    ``_gate_card_is_answerable``, and takes the row down inside the same pump it
-    wrote it in. Measured on this rig at 2 runs in 5 (and 1 in 3 under load) with
-    a live socket — the same sequence the U5 case below names in its own comment,
-    where it was answered by taking the socket down for the same reason. Both
-    halves asserted here need the socket to be gone: a receipt retracted for a
+    (``test_a_source_that_can_never_bind_is_offered_no_gate_card``). HERE NO SECOND
+    CARD IS OFFERED, and the rig no longer pretends G6 is what refuses it: owner
+    recovery is ``can_ever_bind``'s FIRST disjunct by design (a facade with a
+    recovery loop running is on its way back), so G6 passes and the ladder would
+    start a bridge — the live state reads ``can_ever_bind = True`` with
+    ``guard_that_would_drop = '(none: starts)'``. What keeps the card off is that
+    no call to the ladder arrives once the reply has failed: the ONLY calls
+    ``_format(probe.calls)`` records for the whole case belong to the FIRST card
+    — one that started its bridge, and one dropped by G2b because that bridge was
+    still running — and the ladder is re-armed by navigation edges and frontend
+    deltas, of which this session has neither while the row below is on screen, its
+    owner being gone.
+    THE OWNER GOES WITH THE SOCKET (``_Rig.close_owner``), because that is what a
+    dead socket MEANS for the answer under test — it missed the owner because the
+    owner is not there — and because it is what makes that row a STATE rather
+    than a race against the heal: an owner left alive behind a socket the rig has
+    declared dead is found by its own recovery loop within seconds, and the delta
+    that reattach brings re-arms the ladder over the gate the owner still holds.
+    THE SENTENCE IS PRESENT-PROGRESSIVE ABOUT THE LINK (U5), so it lives exactly as
+    long as the app believes the link is down: with a live socket plus the
+    still-pending gate the app re-offers the card at once, reads its own re-offer
+    as ``_gate_card_is_answerable``, and takes the row down inside the same pump
+    it wrote it in. Measured on this rig at 2 runs in 5 (and 1 in 3 under load)
+    with a live socket — the same sequence the U5 case below names in its own
+    comment, where it was answered by taking the socket down for the same reason.
+    Both halves asserted here need the link to be down: a receipt retracted for a
     reply that reached nobody, and a sentence reporting a link that is not there.
     The receipt, the sentence and the unanswered gate are what must hold, and
     those are what this asserts.
@@ -1130,6 +1192,17 @@ async def test_an_answer_that_never_reached_the_owner_writes_no_receipt(
 
                     async def dead_socket(*args: Any, **_kwargs: Any) -> Any:
                         posted.append(args[0] if args else None)
+                        # THE OWNER IS GONE FIRST, because that is WHY the post
+                        # failed: a dead socket MEANS the thing on the other end is
+                        # not there, and this case is about an answer that missed
+                        # it. It is also what makes the row below a STATE rather
+                        # than a race against the heal — left alive, the owner is
+                        # found by its own recovery loop within seconds, and the
+                        # delta that reattach brings re-arms the ladder over the
+                        # gate the owner still holds: the card comes back, the U5
+                        # retirement takes the row down, and this case would be
+                        # racing the very heal it is not about.
+                        rig.close_owner("alpha")
                         # THE LINK GOES DOWN WITH THE POST, not just the post — the
                         # rule the U5 case below states, and the reason this case was
                         # green locally and red in CI. A `ConnectionError` out of a
@@ -1138,6 +1211,17 @@ async def test_an_answer_that_never_reached_the_owner_writes_no_receipt(
                         # still-pending gate at once and retiring the sentence in the
                         # same pump it wrote it in (see the docstring).
                         client._connected = False
+                        # AND IT GOES DOWN THE WAY THE PRODUCT TAKES IT DOWN, which
+                        # is the rig half of #1551's review MINOR. `_on_disconnected`
+                        # on the client IS this facade's own `on_disconnected` closure
+                        # (attach_client.py:878), so this is the real disconnect — the
+                        # `_recovering` flip and the real `_recover_runtime` task —
+                        # rather than the one flag a real drop also sets, which is the
+                        # difference between the state this case measures and a ladder
+                        # refusal (G6) the product never reaches here: see the
+                        # docstring. The reason is the pump's own for an OSError
+                        # (attach_client.py:1364).
+                        client._on_disconnected("owner connection reset")
                         raise ConnectionError("the owner's socket is gone")
 
                     monkeypatch.setattr(client, "approval_answer", dead_socket)
@@ -1183,6 +1267,19 @@ async def test_an_answer_that_never_reached_the_owner_writes_no_receipt(
                         + f"\n  app.focused = {app.focused!r}"
                     )
                     _dump(diagnosis)
+
+                    # THE RIG'S OWN PREMISE, and it is the one #1551's review round
+                    # asked for: this case must measure the state a real dead socket
+                    # leaves behind. `recovering` is that state's public name
+                    # (attached.py:2922), and it is the flag a blanked `_connected`
+                    # left unset — the difference between the mid-recovery facade the
+                    # product does reach here and the unreachable G6 refusal this case
+                    # used to hinge on.
+                    assert alpha.recovering, (
+                        "the facade is not in owner recovery, so the transport did not "
+                        "go down the way a dead socket takes it down and this case is "
+                        "not measuring the state it claims to" + diagnosis
+                    )
 
                     # The premise: the key was taken, so a delivery WAS attempted.
                     # Without it this case could pass by the card never having been
