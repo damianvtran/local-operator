@@ -122,53 +122,6 @@ CLI_DESCRIPTION = """
 """
 
 
-class _LazyVersionAction(argparse._VersionAction):
-    """``--version`` that resolves the installed version when the flag is PARSED.
-
-    ``argparse``'s stock ``action="version"`` takes a fully-formatted STRING at
-    ``add_argument`` time, so the version has to be known while the parser is
-    being built — for every invocation, including the ones that never print it.
-    Resolving it there drags :mod:`local_operator.update` (and with it
-    ``ssl``/``urllib.request``/``http.client``) onto every ``lop`` start: 47.5 ms
-    of CPU measured for the module alone on this host, against a ~10 ms parser
-    build that needs none of it.
-
-    SUBCLASSING RATHER THAN RE-IMPLEMENTING, and that is deliberate. The output
-    of ``--version`` goes through ``parser._get_formatter().add_text(...)
-    .format_help()``, so re-spelling those four lines here would pin today's
-    argparse formatting and silently diverge from the stock action if it ever
-    changed. Delegating to ``super().__call__`` keeps the output byte-identical
-    by construction — the only thing this class changes is WHEN ``version`` is
-    filled in. ``_VersionAction`` has kept this shape since Python 3.2; the test
-    ``test_cli_version_flag_is_byte_identical_to_the_stock_action`` compares the
-    two formattings directly, so a future divergence fails a test rather than a
-    user's script.
-
-    ``self.version`` starts as ``None`` because that is what
-    ``_VersionAction.__init__`` assigns when no ``version=`` is passed, and it is
-    also the sentinel ``super().__call__`` uses to fall back to
-    ``parser.version`` — a parser built by a caller that sets ``parser.version``
-    itself therefore still behaves exactly as stock, provided it passes that
-    value rather than relying on this class.
-    """
-
-    def __call__(
-        self,
-        parser: argparse.ArgumentParser,
-        namespace: argparse.Namespace,
-        values: Any,
-        option_string: Optional[str] = None,
-    ) -> None:
-        if self.version is None:
-            # Function-local for the same reason it used to be local to
-            # ``build_cli_parser``: the import is what costs, and only the run
-            # that actually prints a version should pay it.
-            from local_operator.update import installed_version
-
-            self.version = f"v{installed_version()}"
-        super().__call__(parser, namespace, values, option_string)
-
-
 def build_cli_parser() -> argparse.ArgumentParser:
     """
     Build and return the CLI argument parser.
@@ -180,6 +133,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
     Returns:
         argparse.ArgumentParser: The CLI argument parser
     """
+    from local_operator.update import installed_version
+
     # Create parent parser with common arguments
     parent_parser = argparse.ArgumentParser(add_help=False)
     parent_parser.add_argument(
@@ -239,7 +194,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # it never printed.
     parser.add_argument(
         "--version",
-        action=_LazyVersionAction,
+        action="version",
+        version=f"v{installed_version()}",
         help="Show program's version number and exit",
     )
     parser.add_argument(
