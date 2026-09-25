@@ -184,7 +184,15 @@ def current_tool_source() -> tuple[str, str]:
 
 @contextmanager
 def tool_source(tool_name: str, arguments: Mapping[str, Any] | None = None) -> Iterator[None]:
-    """Publish which call the bytes being redacted came from, for its duration."""
+    """Publish which call the bytes being redacted came from, for its duration.
+
+    The call's IDENTITY only. The guard-area exemption deliberately does not ride
+    here: this context also wraps the scrub of a call's own ARGUMENTS, and a
+    credential typed into one argument of a reading tool (a ``grep`` pattern,
+    say) must still be reported however the call is scoped. It is published
+    around the RESULT's bytes instead, in ``AgentLoop._redact_content`` — see
+    :mod:`local_operator.harness.guard_area`.
+    """
     token = _SOURCE.set((tool_name or "", summarize_arguments(arguments)))
     try:
         yield
