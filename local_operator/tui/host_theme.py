@@ -269,7 +269,10 @@ def install(theme_name: str) -> bool:
     """
     if theme_name != NAME and _remote():
         return False
-    fg, bg, ansi = parse_replies(probe())
+    # A chooser pays the long cap (a late reply is the worse failure for them);
+    # everyone else, probing only so the picker can offer the entry, pays 0.3s
+    # at most on a local terminal that never answers DA1.
+    fg, bg, ansi = parse_replies(probe(1.0 if theme_name == NAME else 0.3))
     if fg is None or bg is None:
         logger.debug("terminal theme: no OSC 10/11 reply, theme not registered")
         return False
