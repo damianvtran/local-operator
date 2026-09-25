@@ -50,6 +50,7 @@ from local_operator.harness.redaction import (
 from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
+    CustomMessage,
     LoopConfig,
     Message,
     ModelSpec,
@@ -3257,11 +3258,16 @@ async def test_the_queued_incident_never_reaches_the_model(tmp_path: Path) -> No
 
     # The instrument is not dead: the live record really is in the context the
     # renderer is about to be handed, so an empty render cannot mean "nothing
-    # was ever queued".
+    # was ever queued". ``isinstance`` rather than a ``getattr`` comparison: the
+    # context holds ``Message``s too, and only a ``CustomMessage`` carries
+    # ``details`` — the runtime never had a Message here, but the type of the
+    # list says it might, and a type-checker cannot see the inequality the
+    # string test relies on.
     parked = [
         message
         for message in session._context.messages
-        if getattr(message, "custom_type", None) == "session_credential_redaction"
+        if isinstance(message, CustomMessage)
+        and message.custom_type == "session_credential_redaction"
     ]
     assert parked, "the notice never reached the live context, so the render proves nothing"
     assert "rotate" in str(parked[-1].details.get("text", ""))
@@ -3881,7 +3887,6 @@ def _fold_incident_row(custom_type: str, text: str) -> list[str]:
     """
     from unittest.mock import MagicMock
 
-    from local_operator.harness.types import CustomMessage
     from local_operator.tui import session_presentation as presentation
 
     class _Target:
