@@ -83,6 +83,14 @@ systems rather than defensiveness:
   because the mock is only ever a test surface: whichever process adopts a
   mock spec is a test process, so the whole process — and every child it
   spawns, which inherits the environment — goes quiet.
+- **Never from a process that is not the user's own**
+  (:func:`desktop_belongs_to_this_process`). The two gates above are things a
+  process DECLARES, so a rig that neither exports the switch nor adopts the
+  mock reaches the desktop — and a redirect to a throwaway ``HOME``, which is
+  what isolates every other side effect in this project, cannot isolate this
+  one: the toast is attributed by bundle identity, which is the user's, not the
+  run's. So the question "is this the user's own session" is asked directly, of
+  the passwd database, and it is the gate that covers a rig nobody can reach.
 
 Whose events count
 ------------------
@@ -111,6 +119,7 @@ import sys
 import threading
 import uuid
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Callable, Literal, Mapping
 
 from local_operator import terminals
@@ -497,6 +506,56 @@ def suppress_notifications_for_process(reason: str = "") -> None:
     )
 
 
+def desktop_belongs_to_this_process() -> bool:
+    """Whether an OS toast posted by THIS process would land on the user's screen.
+
+    THE THIRD GATE, and the one the first two structurally cannot be. The kill
+    switch and the test-hosting rule are both things a process *declares* — one
+    by exporting a variable, the other by adopting the mock wire — so a rig that
+    does neither reaches the operator's desktop. That is not hypothetical: on
+    2026-09-24 a QA rig driving real sessions under ``env -i HOME=…`` posted a
+    banner roughly every nine seconds, carrying its own synthetic tape text
+    ("Reply 1" / "reply 0"), until the operator asked why. ``env -i`` is exactly
+    what strips the suite's arm, and the rig is not a pytest process, so nothing
+    in the harness could have covered it.
+
+    WHY A REDIRECTED HOME IS THE TELL. A notification is attributed by BUNDLE
+    IDENTITY — a machine-wide, per-USER namespace — not by path, so unlike the
+    store, the logs and the cache a toast is not a run-scoped side effect: a copy
+    of our bundle built inside a throwaway home still delivers as
+    ``me.damiantran.localoperator`` to the operator's one real Notification
+    Centre. Every other redirection in this project isolates by path and this one
+    cannot, so "is this the user's own session" has to be asked directly, and the
+    answer a redirected environment cannot fake is the passwd database's
+    (``supervisors.real_home()``, which ``$HOME`` cannot reach). The reasoning is
+    the same one ``supervisors.unit_is_addressable`` uses for a launchd unit, and
+    the helper is shared rather than spelled twice.
+
+    Deliberately NOT asked: whether the CONFIG DIR is the default one.
+    Relocating it is a documented configuration and a user who has done it is
+    still the user, so refusing their toasts would silently take away a feature
+    they configured. A redirected HOME is the isolation recipe this project
+    prescribes for a rig, which is what makes it the signal that means "a run,
+    not a person".
+
+    Fails OPEN when the real home cannot be determined (no passwd database, no
+    ``getuid``): every platform that can post a toast is one that has a passwd
+    entry, so refusing there would buy nothing and take the feature away. The
+    refusal is logged rather than swallowed, because a rig author who expected a
+    banner deserves to find out why none came.
+    """
+    try:
+        from local_operator.supervisors import real_home
+
+        home = real_home()
+        if home is None:
+            return True
+        return Path.home().resolve() == home
+    except Exception:  # noqa: BLE001 — a delivery gate must never break its caller
+        logger.debug("could not tell whose desktop this is", exc_info=True)
+        return True
+
+
 def session_names_in_notifications() -> bool:
     """Whether a toast may be TITLED with the conversation's own name.
 
@@ -800,6 +859,12 @@ def detached_notify(title: str, body: str, *, session_id: str = "", subtitle: st
     swallowed, and the return value reports only whether a child was STARTED.
     """
     if not notifications_enabled():
+        return False
+    if not desktop_belongs_to_this_process():
+        logger.debug(
+            "no OS toast: this process is not running as the real user "
+            "(redirected HOME), so the banner would land on THEIR desktop"
+        )
         return False
     try:
         if sys.platform == "darwin":
@@ -1250,7 +1315,15 @@ class Notifier:
         ):
             self._write(chunk)
 
-        if should_use_desktop_fallback(self._protocol, self._platform, self._env):
+        # The D-Bus toast is an OS surface, so it carries the SAME identity gate
+        # `detached_notify` asks. The two in-band legs above write into THIS
+        # process's terminal — a pty a rig owns — while notify-send reaches the
+        # machine's notification daemon, which belongs to the user and not to the
+        # run.
+        if (
+            should_use_desktop_fallback(self._protocol, self._platform, self._env)
+            and desktop_belongs_to_this_process()
+        ):
             notifier = shutil.which("notify-send")
             if notifier:
                 _spawn_detached(desktop_notify_command(notifier, title, composed, URGENCY))
