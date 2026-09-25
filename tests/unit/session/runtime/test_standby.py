@@ -592,15 +592,15 @@ _CONSOLE_DRIVER = textwrap.dedent("""
     os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(root)
     os.environ.pop(standby.DISABLE_ENV, None)
     standby.enable_warming(root, daemon=(slot == standby.SLOT_DAEMON))
-    # The slot is taken on the warming thread BEFORE anything is spawned, so its
-    # presence is the fast, deterministic answer to "did this console win?". Waiting
-    # the full budget here instead would make every LOSER take the whole budget to
-    # report an outcome that was decided in milliseconds.
-    taken_by = time.monotonic() + 5.0
-    while time.monotonic() < taken_by and slot not in standby._SLOTS:
-        time.sleep(0.05)
+    # ASK, do not infer. The claim is idempotent for a slot this process already
+    # holds, so claiming here answers "did this console get the slot?" synchronously
+    # whatever the warming thread is doing — a LOSER must not have to wait out a
+    # grace window to learn an outcome decided in milliseconds, and a grace window
+    # tuned on an idle host is wrong on a busy one (measured: a 5 s window passed
+    # under ``-n0`` and failed under ``-n 2``).
+    won = bool(standby._take_slot(root, slot))
     warmed = False
-    if slot in standby._SLOTS:
+    if won:
         deadline = time.monotonic() + budget
         while time.monotonic() < deadline:
             warm = standby._WARM[0]
@@ -612,7 +612,7 @@ _CONSOLE_DRIVER = textwrap.dedent("""
     out.write_text(json.dumps({
         "pid": os.getpid(),
         "slot": slot,
-        "slot_held": slot in standby._SLOTS,
+        "slot_held": won and slot in standby._SLOTS,
         "warmed": warmed,
         "spare_pid": spare.proc.pid if spare is not None else None,
     }))
@@ -683,8 +683,131 @@ def _spare_children(pid: int) -> int:
     return count
 
 
+def _clear_module_state() -> None:
+    """Put the standby module back to "no spare, not warming, no slots held".
+
+    A pytest worker runs many cells in ONE process, so module state is shared
+    between them: the slot cells below claim descriptors and enable warming, and a
+    cell that leaves either behind makes the NEXT cell fail for its predecessor's
+    reason (measured: three cells failed that way in a ``-n 2`` run before this
+    existed). Deliberately not ``reset_for_tests``: that retires a tracked standby,
+    and these cells leave no real one to retire.
+    """
+    from local_operator.session.runtime import standby
+
+    standby._WARM[0] = None
+    standby._WARMING[0] = False
+    standby._LAST_REWARM[0] = 0.0
+    standby._release_slots()
+
+
+@pytest.fixture
+def clean_slots():
+    """Clean module state on the way IN and OUT, for every cell that takes a slot."""
+    _clear_module_state()
+    yield
+    _clear_module_state()
+
+
+def _point_config_dir_at(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
+    """Make ``config_dir()`` answer ``root`` — the guard ``ensure_warm`` checks first.
+
+    Without this the two tests below would pass for the wrong reason: the suite
+    redirects ``HOME`` and clears ``LOCAL_OPERATOR_CONFIG_DIR``, so ``config_dir()``
+    answers the test's scratch home and ``ensure_warm`` returns before it reaches
+    the slot at all. (That also means the pre-existing ``ensure_warm`` cells in this
+    file assert on a call that never happens; noted, not fixed here — their subject
+    is the early return, which is real.)
+    """
+    import local_operator.paths as paths
+
+    monkeypatch.setattr(paths, "config_dir", lambda *args, **kwargs: root)
+
+
+def test_an_unwritable_run_directory_denies_the_slot(
+    root: Path, monkeypatch: pytest.MonkeyPatch, clean_slots: None
+) -> None:
+    """M3-1: a cap that vanishes when the disk is full is not a cap.
+
+    ``_take_slot`` used to return ``True`` on any ``OSError``, so with a ``run/``
+    that cannot be created or written — a read-only home, ``ENOSPC`` (this host hit
+    100% twice in one day), ``EMFILE`` — the lock was never taken and two consoles
+    on ONE root both warmed, i.e. the cap silently stopped applying on exactly the
+    roots under pressure. Reproduced by the round-3 review as ``chmod 0o500
+    root/run`` → two spares, no lock file. Cold is the correct answer: "cannot
+    express the cap here" and "do not warm here" are the same answer.
+    """
+    from local_operator.session.runtime import standby
+
+    _point_config_dir_at(monkeypatch, root)
+    (root / "run").mkdir(exist_ok=True)
+    (root / "run").chmod(0o500)
+    try:
+        assert standby._take_slot(root, standby.SLOT_TUI) is False
+        assert standby._SLOTS == {}, "a denied slot must not be recorded as held"
+        # ...and the console therefore warms nothing: this is the failure the
+        # reviewer measured as "2 spares on ONE root, both reporting slot_held=False".
+        spawned: list[Any] = []
+        monkeypatch.setattr(standby, "_spawn_standby", lambda *a: spawned.append(a))
+        monkeypatch.setattr(standby, "_WARMING", [True])
+        standby.ensure_warm(root, sys.executable)
+        assert spawned == [], "a console that could not take the slot warmed anyway"
+    finally:
+        (root / "run").chmod(0o700)
+
+
+def test_the_slot_key_is_the_root_and_the_slot(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clean_slots: None
+) -> None:
+    """m3-1: the key carries the root, because the invariant is per ROOT.
+
+    Keyed by slot alone the dict was only right by accident: ``ensure_warm``
+    refuses any root that is not ``config_dir()`` today, so one process never held
+    two roots' slots at once. An isolated-root session is the case the per-root
+    scoping exists for, and the key now says so.
+    """
+    from local_operator.session.runtime import standby
+
+    other = tmp_path / "other-root"
+    (other / "run").mkdir(parents=True)
+    monkeypatch.setattr(standby, "_WARMING", [True])
+    assert standby._take_slot(root, standby.SLOT_TUI) is True
+    assert standby._take_slot(other, standby.SLOT_TUI) is True, "one root's slot blocked another's"
+    assert standby._take_slot(root, standby.SLOT_TUI) is True, "re-claiming is idempotent"
+    assert sorted(key[0] for key in standby._SLOTS) == sorted({str(root), str(other)})
+
+
+def test_a_failed_spawn_gives_the_slot_back(
+    root: Path, monkeypatch: pytest.MonkeyPatch, clean_slots: None
+) -> None:
+    """m3-2: a claim that produced no spare is a win nobody gets.
+
+    The claim is taken before the fork, so if ``_spawn_standby`` raises, the console
+    used to hold the root's only slot with nothing to offer — for the life of the
+    process, because ``_SLOTS`` is per process and nothing else releases it. The
+    count is then "at most one spare per slot, exactly one holder", which is what
+    the code now does rather than what the prose claimed.
+    """
+    from local_operator.session.runtime import standby
+
+    _point_config_dir_at(monkeypatch, root)
+    standby._WARMING[0] = True
+
+    def explode(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("no fork for you")
+
+    monkeypatch.setattr(standby, "_spawn_standby", explode)
+    standby.ensure_warm(root, sys.executable)
+    assert standby._SLOTS == {}, "the failed spawn kept the root's only slot"
+    # ...and the release is real, which is the part that matters: the next claim
+    # succeeds. Claimed directly rather than by spawning again, so this cell leaves
+    # no child and no tracked standby for the next cell in this worker to trip on.
+    assert standby._take_slot(root, standby.SLOT_TUI) is True
+    assert (str(root), standby.SLOT_TUI) in standby._SLOTS
+
+
 def test_one_spare_per_root_per_slot_however_many_consoles(
-    root: Path, tmp_path: Path, started: dict[str, Any]
+    root: Path, tmp_path: Path, started: dict[str, Any], clean_slots: None
 ) -> None:
     """Agent review round 3: the COUNT is capped, and a console that loses goes cold.
 
