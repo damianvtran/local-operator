@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import httpx
 import pytest
@@ -31,6 +32,7 @@ from local_operator.providers.clients import OpenAICompatClient
 from local_operator.providers.controller import ProviderController
 from local_operator.providers.local import (
     LOCAL_PRESETS,
+    configured_local_providers,
     model_overrides,
     normalize_base_url,
     resolve_base_url,
@@ -154,6 +156,63 @@ def test_presets_and_settings_share_registry():
         assert f"providers.{provider}.base_url" in BY_KEY
         assert f"providers.{provider}.models" in BY_KEY
     assert normalize_base_url("https://host/proxy/v1/v1/") == "https://host/proxy/v1"
+
+
+@pytest.fixture
+def config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """An isolated config dir AND home, which is what `configured_local_providers`
+    and `ConfigManager` both follow."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    return tmp_path / "config"
+
+
+def test_configured_local_providers_reads_the_users_own_opt_in(config_dir):
+    """The preset port is the app's default; `providers.<id>.base_url` is the user's.
+
+    `local_setup` providers ship with a preset port, so their presence in the
+    registry says nothing about whether anything is listening. This reads the one
+    key `_configure_local` writes after a user confirms an endpoint, because that
+    is the only record of a DELIBERATE choice — a UI that reported presets nobody
+    chose would greet every fresh install with its own default ports as failures.
+    """
+    manager = ConfigManager(config_dir)
+    # A raw preset value is NOT an engagement: no `providers:` section at all,
+    # which is what a fresh install has (and what the operator's machine has).
+    assert configured_local_providers() == frozenset()
+    # One write, so the case does not rest on how `update_config` merges a nested
+    # key: an endpoint is an engagement, and model overrides beside it are not.
+    manager.update_config(
+        {
+            "providers": {
+                "vllm": {"base_url": "http://127.0.0.1:8000/v1"},
+                "ollama": {"models": {"m": {}}},
+            }
+        }
+    )
+    assert configured_local_providers() == frozenset({"vllm"})
+
+
+def test_configured_local_providers_treats_empty_and_malformed_as_unset(config_dir):
+    """`validate_endpoint_setting("  ")` is "", i.e. the app's own RESET value.
+
+    Reading a reset as configured would contradict the write path and report a
+    provider the user has just disconnected.
+    """
+    manager = ConfigManager(config_dir)
+    manager.update_config(
+        {
+            "providers": {
+                "vllm": {"base_url": "   "},
+                "ollama": {"base_url": ""},
+                "lmstudio": {"base_url": None},
+                "llamacpp": "not-a-mapping",
+                # A non-local provider is never in this set, whatever it holds.
+                "openrouter": {"base_url": "https://openrouter.ai/api/v1"},
+            }
+        }
+    )
+    assert configured_local_providers() == frozenset()
 
 
 @pytest.mark.parametrize(
