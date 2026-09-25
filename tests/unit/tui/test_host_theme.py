@@ -94,11 +94,13 @@ def test_install_registers_the_theme_and_refreshes_the_settings_choices(monkeypa
 
     monkeypatch.delenv("SSH_TTY", raising=False)
     monkeypatch.delenv("SSH_CONNECTION", raising=False)
-    monkeypatch.setattr(host_theme, "probe", lambda timeout: BLUE_REPLY)
+    caps = []
+    monkeypatch.setattr(host_theme, "probe", lambda timeout: caps.append(timeout) or BLUE_REPLY)
     theme.unregister_theme(host_theme.NAME)
     settings_io._theme_choices()  # a snapshot taken before the theme exists
     try:
         assert host_theme.install("dark")
+        assert caps == [0.3]  # a local user who never chose the theme pays the short cap
         assert host_theme.NAME in {choice.label for choice in settings_io._theme_choices()}
     finally:
         theme.unregister_theme(host_theme.NAME)
