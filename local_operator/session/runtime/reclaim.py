@@ -415,8 +415,28 @@ def runtime_processes(
     ONE fork for the whole census, with no ``per-pid`` probe: at 57 runtimes a
     per-pid ``ps`` (3.9 ms each) would cost 220 ms of the supervisor's slice for
     data the process table already prints in a single call.
+
+    ``-ww`` IS MANDATORY AND IT IS NOT COSMETIC. ``command`` is this row's LAST
+    column, and ``ps(1)`` extends a last column to the edge of the display — so when
+    ps cannot determine the display width, as when its output is piped (every caller
+    here), the width on Linux "is undefined (it may be 80, unlimited, determined by
+    the TERM variable, and so on)". A truncated row severs the ``-m <module>`` pair
+    :func:`parse_process_row` matches, so the census reports FEWER runtimes than
+    exist — or none — as a NUMBER rather than as an error, and an empty census reads
+    downstream as "nothing to sweep". ``-ww`` is unlimited width.
+
+    ``-Eww`` would widen the row too, and it is still the wrong flag even though the
+    three sibling readers in this module use it. ``-E`` appends each process's own
+    environment to that same ``command`` column, which this reader does not need — the
+    environment is read per CANDIDATE by :func:`process_env`/:func:`process_envs`, and
+    the whole-fleet form measured 1.7 MB against 385 KB without it (see
+    :func:`process_env`) — and which it must not have, because ``parse_process_row``
+    word-splits that column and matches the spawn contract in it: environment words in
+    the field being matched are words an env var could put there, and admitting a
+    stranger as a runtime is the one misidentification this module's parser comment
+    exists to forbid.
     """
-    output = run(["ps", "-eo", "pid=,ppid=,etime=,time=,command="], timeout_s)
+    output = run(["ps", "-ww", "-eo", "pid=,ppid=,etime=,time=,command="], timeout_s)
     found: list[RuntimeProcess] = []
     for line in output.splitlines():
         row = parse_process_row(line)
