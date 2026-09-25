@@ -330,7 +330,11 @@ class TuiSessionHandle(SessionHandle):
         # LAST, once the identity above is in place: an idle ``/new`` or
         # ``/resume`` emits no session event, so without this nudge the
         # registrant's push tick (and with it the record `lop sessions` reads)
-        # waited for the 15 s heartbeat. ``_schedule_push`` is thread-safe.
+        # waited for the 15 s heartbeat. Called from the host (Textual) thread,
+        # exactly as the per-event handler in ``subscribe`` calls it: the
+        # ``SessionHandle.subscribe`` contract requires every projection
+        # callback to be thread-safe, i.e. to hop onto its own loop with
+        # ``call_soon_threadsafe`` rather than touch loop state here.
         if self._on_projection is not None:
             self._on_projection()
 
