@@ -25,6 +25,8 @@ from local_operator.evaluation.protocol import ActionBatch
 from local_operator.evaluation.runner.model import DecisionRejected
 from local_operator.evaluation.runner.provider_client import parse_decision
 from local_operator.evaluation.runner.public_reply import (
+    _LeadingObjectDecline,
+    _locate_leading_object,
     decode_public_reply,
     public_reply_contract,
     public_reply_schema,
@@ -911,6 +913,117 @@ async def test_a_truncated_prose_decision_withholds_the_widening() -> None:
     # The class and the channel of the PRE-widening client: refused on the prose,
     # not judged on the call's bytes.
     assert raised.value.class_key == "incomplete-json"
+    assert raised.value.channel_read is False
+
+
+def test_the_leading_tolerance_names_the_reason_it_declined() -> None:
+    """A bare ``None`` cannot say WHY, which is how three rounds went wrong.
+
+    The reply-channel gate asks this helper ONE question -- does the payload
+    state no decision? -- and the helper declines for four different reasons,
+    only the first of which answers yes. Reconstructing that answer from the
+    parser's offset is what put a truncation, a non-decision example and a
+    discarded complete decision each on the widening side, one framing boundary
+    at a time, so the classification is pinned here on the reason itself: a new
+    reason must default to the conservative side, not to whichever side the
+    caller's test for ``None`` happened to land on.
+    """
+
+    decoder = json.JSONDecoder()
+    located = _locate_leading_object('{"actions": [], "public_observations": ""}', decoder)
+    assert not isinstance(located, _LeadingObjectDecline)
+
+    declines = {
+        _LeadingObjectDecline.NOTHING_TO_READ: "no decision here at all",
+        _LeadingObjectDecline.BEGINS_NOTHING: 'Sure: {"actions": [',
+        _LeadingObjectDecline.NOT_DECISION_SHAPED: 'Sure: {"example": true}',
+        _LeadingObjectDecline.DOES_NOT_END_AT_IT: (
+            'Sure: {"actions": [], "public_observations": ""} Hope that helps!'
+        ),
+    }
+    for expected, payload in declines.items():
+        assert _locate_leading_object(payload, decoder) is expected
+
+    assert {reason for reason in _LeadingObjectDecline if reason.states_no_decision} == {
+        _LeadingObjectDecline.NOTHING_TO_READ
+    }
+
+
+@pytest.mark.parametrize(
+    ("prefix", "suffix"),
+    [
+        ("Sure, here is my decision: ", ""),
+        ("```json\n", ""),
+        ('input" string="true">', ""),
+    ],
+    ids=["preamble", "fence", "native-call-syntax"],
+)
+@pytest.mark.asyncio
+async def test_a_framed_truncated_prose_decision_withholds_the_widening(
+    prefix: str, suffix: str
+) -> None:
+    """Framing is not a decision, so it cannot turn a truncated one into silence.
+
+    Round 2's class arriving in the framing it actually arrives in: a preamble,
+    a code fence or native call syntax in front of an object that started and
+    was cut off. The gate reads the DECISION, never the offset the parser
+    reports, because the offset is a property of the framing -- the offset-keyed
+    marker read these as decisionless and executed the call's envelope where
+    base refused and re-prompted. The native-call form is live in the corpus
+    (``cohort8-20260925-002620``, 1044 chars, ends mid-object), and the framed
+    shape is the majority among the prose-bearing ``leading-delimiter`` replies.
+    """
+
+    current = observation()
+    body = envelope(finish_payload(current), "Visible status: ready")
+    # The object's own closing brace is gone, so the prose holds a value that
+    # STARTED and then broke -- behind framing that hides it from offset 0.
+    text = prefix + body[:-1] + suffix
+    stream = ChannelStream(body, name="web_search", text=text)
+
+    with pytest.raises(DecisionRejected) as raised:
+        await _client(stream, model_spec=_spec(supports_tools=True)).decide(
+            current, _turns(current)
+        )
+
+    assert raised.value.class_key == "leading-delimiter"
+    assert raised.value.channel_read is False
+
+
+@pytest.mark.parametrize(
+    ("prefix", "suffix"),
+    [
+        ("Sure, here is my decision: ", "\nLet me know if you need anything else."),
+        ("```json\n", "\n```\nLet me know if you need anything else."),
+        ('input" string="true">', "\nHope that helps!"),
+    ],
+    ids=["preamble", "fence", "native-call-syntax"],
+)
+@pytest.mark.asyncio
+async def test_a_framed_complete_decision_with_trailing_text_withholds_the_widening(
+    prefix: str, suffix: str
+) -> None:
+    """A decision the model wrote and then talked past is still its decision.
+
+    The located path reads a decision behind framing only when the reply ENDS at
+    it -- a bare fence marker is the one exception -- because everything after is
+    the context a quoted decision arrives with. So this decline is a COMPLETE
+    decision declining on framing, and under the offset-keyed marker it was
+    indistinguishable from "no ``{`` at all": the call's envelope was executed
+    in place of a decision the model had already stated in full, which is
+    exactly what the widening's own bound forbids.
+    """
+
+    current = observation()
+    body = envelope(finish_payload(current), "Visible status: ready")
+    stream = ChannelStream(body, name="web_search", text=prefix + body + suffix)
+
+    with pytest.raises(DecisionRejected) as raised:
+        await _client(stream, model_spec=_spec(supports_tools=True)).decide(
+            current, _turns(current)
+        )
+
+    assert raised.value.class_key == "leading-delimiter"
     assert raised.value.channel_read is False
 
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from enum import Enum
 from typing import Any, Mapping, Sequence, get_args
 from urllib.parse import unquote
 
@@ -397,8 +398,11 @@ class DecisionParseError(ValueError):
     that same sentence -- so no reader of the text can tell them apart without
     re-parsing an offset out of a message. Only the first means "this payload
     states no decision"; :func:`_states_a_decision` reads the marker, and it is
-    why the marker exists. Every other raiser, here and in ``provider_client``,
-    leaves it ``False``, which is the conservative side.
+    why the marker exists. Its ONE setter is the leading-object tolerance, which
+    reads the classification off the typed reason it declined for
+    (:class:`_LeadingObjectDecline`) -- so a new decline reason cannot silently
+    land on the widening side. Every other raiser, here and in
+    ``provider_client``, leaves it ``False``, which is the conservative side.
     """
 
     def __init__(self, *args: object, no_value_at_all: bool = False) -> None:
@@ -546,14 +550,26 @@ def _decode_leading_json(payload: str) -> tuple[Any, str, int]:
         # duplicate key at the head on the refusals they already had.
         if isinstance(error, json.JSONDecodeError) and "line 1 column 1 (char 0)" in str(error):
             located = _locate_leading_object(payload, decoder)
-            if located is None:
-                # Nothing could start a value at offset 0 AND no single decision
-                # was readable behind the framing: this is the ONE failure that
-                # means the payload states no decision, and the only raiser that
-                # sets the marker ``_states_a_decision`` gates the
-                # reply-channel widening on.
+            if isinstance(located, _LeadingObjectDecline):
+                # Nothing could start a value at offset 0, and the leading-object
+                # tolerance could not read one behind the framing either. That
+                # tolerance declines for FOUR reasons and only ONE of them means
+                # the payload states no decision, so the marker
+                # ``_states_a_decision`` gates the reply-channel widening on is
+                # read off the DECLINE's own classification rather than
+                # re-derived here from the parser's reported OFFSET -- an offset
+                # is a property of the reply's FRAMING, not of the decision, and
+                # three revisions of this gate each keyed a downstream heuristic
+                # on it, one framing boundary at a time. A decline that is not
+                # ``NOTHING_TO_READ`` is a decision the model STARTED writing
+                # (round 2's class) or wrote in full and then discarded (round
+                # 3's), and the conservative direction for both is the
+                # pre-widening one: refuse on the prose and re-prompt, rather
+                # than execute the call's envelope and never tell the model its
+                # object was cut off or passed over.
                 raise DecisionParseError(
-                    f"decision is not valid JSON: {error}", no_value_at_all=True
+                    f"decision is not valid JSON: {error}",
+                    no_value_at_all=located.states_no_decision,
                 ) from error
             decoded, end, value_start = located
             # Bytes, not code points. The located start is a character index
@@ -597,6 +613,15 @@ def _states_a_decision(payload: str) -> bool:
     :attr:`DecisionParseError.no_value_at_all`, which is also what an empty or
     non-JSON prose reply produces -- answers ``False``.
 
+    That marker is set from the leading tolerance's own typed decline reason
+    (:class:`_LeadingObjectDecline`) and from nothing else, so the four ways
+    that tolerance can decline are classified WHERE THE REASON IS CHOSEN rather
+    than reconstructed here from a parser offset. Only one of them -- no ``{``
+    in the payload at all -- means the model stated no decision; a truncation, a
+    non-decision object, and a decision the reply does not END at all each mean
+    it started or finished one, which is exactly the case this gate must not
+    step over.
+
     The answer comes from that TYPED MARKER and never from the message text,
     because the text cannot carry it: the decoder composes one sentence for both
     parse-failure classes, so a substring test over it puts a TRUNCATED decision
@@ -610,7 +635,10 @@ def _states_a_decision(payload: str) -> bool:
     cannot classify as decisionless WITHHOLDS the widening, so the prose is
     judged exactly as it was before the widening existed. A refusal reason added
     to the decoder later is on that default side too, because a reason that does
-    not set the marker reads as a decision present.
+    not set the marker reads as a decision present -- and a decline reason added
+    to the tolerance later is on it as well, because a new
+    :class:`_LeadingObjectDecline` member states ``states_no_decision`` False
+    until that classification is deliberately declared.
     """
 
     if not payload.strip():
@@ -661,8 +689,80 @@ def _is_fence_marker_only(remainder: str) -> bool:
     )
 
 
-def _locate_leading_object(payload: str, decoder: json.JSONDecoder) -> tuple[Any, int, int] | None:
-    """The reply's leading DECISION when framing precedes it, else ``None``.
+class _LeadingObjectDecline(Enum):
+    """Why the leading-object tolerance could not read the reply's decision.
+
+    :func:`_locate_leading_object` declines for FOUR distinct reasons, and a
+    single ``None`` cannot say which one fired -- which is how three successive
+    revisions of the reply-channel gate each ended up keying a downstream
+    heuristic on the parser's reported OFFSET, a property of the reply's
+    FRAMING rather than of the decision:
+
+    * a foreign-named call overriding a valid prose decision (round 1);
+    * an UNPREFACED truncated decision read as decisionless (round 2);
+    * the same truncation -- and a complete decision with trailing text --
+      arriving behind a preamble, a fence or native call syntax (round 3).
+
+    So the reason is typed HERE, where it is chosen, and the classification the
+    gate needs rides on the reason itself (:attr:`states_no_decision`) instead
+    of being reconstructed by its caller. Only ``NOTHING_TO_READ`` means "this
+    payload states no decision"; the other three each mean the model started or
+    finished one, where the conservative direction is the pre-widening
+    refusal-and-re-prompt.
+    """
+
+    #: No ``{`` in the payload at all: the model stated no decision to read.
+    NOTHING_TO_READ = "nothing-to-read"
+    #: The first ``{`` began a value that did not decode -- a decision the model
+    #: was WRITING (round 2's class, which framing hides from an offset test).
+    BEGINS_NOTHING = "begins-nothing"
+    #: The first ``{`` decoded but states no decision: an example, or an echo of
+    #: the harness's own feedback.
+    NOT_DECISION_SHAPED = "not-decision-shaped"
+    #: It decoded decision-shaped, but the reply does not END at it -- a decision
+    #: written in full and then discarded in favour of trailing text or another
+    #: object (round 3's class).
+    DOES_NOT_END_AT_IT = "does-not-end-at-it"
+
+    @property
+    def states_no_decision(self) -> bool:
+        """Whether this decline means the payload states no decision at all.
+
+        A property rather than a per-member flag so a reason added later
+        defaults to the conservative side without anyone having to remember it:
+        a new member reads as "a decision may be present" until this line is
+        deliberately widened, which is the direction
+        :func:`_states_a_decision` states it wants.
+        """
+
+        return self is _LeadingObjectDecline.NOTHING_TO_READ
+
+
+def _locate_leading_object(
+    payload: str, decoder: json.JSONDecoder
+) -> tuple[Any, int, int] | _LeadingObjectDecline:
+    """The reply's leading DECISION when framing precedes it, else the decline.
+
+    Returns the located ``(value, end, value_start)`` when the three conditions
+    below hold, and otherwise the :class:`_LeadingObjectDecline` naming WHICH one
+    declined -- a typed reason rather than ``None``, because the caller that
+    gates the reply-channel widening on "this payload states no decision" must
+    not have to reconstruct that distinction from an offset. Only
+    ``NOTHING_TO_READ`` states no decision; the other three state one that is
+    unreadable, not decision-shaped, or not the reply's last word.
+
+    The exposure this rule answers is CONDITIONAL, and that belongs here because
+    a bundle cannot show it: whether a misclassified reply changes a turn's
+    OUTCOME depends on the call's own ARGUMENTS, and a sealed artifact publishes
+    the call's name and shape rather than its bytes -- so a corpus can show that
+    the widening fired where base refused and re-prompted, but not what
+    executing that call would have done. The footprint is measured anyway, on
+    2026-09-25 over the arm's 204 ``leading-delimiter`` artifacts: 23 sit beside
+    a call, 14 of those contain a ``{``, and 10 of the 14 took the widening under
+    the offset-keyed marker -- mostly the FRAMED shape, which is the shape these
+    replies actually arrive in. Classifying here keeps the widening on 185 of
+    the 204 (the 10 lost are replies that DID start a decision, which is the
+    trade this rule makes deliberately).
 
     The question the second rule of :func:`_decode_leading_json` is about: a
     reply that put a preamble, a code fence or a native tool-call syntax wrapper
@@ -717,7 +817,9 @@ def _locate_leading_object(payload: str, decoder: json.JSONDecoder) -> tuple[Any
 
     start = payload.find("{")
     if start < 0:
-        return None
+        # The ONE decline that means the model stated no decision: there is no
+        # brace to read. Every return below this line is a decision ATTEMPT.
+        return _LeadingObjectDecline.NOTHING_TO_READ
     try:
         candidate, end = decoder.raw_decode(payload, start)
     except (ValueError, RecursionError):
@@ -725,14 +827,14 @@ def _locate_leading_object(payload: str, decoder: json.JSONDecoder) -> tuple[Any
         # and a candidate whose own keys are duplicated, which the hook refuses:
         # a reply carrying one is not read at all, the direction the
         # duplicate-key rule already set.
-        return None
+        return _LeadingObjectDecline.BEGINS_NOTHING
     if not _is_decision_shaped(candidate):
-        return None
+        return _LeadingObjectDecline.NOT_DECISION_SHAPED
     if payload[end:].strip() and not _is_fence_marker_only(payload[end:]):
         # A second brace -- a competing decision, an example, or an object that
         # did not survive -- or the context a quoted decision arrives with.
         # Either way the reply does not END at the decision it was read from.
-        return None
+        return _LeadingObjectDecline.DOES_NOT_END_AT_IT
     return candidate, end, start
 
 
