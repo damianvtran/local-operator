@@ -61,10 +61,12 @@ same one :func:`enabled_seconds` takes of a malformed bound: disable, never fail
 
 The workspace is deliberately NOT under ``tmp_path``: the master and its workers
 are separate processes and the controller has to be able to read what a wedged
-worker wrote, which means a path both can compute from the environment. It is
-also fixed rather than unique per session so that the workflow's ``always()``
-step can find the files after a job is cancelled, when no process is left to
-tell it where they are.
+worker wrote, which means a path both can compute from the environment. Its
+ROOT is fixed for the same reason -- the workflow's ``always()`` step finds the
+files after a job is cancelled, when no process is left to tell it where they
+are -- while the run's own directory beneath it is unique (see
+:func:`run_dir`), so two concurrent runs on one host never read, or delete, each
+other's evidence.
 
 WHAT A CANCELLED JOB LEAVES BEHIND
 ----------------------------------
@@ -124,18 +126,47 @@ the source AND about behaviour in
 
 WHERE IT IS ENABLED
 -------------------
-Only when ``LOCAL_OPERATOR_SHARD_STALL_SECONDS`` is set, which the ``test`` job
-in ``.github/workflows/ci.yml`` does and nothing else does. The default absence
-is what keeps a developer run and the ``-n0`` e2e stage (which has its own,
-tighter bound) untouched; it also means the number is a CI budget rather than a
-wall-clock assertion about anyone's machine, which is the only kind of number
-AGENTS.md allows to be calibrated from CI.
+``LOCAL_OPERATOR_SHARD_STALL_SECONDS`` is the named bound, and the ``test`` job
+in ``.github/workflows/ci.yml`` sets it. When it is absent the module falls back
+to :data:`LOCAL_DEFAULT_SECONDS` on a host that is not CI, because the same
+silence that costs a CI shard costs a local whole-tree run an evening: measured
+2026-09-24, a local run with no bound at all was watched by hand for four hours
+and killed mid-progress, and its log tail (a wall-clock ``timeout`` killing the
+group, then orphaned workers finishing their own ``pytest_sessionfinish`` against
+a dead channel) read exactly like the CI stall signature -- a ``PluggyTeardownRaisedWarning``
+and an ``OSError: cannot send (already closed?)`` with no test named. Nothing was
+stuck; nobody could tell that from the artefact. The local default is a REPORTING
+bound (:data:`LOCAL_DEFAULT_SECONDS` explains the number), and it stays off on CI
+that did not ask for it, which is what keeps the ``-n0`` e2e stage -- its own
+tighter bound, no worker branch -- out of it.
+
+THE OPT-IN PER-TEST HARD BOUND
+------------------------------
+Reporting alone cannot end a run that is genuinely parked, so the worker's C
+timer can be armed with ``exit=True`` instead: make the process die, and let
+xdist's own crash reporting name the item. That is OFF everywhere by default and
+the timers are report-only (``exit=False``) unless
+``LOCAL_OPERATOR_TEST_TIMEOUT_SECONDS`` asks for it, because a fired bound kills
+a worker carrying unrelated tests -- the same reason the e2e stage runs ``-n0``
+(see below). ``pytest-timeout`` is not a dependency here and is not added for
+this: :mod:`faulthandler` already has the only mechanism that survives the #401
+class of park, and it is the one this module is built on.
+
+The per-test bound is SIZED, never typed in: :func:`sized_bound_seconds` reads
+``tests/durations.json`` -- the same committed per-file weights the CI sharder
+balances on -- and allows :data:`BOUND_SLACK` times a whole FILE's measured total,
+floored at :data:`BOUND_FLOOR_S`. Read that as what it is: a hang catcher, not a
+slow-test detector. A single item cannot trip it unless it alone outran four
+times what its entire file was measured to cost, which is why it is safe against
+a legitimately slow test under fleet load and why it still catches a park (a park
+does not finish at all).
 """
 
 from __future__ import annotations
 
 import contextlib
 import faulthandler
+import json
 import math
 import os
 import sys
@@ -144,12 +175,106 @@ import time
 from pathlib import Path
 
 #: Seconds of NO COMPLETED TEST before the controller reports. Set by the shard
-#: job. Unset (and therefore inert) everywhere else.
+#: job; absent on a developer machine, where :func:`local_seconds` supplies the
+#: fallback above.
 ENV_SECONDS = "LOCAL_OPERATOR_SHARD_STALL_SECONDS"
 
-#: Shared by every xdist worker and readable by the controller -- see the module
-#: docstring for why this is not a ``tmp_path`` fixture directory.
-DUMP_DIR = Path(os.environ.get("TMPDIR", "/tmp")) / "lo-shard-stall"
+#: The local run's own bound, and its off switch. Absent on a local run means
+#: :data:`LOCAL_DEFAULT_SECONDS`; a value that means OFF disables the instrument
+#: entirely (no thread, no dump directory), which a debugger session needs.
+LOCAL_ENV_SECONDS = "LOCAL_OPERATOR_LOCAL_STALL_SECONDS"
+
+#: The bound a LOCAL run reports at when nothing overrides it: 900s (15 min) of
+#: no completed test.
+#:
+#: Sized ABOVE every legitimate item rather than tightly, because the cost of being
+#: too tight is a false alarm on a healthy run -- which is how a diagnostic gets
+#: switched off and then is not there when it matters. Sized from what this tree
+#: MEASURES: the slowest single item a whole-tree local run has produced here is
+#: the C1 picker sweep, at 412.75 s before its boot reuse and 133-177 s after it, so
+#: 900 s is ~2x the worst this host has ever drawn.
+#:
+#: There is a "81 s" version of that number in `.github/workflows/ci.yml` (the
+#: comment above `LOCAL_OPERATOR_SHARD_STALL_SECONDS: "240"`), and it is worth being
+#: plain that it is not evidence: it attributes itself to AGENTS.md ("as AGENTS.md
+#: requires"), and AGENTS.md carries no such measurement at this head or the one
+#: before it -- so following the citation terminates. That comment sizes THIS
+#: module's CI shard bound, not the e2e stage's (which comes from
+#: `tests/e2e/watchdog.py` and cites no such figure), and this docstring quotes it
+#: only to say it is not what the local default is calibrated against.
+#:
+#: CI's 240s is NOT the local number and is not a candidate for one: it is priced
+#: against a 20-minute job cap that a local run does not have.
+LOCAL_DEFAULT_SECONDS = 900.0
+
+#: Opt-in per-test HARD bound (kills the process, naming the item through xdist's
+#: crash report). Unset -> report-only everywhere, which is also what CI runs.
+#: ``1``/``true``/``yes`` -> enable it, sized by :func:`sized_bound_seconds`; a
+#: positive number -> that many seconds for every test. See the module docstring.
+TEST_TIMEOUT_ENV = "LOCAL_OPERATOR_TEST_TIMEOUT_SECONDS"
+
+#: Values of an env flag that mean "not set" / "off". Same reading as the root
+#: conftest's ``_FALSY_ENV_VALUES``; kept in step with it by the guard in
+#: ``tests/unit/test_shard_stall_watchdog.py``.
+FALSY_ENV_VALUES = frozenset({"0", "false", "no", "off"})
+
+#: The committed per-file weights the CI sharder balances on, reused here as the
+#: input to :func:`sized_bound_seconds`. It is measured on a developer machine
+#: (see the manifest's own comment), which is exactly the right calibration for a
+#: bound that has to hold on one.
+MANIFEST_PATH = Path(__file__).with_name("durations.json")
+
+#: How many times a whole FILE's measured total one item may take before the
+#: hard bound fires. 4x a file total is deliberately generous: the manifest is
+#: per FILE, so an item's own cost is not in the data, and the bound must not
+#: fail a test whose file was measured on an idle host while the fleet runs at
+#: load 200.
+BOUND_SLACK = 4.0
+
+#: Floor for the hard bound, in seconds: a file whose measured total is 1.5s still
+#: gets a bound in minutes, because a park is measured in minutes and a small
+#: file's tests still have to boot a Textual app.
+BOUND_FLOOR_S = 300.0
+
+#: The base directory every run's dumps live under. The workflow's report step
+#: points here, and :func:`report_dumps` walks one level into it, so the CI reader
+#: still sees every shard's evidence while each run stays in its own directory.
+DUMP_ROOT = Path(os.environ.get("TMPDIR", "/tmp")) / "lo-shard-stall"
+
+#: The variable the controller exports so that its workers write into THIS run's
+#: directory. A worker process is spawned after ``pytest_configure`` and inherits
+#: the controller's environment -- measured on this tree, a value set in the
+#: controller's configure was visible inside a ``-n 2`` worker -- which is what
+#: makes one directory per run possible without a lock file shared between runs.
+ENV_RUN_DIR = "LOCAL_OPERATOR_SHARD_STALL_DIR"
+
+#: This process's run directory, resolved at install and cached. ``None`` until
+#: then, and on any process that never installed.
+_RUN_DIR: Path | None = None
+
+
+def run_dir() -> Path:
+    """The dump directory for THIS run.
+
+    One directory per run rather than one per user. This module is on by default
+    for local runs now and this host runs ~25 concurrent sessions, where a shared
+    directory makes two failures reachable at once: a report can read a
+    concurrent run's stack excerpt as its own evidence, and a run that finishes
+    can delete an armed dump that a concurrent run's worker still holds open and
+    is still writing to -- so the other run's fired dump lands on an unlinked
+    inode and its report loses the one thing that decides bound-versus-deadlock.
+    Both halves were measured against the shared directory before this change.
+
+    The pid fallback is for a process that never installed (an unusual gateway, a
+    direct import in a test): it still cannot collide with a concurrent run.
+    """
+    if _RUN_DIR is not None:
+        return _RUN_DIR
+    explicit = os.environ.get(ENV_RUN_DIR, "").strip()
+    if explicit:
+        return Path(explicit)
+    return DUMP_ROOT / f"pid-{os.getpid()}"
+
 
 #: ``faulthandler`` writes this when the C timer actually fires
 #: (``Timeout (0:04:00)!``). Distinguishing a real dump from a header written at
@@ -246,6 +371,109 @@ def enabled_seconds() -> float | None:
     return seconds
 
 
+def local_seconds(on_ci: bool) -> float | None:
+    """The stall bound a LOCAL run gets, or ``None`` when the instrument is off here.
+
+    Resolution, first match wins:
+
+    * ``LOCAL_OPERATOR_LOCAL_STALL_SECONDS`` parsing as a usable bound -> that
+      value.
+    * a value that means OFF (``0``/``false``/``no``/``off``) -> ``None``. The
+      off switch has to exist: this instrument now arms itself on every local
+      run, and an operator stepping through a debugger has tests that look
+      stalled for as long as they sit there.
+    * unset, on CI -> ``None``. A CI job that did not ask for the shard bound
+      stays exactly as inert as it was before this default existed. That is not
+      politeness: it is what keeps the ``-n0`` e2e stage (one process, its own
+      tighter bound) out of this module's worker branch, because CI's own
+      explicit value is the only thing that can enable it there.
+    * unset, not CI -> :data:`LOCAL_DEFAULT_SECONDS`.
+
+    ``on_ci`` is passed in rather than read here because the caller already owns
+    that judgement: the root conftest denies ``CI`` when its own bash tool set
+    it, so a subagent running the suite on the operator's laptop must NOT be told
+    it is on a dedicated runner -- a mistake that hook has made once already (see
+    ``_in_agent_shell`` in ``conftest.py``).
+    """
+    raw = os.environ.get(LOCAL_ENV_SECONDS, "").strip()
+    fallback = None if on_ci else LOCAL_DEFAULT_SECONDS
+    if raw:
+        if raw.lower() in FALSY_ENV_VALUES:
+            return None
+        try:
+            seconds = float(raw)
+        except ValueError:
+            return fallback
+        if not math.isfinite(seconds) or seconds <= 0 or seconds >= MAX_BOUND_S:
+            return fallback
+        return seconds
+    return fallback
+
+
+def _manifest_seconds(nodeid: str) -> float | None:
+    """The measured seconds of ``nodeid``'s FILE, or ``None`` when unknown.
+
+    Read through a fresh read rather than a cached import-time load: this runs
+    once per test start in a worker, the file is ~30 KB, and a run that someone
+    regenerates mid-suite (``scripts/gen_test_durations.py``) should be believed
+    rather than shadowed by a snapshot taken at process start. Any failure -- a
+    missing manifest, a malformed one, a file pytest is running but the manifest
+    does not mention -- is ``None``, i.e. "use the floor", never an exception
+    from inside a pytest hook.
+    """
+    path = nodeid.split("::", 1)[0]
+    try:
+        raw = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    durations = raw.get("durations") if isinstance(raw, dict) else None
+    if not isinstance(durations, dict):
+        return None
+    value = durations.get(path)
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def sized_bound_seconds(nodeid: str) -> float:
+    """The per-test hard bound for ``nodeid``: :data:`BOUND_SLACK` x its file, floored.
+
+    See the module docstring for why the manifest is the right input and why the
+    answer is a hang catcher. The floor is what an unmeasured file gets, so a new
+    test file (or one the manifest is missing) is bounded rather than exempt.
+    """
+    measured = _manifest_seconds(nodeid)
+    if measured is None:
+        return BOUND_FLOOR_S
+    return max(BOUND_FLOOR_S, measured * BOUND_SLACK)
+
+
+def per_test_bound() -> tuple[float | None, bool] | None:
+    """The per-test HARD bound as ``(seconds, exit)``, or ``None`` when not asked for.
+
+    ``seconds`` is ``None`` for the sized bound (:func:`sized_bound_seconds`, one
+    bound per test file) and a number when the operator typed one in, which is the
+    escape hatch for someone who has already seen the sized bound misfire.
+
+    The bound kills the process that hits it -- that is its whole purpose, and the
+    only way to turn a park into a failure rather than a silence -- which is why
+    it is OFF unless asked for and why a malformed value resolves to ``None``
+    (report-only). Note the asymmetry with :func:`local_seconds`: an unparseable
+    LOCAL bound falls through to the local default, which only prints, while an
+    unparseable HARD bound falls back to not killing anything.
+    """
+    raw = os.environ.get(TEST_TIMEOUT_ENV, "").strip()
+    if not raw or raw.lower() in FALSY_ENV_VALUES:
+        return None
+    if raw.lower() in {"1", "true", "yes", "on"}:
+        return (None, True)
+    try:
+        seconds = float(raw)
+    except ValueError:
+        return None
+    if not math.isfinite(seconds) or seconds <= 0 or seconds >= MAX_BOUND_S:
+        return None
+    return (seconds, True)
+
+
 def _dump_path(tag: str) -> Path:
     """The dump path for ``tag``; best-effort ensures the directory.
 
@@ -259,9 +487,10 @@ def _dump_path(tag: str) -> Path:
     same "disable, never fail" reading :func:`enabled_seconds` takes of a
     malformed bound.
     """
+    target = run_dir()
     with contextlib.suppress(OSError):
-        DUMP_DIR.mkdir(parents=True, exist_ok=True)
-    return DUMP_DIR / f"{tag}.log"
+        target.mkdir(parents=True, exist_ok=True)
+    return target / f"{tag}.log"
 
 
 class _WorkerTimer:
@@ -278,8 +507,20 @@ class _WorkerTimer:
     became an ``INTERNALERROR``.
     """
 
-    def __init__(self, seconds: float) -> None:
+    def __init__(
+        self, seconds: float | None, hard: tuple[float | None, bool] | None = None
+    ) -> None:
+        #: The report-only bound, or ``None`` when the operator silenced the
+        #: REPORTER and left only the hard bound on. The two knobs are
+        #: independent on purpose: the announcement for the report names the
+        #: variable that switches it off, so the combination is not exotic, and
+        #: the bound is exactly what an operator silencing the report still
+        #: wants (round-1 review MAJOR-1).
         self.seconds = seconds
+        #: The opt-in per-test HARD bound, or ``None`` for the report-only default.
+        #: Captured at install for the same reason ``seconds`` is: the value is
+        #: known to be usable there, whereas ``note_start`` runs inside a hook.
+        self.hard = hard
         self._handle = None
         self._path = _dump_path(f"worker-{os.getpid()}")
         self._armed = False
@@ -287,35 +528,73 @@ class _WorkerTimer:
         # failed open once per test for the rest of the run.
         self._disabled = False
 
+    def bound_for(self, nodeid: str) -> tuple[float, bool]:
+        """The ``(seconds, exit)`` to arm for ``nodeid``.
+
+        ONE place decides this, because two things must agree on it: the timer,
+        and the arm-time header that records what the timer was armed at. A header
+        naming a bound the timer was not armed at is the mislabelling the report
+        filters exist to prevent (see :data:`ARM_MARKER`).
+        """
+        if self.hard is None:
+            # install() refuses to build a timer with neither knob set, so a
+            # reporting bound is present here; the assertion is for the type.
+            assert self.seconds is not None
+            return (self.seconds, False)
+        seconds, _exit = self.hard
+        return (sized_bound_seconds(nodeid) if seconds is None else seconds, True)
+
     def arm(self, nodeid: str) -> None:
         """Start the C timer for ``nodeid``; disable quietly if it cannot.
+
+        One arm per item, because :meth:`disarm` runs on that item's teardown: the
+        timer's unit really is one test, in both modes. That is also the price of
+        the instrument -- one ``faulthandler`` thread create/cancel pair per test,
+        which is why the LOCAL default announces itself rather than being silent.
+
+        Should an arm ever arrive while one is still running (a test that reported
+        no teardown, i.e. a crash or a park), the stale timer is cancelled first --
+        and the reason is stronger than tidiness: ``faulthandler`` does NOT allow
+        several timers, it REPLACES the live one when ``dump_traceback_later`` is
+        called again (measured on this host: the last-armed bound fires, the
+        earlier one never does; the same rule is recorded in
+        ``local_operator/session/runtime/stall_watchdog.py``). Two consequences
+        follow, both of them why the cancel is here rather than optional: an arm
+        silently replaces any other in-process user of the C timer (the runtime
+        watchdog when a test drives it in-process), and :meth:`disarm` cancels
+        whatever is armed rather than only this module's, so the one-arm-per-item
+        invariant has to hold for the whole process.
 
         Every failure here is swallowed rather than raised. This runs inside a
         pytest hook, so an exception is an ``INTERNALERROR`` that fails the
         shard -- the diagnostic is not allowed to be the reason a run goes red,
         and a run whose dump directory is unusable is still a run worth having.
 
-        ``OverflowError`` is in the tuple even though :func:`enabled_seconds`
-        already refuses a bound no timer can hold: the value can also arrive
-        here from a direct construction, and this is the one call whose failure
-        mode is the whole shard. Belt and braces, because the cost of the extra
-        name is zero and the cost of missing it is a red run.
+        ``OverflowError`` is in the tuple even though the resolvers already refuse
+        a bound no timer can hold: the value can also arrive here from a direct
+        construction, and this is the one call whose failure mode is the whole
+        shard. Belt and braces, because the cost of the extra name is zero and the
+        cost of missing it is a red run.
         """
-        if self._armed or self._disabled:
+        if self._disabled:
             return
+        bound, hard = self.bound_for(nodeid)
         try:
             # The handle must exist and stay open for the life of the process:
             # the dump is written from a C thread with a raw descriptor, so the
             # file cannot be opened at the moment it fires.
             if self._handle is None or self._handle.closed:
                 self._handle = self._path.open("w", encoding="utf-8")
-            self._handle.write(
-                f"{ARM_MARKER}{nodeid} exceeded {self.seconds:g}s; every thread follows.\n"
-            )
+            self._handle.write(f"{ARM_MARKER}{nodeid} exceeded {bound:g}s; every thread follows.\n")
             self._handle.flush()
-            faulthandler.dump_traceback_later(
-                self.seconds, file=self._handle, repeat=True, exit=False
-            )
+            if self._armed:
+                faulthandler.cancel_dump_traceback_later()
+            # ``repeat`` is the difference between the two modes, not a detail: a
+            # report-only bound is a floor and wants a fresh snapshot every
+            # interval, while a hard bound ENDS the process on the first firing
+            # (there is nothing left to repeat with), which is also why the two
+            # cannot be requested together.
+            faulthandler.dump_traceback_later(bound, file=self._handle, repeat=not hard, exit=hard)
         except (OSError, ValueError, TypeError, OverflowError):
             self._disabled = True
             return
@@ -336,11 +615,27 @@ class _Controller:
     thread while the reporter reads it from its own.
     """
 
-    def __init__(self, seconds: float, sink=None) -> None:
+    def __init__(self, seconds: float | None, sink=None) -> None:
+        #: ``None`` means "no stall reporting" -- the mode an operator gets from
+        #: ``LOCAL_OPERATOR_LOCAL_STALL_SECONDS=0`` with a per-test hard bound
+        #: left on. The controller still runs, because its other job is the
+        #: cleanup that keeps each run's dump directory from accumulating one
+        #: armed file per test; only the reporting thread is skipped.
         self.seconds = seconds
         self._lock = threading.Lock()
         self._in_flight: dict[str, float] = {}
         self._last_progress = time.monotonic()
+        #: When this controller started, and how many tests have COMPLETED since.
+        #: Reported with every stall, because a silence has two explanations and
+        #: the artifact cannot tell them apart without them: a run that is parked
+        #: and a run that is grinding through slow tests look identical in `-q`
+        #: output (one progress line per 72 completed tests, so the last partial
+        #: line is withheld until its slowest item finishes). Measured 2026-09-24:
+        #: a local whole-tree run whose log stood still at 69% for 29 minutes was
+        #: neither -- it had been killed by the wall-clock `timeout` its operator
+        #: passed, and was progressing at a healthy rate until that second.
+        self._started_at = time.monotonic()
+        self._completed = 0
         self._reported_at = 0.0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -370,9 +665,12 @@ class _Controller:
         with self._lock:
             self._last_progress = time.monotonic()
             if when == "teardown":
+                self._completed += 1
                 self._in_flight.pop(nodeid, None)
 
     def start(self) -> None:
+        if self.seconds is None:
+            return
         self._thread = threading.Thread(target=self._poll, name="shard-stall", daemon=True)
         self._thread.start()
 
@@ -389,6 +687,11 @@ class _Controller:
         Returns whether a report was emitted, which is what the local proof
         asserts on; a real run only cares about the text reaching the job log.
         """
+        if self.seconds is None:
+            # Reporting silenced with a per-test bound left on: the controller
+            # exists for its cleanup, not for this, and comparing against a bound
+            # that is not there would raise inside a hook.
+            return False
         now = time.monotonic()
         with self._lock:
             idle = now - self._last_progress
@@ -409,11 +712,18 @@ class _Controller:
 
     def _format(self, idle: float, in_flight: list[tuple[str, float]]) -> str:
         now = time.monotonic()
+        elapsed = now - self._started_at
+        rate = self._completed / elapsed if elapsed > 0 else 0.0
         lines = [
             "",
             "!" * 72,
             f"SHARD STALL: no test has completed for {idle:.0f}s "
             f"(bound {self.seconds:g}s). {len(in_flight)} still in flight:",
+            # The rate is what turns "silent" into a diagnosis. A run at 0.2/s
+            # that has been quiet for a minute is working; the same numbers with
+            # a rate near zero are a park, or a dead worker set. Printed BEFORE
+            # the node ids because it decides how to read them.
+            f"  {self._completed} tests completed in {elapsed:.0f}s ({rate:.2f}/s)",
         ]
         for nodeid, started in in_flight:
             lines.append(f"  {now - started:7.0f}s  {nodeid}")
@@ -433,7 +743,7 @@ class _Controller:
         """
         out: list[str] = []
         try:
-            candidates = sorted(DUMP_DIR.glob("worker-*.log"))
+            candidates = sorted(run_dir().glob("worker-*.log"))
         except OSError:
             return out
         for path in candidates:
@@ -451,12 +761,19 @@ class _Controller:
     def cleanup(self) -> None:
         """Remove armed-but-unfired dumps; keep anything that actually fired.
 
-        Runs on the controller, which outlives its workers. A fired dump is
-        evidence and is kept even on a green run -- a test that took four
-        minutes and still passed is worth knowing about.
+        Runs on the controller, which outlives its workers, and ONLY inside this
+        run's own directory -- a shared directory made this call delete a
+        concurrent run's armed dump, which is how that run's report lost its
+        stack excerpt.
+
+        A fired dump is evidence and is kept even on a green run -- a test that
+        took four minutes and still passed is worth knowing about. The run's
+        directory is then removed if it is empty, so a healthy run leaves nothing
+        behind while a run with evidence leaves its own directory standing.
         """
+        directory = run_dir()
         try:
-            paths = sorted(DUMP_DIR.glob("*.log"))
+            paths = sorted(directory.glob("*.log"))
         except OSError:
             return
         for path in paths:
@@ -469,6 +786,8 @@ class _Controller:
                 path.unlink()
             except OSError:
                 pass
+        with contextlib.suppress(OSError):
+            directory.rmdir()
 
 
 #: One controller per controller process; None on a worker.
@@ -477,7 +796,64 @@ _CONTROLLER: _Controller | None = None
 _WORKER: _WorkerTimer | None = None
 
 
-def install(config) -> None:
+def _bound_detail(hard: tuple[float | None, bool] | None) -> str:
+    """How the per-test HARD bound is expressed in an announcement line.
+
+    One definition, because two lines print it (:func:`_announce` when reporting
+    is on, :func:`_announce_hard_only` when it is silenced) and a reader has to be
+    able to compare them.
+    """
+    if hard is None:
+        return "reporting only"
+    if hard[0] is None:
+        return "per-test hard bound ON, sized per file"
+    return f"per-test hard bound {hard[0]:g}s"
+
+
+def _announce(seconds: float, hard: tuple[float | None, bool] | None, source: str) -> None:
+    """One stderr line saying this reporter turned ITSELF on, and how to stop it.
+
+    Printed only for the LOCAL default, never for an explicit value: a CI shard or
+    an operator who set the variable already knows, and a per-worker line would be
+    spam (every xdist worker imports this conftest). The silence knob is named in
+    the line itself, because an instrument that reports on a healthy run has to be
+    switchable off by the person reading it -- and never raises, for the same
+    reason nothing else here does.
+
+    The line also says what the silence knob does NOT switch off. The two knobs
+    are independent, and the announcement is where an operator learns the name of
+    the off switch, so a reader who followed it and then set a per-test bound must
+    not be left believing: they were off.
+    """
+    with contextlib.suppress(Exception):
+        print(
+            f"{source} report: ON ({seconds:g}s of no completed test), "
+            f"{_bound_detail(hard)}. "
+            f"Silence the report with {LOCAL_ENV_SECONDS}=0 "
+            f"(a per-test bound survives that).",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+def _announce_hard_only(hard: tuple[float | None, bool]) -> None:
+    """The mirror line: reporting silenced, a per-test bound still armed.
+
+    Printed because the hard bound kills a worker, and a run that can be killed
+    must say so once. Without it the combination is silent in both directions:
+    no report from the controller, and the first thing anyone learns about the
+    bound is a worker dying (round-1 review MAJOR-1).
+    """
+    with contextlib.suppress(Exception):
+        print(
+            f"local stall report: OFF ({LOCAL_ENV_SECONDS}=0); "
+            f"{_bound_detail(hard)} still ON -- a test over it kills its worker.",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+def install(config, on_ci: bool = False) -> None:
     """Wire the module up in whichever process this is. Idempotent.
 
     ``hasattr(config, "workerinput")`` is xdist's own discriminator between a
@@ -485,17 +861,51 @@ def install(config) -> None:
     a session exists -- the two processes need different instrumentation (one
     watches, the other is watched), so the branch has to happen here rather
     than inside a hook.
+
+    Only a WORKER ever arms a C timer, which is the invariant that keeps this
+    module out of the e2e stage's way: that stage runs ``-n0`` (no worker
+    process exists) with its own ``tests/e2e/watchdog`` timer, and
+    ``faulthandler``'s timer is process-global.
+
+    The two knobs are resolved independently, and that ORDER is load-bearing: an
+    early return on a silenced reporter used to skip the hard bound entirely, so
+    the exact combination the announcement invites -- silence the report, set the
+    bound -- ran unbounded and passed (round-1 review MAJOR-1, measured twice).
+    The controller also creates this run's dump directory here and exports it, so
+    that every worker writes into it: install runs before any worker exists.
     """
-    global _CONTROLLER, _WORKER
+    global _CONTROLLER, _WORKER, _RUN_DIR
+    hard = per_test_bound()
     seconds = enabled_seconds()
-    if seconds is None:
+    # Announced only when the fallback -- rather than an explicit bound -- is what
+    # enabled this, so a CI shard and a set variable stay silent.
+    local_default = seconds is None
+    if local_default:
+        seconds = local_seconds(on_ci)
+    if seconds is None and hard is None:
         return
-    if hasattr(config, "workerinput"):
+    is_worker = hasattr(config, "workerinput")
+    if not is_worker:
+        # Made here rather than lazily on the first dump, so that the directory a
+        # reader (or the workflow's report step) is pointed at exists for the
+        # whole run. An empty one is removed by :meth:`_Controller.cleanup`.
+        _RUN_DIR = DUMP_ROOT / f"run-{os.getpid()}"
+        with contextlib.suppress(OSError):
+            _RUN_DIR.mkdir(parents=True, exist_ok=True)
+        os.environ[ENV_RUN_DIR] = str(_RUN_DIR)
+    if is_worker:
         if _WORKER is None:
-            _WORKER = _WorkerTimer(seconds)
+            _WORKER = _WorkerTimer(seconds, hard)
     elif _CONTROLLER is None:
         _CONTROLLER = _Controller(seconds)
         _CONTROLLER.start()
+        if seconds is None:
+            # Reached only with the bound set (the early return above), which is
+            # what the assertion states for the type checker's benefit.
+            assert hard is not None
+            _announce_hard_only(hard)
+        elif local_default:
+            _announce(seconds, hard, "local stall")
 
 
 def note_start(nodeid: str) -> None:
@@ -523,7 +933,7 @@ def shutdown() -> None:
         _WORKER.disarm()
 
 
-def _install_controller_for_test(seconds: float, sink) -> _Controller:
+def _install_controller_for_test(seconds: float | None, sink) -> _Controller:
     """Test seam: a controller wired to a capturing sink, no env var needed."""
     global _CONTROLLER
     _CONTROLLER = _Controller(seconds, sink=sink)
@@ -597,17 +1007,37 @@ def report_dumps(directory: Path | None = None) -> str:
 
     An empty or missing directory is not an error: the step runs on every shard,
     including the ones with nothing to report.
+
+    Each run writes into its own subdirectory (see :func:`run_dir`), so the walk
+    goes one level down and labels the nested blocks with the run they came from:
+    two concurrent runs' evidence has to be attributable, which is the other half
+    of why the directories are separate.
     """
-    root = DUMP_DIR if directory is None else directory
+    root = DUMP_ROOT if directory is None else directory
     try:
         paths = sorted(root.glob("*.log"))
     except OSError:
         paths = []
-    if not paths:
+    runs: list[Path] = []
+    with contextlib.suppress(OSError):
+        runs = sorted(path for path in root.iterdir() if path.is_dir())
+    if not paths and not runs:
         return "no shard stall report: nothing stalled long enough to trip the watchdog\n"
     blocks: list[str] = []
     for path in paths:
         blocks.extend(_report_file(path))
+    for run in runs:
+        try:
+            nested = sorted(run.glob("*.log"))
+        except OSError:
+            continue
+        if not nested:
+            continue
+        blocks.append(f"----- run {run.name} -----")
+        for path in nested:
+            blocks.extend(_report_file(path))
+    if not blocks:
+        return "no shard stall report: nothing stalled long enough to trip the watchdog\n"
     return "\n".join(blocks) + "\n"
 
 
@@ -615,7 +1045,7 @@ def main(argv: list[str] | None = None) -> int:
     """``python -m tests.shard_stall_watchdog [dir]`` -- print the dumps.
 
     The optional directory lets the workflow point at its own
-    ``${TMPDIR:-/tmp}/lo-shard-stall``; the default is :data:`DUMP_DIR`, computed
+    ``${TMPDIR:-/tmp}/lo-shard-stall``; the default is :data:`DUMP_ROOT`, computed
     from the same variable, so the two agree without the caller knowing the name.
     """
     args = list(sys.argv[1:] if argv is None else argv)
