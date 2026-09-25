@@ -500,7 +500,7 @@ def main() -> int:
                 "young_kill_replacement_is_scheduled_and_forks",
                 got_pid is not None and got_s is not None and got_s <= bound,
                 young_pid=young_pid,
-                young_age_s=round(young_age, 2),
+                young_age_s=None if young_age is None else round(young_age, 2),
                 fork_pid=got_pid,
                 fork_s=None if got_s is None else round(got_s, 2),
                 bound_s=round(bound, 2),

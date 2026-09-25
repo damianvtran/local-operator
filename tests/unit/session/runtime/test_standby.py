@@ -45,7 +45,7 @@ import textwrap
 import threading
 import time
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, cast
 
 import pytest
 
@@ -1522,7 +1522,7 @@ class _SupervisorHarness:
     def stub_spawn(
         self, root: Path, interpreter: str, slot: str = standby.SLOT_TUI, *, idle_s: Any = None
     ) -> standby._Standby:
-        warm = standby._Standby(_FakeProc(), _FakeSock(), root, slot)
+        warm = standby._Standby(cast(Any, _FakeProc()), cast(Any, _FakeSock()), root, slot)
         self.spares.append(warm)
         self.spawns.append({"root": root, "slot": slot, "idle_s": idle_s, "warm": warm})
         return warm
@@ -1530,7 +1530,7 @@ class _SupervisorHarness:
     def place(self, handshake: bytes = b"") -> tuple[standby._Standby, _FakeProc, _FakeSock]:
         """Put a hand-made spare in the pool, as if it had just been forked."""
         proc, sock = _FakeProc(), _FakeSock(handshake)
-        warm = standby._Standby(proc, sock, self.root, standby._ROLE[0])
+        warm = standby._Standby(cast(Any, proc), cast(Any, sock), self.root, standby._ROLE[0])
         self.spares.append(warm)
         standby._POOL.append(warm)
         return warm, proc, sock
@@ -1705,7 +1705,7 @@ def test_post_adoption_trio(supervisor_harness: Any) -> None:
     # (3) and the adopted process can never be signalled: the next engage adopts
     #     the REPLACEMENT, and supervisor passes far past the wedge deadline
     #     still never touch the first chat's runtime.
-    replacement.sock.feed(standby._READY + _framed({"ok": True}))
+    cast(Any, replacement.sock).feed(standby._READY + _framed({"ok": True}))
     second = standby.try_adopt(h.root, sys.executable, {}, h.root / "capture2.log", None)
     assert isinstance(second, standby.AdoptedRuntime)
     assert second.pid == replacement.proc.pid
