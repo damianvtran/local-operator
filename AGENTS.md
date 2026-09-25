@@ -1523,7 +1523,8 @@ lop exec --profile reviewer --background --name lo-1281-review < brief.md
 That happened on 2026-09-18: two sessions (`lo-1281-review`, `lo-1281-qa`)
 appeared in the operator's sidebar for a PR they had never asked about, because
 the coder that owed the review round held no `task` tool (a role that does not
-delegate is never handed `task`/`wait`/`wake` — see `harness.subagent`'s prune).
+delegate is never handed `task` or `wake` — see `harness.subagent`'s prune; it
+keeps `jobs` and `wait` only to await its own background `bash` jobs).
 
 **The rule after the 2026-09-19 relaxation, and it has two answers on purpose.**
 The guard in `local_operator/agent_shell.py` decides by the calling session's OWN

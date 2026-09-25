@@ -105,10 +105,11 @@ async def test_a_non_delegating_role_gets_no_task_tool(tmp_path, monkeypatch) ->
     names = {tool.name for tool in stream.requests[0].tools}
     # The fan-out and persistence tools stay gone: a non-delegating role must
     # not start its own children or arm a wake its one-prompt session can't keep.
-    assert not names & {"task", "wait", "wake"}
+    assert not names & {"task", "wake"}
     # But it keeps ``jobs`` to poll/cancel the background bash jobs it can
-    # still produce (it has ``bash``), which is what stops the poll loop.
-    assert "jobs" in names
+    # still produce (it has ``bash``), which is what stops the poll loop, and
+    # ``wait`` to block on one without going deaf to hub notes.
+    assert {"jobs", "wait"} <= names
     assert "bash" in names
     await parent.dispose()
 
@@ -414,7 +415,7 @@ async def test_restricted_tool_construction_matches_legacy_inventory(
     else:
         drop = {name for name in merged_in if name == "wake"}
     if subagent_mod._can_background(legacy_tools):
-        drop = drop - {"jobs"}
+        drop = drop - {"jobs", "wait"}
     expected_names = [tool.name for tool in merged if tool.name not in drop]
     actual_names = [tool.name for tool in child_sessions[0]._tools]
     assert (
