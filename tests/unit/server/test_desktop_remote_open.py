@@ -30,6 +30,8 @@ filesystem and through the real ``errors()`` ladder.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -459,3 +461,142 @@ async def test_a_peer_attachment_this_device_holds_is_still_served(
     response = await client.get(f"/v1/desktop/sessions/{OTHER}/attachments/{ref.digest}")
     assert response.status_code == 200, response.text
     assert response.headers["content-type"].startswith("image/png")
+
+
+# ---------------------------------------------------------------------------
+# The bytes a peer-bound prompt sends must stay resolvable on THIS device
+# ---------------------------------------------------------------------------
+
+
+def _real_png(width: int, height: int) -> bytes:
+    """A real, decodable PNG with compressible but structured content.
+
+    REAL BYTES because the transform under test IS an image ingest: a
+    hand-built ``b"\x89PNG..." + zeros`` payload is not decodable, so
+    ``image_blocks`` drops it and a cell built on one would measure the drop
+    rather than the bound. Compressible because the shapes that matter here are
+    a few hundred pixels wide and must stay well under the store's floor and the
+    route's own body bound.
+    """
+    import zlib
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return len(data).to_bytes(4, "big") + tag + data + zlib.crc32(tag + data).to_bytes(4, "big")
+
+    rows = []
+    for y in range(height):
+        line = bytearray(b"\x00")
+        for x in range(width):
+            tile = ((x // 32) * 6 + (y // 32) * 3) % 256
+            line += bytes((tile, (tile + 40) % 256, (tile + 90) % 256))
+        rows.append(bytes(line))
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(
+            b"IHDR",
+            width.to_bytes(4, "big") + height.to_bytes(4, "big") + b"\x08\x02\x00\x00\x00",
+        )
+        + chunk(b"IDAT", zlib.compress(b"".join(rows), 6))
+        + chunk(b"IEND", b"")
+    )
+
+
+def _wire(raw: bytes, mime: str = "image/png") -> dict[str, str]:
+    return {"data_b64": base64.b64encode(raw).decode("ascii"), "mime_type": mime}
+
+
+@pytest.mark.asyncio
+async def test_a_peer_bound_prompt_sends_and_stages_what_the_owner_will_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The transform's contract, at the object the route calls — and its four gates.
+
+    WHY IT MUST EXIST. The owner's journal row references
+    ``{"attachment": <digest>}``, the owner's runtime is another process with its
+    own config dir, and this device's only read resolves ``<root>/attachments``.
+    Without a copy here the picture the user had just sent answered ``409
+    attachment_on_peer`` while the prompt reported ``admitted`` — the drop the
+    sweep over two real relays in ``tests/unit/network/test_remote_viewer.py``
+    reproduces row by row.
+
+    WHY IT RETURNS WHAT IT SENT. The owner journals the digest of what it
+    RECEIVES, so a mirror of the raw wire bytes only resolves while the owner
+    keeps those bytes verbatim — and it does not, above ``IMAGE_INGEST_MAX_EDGE``
+    (1024 px), over ``IMAGE_MAX_BYTES``, or with an EXIF ``Orientation`` to bake
+    in. Round 1 measured that end to end; this cell pins the shape that fixes
+    it: the returned payload is what the owner's own ingest makes of the input,
+    and the digest staged is the digest OF THAT.
+
+    THE GATES, each because it is a way to pay for nothing: a LOCAL conversation
+    comes back untouched and stages nothing (this device's runtime runs that very
+    ingest and writes that very store); an image the owner would DISCARD is
+    dropped rather than sent (the alternative is the same loss one layer down);
+    a payload under the transcript's externalise floor stages nothing, because
+    such a row keeps its bytes inline; and ``AttachmentStore.put``'s silence is
+    respected — a failed write must never refuse a prompt the owner would admit.
+    """
+    from local_operator.imaging import sniff_image
+    from local_operator.server.utils.desktop_sessions import (
+        DesktopSessionBridge,
+        DesktopSessions,
+    )
+
+    root = tmp_path.resolve()
+    row = _peer_row(id=OTHER)
+    remote = DesktopSessionBridge(root, OTHER, "", remote_row=row)
+    local = DesktopSessionBridge(root, MINE, "")
+    store = root / ATTACHMENTS_DIRNAME
+
+    oversize = _wire(_real_png(1025, 640))
+    original = oversize["data_b64"]
+    assert sniff_image(base64.b64decode(original)).width == 1025  # type: ignore[union-attr]
+
+    # A LOCAL CONVERSATION IS UNTOUCHED, byte for byte, and pays no write.
+    assert await local.prepare_peer_images([oversize]) == [oversize]
+    assert not store.exists(), "a LOCAL conversation staged an image it already owns"
+
+    # AN IMAGE-LESS PROMPT WRITES NOTHING.
+    assert await remote.prepare_peer_images([]) == []
+    assert not store.exists(), "an image-less prompt wrote a store"
+
+    # THE BOUND: what comes back is the OWNER'S ingest output, not the wire bytes.
+    prepared = await remote.prepare_peer_images([oversize])
+    assert len(prepared) == 1
+    settled_bytes = base64.b64decode(prepared[0]["data_b64"])
+    assert settled_bytes != base64.b64decode(original), (
+        "an image over IMAGE_INGEST_MAX_EDGE came back verbatim, so the owner's ingest "
+        "will rewrite it and the digest staged here cannot be the one it journals"
+    )
+    assert sniff_image(settled_bytes).width <= 1024  # type: ignore[union-attr]
+    digest = hashlib.sha256(settled_bytes).hexdigest()[:32]
+
+    # AND IT IS WHAT IS STAGED: exactly one blob, under the digest of the returned
+    # bytes. The old shape of the defect is a blob under a name no row references.
+    assert sorted(p.name for p in store.glob("*.bin")) == [f"{digest}.bin"]
+
+    # THE READ THIS EXISTS FOR, through the pool's own door (the one the route
+    # opens): the bytes served are the bytes the owner's row will name, and the
+    # peer is never consulted for them.
+    _answer_rows(monkeypatch, row)
+    pool = DesktopSessions(root)
+    served, served_mime = await pool.attachment(OTHER, digest)
+    assert served == settled_bytes
+    assert served_mime == prepared[0]["mime_type"]
+
+    # AN IMAGE THE OWNER WOULD DISCARD IS NOT SENT, and stages nothing.
+    junk = {
+        "data_b64": base64.b64encode(b"not an image at all").decode("ascii"),
+        "mime_type": "image/png",
+    }
+    before = sorted(p.name for p in store.glob("*.bin"))
+    assert await remote.prepare_peer_images([junk]) == []
+    assert sorted(p.name for p in store.glob("*.bin")) == before
+
+    # AND THE FLOOR: a payload the owner would leave INLINE is returned (it must
+    # still be sent) but not staged, because nothing would reference the blob.
+    tiny = _wire(_real_png(16, 16))
+    tiny_prepared = await remote.prepare_peer_images([tiny])
+    assert tiny_prepared, "a sub-floor image was dropped instead of sent"
+    tiny_digest = hashlib.sha256(base64.b64decode(tiny_prepared[0]["data_b64"])).hexdigest()[:32]
+    assert not (store / f"{tiny_digest}.bin").exists()
+    assert sorted(p.name for p in store.glob("*.bin")) == [f"{digest}.bin"]

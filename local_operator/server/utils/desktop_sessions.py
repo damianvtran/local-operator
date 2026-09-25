@@ -1462,6 +1462,55 @@ class DesktopSessionBridge:
             ]
         return self.remote
 
+    async def prepare_peer_images(self, images: list[dict[str, str]]) -> list[dict[str, str]]:
+        """What a PEER-bound prompt must SEND, having staged the same bytes here.
+
+        WHY THE DEVICE THAT SENDS MUST ALSO HOLD. A turn's images are
+        content-addressed: the row the OWNER journals references
+        ``{"attachment": <digest>}`` (``transcript._externalize_attachments``),
+        and the only store ``attachment()`` reads on this side is this device's
+        own. A peer-bound prompt's bytes therefore existed nowhere this device
+        can reach — the peer's runtime is another process on another machine and
+        externalises into ITS config dir (``attachments.store_for_transcript_dir``
+        states that rule) — so the conversation the user is LOOKING AT painted a
+        placeholder over the picture they had just sent, one 200 saying
+        ``prompt admitted`` later.
+
+        THE CALLER MUST SEND WHAT THIS RETURNS, not the body it passed in, and
+        that is the whole contract: the owner journals the digest of what it
+        RECEIVES, so the bytes staged here and the bytes sent have to be the same
+        bytes. See :func:`prepare_images_for_owner` for the transform and the
+        invariant it rests on.
+
+        NOTHING HAPPENS FOR A LOCAL SESSION, and the list comes back untouched:
+        this device's runtime externalises into this very store, so bounding here
+        would be work whose only effect is to change bytes the owner was going to
+        bound anyway. Identity rather than ``[]`` so a caller cannot lose an
+        attachment by forgetting which branch it took.
+
+        Runs off the loop: it decodes and re-encodes each image (the same work
+        the owner's ingest does, once per pass) and writes one file per image.
+        """
+        if self.remote_row is None or not images:
+            return images
+        return await asyncio.to_thread(prepare_images_for_owner, self.root, images)
+
+    async def stage_ingested_images(self, payloads: list[dict[str, str]]) -> None:
+        """Stage payloads that are ALREADY the owner's ingest output.
+
+        The third door (``/command``, ``routes/desktop_sessions.py``) does not
+        hand the owner a composer body: it decodes the images with
+        ``decode_images`` — ``image_blocks`` itself — and sends THOSE, so they
+        are already a fixed point and re-running the ingest over them would be a
+        second decode for an answer we hold. Only the write is owed.
+
+        Gated exactly like its sibling: a local conversation's runtime writes this
+        store itself.
+        """
+        if self.remote_row is None or not payloads:
+            return
+        await asyncio.to_thread(stage_images_in_store, self.root, payloads)
+
     async def release(self) -> None:
         async with self.lock:
             self.users -= 1
@@ -3093,6 +3142,170 @@ class PeerAttachmentUnavailable(Exception):
         )
         self.session_id = session_id
         self.row = row
+
+
+#: How many times the OWNER's own ingest may be re-applied before the bytes this
+#: device sends are declared a fixed point of it.
+#:
+#: TWO IS THE MEASURED NORM: one pass bounds the image (``IMAGE_INGEST_MAX_EDGE``
+#: / the byte cap / a baked-in EXIF rotation), the second confirms the result is
+#: what the ladder returns for itself. The third is headroom for the one corner
+#: that is not obviously idempotent on inspection — line art, whose edge cap is
+#: ``IMAGE_MAX_EDGE`` and which could in principle come back as a JPEG that no
+#: longer reads as line art. Rather than argue the corner away, the loop is
+#: bounded and the corner is handled by :func:`_settle_on_the_owner_ingest`'s
+#: fallback below.
+_INGEST_SETTLE_PASSES = 3
+
+
+def _owner_ingest_once(payload: dict[str, str]) -> dict[str, str] | None:
+    """The bytes the OWNER's runtime would keep for this payload, or ``None``.
+
+    THE ONE DEFINITION OF THE TRANSFORM, imported rather than restated, and that
+    is the whole point of this function: ``session.runtime.server.image_blocks``
+    is what every incoming image goes through before admission
+    (``serving._image_blocks_async``), so asking IT what the owner will keep
+    cannot drift from what the owner actually keeps. It is also where the mime
+    comes from — the CONTENT, never the client's declared type.
+
+    ``None`` means the owner would DISCARD this image (``image_blocks`` drops
+    undecodable entries rather than failing the turn), which is a fact the caller
+    needs: sending bytes the owner will throw away is an attachment the user
+    watched leave and will never see again.
+
+    Lazy import, for the reason ``routes/desktop_sessions.decode_images`` states
+    about its own: the runtime's server module is a boot cost this one must not
+    add for every desktop backend.
+    """
+    from local_operator.session.runtime.server import image_blocks
+
+    blocks = image_blocks([{"data_b64": payload["data_b64"], "mime_type": payload["mime_type"]}])
+    if not blocks:
+        return None
+    block = blocks[0]
+    return {"data_b64": block.data, "mime_type": block.mime_type}
+
+
+def _settle_on_the_owner_ingest(
+    payload: dict[str, str],
+) -> tuple[dict[str, str], tuple[dict[str, str], ...]] | None:
+    """``(bytes to send, extra payloads to stage)`` for one image, or ``None``.
+
+    WHY A FIXED POINT RATHER THAN ONE PASS. The invariant the read depends on is
+    that the digest this device stages EQUALS the digest the owner journals, and
+    the owner journals ``image_blocks(what we sent)``. So what we send must be a
+    fixed point of that function: then the owner's ingest returns our bytes
+    unchanged, and the two digests are the same name by CONSTRUCTION rather than
+    by the coincidence that the shipped composer happens to bound at the same
+    1024 px (``bound-image.ts``'s ``IMAGE_MAX_EDGE``). One pass gets most images
+    there — including the 1025 px screenshot and the EXIF-rotated JPEG, whose
+    re-encode bakes the rotation into the pixels — and the second pass is the
+    proof rather than an assumption.
+
+    THE FALLBACK, for the pass bound being reached: the bytes to send are still
+    the last output, and the ONE payload the owner would make of them is staged
+    alongside, so whichever of the two names the owner's row carries resolves
+    here. It costs one blob in a corner nothing has reached, and it is strictly
+    better than a read that 409s on some photos.
+    """
+    current = dict(payload)
+    for _ in range(_INGEST_SETTLE_PASSES):
+        settled = _owner_ingest_once(current)
+        if settled is None:
+            return None
+        if settled == current:
+            return current, ()
+        current = settled
+    return current, ((_owner_ingest_once(current) or current),)
+
+
+def stage_images_in_store(root: Path | None, payloads: list[dict[str, str]]) -> None:
+    """Write already-owner-shaped payloads into ``root``'s attachment store.
+
+    THE READERS THIS IS FOR are ``DesktopSessions.attachment`` and its per-child
+    twin, and neither is a decoration: they are how a transcript row that carries
+    ``{"attachment": <digest>}`` becomes pixels on this device. A row written on
+    a PEER carries a digest whose bytes live in the peer's store (its runtime
+    externalised them into its own config dir — see
+    ``attachments.store_for_transcript_dir``), so a prompt this device SENT is a
+    picture this device could no longer show.
+
+    ONLY WHAT THE OWNER WILL EXTERNALIZE, gated by the same floor the transcript's
+    writer uses (``transcript._ATTACHMENT_FLOOR_BYTES``) rather than by a second
+    copy of the number. Under the floor the payload stays INLINE in the row and
+    every reader already has it; staging it would be a blob nothing references —
+    exactly the churn that floor exists to prevent.
+
+    Best effort, and silent: ``AttachmentStore.put`` is documented to answer
+    ``None`` instead of raising for undecodable input, a read-only home or a full
+    disk, and a mirror that could not be written must not fail a prompt the owner
+    would have admitted. The consequence of a miss is the refusal this device
+    answers with today (``PeerAttachmentUn``), never a lost turn.
+    """
+    from local_operator.session.transcript import _ATTACHMENT_FLOOR_BYTES
+
+    store = AttachmentStore(Path(root) / ATTACHMENTS_DIRNAME if root is not None else None)
+    for payload in payloads:
+        data = payload.get("data_b64") or ""
+        if not isinstance(data, str) or len(data) < _ATTACHMENT_FLOOR_BYTES:
+            continue
+        try:
+            store.put(data, str(payload.get("mime_type") or "image/png"))
+        except OSError as exc:  # noqa: PERF203 — one bad image costs that image
+            logger.debug("peer image could not be staged locally: %s", exc)
+
+
+def prepare_images_for_owner(
+    root: Path | None, images: list[dict[str, str]]
+) -> list[dict[str, str]]:
+    """Bound every wire image as the OWNER will, stage that, and hand back what to send.
+
+    THE RETURN VALUE IS THE FIX. This is not a mirror bolted beside the request —
+    it is the request's images, transformed on the way out: what this returns is
+    what the caller must put in the frame, and it is the same bytes that were
+    staged. Staging the raw wire payload instead was the round-1 defect: the
+    owner does not promise to keep what it is given, so for anything over
+    ``IMAGE_INGEST_MAX_EDGE`` (1024 px) or carrying an EXIF ``Orientation`` tag it
+    journals the digest of its OWN re-encode, and the device that sent the
+    picture still could not read it back.
+
+    THE INVARIANT, stated so a future reader can check it rather than trust it:
+    the digest IS the content key, and the bytes we send are a fixed point of the
+    owner's ingest (see :func:`_settle_on_the_owner_ingest`), so the name written
+    here and the name the owner's row carries are the same name for the same
+    bytes. What would break it: a reference that is not the content key (a
+    per-install id, a path); a store rooted where ``attachment`` does not look;
+    or the owner's ingest gaining a transform that is not a fixed point of
+    itself — a new ladder rung that re-encodes what it is given — which would
+    make this side's settled bytes diverge again.
+
+    An image the owner would DISCARD is dropped here rather than sent, because
+    the alternative is the same silent loss one layer down.
+
+    ``marker`` rides along when the producer knew one, so a sender-side refusal
+    still names the chip the user is looking at (``attach_client._refit_images``
+    reads it). The bytes it maps to are the bounded ones, which is what the
+    owner journals — the marker is a UI fact, not a payload one.
+    """
+    prepared: list[dict[str, str]] = []
+    for image in images:
+        if not isinstance(image, dict):
+            continue
+        data = image.get("data_b64") or image.get("data")
+        if not isinstance(data, str) or not data:
+            continue
+        settled = _settle_on_the_owner_ingest(
+            {"data_b64": data, "mime_type": str(image.get("mime_type") or "image/png")}
+        )
+        if settled is None:
+            logger.debug("a peer-bound image was dropped: the owner's ingest refuses it")
+            continue
+        send, extra = settled
+        stage_images_in_store(root, [send, *extra])
+        if image.get("marker") is not None:
+            send = {**send, "marker": image["marker"]}
+        prepared.append(send)
+    return prepared
 
 
 class SessionDeletionRefused(ValueError):
