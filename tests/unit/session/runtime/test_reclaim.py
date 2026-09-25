@@ -24,7 +24,11 @@ import argparse
 import json
 import os
 import signal
+import subprocess
+import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -52,6 +56,7 @@ from local_operator.session.runtime.reclaim import (
     ancestor_pids,
     config_root_of,
     etime_seconds,
+    parse_process_row,
     process_row,
     reclaim_runtimes,
     record_file,
@@ -151,6 +156,63 @@ def env_text(root: str, *, session: str = "", home: str | None = None) -> str:
     return " ".join(parts)
 
 
+#: The width ``ps`` cuts to when it cannot read a display width and its stdout is not
+#: a terminal — i.e. the width every caller of this module's census gets on Linux.
+#: ``ps(1)`` refuses to promise the number ("the output width is undefined (it may be
+#: 80, unlimited, determined by the TERM variable, and so on)"), and 80 is the value
+#: the Linux CI shard measured, twice, as the cut that cost a shard.
+NARROW_WIDTH = 80
+
+#: The interpreter an ``argv[0]`` here is forged with, at a real CI path length: a
+#: runner's checkout, its ``.venv`` and ``python``. It is what makes the row below
+#: long enough for the narrow cut to matter, and it is deliberately a path that is NOT
+#: this host's — the row must be shaped like the one Linux prints, not like macOS's.
+LONG_INTERPRETER = "/home/runner/work/local-operator/local-operator/.venv/bin/python"
+
+
+@contextmanager
+def live_contract_row() -> Iterator[tuple[int, str]]:
+    """A REAL process wearing the spawn contract, and the REAL row a census reads for it.
+
+    The row's SHAPE is the whole subject: a Linux ``ps`` truncates the last column to
+    the display width, so the row that loses its ``-m <module>`` pair is the row whose
+    command column is long — which a synthetic one-line ``ps`` output cannot show,
+    because it never crosses the cut. So this forks a real child with a real long
+    ``argv[0]`` (the kernel stores ``argv[0]`` verbatim, the trick
+    ``test_launch_arbitration`` uses for the same reason) running ``sys.executable -c``
+    — it never imports this package, and it is reaped before the caller's assertions.
+
+    Yields ``(pid, row)``, where ``row`` is the line the census's OWN argv produced for
+    that pid: the runner is real ``ps``, so a change to that argv is a change to what
+    the assertions below are handed.
+    """
+    forged = f"{LONG_INTERPRETER} -P -m {reclaim.RUNTIME_MODULE}"
+    child = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+        [forged, "-c", "import time; time.sleep(20)"],
+        executable=sys.executable,
+        text=True,
+    )
+    try:
+        raw = ""
+
+        def capture(command, timeout_s):
+            # THE CENSUS'S OWN ARGV, run for real: this records the text those args
+            # produce rather than fabricating a row, so what the cells below cut is a
+            # row this module's reader actually sees.
+            nonlocal raw
+            raw = subprocess.run(  # noqa: S603 — fixed argv, no shell
+                list(command), capture_output=True, text=True, timeout=timeout_s
+            ).stdout
+            return raw
+
+        runtime_processes(run=capture)
+        row = next(line for line in raw.splitlines() if line.split(None, 1)[0] == str(child.pid))
+    finally:
+        child.kill()
+        child.wait(timeout=10)
+    yield child.pid, row
+
+
 # ---------------------------------------------------------------------------
 # The evidence
 # ---------------------------------------------------------------------------
@@ -190,6 +252,77 @@ def test_census_matches_the_spawn_contract_and_ignores_the_searcher() -> None:
     assert [item.pid for item in found] == [123]
     assert found[0].parent_pid == 1
     assert found[0].age_s == pytest.approx(122673.0)
+
+
+def test_the_census_asks_for_the_whole_command_column() -> None:
+    """THE WIDTH FLAG, ASSERTED ON THE ARGV RATHER THAN ON THIS HOST'S ``ps``.
+
+    On Linux, ``command`` is the row's last column, so a piped ``ps`` extends it only
+    to the display width it cannot determine — measured by this repository's own CI
+    rounds at 80 columns, severing a runtime's ``-m <module>`` pair and so reporting
+    a machine with runtimes on it as having none. ``ps -ww`` is unlimited width.
+
+    The width cannot be asserted THROUGH ``ps`` here: macOS does not truncate this
+    column at all (measured, same row with and without ``COLUMNS=80`` through a pipe),
+    so a green run on this host says nothing about the Linux one. The argv is the
+    instrument, so the argv is what is pinned — and with the real runner's real
+    ordering, because a flag in the wrong place is a flag ``ps`` may not apply.
+    """
+    calls: list[list[str]] = []
+
+    def run(command, timeout_s):
+        calls.append(list(command))
+        return ""
+
+    assert runtime_processes(run=run) == []
+    assert len(calls) == 1, "the census is ONE fork for the whole fleet"
+    argv = calls[0]
+    assert argv[0] == "ps"
+    assert "-ww" in argv, f"the census must ask for unlimited width: {argv}"
+    # The width flag belongs with ``ps``'s other display options, ahead of the format
+    # that names the column it widens — the shape this module's three sibling readers
+    # already use (``-Eww`` before ``-p``/``-eo``), and the shape a reader grepping for
+    # the flag alone would not catch.
+    assert argv.index("-ww") < argv.index("-eo"), f"the width flag comes after the format: {argv}"
+    assert argv[-1] == "pid=,ppid=,etime=,time=,command="
+    # AND NOT THE ENVIRONMENT. ``-Eww`` would widen the row too, but it appends each
+    # process's own environment to the very column ``parse_process_row`` word-splits
+    # and matches the spawn contract in, at ~4.4x the output (1.7 MB against 385 KB
+    # for the whole fleet, measured for :func:`process_env`). The census has no use for
+    # it: the environment is read per CANDIDATE by ``process_env``/``process_envs``.
+    assert not any(flag.startswith("-E") for flag in argv), f"the census asked for env: {argv}"
+
+
+def test_a_narrow_row_is_not_evidence_that_no_runtime_is_running() -> None:
+    """THE SILENT ZERO ITSELF, against a real process's real row.
+
+    Both cut rows below are THE SAME LIVE RUNTIME the census just found, seen through
+    the two widths a Linux ``ps`` may pick for a piped row: the documented common 80,
+    and one landing inside the module name. ``parse_process_row`` may only answer
+    ``None`` for them — a severed runtime and a stranger are the same input to it, and
+    it must not guess which it has — so the assertions state the consequence rather
+    than papering over it: this reader CANNOT tell absence from truncation, and the
+    width flag is therefore the only thing standing between a busy machine and a
+    census that reports zero.
+    """
+    with live_contract_row() as (pid, row):
+        wide = parse_process_row(row)
+        assert wide is not None and wide.pid == pid, f"the wide row is not a runtime row: {row!r}"
+        assert wide.command.startswith(LONG_INTERPRETER)
+
+        cut = row[:NARROW_WIDTH]
+        assert (
+            reclaim.RUNTIME_MODULE not in cut
+        ), f"this row is too short to model the Linux cut ({len(row)} cols): {row!r}"
+        assert parse_process_row(cut) is None
+
+        # The second width: the cut lands INSIDE the module name, so the ``-m`` this
+        # reader keys on IS present and the module word is not (this is the shape the
+        # spare-count helper read as "no spare" on the Linux shard).
+        severed = row[: row.index(reclaim.RUNTIME_MODULE) + 20]
+        assert "-m" in severed.split()
+        assert severed.split()[-1] == reclaim.RUNTIME_MODULE[:20]
+        assert parse_process_row(severed) is None
 
 
 def test_socket_table_gives_a_recordless_runtime_a_port_and_an_attach() -> None:
