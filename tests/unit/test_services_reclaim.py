@@ -21,6 +21,7 @@ from ``lsof`` by hand on 2026-09-23.
 
 from __future__ import annotations
 
+import subprocess
 import urllib.error
 from email.message import Message
 from typing import Any
@@ -38,6 +39,17 @@ def _no_sleep(_seconds: float) -> None:
 SERVE_ARGV = (
     "/opt/lop/bin/Local Operator [serve] port=1111 -P -m local_operator.cli "
     "serve --host 127.0.0.1 --port 1111"
+)
+
+
+#: The app's managed backend, in the shape R3-1 measured on this host: a generation
+#: path, then ``<interpreter> -c "<entrypoint>" serve``. It is the daemon that held
+#: port 1111 in the 2026-09-23 incident, and its 140-column command line is why this
+#: file needs a width cell at all: the ``serve`` verb is the LAST word of it, at
+#: column 129 of the row ``serve_process`` prints.
+APP_BACKEND_ARGV = (
+    "/Users/me/.local/share/lop/generations/2026/tools/local-operator/bin/python "
+    "-c from local_operator.cli import main; main() serve --port 1111"
 )
 
 
@@ -219,6 +231,85 @@ def test_the_spawn_contract_is_matched_as_words_not_a_substring() -> None:
     assert services.is_serve_command("/Users/damian/.local/bin/lop serve --port 1111")
     assert not services.is_serve_command("grep -rn local_operator.cli serve src/")
     assert not services.is_serve_command("/bin/zsh -c python -m local_operator.cli services status")
+
+
+def test_the_brand_proof_reads_the_whole_command_column(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE WIDTH FLAG, asserted on the argv rather than on this host's ``ps``.
+
+    ``serve_process`` reads ``uid=,command=``, and ``command`` is that row's LAST
+    column — the one ``ps`` extends only to a display width it cannot know while its
+    stdout is a pipe (``ps(1)``: "the output width is undefined (it may be 80,
+    unlimited, determined by the TERM variable, and so on)"). A cut severs the
+    ``serve`` verb this proof keys on, and on Linux that turned ``lop services
+    reclaim`` against the app's own backend into "not a ``lop serve`` daemon" (QA
+    round 1, Q1: the verdict flips True -> False at 80 and at 120 columns).
+
+    macOS does not truncate this column through a pipe, so the width cannot be
+    proven through ``ps`` here — the argv is what is pinned, as in the census's own
+    test, and with the reader's real ordering, because a width flag after the format
+    it widens is not the same instruction.
+    """
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **_kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout=f"   501  {SERVE_ARGV}\n")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert services.serve_process(4242) == SERVE_ARGV
+    assert len(calls) == 1, "the proof is ONE ps fork over the pid it was handed"
+    argv = calls[0]
+    assert argv[0] == "/bin/ps"
+    assert "-ww" in argv, f"the brand proof must ask for unlimited width: {argv}"
+    assert argv.index("-ww") < argv.index("-o"), f"the width flag comes after the format: {argv}"
+    assert argv[-1] == "uid=,command=", f"the proof reads the wrong columns: {argv}"
+    # NOT ``-Eww``, the spelling the runtime sweep's readers use. The environment
+    # would be appended to the very column a BRAND PROOF word-matches, and for a
+    # stray that proof is the entire case for signalling it; on Linux ``-E`` also
+    # does not exist, so the fork would fail and every reclaim would refuse.
+    assert not any(flag.startswith("-E") for flag in argv), f"the brand proof asked for env: {argv}"
+
+
+def test_a_cut_command_column_is_not_read_as_a_serve_daemon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WHAT THE CUT COSTS, through the real reader and the real ladder.
+
+    Both cut rows below are the SAME daemon that is accepted in full, seen through
+    the two widths a piped ``ps`` may pick — the documented common 80, and 120, which
+    does not save the backend either because its ``serve`` verb is at column 129.
+    The point of the cell is the consequence, stated rather than papered over: at
+    those widths this proof cannot tell the daemon from a stranger, so the claim is
+    not "no daemon" but "a refusal", and the refusal is the one the operator sees.
+    """
+    line = f"   501  {APP_BACKEND_ARGV}"
+    row = {"text": line}
+
+    def fake_run(argv, **_kwargs):
+        return subprocess.CompletedProcess(argv, 0, stdout=f"{row['text']}\n")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    full = services.serve_process(4242)
+    assert full == APP_BACKEND_ARGV
+    assert services.is_serve_command(full)
+
+    for width in (80, 120):
+        row["text"] = line[:width]
+        cut = services.serve_process(4242)
+        assert cut is not None, "the cut lands in the command column, not in the uid"
+        assert " serve" not in cut, f"this cell no longer models the cut: {cut!r}"
+        assert services.is_serve_command(cut) is False
+
+    # AND WHAT THE OPERATOR GETS: the app's own backend, refused as a stranger's
+    # process with the pid left alive — fail-closed, and the R3-1 refusal returning.
+    row["text"] = line[:80]
+    cut_at_eighty = services.serve_process(4242)
+    assert cut_at_eighty is not None
+    outcome, kills = _reclaim(command=cut_at_eighty)
+    assert kills == []
+    assert outcome.problem == "not-a-serve-daemon"
 
 
 # --------------------------------------------------------------------------- #
