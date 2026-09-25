@@ -335,9 +335,11 @@ def main() -> int:
         default="off",
         help=(
             "off: LOP_RUNTIME_STANDBY_DISABLED=1, the fork+import cold spawn. on: the "
-            "daemon keeps its pre-imported standby (session/runtime/standby.py), and "
-            "each timed send starts only once one is listening, i.e. the steady state "
-            "of a daemon that has been up a while"
+            "daemon keeps its pre-imported standby (session/runtime/standby.py). "
+            "EVERY run is reported and NOTHING waits for the warm: a send that "
+            "arrives before the standby is warm takes the cold path, which is the "
+            "run-1 the operator actually gets after a boot — read the runs after "
+            "that as the steady state"
         ),
     )
     args = parser.parse_args()
