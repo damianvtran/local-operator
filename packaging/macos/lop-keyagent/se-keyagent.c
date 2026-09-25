@@ -73,6 +73,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h> /* getpid(), for the doctor probe's unique tag */
 
 /*: The protocol version, echoed in every reply. Helper and client ship in the
    same wheel, so a mismatch means a mixed or broken install, and the honest
@@ -338,60 +339,136 @@ static CFNumberRef make_size_number(void) {
  * The verbs
  * ------------------------------------------------------------------------- */
 
+/*: One rung of the ladder: the access control, the attribute dictionaries, and the
+ *  generation.
+ *
+ *  Returns the new key (+1, the CF naming convention) or NULL, ALWAYS setting
+ *  `out->status` and filling the rest of `out` with the site, the rung and the
+ *  framework's sentence when it failed. Recording the refusal is left to the caller
+ *  because the two callers want different things: the ladder records every rung so
+ *  one message can name each protection class beside the refusal they shared, while
+ *  the duplicate-item case records nothing and reuses what is there.
+ *
+ *  Extracted so the doctor probe below runs THE SAME construction the ladder does —
+ *  a probe that generated a key some other way would answer a question about itself
+ *  rather than about `create`. */
+static SecKeyRef generate_key(CFDataRef tag, int rung, refusal_t *out) {
+    out->site = "key generation";
+    out->protection = LADDER[rung];
+    out->status = errSecParam;
+    out->detail[0] = '\0';
+
+    /* The access control object, built by the same helper the selftest asserts
+       on (make_access_control), so the ownership model verified in CI is the
+       ownership model this loop runs. */
+    CFErrorRef access_err = NULL;
+    SecAccessControlRef access = make_access_control(rung, &access_err);
+    if (!access) {
+        OSStatus status = access_err ? (OSStatus)CFErrorGetCode(access_err) : errSecParam;
+        record_refusal(out, "access control", LADDER[rung], status, access_err);
+        if (access_err) CFRelease(access_err);
+        return NULL;
+    }
+
+    /* kSecPrivateKeyAttrs: permanent, the tag, the access control. */
+    CFMutableDictionaryRef private_attrs = make_private_attrs(tag, access);
+    /* The dictionary RETAINS access (typed callbacks), so this program's reference
+       is released as soon as the dictionary holds it. */
+    CFRelease(access);
+
+    CFNumberRef size = make_size_number();
+    CFMutableDictionaryRef attrs = make_generation_dict(private_attrs, size);
+    /* Both were retained by the generation dictionary; this program's own
+       references go now, which is why every release below is paired with exactly
+       one creation. */
+    CFRelease(size);
+    CFRelease(private_attrs);
+
+    CFErrorRef err = NULL;
+    SecKeyRef key = SecKeyCreateRandomKey(attrs, &err);
+    CFRelease(attrs);
+    if (!key) {
+        OSStatus status = err ? (OSStatus)CFErrorGetCode(err) : errSecParam;
+        record_refusal(out, "key generation", LADDER[rung], status, err);
+        if (err) CFRelease(err);
+        return NULL;
+    }
+    return key;
+}
+
+/*: The {"ok":true,…,"spki":…[,"reused":…][,"rung":…]} reply.
+ *
+ *  TAKES OWNERSHIP of `point` and releases it, so every path that builds a point
+ *  has exactly one release and there is one place the reply's shape is written.
+ *
+ *  `reused` is 1 or 0 for `create`, where the client reads it to tell "this call
+ *  made the key" from "the tag already held one", and NEGATIVE for `public`, whose
+ *  reply has never carried the field: adding it there would be a wire change
+ *  nothing asked for. `rung` is the protection class a GENERATE achieved and is
+ *  OMITTED rather than emptied for a key that was already there — an empty string
+ *  would report a class that was never tried. */
+static int emit_key_reply(CFDataRef point, int reused, const char *rung) {
+    if (!point) {
+        emit_usage_error("the key has no exportable public half");
+        return EXIT_USAGE;
+    }
+    fputs("{\"ok\":true,\"protocol\":", stdout);
+    printf("%d,\"spki\":", PROTOCOL);
+    json_b64url((const unsigned char *)CFDataGetBytePtr(point),
+                (size_t)CFDataGetLength(point));
+    if (reused >= 0) {
+        fputs(reused ? ",\"reused\":true" : ",\"reused\":false", stdout);
+    }
+    if (rung && rung[0]) {
+        fputs(",\"rung\":", stdout);
+        json_string(rung);
+    }
+    fputs("}\n", stdout);
+    CFRelease(point);
+    return 0;
+}
+
 /*: create — make the key if it is not there, and report the public half.
  *
- *  IDEMPOTENT. A second call on a host that already has a key must not make a
- *  second key: the anchored contract is one key per machine, a new anchor
- *  invalidates every paired device's certificate, and the repository's rotation
- *  rule is "write a new key, install a new anchor" — not "delete the old one".
- *  So a duplicate item is answered by finding the existing key and returning it
- *  with "reused":true.
+ *  IDEMPOTENT BY TAG. A second call on a host that already has a key must not make
+ *  a second key: the anchored contract is one key per machine, a new anchor
+ *  invalidates every paired device's certificate, and the repository's rotation rule
+ *  is "write a new key, install a new anchor" — not "delete the old one". So the
+ *  tag is consulted FIRST and an existing item is returned with "reused":true.
  *
- *  WHY THE CREATE IS ATTEMPTED BEFORE THE FIND: a find on a presence-gated key
- *  is a query the framework may authenticate, and creation is measured not to
- *  raise user presence at all. Attempting the create first therefore keeps the
- *  common (fresh host) path free of any interaction, and the duplicate case costs
- *  one extra find. */
+ *  WHY THE FIND COMES FIRST, and this is the measured reason (QA round 1, Q1): on
+ *  this host ``SecKeyCreateRandomKey`` SUCCEEDS against a tag that already holds an
+ *  item, handing back a FRESH public half with "reused":false while ``find_key``
+ *  keeps resolving the tag to the FIRST key. Attempting the create first therefore
+ *  did not reach the duplicate branch below at all: `create` and `public` described
+ *  two different keys, and an anchor staged from ``create()``'s handle pinned a
+ *  public half the key agent would never sign with — every signature then rejected
+ *  against the installed anchor. One find first makes the three verbs agree on ONE
+ *  key, and it is free on the common (fresh host) path: ``errSecItemNotFound`` needs
+ *  no keychain context and raises no presence prompt — the very same query backs
+ *  ``exists`` and ``public``, which are measured prompt-free. The
+ *  ``errSecDuplicateItem`` branch below stays as a second line of defence for a
+ *  platform that does refuse the duplicate outright. */
 static int cmd_create(CFDataRef tag) {
     refusal_t refusals[MAX_REFUSALS];
     int count = 0;
 
+    OSStatus seen_status = errSecSuccess;
+    SecKeyRef seen = find_key(tag, &seen_status);
+    if (seen) {
+        CFDataRef point = public_point(seen);
+        CFRelease(seen);
+        return emit_key_reply(point, 1, NULL);
+    }
+
     for (int i = 0; i < LADDER_LEN; i++) {
-        /* The access control object, built by the same helper the selftest
-           asserts on (make_access_control), so the ownership model verified in
-           CI is the ownership model this loop runs. */
-        CFErrorRef access_err = NULL;
-        SecAccessControlRef access = make_access_control(i, &access_err);
-        if (!access) {
-            OSStatus status = access_err ? (OSStatus)CFErrorGetCode(access_err) : errSecParam;
-            record_refusal(&refusals[count++], "access control", LADDER[i], status, access_err);
-            if (access_err) CFRelease(access_err);
-            continue;
-        }
-
-        /* kSecPrivateKeyAttrs: permanent, the tag, the access control. */
-        CFMutableDictionaryRef private_attrs = make_private_attrs(tag, access);
-        /* The dictionary RETAINS access (typed callbacks), so this program's
-           reference is released as soon as the dictionary holds it. */
-        CFRelease(access);
-
-        CFNumberRef size = make_size_number();
-        CFMutableDictionaryRef attrs = make_generation_dict(private_attrs, size);
-        /* Both were retained by the generation dictionary; this program's own
-           references go now, which is why every release below is paired with
-           exactly one creation. */
-        CFRelease(size);
-        CFRelease(private_attrs);
-
-        CFErrorRef err = NULL;
-        SecKeyRef key = SecKeyCreateRandomKey(attrs, &err);
-        CFRelease(attrs);
+        refusal_t refusal = {0};
+        SecKeyRef key = generate_key(tag, i, &refusal);
         if (!key) {
-            OSStatus status = err ? (OSStatus)CFErrorGetCode(err) : errSecParam;
-            if (status == errSecDuplicateItem) {
-                /* A key is already stored under this tag: report the one that is
+            if (refusal.status == errSecDuplicateItem) {
+                /* A key is already stored under this tag — reached only on a
+                   platform that refuses the duplicate — so report the one that is
                    there, and never a second key. */
-                if (err) CFRelease(err);
                 OSStatus found_status = errSecSuccess;
                 SecKeyRef existing = find_key(tag, &found_status);
                 if (!existing) {
@@ -402,38 +479,14 @@ static int cmd_create(CFDataRef tag) {
                 }
                 CFDataRef point = public_point(existing);
                 CFRelease(existing);
-                if (!point) {
-                    emit_usage_error("the stored key has no exportable public half");
-                    return EXIT_USAGE;
-                }
-                fputs("{\"ok\":true,\"protocol\":", stdout);
-                printf("%d,\"spki\":", PROTOCOL);
-                json_b64url((const unsigned char *)CFDataGetBytePtr(point),
-                            (size_t)CFDataGetLength(point));
-                fputs(",\"reused\":true}\n", stdout);
-                CFRelease(point);
-                return 0;
+                return emit_key_reply(point, 1, NULL);
             }
-            record_refusal(&refusals[count++], "key generation", LADDER[i], status, err);
-            if (err) CFRelease(err);
+            refusals[count++] = refusal;
             continue;
         }
-
         CFDataRef point = public_point(key);
         CFRelease(key);
-        if (!point) {
-            emit_usage_error("the new key has no exportable public half");
-            return EXIT_USAGE;
-        }
-        fputs("{\"ok\":true,\"protocol\":", stdout);
-        printf("%d,\"spki\":", PROTOCOL);
-        json_b64url((const unsigned char *)CFDataGetBytePtr(point),
-                    (size_t)CFDataGetLength(point));
-        fputs(",\"reused\":false,\"rung\":", stdout);
-        json_string(LADDER[i]);
-        fputs("}\n", stdout);
-        CFRelease(point);
-        return 0;
+        return emit_key_reply(point, 0, LADDER[i]);
     }
 
     /* Every rung refused. */
@@ -465,16 +518,9 @@ static int cmd_public_or_exists(CFDataRef tag, int existence_only) {
     }
     CFDataRef point = public_point(key);
     CFRelease(key);
-    if (!point) {
-        emit_usage_error("the stored key has no exportable public half");
-        return EXIT_USAGE;
-    }
-    printf("{\"ok\":true,\"protocol\":%d,\"spki\":", PROTOCOL);
-    json_b64url((const unsigned char *)CFDataGetBytePtr(point),
-                (size_t)CFDataGetLength(point));
-    fputs("}\n", stdout);
-    CFRelease(point);
-    return 0;
+    /* -1: `public` has never carried a `reused` field, and adding one would be a
+       wire change nothing asked for. */
+    return emit_key_reply(point, -1, NULL);
 }
 
 /*: sign — sign EXACTLY the bytes on stdin, and nothing else.
@@ -541,7 +587,7 @@ static int cmd_sign(CFDataRef tag) {
 
 /*: doctor — what this installation can and cannot do, measured rather than claimed.
  *
- *  Three independent facts, none of which writes anything or raises a prompt:
+ *  Four independent facts, none of which raises a prompt:
  *
  *   * `rung`   — the strictest protection class this process can build an access
  *                control object for. This is the measurement that would have caught
@@ -553,8 +599,20 @@ static int cmd_sign(CFDataRef tag) {
  *   * `profile` — whether this bundle carries its embedded provisioning profile.
  *                Reported because its absence is a kernel SIGKILL rather than an
  *                error, so the only place it can be *reported* is before exec.
- */
-static int cmd_doctor(CFDataRef tag) {
+ *   * `generation` — whether this process can actually CREATE in the
+ *                data-protection keychain, under a throwaway tag of its own that it
+ *                deletes again immediately.
+ *
+ *  WHY `generation` EXISTS, and why a read was not enough (QA round 1, Q4). The
+ *  query above is answered -25300 to an UNENTITLED process as well as to an entitled
+ *  one — that is the whole -25300 trap — so a bundle whose entitlement the OS will
+ *  not honour reports `keychain":"ok"` and looks healthy, while `create` fails
+ *  -34018. Measured on four bundles: the refused- and the mangled-entitlement cases
+ *  both passed the old three checks. Generation is the operation the entitlement
+ *  actually gates, so doctor performs it once and deletes the item at once: the tag
+ *  is `<the tag it was given>.<pid>`, so two concurrent doctors cannot see each
+ *  other's item, and nothing the operator owns is touched. */
+static int cmd_doctor(CFDataRef tag, const char *tagtext) {
     const char *rung = "none";
     OSStatus rung_status = errSecParam;
     for (int i = 0; i < LADDER_LEN; i++) {
@@ -596,8 +654,40 @@ static int cmd_doctor(CFDataRef tag) {
         }
     }
 
+    /* THE OS-GATED OPERATION — see the docstring above for why a read is not one.
+       The tag is unique per process, so the item this makes can never be confused
+       with another run's, and it is deleted on EVERY path out including the failed
+       one (a delete of an item that was never made answers -25300, which is not an
+       error for a cleanup). */
+    char probe_tag[1024];
+    snprintf(probe_tag, sizeof probe_tag, "%s.%d", tagtext, (int)getpid());
+    OSStatus generation_status = errSecParam;
+    CFDataRef probe = CFDataCreate(NULL, (const UInt8 *)probe_tag, (CFIndex)strlen(probe_tag));
+    if (probe) {
+        generation_status = errSecParam;
+        for (int i = 0; i < LADDER_LEN; i++) {
+            refusal_t refusal = {0};
+            SecKeyRef made = generate_key(probe, i, &refusal);
+            if (made) {
+                CFRelease(made);
+                generation_status = errSecSuccess;
+                break;
+            }
+            generation_status = refusal.status;
+        }
+        const void *probe_keys[] = {kSecClass, kSecAttrApplicationTag};
+        const void *probe_values[] = {kSecClassKey, probe};
+        CFDictionaryRef sweep = CFDictionaryCreate(NULL, probe_keys, probe_values, 2,
+                                                   &kCFTypeDictionaryKeyCallBacks,
+                                                   &kCFTypeDictionaryValueCallBacks);
+        SecItemDelete(sweep);
+        CFRelease(sweep);
+        CFRelease(probe);
+    }
+
     int ok = (rung_status == errSecSuccess) && (query_status == errSecSuccess ||
-                                                query_status == errSecItemNotFound);
+                                                query_status == errSecItemNotFound) &&
+             (generation_status == errSecSuccess);
     printf("{\"ok\":%s,\"protocol\":%d,\"rung\":", ok ? "true" : "false", PROTOCOL);
     json_string(rung);
     fputs(",\"keychain\":", stdout);
@@ -607,6 +697,30 @@ static int cmd_doctor(CFDataRef tag) {
        must not read prose, and a report should quote the number. */
     printf(",\"keychain_status\":%d,\"profile\":", (int)query_status);
     json_string(profile_ok ? "ok" : "missing");
+    printf(",\"generation\":");
+    json_string(generation_status == errSecSuccess ? "ok" : describe_status(generation_status));
+    printf(",\"generation_status\":%d", (int)generation_status);
+    /* A FAILING REPORT NAMES THE FACT THAT FAILED, because this reply is also the
+       exception's detail on the client side (every non-zero exit becomes a
+       KeyagentError), and "the key agent failed (refused)" without a cause is the
+       generic copy this whole verb exists to replace. */
+    if (!ok) {
+        char detail[256];
+        if (rung_status != errSecSuccess) {
+            snprintf(detail, sizeof detail, "no protection class could be built (%s)",
+                     describe_status(rung_status));
+        } else if (query_status != errSecSuccess && query_status != errSecItemNotFound) {
+            snprintf(detail, sizeof detail, "the keychain query was refused (%s)",
+                     describe_status(query_status));
+        } else {
+            snprintf(detail, sizeof detail,
+                     "the key agent could not create in the keychain, so its entitlement \
+is not in effect (%s)",
+                     describe_status(generation_status));
+        }
+        fputs(",\"detail\":", stdout);
+        json_string(detail);
+    }
     fputs("}\n", stdout);
     return ok ? 0 : EXIT_REFUSED;
 }
@@ -835,7 +949,7 @@ int main(int argc, char **argv) {
     else if (strcmp(verb, "public") == 0) rc = cmd_public_or_exists(tag, 0);
     else if (strcmp(verb, "exists") == 0) rc = cmd_public_or_exists(tag, 1);
     else if (strcmp(verb, "sign") == 0) rc = cmd_sign(tag);
-    else if (strcmp(verb, "doctor") == 0) rc = cmd_doctor(tag);
+    else if (strcmp(verb, "doctor") == 0) rc = cmd_doctor(tag, tagtext);
     else if (strcmp(verb, "selftest") == 0) rc = cmd_selftest(tag);
     else if (strcmp(verb, "purge") == 0) rc = cmd_purge(tag, tagtext);
     else {

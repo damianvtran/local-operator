@@ -30,10 +30,13 @@ made here.
 from __future__ import annotations
 
 import base64
+import datetime
 import json
 import os
+import plistlib
 import signal
 import subprocess
+import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +46,13 @@ from typing import Any
 #: in the same wheel, so a mismatch means a broken or mixed install, and the
 #: honest answer is to refuse rather than to interpret.
 PROTOCOL = 1
+
+#: The helper's own word for "I declined this before touching the keychain" — the
+#: ``site`` every ``emit_usage_error`` reply carries, and therefore the ``site`` side of
+#: an ``EXIT_USAGE`` refusal. It is NOT an OSStatus site: the helper's ``detail`` is the
+#: whole explanation, so the message builder reports it as the key agent's own sentence
+#: rather than inventing a framework diagnosis (agent review round 1, R1-4).
+USAGE_REFUSED = "usage"
 
 #: The identity the helper must have been signed under. Pinned because "the
 #: artefact is ours" is the same test the anchor applies to a public half: a
@@ -69,11 +79,12 @@ SIGN_TIMEOUT_SECONDS = 180.0
 #: How long a terminated helper has to exit before it is killed outright.
 _KILL_GRACE_SECONDS = 2.0
 
-#: The tag ``helper_health`` probes under. A tag NOTHING writes to, on purpose: the
-#: question "can this installation reach an entitled process?" must not depend on
-#: whether the operator's own key exists, and a tag with no item is the cheapest run
-#: that still proves the process was entitled — it answers errSecItemNotFound, not
-#: errSecMissingEntitlement, and is not killed.
+#: The tag ``helper_health`` probes under. A tag NOTHING has a key under, on purpose:
+#: the question "can this installation reach an entitled process?" must not depend on
+#: whether the operator's own key exists. ``doctor`` does CREATE under it — that is how
+#: it establishes OS-level usability rather than inspecting (see ``DoctorReport``) — but
+#: it does so under ``<this tag>.<pid>`` and deletes what it made, so the tag itself
+#: still holds no key and two concurrent doctors cannot see each other's item.
 HEALTH_TAG = "com.local-operator.lopkeyagent.health"
 
 
@@ -123,20 +134,39 @@ class KeyagentError(RuntimeError):
 
 @dataclass(frozen=True)
 class KeyPublic:
-    """A public half, and whether this call also created it."""
+    """A public half, whether this call also created it, and which class it got.
+
+    ``rung`` is the protection class the helper ACHIEVED when it made the key, and is
+    empty when the key was already there (nothing was tried). It is carried rather
+    than dropped because the ladder's whole point is that it never settles for a
+    weaker class: on a host whose keychain has no passcode to bind to it makes the
+    key ``kSecAttrAccessibleWhenUnlockedThisDeviceOnly`` instead of
+    ``…WhenPasscodeSetThisDeviceOnly``, and that difference is exactly what a report
+    has to be able to state (agent review round 1, R1-5).
+    """
 
     point: bytes
     reused: bool = False
+    rung: str = ""
 
 
 @dataclass(frozen=True)
 class DoctorReport:
-    """What ``doctor`` measured: no writes, no prompts."""
+    """What ``doctor`` measured: no prompts, and at most one item it deletes at once.
+
+    ``generation`` is the part that is not an inspection: whether this process could
+    actually CREATE in the data-protection keychain. A read cannot answer that — the
+    query in ``keychain`` is answered ``errSecItemNotFound`` to an unentitled process
+    as well as to an entitled one, so a bundle whose entitlement the OS will not honour
+    reports ``keychain: ok`` and looks healthy (QA round 1, Q4).
+    """
 
     rung: str
     keychain: str
     keychain_status: int
     profile: str
+    generation: str = ""
+    generation_status: int = 0
 
 
 @dataclass(frozen=True)
@@ -201,25 +231,145 @@ def _codesign_fields(app: Path) -> dict[str, str]:
     return fields
 
 
-def _profile_decodes(profile: Path) -> bool:
-    """Whether ``security cms -D -i`` can DECODE the profile in this environment.
+#: The sentence ``security cms -D`` prints when it cannot build the chain that verifies a
+#: profile's own signature because there is no keychain context to do it in. Matched on
+#: the TOOL'S OWN TEXT rather than inferred from a non-zero exit, because a non-zero exit
+#: is also what a truncated or mangled blob produces — and those are two different answers
+#: (see :func:`_decode_profile`).
+_PROFILE_NEEDS_KEYCHAIN = "A default keychain could not be found"
 
-    It builds the certificate chain that verifies the profile's own signature, so it
-    needs a keychain context. Measured on macOS 27.0 with a HOME that has no login
-    keychain (an isolated test root, a container image): it fails with
-    ``security: cert import failed: A default keychain could not be found``, silently —
-    no dialog, no prompt — while the same file decodes normally under the operator's own
-    HOME. So this answers "does this blob decode HERE", which is a weaker question than
-    "does this blob decode", and the caller says which one it got.
+#: The profile field that is the authorization the kernel enforces, and the field that
+#: says how long that authorization lasts.
+_PROFILE_APP_ID_KEY = "com.apple.application-identifier"
+_PROFILE_EXPIRY_KEY = "ExpirationDate"
+_PROFILE_CERTS_KEY = "DeveloperCertificates"
+
+
+def _decode_profile(profile: Path) -> tuple[str, str, bytes]:
+    """Try to decode the profile HERE, and say which of THREE things happened.
+
+    Returns ``(state, detail, decoded)``, where ``state`` is one of:
+
+    * ``decoded`` — ``security cms -D`` read it and produced the plist bytes;
+    * ``no-keychain`` — the decode could not run for want of a keychain context, the
+      isolated-``HOME`` case measured on macOS 27.0 (``security: cert import failed: A
+      default keychain could not be found``, silently — no dialog, no prompt). The blob
+      is neither accepted nor refused, and the caller must SAY SO rather than report a
+      pass it did not observe;
+    * ``failed`` — the decode RAN and refused the blob.
+
+    THE THREE ARE NOT TWO (agent review round 1, R1-6; QA round 1, Q3). Collapsing
+    ``failed`` into ``no-keychain`` reported "no keychain to decode it with" for a profile
+    that is simply not valid CMS — a claim about the invoker that is not true — and, worse,
+    passed the bundle, so a profile of unreadable garbage satisfied the pre-flight that
+    exists to catch exactly that. The distinguishing fact is the tool's own text, never the
+    exit code alone.
     """
     try:
         decoded = _run(["security", "cms", "-D", "-i", str(profile)], timeout=30.0)
-    except OSError:  # pragma: no cover — security(1) ships with macOS
-        return False
-    return decoded.returncode == 0 and bool(decoded.stdout)
+    except OSError as exc:  # pragma: no cover — security(1) ships with macOS
+        return "failed", f"security(1) could not be run: {exc}", b""
+    if decoded.returncode == 0 and decoded.stdout:
+        return "decoded", "", decoded.stdout
+    text = (decoded.stderr or decoded.stdout or b"").decode("utf-8", "replace").strip()
+    if _PROFILE_NEEDS_KEYCHAIN in text:
+        return "no-keychain", text or _PROFILE_NEEDS_KEYCHAIN, b""
+    return "failed", text or f"security cms exited {decoded.returncode}", b""
 
 
-def _profile_authorizes(profile: Path) -> tuple[bool, str]:
+def _signing_leaf(app: Path) -> bytes | None:
+    """The DER of the certificate this bundle's signature was made with, or ``None``.
+
+    ``codesign -d --extract-certificates=<prefix>`` writes the embedded chain to
+    ``<prefix>0`` (the leaf), ``<prefix>1``, …: it is the only way to get the certificate
+    ITSELF rather than a name to compare against, and comparing names would compare
+    printable forms of the same fact. Extracted into a ``TemporaryDirectory`` because the
+    tool writes files and this runs before every verb.
+
+    ``None`` means the tool could not produce one, so the caller can report the pairing as
+    not established rather than as verified.
+    """
+    try:
+        with tempfile.TemporaryDirectory(prefix="lop-keyagent-leaf-") as scratch:
+            prefix = os.path.join(scratch, "chain")
+            result = _run(
+                ["codesign", "--display", f"--extract-certificates={prefix}", str(app)],
+                timeout=30.0,
+            )
+            if result.returncode != 0:  # pragma: no cover — the verify step ran first
+                return None
+            try:
+                return Path(f"{prefix}0").read_bytes()
+            except OSError:  # pragma: no cover — no leaf was written
+                return None
+    except OSError:  # pragma: no cover — codesign ships with macOS
+        return None
+
+
+def _profile_is_usable(decoded: bytes, claimed: str, app: Path) -> tuple[bool, str]:
+    """The checks the DECODED profile makes possible: is it current, and does it PAIR.
+
+    WHY THESE, AND WHY HERE (agent review round 1, R1-2). The raw-bytes test in
+    :func:`_profile_authorizes` proves the blob mentions the right application identifier,
+    and a rotated-out-of-step or lapsed profile passes it: a profile is a plist whose
+    ``ExpirationDate`` the build can read and whose ``DeveloperCertificates`` name the
+    certificates Apple will accept for it, and neither was read anywhere (``grep -rn
+    Expiration`` found the topic only in the design document's prose). A profile the kernel
+    will not honour does not fail politely — it is a SIGKILL, the state §6's table has a row
+    for and which no error handling can turn into a message — so the pre-flight is the only
+    place these can be caught while they are still RETURN VALUES.
+
+    The pairing is the one check that needs the bundle's own signature: the profile's
+    ``DeveloperCertificates`` must contain the certificate that signed this app. Measuring
+    it needs one ``codesign`` extraction, and where that cannot produce a leaf the answer
+    says the pairing was NOT ESTABLISHED rather than claiming a pass.
+    """
+    try:
+        plist = plistlib.loads(decoded)
+    except Exception as exc:  # noqa: BLE001 — any non-plist is a refusal, not a crash
+        return False, f"the embedded provisioning profile is not a plist: {exc}"
+    if not isinstance(plist, dict):  # pragma: no cover — plistlib returns a dict here
+        return False, "the embedded provisioning profile is not a plist dictionary"
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    expiry = plist.get(_PROFILE_EXPIRY_KEY)
+    if not isinstance(expiry, datetime.datetime):
+        return False, f"the embedded provisioning profile carries no {_PROFILE_EXPIRY_KEY}"
+    if expiry.tzinfo is None:  # pragma: no cover — plistlib reads these as UTC
+        expiry = expiry.replace(tzinfo=datetime.timezone.utc)
+    if expiry <= now:
+        return False, (
+            "the embedded provisioning profile expired on "
+            f"{expiry.date().isoformat()} ({(now - expiry).days} day(s) ago)"
+        )
+
+    entitling = plist.get("Entitlements", {}).get(_PROFILE_APP_ID_KEY)
+    if entitling != claimed:
+        # The decoded profile is the authority on this: the bytes test can only say the
+        # string appears SOMEWHERE in the DER, while the kernel reads this dictionary.
+        return False, f"the embedded provisioning profile grants {entitling!r}, not {claimed}"
+
+    certificates = plist.get(_PROFILE_CERTS_KEY) or []
+    if not certificates:
+        return False, (
+            f"the embedded provisioning profile names no {_PROFILE_CERTS_KEY}, so nothing "
+            "authorizes the signature carrying it"
+        )
+    leaf = _signing_leaf(app)
+    if leaf is None:
+        return True, (
+            f"{claimed} (current to {expiry.date().isoformat()}; the profile/signature "
+            "pairing was not established — this environment produced no signing leaf)"
+        )
+    if leaf not in certificates:
+        return False, (
+            "the embedded provisioning profile does not name the certificate that signed "
+            "this key agent, so the kernel would refuse it before it could run"
+        )
+    return True, f"{claimed} (profile decodes, current to {expiry.date().isoformat()}, pairs)"
+
+
+def _profile_authorizes(profile: Path, app: Path) -> tuple[bool, str]:
     """Whether the profile authorizes THIS helper's identity, and how that was decided.
 
     THE FIRST CHECK IS THE LOAD-BEARING ONE, and it deliberately needs no external tool.
@@ -230,22 +380,26 @@ def _profile_authorizes(profile: Path) -> tuple[bool, str]:
     ``assemble_keyagent_bundle.sh`` fails the build without — and the profile's absence
     is measured to be a kernel SIGKILL, which is why it is checked before exec at all.
 
-    The SECOND check, when the environment can decode, proves the blob is not truncated
-    or mangled in a way that leaves the string but loses the structure. Where it cannot
-    be run the description SAYS SO rather than reporting a pass it did not observe —
-    ``uncached in this environment`` is a fact a report can carry; a silent pass is not.
+    The SECOND check, when the environment can decode, is the one that establishes the blob
+    is USABLE rather than merely present: see :func:`_profile_is_usable` for the expiry and
+    pairing checks and why they are here. A blob that decodes and is refused is a FAILURE; a
+    blob this environment cannot decode at all is neither accepted nor refused, and the
+    description says which of the two happened rather than reporting a pass it did not
+    observe (R1-6, Q3).
     """
     claimed = f"{TEAM_IDENTIFIER}.{BUNDLE_IDENTIFIER}"
-    raw = b""
     try:
         raw = profile.read_bytes()
     except OSError as exc:
         return False, f"the embedded provisioning profile is unreadable: {exc}"
     if claimed.encode("utf-8") not in raw:
         return False, f"the embedded provisioning profile does not authorize {claimed}"
-    if _profile_decodes(profile):
-        return True, f"{claimed} (profile decodes)"
-    return True, f"{claimed} (profile uncached in this environment: no keychain to decode it with)"
+    state, detail, decoded = _decode_profile(profile)
+    if state == "no-keychain":
+        return True, f"{claimed} (profile not decoded in this environment: {detail})"
+    if state == "failed":
+        return False, f"the embedded provisioning profile could not be decoded: {detail}"
+    return _profile_is_usable(decoded, claimed, app)
 
 
 def verify_bundle(app: Path) -> str:
@@ -310,7 +464,7 @@ def verify_bundle(app: Path) -> str:
             "it carries no embedded provisioning profile (an entitled bundle "
             "without one is killed by the kernel, not refused)",
         )
-    app_id_ok, app_id_detail = _profile_authorizes(profile)
+    app_id_ok, app_id_detail = _profile_authorizes(profile, app)
     if not app_id_ok:
         raise KeyagentError("unverified", app_id_detail)
     return f"{identifier} (team {team}); {app_id_detail}"
@@ -380,6 +534,22 @@ class KeyagentClient:
                 f"the key agent did not answer within {timeout:g}s",
                 exit_code=None,
             ) from None
+        except BaseException:
+            # ANY OTHER EXIT PATH REAPS THE GROUP TOO, and ``BaseException`` is the point:
+            # Ctrl-C raises ``KeyboardInterrupt``, which is not an ``Exception``.
+            #
+            # MEASURED (agent review round 1, R1-1, reproduced with a fake bundle whose
+            # helper sleeps in place of waiting on the sheet): SIGINT during ``sign`` left
+            # the helper running in its own session — ``start_new_session=True`` — and a
+            # parent that then exited the way ``cli.main`` does on Ctrl-C (exit 130, no
+            # cleanup) left it RE-PARENTED TO PID 1 and still running, with nothing left
+            # that could reap it. On the real path that process is blocked in
+            # ``SecKeyCreateSignature`` with no internal timeout by design, so the state
+            # was "a process left holding an OS presence prompt after the command that
+            # raised it had exited" — and ``_KeyagentSigner.close()`` asserted the
+            # opposite. The timeout path above always reaped; this is the same disposal.
+            self._reap(process)
+            raise
         return subprocess.CompletedProcess(argv, process.returncode, out, err)
 
     @staticmethod
@@ -445,7 +615,29 @@ class KeyagentClient:
         if rc == 2:
             raise KeyagentError("cancelled", stdout or stderr, exit_code=rc)
         if rc == 5:
-            raise KeyagentError("protocol", stdout or stderr, exit_code=rc)
+            # EXIT_USAGE IS TWO THINGS, and the reply says which (QA round 1, Q2).
+            #
+            # A deliberate refusal (`purge` on the operator's own tag), a bad verb and a
+            # bad flag all leave by the same exit code as a genuine mismatch with another
+            # build — and mapping all of them to `protocol` told the operator "the key
+            # agent does not match this runtime … reinstall so both come from one wheel"
+            # for a refusal that was working exactly as designed. The helper echoes
+            # PROTOCOL in every reply it writes, so a parseable reply carrying THIS
+            # protocol came from a helper that understands us and declined; one carrying
+            # another protocol, or none at all, did not.
+            declined = _declined_request(stdout)
+            if declined is None:
+                raise KeyagentError("protocol", stdout or stderr, exit_code=rc)
+            raise KeyagentError(
+                "refused",
+                str(declined.get("detail") or stderr),
+                # NOT `declined["status"]`: on this path it is the EXIT code (5), not an
+                # OSStatus, and handing an exit code to the framework diagnosis table
+                # would be a category error the table cannot detect.
+                status=None,
+                site=str(declined.get("site") or USAGE_REFUSED),
+                exit_code=rc,
+            )
         reply: dict[str, Any] = {}
         if stdout:
             try:
@@ -481,9 +673,21 @@ class KeyagentClient:
     # -- verbs --------------------------------------------------------------
 
     def create(self) -> KeyPublic:
-        """Create the operator key, or return the one already there."""
+        """Create the operator key, or return the one already there.
+
+        ``reused`` and ``rung`` come back with the point rather than being dropped
+        (agent review round 1, R1-5): ``reused`` is the fact that makes a second
+        ``lop operator init`` a report rather than a second key — and, since the helper
+        now consults the tag before generating, it is also the only observable of the
+        race where a key appears between ``init``'s probe and its create — while ``rung``
+        is the protection class the ladder actually achieved.
+        """
         reply = self._invoke("create")
-        return KeyPublic(point=_point(reply), reused=bool(reply.get("reused")))
+        return KeyPublic(
+            point=_point(reply),
+            reused=bool(reply.get("reused")),
+            rung=str(reply.get("rung") or ""),
+        )
 
     def public(self) -> bytes:
         """The public half of the stored key, or ``no-key`` if there is none."""
@@ -502,13 +706,20 @@ class KeyagentClient:
         return base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
 
     def doctor(self) -> DoctorReport:
-        """Measure the bundle's health without writing to any keychain."""
+        """Measure the bundle's health: no prompts, and ONE throwaway key it deletes again.
+
+        Not read-only, deliberately — see :class:`DoctorReport`: establishing that the OS
+        will honour this bundle's entitlement needs an operation the OS gates, and a read
+        is not one.
+        """
         reply = self._invoke("doctor")
         return DoctorReport(
             rung=str(reply.get("rung", "")),
             keychain=str(reply.get("keychain", "")),
             keychain_status=int(reply.get("keychain_status", 0)),
             profile=str(reply.get("profile", "")),
+            generation=str(reply.get("generation", "")),
+            generation_status=int(reply.get("generation_status", 0)),
         )
 
     def purge(self) -> int:
@@ -530,7 +741,9 @@ def helper_health(*, bundle: Path | None = None, tag: str = HEALTH_TAG) -> Keyag
     this installation: present, verifying as ours, and able to run with its
     entitlement. A pre-flight alone would not prove the last part (a profile can
     parse and still not be authorized, which is a kernel kill), so a ``doctor`` run
-    under a tag nothing writes to finishes the answer.
+    finishes the answer — and ``doctor`` establishes the entitlement by CREATING in
+    the keychain under a throwaway tag it deletes again, because the query alone is
+    answered identically by a working install and a dead one (QA round 1, Q4).
 
     Never raises: callers report the reason rather than dying on it.
     """
@@ -543,6 +756,19 @@ def helper_health(*, bundle: Path | None = None, tag: str = HEALTH_TAG) -> Keyag
         return KeyagentHealth(False, f"{exc.kind}: {exc.detail}", exc.kind)
     except OSError as exc:  # pragma: no cover — a filesystem in a bad state
         return KeyagentHealth(False, f"unreadable: {exc}", "absent")
+
+
+def _declined_request(stdout: str) -> dict[str, Any] | None:
+    """The reply if the helper SPEAKS this protocol and declined the request, else None."""
+    if not stdout:
+        return None
+    try:
+        parsed = json.loads(stdout)
+    except ValueError:
+        return None
+    if isinstance(parsed, dict) and parsed.get("protocol") == PROTOCOL:
+        return parsed
+    return None
 
 
 def _point(reply: dict[str, Any]) -> bytes:

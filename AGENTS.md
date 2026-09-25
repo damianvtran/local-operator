@@ -1073,6 +1073,16 @@ it landed.
    `## Fixes` as applicable, then `## Install` and the full-changelog compare
    link). A window's notes are written from the collected impact lines, not
    from commit subjects.
+
+   **A macOS job is on the critical path for every platform now.** `pypi-publish`
+   declares `keyagent-macos` as a hard dependency: the Developer-ID-signed helper and its
+   embedded profile are injected into the macOS wheel, and publishing the pure wheel alone
+   would be the silent downgrade the design forbids. The consequence for this checklist is
+   that an expired Developer ID identity or a revoked App ID stops the Linux and Windows
+   release too — and the remedy is a re-issued p12/profile refilled into
+   `secrets.MACOS_SIGNING_P12_BASE64` / `secrets.MACOS_SIGNING_PROFILE_BASE64`, not a
+   skipped job. `keyagent-macos` runs on the pinned `macos-15` runner deliberately, so do
+   not bump that pin during a release window.
 5. **Post the refs** (tag, release URL, installed `.lop-source` revision) as a
    comment on every PR in the window, and `send` them to each contributor
    still running.
