@@ -39,6 +39,23 @@ from pydantic import BaseModel, ConfigDict, Field
 #: warning in load().
 MIN_WAKE_INTERVAL_MS = 60_000
 
+#: The cap on a wake's self-prompt, enforced by ``build_wake_schedule``.
+#:
+#: It lives HERE rather than in :mod:`wake` for a measured reason: ``cli.py``'s
+#: parser prints it in the ``wake create`` help text, and the parser is built on
+#: EVERY command. Importing it from the scheduler module therefore pulled
+#: ``harness.wake`` — and the pydantic model construction beneath it — onto
+#: ``lop --version``, which printed a version and built a wake option group it
+#: never used. A profile of that command showed ``harness/wake.py:1(<module>)``
+#: at **1.214 s cumulative** as the single largest term in ``build_cli_parser``.
+#: The constant is data with no dependencies, so it belongs with the DTOs.
+MAX_WAKE_MESSAGE_CHARS = 2_000
+
+#: How many schedules one session may hold. Beside :data:`MAX_WAKE_MESSAGE_CHARS`
+#: for the same reason: the parser's help text names both shared caps, and a
+#: second copy of either number is how they drift.
+MAX_WAKE_SCHEDULES = 16
+
 
 class WakeSchedule(BaseModel):
     """One scheduled wake. ``id`` is a stable per-session handle (``w1``…)."""
@@ -77,4 +94,10 @@ class DueWake(BaseModel):
     final: bool = False
 
 
-__all__ = ["MIN_WAKE_INTERVAL_MS", "DueWake", "WakeSchedule"]
+__all__ = [
+    "MAX_WAKE_MESSAGE_CHARS",
+    "MAX_WAKE_SCHEDULES",
+    "MIN_WAKE_INTERVAL_MS",
+    "DueWake",
+    "WakeSchedule",
+]

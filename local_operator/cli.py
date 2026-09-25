@@ -1062,10 +1062,15 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "when",
         help='when to fire: a duration ("in 2m", "45s") or a clock time ("at 09:30")',
     )
-    # Lazy, like every other harness import in this module (see the module
-    # docstring): the flag's help names the SHARED cap rather than a second
-    # number that could drift from it.
-    from local_operator.harness.wake import MAX_WAKE_MESSAGE_CHARS
+    # From ``harness.wake_types``, NOT ``harness.wake``. The help names the SHARED
+    # cap rather than a second number that could drift from it — but the parser is
+    # built on EVERY command, so importing it from the scheduler module pulled
+    # ``harness.wake`` and the pydantic model construction beneath it onto
+    # ``lop --version``, which builds this option group and never uses it.
+    # Measured with a profile of that command: ``harness/wake.py:1(<module>)`` at
+    # **1.214 s cumulative**, the single largest term in ``build_cli_parser``.
+    # The constant is data with no dependencies; it belongs with the DTOs.
+    from local_operator.harness.wake_types import MAX_WAKE_MESSAGE_CHARS
 
     wake_create.add_argument(
         "message",

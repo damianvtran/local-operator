@@ -51,6 +51,10 @@ from typing import Any, Awaitable, Callable, Literal, TypedDict
 #: import paths hand back the SAME class object (asserted by a test — two classes
 #: with one name would silently make ``isinstance`` false at one call site).
 from local_operator.harness.wake_types import (
+    MAX_WAKE_MESSAGE_CHARS as MAX_WAKE_MESSAGE_CHARS,
+)
+from local_operator.harness.wake_types import MAX_WAKE_SCHEDULES as MAX_WAKE_SCHEDULES
+from local_operator.harness.wake_types import (
     MIN_WAKE_INTERVAL_MS as MIN_WAKE_INTERVAL_MS,
 )
 from local_operator.harness.wake_types import DueWake as DueWake
@@ -62,8 +66,6 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-MAX_WAKE_SCHEDULES = 16
-MAX_WAKE_MESSAGE_CHARS = 2_000
 PAST_AT_GRACE_MS = 5_000
 
 MAX_ARM_MS = 60_000  # never arm further out than this; re-check on a tick
