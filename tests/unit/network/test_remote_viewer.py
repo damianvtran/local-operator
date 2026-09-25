@@ -264,3 +264,161 @@ async def test_the_desktop_bridge_reads_and_prompts_a_peers_session(
             await pool.close()
     finally:
         await asyncio.to_thread(created.stop)
+
+
+def _png_bytes(width: int = 240, height: int = 240) -> bytes:
+    """A real, decodable PNG with enough entropy to clear the externalise floor.
+
+    Noise rather than a flat colour on purpose: a constant image compresses to a
+    few hundred bytes and would land UNDER ``transcript._ATTACHMENT_FLOOR_BYTES``,
+    where the row keeps the payload inline and NOTHING about the store is
+    exercised — a cell that would pass on the defect.
+    """
+    import random
+    import zlib
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return len(data).to_bytes(4, "big") + tag + data + zlib.crc32(tag + data).to_bytes(4, "big")
+
+    rng = random.Random(7)
+    rows = [
+        b"\x00"
+        + bytes(
+            value
+            for _ in range(width)
+            for value in (rng.randrange(256), rng.randrange(256), rng.randrange(256))
+        )
+        for _ in range(height)
+    ]
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(
+            b"IHDR",
+            width.to_bytes(4, "big") + height.to_bytes(4, "big") + b"\x08\x02\x00\x00\x00",
+        )
+        + chunk(b"IDAT", zlib.compress(b"".join(rows), 6))
+        + chunk(b"IEND", b"")
+    )
+
+
+async def _desktop_route_client(root: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """The desktop's own router, over a real store, as the app attaches it."""
+    import os
+
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    for name in list(os.environ):
+        if name.startswith("CMUX_"):
+            monkeypatch.delenv(name)
+    from local_operator.config import ConfigManager
+    from local_operator.server.routes import desktop_sessions
+    from local_operator.server.utils.desktop_sessions import DesktopSessions
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "mesh-image-token")
+    app = FastAPI()
+    app.state.config_manager = ConfigManager(root)
+    app.state.desktop_sessions = DesktopSessions(root)
+    app.include_router(desktop_sessions.router)
+    return app, AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer mesh-image-token"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_image_a_desktop_sends_to_a_peer_stays_readable_here(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A peer-bound prompt's image must resolve on the device that SENT it.
+
+    THE DEFECT THIS PINS (measured on the unfixed tree). A turn's images are
+    content-addressed: the OWNER's journal row references
+    ``{"attachment": <digest>}`` and nothing else, and the only store this
+    device's ``GET .../attachments/<digest>`` reads is its own. The owner's
+    runtime is another process with its own config dir, so it externalises the
+    bytes into ITS store — the desktop held nothing, answered ``409
+    attachment_on_peer`` over the picture the user had just sent, and the prompt
+    itself reported ``admitted``. So the desktop mirrors what it sends
+    (``DesktopSessionBridge.stage_peer_images``), and the digest being the
+    CONTENT key is what makes a local copy resolvable against a row written on
+    another machine.
+
+    THE AMBIENT CONFIG DIR MOVES FOR THE ADMISSION, and that is the cell's own
+    rigour rather than decoration: an in-process rig shares one
+    ``LOCAL_OPERATOR_CONFIG_DIR``, so without this the peer's externalise would
+    write into THIS device's store by accident and the assertions below would
+    pass on the unfixed tree. Pointing it at a third directory for the admission
+    puts the peer's copy where production puts it (the peer's own store) and
+    leaves this device's store holding exactly what a real desktop holds.
+    """
+    import base64
+    import hashlib
+    import shutil
+
+    created = await asyncio.to_thread(
+        _create_named_session_on_a_real_peer,
+        peer_pair,
+        monkeypatch,
+        name="desktop-image",
+        prompt="warm up",
+    )
+    try:
+        await asyncio.to_thread(clear_cache)
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(created.server_a.root))
+        raw = _png_bytes()
+        digest = hashlib.sha256(raw).hexdigest()[:32]
+        app, client = await _desktop_route_client(created.server_a.root, monkeypatch)
+        async with client:
+            # BIND BEFORE THE ENV MOVES, so the dial this device makes resolves
+            # its own relay and nothing else.
+            async with app.state.desktop_sessions.session(created.session_id, read=True) as b:
+                await b.snapshot()
+            peer_store = tmp_path / "peer-env"
+            monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(peer_store))
+            response = await client.post(
+                f"/v1/desktop/sessions/{created.session_id}/messages",
+                json={
+                    "request_id": str(uuid.uuid4()),
+                    "text": "here is a picture",
+                    "images": [
+                        {
+                            "data_b64": base64.b64encode(raw).decode("ascii"),
+                            "mime_type": "image/png",
+                        }
+                    ],
+                },
+            )
+            monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(created.server_a.root))
+            assert response.status_code == 200, response.text
+
+            # THE OWNER GOT THE BYTES: its row references the digest of what was
+            # sent, which is the only way the two ends can name the same image.
+            await asyncio.to_thread(created.owner.wait_for_turn)
+            rows = [
+                entry.get("payload") or {}
+                for entry in created.owner.transcript_entries()
+                if (entry.get("payload") or {}).get("role") == "user"
+            ]
+            assert digest in json.dumps(rows), rows
+
+            # THE PEER'S OWN COPY GOES WHERE PRODUCTION PUTS IT, so what remains
+            # here is what this device really holds.
+            peer_own = created.server_b.root / "attachments"
+            peer_own.mkdir(parents=True, exist_ok=True)
+            for suffix in (".bin", ".json"):
+                source = peer_store / "attachments" / f"{digest}{suffix}"
+                assert source.exists(), sorted(p.name for p in source.parent.glob("*"))
+                shutil.move(str(source), str(peer_own / source.name))
+
+            read = await client.get(
+                f"/v1/desktop/sessions/{created.session_id}/attachments/{digest}"
+            )
+            assert read.status_code == 200, (
+                "the desktop cannot show the image it just sent to its own peer "
+                f"session ({read.status_code}): {read.text[:200]}"
+            )
+            assert read.content == raw, "the bytes served are not the bytes sent"
+    finally:
+        await asyncio.to_thread(created.stop)

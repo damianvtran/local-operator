@@ -484,6 +484,14 @@ async def admit_receipt_request(
     assert remote is not None, "the route binds the runtime before admitting"
     queued = bool(getattr(remote, "is_streaming", False))
     await bridge.acquire()
+    # THE BYTES STAY HERE, WHICH IS WHAT MAKES THE ROW THE OWNER WRITES RESOLVABLE
+    # ON THIS DEVICE (§§2.2: what a local session gets). Staged BEFORE the
+    # dispatch, because the owner's turn may journal the row the instant it
+    # admits, and the read that follows it is not ordered against this call.
+    # Only a PEER's conversation pays anything at all (``stage_peer_images``
+    # returns at once for a local one), and it is synchronous file work either
+    # way, so it cannot park the bound below.
+    await bridge.stage_peer_images(images)
     # Non-``None`` only once the dispatch exists: before that the reference is
     # ours alone, with nothing to hand anywhere.
     task: asyncio.Task[tuple[str, bool]] | None = None
@@ -2365,10 +2373,17 @@ async def prompt(session_id: str, body: Prompt, request: Request):
                 async def admit():
                     nonlocal admitted
                     assert bridge.remote is not None
+                    images = [image.model_dump() for image in body.images]
+                    # A PEER'S CONVERSATION KEEPS ITS PICTURES VISIBLE HERE: the
+                    # owner externalises the payload into ITS store, so the row
+                    # carries a digest this device could not resolve (§§2.2, and
+                    # ``stage_peer_images`` states the invariant). Local sessions
+                    # are untouched — their own runtime writes this very store.
+                    await bridge.stage_peer_images(images)
                     detail, duplicate = await bridge.remote.admit_prompt(
                         body.text,
                         command_id=body.request_id,
-                        images=[image.model_dump() for image in body.images],
+                        images=images,
                         steer=body.mode == "steer",
                     )
                     admitted = True
