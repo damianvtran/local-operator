@@ -2442,12 +2442,16 @@ def _arm_may_not_be_automatic_here() -> None:
       is most likely to coincide with it.
 
     Neither direction is acceptable, so the AUTOMATIC in-process coverage for the GIL-held
-    class is a NAMED GAP rather than a feature of this module: the supervisor's
-    ``.deadline`` sibling and the registry heartbeat detect it, and the evidence is pulled
-    ON DEMAND with ``SIGUSR1`` via :func:`_register_evidence_signal`, which writes the same
-    ``O_APPEND`` dump and needs no GIL of ours. See the module docstring's "WHAT THIS DOES
-    NOT COVER". A future change that gives this class automatic in-process coverage has to
-    come with a mechanism that is neither of the two above.
+    class is a NAMED GAP rather than a feature of this module. What the module provides for
+    that class is the ARTIFACT: the ``.deadline`` sibling written beside the dump and the
+    registry heartbeat — both written and readable while a thread is parked — with the
+    evidence pulled ON DEMAND with ``SIGUSR1`` via :func:`_register_evidence_signal`, which
+    writes the same ``O_APPEND`` dump and needs no GIL of ours. The reader that would turn
+    that artifact into a detection lives OUTSIDE this repository and was not exercised by
+    this change, so the supervisor half of the mitigation is asserted rather than verified
+    here — see the module docstring's "WHAT THIS DOES NOT COVER". A future change that gives
+    this class automatic in-process coverage has to come with a mechanism that is neither of
+    the two above.
     """
     return None
 
