@@ -3490,12 +3490,14 @@ def model_command(args: argparse.Namespace) -> int:
     import asyncio
 
     from local_operator.mobile.peer_send import (
+        PEER_MODEL_WAIT_NOTICE_S,
         PeerModelUnconfirmed,
         candidate_lines,
         parse_model_selector,
         resolve_switch_target,
         switch_peer_model,
         switch_receipt,
+        waiting_for_switch_detail,
     )
 
     if getattr(args, "model", None) or getattr(args, "hosting", None):
@@ -3565,10 +3567,26 @@ def model_command(args: argparse.Namespace) -> int:
     if record.pid == sender.get("pid"):
         _peer_red("that target is this session; use /model in it")
         return 1
-    try:
-        detail = asyncio.run(
-            switch_peer_model(record, provider=provider, model_id=model_id, sender=sender)
+
+    async def switch() -> str:
+        # A stopped or wedged target is silent for the whole ack deadline, so
+        # after a short grace the wait is said out loud (UX round 3, U11). On
+        # stderr: stdout carries only the receipt, which callers may parse.
+        # Cancelled the moment an answer arrives, so a healthy switch prints
+        # nothing extra.
+        notice = asyncio.get_running_loop().call_later(
+            PEER_MODEL_WAIT_NOTICE_S,
+            lambda: print(waiting_for_switch_detail(record), file=sys.stderr, flush=True),
         )
+        try:
+            return await switch_peer_model(
+                record, provider=provider, model_id=model_id, sender=sender
+            )
+        finally:
+            notice.cancel()
+
+    try:
+        detail = asyncio.run(switch())
     except (PeerModelUnconfirmed, RuntimeError) as exc:
         _peer_red(switch_receipt(record, str(exc)))
         return 1
