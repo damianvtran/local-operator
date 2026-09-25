@@ -489,6 +489,18 @@ function pinRefusalReason(error: unknown): string {
 	return message;
 }
 
+/* A REFUSAL IS THE DAEMON'S SENTENCE AND NOTHING BOUNDS IT. It is an error body,
+   so a stack trace or a multi-line dump under the action would run the sheet out
+   of its column; the clamp keeps the opening, which is the part that names the
+   rule, and marks the cut rather than pretending the message ended there. */
+const PIN_REASON_MAX = 240;
+
+function clampPinReason(reason: string): string {
+	return reason.length > PIN_REASON_MAX
+		? `${reason.slice(0, PIN_REASON_MAX)}…`
+		: reason;
+}
+
 export function SessionListScreen() {
 	const { sessions, connected } = useSessions();
 	const pinMarks = usePinMarks();
@@ -510,16 +522,35 @@ export function SessionListScreen() {
 		sessionId: string;
 		reason: string;
 	} | null>(null);
-	/* The row whose POST is still in flight, or NONE. The sheet STAYS OPEN across
-	   that wait (design round 11, D25), so without this the action would remain
-	   live and a second tap would send a second request for an answer already on
-	   its way. */
-	const [pinPending, setPinPending] = useState<string | null>(null);
+	/* THE ROWS WITH A PIN REQUEST STILL IN FLIGHT, ONE ENTRY PER REQUEST. The
+	   sheet STAYS OPEN across that wait (design round 11, D25), so a row's action
+	   has to be dead while ITS OWN request is outstanding. A single screen-wide
+	   slot holding "the row last pressed" answered a different question — "was
+	   this row the last press?" — so a press on one row left another row's
+	   re-opened sheet live, offering a verb and a request that contradicted the
+	   one already on its way (review round 12, MAJOR 1). */
+	const [pinPending, setPinPending] = useState<ReadonlySet<string>>(() => new Set());
+	const markPinPending = (sessionId: string, pending: boolean) =>
+		setPinPending((current) => {
+			const next = new Set(current);
+			if (pending) next.add(sessionId);
+			else next.delete(sessionId);
+			return next;
+		});
+	/* WHAT THE SHEET'S LIVE REGION SAYS, held apart from the text it is derived
+	   from so the region can be mounted EMPTY and filled on the commit after (see
+	   the effect below). Opening the sheet clears it, so what is written is always
+	   this sheet's own answer and never the last one's. */
+	const [pinNotice, setPinNotice] = useState("");
 	/* FLIP settle state: card DOM by session id, plus each card's content
 	   coordinate from the previous commit. */
 	const mainRef = useRef<HTMLElement>(null);
 	const cardRefs = useRef(new Map<string, HTMLButtonElement>());
 	const prevTops = useRef(new Map<string, number>());
+	/* The pin action itself, so a wait that ends with the sheet still open can give
+	   focus back to the control the reader pressed. */
+	const pinActionRef = useRef<HTMLButtonElement>(null);
+	const wasPinBusy = useRef(false);
 	const visible = sessions.filter((session) =>
 		`${session.conversation_name} ${session.session_id} ${session.cwd}`
 			.toLowerCase()
@@ -551,15 +582,33 @@ export function SessionListScreen() {
 		: null;
 	/* Busy is about THIS row's action, not about any request: a press on one row
 	   never disables another row's sheet. */
-	const pinBusy = pinRow !== null && pinPending === pinRow.session_id;
+	const pinBusy = pinRow !== null && pinPending.has(pinRow.session_id);
 	const refusalFor = pinRefusal && pinRow && pinRefusal.sessionId === pinRow.session_id
 		? pinRefusal.reason
 		: null;
+	/* THE DAEMON'S FLAG, WHICH IS WHAT THE ACTION TALKS ABOUT. Not `renderedPin`:
+	   the ★ records what the reader asked for, and an unanswered request is not a
+	   state — a sheet opened while this row's request is in flight must offer
+	   neither a verb nor an intent derived from it (review round 12, MAJOR 1).
+	   While that request IS in flight the verb claims nothing at all and simply
+	   says what is happening, so no label can precede the daemon's agreement. */
+	const pinConfirmed = Boolean(pinRow?.pinned);
+	const pinActionLabel = pinBusy
+		? "Saving…"
+		: pinConfirmed
+			? "Unpin from the top"
+			: "Pin to the top";
+	const pinRefusalText = refusalFor
+		? `Could not save the pin: ${clampPinReason(refusalFor)}`
+		: null;
+	const pinNoticeText = pinRefusalText ?? (pinBusy ? "Saving…" : "");
 
 	/* The pin to RENDER for a row: the reader's unanswered mark over the daemon's
-	   confirmed flag. One helper for the ★, the sheet's wording and the value a
-	   press will send, so the row's mark and the action offered on it cannot
-	   disagree about the pin's state. */
+	   confirmed flag. This drives the ★ ON THE CARD AND NOTHING ELSE — not the
+	   sheet's verb and not what a press sends. Those read `session.pinned`
+	   (`pinConfirmed` above), because a mark is the evidence of a request and not
+	   an answer: a sheet re-opened mid-flight would otherwise claim the state the
+	   reader is still waiting to hear about, and offer to invert it. */
 	const renderedPin = (session: SessionSummary) =>
 		pinMarks.get(session.session_id) ?? Boolean(session.pinned);
 
@@ -580,7 +629,7 @@ export function SessionListScreen() {
 		applySessionPin(sessionId, pinnedNext);
 		/* A retry in the same sheet starts from no answer, not the last one. */
 		setPinRefusal(null);
-		setPinPending(sessionId);
+		markPinPending(sessionId, true);
 		try {
 			const saved = await setSessionPin(sessionId, pinnedNext);
 			/* The route answers with the state it READ BACK, which is the daemon's
@@ -605,11 +654,31 @@ export function SessionListScreen() {
 				reason: pinRefusalReason(error),
 			});
 		} finally {
-			setPinPending((current) => (current === sessionId ? null : current));
+			markPinPending(sessionId, false);
 		}
 	};
 
 	useEffect(() => retainSessionListStream(), []);
+
+	/* THE LIVE REGION IS FILLED AFTER THE SHEET HAS MOUNTED, never with it: WebKit
+	   AT takes a region's mount as its baseline, so text that arrives inside an
+	   already-populated container is not announced — and a re-opened sheet arrives
+	   exactly that way, its wait already true. The sheet clears the text as it
+	   opens, so the fill is always this sheet's own answer. */
+	useEffect(() => {
+		setPinNotice(pinNoticeText);
+	}, [pinNoticeText]);
+
+	/* FOCUS COMES BACK TO THE ACTION WHEN THE WAIT ENDS. `disabled` blurs a
+	   control in a real browser, which drops the reader out of the sheet's column
+	   mid-wait and leaves the Sheet's trap with nothing to hold but the first and
+	   last element; a refusal is the case the sheet now stays open for, so the
+	   action is where the reader was and takes focus back. Only a busy→idle
+	   transition, so opening a sheet never steals focus from its own controls. */
+	useEffect(() => {
+		if (wasPinBusy.current && !pinBusy) pinActionRef.current?.focus();
+		wasPinBusy.current = pinBusy;
+	}, [pinBusy]);
 
 	/* One predicate for the pin hint, used by BOTH the height class and
 	   ``aria-hidden`` — two spellings of one condition is how a control ends up
@@ -634,9 +703,11 @@ export function SessionListScreen() {
 			pinned={renderedPin(s)}
 			onLongPress={() => {
 				setPinTarget(s.session_id);
-				/* Opening a sheet clears the last refusal: it belonged to the press
-				   before, and a stale reason under a fresh action is a lie. */
+				/* Opening a sheet clears the last refusal AND its text: they belonged
+				   to the press before, and a stale reason under a fresh action is a
+				   lie — the region starts empty whatever it will say next. */
 				setPinRefusal(null);
+				setPinNotice("");
 			}}
 			ref={(el) => {
 				if (el) cardRefs.current.set(s.session_id, el);
@@ -860,24 +931,28 @@ export function SessionListScreen() {
 			>
 				<div className="flex flex-col p-2">
 					<button
+						ref={pinActionRef}
 						type="button"
 						disabled={pinBusy}
+						/* `disabled` is silent on its own: it says the control is dead and
+						   nothing about the wait that killed it, which no assistive tech can
+						   see either. */
+						aria-busy={pinBusy ? true : undefined}
 						onClick={() =>
-							pinRow && void togglePin(pinRow.session_id, !renderedPin(pinRow))
+							pinRow && void togglePin(pinRow.session_id, !pinConfirmed)
 						}
 						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-left text-body active:bg-surface disabled:opacity-50"
 					>
 						<span className="w-4 shrink-0 text-accent" aria-hidden>
 							★
 						</span>
-						{/* The verb names the state it will SET, so a second look at the same
-						    row reads the outcome rather than a description of the store —
-						    and it is read from the RENDERED pin, so the sheet describes what
-						    the reader can see on the row (a mark included) instead of what the
-						    daemon has confirmed so far. */}
-						{pinRow && renderedPin(pinRow)
-							? "Unpin from the top"
-							: "Pin to the top"}
+						{/* The verb names the state the press will SET, and it is read from the
+						    DAEMON's flag rather than from the ★ on the row: the ★ records a
+						    request the daemon has not answered for, so a sheet opened while
+						    that request is in flight would otherwise claim the opposite state
+						    and offer to invert it (review round 12, MAJOR 1). While a request
+						    for THIS row is outstanding the verb claims nothing at all. */}
+						{pinActionLabel}
 					</button>
 					{/* THE REFUSAL, IN FLOW INSIDE THE SHEET. A paragraph in the sheet's own
 					    column, not an overlay: it takes layout space, so it cannot cover
@@ -886,11 +961,25 @@ export function SessionListScreen() {
 					    dialog that is in flow, which is fine, unlike an alert floating over
 					    the list behind it. The wording is the app's own (`Could not save the
 					    pin: <daemon's reason>`), the same shape the withdrawn band used. */}
-					{refusalFor ? (
-						<p role="alert" className="px-2 pb-1 text-meta text-danger">
-							Could not save the pin: {refusalFor}
-						</p>
-					) : null}
+					{/* THE SHEET'S ONE LIVE REGION, MOUNTED EMPTY AND FILLED AFTER. It is a
+					    sibling of the action in the sheet's own column, so it takes layout
+					    space and cannot be drawn over the control above it; anything
+					    floating (an overlay above the list, a positioned box) fails that,
+					    and anything floating above the list covers the search field. The
+					    text lands on the commit AFTER the sheet mounts (the `pinNotice`
+					    effect), because a container that arrives already populated is not
+					    announced — the shape a re-opened sheet has, its wait already true.
+					    `break-words` and the clamp in `clampPinReason` keep a long daemon
+					    message inside the column. */}
+					<p
+						role="alert"
+						className={cn(
+							"px-2 pb-1 text-meta break-words",
+							pinRefusalText ? "text-danger" : "text-ink-muted",
+						)}
+					>
+						{pinNotice}
+					</p>
 				</div>
 			</Sheet>
 		</div>
