@@ -56,14 +56,20 @@ let slot: { projection: SessionProjection | null; connected: boolean } = {
 	connected: true,
 };
 
-/* Only the projection slot and the stream are faked; the rest of the store is
-   real, so `useDraft` is the production draft store the composer types into. */
+/* Only the projection slot and the streams are faked; the rest of the store is
+   real, so `useDraft` is the production draft store the composer types into.
+
+   BOTH streams: `SessionScreen` mounts the session-LIST stream as well as the
+   projection's (#1477), and an unstubbed one reaches for a real `EventSource`,
+   which this environment does not provide. That is what the other screens' tests
+   stub, and the `./store` factory here has to keep step with the app. */
 vi.mock("./store", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("./store")>();
 	return {
 		...actual,
 		useProjection: vi.fn(() => slot),
 		retainProjectionStream: vi.fn(() => () => {}),
+		retainSessionListStream: vi.fn(() => () => {}),
 	};
 });
 
