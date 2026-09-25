@@ -43,6 +43,8 @@ from typing import Any, Awaitable, Callable, cast
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from local_operator import procstate
+from local_operator.harness.secret_sinks import refusal_text as _secret_sink_refusal
+from local_operator.harness.secret_sinks import scan_python as _scan_secret_cell
 from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
@@ -1097,6 +1099,20 @@ async def execute_eval(
             tool_call_id,
             "eval",
             f"aborted ({signal.reason or 'aborted'}): code not run",
+        )
+
+    # Refuse a cell in which a retrieved secret would be PRINTED, before the
+    # kernel is disturbed: the eval surface is a different language, so it gets
+    # the Python rules of the same table (print/logging/write-then-read, and a
+    # trailing expression whose repr IS the result). Scanning before the
+    # background branch keeps the two modes in agreement — a background cell is
+    # read from the job buffer, which is the same transcript.
+    cell = _scan_secret_cell(params.code)
+    if cell.refused:
+        return _error(
+            tool_call_id,
+            "eval",
+            _secret_sink_refusal(cell, text=params.code, tool_name="eval"),
         )
 
     if params.background:

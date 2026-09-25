@@ -83,6 +83,8 @@ from local_operator.agent_shell import AGENT_SHELL_ENV, MAY_DELEGATE_ENV
 from local_operator.config import CONFIG_FILE_NAME, ConfigManager
 from local_operator.harness.approval import ask_approval
 from local_operator.harness.redaction import report_shape_hits
+from local_operator.harness.secret_sinks import refusal_text as _secret_sink_refusal
+from local_operator.harness.secret_sinks import scan_command as _scan_secret_sinks
 from local_operator.harness.subagent import (
     configured_effort_tiers,
     describe_effort_tiers,
@@ -3592,6 +3594,30 @@ async def execute_bash(
     store = context.variables if context is not None else None
     credential_env = getattr(store, "credential_env", None)
     extra = credential_env() if callable(credential_env) else None
+
+    # Refuse a call in which a stored secret would be PRINTED, before any child
+    # exists. The control this replaces is an output filter (the redaction
+    # ledger's `str.replace`), and a filter decides after the decision to print
+    # has been made and only for the spellings it holds — a Minerva QA session
+    # lost a credential to `v=$(lop secret get "$k") && echo "$k = $v"`, whose
+    # value was in the transcript, and then printed a masked hostname reversed
+    # to read it. The rule keys on the DATA FLOW (a value source reaching a
+    # printing sink), so a re-spelling is refused too.
+    #
+    # `_error`, not `_invalid_arguments`: a printing construct is a policy
+    # refusal, not a malformed argument, and not a prompt — `execute_bash`
+    # deliberately has no second approval gate (the loop's gate already ran), so
+    # asking here would be the double-answer that comment exists to prevent.
+    # The source is the store: a command that never names `lop secret` is
+    # untouched, so ordinary work — and the session-credential flow, which rides
+    # the child's environment and is the mask's business — is unaffected.
+    scan = _scan_secret_sinks(params.command)
+    if scan.refused:
+        return _error(
+            tool_call_id,
+            "bash",
+            _secret_sink_refusal(scan, text=params.command, tool_name="bash"),
+        )
     injections: dict[str, str] = dict(NON_INTERACTIVE_ENV)
     # The DELEGATION ALLOWANCE rides the child environment for the same reason
     # the marker in ``NON_INTERACTIVE_ENV`` does: a `lop exec` run by a session
