@@ -35,6 +35,7 @@ not re-import them; the values and their per-record notes live in that module.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 #: Provider wordings that mean "this request does not fit", in every phrasing
@@ -1256,6 +1257,75 @@ def format_mcp_unavailable_message(server: str, reason: str) -> str:
         "should not retry them in a loop."
     )
     return "\n".join(lines)
+
+
+def format_held_delivery_message(job_labels: Sequence[str], *, reason: str = "") -> str:
+    """Render the row for job results the harness had to HOLD instead of writing.
+
+    A dedicated formatter, authored HERE rather than as a paragraph at the call
+    site, for the reason :func:`format_mcp_unavailable_message` gives: every
+    operator- and model-facing incident sentence in this codebase is built in
+    one place, and a hand-written one at a call site carries no head, no
+    ``suggested action:`` slot, and none of the structure a reader's eye uses to
+    tell a system record from the agent's own prose (design review round 1, D2 —
+    measured in a rendered frame, where this row sat directly under the MCP
+    warning's labelled shape and read as the agent narrating).
+
+    The incident HEAD, because this is a session-level fact the next turn has to
+    know before it trusts the conversation; but NOT ``Incident.render``'s
+    closing tail ("This is why the previous turn ended"), which is FALSE here —
+    the same reason the MCP row does not go through the classifier. Nothing
+    failed and no turn ended: the runtime left while results were still arriving,
+    and the operator's own turn completed.
+
+    ONE PARAGRAPH FOR THE BATCH, however many results it names (design review
+    round 1, D4). The incident's own batch was nine children, and a per-result
+    notice painted nine near-identical warning paragraphs — the shape this file's
+    own delivery contract argues against ("N children that settle during one
+    parent turn are one piece of news"). The count and the ids carry the
+    multiplicity; the per-job detail belongs in the log.
+
+    THE ROUTE IT NAMES IS ONE THAT SURVIVES THE DEPARTURE (design review round 1,
+    D1; UX round 1, U4). The first draft sent the reader to the job ledger
+    ("read it with the jobs tool now"), which is refuted twice over by
+    measurement: ``retention_expired`` drops a settled row on any read after
+    ``DEFAULT_RETENTION_MS`` — five minutes, while this row's reader is a turn
+    that may be hours away — and in a SUCCESSOR the row is ``restored``, which is
+    exempt from that window but carries no result text at all (the roster
+    sidecar's field list has no ``result_text``), so ``wait`` answers with a bare
+    header there. What does survive is the child's own transcript, which the
+    sweep never touches and which ``hub op='peek'`` reads. The bound is rendered
+    from the constant that enforces it rather than typed, like every other bound
+    in this file (design review round 1, D3).
+    """
+    from local_operator.harness.jobs import DEFAULT_RETENTION_MS
+    from local_operator.session.runtime.types import bound_text
+
+    names = [label for label in job_labels if label]
+    shown = ", ".join(names[:5])
+    if len(names) > 5:
+        shown += f", +{len(names) - 5} more"
+    count = len(names) or 1
+    noun = "result" if count == 1 else "results"
+    pronoun = "it was" if count == 1 else "they were"
+    head = (
+        f"[session incident] held delivery: {count} background job {noun} "
+        f"({' '.join(filter(None, [shown]))}) arrived after this session's runtime "
+        "had committed to leaving, so "
+        f"{pronoun} held for the next turn rather "
+        "than written into this conversation"
+    )
+    if reason.strip():
+        head += f" ({reason.strip()[:200]})"
+    return "\n".join(
+        [
+            head + ".",
+            "suggested action: read the child's own transcript with "
+            "hub op='peek' <job id>, which is not swept; the job ledger keeps a "
+            f"result for only {bound_text(DEFAULT_RETENTION_MS / 1000.0)} after it "
+            "settles, and a successor's restored row carries none.",
+        ]
+    )
 
 
 def format_mcp_recovery_message(server: str, tool_count: int) -> str:

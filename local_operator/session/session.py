@@ -11197,6 +11197,15 @@ class Session:
         """
         if not results:
             return
+        if self._leaving_deliveries:
+            # Built with the held flag so a surface can tell these rows from
+            # delivered ones (U6); the text itself is unchanged.
+            held = [
+                self._job_result_message(job_id, text, job, held=True)
+                for job_id, text, job in results
+            ]
+            await self._hold_job_results_for_next_turn(results, held)
+            return
         messages = [self._job_result_message(job_id, text, job) for job_id, text, job in results]
         if self._leaving_deliveries:
             # THE DEPARTURE LATCH. A job delivery is NOT an admission, which is
@@ -11244,32 +11253,36 @@ class Session:
         when a turn still holds it (``_append_or_park_journal``), rejoining at
         the next turn boundary.
 
-        Per-result failure is LOUD and never falls back to opening the turn: a
+        Per-batch failure is LOUD and never falls back to opening the turn: a
         turn is exactly what the latch forbids, and silence would be the silent
-        data loss this arm exists to prevent (§4.1 of the incident plan). The
-        durable ``session_incident`` row is what the next turn's model and the
-        operator's ``[session incident]`` card read, and it says the job's own
-        record still holds the text rather than implying it is gone.
+        data loss this arm exists to prevent (§4.1 of the incident plan). ONE row
+        reports the whole batch (design review round 1, D4): the incident's own
+        batch was nine children, and a per-result notice painted nine
+        near-identical warning paragraphs restating one reason — the shape this
+        file's delivery contract argues against ("N children that settle during
+        one parent turn are one piece of news"). Per-job detail goes to the log.
         """
+        failed: list[str] = []
+        reason = ""
         for (job_id, _text, job), message in zip(results, messages):
             try:
                 await self._transcript.append_message(message)
             except Exception as exc:  # noqa: BLE001 - one lost row must not lose the batch
-                label = getattr(job, "label", job_id)
                 logger.error(
                     "could not persist the result of job %s for the next turn "
                     "(the runtime is leaving)",
                     job_id,
                     exc_info=True,
                 )
-                await self._journal_held_delivery_failure(job_id, label, exc)
+                failed.append(str(getattr(job, "label", job_id) or job_id))
+                reason = reason or (str(exc) or exc.__class__.__name__)
                 continue
             self._append_or_park_journal(message)
+        if failed:
+            await self._journal_held_delivery_failure(failed, reason)
 
-    async def _journal_held_delivery_failure(
-        self, job_id: str, label: str, exc: BaseException
-    ) -> None:
-        """Report a job result that could not be held for the next turn.
+    async def _journal_held_delivery_failure(self, labels: list[str], reason: str) -> None:
+        """Report the job results that could not be held for the next turn.
 
         The one honest outcome when the durability write fails: the runtime is
         leaving, so the alternative the delivery would otherwise take -- open a
@@ -11278,25 +11291,30 @@ class Session:
         it is called from a turn's ``finally`` (through
         ``_deliver_deferred_job_results``) and from the job manager's settle
         hook, and neither may fail because a report failed.
+
+        THE SENTENCE IS AUTHORED IN ``incidents.py`` (design review round 1, D2),
+        not hand-written here: every operator- and model-facing incident row in
+        this codebase is built in that one place, and a paragraph written at a
+        call site carries no head, no ``suggested action:`` slot and none of the
+        structure a reader uses to tell a system record from the agent's prose —
+        measured in a rendered frame, where this row sat directly under the MCP
+        warning's labelled shape and read as the agent narrating. The formatter
+        owns the route it names too, so the pointer cannot drift from what the
+        stores actually do (D1/D3).
         """
-        reason = str(exc) or exc.__class__.__name__
         try:
+            from local_operator.incidents import format_held_delivery_message
+
             await self.journal_incident(
-                f"could not persist the result of background job {job_id!r} "
-                f"while the runtime was leaving: {reason}",
-                rendered=(
-                    f"The result of background job '{label}' arrived after this session's "
-                    "runtime had committed to leaving, and the harness could not write it "
-                    f"into this conversation ({reason}). Nothing is lost yet: the job's own "
-                    "record still holds the full text -- read it with the jobs tool now, "
-                    "because a settled job's row is swept a few minutes after it settles."
-                ),
+                f"could not hold {len(labels)} background job result(s) while the runtime "
+                f"was leaving: {reason}",
+                rendered=format_held_delivery_message(labels, reason=reason),
             )
         except Exception:  # noqa: BLE001 - a failed report must not raise either
             logger.error(
-                "could not journal the lost delivery of job %s (the ERROR log above is the "
+                "could not journal the lost delivery of %s (the ERROR log above is the "
                 "only record)",
-                job_id,
+                labels,
                 exc_info=True,
             )
 
@@ -11338,8 +11356,19 @@ class Session:
         self._leaving_deliveries = False
 
     @staticmethod
-    def _job_result_message(job_id: str, text: str, job: Any) -> CustomMessage:
-        """The model-facing row for one settled job's result."""
+    def _job_result_message(
+        job_id: str, text: str, job: Any, *, held: bool = False
+    ) -> CustomMessage:
+        """The model-facing row for one settled job's result.
+
+        ``held`` marks a row written by the leaving arm rather than delivered by
+        a turn, and it is the ONE difference between the two (UX round 1, U6):
+        the text and every other detail stay byte-identical, so the row the model
+        reads is the same row it has always read, while a surface can tell the
+        two apart. Without it the held row is indistinguishable from a delivered
+        one, and the operator cannot see that a report is waiting for their next
+        turn rather than already answered.
+        """
         label = getattr(job, "label", job_id)
         status = getattr(job, "status", "completed")
         summary = (text or "").strip()
@@ -11350,10 +11379,13 @@ class Session:
             if summary
             else f"background job '{label}' {status}."
         )
+        details: dict[str, Any] = {"job_id": job_id, "text": delivery}
+        if held:
+            details["held"] = True
         return CustomMessage(
             custom_type=JOB_RESULT_MESSAGE_TYPE,
             attribution="user",
-            details={"job_id": job_id, "text": delivery},
+            details=details,
         )
 
     async def _deliver_deferred_job_results(self) -> None:

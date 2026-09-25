@@ -606,6 +606,48 @@ def wake_receipt_headline(text: str) -> str:
     return head.strip()
 
 
+#: Painted under a child's report that arrived after this session's runtime had
+#: committed to leaving, so the row is durable and the model has NOT seen it yet.
+#: The report above it is the child's own words (the same text a delivered row
+#: carries); this line is what says the difference, because without it a held row
+#: and a delivered one read identically (UX round 1, U6).
+HELD_DELIVERY_NOTICE = (
+    "held for your next turn — this report arrived while the session was leaving, "
+    "so no turn has read it yet"
+)
+
+
+def held_delivery_notice(details: dict[str, Any]) -> tuple[str, NoticeSeverity] | None:
+    """A child's report that was HELD for the next turn, and its ink — or None.
+
+    ``None`` for every ``job_result`` row that was DELIVERED, and that is the
+    whole point (UX round 1, U6): the two are the same message in every other
+    respect, so the ONLY thing that can tell a reader "this one is still waiting
+    for you" from "this one was already answered" is the flag the holding arm
+    writes (``Session._job_result_message(..., held=True)``). A row without it
+    is the ordinary delivery, whose own turn is what acknowledged it.
+
+    The severity is derived HERE rather than at a renderer, by this module's rule
+    for the fold decisions the two surfaces share (see
+    ``docs/design/history-fold-convergence.md`` §3): the phone and the TUI must
+    agree on the words and the tier, and a tier decided inside one renderer is a
+    tier the other does not have.
+
+    ``warning``, because the row is a state the operator has to know about and
+    cannot otherwise see: nothing ran, nothing acknowledged it, and the only
+    other trace is the model's own next turn — which has not happened yet. That
+    is the same tier the MCP-unavailable row takes for the same reason, and one
+    above the ``note`` tier of a receipt that answers something the user just
+    did.
+    """
+    if not details.get("held"):
+        return None
+    text = str(details.get("text") or "").strip()
+    if not text:
+        return None
+    return f"{text}\n{HELD_DELIVERY_NOTICE}", "warning"
+
+
 def compaction_refused_notice(details: dict[str, Any]) -> tuple[str, NoticeSeverity]:
     """A compaction that did NOT run, and the ink it deserves.
 

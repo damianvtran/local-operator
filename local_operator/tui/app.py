@@ -716,7 +716,8 @@ RESTORE_SEAM = "\n\n"
 #: phrase the frame now carries.
 DRAIN_NOTICE = (
     "this session is switching to a newer build; it is finishing in-flight work "
-    "first, so a new message will not start a turn until the new build is up"
+    "first, so a new message will not start a turn until the new build is up; a "
+    "child that reports in after this point arrives on the next turn"
 )
 
 #: The same notice for a runtime that was TERMINATED while it had work in flight
