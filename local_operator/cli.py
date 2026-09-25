@@ -8849,7 +8849,6 @@ def main() -> int:
                 # deliberately left AS TYPED rather than resolved: it names a
                 # conversation this device does not hold, and the viewer factory
                 # below is what opens it.
-                from local_operator.resume import UNNAMED_DEVICE
                 from local_operator.session.remote_open import (
                     remote_row_for,
                     unreachable_peer_sentence,
@@ -8884,14 +8883,21 @@ def main() -> int:
                         file=sys.stderr,
                     )
                     return 1
-                # A STATEMENT, NOT A REFUSAL: the viewer that comes up IS this
-                # conversation, and saying where it lives is what tells the user
-                # why the transcript arrives over a link rather than off the disk
-                # under their shell.
-                print(
-                    f"{args.resume} lives on "
-                    f"{remote_row.owner_label or UNNAMED_DEVICE} — opening it remotely"
-                )
+                # AND NOTHING IS PRINTED FOR THE OPENABLE CASE, deliberately. This
+                # arm used to announce "lives on <device> — opening it remotely",
+                # which was a PROMISE THIS METHOD CANNOT KEEP: whether a viewer can
+                # be hosted is decided LATER and elsewhere (`session_factory`'s
+                # remote branch, gated on `has_ui` — and `has_ui` depends on
+                # `use_tui`/`isatty`, which this pre-check does not know yet).
+                # Measured with the output piped: the line was printed, the factory
+                # then had no front end to host the viewer, and the run died with
+                # `ResumeNotFound` — a promise followed by a traceback.
+                #
+                # WHERE THE WORDS BELONG: `session_factory` opens the viewer when a
+                # front end exists (the TUI paints the peer's conversation, which is
+                # the statement), and answers the run that cannot host one with a
+                # sentence naming the device and the way in that works there. One
+                # decider, one message, and no claim made before the decision.
 
             # Cold live-session resumes now stay on the ordinary TUI launch
             # path. ``create_session(has_ui=True)`` returns a AttachedSession when

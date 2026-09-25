@@ -9,10 +9,13 @@ interpreter per case.
 WHAT IT PINS (mesh slice DB2, from the cross-host matrix's finding): a peer's id
 used to reach the LOCAL resolver first, so a conversation the sidebar lists
 perfectly well answered "no session … to resume" from a shell while the TUI's own
-``/resume`` opened it. The two cases are the two sentences:
+``/resume`` opened it. Two sentences, one per case:
 
-* an id ANOTHER DEVICE holds ⇒ "``<id>`` lives on ``<device>`` — opening it
-  remotely", and the local refusal is NOT printed;
+* an id ANOTHER DEVICE holds ⇒ the run names the DEVICE and the two ways in, and
+  the local typo refusal is NOT printed. On a real terminal the same command opens
+  the peer's session as a viewer (driven separately under a pty:
+  ``$LOCAL_OPERATOR_SCRATCHPAD/shell_resume_transcript.py``, which reads the peer's
+  own transcript row off the screen);
 * an id nobody holds ⇒ the SAME refusal as before this change, unchanged.
 
 THE THIRD CASE IS DELIBERATELY NOT HERE: a peer that has become UNREACHABLE does
@@ -114,6 +117,15 @@ async def test_a_peers_id_resumes_from_a_shell_and_an_unknown_one_still_refuses(
         home = tmp_path / "shell-home"
         home.mkdir()
         root = created.server_a.root
+        # A REAL DEVICE HAS A CONFIGURED PROVIDER, and the CLI refuses to boot
+        # without one BEFORE any session factory runs — so without this the cell
+        # would measure the "not configured" banner instead of the messages it is
+        # about (measured: the peer's case surfaced that banner once the pre-check
+        # stopped refusing early). ``hosting: test`` is the harness's own provisioned
+        # provider, so nothing here reaches a network.
+        (root / "config.yml").write_text(
+            "version: 0.0.0\nvalues:\n  hosting: test\n  model_name: mock\n", encoding="utf-8"
+        )
 
         # THE UNKNOWN ID: unchanged, and asserted FIRST so a regression in the new
         # arm cannot mask it (this cell runs the refusal the change was not allowed
@@ -123,13 +135,21 @@ async def test_a_peers_id_resumes_from_a_shell_and_an_unknown_one_still_refuses(
         assert "no session 'feedfacecafe' to resume" in err, err
         assert "lives on" not in out, out
 
-        # THE PEER'S ID: said where it lives, and NOT refused.
+        # THE PEER'S ID: the run says WHERE IT LIVES rather than calling it a typo.
+        #
+        # THIS RUN HAS NO TERMINAL, and the sentence is the one for that case --
+        # deliberately, because whether a viewer can be hosted is decided in
+        # ``session_factory`` (on ``has_ui``, which is ``isatty``/``--tui``) and not
+        # by the CLI's pre-check, which cannot know it. Measured with the promise
+        # made in the pre-check instead: "opening it remotely" was printed and the
+        # run then died with ``ResumeNotFound``. The pty rig named in this module's
+        # docstring covers the terminal half end to end.
         code, out, err = await asyncio.to_thread(
             _run_cli, root, home, "--resume", created.session_id
         )
-        line = next((row for row in out.splitlines() if "lives on" in row), "")
-        assert line.startswith(f"{created.session_id} lives on "), (code, out, err)
-        assert line.endswith("— opening it remotely"), (code, out, err)
+        assert f"{created.session_id} lives on " in err, (code, out, err)
+        assert "no full-screen front end" in err, (code, out, err)
+        assert "--engage " + created.session_id in err, (code, out, err)
         # AND THE LOCAL REFUSAL IS NOT PRINTED: that sentence is the defect this
         # arm exists to remove, and it would otherwise arrive from the resolver one
         # line later.
