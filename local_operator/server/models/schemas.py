@@ -269,7 +269,10 @@ class AgentCreate(BaseModel):
     )
     model: str | None = Field(
         None,
-        description="The model to use for the agent. Defaults to 'openai/gpt-4o-mini'.",
+        description="The model to use for the agent. Leave it unset to start on the "
+        "hosting provider's SUGGESTED model, resolved from "
+        "local_operator.model.defaults when neither an agent nor the config names "
+        "one; a provider with no suggestion is an error rather than a guess.",
     )
     description: str | None = Field(
         None,
@@ -343,7 +346,10 @@ class AgentUpdate(BaseModel):
     )
     model: str | None = Field(
         None,
-        description="The model to use for the agent. Defaults to 'google/gemini-2.0-flash-001'.",
+        description="The model to use for the agent. Leave it unset to start on the "
+        "hosting provider's SUGGESTED model, resolved from "
+        "local_operator.model.defaults when neither an agent nor the config names "
+        "one; a provider with no suggestion is an error rather than a guess.",
     )
     description: str | None = Field(
         None,

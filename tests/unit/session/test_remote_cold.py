@@ -661,6 +661,23 @@ async def test_a_cold_viewer_restores_the_roster_and_todos_from_disk(
         epoch="previous-owner",
         conversation_title="Article search rollout",
         goal="ship the rollout",
+        goal_status="active",
+        goal_judge={
+            "state": "continuing",
+            "run": 2,
+            "verdict": "continue",
+            "reason": "still working",
+        },
+        goal_history=[
+            {
+                "id": "a" * 32,
+                "text": "an earlier objective",
+                "status": "done",
+                "created_at": "2026-09-01T00:00:00Z",
+                "settled_at": "2026-09-02T00:00:00Z",
+                "reason": "",
+            }
+        ],
         jobs=[JobState(id="job1", type="task", label="auditor", status="succeeded")],
         todos=[
             TodoPhaseState(
@@ -727,6 +744,18 @@ async def test_a_cold_viewer_restores_the_roster_and_todos_from_disk(
         assert [item.text for phase in state.todos for item in phase.items] == ["run the gate"]
         assert state.conversation_title == "Article search rollout"
         assert state.goal == "ship the rollout"
+        # The judged-goal record rides the same checkpoint as the goal text, so a
+        # cold attach must carry all of it: a status that arrived and then vanished
+        # would leave the pane unable to strike what it is showing, and a history
+        # that arrived empty would read as "no completed goals".
+        assert state.goal_status == "active"
+        assert state.goal_judge == {
+            "state": "continuing",
+            "run": 2,
+            "verdict": "continue",
+            "reason": "still working",
+        }
+        assert [row["text"] for row in state.goal_history] == ["an earlier objective"]
         # Spend and occupancy are the conversation's, not this process's: a
         # resumed session that already cost money must not open reading zero.
         assert state.cumulative_parent_cost == 12.5

@@ -506,7 +506,7 @@ readings.
 
 | Endpoint | Request | Result inside `CRUDResponse.result` |
 | --- | --- | --- |
-| GET `/v1/desktop/sessions` | `limit` 1..500, default100 | `{sessions: [...]}` canonical rows plus explicit desktop drafts |
+| GET `/v1/desktop/sessions` | `limit` 1..500, default100; `include_archived`; and with the `session_catalogue_page` key `scope_kind`, `scope_name`, `cursor`, `with_counts` | `{sessions:[...],truncated,limit,degraded,next_cursor,cursor_missing,scope,counts}` - canonical rows plus explicit desktop drafts, then any off-page pinned rows (**first page of the head only**) |
 | GET `/v1/desktop/sessions/search` | `q` (<=256 chars), `limit` 1..500, default100 | `{sessions:[{id,name,mtime,forked,rank,body_match}],query,limit}`, best match first |
 | POST `/v1/desktop/sessions` | `{request_id, cwd, target?, model?}` | `{session_id}`; cwd must exist |
 | POST `/v1/desktop/sessions/preview` | `{request_id, cwd, target?, model?}` | `{frontend: <wire sync payload>}` for a session that does not exist |
@@ -521,6 +521,58 @@ readings.
 | POST `.../{id}/notified` | `{completion_token}` | `{claimed:bool}`; cold, never marks read |
 | POST `.../{id}/seen` | `{completion_token}` | `AttentionState`; 409 when the token is not this conversation's current completion |
 | POST `/v1/desktop/attention/seen` | `{items:[{session_id,completion_token}]}`, 1..500 items | `{read:[<store state>], superseded:[session_id], unknown:[session_id]}`; cold, 200 even when nothing cleared |
+
+
+### Scoping and paging the catalogue (`session_catalogue_page: 1`)
+
+A bare `GET `/v1/desktop/sessions`` answers the WHOLE listing: on a store of a few hundred
+sessions that is a multi-second read, and a large group's conversations can fall
+past the page entirely -- so a collapsed group's badge under-reports and
+expanding it draws "No chats yet" over real conversations. A client that sees
+`features.session_catalogue_page >= 1` may instead ask for one group's page and
+walk it by cursor:
+
+| parameter | type | default | meaning |
+| --- | --- | --- | --- |
+| `scope_kind` | `team` \| `agent` | - | filter the page to one binding; the two halves travel together |
+| `scope_name` | str <=64 | - | the team or profile display name |
+| `cursor` | str <=256 | - | an opaque position taken from a previous `next_cursor` |
+| `with_counts` | bool | false | include the per-group census |
+| `limit` | int 1..500 | 100 | unchanged: the page size **within** the scope |
+| `include_archived` | bool | false | unchanged |
+
+The answer carries four more fields, always present and defaulted -- which is how
+a client tells "this answer is not paged" apart from "this server is too old to
+page it":
+
+* **`next_cursor`** -- the resume position of the page's last row. It is non-null
+  **exactly when `truncated` is true**; the two are one fact.
+* **`cursor_missing`** -- true when the request carried a cursor this server could
+  not use: unreadable, minted for another scope, or from a token version this
+  server does not know. The answer is then the scope's FIRST page. An unusable
+  cursor is never an error, because a cursor can outlive the shape it names.
+* **`scope`** -- the scope the answer belongs to, echoed so a page landing after
+  the group was collapsed can still be attributed to the request that asked.
+* **`counts`** -- the census, present only with `with_counts=true`. Its POPULATION
+  is the one a default list can draw: **visible sessions that are not archived**.
+  Every default list in the app hides archived rows, and a badge inflated by rows
+  the panel cannot show is a badge that invites a person into an empty group. The
+  request's own `include_archived` still governs which ROWS come back; a client
+  that asks for archived rows gets them and the counts do not move.
+
+Refusals are named (422, `{code, message}`): `scope_name_required`,
+`scope_kind_required`, `scope_kind_unknown`, `scope_name_too_long`. An
+out-of-range `limit` keeps the framework's own generic validation detail, exactly
+as it did before this key existed. An empty scope is not an error: it is a 200
+with an empty page and a census entry of 0, because a team with no conversations
+yet is a legitimate state and a name in `attachment.json` outlives the registry
+entry it came from.
+
+Off-page pinned rows are appended to the **first page of the head** only: the
+pinned set as a whole rides the answer the Pinned section is drawn from, and a
+later page is merely the scope's continuation. A pinned row whose own rank the
+walk reaches still comes back there as an ordinary row -- the row union is
+id-keyed -- but it is never a second extra.
 
 `POST .../{id}/seen` is the read receipt, and **a 2xx from it means this
 conversation is read**: `unseen: false`, the receipt advanced through the token's
@@ -834,6 +886,147 @@ Set `/goal <text>` while a turn is running therefore behaves as it does on one
 Enter in the terminal: the text is steered into the turn in flight rather than
 parked, and the reply is never withheld for the running turn's duration.
 
+### Following a running child's own trajectory (`.../children/{job_id}/trajectory`)
+
+A child's conversation can be read without a runtime (the child transcript
+route), and while the child RUNS its events are retained in memory on the job
+that launched it — the serialized child events the runtime is already relaying
+to its parent, each stamped with a monotonic `_lo_seq`.
+`POST /v1/desktop/sessions/{session_id}/children/{job_id}/trajectory` hands that
+retained window over **and subscribes this connection to its appends, in one
+call**; `DELETE` of the same path releases the subscription.
+
+`{job_id}` is the **job id** the session's roster publishes (`/snapshot`'s
+`jobs[].id`), not the child's session id. The retained window lives on the job,
+every lookup beneath this route is job-keyed, and a child that ran more than one
+attempt has several job ids over one session directory — a reader holding one of
+them must be shown that one. A job id that is not one of this conversation's own
+child jobs is refused `404 {"code": "child_not_found"}`, the same refusal on the
+same terms as the child transcript route.
+
+**The reply is the seed, not an acknowledgement:**
+
+```json
+{"rows": [{"type": "message_update", "delta": "\u2026", "_lo_seq": 41}],
+ "base_seq": 7, "total": 63, "trajectory_length": 63,
+ "watchers": 1, "joined": false,
+ "available": true, "reason": null}
+```
+
+`rows` are the events the runtime retains for that job — what its own
+`job_trajectory` op pages and what the live append stream extends — neither
+re-stamped nor re-ordered, and with each `_lo_seq` appearing **at most once** (the
+first occurrence wins, at its own position), so a reader folds them through the
+SAME reducer it uses for the parent's live events. `base_seq` is the `_lo_seq` of
+`rows[0]`. `total` and `trajectory_length` both count the window this reply
+carries and are equal by construction: after a successful load the reply IS the
+whole retained window (the pager loops until the owner's own total is reached), so
+"what this reply carries" and "what the runtime retains for the job" are the same
+window. Neither is the roster row's own `trajectory_length` — that one is the
+follower's COPY of the runtime's number and it drifts in both directions (it lags
+the window just read, and it is inflated by the duplicated rows the seed drops) —
+so a reader that wants the runtime's own figure reads the roster row it already
+has, and a reader that wants the window reads these rows.
+
+The dedupe is the runtime's job because the race is the runtime's: the
+subscription is taken BEFORE the window is paged, and the owner computes each
+delta against its own last published window, so a run of rows emitted in that
+overlap is delivered twice — once inside the seed and once as an append. Measured
+on a live child: 16 re-opens, 17 rows for 15 distinct stamps, the repeated pair
+being `turn_start`/`message_start`. An APPEND may therefore still repeat a row the
+seed already carried, which is exactly why the rule below is a stamp watermark
+rather than a position.
+
+`watchers` and `joined` say what the call did to the session's shared count:
+`watchers` is how many readers hold this child's window after it (`1` for an open,
+more when it joined one a sibling window already had live) and `joined` is
+`watchers > 1`. Every `POST` increments and one `DELETE` releases one, so a client
+that re-seeds without unmounting (a rotation, a double mount) accumulates a
+reference; these two fields are what make that visible at the call that caused
+it, instead of at a release nobody sends.
+
+**A reader may rely on identity, never on order.** The seed arrives over HTTP
+while appends arrive on the session's event stream, and either may overtake the
+other — the runtime subscribes BEFORE it pages the window, so an append can land
+before the seed does. A reader applies an append **iff its `_lo_seq` is greater
+than the highest stamp it has already applied**. That one rule makes the
+interleave safe in both directions: a seed that arrives after an append discards
+nothing (the appends it already holds are at or below the seed's maximum, so the
+seed contains them), and one that arrives first cannot lose rows (later stamps
+only add). Rows carrying no stamp — an older runtime, a restored roster row —
+fall back to position.
+
+**The appends ride the session's existing stream; no second subscription is
+opened.** They arrive as `job_trajectory_appends: {job_id: [row, …]}` on
+`frontend.update`, beside `changes`, with `job_trajectory_replacements: [job_id]`
+naming any job whose rows were dropped to keep the frame inside its byte budget:
+the marker means the window is a REPLACEMENT rather than a suffix, so a reader
+resets that job's local rows to exactly what the frame carried. **Both fields are
+per-job and opt-in.** A session whose reader has loaded no job receives `{}` and
+`[]` — byte-identical to the frame an older backend sends — and a session with
+several loaded jobs receives each of them. The rows are byte-bounded by the
+runtime (newest kept, oldest dropped), so a client must not trim them again: what
+it is given is what the socket could carry, and a job that lost a row is the one
+named in the replacements list.
+
+**The opt-in is per SESSION BRIDGE, not per subscriber**, and that is the scope a
+client should build against. Two `GET …/events` streams on one session share one
+bridge, so once ANY window has loaded a job, every subscriber to that session's
+stream receives that job's rows: a second subscriber that never opened the child
+sees them too, and pays their bytes on every frame for as long as a sibling's
+reader is open. That is deliberate rather than an oversight — every subscriber to
+a session's stream is already authorised for that session, the rows are the
+runtime's bounded projection, and the app holds ONE subscription per session by
+its own doctrine, so in the app there is exactly one subscriber and nothing extra
+is ever fanned out. Scoping per subscriber would need a load-to-subscription
+identity the client must echo on every `POST`, and getting it wrong fails to a
+silently empty child page, which is a worse bug than a few bounded rows.
+**Follow-up**: per-subscriber scoping, with the load naming the subscription it
+serves. Until it exists, opening a second stream on a session means seeing the
+rows of whatever another window has loaded.
+
+**Releasing.** `DELETE` is a RELEASE, not an unconditional unsubscribe: several
+windows can watch one child through the same session bridge, and the count is per
+job, so closing one window leaves the others' stream live. Both the release and
+the `POST` that opened the window state what is left or what it left behind
+(`{"watching": bool, "watchers": int}` and `"watchers"`/`"joined"`), so a client
+can see an accumulation at the call that caused it rather than at a release it
+never sends. A release never BUILDS a bridge — a cleanup must not be the request
+that attaches a session — so a session with no resident bridge answers
+`{"watching": false, "watchers": 0}` rather than being refused, while a
+malformed session or job id IS refused (`404 child_not_found`): a value that could
+not name a child is not a cleanup target, so send a release only for an id you
+loaded. Send it on unmount: until the last reference is released the runtime
+keeps relaying a window nobody is reading. Nothing about the CHILD changes on a
+release — a reader is never load-bearing on a child's execution — and the rows
+stay cached on both sides, so reopening re-seeds cheaply.
+
+**When there is nothing to follow**, the answer is a `200` with `available:
+false` and a `reason` TOKEN, never an error:
+
+| `reason` | means | the reader's move |
+|---|---|---|
+| `no-owner` | no owner is attached, the owner is too old for the subscription op, or the connection dropped mid-fetch | retry on the next pulse |
+| `unsupported` | this job type records no trajectory at all (`bash` rather than `task`) | stop asking |
+
+`available: true` with `rows: []` is a third state and the opposite of both: the
+job DOES record a trajectory and none has been relayed yet, so the reader keeps
+polling. A settled child answers like a running one — its retained window is
+there until the job is swept — so a reader opened after the child finished still
+sees its final events.
+
+Capability: `features.subagent_trajectory` (see the keys table).
+
+**The seed body is the one unbounded path here, and leaving it so is deliberate.**
+`rows` carries the whole retained window (≤500 events) in a single HTTP body,
+where the frame path is bounded to 262 KiB against a 1 MiB line. Measured bodies:
+3.6 KB for 14 text rows, 24.6 KB for 87 — so the risk lives entirely in
+TOOL-RESULT-sized rows, and the trigger to watch for is a reader opened on a
+~500-row window of large results. A bound must ship with a page route (this op has
+none to fall back on, so trimming the seed would silently truncate a child's
+history instead of letting the reader fetch the rest), which is why it is a
+follow-up rather than part of this op.
+
 ### A read never needs an answering owner
 
 Every route in the endpoint table marked **read envelope** answers from the
@@ -851,6 +1044,27 @@ rows come from the checkpoint, the local registries or the config store —
 that takes a session — every mutation, every receipt, `/warm`, `/interrupt`,
 `/move` — keeps the control envelope, because none of those can be served
 without the owner that admitted them.
+
+`GET /v1/desktop/mcp` is outside that list because it is outside the session: it
+answers the MCP catalog from the config files and the grant store for a folder, so
+there is no owner to wait for at all. Its optional `session_id` is an ENRICHMENT, not
+a dependency — an already-bound runtime in that same folder may overlay live
+statuses inside a 2 s bound, and a cold, silent or foreign one degrades to the
+config answer rather than to a refusal. That is the whole reason the key exists
+(`features.mcp_catalog`): the Settings page must be able to list servers on an
+install with no model configured, which is the install that could not start a
+session to ask. The two writes beside it are the same shape: `POST /v1/desktop/mcp`
+takes one control, and `POST /v1/desktop/mcp/credentials` takes the MCP credential
+body (`{name, values, confirmed_replace?}`) plus the same optional
+`cwd`, plus ONE request-only field, `header` — the `add_key` form, where the server
+declares no `${ID}` for a key to fill, so the request also names the header the key
+travels in and the server binds `headers[<header>] = "${<id>}"` before storing the
+value. `header` is request-only: no response, no catalog row and no fixture carries
+it, because what crosses back is the row's own `auth.secret_refs`. A `header` on a
+row the catalog does not offer `add_key` for (an OAuth server, a server that
+already sends a credential header, a stdio server), or with more than one id, is
+`200` with `code: "invalid_target"`, and the whole code vocabulary of that route is
+in [DESKTOP_CONTROLS.md](DESKTOP_CONTROLS.md).
 
 `POST .../{id}/watch` is the one route whose envelope is WIDER than that budget,
 and it says so rather than leaving it to be discovered: after the attach it
@@ -1048,6 +1262,40 @@ qualifier under "A submit is ACKNOWLEDGED" for what that is worth.
    and must not be painted into the transcript — it is a notice about a request,
    not a turn — and a renderer that does not know the type ignores it and still
    advances its receipt cursor.
+
+### Harness-injected rows: `provider_payload.harness_injected`
+
+Some user-role rows were NOT typed by a person. The harness itself queues them:
+the goal judge's continuation prompt ("Continue working toward this goal: …"), the
+goal loop's own prompt, the post-compaction auto-continuation, the connectivity
+continuation that records why one answer arrived in two pieces across a network
+interruption. They are persisted as `Message(role="user")` because the TRANSCRIPT
+must record why the conversation continued — and painting one attributes the
+harness's words to the user, which no human-facing surface may do.
+
+Two fields answer "was this row minted by the harness?":
+
+* `message_start.message.provider_payload.harness_injected` — the live event's
+  copy. Structured marker, present only where the producer stamped the row.
+* the durable row's `payload.provider_payload.harness_injected` — the same key on
+  the journal entry a `snapshot`/`/history` page serves, because
+  `encode_message_payload` keeps a non-`None` `provider_payload`.
+
+Both mean, in the words of `harness/rows.py::is_harness_injection`'s docblock:
+*a row carrying it was never typed by a person, so no human-facing surface may
+paint it as their words.* A renderer that reads the marker on user rows paints
+nothing for an injected row — the transcript's own copy is the record, and the
+user's composer row is reserved for the user's own words.
+
+Neither field is new, and no protocol version moves for this: `provider_payload`
+has always been a `Message` field and has always ridden both wires. What changed
+is that surfaces are expected to READ it for `role == "user"` (the desktop's
+transcript reducer already reads the same key for tool rows), and that the
+harness now honours the rule at the emit site as well: a row the shared
+`is_harness_chrome` decision recognises is no longer announced as a
+`message_start` event at all, so a viewer that has not been taught the marker
+cannot paint chrome it was never sent. An owner on an older build still sends
+these rows, which is why the marker (and the recogniser) remain the contract.
 
 ### The `notification` frame
 
@@ -1660,7 +1908,10 @@ absent.
 |---|---|---|---|
 | `desktop_feed` | 1 | `GET /v1/desktop/events`, `POST /v1/desktop/presence` and their frame/lease shapes | the app opens no feed, beats no presence, and keeps its 5 s catalogue poll and its per-session notification path verbatim |
 | `desktop_presence` | 1 | the backend reads the per-publisher records under `run/desktop/delivery/` (plus the legacy `run/desktop/delivery.json` while an older sibling writes it) and defers its own completion banner to a notify-capable desktop | nothing is suppressed on the strength of a lease nobody publishes |
+| `mcp_catalog` | 1 | `GET|POST /v1/desktop/mcp` and `POST /v1/desktop/mcp/credentials`: MCP list, add, remove, test, sign-in and credentials with NO session and NO configured model, in the catalog vocabulary (`connected`/`needs_sign_in`/`not_started`/`connecting`/`error`, per-row `actions`, bounded refusal codes) — see [DESKTOP_CONTROLS.md](DESKTOP_CONTROLS.md) | the app keeps the session-scoped `/v1/desktop/sessions/{id}/mcp` path verbatim; it must NOT show "update the backend", because that path still works |
 | `tunnel` | 1 | `GET /v1/desktop/tunnel`, and `radient_login`/`tunnel_remedy` on `GET /v1/auth/status` | the app shows no tunnel state and no sign-in callout, and the account section keeps its current wording — it must not read the absent key as "the tunnel is fine" |
+| `subagent_trajectory` | 1 | `POST`/`DELETE /v1/desktop/sessions/{id}/children/{job}/trajectory` and the per-job `job_trajectory_appends`/`job_trajectory_replacements` fields they turn on | the child reader keeps its durable pager, opens no watch, and its session's frames carry the empty pair they always have (the opt-in is per session, so an app that opens no reader for ANY child gets exactly today's frames) |
+| `session_catalogue_page` | 1 | `scope_kind`/`scope_name`/`cursor`/`with_counts` on `GET `/v1/desktop/sessions``, and `next_cursor`/`cursor_missing`/`scope`/`counts` in its answer | the app keeps today's exact behaviour: one unscoped `limit=500` request is the only shape it may send. It must NOT send a scope or a cursor to a daemon that does not advertise this key -- unknown query parameters are IGNORED rather than refused, so a scope would be answered with the unfiltered listing drawn under that group's name, and a cursor with page one again |
 
 Neither bumps `notification_contract`, which stays 1: the payload is unchanged
 except for the derived `focus_policy` routing field, which the client already
@@ -1669,3 +1920,8 @@ both skew directions the new behaviour is a no-op: a new backend with an old UI
 never sees a presence file (so rung 4 raises the banner), and an old backend
 with a new UI advertises no keys (so the UI keeps the poll and the per-session
 path).
+
+`subagent_trajectory` bumps nothing either — no existing key's version moves, and
+it is deliberately a NEW key rather than a bump of `subagent_transcript`, whose
+reader gate asks with no minimum version: a bump would leave an older backend
+passing that gate while the live half does not exist.

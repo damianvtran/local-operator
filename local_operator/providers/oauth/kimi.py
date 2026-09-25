@@ -32,6 +32,7 @@ from local_operator.providers.oauth.callback_server import (
     LoginError,
     maybe_await,
     raise_for_refresh_failure,
+    report_flow_details,
 )
 from local_operator.providers.oauth.device_code import (
     DevicePollResult,
@@ -155,6 +156,11 @@ async def login_kimi(
 
         verification_url = authz.get("verification_uri_complete") or authz.get("verification_uri")
         user_code = authz.get("user_code", "")
+        await report_flow_details(
+            callbacks,
+            user_code=str(user_code or ""),
+            expires_in=float(authz.get("expires_in", DEFAULT_TTL_SECONDS)),
+        )
         if callbacks.on_auth_url is not None and verification_url:
             await maybe_await(
                 callbacks.on_auth_url(

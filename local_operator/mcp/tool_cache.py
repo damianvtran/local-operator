@@ -126,6 +126,22 @@ class McpToolCache:
         (and any leftover rows for that name are dropped). A digest mismatch
         deletes the stale row: the next connect will ``put`` the live list.
         """
+        entry = self.get_entry(server, digest)
+        return entry[0] if entry is not None else None
+
+    def get_entry(
+        self, server: str, digest: str | None = None
+    ) -> tuple[list[dict[str, Any]], float] | None:
+        """:meth:`get`, plus WHEN the list was saved: ``(tools, saved_at)``.
+
+        ``saved_at`` is epoch SECONDS (``time.time()`` at the :meth:`put`), and
+        a ``put`` only follows a successful ``tools/list`` — a connect or a
+        refresh, in whichever process ran it — so it is the last time anything
+        on this machine reached the server under this exact config. The catalog
+        publishes it beside the ``last_seen`` count it came with, so a client can
+        say how old that count is after a reload instead of showing a bare
+        number. Same hit/miss and stale-row rules as :meth:`get`.
+        """
         conn = self._connect()
         if conn is None:
             return None
@@ -135,7 +151,7 @@ class McpToolCache:
                 conn.commit()
                 return None
             row = conn.execute(
-                "SELECT tools_json FROM mcp_tool_cache WHERE server = ? AND digest = ?",
+                "SELECT tools_json, saved_at FROM mcp_tool_cache WHERE server = ? AND digest = ?",
                 (server, digest),
             ).fetchone()
             if row is None:
@@ -145,8 +161,10 @@ class McpToolCache:
                 conn.commit()
                 return None
             parsed = json.loads(row[0])
-            return parsed if isinstance(parsed, list) else None
-        except (sqlite3.Error, ValueError):
+            if not isinstance(parsed, list):
+                return None
+            return parsed, float(row[1])
+        except (sqlite3.Error, ValueError, TypeError):
             logger.debug("MCP tool cache read failed for %r", server, exc_info=True)
             return None
         finally:

@@ -311,6 +311,37 @@ does NOT create IAM roles or security groups; those are one-time human steps.
    worker writes into its own environment (OSWorld reads it from nowhere
    else); it is scrubbed on `close`.
 
+7. **Anything else the task's own source declares** → the value that requirement
+   names, as a `--secret` ref or an `--infra` value (the refusal names which, and
+   which substitute will also do). A task whose controller reads a value when the
+   guest's task object is instantiated is **refused at `reset_start`** without it:
+   after the task is parsed, before the provider is constructed, so no guest is
+   ever allocated. Measured before the check existed: 44 of the release's 108
+   tasks declared a value nothing supplied and no existing check covered (40 of
+   them `WEBSITE_HOST_SUFFIX`), and each allocated a desktop and then died inside
+   vendor code — `task_016` raised `ValueError: WEBSITE_HOST_SUFFIX must be set in
+   environment variables` from `aws.py:863 _start_desktop_env`, a traceback naming
+   no adapter, with an instance left to tear down. Two rules keep the refusal
+   honest rather than merely fast:
+   * **A value with no channel is refused whether or not it is supplied.**
+     `GITLAB_PRIVATE_TOKEN` is the case: `desktop_env/controllers/gitlab.py:19-23`
+     reads it through `os.getenv` at import, and this build hands the vendor only
+     the env-delivery allowlist plus the provider's own credentials, so supplying
+     it changes nothing. The two GitLab tasks (`task_026`, `task_041`) therefore
+     cannot run on this build at all, and are refused at the seam instead of
+     allocating a guest and failing mid-setup; a build that puts the name on
+     `vendor_bridge.SECRET_ENV_NAMES` can run them.
+   * **A documented substitute satisfies what it stands in for.** The pinned
+     simulator resolves its key through `model_client`'s fallback chain
+     (`user_simulator.respond` passes no key when it has none, and the client then
+     falls back to the judge key), so a supplied judge key satisfies
+     `OSWORLD_USER_SIM_API_KEY`; only the absence of both is refused.
+   `GOOGLE_ACCOUNT_CREDENTIALS` is declared OPTIONAL: a search of the pinned tree
+   finds the name at no call site, and a required name the apparatus cannot
+   consume is the anti-pattern this table already refuses for the legacy proxy
+   pair. **Needs a wheel built from this source** — it is adapter code, so a wheel
+   pinned before this change keeps the old behaviour.
+
 ## How secrets reach the worker
 
 The worker is spawned with an environment built from a closed allowlist, so
@@ -328,6 +359,28 @@ canary from the bundle's first byte. A missing ref fails the episode
 before any descriptor is persisted, before anything is allocated. The
 credential-store resolver (`runner/host_secrets.py`) is the only runner
 module besides `provider_client.py` allowed near the store.
+
+## Action pacing and protocol comparison
+
+The evaluation runner seals the effective `OSWORLD_ACTION_SETTLE_POLICY` in
+episode infra and manifest metadata. `throughput` is the default: it preserves
+the legacy one-settle-per-model-batch behavior. `paper` is an opt-in mode that
+settles for 3.0 seconds after each compiled nonterminal semantic action. A
+`WAIT` runs for its requested duration first, then receives a separate 3.0 s
+settle; a compound compiled scroll statement is one semantic action.
+
+Both policies retain one observation/readback after each whole model batch.
+Upstream OSWorld can expose/log intermediate states between primitive actions,
+so paper mode provides settle-timing parity, not exact trajectory or
+observation parity. Multi-action paper batches therefore add wall time and
+provider execute overhead compared with throughput mode.
+
+For current benchmark comparisons use release `osworld-v2.1` and its 500-step
+headline budget explicitly (`--benchmark-release osworld-v2.1 --max-steps 500`);
+the wrapper's ordinary defaults (25 steps and the older release) are not that
+protocol. Upstream has no official wall-clock cap. The local five-hour
+`--max-wall-s` watchdog is operational only, and any run truncated by it is
+non-comparable to an uncapped benchmark score.
 
 ## Running one episode
 
@@ -359,7 +412,9 @@ python ~/local-operator/scripts/run_episode.py \
     --infra AWS_SCHEDULER_ROLE_ARN=<role arn> \
     --infra OSWORLD_CLIENT_PASSWORD=<guest password> \
     --infra OSWORLD_FILE_BASE_URL=<asset mirror> \
-    --max-steps 25 --max-usd 0.50 --max-wall-s 1800 --keep-recent-frames 3
+    --infra OSWORLD_ACTION_SETTLE_POLICY=throughput \
+    --benchmark-release osworld-v2.1 --max-steps 500 \
+    --max-usd 0.50 --max-wall-s 18000 --keep-recent-frames 3
 ```
 
 Exit 0 only on `completed`; 1 on any other terminal; 2 when a secret is

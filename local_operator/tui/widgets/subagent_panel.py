@@ -1247,6 +1247,39 @@ def _label_column(
     )
 
 
+class _RankFacts(NamedTuple):
+    """The three :class:`RowFacts` fields the preview's eviction rank reads."""
+
+    status: str
+    queued: bool
+    paused: bool
+
+
+def _rank_facts(job: Any, *, paused: bool) -> _RankFacts:
+    """:func:`row_facts`' ``status``/``queued``/``paused``, without the rest of the row.
+
+    WHY NOT ``row_facts``. The rank runs per child per sync, and ``sync`` runs
+    ``_BAND_SETTLE_PASSES`` times per band refresh; ``row_facts`` also builds the
+    row's activity text, which strips control sequences out of every settled
+    child's whole ``result_text``. At 252 children that was ~6.5 ms a pass for
+    three values the rank reads -- the single largest item in the band's profile.
+
+    The SAME reads ``_read_row`` makes, and the same fallback ``row_facts``
+    returns when one raises (``running``, not queued, not paused). The one
+    divergence is a host job whose OTHER attributes raise (an embedder's
+    property on ``result_text``, say): ``row_facts`` falls back whole for it and
+    this still reads its real status -- which ranks it by what it is.
+    """
+    try:
+        return _RankFacts(
+            status=str(getattr(job, "status", "running")),
+            queued=bool(getattr(job, "queued", False)),
+            paused=paused,
+        )
+    except Exception:
+        return _RankFacts(status="running", queued=False, paused=False)
+
+
 def compose_row(
     *,
     facts: RowFacts,
@@ -2330,13 +2363,7 @@ class SubagentPanel(Container):
             # non-deterministically, since whether the row got a paint before
             # this sync depends on tick timing (it failed ~50% of runs in
             # isolation). It is the same staleness as F2, one function over.
-            facts = row_facts(
-                self._jobs_by_id.get(job_id),
-                fallback_id=job_id,
-                current=False,
-                paused=job_id in self._paused_ids,
-                child_count=self._children_counts.get(job_id, 0),
-            )
+            facts = _rank_facts(self._jobs_by_id.get(job_id), paused=job_id in self._paused_ids)
             # `queued` by its own name: the table ranks it explicitly, so
             # there is no longer a substitution here to keep in step.
             # `paused` before `queued`, matching `summary_counts` and

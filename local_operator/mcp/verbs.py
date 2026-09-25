@@ -55,38 +55,17 @@ def _outranks_global_mcp_scope(source: str | os.PathLike[str], cwd: str) -> bool
         return False
 
 
-#: Which TOOL owns each foreign MCP config file, keyed by the trailing path
-#: fragment ``load_all_mcp_configs`` reads it from. A refusal that names only
-#: the file leaves the user hunting for what writes it; naming the tool makes
-#: "remove it there" an instruction rather than a dead end. The Codex entry is
-#: read-only for a reason that will not change soon: ``tomllib`` parses TOML
-#: (``load``/``loads``) and cannot emit it, and ``tomli_w`` is not a
-#: dependency, so refusing is the only correct answer for a Codex-imported
-#: server rather than a policy we could relax (issue #367).
-_FOREIGN_MCP_CONFIGS: tuple[tuple[tuple[str, ...], str], ...] = (
-    ((".claude.json",), "imported from Claude Code"),
-    ((".claude", ".mcp.json"), "imported from Claude Code"),
-    ((".cursor", "mcp.json"), "imported from Cursor"),
-    ((".vscode", "mcp.json"), "imported from VS Code"),
-    ((".codex", "config.toml"), "imported from Codex CLI"),
-    # Read by the loader, never written by ``_scope_path`` — foreign to the
-    # writer despite living in the project the user is sitting in.
-    ((".mcp.json",), "a project .mcp.json local-operator does not write"),
-)
-
-
 def _foreign_config_origin(source: str | None) -> str:
-    """Name the tool that owns ``source``, for the ``/mcp remove`` refusal."""
-    # Function-local import: this module keeps `pathlib` off its import path
-    # (every other use here is local too), and this runs once per refusal.
-    from pathlib import Path
+    """Name the tool that owns ``source``, for the ``/mcp remove`` refusal.
 
-    if source:
-        parts = Path(source).parts
-        for fragment, origin in _FOREIGN_MCP_CONFIGS:
-            if len(parts) >= len(fragment) and tuple(parts[-len(fragment) :]) == fragment:
-                return origin
-    return "not written by local-operator"
+    The table lives in :data:`local_operator.mcp.catalog.SOURCE_KINDS`, shared
+    with the desktop catalog's ``source.kind``, so the refusal's "imported from
+    Cursor" and the settings row's ``cursor`` cannot drift apart.
+    """
+    from local_operator.mcp.catalog import source_kind
+
+    known = source_kind(source)
+    return known[1] if known is not None else "not written by local-operator"
 
 
 def _home_abbreviated(text: str) -> str:

@@ -144,11 +144,16 @@ def test_list_providers_with_ollama_active(client):
         assert openai["name"] == "OpenAI"
         assert openai["url"] == "https://platform.openai.com/"
         assert openai["requiredCredentials"] == ["OPENAI_API_KEY"]
+        # The suggestion rides the same catalogue the onboarding step reads, from
+        # the one backend table (`model.defaults`) -- never a renderer copy.
+        assert openai["suggestedModel"] == {"id": "gpt-6-astra", "name": "GPT-6 Astra"}
 
         # Verify Ollama provider is present and has expected details
         ollama = next(p for p in providers if p["id"] == "ollama")
         assert ollama["name"] == "Ollama"
         assert ollama["requiredCredentials"] == []
+        # A local runtime serves whatever the user pulled: no suggestion.
+        assert ollama["suggestedModel"] is None
 
 
 def test_list_providers_with_ollama_inactive(client):

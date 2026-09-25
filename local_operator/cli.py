@@ -226,10 +226,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model",
         type=str,
-        help="Model to use (e.g., gpt-4o, claude-3-5-sonnet-latest, deepseek-chat, "
-        "grok-3, glm-5.3, gemini-2.0-flash-001, qwen-plus, moonshot-v1-32k, "
-        "mistral-large-latest, deepseek/deepseek-chat). Optional: when omitted, "
-        "the provider's default model is used.",
+        help="Model to use (e.g., gpt-6-astra, claude-opus-5-5, deepseek-flash, "
+        "grok-4.7, glm-5.3, gemini-3.8-flash, qwen3.8-max, kimi-k3, "
+        "mistral-medium-latest, anthropic/claude-opus-5.5). Optional: when omitted, "
+        "the provider's suggested model is used.",
     )
     parser.add_argument(
         "--run-in",
@@ -1073,6 +1073,18 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    # Hidden for the same reason, and it exists because that flag has TWO callers.
+    # The upgrade's child is told this: the parent bounces the mobile daemon itself
+    # right after the child, so a child that bounced it too would restart the phone
+    # relay twice for one upgrade. A hand-run ``--refresh-daemons`` is given nothing,
+    # has no caller to do that bounce, and therefore does both halves — which is what
+    # an upgrade does. See ``update._run_daemon_repair``.
+    update_parser.add_argument(
+        "--services-only",
+        dest="services_only",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     # Install a build that is already on this machine into its own generation:
     # a source directory, or a git ref of the repository this command runs in.
     # Named separately from the PyPI path because it answers a different
@@ -1157,6 +1169,34 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "not make it is reported, left serving the build it loaded, and retried by "
             "the next `lop services restart`."
         ),
+    )
+    # The RECOVERY verb, and the only destructive one in this group. It exists
+    # because a `lop serve` daemon that is alive and not serving its address is
+    # reachable by NO other command on this machine: `lop stop` resolves session
+    # runtimes, `sessions reclaim` refuses any candidate that has a record, and
+    # `services restart` only ASKS a daemon to move. On 2026-09-23 that left the
+    # operator's desktop app down for twelve minutes with `kill` by hand as the
+    # only way out, and the pid to kill discoverable only by `lsof`.
+    services_reclaim = services_subparsers.add_parser(
+        "reclaim",
+        help=(
+            "End a `lop serve` daemon that is recorded but not serving its address "
+            "(never one that is serving)"
+        ),
+        description=(
+            "Ask ONE serve daemon, named by pid, to leave, escalating from SIGTERM to "
+            "SIGKILL at a bound, after proving the process is this product's serve "
+            "daemon and that it is not the one serving the address its record names. "
+            "`lop services status` lists the daemons this is for. It is never "
+            "automatic: the daemon may be supervising session runtimes, and no reader "
+            "of a record can prove a successor is ready to take its place."
+        ),
+        parents=[parent_parser],
+    )
+    services_reclaim.add_argument(
+        "pid",
+        type=int,
+        help="The daemon's pid, exactly as `lop services status` prints it",
     )
 
     # The install LAYOUT's own commands. One verb group rather than flags on
@@ -1727,6 +1767,17 @@ def config_edit_command(args: argparse.Namespace) -> int:
             )
         if matched_choice is not None:
             value = matched_choice.value
+        elif setting.kind is settings_io.Kind.CASCADE:
+            # The guessing ladder below knows int/float/bool/null and nothing
+            # structured, so a cascade's JSON fell through it as a plain
+            # string and was stored verbatim. ``coerce`` owns the CASCADE
+            # parse — one definition shared with the page — and raises a
+            # ``ValueError`` written for the user, which this function's
+            # existing ``except ValueError`` reports in the same words, on the
+            # same stream, with the same exit code as every other refusal
+            # here. Catching it again at this call site would be a second copy
+            # of that format to keep in sync.
+            value = settings_io.coerce(setting, value)
         else:
             # Try to convert to int
             try:
@@ -8577,6 +8628,7 @@ def main() -> int:
             return update_command(
                 check=bool(getattr(args, "check", False)),
                 refresh_daemons=bool(getattr(args, "refresh_daemons", False)),
+                services_only=bool(getattr(args, "services_only", False)),
                 from_snapshot=getattr(args, "from_snapshot", None),
                 services=not bool(getattr(args, "no_services", False)),
             )
@@ -8608,7 +8660,17 @@ def main() -> int:
             # for the same situation: 2 is argparse's own usage code and the one this
             # path already exited with through `parser.error`, so nothing that scripts
             # the exit status sees a change (round 11 R11-4).
-            print("usage: lop services {status, restart}", file=sys.stderr)
+            if command == "reclaim":
+                from local_operator.services import reclaim_serve_daemon
+
+                reclaim = reclaim_serve_daemon(getattr(args, "pid"))
+                for line in reclaim.lines:
+                    print(line)
+                # A REFUSAL IS A COMPLETED DECISION, and it exits non-zero so a
+                # script can tell it from a reclaim that ran — the same shape
+                # `lop stop`'s "turn is in flight" refusal has.
+                return 1 if reclaim.refused else 0
+            print("usage: lop services {status, restart, reclaim}", file=sys.stderr)
             return 2
         elif args.subcommand == "install":
             # Same lazy import, same reason. The generation layout's own verbs:

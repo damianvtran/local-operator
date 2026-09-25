@@ -736,6 +736,27 @@ _TOOL_ROW_BINDINGS: tuple[Binding, ...] = (
     # for a fourth outcome colour.
     Binding("tool.status.interrupted", "dim", "surface", Role.NEUTRAL, Surface.TOOL_ROW),
     Binding("tool.status.error_glyph", "danger", "tint-danger", Role.OUTCOME, Surface.TOOL_ROW),
+    Binding(
+        "tool.status.partial_glyph",
+        "warning",
+        "surface",
+        Role.OUTCOME,
+        Surface.TOOL_ROW,
+        note=(
+            "A result a search budget cut short: its own glyph (`◐`), the "
+            "collapsed row's promoted disclosure, and the wrapped disclosure in "
+            "the body all ride this one element, so the mark and its ink cannot "
+            "disagree. `warning` is the amber `tool.live.advisory` already "
+            "spends; it measures 8.64:1 on `surface`, against `dim`'s 4.18:1 — "
+            "and `dim` is how the payload's OWN output is painted, which is "
+            "exactly how design review round 1 read the disclosure as more "
+            "output rather than a state (D9). `danger` is deliberately NOT "
+            "used: the search succeeded and its partial answer is usable; it is "
+            "a warning about coverage, not an error. The glyph keeps the "
+            "family's shape-only contract, so `✓`/`◐`/`✗`/`⊘` still separate "
+            "in a colourless frame."
+        ),
+    ),
 )
 
 BINDINGS: tuple[Binding, ...] = _MARKDOWN_BINDINGS + _CODE_BINDINGS + _TOOL_ROW_BINDINGS
