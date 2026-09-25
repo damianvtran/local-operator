@@ -11908,6 +11908,7 @@ async def _execute_send_model(
         # an older build — or it could not be reached; nothing changed, and the
         # sentence leads so the collapsed error slot shows the reason (D2).
         return _error(tool_call_id, "send", switch_receipt(record, str(exc)))
+    outcome = switch_outcome(detail)
     return _text(
         tool_call_id,
         "send",
@@ -11915,7 +11916,11 @@ async def _execute_send_model(
         details={
             "pid": record.pid,
             "model": f"{provider}/{model_id}",
-            "outcome": switch_outcome(detail),
+            "outcome": outcome,
+            # A switch that took but raised afterwards paints the card's
+            # partial-result glyph and tint rather than a clean ✓ (design round
+            # 2, D9), through the existing flag instead of a second mechanism.
+            "partial_result": outcome == "partial",
         },
     )
 

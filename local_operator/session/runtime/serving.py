@@ -4092,6 +4092,9 @@ class ServingSessionHandle(SessionHandle):
         new_label = f"{spec.provider}/{spec.model_id}"
         if peer_model.already_selected(session, new_label):
             return peer_model.already_on_detail(new_label)
+        # Re-selecting the model a pinned fallback displaced: the selection will
+        # not move, the pin will be withdrawn (review round 2, N5).
+        dropped = peer_model.pinned_fallback_label(session) if old_label == new_label else ""
         # Read BEFORE the switch: the question is whether a call was in flight
         # when the switch landed, which is what decides the "mid-turn" wording.
         busy = self.is_conversationally_active()
@@ -4105,27 +4108,35 @@ class ServingSessionHandle(SessionHandle):
             # force. The answer is read back from the session, never inferred from
             # the raise (review round 1, N1).
             apply_error = error
-        in_force = _effective_label(session)
-        if in_force != new_label:
+        # "Did it take" is the SELECTION test, never the effective label (review
+        # round 2, M2): while a fallback serves the requested model the effective
+        # label already equals it, so an apply that never ran would read as a
+        # switch and write a false card. The effective label names what the
+        # session is really on in the refusal.
+        if not peer_model.already_selected(session, new_label):
             raise ValueError(
                 peer_model.refusal_detail(
-                    f"the switch to {new_label} did not take effect", in_force
+                    f"the switch to {new_label} did not take effect", _effective_label(session)
                 )
             ) from apply_error
-        await self._record_peer_model_switch(old_label, new_label, sender or {})
+        await self._record_peer_model_switch(
+            peer_model.audit_body(old_label, new_label, sender, dropped_fallback=dropped),
+            sender or {},
+        )
         if apply_error is not None:
-            return peer_model.partial_switch_detail(old_label, in_force, apply_error)
+            return peer_model.partial_switch_detail(
+                old_label, new_label, apply_error, dropped_fallback=dropped
+            )
         return peer_model.switched_detail(
             old_label,
             new_label,
             busy=busy,
             calling=calling,
             running_subagents=peer_model.running_subagent_count(session),
+            dropped_fallback=dropped,
         )
 
-    async def _record_peer_model_switch(
-        self, old_label: str, new_label: str, sender: dict[str, Any]
-    ) -> None:
+    async def _record_peer_model_switch(self, body: str, sender: dict[str, Any]) -> None:
         """The target-side audit card (design D6), best effort.
 
         Record-only (``mailbox``, no wake) through the ordinary peer receive path,
@@ -4135,12 +4146,8 @@ class ServingSessionHandle(SessionHandle):
         into a reported failure, because the sender would then retry a switch
         that stuck.
         """
-        from local_operator.mobile.peer_model import audit_body
-
         try:
-            await self.receive_peer_message(
-                audit_body(old_label, new_label, sender), mode="mailbox", wake=False, sender=sender
-            )
+            await self.receive_peer_message(body, mode="mailbox", wake=False, sender=sender)
         except Exception:  # noqa: BLE001 — the switch stands whatever the card does
             logger.warning("the remote model switch's audit card was not recorded", exc_info=True)
 

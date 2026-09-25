@@ -2930,6 +2930,13 @@ class ToolCard(ExpandableActionBlock):
             return ""
         return head
 
+    def _switch_row_names_its_outcome(self) -> bool:
+        """Whether this is a settled model-switch row whose summary leads with
+        its own outcome word (``_switch_outcome_summary``)."""
+        return self.tool_name.lower() == "send" and self._summary.startswith(
+            tuple(f"{word} · " for word in SWITCH_OUTCOME_WORDS.values())
+        )
+
     def _partial_reason(self) -> str:
         """The body's LEADING line when the collapsed row must carry it too.
 
@@ -3885,6 +3892,12 @@ class ToolCard(ExpandableActionBlock):
             # able to state that even where there is no disclosure sentence to
             # promote (design review round 2, D2-3).
             reason = self._partial_reason() or _PARTIAL_LABEL
+            if self._switch_row_names_its_outcome():
+                # A model switch that took but raised afterwards: the row already
+                # leads with `switched (error)`, and "Partial" would misname it —
+                # the switch is whole, the error came after (design round 2, D9).
+                # The glyph and tint carry the warning.
+                reason = ""
             tint = bindings.style("tool.status.partial_glyph")
             abbreviates = True
         elif self._state == "interrupted":

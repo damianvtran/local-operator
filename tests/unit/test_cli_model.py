@@ -204,14 +204,27 @@ async def test_a_live_session_whose_name_only_the_store_knows_yet_is_switched(
         runtime.close()
 
 
-def test_a_terminal_switch_is_attributed_to_the_terminal(monkeypatch) -> None:
-    """U2: from a plain terminal the ancestry walk finds no session; the card
-    must not name this short-lived process's pid alone."""
+def test_a_terminal_switch_is_attributed_to_the_terminal(monkeypatch, tmp_path) -> None:
+    """U2, then D7/U9/Q5: from a plain terminal the ancestry walk finds no
+    session. The header label is short (`terminal`) so the card's models survive
+    the clip; the directory rides in `cwd` for the body."""
+    import os as _os
+
     from local_operator.cli import _cli_switch_sender
 
     monkeypatch.setattr("local_operator.cli._peer_sender_identity", lambda: {"pid": 99999})
-    monkeypatch.chdir("/tmp")
-    assert _cli_switch_sender()["conversation_name"] == "lop model (terminal, tmp)"
+    monkeypatch.chdir(tmp_path)
+    sender = _cli_switch_sender()
+    assert (sender["conversation_name"], sender["via"]) == ("terminal", "terminal")
+    assert sender["cwd"] == _os.getcwd()
+
+    # NIT-4: a deleted working directory must not cost the switch its sender.
+    def gone() -> str:
+        raise FileNotFoundError("cwd was removed")
+
+    monkeypatch.setattr("local_operator.cli.os.getcwd", gone)
+    sender = _cli_switch_sender()
+    assert sender["conversation_name"] == "terminal" and "cwd" not in sender
     monkeypatch.setattr(
         "local_operator.cli._peer_sender_identity",
         lambda: {"pid": 7, "session_id": "s1", "conversation_name": "fleet boss"},

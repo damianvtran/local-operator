@@ -2564,6 +2564,23 @@ def test_settled_switch_rows_lead_with_their_outcome() -> None:
     assert "model · pid 1" in card._build_row(80).plain
 
 
+def test_a_switch_that_raised_after_it_took_paints_the_warning_glyph() -> None:
+    """D9: `switched (error)` must not sit beside a clean ✓; the partial glyph
+    carries the warning, and "Partial" (which would misname a whole switch) is
+    not painted. A message send's partial result keeps its label."""
+    from local_operator.tui.widgets.tool_card import ICON_PARTIAL, ICON_SUCCESS
+
+    card = ToolCard("t", "send", {"pid": 48213, "model": "deepseek/deepseek-flash"})
+    card.mark_done("receipt", {"outcome": "partial", "partial_result": True})
+    row = card._build_row(100).plain
+    assert "switched (error) · pid 48213" in row
+    assert ICON_PARTIAL in row and ICON_SUCCESS not in row
+    assert "Partial" not in row
+    message = ToolCard("t", "send", {"pid": 1, "message": "hi"})
+    message.mark_done("ok", {"partial_result": True})
+    assert "Partial" in message._build_row(80).plain
+
+
 def test_send_modes_never_collide_at_narrow_widths() -> None:
     """The defect the leading marker fixes: with the mode to the RIGHT of a long
     target it was truncated away, so a wake, a quiet drop and a mid-turn steer

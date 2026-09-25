@@ -16,6 +16,7 @@ import this without dragging the model graph into its own import time.
 
 from __future__ import annotations
 
+import os
 from contextlib import closing
 from typing import TYPE_CHECKING, Any
 
@@ -171,8 +172,34 @@ def accepted_detail(label: str) -> str:
     )
 
 
+def pinned_fallback_label(session: Any) -> str:
+    """``provider/model`` of the pinned fallback serving instead, else ``""``."""
+    if getattr(session, "active_fallback", None) is None:
+        return ""
+    return str(getattr(session, "effective_model_label", "") or "")
+
+
+def _outcome_line(old: str, new: str, dropped_fallback: str) -> str:
+    """The receipt's first line: what the session is on now, and what it left.
+
+    ``dropped_fallback`` is set when the request re-selected the model a pinned
+    fallback had displaced (review round 2, N5): the selection did not move, so
+    ``switched to X (was X)`` would be false. What changed is that the fallback
+    was withdrawn, and the line says that.
+    """
+    if dropped_fallback:
+        return f"back on {new} (was on fallback {dropped_fallback})"
+    return f"switched to {new} (was {old})"
+
+
 def switched_detail(
-    old: str, new: str, *, busy: bool, running_subagents: int, calling: bool = True
+    old: str,
+    new: str,
+    *,
+    busy: bool,
+    running_subagents: int,
+    calling: bool = True,
+    dropped_fallback: str = "",
 ) -> str:
     """The success receipt, per design §2, as outcome-first short lines.
 
@@ -182,26 +209,33 @@ def switched_detail(
     no call is in flight, so the line speaks of the current STEP instead, which
     is true in both states (UX round 1, U7).
     """
-    lines = [f"switched to {new} (was {old})"]
+    lines = [_outcome_line(old, new, dropped_fallback)]
     if busy:
         in_flight = "the call in flight" if calling else "the current step"
-        # "the old/new model", not the ids again: the first line names both,
-        # and two long ids here pushed this line past a card's width (D1).
-        lines.append(
-            f"mid-turn: {in_flight} finishes on the old model; later calls use the new one"
-        )
+        # Short enough for an expanded card at 80 columns (design round 2, D8);
+        # the first line already says every later call uses the new model.
+        lines.append(f"mid-turn: {in_flight} finishes on the old model")
     else:
         lines.append("its next turn runs on it")
     if running_subagents > 0:
+        # ≤72 cells even at 12 children: an expanded card's body at 80 columns
+        # (design round 2, D8).
         if running_subagents == 1:
-            kept = "1 running subagent keeps its model"
+            kept = "1 running subagent stays on the old model"
         else:
-            kept = f"{running_subagents} running subagents keep their model"
-        lines.append(f"{kept}; new and resumed ones use the new one")
+            kept = f"{running_subagents} running subagents stay on the old model"
+        lines.append(f"{kept}; new and resumed ones switch")
     return "\n".join(lines)
 
 
-def partial_switch_detail(old: str, in_force: str, error: BaseException) -> str:
+#: The second line of a switch that took but raised afterwards. ``switch_outcome``
+#: and the send card key on it, so it is written once.
+PARTIAL_SWITCH_LEAD = "with an error after the switch:"
+
+
+def partial_switch_detail(
+    old: str, in_force: str, error: BaseException, *, dropped_fallback: str = ""
+) -> str:
     """The apply raised, but the read-back shows the switch took (review N1).
 
     ``Session.set_model`` assigns the spec before its journal writes and its
@@ -210,23 +244,36 @@ def partial_switch_detail(old: str, in_force: str, error: BaseException) -> str:
     changed; reporting it as a clean switch would hide the fault.
     """
     return (
-        f"switched to {in_force} (was {old})\n"
-        f"with an error after the switch: {type(error).__name__}: {error}"
+        f"{_outcome_line(old, in_force, dropped_fallback)}\n"
+        f"{PARTIAL_SWITCH_LEAD} {type(error).__name__}: {error}"
     )
 
 
-def audit_body(old: str, new: str, sender: dict[str, Any] | None = None) -> str:
+def audit_body(
+    old: str,
+    new: str,
+    sender: dict[str, Any] | None = None,
+    *,
+    dropped_fallback: str = "",
+) -> str:
     """The body of the record-only peer card written on the target.
 
     NEW MODEL FIRST (design round 1, D3; UX U3): on resume this card is the only
     trace of the switch — the live notice is a harness row replay skips — and
     its collapsed row is clipped from the right, so what the session is on NOW
-    has to survive a narrow terminal. The sender is named last because the card
-    header already names it.
+    has to survive a narrow terminal.
+
+    NO SENDER TAIL (design round 2, D7; UX U9; QA Q5): the card's own header
+    already names the sender, so repeating it here only lengthened the one row
+    whose models must survive the clip. The exception is a terminal sender,
+    whose header says only ``terminal``: where it ran is a fact the header
+    cannot hold, so it trails the models — clipped first, still on expand.
     """
-    who = sender_label(sender or {})
-    tail = f" — switched by {who}" if who else ""
-    return f"{AUDIT_PREFIX} now on {new} (was {old}){tail}"
+    if dropped_fallback:
+        body = f"{AUDIT_PREFIX} back on {new} (was on fallback {dropped_fallback})"
+    else:
+        body = f"{AUDIT_PREFIX} now on {new} (was {old})"
+    return body + _terminal_tail(sender or {})
 
 
 def pending_audit_body(old: str, new: str, sender: dict[str, Any] | None = None) -> str:
@@ -237,15 +284,24 @@ def pending_audit_body(old: str, new: str, sender: dict[str, Any] | None = None)
     exactly that; the switch notice that follows (or a refusal notice) says
     how it ended.
     """
-    who = sender_label(sender or {})
-    tail = f" — requested by {who}" if who else ""
-    return f"{AUDIT_PREFIX} switch to {new} requested (on {old} until it applies){tail}"
+    return f"{AUDIT_PREFIX} switch to {new} requested (on {old} until it applies)" + _terminal_tail(
+        sender or {}
+    )
 
 
-def sender_label(sender: dict[str, Any]) -> str:
-    """A readable name for whoever asked: the conversation, else ``pid N``."""
-    name = str(sender.get("conversation_name") or "").strip()
-    if name:
-        return name
-    pid = sender.get("pid")
-    return f"pid {pid}" if isinstance(pid, int) and not isinstance(pid, bool) else ""
+#: The ``sender["via"]`` value ``lop model`` sets when no lop session ran it.
+TERMINAL_SENDER = "terminal"
+
+
+def _terminal_tail(sender: dict[str, Any]) -> str:
+    """`` — from a terminal in <dir>`` for a terminal sender with a usable cwd.
+
+    The directory's basename only, and nothing at all when there is none to
+    give — ``/`` has an empty basename, and a sender whose cwd was deleted
+    reports none (review round 2, NIT-4). The header's ``terminal`` still
+    names the kind of sender either way.
+    """
+    if sender.get("via") != TERMINAL_SENDER:
+        return ""
+    where = os.path.basename(str(sender.get("cwd") or "").strip().rstrip("/"))
+    return f" — from a terminal in {where}" if where else ""

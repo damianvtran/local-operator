@@ -1170,7 +1170,9 @@ def unconfirmed_switch_detail() -> str:
 
 def unreachable_switch_detail(error: BaseException) -> str:
     """The control socket never opened, so the op was never sent (review N3)."""
-    return f"could not reach that session ({error}); nothing changed"
+    # Both facts the reader acts on lead; the socket detail trails (design
+    # round 2, D10).
+    return f"could not reach that session; nothing changed ({error})"
 
 
 #: How long the sender waits for the target's answer to a switch. ABOVE the TUI
@@ -1326,11 +1328,13 @@ def switch_outcome(detail: str) -> str:
     differ per outcome; a receipt from a target that phrases it differently
     (a future build) maps to ``""`` and the card keeps its argument summary.
     """
+    from local_operator.mobile.peer_model import PARTIAL_SWITCH_LEAD
+
     first = detail.lstrip().split("\n", 1)[0]
     if first.startswith("already on "):
         return "unchanged"
     if first.startswith("pending:"):
         return "pending"
-    if first.startswith("switched to "):
-        return "partial" if "with an error after the switch" in detail else "switched"
+    if first.startswith(("switched to ", "back on ")):
+        return "partial" if PARTIAL_SWITCH_LEAD in detail else "switched"
     return ""
