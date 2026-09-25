@@ -1048,3 +1048,121 @@ def test_the_ci_runner_shapes_are_unchanged_by_the_titration(
         env={"CI": "1"},
     )
     assert resolved == expected, f"{cpus} vCPU / {total_mb} MB runner"
+
+
+# ---------------------------------------------------------------------------
+# A worker that died: named, and never a pass
+# ---------------------------------------------------------------------------
+
+
+class _FakeGateway:
+    def __init__(self, id_: str) -> None:
+        self.id = id_
+
+
+class _FakeNode:
+    def __init__(self, id_: str) -> None:
+        self.gateway = _FakeGateway(id_)
+
+
+class _FakeSession:
+    """Only ``exitstatus``: the attribute ``_fail_on_dead_workers`` writes."""
+
+    def __init__(self, exitstatus: int) -> None:
+        self.exitstatus = exitstatus
+
+
+def test_a_clean_node_down_is_not_a_death(hook_module: types.ModuleType) -> None:
+    """``error=None`` is how xdist ends EVERY healthy worker, so it must stay silent.
+
+    Getting this wrong is the expensive direction: a line per worker at the end of
+    every green run is the kind of noise that gets a diagnostic deleted, and the
+    exit status would flip a passing suite to a failing one on every run.
+    """
+    hook_module._DEAD_WORKERS.clear()
+    hook_module.pytest_testnodedown(_FakeNode("gw0"), None)
+
+    assert hook_module._DEAD_WORKERS == []
+    session = _FakeSession(exitstatus=0)
+    hook_module._fail_on_dead_workers(session, 0)
+    assert session.exitstatus == 0
+
+
+def test_a_dead_worker_is_named_with_its_cause(
+    hook_module: types.ModuleType, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The line has to name the WORKER and say what reached xdist.
+
+    `Not properly terminated` is what a killed worker looks like (`_getremoteerror`
+    returns it when the channel closes with no error, see
+    ``xdist/workermanage.py``), and the same words arrive for a worker that died in
+    a syscall -- so the line reports the cause verbatim rather than inventing one,
+    and adds the two situations that produce it in this repo (a process-group
+    memory cap, a fired per-test bound).
+    """
+    hook_module._DEAD_WORKERS.clear()
+    hook_module.pytest_testnodedown(_FakeNode("gw2"), "Not properly terminated")
+
+    err = capsys.readouterr().err
+    assert "DEAD WORKER" in err
+    assert "gw2" in err and "Not properly terminated" in err
+    assert hook_module._DEAD_WORKERS == [("gw2", "Not properly terminated")]
+
+
+def test_a_dead_worker_is_named_even_when_it_raised_remotely(
+    hook_module: types.ModuleType, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A worker that raised rather than being killed is the OTHER cause, not a gap.
+
+    xdist hands over the remote error object when the worker died with an
+    exception on its channel, so the reporter has to render a non-string cause
+    (class name plus text) instead of assuming the kill path's string. Without
+    this the line would say `DEAD WORKER gw1 ... <execnet object at 0x...>`.
+    """
+    hook_module._DEAD_WORKERS.clear()
+    hook_module.pytest_testnodedown(_FakeNode("gw1"), RuntimeError("boom in a worker"))
+
+    err = capsys.readouterr().err
+    assert "gw1" in err and "RuntimeError" in err and "boom in a worker" in err
+
+
+def test_a_dead_worker_turns_a_green_run_into_a_failing_one(
+    hook_module: types.ModuleType, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The assertion that makes the reporting load-bearing rather than decorative.
+
+    xdist replaces a killed worker and carries on, so a suite whose worker died
+    can finish `N passed` with exit status 0 while tests the dead worker owned
+    never ran. Nothing else in the run reports that, which is why this is the one
+    place that has to force the status -- and the message says so in the log,
+    because an exit code with no explanation is the artifact this whole block
+    exists to remove.
+    """
+    hook_module._DEAD_WORKERS.clear()
+    hook_module.pytest_testnodedown(_FakeNode("gw0"), "Not properly terminated")
+    session = _FakeSession(exitstatus=0)
+
+    hook_module._fail_on_dead_workers(session, 0)
+
+    assert session.exitstatus == pytest.ExitCode.TESTS_FAILED
+    assert "DEAD WORKER(S) DURING A PASSING RUN" in capsys.readouterr().err
+
+
+def test_a_dead_worker_does_not_relabel_a_run_that_already_failed(
+    hook_module: types.ModuleType, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """When something already failed, the status IS the failure -- do not rewrite it.
+
+    Two reasons rather than one: a run with real failures should report those
+    (relabelling muddies what a reader is looking at), and the status here is the
+    run's own, so a second writer that disagrees is how a summary line stops
+    matching the code that produced it.
+    """
+    hook_module._DEAD_WORKERS.clear()
+    hook_module.pytest_testnodedown(_FakeNode("gw3"), "Not properly terminated")
+    session = _FakeSession(exitstatus=1)
+
+    hook_module._fail_on_dead_workers(session, 1)
+
+    assert session.exitstatus == 1
+    assert "DURING A PASSING RUN" not in capsys.readouterr().err
