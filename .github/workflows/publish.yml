@@ -394,10 +394,18 @@ jobs:
           printf '%s' "$PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/keyagent.provisionprofile"
           # No --timestamp flag on purpose: the default is `secure`, and step 5c of the
           # script fails this job if the signature comes back without a timestamp.
+          #
+          # NO --keychain, ON PURPOSE, and this is a measurement rather than a
+          # preference. `--keychain FILE` narrows only the IDENTITY lookup, so it was
+          # never what made the imported key usable (the SEARCH LIST is — see the
+          # import step), and the identity is already pinned by SHA in --identity, so
+          # passing it added nothing but the implication that it was load-bearing.
+          # Measured 2026-09-25 with the identity present only in the throwaway
+          # keychain and that keychain in the search list: signing and verification
+          # succeed identically with and without the flag.
           packaging/macos/assemble_keyagent_bundle.sh \
             --out "$RUNNER_TEMP/lop-keyagent.app" \
             --identity "$IDENTITY_SHA" \
-            --keychain "$KEYCHAIN" \
             --profile "$RUNNER_TEMP/keyagent.provisionprofile"
 
       - name: The helper's own ownership selftest
