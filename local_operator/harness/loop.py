@@ -36,6 +36,11 @@ from pydantic import TypeAdapter, ValidationError
 
 from local_operator.ansi import sanitize_prompt_line
 from local_operator.harness.approval import ask_approval
+from local_operator.harness.guard_area import (
+    READING_TOOLS,
+    exempt_from_escalation,
+    resolves_to_exempt_source,
+)
 from local_operator.harness.intent import (
     INTENT_FIELD,
     INTENT_SCAN_LIMIT,
@@ -670,6 +675,34 @@ class LoopContext:
     messages: list[AgentMessage] = field(default_factory=list)
     tools: list[AgentTool] = field(default_factory=list)
     tool_context: ToolContext | None = None
+    # R3-1: the ORIGINAL arguments of every call the loop actually dispatched,
+    # keyed by ``tool_call_id``. ``messages`` cannot serve this: the assistant
+    # turn the loop stores there is the SCRUBBED copy (``_scrub_history_
+    # arguments``), kept for persistence/replay, while the tool that ran saw
+    # the ORIGINAL -- so a guard reading the arguments back out of ``messages``
+    # is handed a different string than the reader resolved. Recorded at the
+    # dispatch point and consumed (popped) where the result is redacted one step
+    # later -- ``_call_arguments`` on the native path, the eval bridge's own pop
+    # for a nested call -- and popped again on the CANCELLATION path, where no
+    # result is ever redacted: without that second pop a long session would
+    # retain every cancelled call's arguments (a ``write`` carries whole file
+    # contents), and a later call reusing the id would consume a stale record.
+    original_call_args: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # R3-2 / R4-1 / R5: the guard-area exemption verdict of every call, keyed by
+    # ``tool_call_id`` -- the SAME key and the same record/consume shape as
+    # ``original_call_args`` above, but NOT written at this end: the READER writes
+    # it, through ``ToolContext.record_resolved_path``, at the resolution it is
+    # about to open (``_exempt_verdict_recorder`` files it here). Every other
+    # resolution is a second MOMENT as well as a second input, and that is the
+    # defect three rounds in a row narrowed: re-derived at redaction, a tool
+    # BATCH's mutation (``read <path>`` plus ``bash ln -sfn``) always landed
+    # first; computed at dispatch, the reader's own resolution still came later,
+    # and a link moved in that gap cleared the escalation for bytes taken from a
+    # file the exemption does not cover. Consumed (popped) by BOTH redaction
+    # sites -- the native ``_append_results`` path and the eval bridge, which hands
+    # the popped value to ``_redact_content`` -- and popped on cancellation, so it
+    # does not outlive the result it belongs to.
+    exempt_source_verdicts: dict[str, bool] = field(default_factory=dict)
 
 
 @dataclass
@@ -843,7 +876,16 @@ def _error_batch_fingerprint(calls: list[ToolCall], results: list[ToolResult]) -
                 default=str,
             ).encode()
         )
-        digest.update(result.text.encode())
+        # ``surrogatepass``: this digests MODEL-VISIBLE error text, and a lone
+        # surrogate reaches it whenever a malformed path argument is echoed back
+        # (``read {"path": "notes\ud800.txt"}`` returns an error result carrying
+        # that very string). A plain ``.encode()`` raises ``UnicodeEncodeError``
+        # out of the turn on the first such result — the identical class of
+        # turn-killing raise the guard-area matcher had, on an input an agent can
+        # produce by accident. The digest only has to DISCRIMINATE repeated error
+        # batches, so the surrogate's own bytes serve it; the alternative of
+        # skipping the update would make two distinct errors collide.
+        digest.update(result.text.encode("utf-8", "surrogatepass"))
     return digest.hexdigest()
 
 
@@ -953,15 +995,49 @@ async def _cancel_when_aborted(signal: AbortSignal, task: asyncio.Task[None]) ->
     task.cancel()
 
 
-def _call_arguments(context: "LoopContext", tool_call_id: str) -> dict[str, Any]:
-    """The arguments of the call a result belongs to, for the redaction hook.
+def _session_cwd(context: "LoopContext") -> str | None:
+    """The root the READER resolves a relative path against, or None.
 
-    Searched in ``context.messages`` rather than kept beside the result: a
-    ``ToolResult`` carries the call's ID and name but not what it was asked to
-    do, and the assistant message that holds the arguments is the message the
-    loop appended one step earlier. ``reversed`` because the result being
-    appended belongs to the most recent batch.
+    One definition for both redaction sites, because it is the same value the
+    reader itself uses: ``_safe_cwd`` hands ``context.cwd`` to
+    ``_resolve_workspace_path`` in every reading tool, and this is the loop's
+    view of that same field. A site that reconstructed it from the process CWD
+    is exactly the divergence the guard-area exemption must not have (see
+    ``harness/guard_area.py``).
     """
+    return context.tool_context.cwd if context.tool_context is not None else None
+
+
+def _call_arguments(context: "LoopContext", tool_call_id: str) -> dict[str, Any]:
+    """The ORIGINAL arguments of the call a result belongs to, for the redaction hook.
+
+    Recorded at DISPATCH by ``_runner_result``, where ``item.args`` -- what the
+    tool is actually run with -- is in hand, and CONSUMED here (popped) so the
+    recording does not outlive the result it belongs to.
+
+    ``context.messages`` is deliberately NOT the source. The assistant turn the
+    loop stores there is the SCRUBBED copy (``_scrub_history_arguments``), kept
+    for persistence/replay, while the tool that ran -- and the reader inside it
+    -- saw the ORIGINAL. Searching ``messages`` therefore hands this hook a
+    different string than the reader resolved, and the two disagree exactly where
+    it matters: a credential-SHAPED path segment makes the guard resolve
+    ``[redacted]/../...`` while the reader resolved ``<shape>/../...``. Those are
+    identical bytes after scrubbing, so the control sees a guard-area read
+    (escalation ``[True]``) while the attack is silently cleared (``[]``) -- in
+    both ``read`` and ``grep``. R3-1 against PR #1502.
+
+    The ``messages`` search remains as a FALLBACK only for calls that never
+    dispatched -- a planning failure, or a synthetic result the loop invented --
+    where nothing was recorded and the stored arguments are all there is. It is
+    reached only when ``config.redact_tool_result`` is set, and the record is
+    only written under that same condition, so an unconfigured hook leaves this
+    empty either way.
+    """
+    recorded = context.original_call_args.pop(tool_call_id, None)
+    if recorded is not None:
+        return recorded
+    # ``reversed`` because the result being appended belongs to the most recent
+    # batch.
     for message in reversed(context.messages):
         # ``AgentMessage`` is ``Message | CustomMessage`` and only the former
         # carries tool calls; a notice parked beside the batch is skipped rather
@@ -972,6 +1048,64 @@ def _call_arguments(context: "LoopContext", tool_call_id: str) -> dict[str, Any]
             if call.id == tool_call_id:
                 return call.arguments
     return {}
+
+
+def _exempt_verdict_recorder(
+    context: "LoopContext", tool_name: str, tool_call_id: str
+) -> Callable[[str, bool], None]:
+    """The callback a READER uses to publish the path it just resolved.
+
+    Installed on ``ToolContext.record_resolved_path`` for the duration of ONE call
+    whose result will be redacted, and called by ``execute_read``/``execute_grep``
+    at the resolution they are about to open. The membership test is
+    :func:`guard_area.resolves_to_exempt_source`, so the exemption's one definition
+    stays with the exemption.
+
+    Two properties are enforced HERE rather than by convention, because the hook
+    sits on a context every dispatched tool receives (PR #1502 review round 6, M1):
+
+    * **the id is the loop's**, captured from the call this recorder was made for,
+      never an argument a tool body can supply -- so one call cannot file a verdict
+      against another call's id;
+    * **only a READING tool may confer it**: a tool outside
+      :data:`guard_area.READING_TOOLS` filing anything files ``False``, which is the
+      escalating reading. Before this seam existed the matcher itself enforced that
+      with a tool-name check; it is restated here so the property survives the move.
+
+    A reader that never resolves (a scheme handle, a validation failure) records
+    nothing, and the redaction then falls back to resolving for itself -- the
+    escalating direction, unchanged.
+    """
+
+    def record(resolved: str, resolvable: bool) -> None:
+        if tool_name not in READING_TOOLS:
+            context.exempt_source_verdicts[tool_call_id] = False
+            return
+        context.exempt_source_verdicts[tool_call_id] = resolves_to_exempt_source(
+            resolved, resolvable
+        )
+
+    return record
+
+
+def _exempt_source_verdict(context: "LoopContext", tool_call_id: str) -> bool | None:
+    """The guard-area verdict the READER recorded for the result being redacted.
+
+    Recorded by the reader itself, at the resolution it is about to open
+    (:func:`_exempt_verdict_recorder`), and CONSUMED here (popped), the same
+    dispatch/consume shape as :func:`_call_arguments` beside it. ``None`` means
+    this call never resolved -- a planning failure, a synthetic result, a scheme
+    handle -- so ``exempt_from_escalation`` falls back to resolving the verdict
+    itself, which escalates.
+
+    Consuming the reader's own answer rather than re-deriving it is the whole
+    point (R3-2, R4-1 and R5 against PR #1502): every other resolution is a
+    second MOMENT as well as a second input, and a symlink moved in that gap --
+    by a same-batch sibling, by a background process, by anything -- decided the
+    verdict for bytes the reader had already taken from a file the exemption does
+    not cover.
+    """
+    return context.exempt_source_verdicts.pop(tool_call_id, None)
 
 
 def _scrub_argument_value(value: Any, redact: Callable[[str], str]) -> tuple[Any, bool]:
@@ -2828,7 +2962,21 @@ class AgentLoop:
         Approval prompts happen per-call INSIDE the tool task (after
         ``tool_execution_start``), so the UI shows the call while waiting and
         skipped calls never prompt.
+
+        This call is also the TURN boundary for the two redaction records, which is
+        the scope ``_append_results`` mirrors: every record a turn writes is
+        consumed by that turn's own append. A turn that never reaches it -- a
+        consumer that stops iterating between a tool's end and the append -- leaves
+        its records behind, and a later call reusing the id would be priced on them
+        (review round 6, L1). Sweeping HERE closes that without touching a live
+        turn: a turn whose calls split into several batches (``exclusive`` or keyed
+        resources) keeps batch 1's records until batch N is done, which a sweep at
+        the BATCH boundary destroyed -- and the redaction then fell back to the
+        scrubbed arguments and a second resolution, silently clearing a real
+        escalation (review round 7, F1).
         """
+        context.original_call_args.clear()
+        context.exempt_source_verdicts.clear()
         seen_ids: set[str] = set()
         plan: list[_PlannedCall] = []
         for call in calls:
@@ -3201,6 +3349,21 @@ class AgentLoop:
                             intent=planned.intent,
                         )
                     )
+                    # The verdict ``_runner_result`` recorded at dispatch, KEPT
+                    # for the redaction below. Both record kinds are written
+                    # there; only the arguments record is dropped in the
+                    # ``finally`` (this bridge redacts with ``planned.args``
+                    # directly and never reaches ``_call_arguments``), while the
+                    # verdict is the answer this site must CONSUME -- leaving it
+                    # to be re-resolved at redaction time is the R3-2 defect one
+                    # surface along, and it is reachable here without a batch:
+                    # an agent-authored symlink moved between the nested reader's
+                    # resolution and this redaction decides the verdict for bytes
+                    # the reader already read (R4-1 against PR #1502, measured
+                    # 7 of 30 attempts clearing the escalation for a NON-exempt
+                    # file). Initialised here so the value is bound on every path
+                    # through the ``finally`` below.
+                    nested_verdict: bool | None = None
                     try:
                         result = await self._runner_result(planned, context, config, signal, queue)
                     except asyncio.CancelledError:
@@ -3219,6 +3382,21 @@ class AgentLoop:
                             )
                         )
                         raise
+                    finally:
+                        # ``_runner_result`` records the ORIGINAL arguments for
+                        # the redaction hook (R3-1) and, beside them, the
+                        # guard-area verdict (R3-2). This bridge redacts with
+                        # ``planned.args`` directly below and never reaches
+                        # ``_call_arguments`` to consume the arguments record, so
+                        # drop it here or an eval-heavy session accumulates one
+                        # entry per nested call. The VERDICT is not dropped: it
+                        # is popped into ``nested_verdict`` and handed to the
+                        # redaction below, exactly as the native site hands over
+                        # the same record. ``finally`` because the cancellation
+                        # path raises out before the redaction runs, and that
+                        # path must not leave the record behind either.
+                        context.original_call_args.pop(nested.id, None)
+                        nested_verdict = context.exempt_source_verdicts.pop(nested.id, None)
                     # Redact before the result crosses back into arbitrary
                     # Python, the same text policy used for native history.
                     if config.redact_tool_result is not None:
@@ -3233,6 +3411,8 @@ class AgentLoop:
                                     config.redact_tool_result,
                                     name,
                                     planned.args,
+                                    execution_context.cwd,
+                                    nested_verdict,
                                 )
                             }
                         )
@@ -3252,8 +3432,44 @@ class AgentLoop:
                 execution_context = execution_context.model_copy(
                     update={"dispatch_tool": dispatch_tool}
                 )
+            # R3-1 / R3-2 / R4-1 / R5: the guard's view of this call is RECORDED
+            # here and DECIDED by the reader. The arguments come from
+            # ``item.args`` -- the ORIGINAL the tool is about to run with --
+            # because the stored turn is the scrubbed copy (R3-1). The exemption
+            # verdict is not computed here at all: the reader reports the path IT
+            # resolved through ``ToolContext.record_resolved_path`` and this
+            # recorder stores that answer under the call's id. A verdict computed
+            # here would still be a second resolution at a second moment -- the
+            # reader resolves again inside ``tool.execute``, and a symlink moved
+            # in that gap handed the redaction an exemption for bytes the reader
+            # had already taken from a NON-exempt file (measured across rounds
+            # 3-5, most recently 2 of 20 raced attempts). Guarded by the same
+            # config as the redaction that consumes it, so an unconfigured hook
+            # pays nothing.
+            if config.redact_tool_result is not None:
+                context.original_call_args[call.id] = item.args
+                execution_context = execution_context.model_copy(
+                    update={
+                        "record_resolved_path": _exempt_verdict_recorder(
+                            context, tool.name, call.id
+                        )
+                    }
+                )
             return await tool.execute(call.id, item.args, signal, on_update, execution_context)
         except asyncio.CancelledError:
+            # A CANCELLED call's result never reaches ``_append_results``, so the
+            # two records written just above would otherwise be retained for the
+            # life of the session -- and ``LoopContext`` is session-scoped, while
+            # a ``write``'s arguments carry whole file contents. Worse, a later
+            # call reusing this ``tool_call_id`` (the id is the model wire's, not
+            # ours) would pop a STALE record and be judged on the arguments and
+            # the verdict of a call that already ended, which can hand a reading
+            # tool over-exemption and mislabel the notice's summary (R4-3 against
+            # PR #1502). Popping here is unconditional and cheap: an absent key
+            # is a no-op, and a call cancelled BEFORE the records were written
+            # leaves none.
+            context.original_call_args.pop(call.id, None)
+            context.exempt_source_verdicts.pop(call.id, None)
             raise
         except InvalidToolArgumentsError as exc:
             # An argument-SHAPE rejection raised from inside a tool body. This
@@ -3330,6 +3546,7 @@ class AgentLoop:
         slots collide into one result (duplicate tool_result ids on the wire,
         which Anthropic rejects). A slot whose call failed planning never
         runs; its synthetic result is parked in its slot up front.
+
         """
         queue: asyncio.Queue[AgentEvent | _ToolDone | _BatchDone] = asyncio.Queue()
         results_by_slot: list[ToolResult | None] = [None] * len(batch)
@@ -4052,6 +4269,8 @@ class AgentLoop:
                     redact,
                     result.tool_name,
                     _call_arguments(context, result.tool_call_id),
+                    _session_cwd(context),
+                    _exempt_source_verdict(context, result.tool_call_id),
                 )
             # coerceToolResult: an empty tool result serializes as "" on
             # most wires and Anthropic REJECTS an empty ``is_error`` content
@@ -4080,6 +4299,8 @@ class AgentLoop:
         redact: Callable[[str], str],
         tool_name: str,
         arguments: Mapping[str, Any] | None,
+        session_cwd: str | None = None,
+        exempt_verdict: bool | None = None,
     ) -> list[Content]:
         """Mask one result's text blocks OFF the event loop.
 
@@ -4105,13 +4326,41 @@ class AgentLoop:
         finishing a pure function the loop is no longer waiting on. PR #1422
         accepted exactly this cost for the same function on the bash stream; an
         abort channel here would put a signal into a table every caller shares.
+
+        The GUARD-AREA exemption is published HERE, around the result's bytes, and
+        not in ``tool_source`` beside it: this text came from the file the call
+        named, which is the only thing the exemption is about, while the same
+        context also wraps the scrub of a call's own ARGUMENTS — where a
+        credential typed into a different argument of a reading tool would be
+        laundered past the guard by scoping the call to the guard's own file.
+
+        ``session_cwd`` is threaded in for that same exemption: a relative
+        ``path`` must be resolved against the root the READER uses, and a
+        verdict that resolved it against anything else would exempt a read of a
+        different file — the round-1 blocker on PR #1502. ``None`` does NOT make
+        the verdict fail safe, and must not be read as if it did: the guard then
+        falls back to the process CWD (``guard_area.py`` resolves
+        ``session_cwd or "."``), which is the same fallback ``_safe_cwd``
+        applies to a context-less reader — so the two still AGREE, but they
+        agree on the process CWD, and a relative spelling resolves somewhere
+        other than the session root whenever the two differ. That route is only
+        ever exercised by a caller that forgot the argument; this one does not.
+
+        ``exempt_verdict`` is the ALREADY-DECIDED exemption recorded at dispatch
+        (R3-2): resolving it HERE re-reads a filesystem a same-batch mutation has
+        already changed, so the reader and the guard would disagree on which
+        bytes were being masked. ``None`` — a call that never dispatched — tells
+        the guard to resolve it, the same fallback ``_call_arguments`` keeps.
         """
         texts = [item.text for item in content if isinstance(item, TextContent)]
         if not texts:
             return content  # decided ON THE LOOP: imagery/empty pays no hop
 
         def _run() -> list[str]:
-            with tool_source(tool_name, arguments):
+            with (
+                tool_source(tool_name, arguments),
+                exempt_from_escalation(tool_name, arguments, session_cwd, exempt_verdict),
+            ):
                 return [redact(text) for text in texts]
 
         masked = await asyncio.to_thread(_run)

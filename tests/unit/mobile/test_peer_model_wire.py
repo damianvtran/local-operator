@@ -220,7 +220,7 @@ async def test_a_lost_ack_is_unconfirmed_not_failed(monkeypatch) -> None:
     )
     with pytest.raises(PeerModelUnconfirmed) as caught:
         await switch_peer_model(record, provider="deepseek", model_id="x", sender={})
-    assert "may or may not have landed" in str(caught.value)
+    assert "unconfirmed and may still apply" in str(caught.value)
     assert "lop sessions" in str(caught.value)
 
 

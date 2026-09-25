@@ -794,8 +794,14 @@ class TuiSessionHandle(SessionHandle):
         try:
             spec = await asyncio.to_thread(peer_model.validate_peer_selection, provider, model_id)
         except ModelSelectionRefused as refused:
-            current = _effective_label(self._session())
-            raise ValueError(peer_model.refusal_detail(refused.message, current)) from refused
+            session = self._session()
+            raise ValueError(
+                peer_model.refusal_detail(
+                    refused.message,
+                    _effective_label(session),
+                    displaced=peer_model.displaced_selection(session),
+                )
+            ) from refused
         new_label = f"{spec.provider}/{spec.model_id}"
 
         def apply() -> dict[str, Any]:
@@ -812,6 +818,8 @@ class TuiSessionHandle(SessionHandle):
                 "calling": peer_model.provider_call_in_flight(session),
                 "already": peer_model.already_selected(session, new_label),
                 "pending": False,
+                "displaced": "",
+                "serving_fallback": "",
                 "children": 0,
                 "error": None,
             }
@@ -835,6 +843,10 @@ class TuiSessionHandle(SessionHandle):
                 # not `/model` ran. The effective label is kept for "still on".
                 state["took"] = peer_model.already_selected(current, new_label)
                 state["after"] = _effective_label(current)
+                state["displaced"] = peer_model.displaced_selection(current)
+                # A pending switch has not applied: the pin, if any, is still
+                # what serves, and the card must name it (review r1, MINOR-1).
+                state["serving_fallback"] = peer_model.pinned_fallback_label(current)
                 state["children"] = peer_model.running_subagent_count(session)
             return state
 
@@ -850,11 +862,18 @@ class TuiSessionHandle(SessionHandle):
                 # without it the switch notice lands later with no trace of the
                 # sender. Worded as a request, because it can still fail.
                 await self._record_peer_model_card(
-                    peer_model.pending_audit_body(before, new_label, sender or {}), sender
+                    peer_model.pending_audit_body(
+                        before, new_label, sender or {}, fallback=state["serving_fallback"]
+                    ),
+                    sender,
                 )
                 return peer_model.accepted_detail(new_label)
             raise ValueError(
-                peer_model.refusal_detail(f"the switch to {new_label} did not take effect", after)
+                peer_model.refusal_detail(
+                    f"the switch to {new_label} did not take effect",
+                    after,
+                    displaced=state["displaced"],
+                )
             ) from state["error"]
         await self._record_peer_model_card(
             peer_model.audit_body(before, new_label, sender or {}, dropped_fallback=dropped),

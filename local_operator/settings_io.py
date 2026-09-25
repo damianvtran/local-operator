@@ -923,8 +923,9 @@ def _theme_choices() -> tuple[Choice, ...]:
 
     CACHED because ``_build_rows`` calls it on every repaint when the theme row
     is expanded, and AGENTS.md forbids unbounded work on a paint path. The
-    registry is fixed for the life of the process (themes are declared, not
-    installed at runtime), so a stale cache is not reachable. Without this the
+    registry is fixed for the life of the process with ONE exception: the
+    ``terminal`` theme is derived from the host terminal at TUI boot
+    (``tui.host_theme.install``), which clears this cache after registering it. Without this the
     first call pays a ~95ms import of ``local_operator.tui.theme`` — never on a
     real paint, since the TUI has already imported it, but the bound relied on
     an invariant nothing stated (review round 2, m5).

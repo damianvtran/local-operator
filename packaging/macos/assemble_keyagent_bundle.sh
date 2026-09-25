@@ -29,7 +29,20 @@
 # options:
 #   --binary FILE      prebuilt universal binary (default: compile from source)
 #   --source FILE      the C source (default: lop-keyagent/se-keyagent.c)
-#   --keychain FILE    a throwaway keychain holding the identity (CI)
+#   --keychain FILE    a throwaway keychain holding the identity, for a caller that
+#                      has one (the local probe rigs under tools/lop-signing). WHAT
+#                      IT DOES AND DOES NOT DO, because assuming it is sufficient is
+#                      what broke the v0.62.39 release: it narrows the IDENTITY
+#                      (certificate) lookup to FILE. The signing KEY is resolved
+#                      through the user keychain SEARCH LIST, so FILE must ALSO be
+#                      listed there (`security list-keychains -d user -s FILE …`).
+#                      Passing --keychain alone fails at the codesign step below —
+#                      measured here as errSecInternalComponent, the same condition
+#                      the CI runner's macOS 15 reports as errSecItemNotFound. See
+#                      the failure help there for the check that tells the two
+#                      failure modes apart. The release job does not pass it at all:
+#                      it pins the identity with --identity and reaches the key
+#                      through the search list.
 #   --timestamp MODE   ``secure`` (default) or ``none``. ``none`` is NOT for a
 #                      release: it is for a local build on a host whose timestamp
 #                      authority cannot be reached. It REFUSES unless the caller
@@ -240,12 +253,112 @@ if [ "$TIMESTAMP_MODE" = "secure" ]; then
 else
   TS_KW=(--timestamp=none)
 fi
+
+# WHY THIS FAILURE GETS ITS OWN HELP TEXT. The v0.62.39 release died here with
+# `error: The specified item could not be found in the keychain.` and NOTHING in the
+# log named the command or what to check, so the same cause cost a second
+# investigation. The command is named below — but the text hands the reader a check
+# that DISCRIMINATES rather than an asserted cause, because this call's two failure
+# modes are not distinguishable from the message:
+#
+#   errSecInternalComponent   an identity WAS found and its KEY could not be used
+#   errSecItemNotFound /      a LOOKUP returned nothing — which is equally what the
+#   "no identity found"        IDENTITY lookup says when nothing matches, or when
+#                             the certificate chain cannot be evaluated
+#
+# So the help names the measurement instead:
+#
+#   security find-identity -p codesigning "$KEYCHAIN"   # is the identity THERE
+#   security find-identity -p codesigning               # can the SEARCH LIST reach it
+#
+# `-v` is deliberately NOT used in either form. It lists only identities whose
+# certificate chain VALIDATES, so it is a validity report and not a presence check —
+# and validity here depends on what else the search list can see, so neither reading
+# of it generalises: on the host measured below it reports 0 in the failing state,
+# while the v0.62.39 release's own log reports 1 in that same state (the throwaway
+# keychain absent from the list). The non-`-v` form is the presence check, and it is
+# what the two commands above ask for.
+#
+# MEASURED 2026-09-25 on macOS 27, trusted Developer ID identity present only in the
+# throwaway keychain (the CI runner's condition — on this host the login keychain
+# holds the same identity, which masks the bug), p12 imported, partition list set,
+# G2 intermediate imported, same identity SHA throughout:
+#
+#   keychain NOT in the user search list:
+#     find-identity -p codesigning "$KC"  -> 1   (the identity IS in the keychain)
+#     find-identity -v -p codesigning "$KC" -> 0 here; 1 in the release's own log
+#     find-identity -p codesigning        -> 0   (the search list cannot reach it)
+#     codesign ... --keychain "$KC"       -> errSecInternalComponent
+#     codesign ... (no --keychain)        -> "<sha>: no identity found"
+#   keychain APPENDED to the user search list:  all four report the identity, and
+#     both argvs sign and verify (`valid on disk`, `satisfies its Designated
+#     Requirement`).
+#
+# The rig's string is errSecInternalComponent, NOT the release's errSecItemNotFound:
+# those are one condition spelled differently by two macOS versions, and what
+# establishes the cause is the RUNNER ladder, not this host's string — appending the
+# keychain to the search list turned the failing release job green on a macOS 15
+# runner while `--keychain` was still being passed (run 36178040698, head 77ed7beca),
+# and dropping that flag later changed nothing there (run 36179085672). Set it as the
+# DEFAULT keychain instead and it still fails, as it does with the Apple root
+# certificate imported to silence the chain warning: both were measured and ruled out
+# rather than argued away.
+key_unreachable_help() {
+  cat >&2 <<'EOM'
+assemble_keyagent_bundle.sh: THE STEP THAT FAILED IS THE `codesign` CALL ABOVE.
+
+`codesign` fails here in two different situations and the message does not tell
+them apart: `errSecInternalComponent` means an identity WAS found and its key
+could not be used, while `errSecItemNotFound` ("The specified item could not be
+found in the keychain") or "no identity found" means a LOOKUP returned nothing —
+which is also what the IDENTITY lookup says when the certificate chain cannot be
+evaluated. Measure rather than guess. In the shell that created the keychain, and
+WITHOUT `-v` — it reports only chain-validating identities, a validity report rather
+than a presence check (the v0.62.39 log shows it returning a VALID identity in this
+very state, so it cannot be relied on in either direction):
+
+  security find-identity -p codesigning "$KEYCHAIN"   # is the identity THERE?
+  security find-identity -p codesigning               # can the SEARCH LIST reach it?
+
+The second count says what it says only on a host where NOTHING ELSE holds this
+identity. On a machine whose login keychain already has it — the operator's Mac, or
+anywhere the bundle has been signed before — that copy is what the second count
+reports, so it cannot see the misconfiguration at all. That masking is what hid this
+bug locally for as long as it lasted.
+
+* An entry for that identity in the first and none in the second: the keychain is not
+  in the user keychain SEARCH LIST. That is what broke the v0.62.39 release — `codesign
+  --keychain FILE` narrows only the IDENTITY lookup, while the signing KEY resolved
+  through the SEARCH LIST. Add it, and restore the list afterwards:
+
+    security list-keychains -d user -s "$KEYCHAIN" \
+      $(security list-keychains -d user | tr -d '"')
+
+* NONE in both: the identity or its chain is not usable where it was imported —
+  check `--identity` against the p12, that the import landed, and that the
+  Developer ID G2 intermediate is present.
+
+* An identity in BOTH and signing still fails: the key access itself is refused —
+  look at the partition list and the key's ACL, not the search list.
+
+Making the keychain the DEFAULT keychain is NOT a substitute for listing it, and
+neither is importing the Apple root certificate to silence the chain-to-self-signed
+root warning: both were measured to still fail (2026-09-25).
+EOM
+}
+
 if [ "$ASAN" = "1" ]; then
   codesign --force ${CODE_KW[@]+"${CODE_KW[@]}"} ${TS_KW[@]+"${TS_KW[@]}"} \
-    --entitlements "$HERE/keyagent.entitlements" --sign "$IDENTITY" "$APP"
+    --entitlements "$HERE/keyagent.entitlements" --sign "$IDENTITY" "$APP" || {
+      key_unreachable_help
+      exit 1
+    }
 else
   codesign --force --options runtime ${CODE_KW[@]+"${CODE_KW[@]}"} ${TS_KW[@]+"${TS_KW[@]}"} \
-    --entitlements "$HERE/keyagent.entitlements" --sign "$IDENTITY" "$APP"
+    --entitlements "$HERE/keyagent.entitlements" --sign "$IDENTITY" "$APP" || {
+      key_unreachable_help
+      exit 1
+    }
 fi
 
 # --- 5. verify -------------------------------------------------------------

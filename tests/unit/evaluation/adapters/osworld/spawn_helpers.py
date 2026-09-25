@@ -291,7 +291,7 @@ def build_spawnable_adapter(
     )
 
 
-def spawn_config(tmp_path: Path) -> Any:
+def spawn_config(tmp_path: Path, *, completion_gate: bool = True) -> Any:
     """Episode config with timeouts sized for a REAL interpreter spawn.
 
     The in-process default of 5s is ample for a shared-memory adapter but
@@ -301,6 +301,15 @@ def spawn_config(tmp_path: Path) -> Any:
     at prepare — turning a genuine assertion into a flake about machine speed
     rather than about the adapter. Same reasoning, same numbers as
     ``runner/test_episode_subprocess._subprocess_config``.
+
+    ``completion_gate`` defaults to the shipped behaviour. Pass ``False`` from a
+    test whose SUBJECT is something else that happens to drive an episode to a
+    ``done`` finish: the gate spends one extra provider cycle on the first
+    declaration, and a scripted client sized for exactly one reply per turn then
+    runs out — which fails the episode for a reason that has nothing to do with
+    what the test is about. Naming the arm keeps each test's subject its own.
+    See ``tests/unit/evaluation/runner/test_completion_gate.py`` for the gate's
+    own tests, which are the only place it should be on by default.
     """
 
     from tests.unit.evaluation.runner.conftest import build_config
@@ -313,6 +322,7 @@ def spawn_config(tmp_path: Path) -> Any:
         step_timeout=60.0,
         score_timeout=60.0,
         cleanup_timeout=60.0,
+        completion_gate=completion_gate,
     )
 
 
