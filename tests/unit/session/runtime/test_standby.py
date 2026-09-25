@@ -605,6 +605,10 @@ class _Standby:
 
     #: The child end of this standby's own capability handoff, replaced per use.
     _cap_fd: tuple[int, int] = (0, 0)
+    #: The handoff's own sockets, kept alive for the test's lifetime: a fileno whose
+    #: socket has been collected is a closed descriptor, which is what made the
+    #: first draft of this harness fail with ``EBADF``.
+    _handoff: tuple[socket.socket, socket.socket] | None = None
 
 
 def _read_frame(sock: socket.socket) -> dict[str, Any]:
