@@ -39,6 +39,7 @@ import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import pytest
 
@@ -1058,9 +1059,16 @@ async def test_a_run_that_is_not_the_users_own_offers_no_banner(
     # Counted rather than cleared: `frames` accumulates for the bridge's life,
     # and the property is that the second publish adds NO banner — not that the
     # first one disappeared.
-    monkeypatch.setattr("local_operator.tui.notify.desktop_belongs_to_this_process", lambda: False)
-    _publish(tmp_path, sid, "result-2")
-    await bridge.refresh_attention()
+    frames_before = len(bridge.frames)
+    # SCOPED INSIDE the module opt-in's own patch, in the test body: the only
+    # nesting order that restores cleanly (see ``tests/notification_opt_in``).
+    with mock.patch("local_operator.tui.notify.desktop_belongs_to_this_process", lambda: False):
+        _publish(tmp_path, sid, "result-2")
+        await bridge.refresh_attention()
 
-    assert len(bridge.of("notification")) == 1, bridge.of("notification")
-    assert bridge.of("attention"), "the receipt sync is not the thing refused"
+    added = [frame for frame, _ in bridge.frames[frames_before:]]
+    assert [frame for frame in added if frame["type"] == "notification"] == [], added
+    # Read off the frames ADDED by this arm, not the cumulative list: asserting
+    # `bridge.of("attention")` would be satisfied by the control arm's own frame,
+    # so it could not fail.
+    assert [frame for frame in added if frame["type"] == "attention"], added
