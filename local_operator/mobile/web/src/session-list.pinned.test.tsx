@@ -842,9 +842,9 @@ describe("a pin press reorders nothing until the daemon confirms (Q13/Q14/Q15/D1
 			expect(screen.getByRole("alert").textContent).toContain(
 				"no saved messages yet",
 			);
-			expect(starOn("Row 3")).toBe(false);
-			expect(pinnedSection()).toBe(false);
-			expect(rowOrder(list)).toEqual(before);
+			expect(starOn("Row 3"), `the ★ at ${scale}`).toBe(false);
+			expect(pinnedSection(), `a ★ Pinned section at ${scale}`).toBe(false);
+			expect(rowOrder(list), `rows moved at ${scale}`).toEqual(before);
 
 			cleanup();
 		}
