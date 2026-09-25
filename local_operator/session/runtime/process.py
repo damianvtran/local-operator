@@ -4652,7 +4652,25 @@ async def amain(operator_cap: bytes | None = None) -> int:
                     obj = getattr(obj, "cr_await", None) or getattr(obj, "gi_yieldfrom", None)
                 logger.info("task %r await-chain:\n%s", task.get_name(), "\n".join(lines))
 
-        loop.add_signal_handler(debug_stacks, _dump_task_stacks)
+        # THE SIGNAL'S SLOT BELONGS TO THE WATCHDOG, so this process must NOT install a
+        # handler for it. There is one sigaction slot per signal, and the leg that serves
+        # the class where no Python can run has to own it: `stall_watchdog` registers
+        # SIGUSR1 with chaining OFF at its arm and never unregisters, because a revision
+        # where the runtime re-registered on top of this block SEGFAULTED a real runtime
+        # child (rc=-11, no frames) — faulthandler's chain re-raises against the handler
+        # it SAVED and `unregister` restores that stale disposition rather than the live
+        # one.
+        #
+        # THE RUNTIME'S OWN WALK IS REACHED WITHOUT THE SLOT: the watchdog's sampler
+        # observes the signal's dump landing in its own file (the same growth observation
+        # it already makes for its own fires) and calls this back, and
+        # `call_soon_threadsafe` is what puts the walk ON THE LOOP rather than in signal
+        # context — which is the whole reason it cannot be that signal's handler itself.
+        # WHEN NO PYTHON CAN RUN the walk waits for the loop, and the evidence is already
+        # on disk by then: that dump is the leg, this is the bonus it buys back.
+        stall_watchdog.notify_on_evidence_signal(
+            lambda: loop.call_soon_threadsafe(_dump_task_stacks)
+        )
     # The self-reaper: a phone session nobody watches and nothing runs is a
     # live process doing nothing, and before this it idled FOREVER. Runs
     # beside the signal wait; whichever fires first wins.
