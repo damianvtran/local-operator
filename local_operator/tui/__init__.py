@@ -215,6 +215,13 @@ async def run_tui(
     # this path" stays true.
     install_nonfatal_stdin_decode()
 
+    # Ask the terminal for its colors while stdin is still ours: once Textual's
+    # input thread starts, the replies would arrive as keystrokes. Registers the
+    # `terminal` theme only when the terminal answered.
+    from local_operator.tui import host_theme
+
+    host_theme.install()
+
     from local_operator.tui.app import OperatorApp  # lazy: Textual import
 
     with file_logging():
