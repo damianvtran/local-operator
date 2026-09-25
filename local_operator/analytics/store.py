@@ -61,6 +61,7 @@ from local_operator.analytics.model import (
     EXCLUDED_FAULTS,
     ORIGIN_MODEL,
     CallSnapshot,
+    ModelRateRow,
     SessionReport,
     SessionRequest,
     TimingSummary,
@@ -146,6 +147,32 @@ def _is_lock_error(exc: BaseException) -> bool:
 #: estimate a report shows is exactly the one recorded — reproducible after the
 #: fact. Adding a component is a migration: bump the schema and backfill 0.
 _COMPONENT_COLUMNS = ",\n  ".join(f"c_{key} INTEGER NOT NULL DEFAULT 0" for key in COMPONENT_KEYS)
+
+#: The decode-rate measures, in one place because five writers and readers have
+#: to agree on the spelling and the order: the ``calls`` ledger, the
+#: ``session_daily`` rollup, its read projection, the ledger aggregate and the
+#: row-to-result translation.
+#:
+#: ``decode_us`` is the summed first-to-last-output-delta window in
+#: MICROSECONDS; ``decode_tokens`` is ``output_tokens`` over ONLY the calls that
+#: contributed a window (never ``SUM(output_tokens)`` — that divides one
+#: population by another); ``decode_calls`` counts those calls, which is what
+#: turns "unknown" into an honest coverage figure rather than a fabricated
+#: ``0 tok/s``.
+#:
+#: Integer, never REAL: every reader coerces with ``int()``, the rollup upserts
+#: accumulate with ``x = x + excluded.x``, and the finest-grouping merge in
+#: ``session_report`` is exact only over additive integers. Microseconds rather
+#: than milliseconds because a fast model's whole window can be under a
+#: millisecond.
+_DECODE_MEASURE_COLUMNS: tuple[str, ...] = ("decode_us", "decode_tokens", "decode_calls")
+
+#: The same three as schema fragments, for the tables' ``CREATE`` statements. A
+#: pre-release database gets them from ``_MIGRATION_COLUMNS`` (``calls``) and
+#: ``_SESSION_DAILY_MIGRATION_COLUMNS`` (the rollup) instead.
+_DECODE_COLUMNS = ",\n  ".join(
+    f"{name} INTEGER NOT NULL DEFAULT 0" for name in _DECODE_MEASURE_COLUMNS
+)
 
 _SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS calls (
@@ -363,6 +390,7 @@ CREATE TABLE IF NOT EXISTS session_daily (
   cost_known        INTEGER NOT NULL DEFAULT 0,
   calls             INTEGER NOT NULL DEFAULT 0,
   {_COMPONENT_COLUMNS},
+  {_DECODE_COLUMNS},
   max_ts_ms         INTEGER NOT NULL DEFAULT 0,
   updated_at_ms     INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (day, session_id, provider)
@@ -437,6 +465,7 @@ _CALL_COLUMNS = (
     "preparation_ms",
     "outcome",
     "usage_reported",
+    *_DECODE_MEASURE_COLUMNS,
 )
 
 #: Columns added AFTER the first shipped schema. A database created by an older
@@ -483,6 +512,41 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     ("preparation_ms", "REAL NOT NULL DEFAULT -1"),
     ("outcome", "TEXT NOT NULL DEFAULT 'unknown'"),
     ("usage_reported", "INTEGER NOT NULL DEFAULT 1"),
+    # The decode-rate measures. 0 is "no window", not "-1": the timing columns
+    # above are never summed, while these three are, so a -1 would be folded
+    # into the total and corrupt it. The count is what disambiguates unknown
+    # from a measured zero, exactly as ``cost_known_calls`` does for
+    # ``cost_micro``.
+    #
+    # FORWARD-FILL, said out loud as every schema addition here says it: every
+    # row recorded before this release reads 0/0/0, which is UNKNOWN rather than
+    # a measured zero, and no history can be recovered — the window was never
+    # observed, and deriving one as ``duration_ms - ttft_ms`` is measurably
+    # broken (it misses the reasoning phase and collapses on one-frame
+    # responses). The wall rate covers the existing ledger instead.
+    ("decode_us", "INTEGER NOT NULL DEFAULT 0"),
+    ("decode_tokens", "INTEGER NOT NULL DEFAULT 0"),
+    ("decode_calls", "INTEGER NOT NULL DEFAULT 0"),
+)
+
+#: Columns added to the ``session_daily`` ROLLUP after it first shipped, in the
+#: same ``(name, definition)`` shape as ``_MIGRATION_COLUMNS`` and for the same
+#: reason: ``CREATE TABLE IF NOT EXISTS`` cannot add a column to a table that
+#: already exists, so an existing ledger keeps the older shape until an explicit
+#: ``ALTER`` runs. Until this release the rollup tables had NO ALTER path at all
+#: and the shape guard was written to fail closed instead (see the guard in
+#: ``_migrate``); the decode measures are the first columns that need one.
+#:
+#: WHY A FAILED ALTER IS SAFE. ``_migrate_session_daily`` swallows a failure and
+#: logs it, exactly as the ``calls`` ALTERs do. The table then still lacks the
+#: columns, and the shape guard's superset test turns that into
+#: ``_has_session_daily = False`` — the rollup write path switches off, the
+#: ledger keeps recording, and every read takes the slower ledger path. Slow,
+#: never wrong, and ``last_aggregate_refusal`` names the reason.
+_SESSION_DAILY_MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("decode_us", "INTEGER NOT NULL DEFAULT 0"),
+    ("decode_tokens", "INTEGER NOT NULL DEFAULT 0"),
+    ("decode_calls", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 #: Indexes over OPTIONAL columns, created after ``_migrate`` rather than in
@@ -623,13 +687,27 @@ _DAILY_UPSERT_SQL = _rollup_upsert_sql("usage_daily", "day")
 _MONTHLY_UPSERT_SQL = _rollup_upsert_sql("usage_monthly", "month")
 
 #: The measure columns ``session_daily`` accumulates. ``ok`` and ``calls`` are
-#: counts (1 per row), the token/cost fields carry the call's amounts, and the
-#: nine ``c_*`` sums are the estimated component split. Kept as one tuple so the
-#: upsert, the re-derive and the read projection cannot drift apart.
+#: counts (1 per row), the token/cost fields carry the call's amounts, the nine
+#: ``c_*`` sums are the estimated component split, and the three decode measures
+#: close the tuple. Kept as one tuple so the upsert, the re-derive and the read
+#: projection cannot drift apart.
 _SESSION_DAILY_MEASURE_COLUMNS: tuple[str, ...] = (
     "ok",
     *_ROLLUP_MEASURE_COLUMNS,
     *(f"c_{key}" for key in COMPONENT_KEYS),
+    # APPENDED, after the component block, and that position is a contract
+    # rather than an aesthetic: ``_session_daily_rows`` writes these by literal
+    # index and ``_aggregate_from_row`` reads them by literal index, so an
+    # insert anywhere above would silently shift a component's estimate into a
+    # rate total. Appending is also what keeps this projection, the ledger's
+    # (``_ledger_aggregate``/``session_report``) and the test oracle agreeing,
+    # because all of them feed that one row-to-result translation.
+    #
+    # This ONE tuple drives ``_SESSION_DAILY_UPSERT_SQL`` and
+    # ``_SESSION_DAILY_REDERIVE_SQL``, so a re-derived day (the rebucket repair)
+    # sums these from ``calls`` exactly as an accumulated day folded them — a
+    # zone change cannot make a rate disagree with itself.
+    *_DECODE_MEASURE_COLUMNS,
 )
 
 _SESSION_DAILY_INSERT_COLUMNS: tuple[str, ...] = (
@@ -770,7 +848,10 @@ _SESSION_DAILY_REDERIVE_SQL = _session_daily_rederive_sql()
 
 #: The measure sums ``session_daily``'s READ projects. Positionally identical to
 #: ``_aggregate_from_row``'s contract: ``calls`` first (it takes COUNT(*)'s
-#: place), then ok, the six token sums, the two cost sums, then the components.
+#: place), then ok, the six token sums, the two cost sums, then the components,
+#: then the three decode sums — the same order
+#: ``_SESSION_DAILY_MEASURE_COLUMNS`` appends them in, which is why it is stated
+#: here as well as there.
 _SESSION_DAILY_READ_SUMS = (
     "SUM(calls)",
     "SUM(ok)",
@@ -783,6 +864,7 @@ _SESSION_DAILY_READ_SUMS = (
     "SUM(cost_micro)",
     "SUM(cost_known)",
     *(f"SUM(c_{key})" for key in COMPONENT_KEYS),
+    *(f"SUM({name})" for name in _DECODE_MEASURE_COLUMNS),
 )
 _SESSION_DAILY_READ_COLUMNS_SQL = ", ".join(_SESSION_DAILY_READ_SUMS)
 
@@ -861,6 +943,9 @@ def _row_values(
         snapshot.preparation_ms,
         snapshot.outcome,
         int(snapshot.usage_reported),
+        snapshot.decode_us,
+        snapshot.decode_tokens,
+        snapshot.decode_calls,
     )
 
 
@@ -1090,6 +1175,15 @@ def _session_daily_rows(
         measures[9] += 1
         for offset, component in enumerate(COMPONENT_KEYS):
             measures[10 + offset] += components[component]
+        # The decode measures, at the indices ``_SESSION_DAILY_MEASURE_COLUMNS``
+        # appends them to (after the component block). They are already the
+        # ELIGIBILITY-FILTERED values: a call with no measured window carries
+        # 0/0/0 on the snapshot, so a bucket's rate can never divide one
+        # population's tokens by another population's time.
+        decode_base = 10 + len(COMPONENT_KEYS)
+        measures[decode_base] += snap.decode_us
+        measures[decode_base + 1] += snap.decode_tokens
+        measures[decode_base + 2] += snap.decode_calls
         bucket["max_ts_ms"] = max(bucket["max_ts_ms"], int(snap.ts_ms))
         bucket["parent"] = _combine_parent_edges(
             bucket["parent"], _parent_edge_for(snap.session_id, snap.parent_session_id)
@@ -1382,6 +1476,12 @@ class AnalyticsStore:
         self._present_optional = frozenset(
             name for name, _ in _MIGRATION_COLUMNS if name in existing
         )
+        # The rollup's own ALTER pass, BEFORE the shape check below reads the
+        # table: the check is a superset test, so it can only see columns that
+        # already exist. Keeping the migration and the check adjacent is
+        # deliberate — a later column added to one and not the other would make
+        # the guard approve a shape the upsert cannot write.
+        self._migrate_session_daily(conn)
         # Whether the per-session day rollup table is there AND has the shape
         # this code inserts into. Existence alone is not enough, and assuming it
         # is was a real defect (review R1): rollup tables have NO ``ALTER`` path
@@ -1398,15 +1498,20 @@ class AnalyticsStore:
         # rollup", so the ledger keeps recording and every read takes the ledger
         # path — slower, never a hole.
         #
-        # A SUPERSET check, and worth saying what it therefore does not cover
-        # (review R15): a future ``session_daily`` with an extra column that is
-        # ``NOT NULL`` and has no default passes here and then makes the upsert
-        # raise — the very outcome this guard exists to prevent. Unreachable
-        # while rollup tables have no ``ALTER`` path (nothing can add a column to
-        # one), and if one ever needs an ALTER this check has to grow the
-        # ``notnull``/``dflt_value`` columns of ``PRAGMA table_info`` with it.
+        # A SUPERSET check, and it now covers the case review R15 named and left
+        # open: a ``session_daily`` carrying an extra column that is ``NOT NULL``
+        # and has no default. That shape passes a bare superset test and then
+        # makes the upsert raise — the very outcome this guard exists to
+        # prevent. It was "unreachable while rollup tables have no ALTER path",
+        # and THIS RELEASE IS THAT PATH (``_SESSION_DAILY_MIGRATION_COLUMNS``),
+        # so the check grows the ``notnull``/``dflt_value`` columns of
+        # ``PRAGMA table_info`` with it: every column this code does NOT insert
+        # into must be nullable or carry a default, or the rollup reads as "no
+        # rollup". A future release's column without a default therefore fails
+        # CLOSED — slower reads, never a dropped ledger batch.
         try:
-            present = {str(row[1]) for row in conn.execute("PRAGMA table_info(session_daily)")}
+            info = list(conn.execute("PRAGMA table_info(session_daily)"))
+            present = {str(row[1]) for row in info}
             meta_present = (
                 conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE type = 'table' "
@@ -1414,18 +1519,71 @@ class AnalyticsStore:
                 ).fetchone()
                 is not None
             )
-            self._has_session_daily = meta_present and set(_SESSION_DAILY_INSERT_COLUMNS) <= present
+            # ``row`` is (cid, name, type, notnull, dflt_value, pk). The columns
+            # we insert into are our own literals, so they need no default; any
+            # OTHER column is one a later release added and this code cannot
+            # write, which is only safe while SQLite can fill it in itself.
+            unwritable = sorted(
+                str(row[1])
+                for row in info
+                if str(row[1]) not in _SESSION_DAILY_INSERT_COLUMNS
+                and int(row[3]) == 1
+                and row[4] is None
+            )
+            self._has_session_daily = (
+                meta_present
+                and set(_SESSION_DAILY_INSERT_COLUMNS) <= present
+                and not unwritable
+            )
             if present and not self._has_session_daily:
                 missing = sorted(set(_SESSION_DAILY_INSERT_COLUMNS) - present)
                 logger.debug(
                     "analytics: session_daily is missing %s, so the rollup write path is off",
-                    missing or "its meta table",
+                    missing or (f"a default for {unwritable}" if unwritable else "its meta table"),
                 )
         except Exception:  # noqa: BLE001 — no rollup table means no fast path
             logger.debug("analytics: could not inspect for session_daily", exc_info=True)
             self._has_session_daily = False
         self._rebuild_insert_plan()
         self._create_optional_indexes(conn, existing)
+
+    @staticmethod
+    def _migrate_session_daily(conn: sqlite3.Connection) -> None:
+        """Add the rollup's post-first-release columns, idempotently.
+
+        The ``calls`` equivalent is the ``_MIGRATION_COLUMNS`` loop above; this
+        is the same operation for the one ROLLUP table that gained columns, and
+        it exists because ``CREATE TABLE IF NOT EXISTS`` cannot alter a table
+        that already exists — a ledger written by an earlier release keeps the
+        older shape forever without this pass.
+
+        Skips entirely when the table is absent (a fresh database creates it in
+        ``_SCHEMA`` WITH the columns, so there is nothing to do), and swallows a
+        failed ``ALTER`` with a log for the same reason the ``calls`` ALTERs do:
+        analytics must degrade to the slower read path, never refuse to open.
+        A failure is not silent — the shape guard in ``_migrate`` then reads the
+        table as "no rollup" and ``last_aggregate_refusal`` names it.
+
+        ``ALTER TABLE ... ADD COLUMN`` with a CONSTANT default is a schema-only
+        change in SQLite: it rewrites the table's ``sqlite_master`` row rather
+        than the table, so this is O(1) in row count. It is emphatically NOT the
+        ``idx_calls_parent`` operation, whose ~677 ms is an index build that
+        reads and writes every row.
+        """
+        try:
+            present = {str(row[1]) for row in conn.execute("PRAGMA table_info(session_daily)")}
+        except Exception:  # noqa: BLE001 — no table means nothing to migrate
+            logger.debug("analytics: could not inspect session_daily to migrate", exc_info=True)
+            return
+        if not present:
+            return
+        for name, definition in _SESSION_DAILY_MIGRATION_COLUMNS:
+            if name in present:
+                continue
+            try:
+                conn.execute(f"ALTER TABLE session_daily ADD COLUMN {name} {definition}")
+            except Exception:  # noqa: BLE001 — a failed add leaves the older shape
+                logger.debug("analytics: could not add session_daily.%s", name, exc_info=True)
 
     @staticmethod
     def _create_optional_indexes(conn: sqlite3.Connection, existing: set[str]) -> None:
@@ -2491,17 +2649,29 @@ class AnalyticsStore:
         # the positions still line up and the report shows $— instead of the
         # query failing on a missing column.
         cost_cols = "SUM(cost_micro), SUM(cost_known)" if self._has_cost else "0, 0"
+        # The decode measures, appended AFTER the component block so every
+        # position above keeps its meaning for ``_aggregate_from_row``. These
+        # three are in ``_MIGRATION_COLUMNS``, hence in
+        # ``_OPTIONAL_COLUMN_NAMES``, so a ledger that predates them (or whose
+        # ALTER failed) substitutes constant 0 sums and reads as UNKNOWN —
+        # ``decode_calls = 0`` — rather than failing the query or claiming a
+        # measured zero. That is the same treatment ``cost_cols`` and
+        # ``component_sum`` already get, and it is what keeps the ledger path
+        # answering on an un-migrated copy.
+        decode_cols = ", ".join(
+            f"SUM({name})" if name in self._present_optional else "0"
+            for name in _DECODE_MEASURE_COLUMNS
+        )
         base_cols = (
             "COUNT(*), SUM(ok), SUM(input_tokens), SUM(output_tokens), "
             "SUM(cache_read_tokens), SUM(cache_write_tokens), "
             f"SUM(reasoning_tokens), SUM(context_tokens), {cost_cols}"
         )
+        select_cols = f"{base_cols}, {component_sum}, {decode_cols}"
         try:
-            top = conn.execute(
-                f"SELECT {base_cols}, {component_sum} FROM calls{clause}", params
-            ).fetchone()
+            top = conn.execute(f"SELECT {select_cols} FROM calls{clause}", params).fetchone()
             per_provider = conn.execute(
-                f"SELECT provider, {base_cols}, {component_sum} FROM calls{clause} "
+                f"SELECT provider, {select_cols} FROM calls{clause} "
                 "GROUP BY provider ORDER BY provider",
                 params,
             ).fetchall()
@@ -2515,7 +2685,7 @@ class AnalyticsStore:
             # forces a temp B-tree for identical output.
             parent_col = _PARENT_EDGE_SQL if self._has_parent_column() else "''"
             per_session = conn.execute(
-                f"SELECT session_id, {parent_col}, {base_cols}, {component_sum} FROM calls{clause} "
+                f"SELECT session_id, {parent_col}, {select_cols} FROM calls{clause} "
                 "GROUP BY session_id ORDER BY session_id",
                 params,
             ).fetchall()
@@ -2962,6 +3132,16 @@ class AnalyticsStore:
                     "cost_micro",
                     "cost_known",
                     *(f"c_{key}" for key in COMPONENT_KEYS),
+                    # The decode measures, last for the same reason the
+                    # ``session_daily`` projection appends them: the tuple is
+                    # positional and ``_aggregate_from_row`` indexes it. An
+                    # absent column (a ledger that predates them, or whose ALTER
+                    # failed) substitutes 0 via ``col``, which reads as UNKNOWN
+                    # through ``decode_calls`` rather than as a measured zero.
+                    # ``SessionReport.by_model`` inherits all three from this
+                    # same grouped scan, so the per-model table costs no
+                    # additional read.
+                    *_DECODE_MEASURE_COLUMNS,
                 )
             ]
             measures = ", ".join(sums)
@@ -3446,6 +3626,124 @@ class AnalyticsStore:
             calls=sum(r.calls for r in rows),
         )
 
+    def model_rates(
+        self,
+        *,
+        since_ms: int | None = None,
+        until_ms: int | None = None,
+        session_id: str | None = None,
+        limit: int = 200,
+    ) -> list[ModelRateRow]:
+        """Per-model throughput from ONE grouped scan of the raw ledger.
+
+        WHY THE LEDGER AND NOT A ROLLUP. ``usage_daily`` is keyed ``(day,
+        model)`` and would be nearly free, but it is FORWARD-FILL: it covers
+        only days since that rollup shipped, so it would answer with an empty or
+        partial table beside a headline no older than itself. ``session_daily``
+        has no model dimension at all (its schema says so deliberately, because
+        nothing read one). This read therefore covers the operator's whole
+        retained window immediately, which is what makes the WALL rate useful on
+        the day the feature ships — and it is honest about its cost: one grouped
+        scan, seconds on a multi-million-row ledger, which is why it is its own
+        endpoint and its own table rather than a field on ``aggregate()``.
+
+        TWO RATES PER ROW, and they are different measurements:
+
+        - ``decode_tps`` — over calls that produced a measured window, summed
+          from the ``decode_*`` columns. Forward-fill: 0/0 on rows recorded
+          before this shipped, hence ``None`` rather than a fabricated 0.
+        - ``wall_tps`` — over calls with a positive ``duration_ms`` and output
+          tokens, from columns that have always existed, so it covers all
+          history. It INCLUDES queueing and TTFT, so it is a wall rate and must
+          never be labelled decode speed.
+
+        The window is the same ``ts_ms`` half-open range ``aggregate()`` uses, so
+        a reader can hold a row's ``output_tokens`` against the headline's. It
+        does NOT claim to partition the headline: the headline comes from the
+        rollup, this comes from the ledger, and the two have different sources
+        by design (the section that renders this says so on screen).
+
+        Never raises: an unopenable or empty store returns ``[]``, and any
+        optional column this ledger lacks (an un-migrated copy) substitutes a
+        constant 0 so those rows read as UNKNOWN instead of failing the query.
+        """
+        conn = self._read_connection()
+        if conn is None:
+            return []
+        where: list[str] = []
+        params: list[Any] = []
+        if since_ms is not None:
+            where.append("ts_ms >= ?")
+            params.append(int(since_ms))
+        if until_ms is not None:
+            where.append("ts_ms < ?")
+            params.append(int(until_ms))
+        if session_id is not None:
+            where.append("session_id = ?")
+            params.append(session_id)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+
+        # Absent optional column -> constant 0, the same treatment
+        # ``_ledger_aggregate`` gives the cost and component sums. ``duration_ms``
+        # is read through the same door because it is ALSO a post-first-release
+        # column: a ledger old enough to lack it has no wall sample at all, and
+        # 0 is exactly that fact.
+        def _present(name: str) -> bool:
+            return name not in _OPTIONAL_COLUMN_NAMES or name in self._present_optional
+
+        decode_select = ", ".join(
+            f"SUM({name})" if _present(name) else "0" for name in _DECODE_MEASURE_COLUMNS
+        )
+        duration = "duration_ms" if _present("duration_ms") else "0"
+        # ``ROUND`` before ``CAST`` because SQLite's CAST truncates: a 1 234.6 ms
+        # call would otherwise contribute 1 234 000 us and lose 600 of them, and
+        # the wall rate is a summed ratio where every sample is weight.
+        wall_window = f"{duration} > 0 AND output_tokens > 0"
+        wall_select = (
+            f"SUM(CASE WHEN {wall_window} THEN CAST(ROUND({duration} * 1000) AS INTEGER) "
+            "ELSE 0 END), "
+            f"SUM(CASE WHEN {wall_window} THEN output_tokens ELSE 0 END), "
+            f"SUM(CASE WHEN {wall_window} THEN 1 ELSE 0 END)"
+        )
+        sql = (
+            "SELECT provider, model_id, COUNT(*), SUM(output_tokens), "
+            f"{decode_select}, {wall_select} "
+            f"FROM calls{clause} GROUP BY provider, model_id "
+            "ORDER BY SUM(output_tokens) DESC, provider, model_id LIMIT ?"
+        )
+        try:
+            rows = conn.execute(sql, (*params, max(1, min(int(limit), 1000)))).fetchall()
+        except Exception:  # noqa: BLE001 — a report read must never raise
+            logger.debug("analytics: model_rates query failed", exc_info=True)
+            return []
+        finally:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+        def _n(value: Any) -> int:
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        return [
+            ModelRateRow(
+                provider=str(row[0]),
+                model_id=str(row[1]),
+                calls=_n(row[2]),
+                output_tokens=_n(row[3]),
+                decode_us=_n(row[4]),
+                decode_tokens=_n(row[5]),
+                decode_calls=_n(row[6]),
+                wall_us=_n(row[7]),
+                wall_tokens=_n(row[8]),
+                wall_calls=_n(row[9]),
+            )
+            for row in rows
+        ]
+
 
 def _period_from_row(period: str, model: str, measures: Iterable[Any]) -> UsagePeriod:
     """Build a :class:`UsagePeriod` from a SUM row's measure columns.
@@ -3478,7 +3776,16 @@ def _period_from_row(period: str, model: str, measures: Iterable[Any]) -> UsageP
 
 
 def _aggregate_from_row(row: Iterable[Any] | None) -> UsageAggregate:
-    """Build a UsageAggregate from a SUM row (base columns then components)."""
+    """Build a UsageAggregate from a SUM row (base columns, components, rates).
+
+    THE ONE row-to-result translation: every producer feeds it and they must
+    agree positionally — ``_ledger_aggregate``'s projection,
+    ``_session_daily_aggregate``'s ``_SESSION_DAILY_READ_SUMS``,
+    ``session_report``'s ``sums``, and the frozen oracle in
+    ``tests/unit/analytics/test_session_report_equivalence.py``. The decode
+    measures are APPENDED after the component block, so indices ``0..9`` and
+    ``10 + i`` keep exactly the meanings they had.
+    """
     if row is None:
         return UsageAggregate()
     values = list(row)
@@ -3506,4 +3813,13 @@ def _aggregate_from_row(row: Iterable[Any] | None) -> UsageAggregate:
     )
     # Components follow the two cost sums (see ``base_cols``).
     agg.components = {key: _n(10 + i) for i, key in enumerate(COMPONENT_KEYS)}
+    # The decode measures follow the component block. ``_n``'s out-of-range
+    # guard matters here rather than being defensive noise: a producer that
+    # predates these columns (a frozen oracle, a hand-written test tuple) yields
+    # 0/0/0 = UNKNOWN rather than an IndexError, which is the same
+    # absent-columns-read-as-unknown treatment the substitutions upstream give.
+    decode_base = 10 + len(COMPONENT_KEYS)
+    agg.decode_us = _n(decode_base)
+    agg.decode_tokens = _n(decode_base + 1)
+    agg.decode_calls = _n(decode_base + 2)
     return agg

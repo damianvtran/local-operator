@@ -329,6 +329,121 @@ async def test_analytics_names_are_absent_rather_than_empty(desktop, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_analytics_models_names_the_source_and_keeps_the_two_rates_apart(desktop, tmp_path):
+    """The per-model op: its own read, its own source label, two rates.
+
+    Asserted over HTTP rather than against ``model_rates`` directly, for the
+    reason this module's docstring gives: the payload is what the renderer
+    consumes, and a tuple-keyed dict or a dropped side attribute survives the
+    handler and dies at serialisation. ``scope`` is pinned here too — the client
+    PRINTS it on the section's meta line and must not have to infer which store
+    the rows came from.
+    """
+    client, _ = desktop
+    store = AnalyticsStore(tmp_path / "analytics.db")
+    now = int(time.time() * 1000)
+    base = _snap(session_id=PARENT)
+    covered = replace(
+        base,
+        request_id="r1",
+        ts_ms=now,
+        output_tokens=100,
+        duration_ms=2000.0,
+        decode_us=1_000_000,
+        decode_tokens=100,
+        decode_calls=1,
+    )
+    # Output tokens and a duration but NO window: in ``calls`` and the wall rate,
+    # out of the decode rate. This is the split the two-rate design exists for.
+    unwindowed = replace(
+        base,
+        request_id="r2",
+        ts_ms=now + 1,
+        output_tokens=300,
+        duration_ms=1000.0,
+    )
+    other = replace(
+        base,
+        request_id="r3",
+        ts_ms=now + 2,
+        provider="openai",
+        model_id="gpt",
+        output_tokens=50,
+        duration_ms=0.0,
+    )
+    assert store.record_batch([covered, unwindowed, other]) == 3
+    store.close()
+
+    response = await client.get("/v1/desktop/analytics/models")
+    assert response.status_code == 200, response.text
+    data = json.loads(response.text)["result"]["data"]
+
+    assert data["scope"] == "ledger"
+    assert data["since_ms"] is None and data["until_ms"] is None
+    rows = {f"{row['provider']}/{row['model_id']}": row for row in data["rows"]}
+    assert set(rows) == {"anthropic/claude", "openai/gpt"}
+
+    anthropic = rows["anthropic/claude"]
+    assert anthropic["calls"] == 2
+    assert anthropic["output_tokens"] == 400
+    # SUM/SUM over the ONE windowed call: 100 tokens / 1 s.
+    assert anthropic["decode_calls"] == 1
+    assert anthropic["decode_tokens"] == 100 and anthropic["decode_us"] == 1_000_000
+    # Wall covers both, because both have a positive duration.
+    assert anthropic["wall_calls"] == 2
+    assert anthropic["wall_us"] == 3_000_000 and anthropic["wall_tokens"] == 400
+
+    # No duration sample on the openai row: every wall field is 0, which the
+    # client renders as UNKNOWN rather than as 0 tok/s.
+    assert rows["openai/gpt"]["wall_calls"] == 0
+    assert rows["openai/gpt"]["decode_calls"] == 0
+
+
+@pytest.mark.asyncio
+async def test_analytics_models_rejects_an_inverted_window_and_answers_empty(desktop, tmp_path):
+    """The 422 is shared with the sibling route; the empty answer is its own.
+
+    An EMPTY ledger must be a 200 with ``rows: []`` — the same "no data yet"
+    contract ``/v1/desktop/analytics`` keeps — because a client that renders an
+    error for a fresh install is a defect the operator sees on day one.
+    """
+    client, _ = desktop
+    inverted = await client.get(
+        "/v1/desktop/analytics/models", params={"since_ms": 2000, "until_ms": 1000}
+    )
+    assert inverted.status_code == 422, inverted.text
+
+    empty = await client.get("/v1/desktop/analytics/models")
+    assert empty.status_code == 200, empty.text
+    data = json.loads(empty.text)["result"]["data"]
+    assert data["rows"] == [] and data["scope"] == "ledger"
+
+
+@pytest.mark.asyncio
+async def test_analytics_models_scopes_to_one_session(desktop, tmp_path):
+    """``session_id`` narrows the same read, so ``/session`` shares one method."""
+    client, _ = desktop
+    store = AnalyticsStore(tmp_path / "analytics.db")
+    now = int(time.time() * 1000)
+    base = _snap(session_id=PARENT)
+    assert (
+        store.record_batch(
+            [
+                replace(base, request_id="r1", ts_ms=now, model_id="mine"),
+                replace(base, request_id="r2", ts_ms=now + 1, session_id=CHILD, model_id="theirs"),
+            ]
+        )
+        == 2
+    )
+    store.close()
+
+    response = await client.get("/v1/desktop/analytics/models", params={"session_id": PARENT})
+    assert response.status_code == 200, response.text
+    rows = json.loads(response.text)["result"]["data"]["rows"]
+    assert [row["model_id"] for row in rows] == ["mine"]
+
+
+@pytest.mark.asyncio
 async def test_analytics_payload_is_byte_identical_from_the_rollup(desktop, tmp_path):
     """The panel must not be able to tell which read path answered it.
 
