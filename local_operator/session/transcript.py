@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, Callable, Literal, Sequence
 
 from local_operator.harness.message_types import (
+    SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
     SESSION_INCIDENT_MESSAGE_TYPE,
     SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
 )
@@ -102,10 +103,21 @@ ENTRY_PRUNE = "prune"
 #: deletion. A deny-list cannot see a type that does not exist yet; this one
 #: excludes it by default.
 #:
-#: ``session_incident``, ``session_mcp_unavailable`` and ``session_spend.v1``
-#: are the members. ``session_model_switch`` is a deliberate act whose
+#: ``session_incident``, ``session_mcp_unavailable``, ``session_spend.v1``
+#: and ``session_credential_redaction`` are the members.
+#: ``session_model_switch`` is a deliberate act whose
 #: consequences a user may want ranked, and every other custom type is a
 #: separate argument nobody has made yet.
+#:
+#: ``session_credential_redaction`` joins them for the same reason
+#: ``session_incident`` is here, and it is worth stating because the record's
+#: surface changed without its CLOCK rule changing: it is a notice ABOUT the
+#: session (the credential-shape guard masked something that reached a tool)
+#: and never work a turn carried, so its append must not move
+#: ``retention.session_activity``. Its writer calls ``preserve_mtime=True``,
+#: and that request is honoured only when the whole batch is in this set (see
+#: :func:`_is_bookkeeping_batch`), so omitting it here would silently restamp
+#: the session as freshly worked in AND age it toward deletion sooner.
 #:
 #: ``session_mcp_unavailable`` is here because it is the SECOND MCP-grant case,
 #: and the first one is what measured the rule. It is journalled from the MCP
@@ -130,6 +142,7 @@ ENTRY_PRUNE = "prune"
 BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
     {
         SESSION_INCIDENT_MESSAGE_TYPE,
+        SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
         SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
         SESSION_SPEND_CUSTOM_TYPE,
     }

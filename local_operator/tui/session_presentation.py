@@ -830,6 +830,7 @@ def project_settled_rows(
     from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
     from local_operator.harness.message_types import (
         PEER_MESSAGE_MESSAGE_TYPE,
+        SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
         SESSION_INCIDENT_MESSAGE_TYPE,
         SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
     )
@@ -1063,6 +1064,25 @@ def project_settled_rows(
             # ink for the contained case is a design decision on this row, not
             # something the redaction change should make by the back door.
             if getattr(message, "custom_type", None) == SESSION_INCIDENT_MESSAGE_TYPE:
+                details = getattr(message, "details", None) or {}
+                text = str(details.get("text", "")).strip()
+                if text:
+                    self._append_block(NoticeBlock(text, kind="warning", fold_width=fold_width))
+                    appended = True
+                continue
+            # The credential-SHAPE notice, which now carries its OWN type rather
+            # than ``session_incident``: the record is operator-facing and stopped
+            # entering the model's context (see ``harness/message_types.py``), but
+            # the OPERATOR's row is unchanged, and its own type needs its own
+            # branch for exactly the reason the incident branch above exists — a
+            # custom message with no branch falls past every one of them and past
+            # the role-based handling below, so an unbranched record paints NOWHERE.
+            #
+            # Same `warning` ink and the same text as before the split, because
+            # what the operator asked to see did not change; only the model stopped
+            # being told. Do not merge this back into the incident branch: the two
+            # types are separate so that the renderer can exclude one of them.
+            if getattr(message, "custom_type", None) == SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE:
                 details = getattr(message, "details", None) or {}
                 text = str(details.get("text", "")).strip()
                 if text:

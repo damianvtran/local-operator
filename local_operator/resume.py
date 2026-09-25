@@ -460,6 +460,18 @@ PREVIEW_MAX_CHARS = 200
 #: equal, so a rename cannot silently turn this scan into one that matches
 #: nothing (which would degrade to the house sentence and look like "this
 #: session had no failure" rather than like a bug).
+#:
+#: ``SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE`` is deliberately NOT added to
+#: this scan or to any replay path in this module, and that is worth stating
+#: because it moved out of ``session_incident`` — a reader could reasonably
+#: expect a second literal here. Two reasons it needs none. (1) The only use of
+#: this literal is :func:`session_failure_summary` below, which reads
+#: ``details.raw``; the credential record has never carried ``raw`` (it carries
+#: ``text``, ``tool``, ``shapes``, ``summary``), so this scan could not return
+#: that record even while it was a ``session_incident``. (2) Nothing in this
+#: module re-injects an incident into a model context — a resumed session
+#: replays through ``transcript.replay_entries`` into
+#: ``harness/render.py``'s allow-list, which is where the new type is excluded.
 _SESSION_INCIDENT_TYPE = "session_incident"
 
 #: The marker that says a fragment is a user message, and the first COMPLETE
@@ -2591,6 +2603,13 @@ def session_failure_summary(session_dir: Path, *, max_chars: int = PREVIEW_MAX_C
     why the previous turn ended. Take it into account before repeating the same
     request." — an instruction addressed to the model, which on a lock screen
     reads as nonsense. ``raw`` is the sentence a human wants.
+
+    A credential-redaction record (``session_credential_redaction``, which left
+    ``session_incident`` on 2026-09-24) is NOT matched here, and the reason is
+    the same as before the split rather than a consequence of it: it carries no
+    ``raw`` field at all, so a notification's failure text was never composed
+    from one. ``notifications/compose.py``'s ``error`` body therefore still
+    takes its text only from a real failed turn, which is what that body claims.
 
     No new durable path is introduced. ``incidents.py`` already journals this
     record on every classified failure, precisely so a resumed session can

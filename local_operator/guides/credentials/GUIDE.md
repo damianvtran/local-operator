@@ -207,9 +207,14 @@ to be byte-exact.
 
 ## What actually counts as a compromise
 
-The harness tells you when it masks a credential (`[credential redaction] …`),
-and the notice classifies itself. The distinction is worth knowing, because a
-rotation is the user's work and a false alarm spends it:
+When the harness masks a credential, the OPERATOR is told — a `[credential
+redaction] …` row in the transcript and a live receipt — and the notice
+classifies itself. **It is deliberately not sent to you (the model), and you
+should not act on one as though it were.** The row reports a value that was
+masked out of the text you were given, so you never held it and there is nothing
+for you to do. The distinction below is what the OPERATOR reads it against, and
+is worth knowing anyway, because a rotation is the user's work and a false alarm
+spends it:
 
 - **A value in the MODEL'S CONTEXT is compromised.** Something of it is readable
   there — the mask did not remove every copy, whether it fell short or a rule
