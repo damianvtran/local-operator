@@ -667,20 +667,40 @@ def _warm_console(
     return console
 
 
-def _spare_children(pid: int) -> int:
-    """How many standby interpreters ``pid`` has as direct children."""
-    out = subprocess.run(
-        ["ps", "-eo", "pid=,ppid=,command="], capture_output=True, text=True
-    ).stdout
-    count = 0
-    for line in out.splitlines():
-        fields = line.split(None, 2)
-        if len(fields) < 3:
-            continue
-        _child, parent, command = fields
-        if parent.isdigit() and int(parent) == pid and standby.STANDBY_MODULE in command:
-            count += 1
-    return count
+def _live(pid: int) -> bool:
+    """Is ``pid`` alive? ``kill(pid, 0)`` is the kernel's own probe, no table read."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Exists but not ours to signal: never "dead". Cannot happen for our own
+        # children, and treating it as alive keeps the failure mode honest.
+        return True
+    return True
+
+
+def _reported_spare(report: dict[str, Any]) -> int | None:
+    """The spare THIS console warmed, from its own report — no process table.
+
+    BY CONSTRUCTION INSTEAD OF BY SCAN (agent review round 7). The previous helper
+    counted ``ps -eo pid=,ppid=,command=`` rows whose ``command`` column contained
+    ``standby.STANDBY_MODULE``, and procps TRUNCATES that column to the terminal width
+    (80 columns when stdout is not a terminal): on Linux a long absolute interpreter
+    path cut the module name off, the substring never matched, and every count read 0 —
+    ``assert 0 == 1`` on this very cell with ``warmed is True`` on the line above. macOS
+    does not truncate, so a macOS-only review could not see it; ``ubuntu-latest`` is the
+    only job where this suite runs on procps.
+
+    Nothing about the cap needs a table scan. The console forked the spare and holds a
+    descriptor to it, so it reports the pid it started; the count below is the number of
+    distinct reported pids that are still alive, which is width-independent by
+    construction.
+    """
+    pid = report.get("spare_pid")
+    if isinstance(pid, int) and _live(pid):
+        return pid
+    return None
 
 
 def _clear_module_state() -> None:
@@ -819,26 +839,31 @@ def test_one_spare_per_root_per_slot_however_many_consoles(
     root, held for the life of the console and released by the KERNEL when it dies.
     """
     first = _warm_console(root, tmp_path, started, standby.SLOT_TUI, "a")
+    first_spare = _reported_spare(first.result())
     assert first.result()["warmed"] is True
-    assert _spare_children(first.proc.pid) == 1
+    assert first_spare is not None, "the console that won the slot has no live spare"
 
     second = _warm_console(root, tmp_path, started, standby.SLOT_TUI, "b")
     loser = second.result()
     assert (
         loser["slot_held"] is False and loser["warmed"] is False
     ), "the TUI slot was already taken"
-    assert _spare_children(second.proc.pid) == 0, "a console that lost the slot spawned anyway"
+    assert _reported_spare(loser) is None, "a console that lost the slot spawned anyway"
 
     # The daemon's slot is the OTHER one: the desktop surface never competes with a
     # TUI, which is why the cap is two rather than one.
     daemon = _warm_console(root, tmp_path, started, standby.SLOT_DAEMON, "c")
+    daemon_spare = _reported_spare(daemon.result())
     assert daemon.result()["warmed"] is True
-    assert _spare_children(daemon.proc.pid) == 1
+    assert daemon_spare is not None, "the daemon console has no live spare"
 
     # A third spare is impossible, not merely discouraged: there is no slot left.
     third = _warm_console(root, tmp_path, started, standby.SLOT_TUI, "d")
     assert third.result()["warmed"] is False
-    assert _spare_children(first.proc.pid) + _spare_children(daemon.proc.pid) == 2
+    assert _reported_spare(third.result()) is None, "a third console warmed a spare"
+    # EXACTLY TWO, one per slot — and they are different spares, which is the claim
+    # the memory ceiling rests on.
+    assert len({first_spare, daemon_spare}) == 2, "the two slots do not hold two distinct spares"
 
     # Kernel-released on death, which is what ``flock`` buys over a pid file: kill
     # the TUI slot's owner and the slot is free immediately, with no stale owner to
@@ -847,7 +872,9 @@ def test_one_spare_per_root_per_slot_however_many_consoles(
     first.proc.wait(timeout=60)
     fourth = _warm_console(root, tmp_path, started, standby.SLOT_TUI, "e")
     assert fourth.result()["warmed"] is True, "the slot did not come back after its owner died"
-    assert _spare_children(fourth.proc.pid) == 1
+    fourth_spare = _reported_spare(fourth.result())
+    assert fourth_spare is not None, "the re-warmed console has no live spare"
+    assert fourth_spare != daemon_spare, "the re-warm reused the other slot's spare"
 
 
 class _Standby:

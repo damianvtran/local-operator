@@ -156,8 +156,14 @@ def _read_report(path: Path, wait_s: float) -> dict[str, Any] | None:
 
 def _process_table() -> dict[int, tuple[int, str]]:
     """``pid -> (ppid, command)`` for every live process, one ``ps``."""
+    # ``-eww`` IS NOT OPTIONAL: unlimited width. procps truncates the ``command``
+    # column to the terminal width (80 columns when stdout is not a terminal), so on
+    # Linux a long interpreter path is cut before the module name and a substring test
+    # matches nothing — reading as "no processes" instead of as an error. macOS does
+    # not truncate, which is why this is invisible on the host the whole PR was
+    # measured on (agent review round 7; the same trap failed a CI shard in the suite).
     out = subprocess.run(
-        ["ps", "-eo", "pid=,ppid=,command="], capture_output=True, text=True
+        ["ps", "-eww", "-o", "pid=,ppid=,command="], capture_output=True, text=True
     ).stdout
     table: dict[int, tuple[int, str]] = {}
     for line in out.splitlines():
@@ -176,9 +182,15 @@ def _root_census(root: Path, exclude: set[int]) -> dict[int, str]:
     ride in argv at all, it rides in ``LOCAL_OPERATOR_CONFIG_DIR`` — so an argv-shaped
     predicate matched a probe built to be matched and missed every process that
     actually occurs: two adopted runtimes alive at ppid 1, recorded as
-    ``descendants_recorded: []``. ``ps -Ee`` prints each process's environment after its
-    command, so this sees a process that inherited the root, including one re-parented
-    to ppid 1 after its console exited.
+    ``descendants_recorded: []``.
+
+    NOT UNIVERSAL, AND THAT MATTERS (round 7): ``ps -Ee`` prints an environment for the
+    processes that EXPOSE one, which is not all of them — a Python or Node child does,
+    ``/bin/sleep`` and stripped copies of it do not, measured in the same second from the
+    same parent with the same environment. Where it is exposed this sees a process that
+    inherited the root, including one re-parented to ppid 1 after its console exited; the
+    caller therefore reads ``_env_census_diagnostics`` as well, so a census that cannot
+    see environments fails the run instead of reporting "no writers".
 
     Shape-checked, not a bare substring (round 5, M-3): the needle is the variable NAME
     together with this run's session-unique value, so a command that merely mentions the
@@ -188,7 +200,7 @@ def _root_census(root: Path, exclude: set[int]) -> dict[int, str]:
     """
     needle = f"LOCAL_OPERATOR_CONFIG_DIR={root}"
     out = subprocess.run(
-        ["ps", "-Ee", "-o", "pid=,ppid=,command="], capture_output=True, text=True
+        ["ps", "-Eeww", "-o", "pid=,ppid=,command="], capture_output=True, text=True
     ).stdout
     found: dict[int, str] = {}
     for line in out.splitlines():
@@ -200,6 +212,50 @@ def _root_census(root: Path, exclude: set[int]) -> dict[int, str]:
             continue
         found[pid] = fields[1][-120:]
     return found
+
+
+def _env_census_diagnostics() -> tuple[dict[str, int], list[int]]:
+    """What the environment census can read, and the shape it must not miss.
+
+    A DEAD INSTRUMENT MUST NOT RETURN A COMFORTABLE READING (agent review round 7). The
+    environment is exposed per PROCESS, not by ``ps``: measured on this host, in the same
+    second, from the same parent and with the same environment, Python and Node children
+    show it while ``/bin/sleep``, a plain copy of ``/bin/sleep``, a signature-stripped
+    copy of that and a copy of ``/bin/cat`` do not (the discriminator was not isolated —
+    the dyld cache and the code signature were both ruled out). So the census cannot
+    promise to see every future spawner, and its failure mode is silent in the direction
+    that matters: an unreadable environment looks exactly like "no writers".
+
+    Hence this: read how many processes the census can see an environment for at all, and
+    name the shape it must not miss — a live process whose command names a standby or
+    runtime module but which came back with NO environment. That is a candidate writer
+    the census cannot attribute, and the caller warns and fails on it rather than
+    reporting a comfortable zero.
+    """
+    out = subprocess.run(
+        ["ps", "-Eeww", "-o", "pid=,ppid=,command="], capture_output=True, text=True
+    ).stdout
+    seen = 0
+    with_environment = 0
+    unreadable: list[int] = []
+    for line in out.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) < 2 or not fields[0].isdigit():
+            continue
+        seen += 1
+        rest = fields[2] if len(fields) > 2 else ""
+        # A real environment is many ``NAME=value`` words; two is a generous floor that a
+        # command line of its own cannot plausibly reach.
+        assignments = sum(
+            1
+            for word in rest.split()
+            if "=" in word and word.split("=", 1)[0].replace("_", "").isalnum()
+        )
+        if assignments >= 2:
+            with_environment += 1
+        elif f"-m {STANDBY_MODULE}" in rest or f"-m {RUNTIME_MODULE}" in rest:
+            unreadable.append(int(fields[0]))
+    return {"processes": seen, "with_environment": with_environment}, unreadable
 
 
 def _descendants(roots: set[int], table: dict[int, tuple[int, str]]) -> set[int]:
@@ -232,7 +288,7 @@ def _runtime_processes() -> list[tuple[int, int, float, str]]:
     ``rmtree`` fail (QA round 3, Q4-3).
     """
     out = subprocess.run(
-        ["ps", "-eo", "pid=,ppid=,rss=,command="], capture_output=True, text=True
+        ["ps", "-eww", "-o", "pid=,ppid=,rss=,command="], capture_output=True, text=True
     ).stdout
     found: list[tuple[int, int, float, str]] = []
     for line in out.splitlines():
@@ -252,7 +308,7 @@ def _spare_processes() -> list[tuple[int, int, float, str]]:
     what ``pyright`` refused (whole-tree, CI).
     """
     out = subprocess.run(
-        ["ps", "-eo", "pid=,ppid=,rss=,command="], capture_output=True, text=True
+        ["ps", "-eww", "-o", "pid=,ppid=,rss=,command="], capture_output=True, text=True
     ).stdout
     found: list[tuple[int, int, float, str]] = []
     for line in out.splitlines():
@@ -486,19 +542,23 @@ def _one_run(consoles: int, mode: str, warm_wait: float) -> dict[str, Any]:
         def _mine() -> dict[int, str]:
             """Live writers and descendants of this run: pid -> command tail.
 
-            The tail comes from the plain ``ps`` table (command only): the census below
-            reads ``ps -Ee``, whose line is command PLUS environment, so a short
-            ``python -c`` command would be recorded as a wall of env vars and the audit
-            the artefact exists for would have nothing to read.
+            The tail comes from the plain ``ps`` table (command only), and the census is
+            only a FALLBACK — it reads ``ps -Eeww``, whose line is the command PLUS the
+            environment, so letting it overwrite the table's entry recorded an environment
+            fragment for every census-attributed pid, the reverse of what N-1 asked for
+            (round 7). The census is therefore the fallback, and a pid it finds that the
+            TREE cannot reach — the detached-runtime shape, ppid 1, which is the whole
+            reason the census exists — is labelled with the route that found it instead
+            of passing an environment fragment off as a command.
             """
             table = _process_table()
             found = {
-                pid: (table[pid][1] if pid in table else "")[-160:]
+                pid: cmd[-160:]
                 for pid, (_ppid, cmd) in table.items()
                 if pid in _descendants(console_pids, table)
             }
             for pid, tail in _root_census(base, exclude=console_pids | {self_pid}).items():
-                found[pid] = tail
+                found.setdefault(pid, "[detached: env-only] " + tail[-100:])
             for pid in list(found):
                 if pid in console_pids or pid == self_pid:
                     del found[pid]
@@ -534,6 +594,20 @@ def _one_run(consoles: int, mode: str, warm_wait: float) -> dict[str, Any]:
                     pass
                 killed[pid] = tail
             time.sleep(0.4)
+
+        # IS THE INSTRUMENT WORKING? Asked before the writer set is believed (round 7):
+        # an unreadable environment looks exactly like "no writers", so a census that
+        # cannot read one is a failure to report, not a zero to trust.
+        census_diagnostics, unreadable_writers = _env_census_diagnostics()
+        census_blind = bool(unreadable_writers) or census_diagnostics["with_environment"] == 0
+        if census_blind:
+            print(
+                f"  WARNING: the environment census may be blind — "
+                f"{census_diagnostics['with_environment']}/{census_diagnostics['processes']} "
+                f"processes exposed an environment, and these module-named processes "
+                f"exposed none: {unreadable_writers}",
+                flush=True,
+            )
 
         # IS ANYTHING LEFT TO PUT IT BACK? Recorded, because "we removed it" is only a
         # sound claim when the writer set is empty at the moment of removal (R5-1).
@@ -571,6 +645,11 @@ def _one_run(consoles: int, mode: str, warm_wait: float) -> dict[str, Any]:
         # unlinking the record), so it is disclosed rather than hidden by a retry.
         root_removed = False
         root_reappeared = False
+        # A TRANSIENT failure here is not the same fact as "the removal failed" (round
+        # 7, NIT): it used to land in ``removal_error`` and sit beside
+        # ``root_removed: true`` as an apparent contradiction. Recorded separately, so
+        # ``removal_error`` names only what a failed final state failed on.
+        settle_removal_errors: list[str] = []
         clean_reads = 0
         for _round in range(6):
             time.sleep(1.0)
@@ -582,17 +661,31 @@ def _one_run(consoles: int, mode: str, warm_wait: float) -> dict[str, Any]:
                 except FileNotFoundError:
                     pass
                 except OSError as error:
-                    removal_error = f"{type(error).__name__}: {error}"
-                    print(f"  (settle removal failed: {removal_error})", flush=True)
+                    detail = f"{type(error).__name__}: {error}"
+                    settle_removal_errors.append(detail)
+                    print(f"  (settle removal failed: {detail})", flush=True)
             else:
                 clean_reads += 1
                 if clean_reads >= 2:
                     root_removed = True
                     break
+        # NIT(b) (round 7): a non-empty writer set was recorded and then ignored, which
+        # is the shape where a reading exists and nothing acts on it. It IS the failure
+        # this cleanup exists to prevent — a live writer is a process that can put the
+        # root back after this script has exited — so it warns AND fails the run.
+        cleanup_ok = root_removed and not writers_at_removal and not census_blind
+        if writers_at_removal:
+            print(
+                f"  WARNING: {len(writers_at_removal)} writer(s) still name this root at "
+                f"the moment of removal: "
+                f"{[f'{pid}:{tail[:40]}' for pid, tail in sorted(writers_at_removal.items())]}",
+                flush=True,
+            )
         if row is not None:
             # In the artefact as well as the log, and each entry carries a command tail
             # so an audit is possible from the JSON (round 5, N-1).
             row["root_removed"] = root_removed
+            row["cleanup_ok"] = cleanup_ok
             row["root_reappeared_after_removal"] = root_reappeared
             row["cleanup"] = {
                 "descendants_recorded": {str(pid): tail for pid, tail in sorted(recorded.items())},
@@ -602,6 +695,9 @@ def _one_run(consoles: int, mode: str, warm_wait: float) -> dict[str, Any]:
                 },
                 "listing_before_removal": listing_before_removal,
                 "removal_error": removal_error,
+                "settle_removal_errors": settle_removal_errors,
+                "census": census_diagnostics,
+                "cleanup_ok": cleanup_ok,
             }
         if not root_removed:
             print(
@@ -638,12 +734,13 @@ def main() -> int:
     if args.json:
         Path(args.json).write_text(json.dumps(row, indent=2) + "\n")
         print(f"wrote {args.json}")
-    if row.get("root_removed") is False:
-        # A surviving root is a FAILURE of this script's own cleanup, not a note
-        # (agent review round 4, R4-1): the claim is settle-checked now, so it is
-        # asserted here too rather than reported as true and left for someone to
-        # discover in $TMPDIR later.
-        print("  FAILED: the isolated root survived the settle; see the WARNING above")
+    if row.get("cleanup_ok") is False:
+        # A surviving root, a surviving writer, or a census that could not read any
+        # environment is a FAILURE of this script's own cleanup or of its instrument —
+        # not a note (rounds 4, 5 and 7). Both root claims are settle-checked and the
+        # writer set is acted on, so a failure is asserted here rather than reported as
+        # a success for someone to discover in the temp directory later.
+        print("  FAILED: the isolated root survived, or a writer survived, or the census was blind")
         return 1
     return 0
 
