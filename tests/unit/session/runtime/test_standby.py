@@ -277,6 +277,14 @@ class _FakeHandoff:
 #: this suite is long enough to take the fallback, which is why an impostor
 #: listening only on the natural path would see nothing and this test would pass
 #: against the very revision it exists to reproduce — measured.
+#: Binds the rendezvous path THE FIRST REVISION WOULD HAVE COMPUTED, and reports
+#: what it got. That rule had two candidates: the natural path under the root, and
+#: a ``$TMPDIR/lop-standby-<uid>-<digest>`` fallback chosen whenever the natural one
+#: was too long for ``sun_path`` (104 bytes on macOS). Getting this wrong makes the
+#: test pass for the wrong reason in both directions — an impostor listening only
+#: on the natural path sees nothing under a long pytest ``tmp_path`` (measured: the
+#: bind fails with ``AF_UNIX path too long``), and one listening only on the
+#: fallback misses the root the engage actually uses.
 _IMPOSTOR = textwrap.dedent("""
     import hashlib, json, os, select, socket, sys, tempfile
     from pathlib import Path
@@ -287,32 +295,28 @@ _IMPOSTOR = textwrap.dedent("""
     digest = hashlib.sha256(str(natural_dir).encode("utf-8")).hexdigest()[:12]
     uid = os.getuid() if hasattr(os, "getuid") else 0
     fallback_dir = Path(tempfile.gettempdir()) / ("lop-standby-%d-%s" % (uid, digest))
-    fallback_dir.mkdir(parents=True, exist_ok=True)
-    os.chmod(fallback_dir, 0o700)
-    listeners = []
-    for directory in (natural_dir, fallback_dir):
-        path = directory / "standby.sock"
-        if path.exists():
-            path.unlink()
-        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        listener.bind(str(path))
-        os.chmod(path, 0o600)
-        listener.listen(1)
-        listeners.append((listener, path))
-    report = {
-        "bound": [str(p) for _l, p in listeners],
-        "connections": 0,
-        "cap_len": 0,
-        "via": "",
-    }
+    natural = natural_dir / "standby.sock"
+    # The retired rule, verbatim: 103 is the longest ``sun_path`` payload the
+    # first revision would use (macOS allows 104 bytes including the NUL).
+    path = natural if len(str(natural)) <= 103 else fallback_dir / "standby.sock"
+    if path.parent != natural_dir:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(path.parent, 0o700)
+    if path.exists():
+        path.unlink()
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(path))
+    os.chmod(path, 0o600)
+    listener.listen(1)
+    report = {"bound": str(path), "connections": 0, "cap_len": 0}
+    # Ready to be contacted; the marker goes out BEFORE the wait, so the test
+    # knows the listener is bound rather than waiting out its own deadline.
     Path(sys.argv[3]).write_text("ready")
-    ready, _w, _x = select.select([l for l, _p in listeners], [], [], 25.0)
+    ready, _w, _x = select.select([listener], [], [], 25.0)
     if ready:
-        listener = ready[0]
         conn, _ = listener.accept()
         with conn:
             report["connections"] = 1
-            report["via"] = str(dict((l, p) for l, p in listeners)[listener])
             conn.settimeout(5.0)
             try:
                 _marker, fds, _flags, _address = socket.recv_fds(conn, 1, 1)
@@ -325,8 +329,19 @@ _IMPOSTOR = textwrap.dedent("""
                 conn.sendall(len(payload).to_bytes(4, "big") + payload)
             except OSError:
                 pass
-    for listener, _path in listeners:
-        listener.close()
+    listener.close()
+    # Clean up after ourselves, including the fallback directory when this rig had
+    # to create it: the retired design leaked one of these per root (R1-5), and a
+    # test that reproduces the leak must not add to it.
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    if path.parent != natural_dir:
+        try:
+            path.parent.rmdir()
+        except OSError:
+            pass
     out.write_text(json.dumps(report))
     """)
 
@@ -349,19 +364,22 @@ def test_an_impostor_listener_receives_no_capability(
     root.mkdir()
     report = tmp_path / "impostor.json"
     ready = tmp_path / "impostor-ready"
+    errors = tmp_path / "impostor.err"
     impostor = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
         [sys.executable, "-c", _IMPOSTOR, str(root), str(report), str(ready)],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        # Kept, not discarded: the only thing that makes an early exit from this
+        # rig diagnosable is its own traceback.
+        stderr=errors.open("wb"),
     )
     try:
         deadline = time.monotonic() + 20
         while not ready.exists():
-            assert impostor.poll() is None, "the impostor exited before binding"
-            assert time.monotonic() < deadline, "the impostor never bound the retired paths"
+            why = errors.read_text() if errors.exists() else ""
+            assert impostor.poll() is None, f"the impostor could not bind: {why}"
+            assert time.monotonic() < deadline, f"the impostor never bound: {why}"
             time.sleep(0.02)
-        assert (root / RETIRED_RENDEZVOUS[0] / RETIRED_RENDEZVOUS[1]).exists()
 
         approval.reset_operator_caps_for_tests()
         monkeypatch.delenv(standby.DISABLE_ENV, raising=False)
@@ -400,9 +418,9 @@ def test_an_impostor_listener_receives_no_capability(
         # this session's spawn — least of all a descriptor — reached it.
         assert impostor.wait(timeout=40) == 0
         seen = json.loads(report.read_text())
-        # BOTH retired paths were listening, and neither was reached: nothing of
-        # this session's spawn, least of all a descriptor, travelled anywhere.
-        assert len(seen["bound"]) == 2, seen
+        # The retired path was bound and never reached: nothing of this session's
+        # spawn, least of all a descriptor, travelled anywhere.
+        assert seen["bound"].endswith("standby.sock"), seen
         assert seen["connections"] == 0, seen
         assert seen["cap_len"] == 0, seen
         # And the console never bound a capability to it. This is the assertion
