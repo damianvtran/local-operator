@@ -2966,6 +2966,32 @@ def test_a_real_runtime_child_engages_at_publication_and_moves_its_own_bound(
 # it is half the evidence rather than a courtesy — a predicate that fires on a
 # long wait is the bug this bound exists to prevent wearing the other hat.
 
+#: THE FLOOR IS LOWERED IN THE CHILD, and it is the one number in this rig that is
+#: about the HOST rather than the contract. The module's ``PROGRESS_CPU_FLOOR`` (5% of
+#: a core) is a claim about a quiet machine, and this fleet is not one: measured on
+#: 2026-09-24 (load ~100 beside ~25 sessions) the spinning child below came in at
+#: 0.0185-0.0283 of a core — BELOW the floor — and the sibling rig beside
+#: ``test_runtime_stall_watchdog_arm_deadlock.SPIN_FLOOR`` recorded the same class at
+#: 0.017-0.021. On 2026-09-25 the same child cleared the shipped floor outright, and
+#: that swing is exactly the point: whether the CPU gate is reachable is a bet on the
+#: host that day. With it out of reach the leg cannot fire at all — the child spins its
+#: full window, prints "spin-finished" and leaves no marker, a reading about load
+#: wearing the face of a broken mechanism — and the fire is this cell's whole subject.
+#: So the rig sets a threshold the host cannot fail to reach: 0.0005 keeps ~35x
+#: headroom under the smallest SPIN burn measured here — and it is BELOW an idle
+#: runtime's own burn rather than above it. This module records an idle runtime at
+#: 0.006-0.011 of a core (beside ``PROGRESS_CPU_FLOOR``), and this rig's own awaiting
+#: child measured 0.0079 here (0.0700 s of CPU over an 8.87 s wait, load ~93), so
+#: 0.0005 sits ~16x UNDER the idle band. The lowered floor therefore buys reachability
+#: at the cost of the spin/idle separation, and that is safe only because it is applied
+#: to the FIRING arms alone (the fire cell and its without-lane control): every negative
+#: arm — the awaiting child, the lane children — keeps the shipped floor, which is what
+#: keeps "a long wait is not a spin" a real test rather than a gate nobody can miss.
+#: (The rig's own dump line reads "at least 0% of a core": ``PROGRESS_MARKER`` formats
+#: the floor with ``:.0%``, and 0.0005 renders as 0%.) The burn is the real subject
+#: either way — only the threshold moves.
+SPIN_FLOOR = 0.0005
+
 _SPINNING_CHILD = r"""
 import asyncio
 import os
@@ -2993,6 +3019,9 @@ async def main() -> None:
     root = pathlib.Path(sys.argv[2])
     process.HEARTBEAT_INTERVAL_S = 0.3
     server.HEARTBEAT_INTERVAL_S = 0.3
+    # The rig's floor, NOT the module's: see ``SPIN_FLOOR``. The spin below is the
+    # subject; the threshold is set where THIS host can reach it.
+    stall_watchdog.PROGRESS_CPU_FLOOR = float(sys.argv[4])
 
     session = make_session(root, _stream)
     handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(root))
@@ -3101,7 +3130,7 @@ def test_the_progress_leg_fires_on_a_spinning_loop_that_never_advances(tmp_path:
     result = _run_script(
         _SPINNING_CHILD,
         tmp_path,
-        args=(str(CHILD_BOUND_S), str(tmp_path), str(REPO)),
+        args=(str(CHILD_BOUND_S), str(tmp_path), str(REPO), str(SPIN_FLOOR)),
         timeout=120.0,
     )
     assert (
@@ -3116,6 +3145,12 @@ def test_the_progress_leg_fires_on_a_spinning_loop_that_never_advances(tmp_path:
     pid = int(result.stdout.split("armed:", 1)[1].split()[0])
     text = _dump_for(tmp_path, pid).read_text(encoding="utf-8")
     assert stall_watchdog.FIRED_MARKER in text, text
+    # THE ALL-THREAD DUMP IS IN THE SAME FILE, and it is asserted rather than
+    # assumed: the marker alone could be a line; the thread walk is what makes the
+    # artifact the fire's own.
+    assert (
+        "Thread 0x" in text or "Current thread" in text
+    ), f"the fire wrote no all-thread dump: {text[-800:]!r}"
     # THE FIRING PATH NAMED ITS CLASS AND ITS LEG. A bound that fires without
     # saying which predicate ended the runtime leaves the next reader unable to
     # tell a fire from a silent non-fire — the defect this class exists for.
@@ -3412,7 +3447,7 @@ def test_the_progress_leg_spares_a_manager_whose_lane_holds_a_step(tmp_path: Pat
     control = _run_script(
         _SPINNING_CHILD,
         control_root,
-        args=(str(CHILD_BOUND_S), str(control_root), str(REPO)),
+        args=(str(CHILD_BOUND_S), str(control_root), str(REPO), str(SPIN_FLOOR)),
         timeout=120.0,
     )
     # DUMP-ONLY: a fire never ends the runtime, so rc 0 is what BOTH arms read and
@@ -5970,19 +6005,6 @@ lib.sleep.argtypes = [ctypes.c_uint]
 lib.sleep(600)
 sys.stdout.write("the parked call returned\\n")
 """
-
-
-#: THE GIL-HELD CLASS IS A NAMED GAP ON THE FOLDED BUILD (see the module docstring and
-#: the PR body): the Python fire needs Python, and every automatic native-timer shape was
-#: measured unshippable. A cell that asserts a dump from such a child can therefore never
-#: pass here, and letting it fail would report the INTENDED state as a defect. The guard
-#: is skipped rather than deleted so the cell reappears the moment a mechanism exists —
-#: and it is scoped to the cell body, never to a loop, so it cannot mis-gate anything else.
-_GIL_HELD_CLASS_IS_A_NAMED_GAP = (
-    "intended behaviour on the folded build: the GIL-held class is documented as a named "
-    "gap (no automatic in-process dump), so this cell documents the gap rather than "
-    "asserting a fire that no leg can take"
-)
 
 
 def test_a_frame_frozen_in_a_c_matcher_is_dumped(tmp_path: Path) -> None:
