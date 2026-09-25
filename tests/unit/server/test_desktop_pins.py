@@ -705,6 +705,61 @@ async def test_the_extras_ride_one_page_of_a_walk(pins_api) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_foreign_cursor_on_the_head_still_carries_the_extras(pins_api) -> None:
+    """A token that DECODES but is not usable here is still this scope's first page.
+
+    ``cursor_missing`` is the disjunction the extras gate reads, and it has two
+    halves that have to be treated alike: an unreadable token, and a decodable
+    FOREIGN one (a group's cursor sent on the head request -- the client bug the
+    flag exists to absorb). Gating on ``position is None`` covered only the first:
+    a foreign token decodes, so the resume filter was skipped and the answer WAS
+    the head's first page, but the pinned extras were omitted from it. That is the
+    one shape where the Pinned section could lose the rows this list exists to
+    keep, since the same answer is what settles ``pinFacts``.
+    """
+    from local_operator.resume import write_session_attachment
+
+    client, root = pins_api
+    for index in range(4):
+        session_id = f"lop{index:07d}"
+        _session(root, session_id)
+        write_session_attachment(root / "sessions" / session_id, team="lopdev", agent="", goal="")
+    # Ranked LAST (one shared `created_at`, so the id breaks the tie), and pinned,
+    # so a page bound of 2 cannot carry it and only the extras half can.
+    older = "oldpin000001"
+    _session(root, older)
+    write_session_attachment(root / "sessions" / older, team="lopdev", agent="", goal="")
+    assert toggle_pin(root, older) is True
+
+    scoped = (
+        await _json(
+            client.get(
+                "/v1/desktop/sessions",
+                params={"limit": 2, "scope_kind": "team", "scope_name": "lopdev"},
+            )
+        )
+    )["result"]
+    foreign = scoped["next_cursor"]
+    assert foreign is not None, "the scoped page must be truncatable for this shape"
+
+    cursorless = (await _json(client.get("/v1/desktop/sessions", params={"limit": 2})))["result"]
+    resumed = (
+        await _json(client.get("/v1/desktop/sessions", params={"limit": 2, "cursor": foreign}))
+    )["result"]
+
+    # The foreign token is refused the way an unreadable one is -- and the answer
+    # is the first page, so it carries the extras exactly as the cursorless one.
+    assert resumed["cursor_missing"] is True
+    assert [row["id"] for row in cursorless["sessions"]] == [
+        "lop0000000",
+        "lop0000001",
+        older,
+    ]
+    assert resumed["sessions"] == cursorless["sessions"]
+    assert resumed["next_cursor"] == cursorless["next_cursor"]
+
+
+@pytest.mark.asyncio
 async def test_a_pinned_conversation_beyond_the_page_is_carried_in_the_answer(pins_api) -> None:
     """THE FIX. A pin outside the page is a ROW in the answer, with its name and
     `pinned: true`, so the client's pinned section has something to draw."""
