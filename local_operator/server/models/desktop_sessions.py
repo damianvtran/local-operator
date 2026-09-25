@@ -340,6 +340,17 @@ class CreatedSession(BaseModel):
     binding: dict[str, str | None] = Field(default_factory=dict)
     session_id: str
     replayed: bool = False
+    #: Who the new conversation runs as, for a create that named an agent or a team,
+    #: plus the two facts a renderer cannot derive: whether the profile's
+    #: instructions were actually applied, and what the session is running on when a
+    #: profile overrode a requested model. ``None`` for a create that named neither —
+    #: so the local path's answer and every older client's body are unchanged.
+    #:
+    #: A NAMED FIELD rather than a loose key: the route returns through this model,
+    #: which drops what it does not declare, so an undeclared dict would have reached
+    #: the client as nothing and the peer's honest half ("its instructions are not
+    #: attachable") would have been silently lost.
+    identity: dict[str, Any] | None = None
     #: THE RUNTIME IS STILL JOINING (QA round 1, Q4b). The conversation exists, the id
     #: is durable and the caller owns it, but no owner has come up to answer a prompt
     #: yet: a prompt sent now is REFUSED by the peer (``OwnerUnreachable``), so a

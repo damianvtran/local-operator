@@ -1576,8 +1576,18 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
                 "--yolo",
                 action="store_true",
                 default=argparse.SUPPRESS,
-                help="Auto-approve all tool executions (read/write/exec tiers)"
-                " without prompting",
+                help=(
+                    # A VERB THAT REFUSES THE FLAG SAYS SO instead of advertising it:
+                    # ``network sessions --create`` declines ``yolo`` on both ends (a
+                    # session on another device must not run unattended), so the global
+                    # sentence would promise this verb something the product will not do
+                    # (QA round 1, Q3). The verb marks itself; see ``network.cli``.
+                    "Refused for this verb's peer create: a session on another device "
+                    "cannot start unattended, so the flag is accepted and then declined"
+                    if getattr(subparser, "yolo_is_refused", False)
+                    else "Auto-approve all tool executions (read/write/exec tiers)"
+                    " without prompting"
+                ),
             )
             subparser.add_argument(
                 "--resume",
