@@ -101,15 +101,21 @@ def _standby_child() -> int | None:
     """The pid of this process's live standby child, or ``None``."""
     from local_operator.session.runtime import standby
 
+    # ``-eww`` and the ``-m <module>`` shape, both mandatory (agent review round 8, R8-1):
+    # procps truncates the ``command`` column to the terminal width, so a bare substring
+    # test against it matches nothing on Linux and this returns None — and its only caller
+    # is the reaper, so the spare is then NEVER reaped (~135 MB leaked per run). Anchoring
+    # on the flag and module also cannot match an unrelated command that merely mentions
+    # the module name.
     out = subprocess.run(
-        ["ps", "-eo", "pid=,ppid=,command="], capture_output=True, text=True
+        ["ps", "-eww", "-o", "pid=,ppid=,command="], capture_output=True, text=True
     ).stdout
     for line in out.splitlines():
         fields = line.split(None, 2)
         if len(fields) < 3:
             continue
         pid, ppid, command = fields
-        if int(ppid) == os.getpid() and standby.STANDBY_MODULE in command:
+        if int(ppid) == os.getpid() and f"-m {standby.STANDBY_MODULE}" in command:
             return int(pid)
     return None
 

@@ -698,7 +698,9 @@ def _reported_spare(report: dict[str, Any]) -> int | None:
     construction.
     """
     pid = report.get("spare_pid")
-    if isinstance(pid, int) and _live(pid):
+    # ``bool`` is an ``int`` in Python, so ``isinstance(True, int)`` would accept a JSON
+    # ``true`` where a pid belongs and then probe pid 1 (round 8, N-1).
+    if isinstance(pid, int) and not isinstance(pid, bool) and _live(pid):
         return pid
     return None
 
@@ -842,6 +844,18 @@ def test_one_spare_per_root_per_slot_however_many_consoles(
     first_spare = _reported_spare(first.result())
     assert first.result()["warmed"] is True
     assert first_spare is not None, "the console that won the slot has no live spare"
+    # ...and it IS the standby module, not merely some live pid (round 8, M-2): the pid
+    # above proves a child exists, this proves which one. ``-ww`` is mandatory for the
+    # reason the rest of this PR learned — procps truncates this column at the terminal
+    # width, and the module name sits past column 80 in a real row.
+    spare_command = subprocess.run(
+        ["ps", "-ww", "-o", "command=", "-p", str(first_spare)],
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert (
+        standby.STANDBY_MODULE in spare_command
+    ), f"the console's live child is not the standby module: {spare_command.strip()[:120]!r}"
 
     second = _warm_console(root, tmp_path, started, standby.SLOT_TUI, "b")
     loser = second.result()
@@ -860,10 +874,13 @@ def test_one_spare_per_root_per_slot_however_many_consoles(
     # A third spare is impossible, not merely discouraged: there is no slot left.
     third = _warm_console(root, tmp_path, started, standby.SLOT_TUI, "d")
     assert third.result()["warmed"] is False
-    assert _reported_spare(third.result()) is None, "a third console warmed a spare"
-    # EXACTLY TWO, one per slot — and they are different spares, which is the claim
-    # the memory ceiling rests on.
-    assert len({first_spare, daemon_spare}) == 2, "the two slots do not hold two distinct spares"
+    # EXACTLY TWO, one per slot, and a third console adds nothing — asserted as the UNION
+    # of all three consoles' spares. It used to be two lines, and the second of them could
+    # never fire on its own: a third spare implies ``warmed is True``, so the line above
+    # is what fails first and the spare check was redundant coverage (round 8, N-2).
+    assert (
+        len({first_spare, daemon_spare, _reported_spare(third.result())} - {None}) == 2
+    ), "the three consoles do not hold exactly two distinct spares"
 
     # Kernel-released on death, which is what ``flock`` buys over a pid file: kill
     # the TUI slot's owner and the slot is free immediately, with no stale owner to
