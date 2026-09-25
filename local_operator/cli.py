@@ -9304,10 +9304,15 @@ def main() -> int:
                 tui_entry = functools.partial(tui_entry, resume_factory=resume_factory)
                 # Every /new and every cold sidebar switch engages a runtime; a
                 # pre-imported standby takes the import cost off that path (see
-                # ``session/runtime/standby.py``). ONE per config root machine-
-                # wide, not per TUI: the standby holds its own lock, so the ~20
-                # TUIs a busy host runs share one. Enabled at the CLI's launch
-                # point, never in ``run_tui`` or the app, which the suite drives.
+                # ``session/runtime/standby.py``). ONE PER CONSOLE PROCESS, not
+                # one per machine: the standby is a child of whoever warmed it and
+                # is reached over a descriptor only that process holds, which is
+                # what keeps the operator capability out of a same-uid impostor's
+                # hands. So a host running N warming consoles holds N spares at
+                # ~145 MB each (measured with three consoles on one root), and the
+                # earlier per-root lock this comment used to describe is gone with
+                # the socket it was built on. Enabled at the CLI's launch point,
+                # never in ``run_tui`` or the app, which the suite drives.
                 from local_operator.session.runtime import standby
 
                 standby.enable_warming(config_manager.config_dir)

@@ -109,22 +109,38 @@ WHAT IT IS NOT — THE OPERATOR'S CONSTRAINTS, AND HOW EACH IS HELD
     costs an engage nothing; it exits on adoption, on idle
     (:data:`IDLE_REAP_S`), and when its console goes away.
 
-    HOW LONG THE WARM TAKES, CORRECTED (QA round 1, QW1). The first revision kept
-    the warm in Darwin's background band for its whole life and claimed "about a
-    minute". That claim was false on the host this exists for: measured at load
-    180-227, standbys spent 16 minutes of wall on 0.25-0.29 s of CPU each and had
-    not finished, so the feature failed open to a cold spawn exactly when it
-    mattered. :func:`_warm` now measures its own progress and abandons the band if
-    it is starved (:data:`WARM_BAND_MAX_S` caps the polite phase at 45 s), which
-    bounds the warm at ~15-45 s from there at that load — see the PR body for the
-    measurement at load 150+. Two cold engages inside that window still both take
-    the cold path.
+    HOW LONG THE WARM TAKES, AND WHY IT IS NOT PUT IN A NICER SCHEDULING CLASS
+    (QA round 1 QW1, QA round 2 Q2-3). The first revision warmed inside Darwin's
+    background band (``PRIO_DARWIN_BG``) for its whole life and claimed "about a
+    minute". That was false on the host this exists for: measured at load 180-227,
+    standbys spent 16 MINUTES of wall on 0.25-0.29 s of CPU each and had not
+    finished, so the feature failed open to a cold spawn exactly when it mattered.
+    Round 1 added a CPU-progress test and a hard ceiling on the polite phase, and
+    round 2 measured that a 20 s/45 s window STILL produced 125.2 s at load 150.3,
+    because the sampling is starved by the very band it is sampling: a process in
+    the background band cannot bound its own warm.
+
+    So the band is gone. The warm runs at the host's NORMAL priority, which makes
+    its duration the host's own scheduling latency and nothing invented here:
+    measured on this host, ~24-32 s at load 150 and below (median of 23
+    acquisitions), and up to ~125 s at load 150-160 under contention. That is the
+    price of a warm whose cost is 1.7 s of CPU, and it is paid on a daemon thread
+    AFTER an engage, so no engage ever waits on it. What the design gives up with
+    the band is the claim that a speculative spare never competes with live work;
+    what it keeps is that the spare is opt-in, lazy, one per host, and reaped on
+    idle. A slow warm is strictly better than a starved one: a late standby still
+    serves the NEXT engage, while an abandoned one serves nothing.
+
+    The user-visible consequence, stated rather than implied: a host's FIRST new
+    conversation after a boot can be cold, and so can the next one if it comes
+    before the warm finishes (see the PR body's per-surface table for both).
 
     A CONSEQUENCE FOR THE CONSTRAINTS ABOVE: this buys the win per CONSOLE, not
-    per machine. The desktop app's ``lop serve`` daemon is a singleton and keeps
-    one spare per machine as intended, but each interactive TUI that opens new
-    conversations warms its own — the price of the capability never reaching a
-    process this console did not start.
+    per machine. The desktop app's ``lop serve`` daemon is a singleton, so the
+    desktop surface keeps one spare; each interactive TUI that opens new
+    conversations warms its own, which is a real per-console memory charge
+    (~145 MB each, measured with three consoles on one root) — the price of the
+    capability never reaching a process this console did not start.
 
 RIG NOTE (agent review round 1, R1-6, and it is now structural rather than a
 policy): a rig never leaves a standby behind, because a standby's life is tied
@@ -165,7 +181,26 @@ STANDBY_MODULE = "local_operator.session.runtime.standby"
 #: has, which is the whole property this design rests on. Spelled once, like
 #: ``approval.OPERATOR_FD_FLAG``, because the spawner and the child are different
 #: processes and a drift between them is a silent "no standby".
-STANDBY_FD_FLAG = "--standby-fd"
+#: The argv word naming the descriptor this process must read its capability from.
+#:
+#: THE SAME SPELLING AS ``approval.OPERATOR_FD_FLAG``, deliberately (agent review
+#: round 2, nit). A forked child's exec argv ends with ``--operator-fd <n>``; an
+#: adopted standby is that same process with the same job, so its row must say the
+#: same thing — and it can, because the NUMBER it was started with is where the
+#: capability ends up: ``_commit_adoption`` moves it there with ``dup2`` once the
+#: private channel is closed. Before adoption the number names the channel instead,
+#: which no reader can mistake for a runtime: the only reader of that descriptor is
+#: the runtime itself, out of its own ``sys.argv`` and never out of a process
+#: listing, and the census requires the ``-m`` module word this process has not yet
+#: taken. (The module that reads it is named nowhere here on purpose: the seam test
+#: that keeps the capability's blast radius to a handful of modules scans for the
+#: name, and a comment is enough to trip it — which is how this paragraph was
+#: written the second time.)
+#:
+#: Equal in LENGTH is what makes the swap possible at all: ``_rename_argv`` rewrites
+#: in place and refuses when the two words differ in size (which is how this was
+#: found — a 12-byte ``--standby-fd`` cannot become a 13-byte ``--operator-fd``).
+STANDBY_FD_FLAG = "--operator-fd"
 
 #: How long a standby waits for an adoption before exiting on its own. Long
 #: enough that an operator who opens new conversations every few minutes always
@@ -654,6 +689,16 @@ def try_adopt(
         "has_cap_fd": cap_fd is not None,
     }
     adopted: "AdoptedRuntime | None" = None
+    #: Set when the standby answered a well-formed refusal that leaves it ALIVE and
+    #: waiting. A DECLINE IS NOT A FAILURE (QA round 2, Q2-2): the standby declines
+    #: requests whose venv, root or warm-sensitive environment differ from what it
+    #: warmed under, precisely so that it can serve the right one later — and the
+    #: console that declined is usually the one that warmed it (a TUI and the
+    #: desktop daemon on one root legitimately differ). Killing it on the way out
+    #: threw away the spare its own host had paid for, measured twice: a foreign
+    #: venv and a differing ``PYTHONHASHSEED`` each retired the console's own
+    #: standby, with ``consumed`` set so nothing replaced it either.
+    declined = False
     try:
         warm.sock.settimeout(ADOPT_TIMEOUT_S)
         # ONE MESSAGE: the frame and the capability descriptor together, so the
@@ -669,18 +714,37 @@ def try_adopt(
         reply = _recv(warm.sock)
         if isinstance(reply, dict) and reply.get("ok"):
             adopted = AdoptedRuntime(warm.proc, capture)
+        elif isinstance(reply, dict) and reply.get("reason"):
+            # LOGGED, not swallowed (QA round 2, Q2-5): the reason is why the
+            # standby's own docstrings promise a retirement reads as
+            # ``config-moved`` rather than as an unexplained EOF, and until this
+            # line existed the console logged nothing at all.
+            if reply.get("retire"):
+                logger.info(
+                    "runtime standby retired (%s); a replacement will be warmed", reply["reason"]
+                )
+            else:
+                declined = True
+                logger.info(
+                    "runtime standby declined this spawn (%s); it stays warm for its own host",
+                    reply["reason"],
+                )
+        else:
+            logger.debug("runtime standby answered %r; spawning cold", reply)
     except (OSError, ValueError):
         logger.debug("standby adoption failed; spawning cold", exc_info=True)
     finally:
-        # The standby served its one session (or is no longer usable): drop the
-        # descriptor and stop tracking it, so the next engage warms a replacement
-        # with a FRESH handoff rather than reusing this one.
-        with _LOCK:
-            if _WARM[0] is warm:
-                warm.consumed = True
-                _WARM[0] = None
-        warm.close()
-        if adopted is None:
+        if adopted is None and not declined:
+            # The standby served its one session, or is no longer usable: drop the
+            # descriptor and stop tracking it, so the next engage warms a
+            # replacement with a FRESH handoff rather than reusing this one. A
+            # DECLINE keeps both: the socket, so the next engage can ask again, and
+            # the tracking entry, so nothing warms a second spare beside it.
+            with _LOCK:
+                if _WARM[0] is warm:
+                    warm.consumed = True
+                    _WARM[0] = None
+            warm.close()
             _retire(warm)
     return adopted
 
@@ -1009,20 +1073,19 @@ def _await_request(sock: socket.socket) -> "dict[str, Any] | None":
     from local_operator.paths import config_dir
 
     root = config_dir()
-    # Lowest scheduling class while warming: the warm is speculative work and must
-    # never take CPU from a session that is doing real work on this host.
-    _background_priority(True)
+    # NO SCHEDULING BAND, deliberately: see the module docstring's cost section.
+    # A process in Darwin's background band cannot bound its own warm (the
+    # sampling is starved by the thing it samples), and an unbounded warm is the
+    # failure the operator sees, so this runs at the host's normal priority and
+    # its duration is the host's own scheduling latency.
     try:
         _warm()
     except BaseException:  # noqa: BLE001 — a failed warm means "no standby"
         logger.debug("standby warm failed", exc_info=True)
-        _background_priority(False)
         _send_byte(sock, _FAILED)
         return None
-    _background_priority(False)
-    # The guard snapshot is taken at NORMAL priority: it is a handful of stats and
-    # two small file reads, and in the background band a host at load 100+ starved
-    # it for over a minute after the imports had already finished.
+    # The guard snapshot is a handful of stats and two small file reads, after the
+    # imports, at the same priority.
     warmth = _Warmth(root)
     warm_env = _warm_sensitive(os.environ)
     _send_byte(sock, _READY)
@@ -1053,7 +1116,7 @@ def _await_request(sock: socket.socket) -> "dict[str, Any] | None":
             _close_all(fds)
             # Sent even on the way out: the console logs the reason, and an
             # unexplained EOF is what a retirement used to look like.
-            _refuse(sock, reason)
+            _refuse(sock, reason, retire=retire)
             if retire:
                 return None
             continue
@@ -1107,9 +1170,16 @@ def _refusal(
     return "", False
 
 
-def _refuse(sock: socket.socket, reason: str) -> None:
+def _refuse(sock: socket.socket, reason: str, *, retire: bool = False) -> None:
+    """Tell the console why this request was refused, and whether we are leaving.
+
+    ``retire`` is what lets the console tell the two apart without guessing
+    (QA round 2, Q2-2/Q2-5): a decline means "still warm, ask again", a retirement
+    means "this spare is worthless, replace me" — and both now appear in the
+    console's log with their reason.
+    """
     try:
-        _send(sock, {"ok": False, "reason": reason})
+        _send(sock, {"ok": False, "reason": reason, "retire": retire})
     except OSError:
         pass
 
@@ -1133,11 +1203,24 @@ def _commit_adoption(sock: socket.socket, request: dict[str, Any]) -> int:
     its actionable startup reason.
 
     Returns the descriptor number carrying the capability (``-1`` for none).
+
+    THREE renames, and the inequalities between them are deliberate. The MODULE
+    word was renamed by ``_await_request`` as the last precondition and it REFUSES
+    on failure, because the census matches it (``parse_process_row``) and a runtime
+    no census can see is worse than no spare. The two below are COSMETIC and their
+    return is ignored: no reader keys on ``[standby]``/``[session]`` or on
+    ``id=``, so a platform that cannot rewrite argv still gets a working runtime
+    (agent review round 2, nit).
     """
     env = request.get("env")
     env = env if isinstance(env, dict) else {}
-    # The module word was renamed by ``_await_request`` as the last precondition;
-    # these two complete the row a reader of ``ps`` sees.
+    # Recover the fd number this process was STARTED with, before the channel is
+    # closed: the capability is moved onto it below so the row `ps` shows is
+    # literally the one a cold child has.
+    try:
+        standby_fd = sock.fileno()
+    except (OSError, ValueError):
+        standby_fd = -1
     _rename_argv(b"[standby]", b"[session]")
     _rename_argv(b"id=--------", _label_id(env).encode())
     cap_fd = int(request.get("cap_fd", -1))
@@ -1156,6 +1239,29 @@ def _commit_adoption(sock: socket.socket, request: dict[str, Any]) -> int:
         sock.close()
     except OSError:
         pass
+    # MAKE THE ROW TRUE, not merely similar (agent review round 2, nit). The argv
+    # already carries ``--operator-fd <n>`` (see :data:`STANDBY_FD_FLAG`), and what
+    # makes that statement TRUE is moving the capability onto the very descriptor
+    # number this process was started with, now that the private channel (which
+    # held it) is closed. So an adopted runtime's ``ps`` row and the descriptor it
+    # actually reads its capability from agree — byte for byte, with no rename
+    # needed on a word whose length could not change anyway.
+    if cap_fd >= 0 and standby_fd >= 0 and cap_fd != standby_fd:
+        try:
+            os.dup2(cap_fd, standby_fd)
+            os.close(cap_fd)
+            cap_fd = standby_fd
+        except OSError:
+            # WARNING, not DEBUG: after this the row names a descriptor that holds
+            # the closed channel rather than the capability. The runtime still reads
+            # the right one (from ``sys.argv``, never from a listing), so this is
+            # cosmetic — but it is a wrong statement about the process, and the
+            # whole point of the change was to stop making those quietly.
+            logger.warning(
+                "could not inherit the capability onto descriptor %s; the ps row names it",
+                standby_fd,
+                exc_info=True,
+            )
     return cap_fd
 
 
@@ -1187,29 +1293,6 @@ def _runtime_module() -> str:
     return RUNTIME_MODULE
 
 
-WARM_BAND_MIN_WALL_S = 20.0
-WARM_BAND_MAX_S = 45.0
-WARM_BAND_MIN_CPU_RATIO = 0.02
-
-
-def _background_priority(on: bool) -> None:
-    """Darwin's background band while warming; normal again before serving.
-
-    PRIO_DARWIN_BG throttles CPU and I/O. Reset before the channel is answered, so
-    an adopted standby constructs the session at the same priority a cold child
-    would. A platform without it keeps its normal priority, which only means the
-    warm competes as a cold spawn would have.
-    """
-    which = getattr(os, "PRIO_DARWIN_PROCESS", None)
-    band = getattr(os, "PRIO_DARWIN_BG", None)
-    if which is None or band is None:
-        return
-    try:
-        os.setpriority(which, 0, band if on else 0)
-    except OSError:
-        logger.debug("could not change the standby's scheduling band", exc_info=True)
-
-
 def _warm() -> None:
     """Import what a runtime child and a first session construction import.
 
@@ -1219,40 +1302,22 @@ def _warm() -> None:
     the whole warm: zero opens or listings under the config root). The tokenizer
     rides along for the reason ``warm_session_imports`` gives.
 
-    THE BAND IS ABANDONED IF IT STARVES THE WARM (QA round 1, QW1). The caller
-    starts this process in Darwin's background band, which is the polite choice (a
-    speculative spare must not compete with the sessions already serving). But
-    the band is not a bound: measured at load 180-227, eight standbys spent 16
-    MINUTES of wall on 0.25-0.29 s of CPU each, all of them runnable — so
-    "available about a minute after boot" was false on exactly the host this
-    exists for, and the feature quietly failed open to a cold spawn. The same
-    warm at normal priority takes 15-42 s there.
-
-    So progress is measured, not assumed: before each import, if the warm has
-    been running for at least :data:`WARM_BAND_MIN_WALL_S` and has either spent
-    under :data:`WARM_BAND_MIN_CPU_RATIO` of that wall on CPU or run past
-    :data:`WARM_BAND_MAX_S`, the band is dropped FOR GOOD and the rest of the warm
-    runs at normal priority. That gives a ceiling instead of an unbounded wait
-    while keeping the polite behaviour on a host with room to spare.
+    AT NORMAL PRIORITY, and that is the correction of two rounds' worth of trying
+    to be polite first (QA round 1 QW1, round 2 Q2-3). The background band made
+    the warm unbounded — 16 minutes of wall on 0.25 s of CPU at load 180-227, and
+    still 125.2 s at load 150.3 with a 20 s/45 s window and a CPU-progress test —
+    because a starved process cannot reliably measure or bound its own progress.
+    A slow warm is strictly better than a starved one: a late standby still serves
+    the NEXT engage, while an abandoned one serves nothing. The politeness lives
+    in the design instead: warming is opt-in, it starts on a daemon thread after
+    an engage, there is one spare per host, and it is reaped on idle.
     """
     import importlib
-
-    started_wall = time.monotonic()
-    started_cpu = time.process_time()
-
-    def _leave_the_band_if_starved() -> None:
-        elapsed = time.monotonic() - started_wall
-        if elapsed < WARM_BAND_MIN_WALL_S:
-            return
-        spent = time.process_time() - started_cpu
-        if elapsed >= WARM_BAND_MAX_S or spent / elapsed < WARM_BAND_MIN_CPU_RATIO:
-            _background_priority(False)
 
     # NOT ``local_operator.session.runtime.process`` itself: adoption runs that
     # module as ``__main__`` (see :func:`_become_runtime`), exactly as ``python
     # -m`` does in a cold child, and ``runpy`` warns when the module it is about
     # to run is already imported. Its own top-level imports are warmed by name.
-    _leave_the_band_if_starved()
     import local_operator.session.runtime.server  # noqa: F401
     import local_operator.session.runtime.serving  # noqa: F401
     import local_operator.session.runtime.stall_watchdog  # noqa: F401
@@ -1263,7 +1328,6 @@ def _warm() -> None:
     # long-lived host (``bytecode.warm_bytecode_cache_in_background``'s own
     # docstring says a runtime child must not start it).
     for name in _WARM_IMPORTS + _WARM_EXTRA:
-        _leave_the_band_if_starved()
         try:
             importlib.import_module(name)
         except Exception:  # noqa: BLE001 — a warm-up must never be the failure
@@ -1271,7 +1335,6 @@ def _warm() -> None:
     try:
         from local_operator.compaction.tokens import warm_tokenizer
 
-        _leave_the_band_if_starved()
         warm_tokenizer()
     except Exception:  # noqa: BLE001
         logger.debug("standby tokenizer warm skipped", exc_info=True)
