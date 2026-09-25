@@ -73,8 +73,13 @@ def test_compact_schema_and_prompt_omit_repeated_action_ids() -> None:
     assert compact["properties"]["observation_id"]["pattern"] == r"\S"
     assert public_reply_schema() == legacy
     assert build_system_prompt() == build_system_prompt(action_binding=LEGACY_ACTION_BINDING)
+    # The legacy prompt is byte-frozen on purpose, and the digest moved once:
+    # the "finish" bullet gained the sentence that states the completion gate's
+    # contract (the reason the model is told to check the newest observation
+    # against the task before declaring done). Re-pin deliberately, never by
+    # pasting whatever the run printed.
     assert hashlib.sha256(build_system_prompt().encode()).hexdigest() == (
-        "9ba3e9d180e28ac8e7f189b00bb1fa062b5092a68036300d99b869ffedc7836a"
+        "6c94d6494b605e791b77af73d0bbb1cbf411773d730670f2f255f3cf19fa2b29"
     )
     assert '"observation_id": "<current observation id>"' in build_system_prompt(
         action_binding=COMPACT_ACTION_BINDING
@@ -199,7 +204,10 @@ async def test_compact_contract_is_sealed_in_verified_runner_bundle(
     stream = ScriptedStream(compact_reply)
     client = _client(stream, tmp_path / "artifacts", action_binding=COMPACT_ACTION_BINDING)
     run_root = tmp_path / "runner"
-    config = build_config(run_root)
+    # Control arm: this test is about which reply CONTRACT is sealed, and the
+    # completion gate's own extra cycle is covered by
+    # ``tests/unit/evaluation/runner/test_completion_gate.py``.
+    config = build_config(run_root, completion_gate=False)
     episode_spec = build_spec(episode_id)
     adapter_selector = selector(tmp_path)
 

@@ -278,7 +278,16 @@ def load_anchor(uid: int | str | None = None) -> AnchorLoad:
         )
     opened = _open_no_follow(path)
     if opened is None:
-        return AnchorLoad(anchor=None, path=path, root_owned=False, reason="no anchor installed")
+        # WHAT THE READER IS TOLD CHANGED HERE (design round 1, D1). "no anchor installed"
+        # named the FILE; this names the CONSEQUENCE, so `lop operator status` can put it
+        # on a `reason` line beside the key agent's own fault rather than in place of it —
+        # the two are independent facts and one used to overwrite the other.
+        return AnchorLoad(
+            anchor=None,
+            path=path,
+            root_owned=False,
+            reason="no anchor is installed, so the runtime trusts no key yet",
+        )
     descriptor, info = opened
     try:
         if os.name != "nt":  # pragma: no branch — the POSIX check is the measured one
