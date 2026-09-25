@@ -576,12 +576,34 @@ def serve_process(pid: int, *, timeout_s: float = HEALTH_TIMEOUT_S) -> str | Non
     be signalled must be re-identified at signal time, because a pid is
     recyclable and a snapshot is not evidence about this instant. ``None`` is
     therefore a REFUSAL at every call site, never "probably gone".
+
+    ``-ww`` IS MANDATORY, and the last column is why. ``command`` is the column
+    ``is_serve_command`` word-matches, and ``ps`` extends a LAST column only to the
+    display width — which, with stdout on a pipe (every call site here, including
+    the app's own managed backend), is not knowable: ``ps(1)`` says the width "is
+    undefined (it may be 80, unlimited, determined by the TERM variable, and so on)".
+    A cut lands exactly where the brand is. The app's managed backend — a
+    ``<generation>/bin/python -c "<entrypoint>" serve`` line, and the daemon that
+    held port 1111 in the 2026-09-23 incident — is a 140-column command whose
+    ``serve`` verb sits at column 129 of the row this function's own format prints,
+    so a row cut to 80 OR 120 columns makes :func:`is_serve_command` answer False
+    and ``reclaim`` refuses the app's own daemon as "not a ``lop serve`` daemon".
+    Fail-closed, and wrong: the R3-1 refusal returning. ``-ww`` is unlimited width.
+
+    NOT ``-Eww``, which the runtime sweep's readers use: ``-E`` would append every
+    process's own environment to this same column, and this column is exactly the
+    text a BRAND PROOF reads. An environment word pair spelled like the serve
+    marker (or a ``lop`` + ``serve`` pair in any variable's value) would then be
+    accepted as this product's daemon, and for a stray that proof is the entire
+    case for signalling it. ``-E`` is also a macOS-only ``ps`` flag — on Linux
+    procps it does not exist, so the environment spelling would not merely widen
+    the row there, it would fail the fork and turn every reclaim into a refusal.
     """
     import subprocess
 
     try:
         result = subprocess.run(  # noqa: S603 — fixed argv, no shell
-            ["/bin/ps", "-p", str(pid), "-o", "uid=,command="],
+            ["/bin/ps", "-ww", "-p", str(pid), "-o", "uid=,command="],
             capture_output=True,
             text=True,
             timeout=timeout_s,
