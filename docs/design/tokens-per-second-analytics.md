@@ -112,15 +112,50 @@ change**, and no provider client is touched.
 ### 3.1 Hot-path budget
 
 Constraint: **at most ONE `time.monotonic()` per output delta, no allocation,
-no lock, no I/O**, and the existing two `getattr(event, "type", "")` lookups
-collapse into one.
+no lock, no I/O.**
 
-Today the loop does two lookups per event (the second short-circuits once
-`first_reasoning_at` is set). The change performs ONE lookup and dispatches on
-it:
+**CORRECTED AFTER MEASUREMENT (benchmark round 1).** An earlier revision of this
+section claimed the change *saves* work by collapsing the loop's two
+`getattr(event, "type", "")` lookups into one. That claim is **false**, and the
+benchmark falsified it: both of the old guards are `x is None and getattr(...)`,
+so once `first_token_at` and `first_reasoning_at` are set they **short-circuit to
+zero lookups per event** in the steady state, while the decode window must
+classify *every* event to know which are output deltas. The change therefore
+ADDS one event dispatch (one pydantic field read plus one `frozenset` membership
+test) per event, on top of the clock read per output delta.
+
+Measured, interleaved A/B on this host at load average 44-61, min of 600 samples
+per point (`scripts/bench_tps_overhead.py`):
+
+| N deltas | base ns/event | head ns/event | paired delta (3 rounds) |
+|---|---|---|---|
+| 50 | 3 567.5 | 3 662.5 | +169.2 / +80.8 / +246.7 |
+| 500 | 3 289.8 | 3 515.7 | +354.7 / +101.8 / +225.8 |
+| 5 000 | 3 782.1 | 3 998.1 | +366.2 / −68.8 / +445.9 |
+
+best-of-600 slope, 500 → 5 000: **base 3 836.8, head 4 051.8, delta
++214.9 ns/event** — against a bare `time.monotonic()` of 37-43 ns (best) /
+68-73 ns (median) on the same host at the same moment, i.e. 2.4-5.7× one clock
+read, not the ~1× the earlier revision implied.
+
+What the measurement DID confirm, structurally and exactly (counted, not timed):
+`head` reads the clock **exactly once per output delta** (1.0006/drain at
+N = 5 000; base 0.0008), and `head` performs exactly one type dispatch per event
+(N/drain; base 3 per drain, i.e. only while its guards are still unset).
+
+The honest statement of the cost is therefore: **one clock read plus one event
+dispatch per output delta, about 0.2 µs/event in total** — ~1 ms on a 5 000-delta
+turn, against a generation measured in seconds. That is not a significant
+overhead for a turn, which is what the operator asked for; it is simply not the
+*saving* the earlier revision claimed, and the code comment beside the loop says
+the same thing as this table rather than the old claim.
+
+Everything else in the budget holds: no allocation, no lock, no `await`, no I/O
+in the delta branch (structural: the branch is four scalar locals and two
+comparisons).
 
 ```python
-event_type = getattr(event, "type", "")          # ONE lookup, was two
+event_type = getattr(event, "type", "")   # ONE dispatch per event (see above)
 if event_type == "reasoning_delta":
     now = time.monotonic() if first_reasoning_at is None else None
     if now is not None:
@@ -137,14 +172,6 @@ elif event_type in _OUTPUT_DELTA_TYPES:          # module-level frozenset
     if first_output_at is None:
         first_output_at = last_output_at
 ```
-
-Budget accounting per output delta: **exactly one `time.monotonic()`**, one
-integer increment, up to two float assignments, one set-membership test. No
-`list.append`, no dict, no lock, no `await`, no I/O. The first delta costs no
-*extra* read because it reuses the one already taken for `last_output_at`.
-`time.monotonic()` is a vDSO/`mach_absolute_time` read, tens of nanoseconds; a
-2,000-delta turn spends well under a millisecond against a multi-second
-generation.
 
 **Byte-for-byte transparency is preserved.** Nothing is added to, removed from,
 or reordered in the yielded stream: the loop still ends in `yield event`, and

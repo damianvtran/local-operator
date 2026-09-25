@@ -5744,11 +5744,21 @@ class SessionStreamFn:
             self._descendant_request_counter.begin()
         try:
             async for event in stream:
-                # ONE ``getattr`` for the event type, where the two stamps below
-                # used to do one each. The dispatch is the decode window's hot
-                # path: per output delta it is one lookup, one integer
-                # increment, up to two float assignments and one
-                # set-membership test — no allocation, no lock, no I/O.
+                # ONE ``getattr`` for the event type, and it is an ADDITION to
+                # this loop rather than a saving — measured, not assumed
+                # (``scripts/bench_tps_overhead.py``, interleaved A/B below).
+                # The two stamps this dispatch replaces were
+                # ``first_token_at is None and getattr(...)``, so they
+                # SHORT-CIRCUITED to zero lookups per event once their stamp was
+                # set; the decode window cannot do that, because knowing which
+                # events are output deltas is the whole measurement. So per
+                # event this adds one pydantic field read plus one frozenset
+                # membership test, and per OUTPUT delta it adds exactly one
+                # ``time.monotonic()`` on top (counted: 1.0006 clock reads per
+                # delta, against 0.0008 before). Measured cost: +215 ns/event
+                # (best-of-600 slope, 500 -> 5 000 deltas), which is ~1 ms on a
+                # 5 000-delta turn against a generation measured in seconds. No
+                # allocation, no lock, no I/O in the delta branch.
                 event_type = getattr(event, "type", "")
                 if event_type == "reasoning_delta":
                     # Matched on the event's own type string, exactly as
