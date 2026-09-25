@@ -493,9 +493,9 @@ def default_db_path() -> Path:
 #: :meth:`AuthStore._usage_ranked_order`, which closes the usage cache per
 #: ranking for this reason. Eight is far above any real process's credential
 #: roots (one, plus an isolated or server root) and 24 descriptors at worst.
-_SHARED_STORES: "OrderedDict[tuple[str, str, tuple[tuple[str, str], ...]], AuthStore]" = (
-    OrderedDict()
-)
+_SHARED_STORES: (
+    "OrderedDict[tuple[str, str, tuple[tuple[str, str], ...], tuple[int, int] | None], AuthStore]"
+) = OrderedDict()
 _SHARED_STORES_MAX = 8
 
 #: Guards the map, and is held ACROSS the ``AuthStore()`` construction inside
@@ -519,6 +519,33 @@ def _canonical_config_root(config_root: Path | None) -> Path:
     construction.
     """
     return config_root if config_root is not None else config_dir()
+
+
+def _file_identity(path: Path) -> tuple[int, int] | None:
+    """``(st_dev, st_ino)`` for the file at ``path``, or ``None`` if it is absent.
+
+    The accessor keys on this, and it is a CORRECTNESS component rather than
+    bookkeeping. A live SQLite connection is bound to the INODE it opened, not
+    to the path it was opened by: if ``auth.db`` is deleted and recreated — a
+    logout that wipes it, a restored backup, ``VACUUM``, or a test suite that
+    recycles a temp directory — a cached connection keeps answering from the
+    unlinked old file, and every new row written to the replacement is
+    invisible to it. Measured, in the classification suite: two parametrized
+    cases sharing a recreated ``tmp_path`` had a fresh connection see the new
+    row while the shared connection still answered from the deleted one, which
+    surfaced as a credential "stored by login" that the cascade could not find.
+
+    So the identity is part of the key: a replacement moves the key, the next
+    acquisition builds a store on the current file, and the stale entry is left
+    to the map's bound. On a platform or filesystem that does not fill
+    ``st_ino`` this degrades to the path-only behaviour it replaces rather than
+    failing.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_dev, stat.st_ino)
 
 
 def shared_auth_store(
@@ -580,8 +607,9 @@ def shared_auth_store(
     covered than three: the three classification legs previously held three
     independent "single-flight" locks for one credential. It holds no per-call
     state that a second caller could corrupt: a cursor is created and consumed
-    inside one serialized statement, and the store commits each write rather
-    than leaving a transaction open across calls.
+    inside one serialized statement, and every write path commits in the same
+    call, so no transaction is left open across calls (checked over all thirteen
+    ``commit`` sites).
 
     ``usage_cache`` is deliberately NOT accepted: it is an injection seam for
     tests, a per-store handle, and a caller that needs its own has no business
@@ -590,21 +618,29 @@ def shared_auth_store(
     The map is bounded at :data:`_SHARED_STORES_MAX` roots and evicts by
     dropping its reference, never by closing — see the note there. A process
     with more distinct credential roots than that keeps working; it just stops
-    reusing the least recently used ones.
+    reusing the least recently used ones. An entry is also keyed on the file's
+    IDENTITY and not only its path, so a deleted-and-recreated ``auth.db`` is
+    never served from the old connection — see :func:`_file_identity`.
     """
     resolved_db = Path(db_path) if db_path is not None else default_db_path()
-    key = (
+    base_key = (
         str(resolved_db),
         str(_canonical_config_root(config_dir)),
         tuple(sorted((config_overrides or {}).items())),
     )
     with _SHARED_STORES_LOCK:
+        # Stat BEFORE the lookup so a replaced file is a miss rather than a
+        # stale hit (see :func:`_file_identity`), and again after construction
+        # so the entry is filed under the inode the store actually opened —
+        # which for a first call is the one the constructor just created.
+        key = (*base_key, _file_identity(resolved_db))
         store = _SHARED_STORES.get(key)
         if store is None or store.closed:
             # Reopen rather than hand back a closed handle (see CLOSING above);
             # a fresh AuthStore also re-arms the lazily-built usage cache, which
             # ``close()`` had dropped.
             store = AuthStore(resolved_db, config_dir=config_dir, config_overrides=config_overrides)
+            key = (*base_key, _file_identity(resolved_db))
             _SHARED_STORES[key] = store
         _SHARED_STORES.move_to_end(key)
         while len(_SHARED_STORES) > _SHARED_STORES_MAX:
