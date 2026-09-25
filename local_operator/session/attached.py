@@ -2583,10 +2583,7 @@ class AttachedSession:
         retained dial in place (``attaching``), which is what the bridge's
         ``cold``/``cold_reason`` pair reports.
         """
-        from local_operator.mobile.attach_client import (
-            dialable_owner_record,
-            find_runtime_record,
-        )
+        from local_operator.mobile.attach_client import dialable_owner_record
 
         # FOREGROUND: an HTTP request is waiting on this acquisition, so it
         # announces itself rather than silently inheriting whatever envelope a
@@ -2625,10 +2622,19 @@ class AttachedSession:
                     # (review round 2, NIT-2).
                     self._note_read_cold_reason(self._runtime_record, self._runtime_pid)
                 return False
-            record, owner = await asyncio.to_thread(
-                find_runtime_record, self._config_dir, self._session_id
-            )
-            if record is None and owner is not None:
+            # THE OWNER SEAM, NOT THE LOCAL REGISTRY (mesh slice DB2). This asked
+            # ``find_runtime_record`` directly, which is a scan of THIS machine's
+            # run directory — so for a session another device holds it answered
+            # "no runtime" about a conversation whose runtime is live on the peer,
+            # and a desktop read could never attach to one (the read attach is the
+            # ONLY route by which a remote viewer's transcript arrives, since
+            # there is no local journal to parse). ``SessionOwner.locate`` is
+            # defined as the same contract for exactly this reason: the local
+            # owner delegates to that same function, so THIS DEVICE'S BEHAVIOUR IS
+            # UNCHANGED, and a remote owner asks the peer and reproduces both of
+            # its states ("no owner" and "an owner that published no record").
+            record, owner = await asyncio.to_thread(self._owner.locate)
+            if record is None and owner is not None and self._owner.placement.is_local:
                 # AN owner EXISTS but published no LIVE record: an older binary, a
                 # registrant that failed, or — the case a read must not call "no
                 # runtime" — a WEDGED record (pid alive, heartbeat stale), which
@@ -2637,6 +2643,15 @@ class AttachedSession:
                 # projection's identity check arbitrates, so one refused dial is
                 # the entire cost, and a stuck owner that recovers on its own is
                 # served instead of being reported as absent.
+                #
+                # LOCAL PLACEMENT ONLY, and that clause is the fix rather than
+                # tidiness: ``dialable_owner_record`` is a pid→record lookup in
+                # THIS machine's run directory, so asking it about a peer's pid
+                # could only ever match a record of some unrelated LOCAL runtime
+                # that happened to reuse the number. A remote owner's own
+                # ``locate`` has already asked the peer both of the questions this
+                # fallback exists for, and its answer is the only one that can be
+                # true here.
                 record = await asyncio.to_thread(dialable_owner_record, self._config_dir, owner)
             if record is None or self._disposed:
                 if budget is not None:

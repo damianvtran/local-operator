@@ -9236,7 +9236,7 @@ class OperatorApp(App[None]):
         if session_id:
             from local_operator.paths import config_dir
 
-            if self._announce_remote_session(session_id, config_dir()):
+            if self._open_session_or_refuse(session_id, config_dir()):
                 # THE PEER ROW STAYS THE ORIGIN (review round 9, MINOR 1). This
                 # used to clear the intent, and ``_switch_session_from`` then
                 # re-derived its origin from the ATTACHED session — the local row
@@ -14802,7 +14802,7 @@ class OperatorApp(App[None]):
         # without remembering the symbol.
         self._resume_session(arg.strip() or RESUME_LATEST, notice)
 
-    def _announce_remote_session(self, session_id: str, root: Path) -> bool:
+    def _open_session_or_refuse(self, session_id: str, root: Path) -> bool:
         """OPEN ``session_id`` as a remote viewer when ANOTHER DEVICE holds it.
 
         THE ONE GUARD BEHIND EVERY WAY A USER NAMES A SESSION THEY ARE NOT ON
@@ -14814,10 +14814,15 @@ class OperatorApp(App[None]):
         a local attach, so prompts, steering, ``/stop``, ``/model``, ``/rename``
         and every routed slash execute on the peer's runtime.
 
-        The name is kept so both callers read unchanged; the contract is too — a
-        ``True`` is the WHOLE outcome for that id and the caller must start
-        nothing of its own (the U27 lesson: the pick used to start a local
-        navigation anyway and print the local store's failure over the top).
+        The name says what the caller needs, because the name is what a future
+        reader greps for: it OPENS the session when another device holds it and
+        REFUSES it with a sentence when that device is unreachable — a ``True``
+        is the WHOLE outcome for that id and the caller must start nothing of its
+        own (the U27 lesson: the pick used to start a local navigation anyway and
+        print the local store's failure over the top). It was called
+        ``_announce_remote_session`` until round 1's NIT 2: it had stopped
+        announcing anything, and a reader looking for "who opens a remote
+        session" would not have found it under that name.
 
         CACHE-ONLY ON THE HIT, ONE READ ON THE MISS (UX round 3, U20):
         ``remote_row_for`` reads the producer the sidebar's poll fills, and pays a
@@ -14827,22 +14832,20 @@ class OperatorApp(App[None]):
         AN UNREACHABLE PEER IS REFUSED WITH ITS REASON, not opened into a viewer
         that can never bind (``mesh-ui.md`` §1.3 degraded states): the sentence
         names the device, the reason in words, and the one command that
-        diagnoses the link.
+        diagnoses the link. It is ``remote_open.unreachable_peer_sentence`` — the
+        SAME composer the desktop backend answers the same state with, so one
+        situation is described one way on both surfaces.
         """
-        from local_operator.resume import UNNAMED_DEVICE, peer_reason_words
-        from local_operator.session.remote_open import remote_row_for
+        from local_operator.session.remote_open import (
+            remote_row_for,
+            unreachable_peer_sentence,
+        )
 
         row = remote_row_for(session_id, root)
         if row is None:
             return False
-        device = row.owner_label or UNNAMED_DEVICE
         if not row.reachable:
-            self._system_notice(
-                f"{session_id} is on {device}, which is unreachable "
-                f"({peer_reason_words(row.unreachable_reason)}). /network doctor "
-                f"{row.owner_device_name or row.owner_device} diagnoses the link.",
-                "warning",
-            )
+            self._system_notice(unreachable_peer_sentence(session_id, row), "warning")
             return True
         self._run_session_transition(self._open_remote_session(session_id, row, root))
         return True
@@ -14918,9 +14921,9 @@ class OperatorApp(App[None]):
             # machine's store, fail, and report a missing session about a session
             # that is running perfectly well one device over. The sentence, the
             # cache policy and the cold-cache fallback all live in
-            # `_announce_remote_session`, so this arm and the pick cannot answer
+            # `_open_session_or_refuse`, so this arm and the pick cannot answer
             # one session two ways.
-            if self._announce_remote_session(concrete, config_dir()):
+            if self._open_session_or_refuse(concrete, config_dir()):
                 return
             owner = live_runtime_pid(config_dir(), concrete)
             if owner is not None and owner != os.getpid():
@@ -27888,7 +27891,7 @@ class OperatorApp(App[None]):
                 )
             finally:
                 self._move_in_flight = False
-            self._publish_move_result(target_id, request, result, phase_notice)
+            self._publish_move_result(target_id, request, result, phase_notice, left=leaving)
 
         self.run_worker(run(), thread=False, group="session-move", exit_on_error=False)
 
@@ -27914,13 +27917,48 @@ class OperatorApp(App[None]):
         request: "MoveTo",
         result: dict[str, Any],
         phase_notice: NoticeBlock,
+        *,
+        left: bool = False,
     ) -> None:
-        """Restate the phase row as the receipt, then reopen the session where it lives."""
+        """Restate the phase row as the receipt, then reopen the session where it lives.
+
+        ``left`` says this move was entered from INSIDE the session being moved,
+        so the request had to leave it first (``_leave_for_move``) — and that is
+        the fact every branch below needs. On a refusal it decides both the
+        sentence ("Nothing changed" is FALSE, because locally the TUI did leave)
+        and the way back (without one, the user is dropped onto an empty local
+        session by a command that reported nothing happened). On a success it is
+        already implied; the reopen is the same one either way.
+        """
         phases = [str(item.get("phase") or "") for item in result.get("phases") or ()]
         if not result.get("ok"):
             reached = str(result.get("phase_reached") or "")
             changed = bool(result.get("changed"))
-            tail = "" if changed else " Nothing changed."
+            if left and changed:
+                # THE HALF-COMMITTED CASE, where round 1's sentence was simply
+                # false. ``changed=True`` means the contract says the move already
+                # DID something — the CLI's own message for the
+                # ``deadline_exceeded`` refusal says the handoff was committed, and
+                # its ``--keep`` variant warns that asking again would make another
+                # copy — so "it did not move" would contradict the refusal printed
+                # in the same sentence. What is true, and all the user needs, is
+                # where they are now and that the move may have gone through.
+                tail = (
+                    f" You are back on {session_id}; this move may already have gone "
+                    "through, so check before asking again."
+                )
+            elif left:
+                # THE USER WAS MOVED OFF THE SESSION TO GET HERE. Saying
+                # "Nothing changed" would be a lie about a screen the user can
+                # see, and the caller would be left on a fresh local session with
+                # no statement of where the one they were in went — so the tail
+                # names the way back this method then takes. Order matters in the
+                # sentence: the refusal, then the truth about the local state.
+                tail = f" You are back on {session_id} — it did not move."
+            elif changed:
+                tail = ""
+            else:
+                tail = " Nothing changed."
             message = str(result.get("message") or "the move was refused")
             text = f"Could not move {session_id}: {message}.{tail}".replace("..", ".")
             if reached in MOVE_PHASE_ORDER:
@@ -27934,6 +27972,16 @@ class OperatorApp(App[None]):
                 # happened" in a second, louder register (seen in the frame).
                 self._transcript_view().remove_block(phase_notice)
             self._system_notice(text, "error")
+            if left:
+                # THE WAY BACK, and the reason the sentence above is true: every
+                # refusal that arrives AFTER the leave (``busy``,
+                # ``digest_mismatch``, ``relay_unavailable``,
+                # ``session_unreachable``, and the ``deadline_exceeded`` one built
+                # with ``changed=True``) has already left the session, and none of
+                # them moves it. Reopening where it LIVES is the one answer that
+                # covers both placements the pick knows: a peer's id opens
+                # attached-remote, a local id resumes.
+                self._reopen_where_the_session_lives(session_id)
             return
         phase_notice.restate(self._move_phase_text(session_id, request, phases), "info")
         to_block = result.get("to_device") or {}
@@ -27954,13 +28002,29 @@ class OperatorApp(App[None]):
         if str(result.get("phase") or "") not in ("committed", "done"):
             return
         # REOPEN WHERE IT LIVES. The sidebar's pick path already knows both
-        # answers: a peer's id opens attached-remote (`_announce_remote_session`),
+        # answers: a peer's id opens attached-remote (`_open_session_or_refuse`),
         # a local id resumes. The peer cache is dropped first so the pick does
         # not answer from a listing taken before the move committed.
+        self._reopen_where_the_session_lives(new_id)
+
+    def _reopen_where_the_session_lives(self, session_id: str) -> None:
+        """Switch to ``session_id`` by sidebar navigation — the ONE way back.
+
+        Extracted when the refusal path needed it too (round 1, V3): a move
+        entered from inside a session leaves it FIRST, so every refusal that
+        arrives afterwards owes the user the same return the success path gives
+        them. Two spellings of it would let the success path keep a fix the
+        refusal path lost, which is exactly how this was missed — the success
+        branch had it, the refusal branch returned before reaching it.
+
+        ``clear_cache()`` first, and for the reason the success path always did:
+        the pick answers from the peer listing, and a listing taken before the
+        move is exactly the stale one this is recovering from.
+        """
         from local_operator.session.peer_rows import clear_cache
 
         clear_cache()
-        self._select_sidebar_session(new_id)
+        self._select_sidebar_session(session_id)
 
     def _apply_move(self, raw: str, notice: NoticeFn) -> None:
         """Validate ``raw`` and move the session to it, or say why not.
@@ -41892,12 +41956,18 @@ class OperatorApp(App[None]):
         args: str,
         images: list[Any] | None = None,
         *,
-        locality: str = "local",
+        locality: str | None = None,
         consumers: Iterable[str] | None = None,
         # ``None`` = "not said", read conservatively: only the LOCAL path omits
         # it, and that path is a pane that owns its gate, whose answer the local
         # call sites pass explicitly (agent review round 4, R4-3).
         may_loosen: bool | None = None,
+        # ``None`` = "not said", also read conservatively. The capabilities the
+        # CONNECTION resolved, forwarded by the registrant's seam for the same
+        # reason ``locality`` and ``may_loosen`` are: it is a property of the
+        # callers's connection, not of the command. Read by the delete-scoped
+        # verbs only — see ``_delete_scope_refusal``.
+        capabilities: frozenset[str] | None = None,
     ) -> dict[str, Any]:
         """Run one shared slash command and return its typed outcome as data.
 
@@ -41913,9 +41983,13 @@ class OperatorApp(App[None]):
                 round trip, and local model activation refreshes capacity off the UI loop.
 
                 ``locality`` is the invoking client's declared position (see
-                ``ClientLocality``). Only ``/mcp``'s grant verbs read it: a browser
-                opened here is in front of a user at THIS machine, which is true of
-        every client today and false for a future relayed remote device.
+                ``ClientLocality``), and ``None`` means the caller did not say
+                (round 2, R2-1): every gate reads that as RELAYED rather than as
+                local, so a carrier that forgets to forward it refuses instead of
+                running a verb against the owner's machine. Two readers now: the
+                ``/mcp`` grant verbs, where a browser opened here is in front of a
+                user at THIS machine, and the delete-scoped verbs, which the mesh
+                vocabulary reserves for ``delete`` (``_delete_scope_refusal``).
 
         NOT THE SAME FIELD AS ``SessionRow.locality`` (review round 4, NIT 2),
         and the two are named apart here rather than re-spelled: this one is
@@ -41931,7 +42005,7 @@ class OperatorApp(App[None]):
                 ``consumers`` is which action-carrying receipts the invoking client
                 renders itself; see :meth:`_complete_unconsumed_action`.
         """
-        result = await self._slash_result(command, args, images, locality, may_loosen)
+        result = await self._slash_result(command, args, images, locality, may_loosen, capabilities)
         result = self._complete_unconsumed_action(result, images, consumers)
         return result.model_dump(mode="json")
 
@@ -42007,8 +42081,9 @@ class OperatorApp(App[None]):
         command: str,
         args: str,
         images: list[Any] | None,
-        locality: str = "local",
+        locality: str | None = None,
         may_loosen: bool | None = None,
+        capabilities: frozenset[str] | None = None,
     ) -> Any:
         from local_operator.session.frontend_state import SlashResult
 
@@ -42056,6 +42131,17 @@ class OperatorApp(App[None]):
             # permission branch for connections that CAN loosen (#1310), and no gate
             # catches the swap — see the twin in ``session/runtime/serving.py``.
             return self._approvals_slash_result(args, SlashResult, may_loosen=may_loosen)
+        # THE DELETE-SCOPED VERBS ARE GATED HERE, on the same predicate the
+        # detached runtime's dispatch uses (``session/runtime/serving.py``,
+        # imported rather than restated so the two hosts cannot drift). A
+        # session is owned either by a runtime or by this app, and a follower
+        # must get the same answer from both: ``/archive``, ``/unarchive`` and
+        # ``/delete`` produce the effect ``net_session_lifecycle`` reserves for
+        # ``delete``, while the row that carries them is authorised on ``slash``
+        # — which a ``drive`` member holds WITHOUT ``delete``.
+        refusal = self._delete_scope_refusal(command, locality, capabilities, SlashResult)
+        if refusal is not None:
+            return refusal
         if command == "archive":
             return self._archive_slash_result(True, SlashResult)
         if command == "unarchive":
@@ -42074,6 +42160,30 @@ class OperatorApp(App[None]):
             ),
             style="warning",
         )
+
+    @staticmethod
+    def _delete_scope_refusal(
+        command: str,
+        locality: str | None,
+        capabilities: frozenset[str] | None,
+        SlashResult: Any,
+    ) -> Any | None:
+        """The refusal for a delete-scoped verb this CONNECTION may not run, else ``None``.
+
+        THE DECISION AND THE SENTENCE ARE NOT HERE: both live in
+        ``network.types.delete_scope_refusal``, which all three hosts call so they
+        cannot drift (round 2, R2-5; round 1 had the same three lines in three
+        files). This wrapper only wraps the sentence in this host's ``SlashResult``.
+        The import is function-local for the reason the sibling import in
+        ``_complete_unconsumed_action`` is: the TUI reaches the runtime's package
+        lazily rather than at module scope.
+        """
+        from local_operator.network.types import delete_scope_refusal
+
+        text = delete_scope_refusal(command, locality, capabilities)
+        if text is None:
+            return None
+        return SlashResult(kind="notice", text=text, style="warning")
 
     def _archive_slash_result(self, archived: bool, SlashResult: Any) -> Any:
         """``/archive`` and ``/unarchive`` for a viewer attached to THIS owner.
@@ -42577,7 +42687,15 @@ class OperatorApp(App[None]):
             style="info",
         )
 
-    async def _mcp_slash_result(self, arg: str, SlashResult: Any, locality: str = "local") -> Any:
+    async def _mcp_slash_result(
+        self,
+        arg: str,
+        SlashResult: Any,
+        # ``None`` = "not said", read the same fail-closed way as the delete-scoped
+        # gate one call over (round 2, R2-1): a browser cannot be opened in front of
+        # a caller we cannot place.
+        locality: str | None = None,
+    ) -> Any:
         parts = arg.split()
         if not parts:
             block = self._mcp_block()
@@ -42645,7 +42763,7 @@ class OperatorApp(App[None]):
             self._session,
             sub,
             parts[1],
-            browser_is_reachable=locality != "remote",
+            browser_is_reachable=locality == "local",
             notify=lambda body, style: self._system_notice(body, cast("NoticeKind", style)),
             spawn=self._spawn_mcp_grant,
         )

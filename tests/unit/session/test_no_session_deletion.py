@@ -441,6 +441,16 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         2,
     ),
     (
+        "local_operator/network/credentials/placement.py::forget_network",
+        "shutil.rmtree",
+        "`lop network disconnect`/`rm` drops this network's placement and observation "
+        "documents: <config>/network/credentials/<network_id>/, a child of network/ and a "
+        "sibling of sessions/ — never a session directory. The id is the network record's "
+        "own, and the sweep is ignore_errors over a directory this module's "
+        "`credentials_dir_for` created",
+        1,
+    ),
+    (
         "local_operator/network/store.py::purge_identity",
         "<path>.unlink",
         "`uninstall --purge-identity`: the keypair FILE <config>/network/identity/"
