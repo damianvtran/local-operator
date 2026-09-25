@@ -38,6 +38,17 @@ is a resource leak that outlives the command, and the relay already ticks (its
 heartbeat calls ``flush``). Events whose loss to a power cut would be
 unrecoverable — a panic, a removal, a rotation — are written through immediately.
 
+WHAT A READER OF THE FILE SEES FOLLOWS FROM THAT, and it is the thing an independent
+verifier gets wrong. While the relay runs, ``audit.jsonl`` lags the log's own memory
+by at most one heartbeat (the relay's own interval, 15 s): a row recorded a moment ago
+is
+appended to the buffer and is not in the file yet, so reading the file is reading the
+last PUBLISHED state rather than the last event. Once the relay stops, nothing
+drains the tail until the next record or a ``close()``. A reader in ANOTHER process
+inherits exactly this lag — ``lop network log`` included, because it reads the same
+file and cannot drain a buffer it does not own — so a verification that must see the
+tail should trigger one more event, or stop the relay, before it counts rows.
+
 RETENTION IS BY SIZE AND BY AGE with a fixed number of compressed generations, so
 the steady-state footprint is bounded by construction rather than by tuning. The
 numbers are ``mesh-incident-response.md``'s, because R18 requires them measured

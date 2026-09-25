@@ -1798,6 +1798,78 @@ def test_a_viewer_leaving_releases_the_owner_s_stream(
         _stop_all(served)
 
 
+def test_the_owner_s_close_row_reaches_the_file_it_writes(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q-XH-9: the close is in ``audit.jsonl`` itself, not only in this process's view.
+
+    AN INDEPENDENT VERIFIER READS THE AUDIT THE WAY AN OPERATOR DOES — `jq` over
+    ``network/audit.jsonl``, in another process, which cannot flush a buffer it does not
+    own. Every stream row is appended to the writer's buffer and is NOT in the file at
+    the instant it is recorded (measured with an instrument that reads the path after
+    each ``record``: ``raw_stream_rows 0 -> 0`` for both roles in every departure shape),
+    so what such a reader can see depends on the relay publishing its own tail. It does:
+    the heartbeat flushes unconditionally, so the row lands within one ``HEARTBEAT_S``.
+    This cell reads the file with no flush and no ``tail()`` — the reader QA used — and
+    fails if the owner's release is invisible there for longer than that.
+    """
+    server_a, server_b, host_a, port_a = peer_pair
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    _seed(server_a.root, SESSION)
+    served = _serve(monkeypatch, server_a.root)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
+    try:
+        _warm(server_a.root, SESSION)
+        _viewer(server_b)
+        assert _dial_to(server_b, record, host_a, port_a) is not None
+
+        viewer = _StreamClient(server_b.root)
+        opened = viewer.open_stream(
+            server_a.identity.device_id,
+            SESSION,
+            events=True,
+            frontend_state=True,
+            surface="terminal",
+        )
+        assert opened["op"] == "ack", opened
+        assert viewer.recv() is not None, "no welcome through the stream"
+        assert _wait_for(lambda: _owner_stream(server_a, SESSION) is not None)
+        viewer.close()
+
+        path = store.audit_path(server_a.root)
+
+        def _owner_close_row() -> dict[str, Any] | None:
+            """The owner's close row AS THE FILE HOLDS IT — no flush, no `tail()`."""
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                return None
+            for line in reversed(lines):
+                if not line:
+                    continue
+                row = json.loads(line)
+                if row.get("event") != "session_stream_closed":
+                    continue
+                if (row.get("detail") or {}).get("role") == "owner":
+                    return row
+            return None
+
+        assert _wait_for(lambda: _owner_close_row() is not None, timeout_s=45), (
+            "the owner's close row never reached the file it writes: an operator "
+            "reading audit.jsonl cannot see that the release happened or why"
+        )
+        row = _owner_close_row()
+        assert row is not None
+        # THE MACHINE FIELD SURVIVES THE FILE, which is the surface an incident reader
+        # filters on (agent review round 1, MAJOR 1): a mapped cause, not `internal`.
+        assert row["cause"] not in ("", "internal"), row
+        assert row["cause"] in {"viewer_left", "peer_closed", "owner_gone", "peer_unreachable"}, row
+        assert (row.get("detail") or {}).get("cause"), row
+        assert (row.get("detail") or {}).get("stream"), row
+    finally:
+        _stop_all(served)
+
+
 def test_a_read_only_member_may_open_a_stream_and_may_not_prompt_through_it(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
