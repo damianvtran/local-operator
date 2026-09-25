@@ -209,6 +209,33 @@ def test_the_rollup_matches_the_ledger_for_every_real_window(tmp_path):
         assert _result_key(agg) == before[(since, until, session)], (since, until, session)
 
 
+def test_the_daily_sweep_stands_down_between_days(tmp_path):
+    """A runtime that is LEAVING stops the day walk at the day it is on.
+
+    A short pass is SAFE here by construction, which is what makes the walk
+    stoppable at all: the rebucket publish needs the whole span and the sweep
+    watermark only advances when the recent window was derived in full, so a
+    walk that left early touches neither and the next launch resumes from the
+    same frontier instead of stepping over a hole.
+    """
+    store = _seeded_store(tmp_path)
+    plan = store.session_daily_worklist(max_days=90)
+    assert len(plan.days) >= 2, "the fixture must span days for the stop to land between them"
+
+    checks: list[None] = []
+
+    def should_stop() -> bool:
+        checks.append(None)
+        return len(checks) > 1
+
+    assert backfill_analytics_session_daily(tmp_path, store=store, should_stop=should_stop) == 1
+    assert len(checks) == 2, "the predicate is not consulted once per day"
+    # The frontier is exactly where it was, so nothing was claimed as swept.
+    assert store.session_daily_worklist(max_days=90).days == plan.days
+    assert backfill_analytics_session_daily(tmp_path, store=store) == len(plan.days)
+    store.close()
+
+
 def test_the_rollup_keeps_the_session_set_the_tui_forest_needs(tmp_path):
     """The forest drops an edge whose parent is absent, so the SET must match.
 
