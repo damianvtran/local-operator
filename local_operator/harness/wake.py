@@ -35,7 +35,26 @@ import re
 from datetime import datetime, time, timedelta
 from typing import Any, Awaitable, Callable, Literal, TypedDict
 
-from pydantic import BaseModel, ConfigDict, Field
+# ``pydantic`` is deliberately NOT imported here any more: the only pydantic
+# types this module ever touched were the two DTOs, and they moved to
+# ``harness.wake_types``. Keeping the import would leave this module paying the
+# very cost the split removed, for nothing.
+#
+#: The two wake DTOs and the interval constant they constrain live in
+#: :mod:`local_operator.harness.wake_types`, and are imported here rather than
+#: defined here — see that module's docstring. The short version: ``WakeSchedule``
+#: is part of the SHARED vocabulary (``harness.types`` annotates
+#: ``WakeSchedulerProtocol`` with it), and a shared type defined beside the
+#: scheduler it belongs to dragged this module's ~203 ms import onto every entry
+#: point that touches ``harness.types``. Re-exported here, so every existing
+#: ``from local_operator.harness.wake import WakeSchedule`` keeps working and both
+#: import paths hand back the SAME class object (asserted by a test — two classes
+#: with one name would silently make ``isinstance`` false at one call site).
+from local_operator.harness.wake_types import (
+    MIN_WAKE_INTERVAL_MS as MIN_WAKE_INTERVAL_MS,
+)
+from local_operator.harness.wake_types import DueWake as DueWake
+from local_operator.harness.wake_types import WakeSchedule as WakeSchedule
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +62,6 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-MIN_WAKE_INTERVAL_MS = 60_000  # a wake starts a full turn; sub-minute starves the user
 MAX_WAKE_SCHEDULES = 16
 MAX_WAKE_MESSAGE_CHARS = 2_000
 PAST_AT_GRACE_MS = 5_000
@@ -86,47 +104,13 @@ _CLOCK_RE = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*$")
 # ---------------------------------------------------------------------------
 # Shape
 # ---------------------------------------------------------------------------
-
-
-class WakeSchedule(BaseModel):
-    """One scheduled wake. ``id`` is a stable per-session handle (``w1``…)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    id: str
-    message: str  # the self-prompt delivered on fire
-    next_due_at: int  # epoch ms
-    # Constrained at the field level: load() adopts schedules straight from
-    # the transcript, and every_ms == 0 in a hand-edited file used to raise
-    # ZeroDivisionError inside pump(), killing the scheduler with an
-    # unobserved exception. Invalid rows are dropped with a warning in load().
-    every_ms: int | None = Field(default=None, ge=MIN_WAKE_INTERVAL_MS)
-    until_at: int | None = None  # hard stop
-    limit: int | None = None  # retire after N deliveries
-    fired_count: int = 0
-    created_at: int = 0
-    #: The desktop request that ARMED this row, when one did — its origin, not its
-    #: provenance in the bookkeeping sense. It exists so that "did this request's
-    #: write land?" has an exact answer: every other field of a row is something a
-    #: legitimate concurrent writer changes (the session's own persist advances
-    #: ``next_due_at``/``fired_count`` when the wake fires, and re-times it on
-    #: catch-up), so a question asked by comparing content can be answered wrongly
-    #: by a writer that did nothing but let the wake run — review round 4, R9.
-    #: Absent for rows the agent's ``wake`` tool or the CLI created, which have no
-    #: request id to record; those keep the id-plus-message fallback that
-    #: ``wakes/arm.py`` documents.
-    request_id: str | None = None
-
-
-class DueWake(BaseModel):
-    """A wake that is due right now, handed to the ``deliver`` callback."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    schedule: WakeSchedule
-    occurrence: int  # 1-based = fired_count + 1 at fire time
-    planned_total: int | None = None
-    final: bool = False
+#
+# ``WakeSchedule`` and ``DueWake`` are DEFINED in ``harness.wake_types`` and
+# re-exported by the import block at the top of this module. They are not
+# repeated here on purpose: a second definition would be a second class, so
+# ``isinstance`` against one import path would be false for an object built
+# through the other, and the failure would be silent. See that module for why
+# they live away from the scheduler.
 
 
 class MissedWakeOccurrence(TypedDict):
