@@ -1693,6 +1693,55 @@ class TestOAuthEndpointDiscovery:
         assert endpoints.protected_resource_metadata is not None
 
     @pytest.mark.asyncio
+    async def test_a_prm_5xx_is_never_cached_as_an_answered_negative(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review R1-1. A 5xx on the PRM leg means the question went UNANSWERED.
+
+        The PRM loop used to record only a transport exception as "could not
+        ask", so a 503 fell through the non-200 branch unmarked; if the ASM leg
+        then answered an honest 404, ``answered_negative`` was true and the
+        probe was cached for ``OAUTH_DISCOVERY_NEGATIVE_TTL_S``. Every connect in
+        that window returned ``None`` without probing at all, where the base
+        retried every time — and the function's own docstring calls a 5xx a
+        FAILURE that is never cached.
+
+        Asserted as a CALL COUNT, not a timing: the second probe must still
+        reach the network.
+        """
+        import httpx
+
+        from local_operator.mcp import auth as auth_mod
+
+        auth_mod._DISCOVERED_ENDPOINTS_CACHE.clear()
+        auth_mod._DISCOVERED_ENDPOINTS_NEGATIVE_CACHE.clear()
+        requests: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            requests.append(url)
+            # PRM: the server declines to answer. ASM: an honest "not here".
+            if "oauth-protected-resource" in url or "resource-metadata" in url:
+                return httpx.Response(503)
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        real_client = httpx.AsyncClient
+
+        def patched_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+            kwargs["transport"] = transport
+            return real_client(*args, **kwargs)
+
+        monkeypatch.setattr(httpx, "AsyncClient", patched_client)
+        first = await auth_mod.discover_oauth_endpoints(self.URL)
+        before = len(requests)
+        second = await auth_mod.discover_oauth_endpoints(self.URL)
+        assert first is None and second is None
+        assert (
+            len(requests) > before
+        ), "the second probe made no request: a PRM 5xx was cached as an answered negative"
+
+    @pytest.mark.asyncio
     async def test_discovery_returns_none_when_asm_missing(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

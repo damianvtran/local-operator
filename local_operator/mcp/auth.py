@@ -3449,6 +3449,17 @@ async def _discover_oauth_endpoints_uncached(server_url: str) -> _OAuthProbe:
     #: possibly INCOMPLETE — the PRM document is what names a non-same-origin
     #: authorization server — so no ASM answer may then be called definitive.
     prm_unreachable = False
+    #: The PRM leg ASKED its question and did not get an answer: a non-4xx,
+    #: non-200 status (a 5xx, a 3xx we did not follow), or a 200 whose body will
+    #: not validate. Distinct from ``prm_unreachable`` — that is "we could not
+    #: ask", this is "the server declined to answer" — and tracked separately
+    #: because it has to veto a definitive negative the same way ``asm_unusable``
+    #: does. Without it, a 503 on PRM followed by an honest 404 on ASM read as
+    #: "this deployment publishes no OAuth metadata" and was cached as an
+    #: ANSWERED NEGATIVE for the whole TTL — the exact case the rule above calls
+    #: a FAILURE ("a 5xx … is a FAILURE (never cached, retried next connect)").
+    #: Reported as review R1-1.
+    prm_unusable = False
     #: ASM candidates that answered 4xx ("not here") and ones that did not
     #: answer usably. A definitive negative needs at least one of the first and
     #: none of the second.
@@ -3463,11 +3474,21 @@ async def _discover_oauth_endpoints_uncached(server_url: str) -> _OAuthProbe:
                 except httpx.HTTPError:
                     prm_unreachable = True
                     continue
+                # Mirror the ASM leg's split, for the same reason. A 4xx means
+                # "not at this URL, try the next"; anything else non-200 means
+                # the server declined to answer the metadata question, so the
+                # probe is not definitive however the ASM leg goes on to answer.
+                if 400 <= response.status_code < 500:
+                    continue
                 if response.status_code != 200:
+                    prm_unusable = True
                     continue
                 try:
                     prm = ProtectedResourceMetadata.model_validate_json(response.content)
                 except Exception:  # noqa: BLE001 — malformed metadata: try the next URL
+                    # A 200 this content type cannot be read out of is the same
+                    # state as a 5xx: the question went unanswered.
+                    prm_unusable = True
                     continue
                 if prm.authorization_servers:
                     auth_server_url = str(prm.authorization_servers[0])
@@ -3505,7 +3526,10 @@ async def _discover_oauth_endpoints_uncached(server_url: str) -> _OAuthProbe:
                     # Both halves are required: an answer from the ASM phase,
                     # and no unanswered question anywhere in the probe.
                     answered_negative=(
-                        asm_refused > 0 and not asm_unusable and not prm_unreachable
+                        asm_refused > 0
+                        and not asm_unusable
+                        and not prm_unreachable
+                        and not prm_unusable
                     ),
                 )
             return _OAuthProbe(
