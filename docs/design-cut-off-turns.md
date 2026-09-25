@@ -793,7 +793,7 @@ Rendered by `_default_convert_to_llm` (`session/session.py:675-697`) from the
 > suggested action: The runtime was cut off before this turn produced a result.
 > The transcript holds whatever was written before it stopped and nothing after.
 > Check the state of anything it was mid-way through before repeating the work;
-> do not assume the request completed.
+> do not assume that work finished.
 > This is why the previous turn ended. Take it into account before repeating the
 > same request.
 

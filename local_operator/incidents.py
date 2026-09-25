@@ -344,11 +344,14 @@ _HINTS: dict[str, str] = {
     # harness-initiated, opened with no human waiting on a receipt — and in that
     # case the operator's own request HAD completed, which is precisely the
     # falsehood that cost a turn re-verifying finished work in the report this
-    # change answers. "it" is the run the row is about, which is true of both.
+    # change answers. The subject is the WORK the run was doing, spelled out
+    # rather than left as a pronoun with two candidate antecedents ("it" could
+    # read as the turn or as the thing the turn was mid-way through — UX round 2,
+    # U11), and it is true whichever owner the run had.
     "cut-off": "The runtime was cut off before this turn produced a result. The transcript "
     "holds whatever was written before it stopped and nothing after. Check the "
     "state of anything it was mid-way through before repeating the work; do not "
-    "assume it completed.",
+    "assume that work finished.",
 }
 
 #: Why a turn was cut off. Harness-authored, so unlike :data:`_RULES` these are
