@@ -844,10 +844,13 @@ def note_spare_gone(spare: "_Standby", reason: str, *, terminate: bool = False) 
         _retire(spare)
     spare.close()
     with _LOCK:
-        try:
-            _POOL.remove(spare)
-        except ValueError:
-            pass
+        # Rebuilt by IDENTITY rather than ``list.remove`` (agent review round 1,
+        # B1 round: the session-deletion guard read ``_POOL.remove`` as a
+        # filesystem removal — the receiver is a module global, not a literal
+        # container, which is the only shape that guard can tell apart). A
+        # comprehension over the list is the same operation, spelled where no
+        # reader has to guess what the receiver is.
+        _POOL[:] = [entry for entry in _POOL if entry is not spare]
     life = _now() - spare.spawned_at
     retry_class = (
         reason
