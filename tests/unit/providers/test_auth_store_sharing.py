@@ -228,6 +228,39 @@ def test_close_records_the_flag_and_a_double_close_is_harmless(root: Path) -> No
     assert store.closed
 
 
+def test_a_replaced_auth_db_is_never_served_from_the_old_connection(
+    root: Path, auth_connects: list[str]
+) -> None:
+    """A recreated ``auth.db`` must not be answered from the unlinked old file.
+
+    Found by this change's own regression run, and the reason
+    ``_file_identity`` is part of the key. A live SQLite connection is bound to
+    the INODE it opened: once ``auth.db`` is deleted and recreated — a logout
+    that wipes it, a restored backup, ``VACUUM``, or a test suite recycling a
+    temp directory — a cached connection keeps reading the unlinked old file and
+    every row written to the replacement is invisible to it. That surfaced as a
+    credential "stored by login" which the cascade could not find: a fresh
+    connection saw the new row while the shared one still answered from the
+    deleted file.
+    """
+    first = shared_auth_store()
+    first.upsert_credential("openai", {"key": "old", "type": "api_key", "source": "login"})
+    assert [r.data["key"] for r in first.list_credentials("openai")] == ["old"]
+
+    # Replace the file wholesale, as an unlink-and-recreate does.
+    for suffix in ("", "-wal", "-shm"):
+        (root / f"auth.db{suffix}").unlink(missing_ok=True)
+    writer = AuthStore(root / "auth.db", config_dir=root)
+    try:
+        writer.upsert_credential("openai", {"key": "new", "type": "api_key", "source": "login"})
+    finally:
+        writer.close()
+
+    second = shared_auth_store()
+    assert second is not first, "a replaced auth.db must not be reused"
+    assert [r.data["key"] for r in second.list_credentials("openai")] == ["new"]
+
+
 def test_close_shared_auth_stores_releases_what_it_handed_out(root: Path) -> None:
     """The teardown closes the shared store and empties the map.
 
