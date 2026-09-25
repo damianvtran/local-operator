@@ -2362,6 +2362,11 @@ def _group_section(
 #: as clearly as it says a number.
 MODEL_RATES_PENDING = "pending"
 
+#: The read broke. Its own value rather than an empty list, because the section's
+#: sentence for an empty answer ("no per-model rows") is a claim about the
+#: LEDGER, and a failed query knows nothing about the ledger.
+MODEL_RATES_FAILED = "failed"
+
 #: What the two rate columns are, and why one of them can be a dash. Printed
 #: under the table whenever anything in it is unknown, because ``—`` and a
 #: number are only distinguishable if the screen says what the dash means.
@@ -2377,7 +2382,7 @@ def _model_rate_section(
 ) -> Text | None:
     """The per-model rate table, or ``None`` when this caller asked for no such table.
 
-    Three distinct inputs, and the distinction is the point:
+    Four distinct inputs, and the distinction is the point:
 
     - ``None`` — the caller does not do this read at all, so there is no
       section. That keeps every existing caller (and every test that composes a
@@ -2385,17 +2390,33 @@ def _model_rate_section(
     - ``MODEL_RATES_PENDING`` — the read is in flight. The section states that
       rather than showing an empty table, because "no rows" and "no answer yet"
       are different facts and this read takes seconds on a large ledger.
+    - ``MODEL_RATES_FAILED`` — the read failed. Its own sentence, distinct from
+      "no rows": a table that says "none" when the query actually broke tells the
+      reader their ledger is empty, which is a different and false claim.
     - a sequence — the answer, possibly empty. Empty is its own sentence.
 
     The rows come from the raw LEDGER, not from the ``session_daily`` rollup the
-    headline above them comes from, and the meta line says so: these rows do not
-    partition that headline and the table must not read as if they did.
+    headline above them comes from, and the meta line says so. The SCOPE is the
+    same one the headline covers — both are all-time, because the headline
+    ``aggregate()`` is unbounded — so a reader can hold a row's output tokens
+    against the headline's, which is the comparison the section exists to invite
+    (review round 1, MAJOR 2: an earlier revision read 30 days here while the
+    Totals read all time, and said nothing about it on screen).
     """
     if model_rates is None:
         return None
-    block = section_header("By model", meta=f"from the ledger · {MODEL_RATE_LEGEND}")
+    # The meta is SHORT on purpose: the composed line is cropped at every
+    # terminal width the panel is used at, and the half that got cut was the
+    # legend — i.e. exactly the explanation of the ``—`` marks. The legend is
+    # drawn once, under the table, and only when something in it is unknown.
+    block = section_header("By model", meta="from the ledger · all time")
     dim = semantic_style("dim")
     fg = semantic_style("fg")
+    if model_rates == MODEL_RATES_FAILED:
+        block.append(
+            "\n  the per-model read failed — the rest of this report is unaffected", style=dim
+        )
+        return block
     if isinstance(model_rates, str):
         block.append("\n  reading the ledger…", style=dim)
         return block

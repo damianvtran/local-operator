@@ -310,6 +310,7 @@ async def analytics_models(
     since_ms: int | None = Query(default=None, ge=0),
     until_ms: int | None = Query(default=None, ge=0),
     session_id: str | None = Query(default=None, pattern=r"^[a-f0-9]{12}$"),
+    days: int | None = Query(default=None, ge=1, le=366),
     limit: int = Query(default=200, ge=1, le=1000),
 ):
     """Per-model throughput, on its OWN op rather than on ``analytics.get``.
@@ -323,17 +324,22 @@ async def analytics_models(
     that cost isolated and separately measurable, and lets a client show a
     loading state for this one section.
 
-    ``days`` is accepted for wire symmetry with ``analytics.get`` so a client can
-    build both requests from one window object. It is deliberately NOT used to
-    derive bounds here: a client that sends ``days`` also sends the exact
-    ``since_ms``/``until_ms`` its other sections were rendered from, and deriving
-    a second, drifting window from a day count is how two sections of one screen
-    end up describing different spans.
+    ``days`` is declared for wire symmetry with ``analytics.get``, which a client
+    building both requests from one window object sends. It is used ONLY as a
+    fallback when neither bound arrives — as ``now - days``, a rolling window
+    rather than a local-midnight one, because this route has no business
+    re-deriving the client's own day arithmetic. An earlier revision declared
+    neither the parameter nor the fallback while the docstring said it was
+    accepted, so a ``days``-only caller silently received an unbounded scan
+    (review round 1, minor 1); an unhandled argument that changes the result is
+    worse than a rejected one.
     """
     from local_operator.analytics.store import AnalyticsStore
 
     if since_ms is not None and until_ms is not None and since_ms > until_ms:
         raise HTTPException(422, "The start must precede the end")
+    if since_ms is None and until_ms is None and days is not None:
+        since_ms = int(time.time() * 1000) - days * 86_400_000
 
     def read_rates():
         store = AnalyticsStore(request.app.state.config_manager.config_dir / "analytics.db")

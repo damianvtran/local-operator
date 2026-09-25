@@ -37694,7 +37694,16 @@ class OperatorApp(App[None]):
         self.run_worker(
             self._read_model_rates_worker(screen),
             thread=False,
-            group="analytics",
+            # ITS OWN GROUP, and that is load-bearing rather than tidy (review
+            # round 1, NIT 2, reproduced with a minimal Textual app):
+            # ``exclusive=True`` cancels the group's existing worker, and the
+            # worker that opened this screen — the coroutine that pushed it and is
+            # still awaiting — is in the ``analytics`` group. Sharing the group
+            # therefore had the child cancel its own PARENT, whose next await
+            # never resumed. A distinct group keeps the exclusivity (one rates
+            # read at a time) without cancelling the read that produced the
+            # report.
+            group="analytics-rates",
             exclusive=True,
             # The read is already isolated in a thread and cannot raise, but a
             # screen a user opened to LOOK at their ledger must never be the
@@ -37707,45 +37716,40 @@ class OperatorApp(App[None]):
 
         Its own worker, and its own exception boundary: this read is slower than
         everything else on the screen put together, so a failure here must cost
-        the table (and say so in that table) rather than the whole report. The
-        table is scoped to the same 30-day window the daily chart draws, so the
-        two sections describe one span even though they come from different
-        stores.
+        the table (and say so in that table) rather than the whole report.
+
+        **The scope is the same one the headline covers** — unbounded, i.e. all
+        time — because the Totals above this table come from an unbounded
+        ``aggregate()``. Reading 30 days here while the Totals read all time was a
+        review finding (round 1, MAJOR 2): the section invites the reader to hold
+        a model's output tokens against the headline's, and a narrower window
+        makes that comparison quietly wrong with nothing on screen saying so. The
+        meta line names the scope for the same reason.
+
+        The read is also no slower at that scope: measured on the operator's
+        1.95 M-row ledger, unbounded is 2 358.7 ms against 2 241.8 ms for 30 days.
         """
         from local_operator.analytics.store import AnalyticsStore
 
         def _read() -> list[Any]:
             store = AnalyticsStore()
             try:
-                return store.model_rates(since_ms=self._analytics_window_start_ms())
+                return store.model_rates()
             finally:
                 store.close()
 
         try:
-            rows = await asyncio.to_thread(_read)
+            rows: Any = await asyncio.to_thread(_read)
         except Exception:  # noqa: BLE001 — a slow side table never breaks the screen
             logger.debug("analytics: model rates failed", exc_info=True)
-            rows = []
+            from local_operator.tui.widgets.analytics_panel import MODEL_RATES_FAILED
+
+            rows = MODEL_RATES_FAILED
         # ``is_mounted`` because the user can dismiss the screen while a
         # seconds-long read is in flight, and a detached screen has nothing to
         # repaint.
         if getattr(screen, "is_mounted", False):
             screen.set_model_rates(rows)
-
-    @staticmethod
-    def _analytics_window_start_ms() -> int:
-        """Local midnight 29 days back: the 30-day window the panel charts.
-
-        Spelled here rather than taken from ``series_totals`` because the two are
-        different stores: the chart's window is a count of daily ROLLUP buckets,
-        while this one is a ``ts_ms`` bound on the raw ledger, and deriving the
-        second from the first would make a day with no calls shift the model
-        table's window off the chart's.
-        """
-        now = time.time()
-        local = time.localtime(now)
-        midnight = time.mktime((local.tm_year, local.tm_mon, local.tm_mday, 0, 0, 0, 0, 0, -1))
-        return int((midnight - 29 * 86400) * 1000)
 
     def _cmd_session(self, arg: str, notice: NoticeFn) -> None:
         """Read only this session's ledger, or copy its ID; never treat text as a prompt."""
