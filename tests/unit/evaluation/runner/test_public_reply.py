@@ -948,6 +948,75 @@ async def test_an_episode_runs_on_wrapper_framed_replies(tmp_path: Path, episode
     assert batch["actions"] == json.loads(recorded)["actions"]
 
 
+@pytest.mark.asyncio
+async def test_a_tolerated_reply_reaches_the_bundle_with_its_counts(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """Both tolerances' rates are readable from a SEALED, verified bundle.
+
+    Why this is a bundle test and not one more unit assertion on the decision: a
+    reply the tolerance RECOVERS produces no rejection artifact, so without these
+    counts the class left the bundle the moment the tolerance started working --
+    which is exactly when a campaign needs to know whether the model is still
+    confused. The first reply needs BOTH tolerances at once (a decision behind a
+    preamble, and ``frame_id`` on a kind that does not take it); the second needs
+    neither, so the zeros are a measurement rather than an absence.
+    """
+
+    preamble = "Working out where to wait.\n"
+    note = "Visible status: tolerated and still carried"
+    calls = 0
+
+    def reply(message: Message) -> str:
+        nonlocal calls
+        calls += 1
+        raw = _wait_reply(message)
+        if calls == 1:
+            batch = json.loads(raw)
+            batch["actions"][0]["frame_id"] = "screen"
+            return preamble + envelope(json.dumps(batch), note)
+        oid = json.loads(raw)["actions"][0]["observation_id"]
+        return envelope(
+            json.dumps(
+                {
+                    "actions": [
+                        {
+                            "kind": "finish",
+                            "observation_id": oid,
+                            "status": "done",
+                            "reason": "complete",
+                        }
+                    ]
+                }
+            ),
+            note,
+        )
+
+    config = build_config(tmp_path)
+    stream = RecordingStream(reply)
+    client = _client(stream, config.artifact_root)
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        config,
+        selector=selector(tmp_path),
+        model=client,
+        launch=lambda _: FakeAdapter(tmp_path, episode_id),
+        rescue=_rescue_ok,
+        redactions=RedactionSet.from_resolved_values([]),
+    )
+    outcome = await runner.run()
+
+    assert outcome.status == "completed"
+    root = outcome.bundle_root
+    assert root is not None
+    assert verify_bundle(root).valid
+    responses = payloads(root, ModelResponsePayload)
+    assert responses[0].leading_framing_bytes == len(preamble)
+    assert responses[0].tolerated_action_fields == 1
+    assert responses[1].leading_framing_bytes == 0
+    assert responses[1].tolerated_action_fields == 0
+
+
 def test_an_unsafe_reply_degrades_without_losing_the_rejection() -> None:
     """Withholding the reply must not withhold the rejection.
 

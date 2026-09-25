@@ -460,9 +460,17 @@ def _build_batch(arguments: Mapping[str, Any], observation: Observation) -> Acti
     (``drop_sibling_action_fields``): a field belonging to a SIBLING action kind
     states nothing the required ``kind`` tag did not already state, and the prose
     path drops it for the same reason and with the same report. Applied here too
-    because the two channels converge on this one validated structure -- a
-    tolerance that lived on only one of them would make the same reply acceptable
-    or not depending on which channel the model happened to answer on.
+    because the two channels converge on this one validated structure, and a
+    drop that ran on only one of them would refuse a decision the other accepts.
+
+    Scoped to the drop: this function reads an action ARRAY, because that is
+    what the offered call's parameters declare (``public_reply_schema``). The
+    prose channel additionally accepts an ``actions`` value that is a
+    JSON-encoded STRING (``_actions_from_json_string``), and that tolerance is
+    deliberately NOT mirrored here -- a call whose argument contradicts the type
+    the channel offered it is refused, while the same bytes arriving as prose
+    are read. Widening this channel's accepted spellings is a contract decision
+    of its own rather than part of reading a batch's actions.
     """
     raw_actions = arguments.get("actions")
     actions: Any = raw_actions
@@ -475,7 +483,7 @@ def _build_batch(arguments: Mapping[str, Any], observation: Observation) -> Acti
             )
             for action in raw_actions
         ]
-        actions = drop_sibling_action_fields(actions)
+        actions, _tolerated_fields = drop_sibling_action_fields(actions)
     return ActionBatch.model_validate(
         {
             "protocol_version": PROTOCOL_VERSION,

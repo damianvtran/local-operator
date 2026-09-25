@@ -329,6 +329,17 @@ class ModelResponsePayload(ProtocolModel):
     #: provider stopped emitting the token, or stopped sending the model that
     #: carries it -- that no other field can express.
     stripped_reply_markers: SafeCount = 0
+    #: How many of the reply's action fields the sibling-kind tolerance dropped
+    #: before the batch was validated, and how many bytes of framing preceded
+    #: the decision when the decoder had to locate it behind a preamble, a code
+    #: fence or a native call-syntax wrapper. Both defaulted, so a bundle written
+    #: before these fields existed still validates and reads as zero -- which is
+    #: what those runs meant: nothing needed a tolerance. Written on the ACCEPTED
+    #: path, because an accepted reply is the only remaining record of the class
+    #: these two tolerances serve once they work (a refused reply still carries
+    #: its own class in the rejection artifact).
+    tolerated_action_fields: SafeCount = 0
+    leading_framing_bytes: SafeCount = 0
     redacted_response: EvidenceArtifactRef | None = None
 
 

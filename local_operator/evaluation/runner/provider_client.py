@@ -1570,10 +1570,12 @@ def parse_decision(
     meant.
     """
 
-    decoded, trailing = _decode_leading_json(payload)
+    decoded, trailing, leading_framing_bytes = _decode_leading_json(payload)
     if not isinstance(decoded, Mapping):
         raise DecisionParseError("decision must be a JSON object")
-    actions, note = normalise_public_reply(decoded, action_binding=action_binding)
+    actions, note, tolerated_action_fields = normalise_public_reply(
+        decoded, action_binding=action_binding
+    )
     if action_binding == COMPACT_ACTION_BINDING:
         try:
             actions = bind_compact_actions(decoded, actions, observation.observation_id)
@@ -1671,6 +1673,13 @@ def parse_decision(
         prompt_cache_key=prompt_cache_key,
         context_tokens=context_tokens,
         compaction=compaction,
+        # The decoder's own counts, set here rather than attached afterwards:
+        # they are facts about the REPLY's bytes -- how much framing preceded
+        # the decision, how many action fields the kind mismatch cost -- while
+        # the provenance ``decide`` attaches (``stripped_reply_markers``) is
+        # about how the reply was assembled before this function saw it.
+        tolerated_action_fields=tolerated_action_fields,
+        leading_framing_bytes=leading_framing_bytes,
     )
 
 
