@@ -174,6 +174,17 @@ async def test_a_failing_record_write_does_not_break_the_push(tmp_path: Path) ->
             "back to anthropic/claude-opus-5",
         ),
         (
+            # Review R2-1: a route edge that FORGOT its reason still prints. The
+            # skip keys on ``context_metadata`` alone, so a future emitter's
+            # omission degrades to the plain verb instead of vanishing.
+            ModelChangeEvent(provider="anthropic", model_id="claude-opus-5"),
+            "back to anthropic/claude-opus-5",
+        ),
+        (
+            ModelChangeEvent(provider="zai", model_id="glm-5.3", is_fallback=True),
+            "fell back to zai/glm-5.3",
+        ),
+        (
             # Every production pin carries its cause (``RouteState.activate``).
             ModelChangeEvent(
                 provider="zai", model_id="glm-5.3", is_fallback=True, reason="provider failure"
