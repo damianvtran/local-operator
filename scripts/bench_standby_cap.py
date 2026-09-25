@@ -154,6 +154,42 @@ def _read_report(path: Path, wait_s: float = 120.0) -> dict[str, Any] | None:
     return None
 
 
+def _process_table() -> dict[int, tuple[int, str]]:
+    """``pid -> (ppid, command)`` for every live process, one ``ps``."""
+    out = subprocess.run(
+        ["ps", "-eo", "pid=,ppid=,command="], capture_output=True, text=True
+    ).stdout
+    table: dict[int, tuple[int, str]] = {}
+    for line in out.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) >= 2 and fields[0].isdigit() and fields[1].isdigit():
+            table[int(fields[0])] = (int(fields[1]), fields[2] if len(fields) > 2 else "")
+    return table
+
+
+def _descendants(roots: set[int], table: dict[int, tuple[int, str]]) -> set[int]:
+    """Every live pid strictly below ``roots``, however deep.
+
+    Recursive on purpose (agent review round 4, R4-1): the cleanup's old predicate
+    compared a candidate's ppid against a LIVE console, so once a console was killed
+    every survivor was ppid 1 and unreachable by construction — which is how eight of
+    eight runs reported ``root_removed: true`` while an orphaned runtime put the root
+    back. A console's engage children are grandchildren or deeper of this script, so
+    the walk cannot stop one level down.
+    """
+    kids: dict[int, list[int]] = {}
+    for pid, (ppid, _command) in table.items():
+        kids.setdefault(ppid, []).append(pid)
+    found: set[int] = set()
+    stack = list(roots)
+    while stack:
+        for child in kids.get(stack.pop(), []):
+            if child not in found:
+                found.add(child)
+                stack.append(child)
+    return found
+
+
 def _runtime_processes() -> list[tuple[int, int, float, str]]:
     """Live RUNTIME children (``-m ...runtime.process``), for the cleanup only.
 
@@ -297,8 +333,12 @@ def _one_run(consoles: int, mode: str, warm_wait: float) -> dict[str, Any]:
                 )
             )
         reports = []
+        reports_deadline = time.monotonic() + warm_wait + 120.0
         for index in range(len(slots)):
-            report = _read_report(out_dir / f"console-{index}.json", warm_wait + 120.0)
+            report = _read_report(
+                out_dir / f"console-{index}.json",
+                max(0.0, reports_deadline - time.monotonic()),
+            )
             assert report is not None, f"console {index} never reported a readable report"
             reports.append(report)
         spares = _spare_processes()
@@ -309,16 +349,27 @@ def _one_run(consoles: int, mode: str, warm_wait: float) -> dict[str, Any]:
         # spares / 424 MB". Only this run's consoles' children are ours.
         mine = [item for item in spares if item[1] in console_pids]
         foreign = [item for item in spares if item[1] not in console_pids]
-        # Phase 2: everyone engages now that the count is known.
-        for index in range(len(slots)):
-            (out_dir / f"console-{index}.go").write_text("go")
-        engages = [
-            _read_report(out_dir / f"console-{index}.engage.json", 600.0)
-            for index in range(len(slots))
-        ]
+        # SAMPLED BEFORE THE ENGAGES (agent review round 4, R4-2): an adopted engage
+        # consumes its console's spare and the console exits, so sampling afterwards
+        # measured pids that no longer existed — no footprint at all in five of eight
+        # runs — or a spare already replaced by its successor (the reviewer read
+        # 163/167 MB and 170/172 MB against this body's 129-136 MB for that reason).
         before = [
             {"pid": pid, "rss_mb": rss, "footprint_mb": _footprint_mb(pid)}
             for pid, _ppid, rss, _tail in mine
+        ]
+        # Phase 2: everyone engages now that the count is known.
+        for index in range(len(slots)):
+            (out_dir / f"console-{index}.go").write_text("go")
+        # ONE deadline for the set, not one per console (agent review round 4, R4-3):
+        # N x 600 s is not a bound.
+        engages_deadline = time.monotonic() + 600.0
+        engages = [
+            _read_report(
+                out_dir / f"console-{index}.engage.json",
+                max(0.0, engages_deadline - time.monotonic()),
+            )
+            for index in range(len(slots))
         ]
         row = {
             "consoles": len(slots),
@@ -367,45 +418,102 @@ def _one_run(consoles: int, mode: str, warm_wait: float) -> dict[str, Any]:
             row["cold_bind_ms_median"] = round(statistics.median(cold), 1)
         return row
     finally:
-        # CHILDREN FIRST, WHILE THEIR PARENTS ARE STILL ALIVE (QA round 3, Q4-3).
-        # Phase 2's engages spawn real runtimes (``-m ...runtime.process``) as
-        # children of the consoles, and killing the consoles first orphans them: a
-        # runtime still writing into the root made ``rmtree`` fail ENOTEMPTY, and
-        # ``ignore_errors=True`` hid it — measured as 6 of 8 runs leaving the root
-        # behind even after the first attempt at this fix. So: collect the children
-        # (runtimes and spares) attributable to THIS run's consoles, kill those, then
-        # the consoles, sweep once more for a kill that raced a fork, remove the root,
-        # and CHECK that it is gone.
+        # THE TREE IS RECORDED BEFORE ANYTHING IS KILLED, AND SWEPT TO QUIESCENCE
+        # (agent review round 4, R4-1). The previous version attributed a process to
+        # this run by comparing its ppid against a LIVE console and then killed the
+        # consoles in its first pass, so every survivor was ppid 1 and unreachable by
+        # the predicate that was supposed to find it: eight of eight runs reported
+        # ``root_removed: true`` while an orphaned runtime mkdir'd the root back
+        # through ``registry.run_dir`` (publish/heartbeat, ``journal.clear_boot_record``).
+        # Two predicates now, both exact, and both re-evaluated every sweep:
+        #   * every descendant of this run's consoles, however deep — while the
+        #     consoles are alive, which is why the children go first;
+        #   * every live process whose argv names THIS root, which is session-unique,
+        #     so it still finds an orphan after its parent is gone.
         console_pids = {proc.pid for proc in procs}
-        for _pass in range(2):
-            ours = [
-                item
-                for item in _runtime_processes() + _spare_processes()
-                if item[1] in console_pids
-            ]
-            if not ours:
+
+        def _mine() -> set[int]:
+            table = _process_table()
+            found = _descendants(console_pids, table)
+            found |= {pid for pid, (_ppid, cmd) in table.items() if str(base) in cmd}
+            return found - console_pids
+
+        recorded = sorted(_mine())
+        killed: set[int] = set()
+        for _round in range(8):  # a console can fork while its child is being killed
+            live = _mine()
+            if not live:
                 break
-            for pid, _ppid, _rss, _tail in ours:
+            for pid in sorted(live):
                 try:
                     os.kill(pid, 9)
                 except OSError:
                     pass
-            if _pass == 0:
-                for proc in procs:
-                    if proc.poll() is None:
-                        proc.kill()
-                        proc.wait(timeout=30)
-        shutil.rmtree(base, ignore_errors=True)
-        # NOT silence: the removal is part of what this script claims to do, so a
-        # survivor is printed and recorded rather than swallowed by ``ignore_errors``.
-        root_removed = not base.exists()
+            killed |= live
+            time.sleep(0.4)
+        # Children are quiescent, so the consoles can go now; then sweep once more by
+        # the root path alone, for anything a console forked as it died.
+        for proc in procs:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=30)
+        for _round in range(4):
+            table = _process_table()
+            live = {pid for pid, (_ppid, cmd) in table.items() if str(base) in cmd}
+            if not live:
+                break
+            for pid in sorted(live):
+                try:
+                    os.kill(pid, 9)
+                except OSError:
+                    pass
+            killed |= live
+            time.sleep(0.4)
+
+        # Remove, and PRINT THE REASON when it fails (agent review round 4, R4-4):
+        # ``ignore_errors=True`` threw away the only evidence of why, which cost the
+        # reviewer eight runs and an audit hook to recover.
+        removal_error = ""
+        for _round in range(4):
+            try:
+                shutil.rmtree(base)
+            except FileNotFoundError:
+                break
+            except OSError as error:
+                removal_error = str(error)
+                print(f"  (removal attempt {_round + 1} failed: {error})", flush=True)
+                time.sleep(0.5)
+                continue
+            break
+
+        # SETTLE, do not read once (R4-1): ``not base.exists()`` immediately after the
+        # removal cannot see a writer that puts the root back a moment later, which is
+        # exactly how a run could print ``root_removed: true`` and still leave one. Two
+        # consecutive clean reads, a second apart, are what this claim can assert.
+        root_removed = False
+        clean_reads = 0
+        for _round in range(6):
+            time.sleep(1.0)
+            if base.exists():
+                clean_reads = 0
+                shutil.rmtree(base, ignore_errors=True)
+            else:
+                clean_reads += 1
+                if clean_reads >= 2:
+                    root_removed = True
+                    break
         if row is not None:
             # In the artefact as well as the log: "this script removes its root" is a
             # claim, and a claim that only prints when it fails is not checkable.
             row["root_removed"] = root_removed
+            row["cleanup"] = {
+                "descendants_recorded": recorded,
+                "pids_killed": sorted(killed),
+                "removal_error": removal_error,
+            }
         if not root_removed:
             print(
-                f"  WARNING: {base} was not removed; still present: "
+                f"  WARNING: {base} survived the settle; still present: "
                 f"{[str(item) for item in sorted(base.rglob('*'))[:5]]}",
                 flush=True,
             )
@@ -438,6 +546,13 @@ def main() -> int:
     if args.json:
         Path(args.json).write_text(json.dumps(row, indent=2) + "\n")
         print(f"wrote {args.json}")
+    if row.get("root_removed") is False:
+        # A surviving root is a FAILURE of this script's own cleanup, not a note
+        # (agent review round 4, R4-1): the claim is settle-checked now, so it is
+        # asserted here too rather than reported as true and left for someone to
+        # discover in $TMPDIR later.
+        print("  FAILED: the isolated root survived the settle; see the WARNING above")
+        return 1
     return 0
 
 
