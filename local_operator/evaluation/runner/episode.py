@@ -84,6 +84,7 @@ from local_operator.evaluation.evidence.models import (
     OutcomeDraft,
     PreflightPayload,
     ReconciliationPayload,
+    ReplyTolerancePayload,
     RouteIdentity,
     ScoreArtifact,
     ScoringResultPayload,
@@ -1156,6 +1157,27 @@ class EpisodeRunner:
                 redacted_response=response_artifact,
             ),
         )
+        # The two reply tolerances are recorded on their OWN kind rather than as
+        # fields of the response above, and that is a compatibility constraint:
+        # ``event_id`` is a digest over the payload as the current model
+        # canonicalizes it, so a field added to ``ModelResponsePayload``
+        # re-baselines every ``model_response`` event ever sealed -- making every
+        # pre-change bundle fail ``verify_bundle`` and un-recoverable. See
+        # ``ReplyTolerancePayload`` for the measurement. Written only when a
+        # tolerance FIRED, so its absence reads as zero and an ordinary reply
+        # costs no journal line; the recovered rate is this kind's count over
+        # ``model_response``.
+        tolerated_action_fields = getattr(decision, "tolerated_action_fields", 0)
+        leading_framing_bytes = getattr(decision, "leading_framing_bytes", 0)
+        if tolerated_action_fields or leading_framing_bytes:
+            self._append(
+                "reply_tolerance",
+                ReplyTolerancePayload(
+                    request_id=request_id,
+                    tolerated_action_fields=tolerated_action_fields,
+                    leading_framing_bytes=leading_framing_bytes,
+                ),
+            )
         self._append(
             "usage_cost",
             UsageCostPayload(

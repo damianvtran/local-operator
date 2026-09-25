@@ -74,6 +74,7 @@ EventKind = Literal[
     "lifecycle_transition",
     "model_request",
     "model_response",
+    "reply_tolerance",
     "usage_cost",
     "context_compaction",
     "budget_commitment",
@@ -330,6 +331,53 @@ class ModelResponsePayload(ProtocolModel):
     #: carries it -- that no other field can express.
     stripped_reply_markers: SafeCount = 0
     redacted_response: EvidenceArtifactRef | None = None
+
+
+class ReplyTolerancePayload(ProtocolModel):
+    """The tolerances that recovered ONE accepted reply, as a sealed count.
+
+    A kind of its own rather than two more fields on ``ModelResponsePayload``,
+    and that is a compatibility constraint rather than a preference: an event's
+    ``event_id`` is a digest over its payload as the CURRENT model canonicalizes
+    it (``EventRecord._validate_and_identify``), and ``verify_bundle`` recomputes
+    it. A field added to an already-sealed payload model is therefore NOT
+    additive: every ``model_response`` event written before the field existed
+    recomputes to a different id and reports ``event_hash_mismatch`` -- measured
+    on this module's history, one error per such event across 41 of the campaign's
+    49 sealed bundles -- and ``EvidenceWriter.recover`` refuses a bundle carrying
+    an error-severity issue outright, so the change silently strands the entire
+    evidence record of every episode already run. ``schema_version`` is a
+    ``Literal["1.0"]`` constant with no cross-revision comparison, so nothing
+    downstream can tell "sealed before the field" from "tampered with".
+
+    A NEW KIND cannot do any of that: no existing event changes kind or payload,
+    so no existing digest moves, and a reader that predates these counts simply
+    finds no event of this kind rather than a bundle it can no longer verify.
+
+    Written only when a tolerance actually FIRED, which is the one place absence
+    carries the same information as a zero: a run of ordinary replies costs no
+    journal line, and the recovered rate is this kind's count over
+    ``model_response``. It is written on the ACCEPTED path, because an accepted
+    reply is the only remaining record of the class these tolerances serve once
+    they work -- a refused reply still carries its own class in the rejection
+    artifact, and the pre-change rate was countable only because every instance
+    was one.
+    """
+
+    #: The attempt these counts belong to -- the ``request_id`` of the
+    #: ``model_response`` event this record follows, so a tolerance is
+    #: attributable to a served route and a model rather than to the episode.
+    request_id: StrictIdentifier
+    #: How many of the reply's action fields the sibling-kind tolerance dropped
+    #: before the batch was validated (``drop_sibling_action_fields``).
+    tolerated_action_fields: SafeCount = 0
+    #: How many UTF-8 BYTES of framing preceded the decision after leading
+    #: whitespace, when the decoder had to LOCATE it behind a preamble, a code
+    #: fence or a native call-syntax wrapper (``_locate_leading_object``). Bytes
+    #: rather than characters so the count is a prefix of the reply's reported
+    #: size for any consumer that slices by it; the module's own framing
+    #: examples include non-ASCII text (``思考中：``, ``<｜DSML｜...>``).
+    leading_framing_bytes: SafeCount = 0
 
 
 class UsageCostPayload(ProtocolModel):
@@ -600,6 +648,7 @@ EventPayload: TypeAlias = (
     | LifecycleTransitionPayload
     | ModelRequestPayload
     | ModelResponsePayload
+    | ReplyTolerancePayload
     | UsageCostPayload
     | ContextCompactionPayload
     | BudgetCommitmentPayload
@@ -621,6 +670,7 @@ _EVENT_PAYLOAD_TYPES: dict[str, type[ProtocolModel]] = {
     "lifecycle_transition": LifecycleTransitionPayload,
     "model_request": ModelRequestPayload,
     "model_response": ModelResponsePayload,
+    "reply_tolerance": ReplyTolerancePayload,
     "usage_cost": UsageCostPayload,
     "context_compaction": ContextCompactionPayload,
     "budget_commitment": BudgetCommitmentPayload,
