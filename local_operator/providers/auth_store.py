@@ -57,6 +57,7 @@ What a marked row gets instead is a deferred, classified refusal
 from __future__ import annotations
 
 import asyncio
+import atexit
 import dataclasses
 import hashlib
 import json
@@ -67,6 +68,7 @@ import threading
 import time
 import uuid
 import zlib
+from collections import OrderedDict
 from collections.abc import Collection, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -474,6 +476,185 @@ def default_db_path() -> Path:
     return config_dir() / "auth.db"
 
 
+#: Process-level stores handed out by :func:`shared_auth_store`.
+#:
+#: Keyed on everything that can change an ANSWER, not merely on the file: the
+#: resolved ``auth.db`` path, the canonical config ROOT the env tier reads its
+#: provider-class store rows from, and the config-derived override tier. Two
+#: callers that would resolve a provider's key differently must not be handed
+#: one store — see :func:`shared_auth_store`.
+#:
+#: Ordered, and bounded at :data:`_SHARED_STORES_MAX`. The bound is what keeps
+#: this from trading a per-call connection for a per-ROOT one that is never
+#: released: a test session reaches the classification leg with a fresh
+#: ``tmp_path`` per test, so an unbounded map grows a connection (three file
+#: descriptors with WAL sidecars) per test in a worker. That is the exact shape
+#: that already hit ``EMFILE`` under the default 256-descriptor limit here — see
+#: :meth:`AuthStore._usage_ranked_order`, which closes the usage cache per
+#: ranking for this reason. Eight is far above any real process's credential
+#: roots (one, plus an isolated or server root) and 24 descriptors at worst.
+_SHARED_STORES: "OrderedDict[tuple[str, str, tuple[tuple[str, str], ...]], AuthStore]" = (
+    OrderedDict()
+)
+_SHARED_STORES_MAX = 8
+
+#: Guards the map, and is held ACROSS the ``AuthStore()`` construction inside
+#: :func:`shared_auth_store` — which is the point rather than an accident. The
+#: construction is the expensive part (connect + 3 PRAGMAs + schema DDL + 3
+#: chmods, measured at ~1.6 ms and up to 9.2 ms under fleet load), so two
+#: threads racing for the first store must produce ONE connection, not two.
+_SHARED_STORES_LOCK = threading.Lock()
+
+
+def _canonical_config_root(config_root: Path | None) -> Path:
+    """The config root a store built with ``config_root`` will actually read.
+
+    ``None`` is NOT a third root. Every consumer of this argument resolves it as
+    ``config_dir()`` — ``secrets/keys.secrets_dir`` is literally
+    ``(base if base is not None else config_dir())`` — so keying ``None`` apart
+    from ``config_dir()`` would open two connections to one root for no
+    answer-level reason, which is the duplication this accessor exists to
+    remove. Canonicalising is therefore exactly answer-preserving rather than
+    merely convenient: the two spellings denote the same directory by
+    construction.
+    """
+    return config_root if config_root is not None else config_dir()
+
+
+def shared_auth_store(
+    db_path: str | Path | None = None,
+    *,
+    config_dir: Path | None = None,
+    config_overrides: dict[str, str] | None = None,
+) -> AuthStore:
+    """The process's store for one credential root — reused, not reopened.
+
+    WHY THIS EXISTS. Constructions that only READ through the cascade were
+    opening a fresh SQLite connection each: measured on this tree at seven
+    connections to one ``auth.db`` per boot (``classification/vendors.py`` x3,
+    ``model/configure.py`` x3, ``session_factory.py`` x1) and six per cold
+    prompt, each paying connect + three ``PRAGMA`` + the schema
+    ``executescript`` + three ``chmod``. They all resolve the same file with the
+    same tier configuration, so the connection is shared state that was being
+    rebuilt per call.
+
+    WHO MAY USE IT, AND WHO MUST NOT.
+    Only a caller whose use is a bounded read through the cascade and which
+    does NOT own a close. The distinction is not stylistic — it is the one
+    :func:`_release_detached_refresh` and :meth:`AuthStore.detached_refresh`
+    record, and the sites that must keep their own store are:
+
+    * The tunnels trio (``tunnels/api.py``, ``tunnels/report.py``), which sit
+      inside ``with closing(AuthStore())`` precisely so the connection dies with
+      the bounded call. They are the callers whose detached exchange gets its
+      OWN store (:meth:`AuthStore.detached_refresh`), which is a correctness
+      requirement rather than tidiness.
+    * The session's store (``session_factory.py``), which
+      :func:`~local_operator.session_factory.attach_auth_dispose` CLOSES on
+      ``session.dispose()``. Its key would otherwise be indistinguishable from
+      the classification legs' — same file, same root — and disposing one
+      session would then close the store under every other reader in the
+      process. That is the concrete form of the hazard
+      :func:`_release_detached_refresh` warns about, and it is why ownership,
+      not just the path, decides what may share.
+
+    CLOSING. Nothing that receives this store may close it; the process's
+    teardown is :func:`close_shared_auth_stores`. A caller that closes it
+    anyway cannot poison the process, which is the deliberate half of the
+    choice: use-after-close raises ``sqlite3.ProgrammingError`` ("Cannot operate
+    on a closed database"), so this accessor REOPENS a store it finds closed
+    rather than handing the corpse on. The residual window is the one no
+    accessor can close — a caller already INSIDE a call when another thread
+    closes — and that is why the contract is "never close what you were
+    handed" rather than a promise that closing is harmless.
+
+    THREADING. Sharing is what this store was built for, so the consolidation
+    makes an existing property real rather than adding one: the connection is
+    opened with ``check_same_thread=False`` and every statement goes through
+    :class:`_SerializedConnection`'s reentrant mutex (see :meth:`_connect`),
+    which exists so a caller on a worker thread gets a correct answer instead of
+    a ``ProgrammingError``. The store already holds process-scoped routing state
+    shared by every session in the process (``_round_robin``,
+    ``_deprioritized``), and its per-process refresh single-flight
+    (``_refresh_locks``) is per STORE — so one shared store is strictly better
+    covered than three: the three classification legs previously held three
+    independent "single-flight" locks for one credential. It holds no per-call
+    state that a second caller could corrupt: a cursor is created and consumed
+    inside one serialized statement, and the store commits each write rather
+    than leaving a transaction open across calls.
+
+    ``usage_cache`` is deliberately NOT accepted: it is an injection seam for
+    tests, a per-store handle, and a caller that needs its own has no business
+    sharing one.
+
+    The map is bounded at :data:`_SHARED_STORES_MAX` roots and evicts by
+    dropping its reference, never by closing — see the note there. A process
+    with more distinct credential roots than that keeps working; it just stops
+    reusing the least recently used ones.
+    """
+    resolved_db = Path(db_path) if db_path is not None else default_db_path()
+    key = (
+        str(resolved_db),
+        str(_canonical_config_root(config_dir)),
+        tuple(sorted((config_overrides or {}).items())),
+    )
+    with _SHARED_STORES_LOCK:
+        store = _SHARED_STORES.get(key)
+        if store is None or store.closed:
+            # Reopen rather than hand back a closed handle (see CLOSING above);
+            # a fresh AuthStore also re-arms the lazily-built usage cache, which
+            # ``close()`` had dropped.
+            store = AuthStore(resolved_db, config_dir=config_dir, config_overrides=config_overrides)
+            _SHARED_STORES[key] = store
+        _SHARED_STORES.move_to_end(key)
+        while len(_SHARED_STORES) > _SHARED_STORES_MAX:
+            evicted_key, evicted = _SHARED_STORES.popitem(last=False)
+            if evicted is store:
+                # Cannot happen with a max of 2 or more, but a bound of 1 would
+                # otherwise evict the store this call is about to return.
+                _SHARED_STORES[evicted_key] = evicted
+                break
+            # DROPPED, never closed, and that is the safe direction: a caller
+            # that is mid-call (or awaiting a refresh) still holds a reference,
+            # so the store stays alive and valid for it, and only the map's own
+            # reference goes away. Closing here would hand that caller the
+            # ``ProgrammingError`` this accessor exists to prevent. The
+            # descriptors return by refcount once the last holder lets go, which
+            # is what bounds the process.
+            logger.debug(
+                "shared auth store: evicting %s (over %d roots)", evicted_key[0], _SHARED_STORES_MAX
+            )
+        return store
+
+
+def close_shared_auth_stores() -> None:
+    """Close every process-level store. The only legitimate closer of one.
+
+    Registered with :mod:`atexit` so a process that used a shared store releases
+    its file descriptor and WAL sidecars deterministically instead of relying on
+    the interpreter to reclaim them. Closing at exit cannot cut short a live
+    exchange: the detached refreshes that must outlive their caller own their
+    own store and are closed by :func:`_release_detached_refresh`, and atexit
+    runs after every non-daemon thread has finished.
+
+    Exceptions are swallowed and the reference is dropped regardless. Shutdown
+    is the wrong moment to raise — an already-broken handle must not turn a
+    clean exit into a traceback — and dropping the reference is what matters,
+    since the process is ending either way.
+    """
+    with _SHARED_STORES_LOCK:
+        stores = list(_SHARED_STORES.values())
+        _SHARED_STORES.clear()
+    for store in stores:
+        try:
+            store.close()
+        except Exception:  # noqa: BLE001 — a broken handle is not a shutdown failure
+            logger.debug("shared auth store: close at teardown failed", exc_info=True)
+
+
+atexit.register(close_shared_auth_stores)
+
+
 def _identity_key_for(provider: str, credential: dict[str, Any]) -> str | None:
     """Dedupe key so one account holds one row (org scope ⇒ separate rows).
 
@@ -852,6 +1033,9 @@ class AuthStore:
         # shared ``~/.local-operator/usage_cache.db`` is opened on demand.
         self._usage_cache: "UsageCacheStore | None" = usage_cache
         self._usage_cache_probed = usage_cache is not None
+        #: Set by :meth:`close`. Read by :func:`shared_auth_store` to decide
+        #: whether the process-level store it is holding is still usable.
+        self._closed = False
         self._conn = self._connect()
 
     @property
@@ -911,10 +1095,22 @@ class AuthStore:
         return _SerializedConnection(conn)
 
     def close(self) -> None:
+        # The flag is set FIRST so a reader that races this close sees either a
+        # live store or a closed one, never a store whose connection is already
+        # gone but which still claims to be open. It is what
+        # :func:`shared_auth_store` consults to decide whether to reopen, and
+        # its only consumer: everything else detects a closed connection the way
+        # sqlite does, with ``ProgrammingError`` on use.
+        self._closed = True
         self._conn.close()
         if self._usage_cache is not None:
             self._usage_cache.close()
             self._usage_cache = None
+
+    @property
+    def closed(self) -> bool:
+        """Whether :meth:`close` has run. See :func:`shared_auth_store`."""
+        return self._closed
 
     @staticmethod
     def _now_ms() -> int:
