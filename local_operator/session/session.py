@@ -11198,16 +11198,6 @@ class Session:
         if not results:
             return
         if self._leaving_deliveries:
-            # Built with the held flag so a surface can tell these rows from
-            # delivered ones (U6); the text itself is unchanged.
-            held = [
-                self._job_result_message(job_id, text, job, held=True)
-                for job_id, text, job in results
-            ]
-            await self._hold_job_results_for_next_turn(results, held)
-            return
-        messages = [self._job_result_message(job_id, text, job) for job_id, text, job in results]
-        if self._leaving_deliveries:
             # THE DEPARTURE LATCH. A job delivery is NOT an admission, which is
             # what makes this arm necessary: ``ServingSessionHandle.begin_drain``
             # and ``begin_retire`` refuse ``prompt`` and ``receive_peer_message``
@@ -11228,8 +11218,20 @@ class Session:
             # exactly what ``dispose`` cancels in flight (see the comment on the
             # name/model flushes there). ``_hold_job_results_for_next_turn``
             # never raises, so no caller needs its own guard.
-            await self._hold_job_results_for_next_turn(results, messages)
+            #
+            # ONE arm, not two (review round 2, MINOR-A). An earlier revision
+            # left this comment on a second ``_leaving_deliveries`` test placed
+            # AFTER the message build, which the arm above had already made
+            # unreachable; the branch that could write a held row as DELIVERED
+            # is the one that must not exist, so the held build lives here and
+            # the latch is tested once.
+            held = [
+                self._job_result_message(job_id, text, job, held=True)
+                for job_id, text, job in results
+            ]
+            await self._hold_job_results_for_next_turn(results, held)
             return
+        messages = [self._job_result_message(job_id, text, job) for job_id, text, job in results]
         self._spawn_background(self._prompt_messages(list(messages)))
 
     async def _hold_job_results_for_next_turn(
@@ -11262,7 +11264,7 @@ class Session:
         file's delivery contract argues against ("N children that settle during
         one parent turn are one piece of news"). Per-job detail goes to the log.
         """
-        failed: list[str] = []
+        failed: list[tuple[str, str]] = []
         reason = ""
         for (job_id, _text, job), message in zip(results, messages):
             try:
@@ -11274,14 +11276,19 @@ class Session:
                     job_id,
                     exc_info=True,
                 )
-                failed.append(str(getattr(job, "label", job_id) or job_id))
+                # The ID travels with the label: the row's own remedy is
+                # addressed by id, and a reader who is shown only a label has
+                # nothing to substitute into it (UX round 2, U9).
+                failed.append((job_id, str(getattr(job, "label", job_id) or job_id)))
                 reason = reason or (str(exc) or exc.__class__.__name__)
                 continue
             self._append_or_park_journal(message)
         if failed:
             await self._journal_held_delivery_failure(failed, reason)
 
-    async def _journal_held_delivery_failure(self, labels: list[str], reason: str) -> None:
+    async def _journal_held_delivery_failure(
+        self, jobs: list[tuple[str, str]], reason: str
+    ) -> None:
         """Report the job results that could not be held for the next turn.
 
         The one honest outcome when the durability write fails: the runtime is
@@ -11301,20 +11308,42 @@ class Session:
         warning's labelled shape and read as the agent narrating. The formatter
         owns the route it names too, so the pointer cannot drift from what the
         stores actually do (D1/D3).
-        """
-        try:
-            from local_operator.incidents import format_held_delivery_message
 
-            await self.journal_incident(
-                f"could not hold {len(labels)} background job result(s) while the runtime "
-                f"was leaving: {reason}",
-                rendered=format_held_delivery_message(labels, reason=reason),
-            )
+        AND IT IS DURABLE EVEN WHEN THE DISPOSAL WON (QA round 2, Q-R2-2).
+        ``journal_incident`` returns early on ``self._disposed`` — right for a row
+        that has to reach a live model's context, wrong here: in the ordering
+        this whole change is about, the disposal reaches the turn BEFORE its
+        flush, so the one path whose entire purpose is "do not lose this quietly"
+        was allowed to end as an ERROR log line and nothing else. The transcript
+        accepts appends until the very end of ``dispose`` (the same fact MAJOR-1
+        rests on), so the disposed case writes the row directly. The live-context
+        half is skipped rather than faked: there is no turn in this process to
+        read it, and the row's reader is the next one.
+        """
+        from local_operator.harness.message_types import SESSION_INCIDENT_MESSAGE_TYPE
+        from local_operator.harness.types import CustomMessage
+        from local_operator.incidents import format_held_delivery_message
+
+        rendered = format_held_delivery_message(jobs, reason=reason)
+        raw = (
+            f"could not hold {len(jobs)} background job result(s) while the runtime "
+            f"was leaving: {reason}"
+        )
+        try:
+            if self._disposed:
+                message = CustomMessage(
+                    custom_type=SESSION_INCIDENT_MESSAGE_TYPE,
+                    attribution="system",
+                    details={"text": rendered, "raw": raw[:1000]},
+                )
+                await self._transcript.append_message(message, preserve_mtime=True)
+            else:
+                await self.journal_incident(raw, rendered=rendered)
         except Exception:  # noqa: BLE001 - a failed report must not raise either
             logger.error(
                 "could not journal the lost delivery of %s (the ERROR log above is the "
                 "only record)",
-                labels,
+                [job_id for job_id, _label in jobs],
                 exc_info=True,
             )
 
