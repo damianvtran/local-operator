@@ -217,10 +217,14 @@ async def run_tui(
 
     # Ask the terminal for its colors while stdin is still ours: once Textual's
     # input thread starts, the replies would arrive as keystrokes. Registers the
-    # `terminal` theme only when the terminal answered.
+    # `terminal` theme only when the terminal answered. Never fatal: a theme is
+    # not worth a boot.
     from local_operator.tui import host_theme
 
-    host_theme.install()
+    try:
+        host_theme.install(theme_name)
+    except Exception:
+        logger.debug("terminal theme probe failed", exc_info=True)
 
     from local_operator.tui.app import OperatorApp  # lazy: Textual import
 
