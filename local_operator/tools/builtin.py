@@ -11861,13 +11861,13 @@ async def _execute_send_model(
     transcript no running owner holds (D1's overturn condition).
     """
     from local_operator.mobile.peer_send import (
-        MODEL_SWITCH_CAPABILITY,
         PeerModelUnconfirmed,
         candidate_lines,
-        cold_switch_target,
         parse_model_selector,
-        resolve_peer_target,
+        resolve_switch_target,
+        switch_outcome,
         switch_peer_model,
+        switch_receipt,
     )
 
     parsed = parse_model_selector(params.model or "")
@@ -11875,11 +11875,10 @@ async def _execute_send_model(
         return _error(tool_call_id, "send", parsed)
     provider, model_id = parsed
     record, candidates, error = await asyncio.to_thread(
-        resolve_peer_target,
+        resolve_switch_target,
         target=params.target,
         pid=params.pid,
         session=params.session,
-        capability=MODEL_SWITCH_CAPABILITY,
     )
     if candidates:
         lines = [
@@ -11889,12 +11888,7 @@ async def _execute_send_model(
         lines.extend(candidate_lines(candidates, indent="  ", prefix="pid="))
         return _error(tool_call_id, "send", "\n".join(lines))
     if record is None:
-        # Live only. A session only the store knows is named as NOT RUNNING,
-        # with the two ways to switch it, rather than as "no match".
-        cold = await asyncio.to_thread(
-            cold_switch_target, error, target=params.target, session=params.session
-        )
-        return _error(tool_call_id, "send", cold or error or "no target resolved")
+        return _error(tool_call_id, "send", error or "no target resolved")
     if record.pid == os.getpid():
         return _error(
             tool_call_id,
@@ -11903,22 +11897,26 @@ async def _execute_send_model(
             "send — use /model",
         )
     sender = await _send_sender_identity(context)
-    name = record.conversation_name or record.session_id
     try:
         detail = await switch_peer_model(
             record, provider=provider, model_id=model_id, sender=sender
         )
     except PeerModelUnconfirmed as exc:
-        return _error(tool_call_id, "send", str(exc))
+        return _error(tool_call_id, "send", switch_receipt(record, str(exc)))
     except RuntimeError as exc:
         # The peer ANSWERED no — a refusal, an unengaged or incapable handle, or
-        # an older build — so nothing changed and its sentence says why.
-        return _error(tool_call_id, "send", f"pid {record.pid} {name!r}: {exc}")
+        # an older build — or it could not be reached; nothing changed, and the
+        # sentence leads so the collapsed error slot shows the reason (D2).
+        return _error(tool_call_id, "send", switch_receipt(record, str(exc)))
     return _text(
         tool_call_id,
         "send",
-        f"pid {record.pid} {name!r}: {detail}",
-        details={"pid": record.pid, "model": f"{provider}/{model_id}"},
+        switch_receipt(record, detail),
+        details={
+            "pid": record.pid,
+            "model": f"{provider}/{model_id}",
+            "outcome": switch_outcome(detail),
+        },
     )
 
 

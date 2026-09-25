@@ -3490,14 +3490,25 @@ def model_command(args: argparse.Namespace) -> int:
     import asyncio
 
     from local_operator.mobile.peer_send import (
-        MODEL_SWITCH_CAPABILITY,
         PeerModelUnconfirmed,
         candidate_lines,
-        cold_switch_target,
         parse_model_selector,
-        resolve_peer_target,
+        resolve_switch_target,
         switch_peer_model,
+        switch_receipt,
     )
+
+    if getattr(args, "model", None) or getattr(args, "hosting", None):
+        # The run-shaping `--model`/`--hosting` every subcommand inherits
+        # (`_propagate_global_flags`) mean "the model for THIS run", and a
+        # command named `model` makes `--model <p/m>` the natural guess. Parsed
+        # silently it left the selector empty and the error blamed the target
+        # (UX round 1, U4), so the mistake is named instead.
+        _peer_red(
+            "the model is a positional here, not a flag: "
+            "`lop model <name> <provider>/<model>` or `lop model --pid N <provider>/<model>`"
+        )
+        return 1
 
     has_selector = args.pid is not None or args.session is not None
     target, selector = args.target, args.selector
@@ -3529,13 +3540,12 @@ def model_command(args: argparse.Namespace) -> int:
         return 1
     provider, model_id = parsed
 
-    record, candidates, error = resolve_peer_target(
+    record, candidates, error = resolve_switch_target(
         target=target,
         pid=args.pid,
         session=args.session,
         pid_hint="--pid",
         session_hint="--session",
-        capability=MODEL_SWITCH_CAPABILITY,
     )
     if candidates:
         print(
@@ -3549,29 +3559,37 @@ def model_command(args: argparse.Namespace) -> int:
         )
         return 1
     if record is None:
-        _peer_red(
-            cold_switch_target(error, target=target, session=args.session)
-            or error
-            or "no target resolved"
-        )
+        _peer_red(error or "no target resolved")
         return 1
-    sender = _peer_sender_identity()
+    sender = _cli_switch_sender()
     if record.pid == sender.get("pid"):
         _peer_red("that target is this session; use /model in it")
         return 1
-    name = record.conversation_name or record.session_id
     try:
         detail = asyncio.run(
             switch_peer_model(record, provider=provider, model_id=model_id, sender=sender)
         )
-    except PeerModelUnconfirmed as exc:
-        _peer_red(str(exc))
+    except (PeerModelUnconfirmed, RuntimeError) as exc:
+        _peer_red(switch_receipt(record, str(exc)))
         return 1
-    except RuntimeError as exc:
-        _peer_red(f"pid {record.pid} {name!r}: {exc}")
-        return 1
-    print(f"pid {record.pid} {name!r}: {detail}")
+    print(switch_receipt(record, detail))
     return 0
+
+
+def _cli_switch_sender() -> "dict[str, Any]":
+    """Who the target's audit card should name for a ``lop model`` run.
+
+    Inside a lop session (its `bash` tool, a shell under it) the ancestry walk
+    finds that session and the card names it. From a plain terminal it finds
+    nothing, and the bare pid it falls back to is this short-lived process —
+    gone before the owner reads the card, and a different number every run
+    (UX round 1, U2). That case is labelled as what it is: a human at a
+    terminal, and where.
+    """
+    sender = _peer_sender_identity()
+    if not str(sender.get("session_id") or "").strip():
+        sender["conversation_name"] = f"lop model (terminal, {os.path.basename(os.getcwd())})"
+    return sender
 
 
 def _non_negative_int(text: str) -> int:

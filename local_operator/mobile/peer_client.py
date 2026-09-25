@@ -131,6 +131,15 @@ async def send_peer_message(
     )
 
 
+class ControlDialFailed(ConnectionError):
+    """The control socket could not be OPENED, so no request byte was sent.
+
+    A ``ConnectionError`` subclass on purpose: every existing caller that folds
+    connection faults into "may or may not have arrived" keeps doing so, and a
+    caller that can say more (``switch_peer_model``) catches this first.
+    """
+
+
 async def send_control_op(
     record: SessionRecord,
     op: str,
@@ -157,7 +166,12 @@ async def send_control_op(
     projection (the target's own large transcript, not our request) is
     tolerated rather than crashing the sender.
     """
-    reader, writer = await asyncio.open_connection("127.0.0.1", record.control_port)
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", record.control_port)
+    except OSError as exc:
+        # Nothing was written, so nothing can have landed: a distinct class lets
+        # a caller say "not delivered" instead of "may or may not have landed".
+        raise ControlDialFailed(str(exc) or type(exc).__name__) from exc
     try:
         # Auth frame: the bare key (no ``client``) => daemon-class connection.
         writer.write(json.dumps({"key": record.control_key}).encode() + b"\n")

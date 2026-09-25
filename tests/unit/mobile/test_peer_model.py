@@ -78,44 +78,100 @@ def test_a_keyless_provider_is_usable_with_no_credential(fake_store):
 
 
 @pytest.mark.parametrize(
-    "busy,children,expected",
+    "busy,calling,children,expected",
     [
-        (False, 0, "switched to b/y (was a/x); its next turn runs on it"),
+        (False, True, 0, ["switched to b/y (was a/x)", "its next turn runs on it"]),
         (
             True,
+            True,
             0,
-            "switched to b/y (was a/x) mid-turn; the call in flight finishes on a/x, "
-            "every later call uses b/y",
+            [
+                "switched to b/y (was a/x)",
+                "mid-turn: the call in flight finishes on the old model; later calls use the "
+                "new one",
+            ],
+        ),
+        (
+            True,
+            False,
+            0,
+            [
+                "switched to b/y (was a/x)",
+                "mid-turn: the current step finishes on the old model; later calls use the "
+                "new one",
+            ],
         ),
         (
             False,
+            True,
             1,
-            "switched to b/y (was a/x); its next turn runs on it; 1 running subagent keeps "
-            "its current model — new and resumed ones use b/y",
+            [
+                "switched to b/y (was a/x)",
+                "its next turn runs on it",
+                "1 running subagent keeps its model; new and resumed ones use the new one",
+            ],
         ),
         (
             False,
+            True,
             3,
-            "switched to b/y (was a/x); its next turn runs on it; 3 running subagents keep "
-            "their current model — new and resumed ones use b/y",
+            [
+                "switched to b/y (was a/x)",
+                "its next turn runs on it",
+                "3 running subagents keep their model; new and resumed ones use the new one",
+            ],
         ),
     ],
 )
-def test_the_switch_receipts_are_the_designed_strings(busy, children, expected) -> None:
-    assert (
-        peer_model.switched_detail("a/x", "b/y", busy=busy, running_subagents=children) == expected
+def test_the_switch_receipts_are_outcome_first_short_lines(busy, calling, children, expected):
+    detail = peer_model.switched_detail(
+        "a/x", "b/y", busy=busy, calling=calling, running_subagents=children
     )
+    assert detail.splitlines() == expected
 
 
-def test_the_other_receipts() -> None:
-    assert peer_model.already_on_detail("a/x") == "already on a/x; nothing changed"
+def test_every_receipt_line_fits_an_expanded_card_at_100_columns() -> None:
+    """D1: the card clips each body line; with realistic model ids every line of
+    the busiest receipt stays inside the ~94-cell body at 100 columns."""
+    old, new = "anthropic/claude-opus-5", "deepseek/deepseek-flash"
+    detail = peer_model.switched_detail(old, new, busy=True, calling=True, running_subagents=12)
+    assert max(len(line) for line in detail.splitlines()) <= 94, detail
+
+
+def test_the_other_receipts_lead_with_a_distinct_outcome() -> None:
+    assert peer_model.already_on_detail("a/x").splitlines() == ["already on a/x", "nothing changed"]
+    assert peer_model.accepted_detail("a/x").startswith("pending: switch to a/x accepted\n")
     assert (
         peer_model.refusal_detail("'q' is not a known provider.", "a/x")
         == "refused: 'q' is not a known provider; still on a/x"
     )
-    assert peer_model.audit_body("a/x", "b/y") == (
-        "[remote model switch] switched this session from a/x to b/y"
+
+
+def test_the_audit_card_leads_with_the_new_model_and_names_the_sender() -> None:
+    """D3/U3: on resume the card is the only trace, and it is clipped from the right."""
+    assert peer_model.audit_body("a/x", "b/y", {"conversation_name": "fleet boss"}) == (
+        "[remote model switch] now on b/y (was a/x) — switched by fleet boss"
     )
+    assert peer_model.audit_body("a/x", "b/y", {"pid": 7}) == (
+        "[remote model switch] now on b/y (was a/x) — switched by pid 7"
+    )
+    assert peer_model.audit_body("a/x", "b/y") == "[remote model switch] now on b/y (was a/x)"
+
+
+def test_a_call_in_flight_is_told_apart_from_an_open_tool_batch() -> None:
+    """U7: an assistant tail with unanswered tool calls is a tool step, not a call."""
+    from types import SimpleNamespace
+
+    from local_operator.harness.types import Message, TextContent, ToolCall
+
+    user = Message(role="user", content=[TextContent(text="go")])
+    call = Message(role="assistant", tool_calls=[ToolCall(id="c1", name="bash")])
+    waiting_on_tool = SimpleNamespace(_context=SimpleNamespace(messages=[user, call]))
+    assert peer_model.provider_call_in_flight(waiting_on_tool) is False
+    # A turn whose tail is the user's own message is waiting on the provider.
+    waiting_on_model = SimpleNamespace(_context=SimpleNamespace(messages=[user]))
+    assert peer_model.provider_call_in_flight(waiting_on_model) is True
+    assert peer_model.provider_call_in_flight(SimpleNamespace()) is True
 
 
 # ---------------------------------------------------------------------------
@@ -157,15 +213,17 @@ async def test_serving_switches_reads_back_and_records_the_card(monkeypatch) -> 
 
     detail = await handle.receive_peer_model("DeepSeek", " deepseek-flash ", sender=sender)
 
-    assert detail == (
-        "switched to deepseek/deepseek-flash (was test/mock); its next turn runs on it"
-    )
+    assert detail.splitlines() == [
+        "switched to deepseek/deepseek-flash (was test/mock)",
+        "its next turn runs on it",
+    ]
     assert [(spec.provider, spec.model_id, explicit) for spec, explicit in applied] == [
         ("deepseek", "deepseek-flash", True)
     ]
     assert cards == [
         (
-            "[remote model switch] switched this session from test/mock to deepseek/deepseek-flash",
+            "[remote model switch] now on deepseek/deepseek-flash (was test/mock) — switched by "
+            "fleet boss",
             sender,
         )
     ]
@@ -185,8 +243,37 @@ async def test_serving_same_pair_is_a_no_op(monkeypatch) -> None:
     handle, session, applied, cards = _serving(monkeypatch)
     session.model_label = session.effective_model_label = "deepseek/deepseek-flash"
     detail = await handle.receive_peer_model("deepseek", "deepseek-flash", sender={})
-    assert detail == "already on deepseek/deepseek-flash; nothing changed"
+    assert detail == "already on deepseek/deepseek-flash\nnothing changed"
     assert applied == [] and cards == []
+
+
+@pytest.mark.asyncio
+async def test_serving_switching_onto_the_active_fallback_is_a_real_switch(monkeypatch) -> None:
+    """M1: while a fallback serves ``deepseek/deepseek-flash`` for a Claude
+    selection, asking for ``deepseek/deepseek-flash`` must make it the SELECTION
+    (the explicit re-selection withdraws the pin, as ``/model`` does) — not
+    answer "already on" and leave the session to return to Claude."""
+    from types import SimpleNamespace
+
+    handle, session, applied, cards = _serving(monkeypatch)
+    session.model_label = "anthropic/claude-opus-4"
+    session.effective_model_label = "deepseek/deepseek-flash"
+    # FakeSession declares no fallback slot; the handle reads it with getattr.
+    setattr(session, "active_fallback", SimpleNamespace(provider="deepseek", model_id="x"))
+
+    def set_model(spec, explicit=False):  # noqa: ANN001
+        applied.append((spec, explicit))
+        setattr(session, "active_fallback", None)  # the explicit re-selection drops the pin
+        session.model_label = session.effective_model_label = f"{spec.provider}/{spec.model_id}"
+
+    monkeypatch.setattr(session, "set_model", set_model, raising=False)
+    detail = await handle.receive_peer_model("deepseek", "deepseek-flash", sender={})
+    assert detail.splitlines()[0] == (
+        "switched to deepseek/deepseek-flash (was anthropic/claude-opus-4)"
+    )
+    assert [(s.model_id, explicit) for s, explicit in applied] == [("deepseek-flash", True)]
+    assert session.model_label == "deepseek/deepseek-flash"
+    assert len(cards) == 1
 
 
 @pytest.mark.asyncio
@@ -195,8 +282,8 @@ async def test_serving_busy_switch_names_the_call_in_flight(monkeypatch) -> None
     session.is_streaming = True
     session.running_children = 2
     detail = await handle.receive_peer_model("deepseek", "deepseek-flash", sender={})
-    assert "mid-turn; the call in flight finishes on test/mock" in detail
-    assert "2 running subagents keep their current model" in detail
+    assert "mid-turn: the call in flight finishes on the old model; later calls use" in detail
+    assert "2 running subagents keep their model" in detail
 
 
 @pytest.mark.asyncio
@@ -208,4 +295,42 @@ async def test_serving_a_switch_that_did_not_take_is_a_refusal(monkeypatch) -> N
         await handle.receive_peer_model("deepseek", "deepseek-flash", sender={})
     assert "did not take effect" in str(caught.value)
     assert "still on test/mock" in str(caught.value)
+    assert cards == []
+
+
+@pytest.mark.asyncio
+async def test_serving_a_raise_after_the_switch_took_is_reported_as_switched(monkeypatch) -> None:
+    """N1: ``Session.set_model`` assigns before its journal and notify steps, so a
+    later raise can leave the new model in force. The answer is read back, never
+    "nothing changed"; the card is still written."""
+    handle, session, _applied, cards = _serving(monkeypatch)
+
+    def set_model(spec, explicit=False):  # noqa: ANN001
+        session.model_label = session.effective_model_label = f"{spec.provider}/{spec.model_id}"
+        raise RuntimeError("journal write failed")
+
+    monkeypatch.setattr(session, "set_model", set_model, raising=False)
+    detail = await handle.receive_peer_model("deepseek", "deepseek-flash", sender={})
+    assert detail.splitlines() == [
+        "switched to deepseek/deepseek-flash (was test/mock)",
+        "with an error after the switch: RuntimeError: journal write failed",
+    ]
+    assert len(cards) == 1
+
+
+@pytest.mark.asyncio
+async def test_serving_a_raise_before_the_switch_took_is_a_refusal_on_the_real_model(
+    monkeypatch,
+) -> None:
+    handle, session, _applied, cards = _serving(monkeypatch)
+
+    def set_model(spec, explicit=False):  # noqa: ANN001
+        raise RuntimeError("store locked")
+
+    monkeypatch.setattr(session, "set_model", set_model, raising=False)
+    with pytest.raises(ValueError) as caught:
+        await handle.receive_peer_model("deepseek", "deepseek-flash", sender={})
+    assert str(caught.value) == (
+        "refused: the switch to deepseek/deepseek-flash did not take effect; still on test/mock"
+    )
     assert cards == []

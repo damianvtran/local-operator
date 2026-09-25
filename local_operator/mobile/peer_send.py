@@ -1147,26 +1147,37 @@ def parse_model_selector(selector: str) -> "tuple[str, str] | str":
     provider = provider.strip().lower()
     model_id = model_id.strip()
     if not sep or not provider or not model_id:
-        return (
-            f"model must be <provider>/<model-id> (e.g. deepseek/deepseek-flash), " f"not {text!r}"
-        )
+        return f"model must be <provider>/<model-id> (e.g. deepseek/deepseek-flash), not {text!r}"
     return provider, model_id
 
 
-def older_peer_detail(label: str) -> str:
-    """What an ``unknown op`` from an older build means to the sender (design D7)."""
+def older_peer_detail() -> str:
+    """What an ``unknown op`` from an older build means to the sender (design D7).
+
+    No address in the sentence: every surface prints the address beside it, and
+    a sentence that named the pid again printed it twice (QA Q1, UX U6).
+    """
     return (
-        f"{label} runs an older lop that cannot switch models remotely; nothing changed — "
+        "older lop: it cannot switch models remotely; nothing changed — "
         "update it (lop update) or run /model in that session"
     )
 
 
-def unconfirmed_switch_detail(label: str) -> str:
-    """A lost ack after the switch op was sent (design D7)."""
-    return (
-        f"no answer from {label} — the switch may or may not have landed; check "
-        "`lop sessions` before retrying"
-    )
+def unconfirmed_switch_detail() -> str:
+    """A lost ack AFTER the switch op was sent (design D7)."""
+    return "no answer — the switch may or may not have landed; check `lop sessions` before retrying"
+
+
+def unreachable_switch_detail(error: BaseException) -> str:
+    """The control socket never opened, so the op was never sent (review N3)."""
+    return f"could not reach that session ({error}); nothing changed"
+
+
+#: How long the sender waits for the target's answer to a switch. ABOVE the TUI
+#: host's own app-hop budget (``tui_handle._APP_HOP_TIMEOUT_S``, 10 s), because a
+#: target that is busy but succeeding must not read as "no answer" (review N2);
+#: the same figure as the attach client's ``ACK_TIMEOUT_S``.
+PEER_MODEL_ACK_TIMEOUT_S = 15.0
 
 
 def not_running_detail(session: str) -> str:
@@ -1195,68 +1206,131 @@ async def switch_peer_model(
     ``refused: …; still on …``), an unengaged or incapable handle, or an OLDER
     build that does not know the op, which is translated here into
     :func:`older_peer_detail` because its raw ``unknown op`` text says nothing
-    about what the sender should do. Raises :class:`PeerModelUnconfirmed` when
-    the dial or its ack was lost after the op may have been read.
+    about what the sender should do, and when the socket could not be opened
+    (nothing was sent, so nothing changed). Raises :class:`PeerModelUnconfirmed`
+    only when the op was written and no answer came back within
+    :data:`PEER_MODEL_ACK_TIMEOUT_S`.
 
     Live, started records only: resolution already refused the rest, and this
     re-checks ``started`` for a caller that bypassed it, exactly as
     :func:`deliver_peer_message` does.
     """
-    from local_operator.mobile.peer_client import send_control_op
+    from local_operator.mobile.peer_client import ControlDialFailed, send_control_op
 
-    label = unengaged_label(pid=record.pid, session_id=record.session_id)
     if not getattr(record, "started", True):
+        label = unengaged_label(pid=record.pid, session_id=record.session_id)
         raise RuntimeError(unengaged_refusal(label, capability=MODEL_SWITCH_CAPABILITY))
     try:
         return await send_control_op(
             record,
             "peer_set_model",
             {"provider": provider, "model_id": model_id, "sender": sender},
+            deadline_s=PEER_MODEL_ACK_TIMEOUT_S,
             default_detail=f"switched to {provider}/{model_id}",
             default_error="the switch was refused",
         )
+    except ControlDialFailed as exc:
+        # Before the ConnectionError arm below, which it subclasses: nothing was
+        # sent, so this one CAN say nothing changed.
+        raise RuntimeError(unreachable_switch_detail(exc)) from exc
     except RuntimeError as exc:
         # D7: an older registrant's dispatch raises ``unknown op: 'peer_set_model'``.
         # Matched on the prefix AND the op name, so an unrelated refusal that
         # happens to quote a word is not rewritten.
         if str(exc).startswith("unknown op") and "peer_set_model" in str(exc):
-            raise RuntimeError(older_peer_detail(label)) from exc
+            raise RuntimeError(older_peer_detail()) from exc
         raise
-    except (ConnectionError, OSError, ValueError) as exc:
-        # TimeoutError is an OSError subclass. Every arm here is "no acknowledged
-        # result", never "nothing changed": the op may already sit in the
-        # target's socket buffer.
-        raise PeerModelUnconfirmed(unconfirmed_switch_detail(label)) from exc
+    except (ConnectionError, OSError) as exc:
+        # After the op frame was written (a dial failure is caught above).
+        # TimeoutError is an OSError subclass. Either way there is no
+        # acknowledged result — never "nothing changed", because the op may
+        # already sit in the target's socket buffer.
+        raise PeerModelUnconfirmed(unconfirmed_switch_detail()) from exc
 
 
-def cold_switch_target(error: str, *, target: "str | None", session: "str | None") -> str:
-    """The "not running" refusal when the live resolver missed a STORED session.
+def resolve_switch_target(
+    *,
+    target: "str | None",
+    pid: "int | None",
+    session: "str | None",
+    pid_hint: str = "an exact pid",
+    session_hint: str = "a session id",
+) -> "tuple[Any | None, list[Any], str]":
+    """Resolve a model-switch address to ONE live, engaged record (design D4).
 
-    A model switch is live-only (design D4), but "no live session matches" is a
-    false-sounding answer about a session the user can see in ``lop sessions
-    --all``: it exists, it merely has no owner to apply the switch. So the two
-    no-owner answers — an exact id nothing owns, a name only the store knows —
-    are re-asked of the store, and a hit becomes :func:`not_running_detail`
-    naming the two ways to switch it. Everything else (a wedged or unengaged
-    live match, a conflicting selector) stands as the live resolver's answer,
-    for the reasons :func:`live_scan_found_nothing` and
-    :func:`session_id_unowned` give.
+    ``resolve_peer_target`` with the switch's own refusal wording, plus one
+    step for a name only the store answers to. A live record's name can lag a
+    rename by a heartbeat, so a just-renamed session's name resolves on disk
+    first (UX round 1, U1): the stored id is therefore asked of the LIVE
+    registry before it is called "not running". A live owner is switched
+    through its record; only a session no process owns gets the "open it and
+    use /model" sentence.
 
-    Returns ``""`` when the store does not know the address either. Blocking
-    (directory scans): callers run it off the loop.
+    Returns ``resolve_peer_target``'s triple. Blocking (registry and directory
+    scans): callers run it off the loop.
     """
-    stored = ""
+    record, candidates, error = resolve_peer_target(
+        target=target,
+        pid=pid,
+        session=session,
+        pid_hint=pid_hint,
+        session_hint=session_hint,
+        capability=MODEL_SWITCH_CAPABILITY,
+    )
+    if record is not None or candidates:
+        return record, candidates, error
     if session and session_id_unowned(error):
         stored = resolve_cold_session(session) or ""
-    elif (target or "").strip() and live_scan_found_nothing(error):
-        stored_id, candidates, _withheld = resolve_stored_target(target or "")
-        if stored_id:
-            stored = stored_id
-        elif candidates:
-            # Several stored namesakes, none running: naming one would pick a
-            # recipient the call did not name, so the count is the answer.
+        return None, [], not_running_detail(stored) if stored else error
+    if (target or "").strip() and live_scan_found_nothing(error):
+        stored_id, stored_candidates, _withheld = resolve_stored_target(target or "")
+        if stored_candidates:
+            # Several stored namesakes: naming one would pick a recipient the
+            # call did not name, so the count is the answer.
             return (
-                f"{len(candidates)} stored sessions match {target!r} and none is running — "
-                "open the one you mean and use /model"
+                None,
+                [],
+                f"{len(stored_candidates)} stored sessions match {target!r} and none is "
+                "running — open the one you mean and use /model",
             )
-    return not_running_detail(stored) if stored else ""
+        if stored_id:
+            live, _ignored, live_error = resolve_peer_target(
+                session=stored_id, session_hint=session_hint, capability=MODEL_SWITCH_CAPABILITY
+            )
+            if live is not None:
+                return live, [], ""
+            if not session_id_unowned(live_error):
+                # A live owner that refused (unengaged, wedged): its own answer.
+                return None, [], live_error
+            return None, [], not_running_detail(stored_id)
+    return None, [], error
+
+
+def switch_receipt(record: "Any", detail: str) -> str:
+    """How BOTH surfaces print a switch: the target's lines, then the address.
+
+    OUTCOME FIRST (design round 1, D1/D2): the sender's TUI card clips a line
+    from the right, and a leading ``pid N 'name':`` prefix spent the cells the
+    outcome needed while repeating what the card's own argument lines show. The
+    address therefore closes the receipt, in ``lop send``'s grammar
+    (``→ name (pid N)``, D4), so one terminal reads one vocabulary.
+    """
+    name = record.conversation_name or record.session_id
+    return f"{detail.rstrip()}\n→ {name} (pid {record.pid})"
+
+
+def switch_outcome(detail: str) -> str:
+    """The machine word for a switch receipt: the card's collapsed-row key (D6).
+
+    Read off the receipt's FIRST WORDS, which ``mobile/peer_model`` composes to
+    differ per outcome; a receipt from a target that phrases it differently
+    (a future build) maps to ``""`` and the card keeps its argument summary.
+    """
+    first = detail.lstrip().split("\n", 1)[0]
+    if first.startswith("already on "):
+        return "unchanged"
+    if first.startswith("pending:"):
+        return "pending"
+    if first.startswith("switched to "):
+        return "partial" if "with an error after the switch" in detail else "switched"
+    return ""

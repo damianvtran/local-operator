@@ -1,4 +1,4 @@
-"""``lop model`` switches a REAL second session's model (design D1–D4, D6, D7).
+"""``lop model`` switches a REAL second session's model (design D1–D4, D6).
 
 The motivating incident: four live sessions had to move from one provider to
 another, and the only route that worked was typing ``/model`` into each pane.
@@ -13,6 +13,16 @@ conftest redirects ``HOME``. Every child environment here is rebuilt with every
 explicitly — a runtime that inherited a workspace id could address the
 operator's live window, and an inherited ``LOP_MOBILE_CHILD_*`` would make the
 child something this test did not choose. Session ids are synthetic.
+
+What this file proves end to end: the idle switch and its receipt, the durable
+``selected_model`` / ``session_model_switch`` / audit-card rows, a refused pair
+that changes nothing, the already-on answer, the stored-session refusal, and —
+on a busy target — that the provider call ALREADY in flight finishes on the old
+model while the next call in the SAME turn runs on the new one (read off the
+``model_id`` each assistant row's ``usage`` records). What it does not prove:
+D7's older-peer mapping, which rests on
+``tests/unit/mobile/test_peer_model_wire.py`` (a registrant that answers
+``unknown op``) and on QA against a real older build.
 
 ``DEEPSEEK_API_KEY`` is a placeholder: it makes ``deepseek`` USABLE for the
 target-side credential check (``ProviderController.is_usable`` reads env keys),
@@ -107,6 +117,8 @@ def _record(config_dir: Path, session_id: str) -> Any:
 
 
 def _wait(predicate, timeout: float, what: str) -> Any:
+    """Poll ``predicate`` until truthy. Every caller also wraps it in ``bounded``,
+    so a wedged predicate dumps its stacks instead of hanging the worker."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         value = predicate()
@@ -159,25 +171,36 @@ def test_lop_model_switches_a_live_session_and_audits_it(headless_tui_env: Path)
         with bounded(90, "peer model: idle switch"):
             switched = _lop(config, "model", "--pid", str(record.pid), "deepseek/deepseek-flash")
         assert switched.returncode == 0, switched.stdout + switched.stderr
-        assert switched.stdout.strip() == (
-            f"pid {record.pid} {name!r}: switched to deepseek/deepseek-flash (was test/mock); "
-            "its next turn runs on it"
-        )
+        assert switched.stdout.strip().splitlines() == [
+            "switched to deepseek/deepseek-flash (was test/mock)",
+            "its next turn runs on it",
+            f"→ {name} (pid {record.pid})",
+        ]
 
-        rows = _wait(
-            lambda: (
-                lambda r: r if _custom(r, "selected_model") and _custom(r, "peer_message") else None
-            )(_rows(transcript)),
-            15,
-            "the switch never reached the target's transcript",
-        )
+        with bounded(30, "peer model: transcript rows"):
+            rows = _wait(
+                lambda: (
+                    (
+                        lambda r: (
+                            r
+                            if _custom(r, "selected_model") and _custom(r, "peer_message")
+                            else None
+                        )
+                    )(_rows(transcript))
+                ),
+                15,
+                "the switch never reached the target's transcript",
+            )
         # The audit card (D6): a record-only peer card naming from and to.
         cards = _custom(rows, "peer_message")
         assert len(cards) == 1
-        assert (
-            "[remote model switch] switched this session from test/mock to "
-            "deepseek/deepseek-flash" in json.dumps(cards[0])
-        )
+        # New model FIRST, then the old one, then who asked: the CLI from a
+        # plain terminal is named as that, never as its own short-lived pid.
+        body = cards[0]["details"]["body"]
+        assert body.startswith(
+            "[remote model switch] now on deepseek/deepseek-flash (was test/mock) — switched by "
+            "lop model (terminal, "
+        ), body
         # The durable selection a resume keeps, and the model-visible notice.
         assert _custom(rows, "selected_model")[-1]["details"]["selector"] == (
             "deepseek/deepseek-flash"
@@ -194,7 +217,7 @@ def test_lop_model_switches_a_live_session_and_audits_it(headless_tui_env: Path)
         assert refused.returncode == 1
         assert (
             "refused: 'not-a-model' is not a model deepseek serves; still on "
-            "deepseek/deepseek-flash" in refused.stderr
+            "deepseek/deepseek-flash\n→ " in refused.stderr
         ), refused.stderr
         after = _rows(transcript)
         assert len(_custom(after, "peer_message")) == 1, "a refusal must not write a card"
@@ -208,7 +231,7 @@ def test_lop_model_switches_a_live_session_and_audits_it(headless_tui_env: Path)
 
         same = _lop(config, "model", "--pid", str(record.pid), "deepseek/deepseek-flash")
         assert same.returncode == 0, same.stderr
-        assert "already on deepseek/deepseek-flash; nothing changed" in same.stdout
+        assert same.stdout.startswith("already on deepseek/deepseek-flash\nnothing changed\n")
     finally:
         _kill_all(child, config)
 
@@ -234,18 +257,41 @@ def test_lop_model_on_a_busy_session_says_the_call_in_flight_finishes(
                 30,
                 "the target never reported busy",
             )
+        # The mock answers the turn's first provider call at once with the bash
+        # call, so a short settle puts the switch inside the 8 s tool step. The
+        # assistant row for that call is only persisted when the batch ends, so
+        # it cannot be the event waited on; the settle is bounded well inside
+        # the sleep, and the model assertion below is what proves ordering.
+        time.sleep(1.0)
         with bounded(90, "peer model busy: switch"):
             switched = _lop(config, "model", "--pid", str(record.pid), "test/other-mock")
         assert switched.returncode == 0, switched.stdout + switched.stderr
-        assert (
-            "switched to test/other-mock (was test/mock) mid-turn; the call in flight finishes "
-            "on test/mock, every later call uses test/other-mock" in switched.stdout
+        lines = switched.stdout.splitlines()
+        assert lines[0] == "switched to test/other-mock (was test/mock)", switched.stdout
+        # Which of the two true sentences depends on whether the first call has
+        # been answered yet; the unit tests pin each wording to its state.
+        assert lines[1] in (
+            "mid-turn: the current step finishes on the old model; later calls use the new one",
+            "mid-turn: the call in flight finishes on the old model; later calls use the new one",
         ), switched.stdout
-        _wait(
-            lambda: _custom(_rows(transcript), "selected_model"),
-            30,
-            "the busy switch never reached the transcript",
-        )
+        # THE SEMANTICS, not just the sentence: the call already answered ran on
+        # the old model, and the NEXT call in the same turn — the one after the
+        # bash step — ran on the new one. The mock stamps each reply's usage
+        # with the spec it was built from.
+        with bounded(60, "peer model busy: the turn finishes"):
+            assistant = _wait(
+                lambda: (lambda r: r if len(r) >= 2 else None)(
+                    [
+                        row["payload"]
+                        for row in _rows(transcript)
+                        if row.get("payload", {}).get("role") == "assistant"
+                    ]
+                ),
+                30,
+                "the busy turn never made its second provider call",
+            )
+        models = [(row.get("usage") or {}).get("model_id") for row in assistant]
+        assert models[:2] == ["mock", "other-mock"], models
     finally:
         _kill_all(child, config)
 

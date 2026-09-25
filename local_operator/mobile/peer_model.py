@@ -103,43 +103,149 @@ def running_subagent_count(session: Any) -> int:
         return 0
 
 
+def already_selected(session: Any, label: str) -> bool:
+    """Is ``label`` the SELECTED model, with no provider fallback serving instead?
+
+    The "already on" test, and it must read the selection, never the effective
+    route (review round 1, M1). While a fallback is pinned, the effective label
+    is the fallback's; comparing against it made a switch ONTO the fallback's
+    model a no-op, so the selection stayed on the model being moved away from
+    and the session returned to it when the route settled — the motivating
+    incident exactly. ``/model`` compares against the selection too, and an
+    explicit re-selection withdraws the pin (``Session.set_model``), so a pinned
+    session always goes through the switch.
+    """
+    selected = str(getattr(session, "model_label", "") or "")
+    return selected == label and getattr(session, "active_fallback", None) is None
+
+
+def selected_label(session: Any) -> str:
+    """``provider/model`` the session has SELECTED (the "was" in a receipt)."""
+    return str(getattr(session, "model_label", "") or "")
+
+
+def provider_call_in_flight(session: Any) -> bool:
+    """Is the running turn waiting on a PROVIDER call (not a tool) right now?
+
+    Decides the busy receipt's wording only (UX round 1, U7). A turn's live
+    context ends in unanswered tool calls for the whole of a tool batch
+    (``protocol.unanswered_tail_call_ids`` is that one rule), so an open batch
+    means the turn is waiting on a tool or on an approval, and no call is in
+    flight. Any read failure answers True, the historical wording: this only
+    chooses between two true-enough sentences.
+    """
+    messages = getattr(getattr(session, "_context", None), "messages", None)
+    if not messages:
+        return True
+    try:
+        from local_operator.session.protocol import unanswered_tail_call_ids
+
+        return not unanswered_tail_call_ids(list(messages))
+    except Exception:  # noqa: BLE001 — wording only; never fail a switch over it
+        return True
+
+
 def refusal_detail(reason: str, current: str) -> str:
     """``refused: <reason>; still on <current>`` — the error frame's message."""
     return f"refused: {reason.rstrip('.')}; still on {current}"
 
 
+# THE RESULT STRINGS ARE SHORT LINES, OUTCOME FIRST (design round 1, D1/D6).
+# The sender's TUI card clips a success body per LINE rather than wrapping it,
+# so a one-line receipt lost its busy semantics and its subagent count at every
+# width (the busy form measured 298 cells). Each line below stays well under the
+# ~94-cell budget an expanded card has at 100 columns once the models are
+# long, and the FIRST word differs per outcome — `switched`, `already on`,
+# `pending` — so the collapsed row and a skimming reader tell them apart.
+
+
 def already_on_detail(label: str) -> str:
-    return f"already on {label}; nothing changed"
+    return f"already on {label}\nnothing changed"
 
 
 def accepted_detail(label: str) -> str:
     """A TUI local-setup provider activates asynchronously (a capacity probe)."""
-    return f"accepted: checking local capacity for {label}; the switch applies when that finishes"
+    return (
+        f"pending: switch to {label} accepted\n"
+        "it applies once that session's local capacity check finishes"
+    )
 
 
-def switched_detail(old: str, new: str, *, busy: bool, running_subagents: int) -> str:
-    """The success receipt, per design §2.
+def switched_detail(
+    old: str, new: str, *, busy: bool, running_subagents: int, calling: bool = True
+) -> str:
+    """The success receipt, per design §2, as outcome-first short lines.
 
     ``busy`` names the ``/model`` semantics the switch actually has: it lands at
-    the next PROVIDER CALL, so a call already in flight finishes on the old
-    model — the one moment "starting when" is a live question.
+    the next PROVIDER CALL. ``calling`` says whether a provider call is what the
+    target is in the middle of: when it is parked on a tool (or on an approval)
+    no call is in flight, so the line speaks of the current STEP instead, which
+    is true in both states (UX round 1, U7).
     """
+    lines = [f"switched to {new} (was {old})"]
     if busy:
-        text = (
-            f"switched to {new} (was {old}) mid-turn; the call in flight finishes on "
-            f"{old}, every later call uses {new}"
+        in_flight = "the call in flight" if calling else "the current step"
+        # "the old/new model", not the ids again: the first line names both,
+        # and two long ids here pushed this line past a card's width (D1).
+        lines.append(
+            f"mid-turn: {in_flight} finishes on the old model; later calls use the new one"
         )
     else:
-        text = f"switched to {new} (was {old}); its next turn runs on it"
+        lines.append("its next turn runs on it")
     if running_subagents > 0:
         if running_subagents == 1:
-            kept = "1 running subagent keeps its current model"
+            kept = "1 running subagent keeps its model"
         else:
-            kept = f"{running_subagents} running subagents keep their current model"
-        text += f"; {kept} — new and resumed ones use {new}"
-    return text
+            kept = f"{running_subagents} running subagents keep their model"
+        lines.append(f"{kept}; new and resumed ones use the new one")
+    return "\n".join(lines)
 
 
-def audit_body(old: str, new: str) -> str:
-    """The body of the record-only peer card written on the target."""
-    return f"{AUDIT_PREFIX} switched this session from {old} to {new}"
+def partial_switch_detail(old: str, in_force: str, error: BaseException) -> str:
+    """The apply raised, but the read-back shows the switch took (review N1).
+
+    ``Session.set_model`` assigns the spec before its journal writes and its
+    stream notify, so an exception from a later step can leave the new model
+    in force. Reporting that as a refusal would tell the sender nothing
+    changed; reporting it as a clean switch would hide the fault.
+    """
+    return (
+        f"switched to {in_force} (was {old})\n"
+        f"with an error after the switch: {type(error).__name__}: {error}"
+    )
+
+
+def audit_body(old: str, new: str, sender: dict[str, Any] | None = None) -> str:
+    """The body of the record-only peer card written on the target.
+
+    NEW MODEL FIRST (design round 1, D3; UX U3): on resume this card is the only
+    trace of the switch — the live notice is a harness row replay skips — and
+    its collapsed row is clipped from the right, so what the session is on NOW
+    has to survive a narrow terminal. The sender is named last because the card
+    header already names it.
+    """
+    who = sender_label(sender or {})
+    tail = f" — switched by {who}" if who else ""
+    return f"{AUDIT_PREFIX} now on {new} (was {old}){tail}"
+
+
+def pending_audit_body(old: str, new: str, sender: dict[str, Any] | None = None) -> str:
+    """The card for an ACCEPTED switch whose outcome is still being decided.
+
+    A TUI local-setup provider activates after a capacity probe, so at the
+    moment the card is written the switch may still fail. "requested" says
+    exactly that; the switch notice that follows (or a refusal notice) says
+    how it ended.
+    """
+    who = sender_label(sender or {})
+    tail = f" — requested by {who}" if who else ""
+    return f"{AUDIT_PREFIX} switch to {new} requested (on {old} until it applies){tail}"
+
+
+def sender_label(sender: dict[str, Any]) -> str:
+    """A readable name for whoever asked: the conversation, else ``pid N``."""
+    name = str(sender.get("conversation_name") or "").strip()
+    if name:
+        return name
+    pid = sender.get("pid")
+    return f"pid {pid}" if isinstance(pid, int) and not isinstance(pid, bool) else ""

@@ -794,37 +794,75 @@ class TuiSessionHandle(SessionHandle):
             raise ValueError(peer_model.refusal_detail(refused.message, current)) from refused
         new_label = f"{spec.provider}/{spec.model_id}"
 
-        def apply() -> tuple[str, str, bool, bool, int]:
+        def apply() -> dict[str, Any]:
             session = self._session()
-            before = _effective_label(session)
-            busy = bool(getattr(session, "is_streaming", False))
-            if before == new_label:
-                return before, before, busy, False, 0
-            self._app._run_slash_command(f"/model {new_label}")
-            pending = getattr(self._app, "_model_activation_pending", None) is not None
-            after = _effective_label(self._session())
-            return before, after, busy, pending, peer_model.running_subagent_count(session)
+            state: dict[str, Any] = {
+                "before": peer_model.selected_label(session),
+                "busy": bool(getattr(session, "is_streaming", False)),
+                "calling": peer_model.provider_call_in_flight(session),
+                "already": peer_model.already_selected(session, new_label),
+                "pending": False,
+                "children": 0,
+                "error": None,
+            }
+            if state["already"]:
+                state["after"] = _effective_label(session)
+                return state
+            try:
+                self._app._run_slash_command(f"/model {new_label}")
+            except Exception as error:  # noqa: BLE001 — the read-back decides (review N1)
+                state["error"] = error
+            finally:
+                # Read back in `finally`, in THIS hop: whatever `/model` managed
+                # before a raise is what is in force, and no later command can
+                # land between the switch and the answer.
+                state["pending"] = getattr(self._app, "_model_activation_pending", None) is not None
+                state["after"] = _effective_label(self._session())
+                state["children"] = peer_model.running_subagent_count(session)
+            return state
 
-        before, after, busy, pending, children = await self._on_app(apply)
+        state = await self._on_app(apply)
         self._refresh_state()
-        if before == new_label:
+        before, after = state["before"], state["after"]
+        if state["already"]:
             return peer_model.already_on_detail(new_label)
         if after != new_label:
-            if pending:
+            if state["pending"] and state["error"] is None:
+                # The capacity probe runs after this hop, so the outcome is not
+                # known yet. The card still records WHO asked (QA round 1, Q2):
+                # without it the switch notice lands later with no trace of the
+                # sender. Worded as a request, because it can still fail.
+                await self._record_peer_model_card(
+                    peer_model.pending_audit_body(before, new_label, sender or {}), sender
+                )
                 return peer_model.accepted_detail(new_label)
             raise ValueError(
                 peer_model.refusal_detail(f"the switch to {new_label} did not take effect", after)
-            )
-        # The audit card (design D6), record-only so it never opens a turn.
-        # Best effort: the switch has already happened, and reporting a failed
-        # card as a failed switch would invite a retry of a switch that stuck.
+            ) from state["error"]
+        await self._record_peer_model_card(
+            peer_model.audit_body(before, after, sender or {}), sender
+        )
+        if state["error"] is not None:
+            return peer_model.partial_switch_detail(before, after, state["error"])
+        return peer_model.switched_detail(
+            before,
+            after,
+            busy=state["busy"],
+            calling=state["calling"],
+            running_subagents=state["children"],
+        )
+
+    async def _record_peer_model_card(self, body: str, sender: dict[str, Any] | None) -> None:
+        """The audit card (design D6), record-only so it never opens a turn.
+
+        Best effort: the switch has already happened (or been accepted), and
+        reporting a failed card as a failed switch would invite a retry of a
+        switch that stuck.
+        """
         try:
-            await self.receive_peer_message(
-                peer_model.audit_body(before, after), mode="mailbox", wake=False, sender=sender
-            )
+            await self.receive_peer_message(body, mode="mailbox", wake=False, sender=sender)
         except Exception:  # noqa: BLE001 — the switch stands whatever the card does
             logger.warning("the remote model switch's audit card was not recorded", exc_info=True)
-        return peer_model.switched_detail(before, after, busy=busy, running_subagents=children)
 
     async def set_effort(self, effort: str) -> str:
         def apply() -> None:

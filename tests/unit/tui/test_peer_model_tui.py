@@ -76,17 +76,18 @@ async def test_an_idle_tui_switch_is_read_back_in_the_same_hop(tmp_path, monkeyp
             sender = {"pid": 4242, "conversation_name": "fleet boss"}
             detail = await handle.receive_peer_model("deepseek", "deepseek-flash", sender=sender)
             await pilot.pause()
-            assert detail == (
-                "switched to deepseek/deepseek-flash (was test/mock); its next turn runs on it"
-            )
+            assert detail.splitlines() == [
+                "switched to deepseek/deepseek-flash (was test/mock)",
+                "its next turn runs on it",
+            ]
             # The app's own /model ran: one explicit switch, through set_model.
             assert [(m.provider, m.model_id, e) for m, e in session.applied] == [
                 ("deepseek", "deepseek-flash", True)
             ]
             assert session.peer_cards == [
                 (
-                    "[remote model switch] switched this session from test/mock to "
-                    "deepseek/deepseek-flash",
+                    "[remote model switch] now on deepseek/deepseek-flash (was test/mock) — "
+                    "switched by fleet boss",
                     sender,
                 )
             ]
@@ -105,12 +106,12 @@ async def test_a_busy_tui_switch_names_the_call_in_flight(tmp_path, monkeypatch)
         async with app.run_test(size=(100, 30)) as pilot:
             handle = await _handle(app, pilot)
             detail = await handle.receive_peer_model("deepseek", "deepseek-flash", sender={})
-            assert detail == (
-                "switched to deepseek/deepseek-flash (was test/mock) mid-turn; the call in "
-                "flight finishes on test/mock, every later call uses deepseek/deepseek-flash; "
-                "1 running subagent keeps its current model — new and resumed ones use "
-                "deepseek/deepseek-flash"
-            )
+            assert detail.splitlines() == [
+                "switched to deepseek/deepseek-flash (was test/mock)",
+                "mid-turn: the call in flight finishes on the old model; later calls use the "
+                "new one",
+                "1 running subagent keeps its model; new and resumed ones use the new one",
+            ]
     finally:
         store.close()
 
@@ -160,7 +161,103 @@ async def test_a_tui_same_pair_is_a_no_op(tmp_path, monkeypatch) -> None:
         async with app.run_test(size=(100, 30)) as pilot:
             handle = await _handle(app, pilot)
             detail = await handle.receive_peer_model("deepseek", "deepseek-flash", sender={})
-            assert detail == "already on deepseek/deepseek-flash; nothing changed"
+            assert detail == "already on deepseek/deepseek-flash\nnothing changed"
             assert session.applied == []
     finally:
+        store.close()
+
+
+class _FallbackSession(_SwitchableSession):
+    """Selection on Claude while a pinned fallback serves deepseek (M1)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._label = "anthropic/claude-opus-4"
+        self.active_fallback: Any = object()
+
+    @property
+    def effective_model_label(self) -> str:
+        return "deepseek/deepseek-flash" if self.active_fallback is not None else self._label
+
+    def set_model(self, model: Any, *, explicit: bool = False) -> None:
+        super().set_model(model, explicit=explicit)
+        if explicit:
+            self.active_fallback = None  # an explicit re-selection drops the pin
+
+
+@pytest.mark.asyncio
+async def test_a_tui_switch_onto_the_active_fallback_is_a_real_switch(
+    tmp_path, monkeypatch
+) -> None:
+    """M1 on the TUI host: the "already on" test reads the SELECTION."""
+    session = _FallbackSession()
+    app, store = await _app(session, tmp_path, monkeypatch)
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            handle = await _handle(app, pilot)
+            detail = await handle.receive_peer_model("deepseek", "deepseek-flash", sender={})
+            assert detail.splitlines()[0] == (
+                "switched to deepseek/deepseek-flash (was anthropic/claude-opus-4)"
+            )
+            assert [(m.model_id, e) for m, e in session.applied] == [("deepseek-flash", True)]
+            assert session.model_label == "deepseek/deepseek-flash"
+            assert session.active_fallback is None
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_tui_raise_after_the_switch_took_is_reported_as_switched(
+    tmp_path, monkeypatch
+) -> None:
+    """N1 on the TUI host: the read-back runs in `finally`, in the same hop."""
+    session = _SwitchableSession()
+    app, store = await _app(session, tmp_path, monkeypatch)
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            handle = await _handle(app, pilot)
+            real = app._run_slash_command
+
+            def raising(text, *args, **kwargs):  # noqa: ANN001
+                real(text, *args, **kwargs)
+                raise RuntimeError("receipt paint failed")
+
+            monkeypatch.setattr(app, "_run_slash_command", raising)
+            detail = await handle.receive_peer_model("deepseek", "deepseek-flash", sender={})
+            assert detail.splitlines() == [
+                "switched to deepseek/deepseek-flash (was test/mock)",
+                "with an error after the switch: RuntimeError: receipt paint failed",
+            ]
+            assert len(session.peer_cards) == 1
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_an_accepted_local_switch_still_records_who_asked(tmp_path, monkeypatch) -> None:
+    """Q2: a local-setup provider's capacity probe runs AFTER the hop, so the
+    answer is `pending`; the card is written now, worded as a request."""
+    session = _SwitchableSession()
+    app, store = await _app(session, tmp_path, monkeypatch)
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            handle = await _handle(app, pilot)
+
+            def pending_only(text, *args, **kwargs):  # noqa: ANN001
+                # What `_cmd_model` does for a local-setup provider: park the
+                # activation behind a probe and return with nothing switched.
+                app._model_activation_pending = 1
+
+            monkeypatch.setattr(app, "_run_slash_command", pending_only)
+            detail = await handle.receive_peer_model(
+                "deepseek", "deepseek-flash", sender={"conversation_name": "fleet boss"}
+            )
+            assert detail.startswith("pending: switch to deepseek/deepseek-flash accepted\n")
+            assert session.applied == []
+            assert [text for text, _ in session.peer_cards] == [
+                "[remote model switch] switch to deepseek/deepseek-flash requested (on "
+                "test/mock until it applies) — requested by fleet boss"
+            ]
+    finally:
+        app._model_activation_pending = None
         store.close()
