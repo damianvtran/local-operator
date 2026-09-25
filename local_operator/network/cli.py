@@ -1062,6 +1062,27 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
         "networks": networks,
         "refreshed": bool(pulled),
     }
+    # A MEMBER WHOSE DOCUMENT COULD NOT BE MERGED IS SAID OUT LOUD (review round 5,
+    # NIT 2). ``pull_placement`` refuses one unreadable document BY NAME and merges the
+    # rest, which is the resilience we want — but that reply reached no surface: this
+    # listing reduced the whole pull to ``bool(pulled)``, so a merge that used to raise
+    # became INVISIBLE. Trading a loud failure for a silent one is not resilience. The
+    # names go to STDERR (the listing's own output is the payload, and a machine
+    # reading ``--json`` parses one document, not two), and the same list rides the
+    # payload so a script can branch on it.
+    skipped = [row for row in (pulled or {}).get("skipped") or [] if isinstance(row, dict)]
+    if skipped:
+        payload["skipped"] = skipped
+        for row in skipped:
+            device = str(row.get("device") or "")
+            name = _device_name_anywhere(device)
+            reason = str(row.get("reason") or "unreadable_document")
+            print(
+                f"\033[1;33m{name or device}: its sharing list could not be read "
+                f"({reason}); the rest were merged. Nothing was changed for it — it is "
+                f"merged on the next listing, or ask that device to re-share.\033[0m",
+                file=sys.stderr,
+            )
     return _emit(args, payload, lines)
 
 
@@ -1369,6 +1390,21 @@ def _audit_placement(
         log.close()
     except Exception:  # noqa: BLE001 — see the docstring
         pass
+
+
+def _device_name_anywhere(device_id: str) -> str:
+    """A device's display name from ANY of this device's records, or ``""``.
+
+    Searched across records rather than one network's: the pull reports the members it
+    dialled, and this CLI renders a NAME beside an id wherever it has one (``_member_name``
+    for a known network). A name is never load-bearing — an unresolved device prints its
+    id — so a lookup that finds nothing is not a failure.
+    """
+    for record in _networks():
+        name = _member_name(record, device_id)
+        if name:
+            return name
+    return ""
 
 
 def _member_name(record: Any, device_id: str) -> str:

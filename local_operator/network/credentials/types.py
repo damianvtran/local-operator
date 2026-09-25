@@ -148,7 +148,13 @@ PEER_NUMBER_CEILING = 2**53
 
 
 def peer_number(value: Any, *, default: float = 0, maximum: float | None = None) -> float:
-    """A number a PEER sent, or ``default`` — TOTAL: no input raises, none is out of range.
+    """A number a PEER sent, or ``default`` — total for anything JSON can decode.
+
+    NOT PYTHON-TOTAL (review round 5, NIT 1): an ``int`` SUBCLASS with a raising
+    ``__lt__``/``__gt__`` propagates out of the comparisons below. ``json.loads``
+    cannot build one, so every peer byte this function exists to validate is covered;
+    the narrower claim is written down rather than the broad one, because an overstated
+    contract is how the next reader stops checking.
 
     WHY THIS EXISTS (QA round 2, and review round 2 m1 before it): every numeric field
     on a broker frame, a grant, a refusal or a pulled placement document was read with
@@ -191,8 +197,16 @@ def peer_number(value: Any, *, default: float = 0, maximum: float | None = None)
     else:
         return default
     if isinstance(number, float) and not math.isfinite(number):
-        return default
+        # A NON-FINITE VALUE IS OVER THE CAP, NOT GARBAGE (review round 5, R5-m1).
+        # ``1e999`` decodes to ``inf``, and ``nan``/``-inf`` are equally unbounded, so
+        # they take the same branch as any other over-cap number — the clamp where the
+        # field has one, the fail-safe default where it has none. Falling to the
+        # default instead SHORTENED the backoff this cap exists to bound: an ``inf``
+        # retry became the 60 s default rather than the 300 s ceiling.
+        return maximum if maximum is not None else default
     if number < 0:
+        # A real negative is a peer's own typo for a small number, not an unbounded
+        # one, so it takes the default. ``-inf`` never reaches here (above).
         return default
     if number > PEER_NUMBER_CEILING or (maximum is not None and number > maximum):
         return maximum if maximum is not None else default

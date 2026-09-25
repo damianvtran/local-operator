@@ -556,42 +556,64 @@ def test_the_owner_side_refresh_a_report_can_provoke_is_rate_limited(
     assert posts_after_first == 1
 
 
-def test_two_reports_racing_one_window_refresh_once_and_say_so(
+class _LockWatched(dict[Any, float]):
+    """A report-window map that refuses to be read or stamped outside ``_report_lock``.
+
+    A RACED THREADS TEST CANNOT CARRY THIS PROPERTY (review round 5, R5-M1). The first
+    version of this test started two threads at a barrier inside ``get`` and asserted the
+    end state. It passed on both builds: with the lock the barrier simply timed out (the
+    second reader was blocked on the lock, never reaching it), and without it the readers
+    tripped the barrier but were released unordered, so the first finished ``get`` AND
+    stamped before the second's lookup — which then read a fresh stamp and answered
+    ``coalesced`` anyway. The intended end state was reachable either way, so the test
+    could never fail for the revert it named.
+
+    Watching the map asserts the INVARIANT instead of racing for the consequence, and it
+    fails deterministically the moment either arm loses its lock: an arm that reads or
+    stamps outside ``_report_lock`` is a check-then-set that a second report can slip
+    through, whatever the scheduler happens to do that run.
+    """
+
+    def __init__(self, lock: threading.Lock, name: str) -> None:
+        super().__init__()
+        self._lock = lock
+        self._name = name
+
+    def get(self, key: Any, default: Any = None) -> Any:  # type: ignore[override]
+        assert self._lock.locked(), f"{self._name} was read outside _report_lock"
+        return super().get(key, default)
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        assert self._lock.locked(), f"{self._name} was stamped outside _report_lock"
+        super().__setitem__(key, value)
+
+
+def test_both_report_windows_are_read_and_stamped_under_one_lock(
     owner: Any, idp: RotatingIdP
 ) -> None:
-    """R4-n2: two reports inside one window answered ``refreshed`` twice for ONE POST.
+    """R4-n2, asserted as an invariant: neither report window is read or stamped unlocked.
 
-    The read-then-stamp of the refresh window was two steps, so a second report could
-    read "never refreshed" between the first one's read and its stamp. The barrier
-    below holds the first reader inside ``get`` for up to 1 s: without the lock both
-    readers meet there and both see nothing; with it the second waits for the stamp.
+    Both arms have the same check-then-set shape, and BOTH are covered here — the block
+    arm's window (``_report_blocked``) had no test of its own at all, so a revert of its
+    lock would have shipped unseen.
     """
-    import threading
+    assert isinstance(owner.broker, owner_mod.MeshCredentialBroker)
+    lock = owner.broker._report_lock  # noqa: SLF001 — the invariant is about this object
+    owner.broker._report_refreshed = _LockWatched(lock, "_report_refreshed")  # noqa: SLF001
+    owner.broker._report_blocked = _LockWatched(lock, "_report_blocked")  # noqa: SLF001
 
-    barrier = threading.Barrier(2, timeout=1.0)
+    # The refresh window: one report refreshes, the next inside the window coalesces.
+    first = _report(owner, BORROWER_DEVICE, "invalid")
+    second = _report(owner, BORROWER_DEVICE, "invalid")
+    assert first["action"] == "refreshed", first
+    assert second["action"] == "coalesced", second
 
-    class _Held(dict[int, float]):
-        def get(self, key: Any, default: Any = None) -> Any:  # type: ignore[override]
-            try:
-                barrier.wait()
-            except threading.BrokenBarrierError:
-                pass
-            return super().get(key, default)
-
-    owner.broker._report_refreshed = _Held()  # noqa: SLF001
-    actions: list[str] = []
-    workers = [
-        threading.Thread(
-            target=lambda: actions.append(_report(owner, BORROWER_DEVICE, "invalid")["action"])
-        )
-        for _ in range(2)
-    ]
-    for worker in workers:
-        worker.start()
-    for worker in workers:
-        worker.join(timeout=30)
-    assert sorted(actions) == ["coalesced", "refreshed"], actions
-    assert len(idp.posts) == 1
+    # The block window, through a scoped verdict so the arm is reached at all.
+    blocked = _report(owner, BORROWER_DEVICE, "quota", model_id="claude-fable-5")
+    again = _report(owner, BORROWER_DEVICE, "quota", model_id="claude-fable-5")
+    assert blocked["action"] == "blocked", blocked
+    assert again["action"] == "coalesced", again
+    assert len(idp.posts) == 1, "a window was not honoured"
 
 
 @pytest.fixture()

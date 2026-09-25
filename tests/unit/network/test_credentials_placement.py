@@ -1142,6 +1142,9 @@ def test_the_credentials_listing_names_the_owner_and_who_may_borrow(
 #: ``10**400`` is the shape the first helper missed (review round 4, R4-M1): ``json``
 #: decodes a 401-digit number to an ``int``, and ``float()`` of it raised
 #: ``OverflowError``. ``2**53 + 1`` is the first integer a float round-trip loses.
+#: ``nan`` and ``inf`` are NOT here (review round 5, R5-m1): they are over-cap rather
+#: than garbage, so they belong to the clamp test below, where the value a field ends up
+#: with is asserted rather than merely "not an exception".
 _GARBLED = (
     "abc",
     -5,
@@ -1149,13 +1152,15 @@ _GARBLED = (
     10**400,
     "1" + "0" * 400,
     2**53 + 1,
-    float("nan"),
-    float("inf"),
     True,
     [1],
     {"x": 1},
     None,
 )
+
+#: Every shape that is unbounded rather than merely large, as the wire can carry it:
+#: ``1e999`` is what ``json.loads`` makes of an overflowing literal.
+_NON_FINITE = (float("inf"), float("-inf"), float("nan"), "1e999", "-1e999")
 
 
 @pytest.mark.parametrize("value", _GARBLED)
@@ -1231,7 +1236,10 @@ def test_a_numeric_string_from_a_peer_still_reads_as_its_number() -> None:
     assert BrokerError.from_detail({"code": "x"}).retry_after_ms == 0
 
 
-@pytest.mark.parametrize("value", [300_001, 10**18, 10**400, "10000000"])
+@pytest.mark.parametrize(
+    "value",
+    [300_001, 10**18, 10**400, "10000000", float("inf"), float("nan"), "1e999"],
+)
 def test_an_over_cap_retry_is_clamped_to_the_cap_not_dropped_to_the_default(value: Any) -> None:
     """R4-m2: the clamp is the property, and nothing pinned it.
 
@@ -1373,3 +1381,94 @@ def test_a_real_merge_of_a_401_digit_revision_reads_it_as_the_floor(tmp_path: Pa
     assert changed == ["deepseek"]
     merged = placement_mod.PlacementDocument.load(NETWORK, tmp_path).entries["deepseek"]
     assert merged.doc_rev == 1
+
+
+@pytest.mark.parametrize("value", _NON_FINITE)
+def test_a_non_finite_value_clamps_where_a_cap_exists_and_reads_the_floor_where_none_does(
+    value: Any,
+) -> None:
+    """R5-m1: an unbounded value takes the over-cap branch, on BOTH kinds of field.
+
+    ``1e999`` decodes to ``inf``, and ``nan``/``-inf`` are equally unbounded. Falling to
+    the DEFAULT instead contradicted the clamp's whole purpose — an ``inf`` retry was
+    cached for 60 s rather than the 300 s ceiling, which SHORTENS the backoff the cap
+    exists to bound — and it happened on the wire, not in a hypothetical: it is what a
+    peer's overflowing literal produces.
+
+    Where the field HAS a cap the answer is the cap. Where it has none there is nothing
+    to clamp to, so the value becomes that field's fail-safe: an expired grant, the
+    floor revision, epoch zero.
+    """
+    from local_operator.network.credentials.types import (
+        MAX_PEER_RETRY_AFTER_MS,
+        BrokerError,
+        CredentialPlacementEntry,
+        Grant,
+    )
+
+    error = BrokerError.from_detail({"code": "quota_blocked", "retry_after_ms": value})
+    assert error.retry_after_ms == MAX_PEER_RETRY_AFTER_MS
+    assert error.cache_ttl_ms == MAX_PEER_RETRY_AFTER_MS
+
+    grant = Grant.from_detail({"grant_expires_at_ms": value, "token_expires_at_ms": value})
+    assert grant.grant_expires_at_ms == 0 and grant.token_expires_at_ms == 0
+
+    entry = CredentialPlacementEntry.from_json({"key": "k", "doc_rev": value})
+    assert entry.doc_rev == 1
+
+
+def test_a_skipped_member_is_named_on_the_listing(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """NIT 2 (review round 5): the pull was reduced to ``bool(pulled)``, so a member
+    whose document could not be merged became INVISIBLE — the resilience trade silently
+    replaced a raised error with nothing at all.
+
+    The pull's ``skipped`` list must reach both surfaces: the ``--json`` payload (so a
+    script can branch on it) and STDERR (so the person sees which device was left and
+    what to do). STDOUT stays the payload alone, because a ``--json`` consumer parses one
+    document, not two.
+    """
+    import io
+    from contextlib import redirect_stderr
+
+    from local_operator.network import cli as network_cli
+
+    document = _declared(root)
+    document.save()
+    monkeypatch.setattr(network_cli, "_networks", lambda: [])
+    monkeypatch.setattr(
+        network_cli,
+        "_relay_call",
+        lambda *a, **k: {
+            "kind": "ack",
+            "changed": [],
+            "owners": 2,
+            "skipped": [{"device": OTHER, "reason": "malformed_document"}],
+        },
+    )
+
+    args = _parser().parse_args(["network", "credentials", "--json"])
+    stderr = io.StringIO()
+    with redirect_stderr(stderr):
+        assert network_cli.main(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["skipped"] == [{"device": OTHER, "reason": "malformed_document"}]
+    assert payload["refreshed"] is True
+    said = stderr.getvalue()
+    assert OTHER in said, said
+    assert "malformed_document" in said, said
+    assert "next listing" in said, said
+
+    # No skipped members: the key is absent and nothing is printed, so the ordinary
+    # listing is byte-identical to before this change.
+    monkeypatch.setattr(
+        network_cli, "_relay_call", lambda *a, **k: {"kind": "ack", "changed": [], "owners": 2}
+    )
+    args = _parser().parse_args(["network", "credentials", "--json"])
+    stderr = io.StringIO()
+    with redirect_stderr(stderr):
+        assert network_cli.main(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert "skipped" not in payload
+    assert stderr.getvalue() == ""
