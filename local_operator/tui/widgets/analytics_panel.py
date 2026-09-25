@@ -1781,8 +1781,16 @@ def _keeps_cache_column(
     moved one column along by adding a rate column ahead of it.
 
     So the decision is measured rather than thresholded: compute the row budget
-    WITH the column, and keep it only when the name floor still fits beside it.
+    WITH the column, and keep it only when the name column still fits beside it.
     Both tables share one ``name_col``, so the wider of the two rows decides.
+
+    WHICH FLOOR, because the module now has two: this gate uses the COMFORT floor
+    (``_MIN_NAME_COL``), not the hard one. A rate column is worth shedding to keep
+    a 30-cell session title legible, long before the 12-cell floor where a name
+    stops identifying anything — and shedding it clips nothing either way, since
+    ``build_report`` sizes the name column from the space this gate leaves. Review
+    round 3 asked for this sentence: the docstring named "the name floor" while
+    there were two, and only one of them is what breaks the budget here.
     """
     if width < _WIDE_TABLE_MIN:
         return False
