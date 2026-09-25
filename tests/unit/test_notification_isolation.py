@@ -1186,3 +1186,36 @@ def test_no_test_nests_a_fixture_scoped_patch_under_the_opt_in() -> None:
         "worker process — scope a `mock.patch` inside the test body instead:\n"
         + "\n".join(f"  {path}" for path in offenders)
     )
+
+
+def test_the_predicate_does_not_launder_a_defect_into_a_fail_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What pins the narrowed `except`, which nothing else did.
+
+    R1-4 replaced a bare `except Exception` because it turned a DEFECT in the
+    predicate into "a platform we cannot interrogate" — and the answer to that is
+    ``True``, which fails OPEN in the direction that re-opens the leak this module
+    exists to close. Round-2 QA (QA-1) pointed out that the fix itself was
+    unpinned: every other cell here passes with the bare catch restored.
+
+    Both halves are asserted, because a cell that only proved propagation would
+    pass on a predicate that raises at a real user too: the shapes a platform can
+    actually produce still fail open, and the shapes only a bug produces do not.
+    """
+    from local_operator.tui import notify
+
+    def raises(shape: BaseException):
+        def raiser():
+            raise shape
+
+        return raiser
+
+    for defect in (NameError("boom"), TypeError("boom"), KeyError("not a passwd shape")):
+        monkeypatch.setattr("local_operator.supervisors.real_home", raises(defect))
+        with pytest.raises(type(defect)):
+            notify.desktop_belongs_to_this_process()
+
+    for shape in (OSError("no home"), RuntimeError("cannot resolve a home")):
+        monkeypatch.setattr("local_operator.supervisors.real_home", raises(shape))
+        assert notify.desktop_belongs_to_this_process() is True
