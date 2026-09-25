@@ -43,7 +43,8 @@ from local_operator.evaluation.action_surface import (
 )
 from local_operator.evaluation.adapters.supervisor import verify_artifact
 from local_operator.evaluation.evidence.models import RouteIdentity
-from local_operator.evaluation.protocol import ActionBatch, Observation
+from local_operator.evaluation.protocol import ActionBatch, FinishAction, Observation
+from local_operator.evaluation.runner.completion import finish_claim
 from local_operator.evaluation.runner.model import (
     CompactionRecord,
     DecisionRejected,
@@ -1449,6 +1450,9 @@ its batch. Their fields are listed above; what the list cannot tell you is what
 they MEAN:
 
 * "finish" -- you believe the task is done. The episode is then scored.
+  Declaring it does not make it so: your "reason" is a claim about the state you
+  produced, and the newest observation is the only evidence for it, so check
+  that screen against what the task asked for before you say it is finished.
 {ask_text}
 """
 
@@ -1953,7 +1957,7 @@ class _ContextBuilder:
         # would fail the next observation loudly, which is the design. Frames
         # that are too large are a TRANSPORT problem and are handled by
         # dropping whole frames (``_enforce_wire_fit``), never by resizing one.
-        from local_operator.harness.types import ImageContent, Message, TextContent
+        from local_operator.harness.types import Message, TextContent
 
         observation = turn.observation
         text = observation.text
@@ -1998,11 +2002,25 @@ class _ContextBuilder:
             lines.append(UNCHANGED_FRAMES_NOTE)
         lines.extend(["", rendered_text])
         content: list[Any] = [TextContent(text="\n".join(lines))]
+        content.extend(self._frame_content(observation))
+        return Message(role="user", content=content)
+
+    def _frame_content(self, observation: Observation) -> list[Any]:
+        """An observation's frames as provider image blocks, in order.
+
+        Bytes come through the SAME reader the runner verifies frames with
+        (O_NOFOLLOW, size, digest): a frame the runner would refuse to publish
+        is a frame the model must not be shown, and a second reader here would
+        be a second place for that check to drift. Factored out because the
+        completion challenge re-attaches the CURRENT observation's frames, and
+        a second inline copy of this loop is exactly how the two readers would
+        come to disagree -- the property is "one reader", not "two calls that
+        look alike today".
+        """
+        from local_operator.harness.types import ImageContent
+
+        content: list[Any] = []
         for frame in observation.frames:
-            # Bytes come through the SAME reader the runner verifies frames
-            # with (O_NOFOLLOW, size, digest): a frame the runner would refuse
-            # to publish is a frame the model must not be shown, and a second
-            # reader here would be a second place for that check to drift.
             data = verify_artifact(self._artifact_root, frame.artifact)
             content.append(
                 ImageContent(
@@ -2010,7 +2028,39 @@ class _ContextBuilder:
                     mime_type=frame.artifact.media_type,
                 )
             )
-        return Message(role="user", content=content)
+        return content
+
+    def append_challenge(self, reply: str, challenge: str, observation: Observation) -> None:
+        """Fold a completion challenge into the history, frames included.
+
+        ``append_rejection``'s shape, with one addition: the challenge owns the
+        claim that the end state is the only evidence, so the end state rides in
+        the SAME user message -- the current observation's frames, re-attached
+        through the one frame reader. The pair is APPENDED, so the prefix cache
+        survives: re-attaching an observation by rewriting the message that
+        already carried it would cost the whole cached entry, while a new
+        trailing message costs only the new tokens.
+
+        Frames are re-attached even though the same pixels were already sent as
+        this turn's observation message. That is deliberate: the challenge asks
+        the model to compare the task against THIS frame, and a request to
+        compare against an image several messages up is a request to reason from
+        memory instead. The cost is one uncached frame per episode (the frame
+        budget sees it, so ``rebuild_due`` can move forward one turn), which is
+        the price of the comparison being made against something rather than
+        nothing.
+        """
+        from local_operator.harness.types import Message, TextContent
+
+        shown = reply
+        if len(shown) > MAX_REJECTED_REPLY_CHARS:
+            shown = shown[:MAX_REJECTED_REPLY_CHARS] + "\n[... reply truncated]"
+        self._messages.append(
+            Message(role="assistant", content=[TextContent(text=shown or "(empty reply)")])
+        )
+        content: list[Any] = [TextContent(text=challenge)]
+        content.extend(self._frame_content(observation))
+        self._messages.append(Message(role="user", content=content))
 
     def append_rejection(self, reply: str, diagnostic: str) -> None:
         """Fold a rejected reply into the history so the next call corrects it.
@@ -2678,6 +2728,48 @@ class ProviderModelClient:
                 compaction=compaction,
             ) from error
 
+    async def challenge_completion(
+        self,
+        observation: Observation,
+        history: Sequence[EpisodeTurn],
+        *,
+        batch: ActionBatch,
+        instruction: str,
+    ) -> str:
+        """Ask the model to check a ``done`` claim against the end state.
+
+        See ``EpisodeModelClient.challenge_completion`` for the contract; this
+        is its provider-backed implementation. Three details belong here:
+
+        * the claim is replayed with the rule the history already uses for a
+          batch (``append_new_turns``): the model's public reply when it wrote
+          one, its canonical action batch otherwise. The message it is asked to
+          re-examine is therefore the message it would have been shown had the
+          episode continued, not a paraphrase of it.
+        * ``append_new_turns`` is called first, so the current observation is in
+          the conversation whatever the caller's ordering was. It renders only
+          what is new (the builder keeps cursors), so a normal call -- the
+          finish was just decided on this observation -- appends nothing.
+        * nothing here calls the provider. The challenge is appended in-process
+          and the billing happens on the next ``decide``, which is what keeps
+          the runner's own accounting of model cycles the only account.
+        """
+
+        self._context.append_new_turns(history)
+        claim = finish_claim(batch)
+        challenge = build_completion_challenge(
+            claim=claim,
+            instruction=instruction,
+            observation=observation,
+        )
+        turn = history[-1] if history else None
+        if turn is not None and turn.public_reply is not None:
+            shown = turn.public_reply
+        else:
+            shown = batch.to_canonical_json().decode("utf-8")
+        self._context.append_challenge(shown, challenge, observation)
+        return challenge
+
     async def _maybe_compact(self) -> tuple[CompactionRecord | None, ModelUsage | None, int]:
         """Run one compaction pass when the frame budget or the resolved trigger says so.
 
@@ -3295,6 +3387,74 @@ def _rejection_prompt(reason: str, observation: Observation) -> str:
         "Nothing was executed. Reply again for this same observation "
         f"(Observation ID: {observation.observation_id}; Frames: "
         f"{_frames_line(observation)}) with a corrected JSON batch and nothing else."
+    )
+
+
+#: How much of the task text, and of the model's own claim, one challenge may
+#: quote back. Both source fields are bounded at 10_000 characters on the wire
+#: (``Observation.text``, ``FinishAction.reason``) and quoting either in full
+#: buys nothing: the challenge is read for its INSTRUCTION, and the measured
+#: claims were a sentence. The bound also keeps a challenge's own cost a
+#: constant rather than a function of how verbose the model happened to be.
+MAX_CHALLENGE_QUOTE_CHARS = 4_000
+
+
+def _bounded_quote(text: str) -> str:
+    """``text`` for the challenge, cut to the quote bound with a marker."""
+
+    stripped = text.strip()
+    if len(stripped) <= MAX_CHALLENGE_QUOTE_CHARS:
+        return stripped
+    return stripped[:MAX_CHALLENGE_QUOTE_CHARS] + "\n[... truncated]"
+
+
+def build_completion_challenge(
+    *, claim: FinishAction, instruction: str, observation: Observation
+) -> str:
+    """The user turn that asks the model to check a ``done`` claim.
+
+    WHY THE WORDING IS SHAPED THIS WAY, and it is not a polite "are you sure?".
+    The measured failure is not a model that did not look -- its claim was TRUE
+    about the frame it was bound to -- but a model that never compared that
+    frame against the task. So the challenge has to do three things:
+
+    * name the ``reason`` as a CLAIM rather than as evidence, because the claim
+      is the thing that was mistaken for proof of the work;
+    * restate the task as it was stated, because the comparison has no second
+      operand otherwise (the instruction is never summarised away -- every
+      compaction in the corpus is ``strategy="prune"`` with no summary);
+    * re-attach the end state and say it is the only evidence that counts, so
+      "done" has to be defended against a picture rather than a memory.
+
+    BOTH replies are named, including the one that changes nothing. Re-declaring
+    the SAME finish is the correct answer when the observation already shows
+    every required outcome, and a challenge that did not say so would be an
+    instruction to find work that does not exist -- which is a false-positive
+    cost the gate must not have. The observation id and frame ids are restated
+    for the reason ``_rejection_prompt`` gives: the reply has to bind to this
+    observation, and getting that wrong costs a billed rejection.
+    """
+
+    return (
+        "You declared this task finished. That declaration is a CLAIM, and it is "
+        "not accepted yet: check it against what the environment actually shows.\n\n"
+        f'Your stated reason was: "{_bounded_quote(claim.reason)}"\n\n'
+        "That is your own account of what you did. It is NOT evidence that the task "
+        "is complete.\n\n"
+        "The task you were given was:\n"
+        f"{_bounded_quote(instruction)}\n\n"
+        "The screenshot below is the state your LAST action produced. It is the only "
+        "evidence that counts. Read it, and for each thing the task requires, ask "
+        "whether THIS observation shows it. If any required outcome is not visible "
+        "here, the task is not finished.\n\n"
+        "Reply in exactly one of these two ways:\n"
+        "* the SAME finish action, unchanged, if this observation already shows every "
+        "required outcome; or\n"
+        "* a batch of actions that closes the gap you can see.\n\n"
+        "Do no optional extra work, and do not restate your plan. Reply with a JSON "
+        "batch for this same observation "
+        f"(Observation ID: {observation.observation_id}; Frames: "
+        f"{_frames_line(observation)}) and nothing else."
     )
 
 
