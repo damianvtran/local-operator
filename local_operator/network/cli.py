@@ -1808,12 +1808,13 @@ def _join_one(
         sock.sendall(codec.seal({"op": "net_pair_ready", "req": 1, "sas": typed}))
         # The wait is the CONFIRM budget, not the handshake timeout: the other side
         # now has to reach a human, and timing out at 10 s would fail every honest
-        # pairing on a device whose relay is a daemon.
-        remaining = max(0.0, envelope.issued_at + envelope.ttl_s - time.time())
+        # pairing on a device whose relay is a daemon. It is also the SAME number the
+        # prompt printed a moment ago — ``invite_mod.remaining_seconds`` is the one owner
+        # of "what is left", so the promise and this wait cannot drift with the token's
+        # age (agent review round 1, MAJOR 2).
+        remaining = invite_mod.remaining_seconds(envelope)
         answer = codec.open(
-            reader.read_record_payload(
-                wire.deadline_in(helpers["pair_timeout_seconds"](remaining or envelope.ttl_s))
-            )
+            reader.read_record_payload(wire.deadline_in(helpers["pair_timeout_seconds"](remaining)))
         )
         if answer.get("op") == "net_pair_abort":
             # ``refusal_from_pairing`` OWNS the reason -> sentence map, and it lives
