@@ -1330,32 +1330,38 @@ def format_held_delivery_message(jobs: Sequence[tuple[str, str]], *, reason: str
     named = [
         f"{label} ({job_id})" if label and label != job_id else job_id for job_id, label in jobs
     ]
-    shown = ", ".join(named[:5])
-    if len(named) > 5:
-        shown += f", +{len(named) - 5} more"
     count = len(named) or 1
     noun = "result" if count == 1 else "results"
+    subject = "it" if count == 1 else "they"
     them = "it" if count == 1 else "them"
     head = (
-        f"[session incident] held delivery: {count} background job {noun} could NOT be "
-        f"held for the next turn — {them} arrived after this session's runtime had "
-        f"committed to leaving, and the harness could not write {them} into this "
-        "conversation"
+        f"[session incident] held delivery: {count} background job {noun} could not be held "
+        f"for the next turn — {subject} arrived after this session's runtime had committed "
+        f"to leaving, and the harness could not write {them} into this conversation"
     )
     if reason.strip():
         head += f" ({reason.strip()[:200]})"
     lines = [head + "."]
-    # The ids on their own line, in the register the MCP row's ``Reason:`` slot
-    # established: the batch's identities are reference material, not part of the
-    # sentence a reader skims (design review round 2, D11's spirit — the harness's
-    # own words are marked as such rather than run together with the child's).
-    if shown:
-        lines.append(f"Jobs: {shown}")
+    # EVERY id, with no "+N more" (design round 3, D16 = UX U13 = review MINOR-4):
+    # the route below is addressed by id, so a truncated list made it followable
+    # for five of nine — the incident's own shape. The list is reference material
+    # on its own line, not part of the sentence a reader skims.
+    if named:
+        lines.append(f"Jobs: {', '.join(named)}")
     lines.append(
-        f"suggested action: nothing has read {them} — a subagent child keeps its own "
-        "transcript, readable by id with hub op='peek' <job id> (paging with start=), "
-        "and a background bash command keeps only its job row, dropped on the first "
-        f"read after {bound_text(DEFAULT_RETENTION_MS / 1000.0)} past settling."
+        # No present-tense claim about who has read these (review round 3,
+        # MINOR-3): the row is durable and re-rendered forever, so "nothing has
+        # read it" would become false the moment a later turn did read it — the
+        # same class D10/U7 fixed for the held notice. "never reached this
+        # conversation" is a fact about the write that stays true.
+        f"suggested action: {subject} never reached this conversation — a subagent child "
+        "keeps its own transcript, readable by id with hub op='peek' <job id> (paging with "
+        "range='a-b'), and a background bash command has no transcript at all: its output "
+        "lives only in its job row, which the ledger drops once "
+        f"{bound_text(DEFAULT_RETENTION_MS / 1000.0)} have passed since it settled — and it "
+        "is dropped on the next read after that, or sooner when the sweep runs on a "
+        "settle, a cancel or a delivery sink's exit, so by the time this row is read that "
+        "row is usually gone."
     )
     return "\n".join(lines)
 
