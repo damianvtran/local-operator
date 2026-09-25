@@ -60,7 +60,13 @@ from local_operator.harness.approval import (
 )
 from local_operator.harness.approval import transition_authority
 from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
-from local_operator.harness.types import AgentEndEvent, AgentEvent, ModelChangeEvent
+from local_operator.harness.types import (
+    AgentEndEvent,
+    AgentEvent,
+    ModelChangeEvent,
+    SubagentEndEvent,
+    SubagentStartEvent,
+)
 from local_operator.harness.wire import bound_agent_end_for_wire
 
 if TYPE_CHECKING:
@@ -214,6 +220,11 @@ GATE_TIMEOUT_CUSTOM_TYPE = _GATE_TIMEOUT_CUSTOM_TYPE
 # but an abandoned automation loop must not grow one owner's memory forever.
 MAX_QUEUED_PROMPTS = 32
 
+#: Coalescing window for the per-event child-roster republish. The same 50 ms
+#: as ``RuntimeServer._push_later`` (the repaint it feeds) and
+#: ``Session._schedule_frontend_jobs``; see ``_schedule_roster_refresh``.
+_ROSTER_REFRESH_COALESCE_S = 0.05
+
 #: THE RUNG-4 RETRY LADDER (review round 1, R7).
 #:
 #: The only attempt used to be the turn-settled task, so a spawn that failed
@@ -349,6 +360,10 @@ class _PromptCommand:
     #: ``Session.prompt``'s own keyword so the row carries the STRUCTURAL
     #: provenance stamp from the one place a row is born.
     harness_injected: bool = False
+    #: Whether the drain waits out a turn it did not open (a wake, a job-result
+    #: delivery, a compaction) before handing this command to ``Session.prompt``.
+    #: See ``ServingSessionHandle.prompt``'s ``wait_for_turn``.
+    wait_for_turn: bool = True
 
     def __iter__(self):  # type: ignore[no-untyped-def]
         # Tuple compatibility for older diagnostics that inspect the queue.
@@ -660,6 +675,7 @@ class ServingSessionHandle(SessionHandle):
         #: type, not a dynamic one every reader has to guess at.
         self._registrant: Any = None
         self._on_projection: Callable[[], None] | None = None
+        self._roster_refresh_scheduled = False
         self._projection = SessionProjection(
             session_id=session.session_id,
             pid=0,  # stamped by the registrant's record
@@ -1635,6 +1651,24 @@ class ServingSessionHandle(SessionHandle):
         self._retiring_cause = cause or "retiring"
         self._retiring_detail = detail
         self._exit_committed = True
+        # THE DEPARTURE LATCH'S THIRD ARRIVAL PATH, armed in the same synchronous
+        # step that commits the exit -- the placement rule ``begin_drain``
+        # documents for the wake divert, and for the same reason: a divert
+        # installed one await later would leave a settled child's result free to
+        # open the turn this exit can only abort (see
+        # ``Session.retire_job_deliveries_to_transcript`` for the measured
+        # incident). Inline rather than factored out, exactly like the wake
+        # divert next door: the cell harnesses in ``test_serving_drain`` and
+        # ``test_prompt_admission_race`` bind this class's methods one by one, so
+        # a new private helper would have to be bound there too before any of
+        # them could take this latch at all.
+        session = getattr(self, "_session", None)
+        divert = getattr(session, "retire_job_deliveries_to_transcript", None)
+        if callable(divert):
+            try:
+                divert()
+            except Exception:  # noqa: BLE001 -- a failed divert must not block an exit
+                logger.debug("could not divert job deliveries to the transcript", exc_info=True)
         # The exit's own LOG line, and the only reader this detail has. It is
         # logged HERE rather than at the departure site so every rung's reading
         # lands in one shape: the two build rungs log the pair they composed at
@@ -1719,7 +1753,14 @@ class ServingSessionHandle(SessionHandle):
           process leaves at the first instant the reaper finds the work done;
         * wakes that fire from now on are spooled for the successor rather than
           run against a build that is leaving — invariant (iv), see
-          ``Session.retire_wakes_to_inbox``.
+          ``Session.retire_wakes_to_inbox``;
+        * and a settled child's result is HELD durably for whoever turns next -
+          charged to the same invariant (i), which the refusals above only
+          appear to hold: a job delivery is harness-initiated and reached
+          ``Session._deliver_job_results`` directly, so it opened a turn this
+          runtime could only abort. See
+          ``Session.retire_job_deliveries_to_transcript`` for the measured
+          incident and the two spellings it was fixed as.
 
         Deliberately NOT ``note_cut_off``: no turn is being cut off. The turn
         running when this latches is expected to FINISH, and arming a cut-off
@@ -1743,6 +1784,17 @@ class ServingSessionHandle(SessionHandle):
                 divert()
             except Exception:  # noqa: BLE001 — a failed divert must not block the drain
                 logger.debug("could not divert wakes to the inbox", exc_info=True)
+        # The SECOND harness-initiated arrival, beside the wake divert above and
+        # for the same reason: the admission refusals this latch installs cover
+        # ``prompt``/``receive_peer_message`` only, so a settled child's result
+        # would otherwise open a turn on the runtime that is leaving -- the
+        # measured incident (``Session.retire_job_deliveries_to_transcript``).
+        divert = getattr(session, "retire_job_deliveries_to_transcript", None)
+        if callable(divert):
+            try:
+                divert()
+            except Exception:  # noqa: BLE001 — a failed divert must not block the drain
+                logger.debug("could not divert job deliveries to the transcript", exc_info=True)
         return True
 
     def end_drain(self) -> bool:
@@ -1769,6 +1821,18 @@ class ServingSessionHandle(SessionHandle):
         self._draining = False
         self._retiring_cause = ""
         self._retiring_detail = ""
+        # ...and the DELIVERY divert goes with the latch, which the wake divert
+        # deliberately does not: a kept runtime is serving again, so a child that
+        # settles for the rest of its life must reach it without someone having
+        # to type something first. The rows already held need no undoing -- they
+        # are durable and ride the next turn either way.
+        session = getattr(self, "_session", None)
+        resume = getattr(session, "resume_job_deliveries_to_turns", None)
+        if callable(resume):
+            try:
+                resume()
+            except Exception:  # noqa: BLE001 — a failed undo must not block the abandon
+                logger.debug("could not release the job-delivery divert", exc_info=True)
         return True
 
     # -- the update window -------------------------------------------------
@@ -2580,7 +2644,16 @@ class ServingSessionHandle(SessionHandle):
             # state machine, so folding inline is safe. Only the repaint push
             # crosses threads.
             self._fold.fold_event(event)
-            self._refresh_state()
+            # The ROSTER half of the refresh is coalesced, the scalar half is
+            # not; see ``_schedule_roster_refresh``. A subagent start/end is
+            # the exception: the fold REBUILDS that child's row from the event,
+            # which carries no session id, so the registry's identity fields
+            # must be re-applied before this event's own push goes out.
+            if isinstance(event, (SubagentStartEvent, SubagentEndEvent)):
+                self._refresh_state()
+            else:
+                self._refresh_state(roster=False)
+                self._schedule_roster_refresh()
             self._refresh_todos()
             if isinstance(event, ModelChangeEvent):
                 self._retry_naming_after_route_change()
@@ -2640,7 +2713,34 @@ class ServingSessionHandle(SessionHandle):
         *,
         wait_complete: bool = False,
         harness_injected: bool = False,
+        wait_for_turn: bool = True,
     ) -> str:
+        """Admit one ordinary prompt; the receipt is its durable append.
+
+        ``wait_for_turn`` makes an accepted prompt WAIT for a turn this queue
+        did not open instead of failing after admission (see
+        ``_await_turn_lock_free``). It is True for every caller of THIS handle —
+        the desktop route (``admit_prompt``), the phone's daemon, a peer
+        ``lop send`` and ``lop exec``'s headless turn all arrive here — and one
+        caller passes False: the boot inbox drain
+        (``process._run_owner_prompt``) runs BEFORE the control socket listens,
+        so waiting there would keep the runtime unreachable for a whole wake
+        turn, and it already answers the refusal by steering the row into the
+        turn in flight — which needs the refusal to arrive rather than the wait.
+
+        THE SEAM IS THIS HANDLE'S, and that is a deliberate boundary rather than
+        an oversight: ``TuiSessionHandle.prompt`` has no equivalent, so a
+        desktop or phone send to a session a TUI owns still fails after
+        admission when a turn it did not open holds the lock. Nothing is lost
+        there (the refusal releases the id, so the retry admits — see
+        ``CommandReservations.reject``), and it reports the failure honestly.
+        Giving that host the wait as well would put a long wait inside a wire
+        ack the client bounds at ``ACK_TIMEOUT_S``: the message would still land
+        while the caller had already rendered a transport error, which is the
+        ambiguous outcome this seam avoids. A TUI-hosted send therefore keeps
+        the fail-then-retry shape, and this docstring states it rather than
+        claiming a uniformity the code does not have.
+        """
         self._check_loop_thread()
         if not command_id:
             # Only old in-process callers omit the v3 field. Minting here keeps
@@ -2648,7 +2748,13 @@ class ServingSessionHandle(SessionHandle):
             command_id = str(uuid.uuid4())
         existing = self._prompt_commands.get(command_id)
         if existing is not None:
-            await existing.admitted
+            # Shielded for the reason the receipt below documents: this is a
+            # DUPLICATE, so the future it awaits belongs to a producer that is
+            # still waiting for its own answer. A retry whose client gives up
+            # would otherwise cancel the first caller's admission — the very
+            # retry path this change exists to make safe, entered from the other
+            # side (agent review round 2, MAJOR-1).
+            await asyncio.shield(existing.admitted)
             return "already admitted"
         # Bounded BEFORE the reservation, deliberately: the bound is a thread
         # hop, and awaiting between reserving a producer identity and queueing
@@ -2815,7 +2921,9 @@ class ServingSessionHandle(SessionHandle):
         self._maybe_name_conversation(text)
         admitted: asyncio.Future[None] = self._loop.create_future()
         completed = self._loop.create_future() if wait_complete else None
-        command = _PromptCommand(command_id, text, blocks, admitted, completed, harness_injected)
+        command = _PromptCommand(
+            command_id, text, blocks, admitted, completed, harness_injected, wait_for_turn
+        )
         position = len(self._prompt_queue) + 1
         legacy_prompt = "message_id" not in inspect.signature(self._session.prompt).parameters
         # Compatibility-only fake/third-party sessions predate durable
@@ -2829,7 +2937,16 @@ class ServingSessionHandle(SessionHandle):
             self._prompt_drain_task = asyncio.ensure_future(self._drain_prompt_queue())
             self._prompt_drain_task.add_done_callback(self._observe_prompt_drain)
         # ACK is the durable transcript append, never insertion into this queue.
-        await admitted
+        #
+        # SHIELDED, like ``completed`` two statements below and for the same
+        # reason: this future is SHARED with the drain (and with any duplicate
+        # sender awaiting it), so a plain ``await`` makes this caller's
+        # cancellation destroy every other holder's admission — the state agent
+        # review round 2 reproduced by cancelling a caller. The cancellation
+        # still reaches THIS caller (``shield`` protects the future, not the
+        # await), which is the honest outcome: this sender gave up, the message
+        # it sent is unaffected.
+        await asyncio.shield(admitted)
         self._command_reservations.accept(command_id)
         if completed is not None and not await asyncio.shield(completed):
             raise RuntimeError("The admitted loop turn did not complete")
@@ -2969,14 +3086,13 @@ class ServingSessionHandle(SessionHandle):
                         harness_injected=True,
                     )
                 except BaseException:
-                    # A refused admission (`TurnInFlight`) makes the drain park
-                    # this id as `prompt-transfer`, keeping it claimable for a
-                    # client that retries the same id as a STEER. The judge never
-                    # retries: it publishes `waiting` and re-arms at the next turn
-                    # end with a NEW id. Without this release each refusal left
-                    # one entry in the map until dispose (agent review round 1,
-                    # MINOR-2, reproduced on this head). `reject` is a no-op for
-                    # an id that already went durable or was never reserved.
+                    # The judge never retries: it publishes `waiting` and re-arms
+                    # at the next turn end with a NEW id, so nothing may keep this
+                    # one reserved (agent review round 1, MINOR-2). The drain
+                    # already releases a refused id itself; this stays as the
+                    # judge's own guarantee rather than a dependency on that, and
+                    # `reject` is a no-op for an id that already went durable or
+                    # was never reserved.
                     self._command_reservations.reject(command_id)
                     raise
 
@@ -3326,6 +3442,56 @@ class ServingSessionHandle(SessionHandle):
         self._refresh_state()
         self._notify()
 
+    async def _await_turn_lock_free(self) -> None:
+        """Wait out a turn this queue did not open before handing it the head.
+
+        ``Session.prompt`` REFUSES outright (``TurnInFlight``) when its turn lock
+        is held, and this queue is not the only thing that takes that lock: a
+        background job's result delivery, a peer wake, a scheduled wake, a resume
+        catch-up (all ``Session._prompt_messages``) and an on-demand compaction
+        do too. A prompt this queue had already ACCEPTED was therefore failed
+        after admission whenever one of those won the race to the lock — a
+        desktop send answered 503, and before the reservation fix its same-id
+        retry was reported admitted without ever landing (QA on PR #1528,
+        Q1-5, and the "prompt failed after admission … TurnInFlight" log line).
+        The accepted prompt has to wait its turn exactly as it waits behind a
+        prompt queued ahead of it here.
+
+        ACQUIRED AND RELEASED, not polled: the lock's own FIFO is the event, so
+        this wakes the moment the holder (and anything queued before this wait)
+        lets go. Holding it for no work is harmless. What makes the hand-off
+        sound is that the caller's ``Session.prompt`` probe then runs with NO
+        await in between — a coroutine's body runs synchronously up to its first
+        suspension — so the probe sees the lock free; a wake that queued behind
+        this wait is then ahead of the prompt's own ``acquire``, which waits
+        rather than refusing.
+
+        WHAT THIS DOES NOT PROMISE: this is not "an admitted prompt cannot fail".
+        ``Session.prompt`` re-checks ``_is_streaming`` once it holds the lock,
+        and its ``@path`` expansion awaits outside it — an approval card parked
+        on a person is enough for a turn to start and finish in that gap — so the
+        refusal is still reachable. What covers it is the release of the id on
+        failure, which is what makes the retry admit; the probe's own verdict is
+        attributed per turn for the same reason (see ``observe_end``).
+
+        THE FAIRNESS RELIED ON: CPython's ``Lock.acquire`` wakes waiters FIFO
+        and its uncontended fast path is guarded by
+        ``all(w.cancelled() for w in self._waiters)``, so a waiter this wait has
+        woken is not jumped by the next caller. A future interpreter that took
+        the fast path with a woken waiter would let the prompt overtake it — a
+        fairness loss, never a refusal, because the probe would still find the
+        lock free.
+
+        A session without the lock (a reduced double, a third-party protocol
+        host) keeps the historical behaviour of refusing at the probe.
+        Cancellation (``dispose``) propagates, and ``asyncio.Lock`` hands the
+        lock on for a cancelled waiter.
+        """
+        lock = getattr(self._session, "_turn_lock", None)
+        if isinstance(lock, asyncio.Lock) and lock.locked():
+            async with lock:
+                pass
+
     async def _drain_prompt_queue(self) -> None:
         """Run admitted ordinary prompts in owner order, one safe turn at a time.
 
@@ -3339,6 +3505,45 @@ class ServingSessionHandle(SessionHandle):
             succeeded = False
             emitted_failure = False
 
+            def own_turn_has_started() -> bool:
+                """Is the turn emitting on this bus THIS command's own turn?
+
+                YES exactly when this command's admission is durable, and that is
+                an invariant rather than a heuristic: ``Session.prompt`` resolves
+                the caller's ``admitted`` future at the append point, which is
+                INSIDE the turn and under its lock, and that turn holds the lock
+                until it ends. So from the moment admission lands, every event on
+                this session's bus belongs to this command's turn — and before it
+                lands, none do: the drain's wait (``_await_turn_lock_free``) is
+                precisely the window in which a turn this queue did NOT open is
+                the one running.
+
+                Read as ``admitted.done()`` rather than through a callback, so
+                there is no scheduling gap between the fact and the reading, and
+                no generation to latch: a stored generation would go stale in
+                the very window it was meant to guard (a future callback that
+                runs only after a foreign turn started would latch THAT turn).
+
+                A host that resolves ``admitted`` at queue time (the legacy
+                branch below, whose sessions predate the durable seam) is
+                attributable from the start and keeps its historical all-events
+                reading, so no reduced or third-party host loses its verdict.
+                """
+                #
+                # A CANCELLED future reads as "not ours" and is checked BEFORE
+                # ``exception()``, which RAISES ``CancelledError`` on a cancelled
+                # future — a ``BaseException``, so ``Session._emit``'s per-handler
+                # ``except Exception`` cannot contain it and it left the fan-out
+                # into whichever turn was emitting: the running turn truncated at
+                # its first event, the prompt drain cancelled, and nothing
+                # reported (agent review round 2, MAJOR-1). The shields below
+                # remove the state from the handle's own waiters; this order is
+                # what keeps the gate safe for any other, and it is the reason the
+                # two are not redundant.
+                if not command.admitted.done() or command.admitted.cancelled():
+                    return False
+                return command.admitted.exception() is None
+
             def observe_end(event: AgentEvent) -> None:
                 nonlocal emitted_failure
                 from local_operator.harness.types import (
@@ -3346,6 +3551,19 @@ class ServingSessionHandle(SessionHandle):
                     ToolExecutionEndEvent,
                 )
 
+                if not own_turn_has_started():
+                    # ONLY THIS COMMAND'S OWN TURN MAY MOVE EITHER VERDICT, and
+                    # the gate is load-bearing rather than tidy: the subscription
+                    # below is installed BEFORE ``_await_turn_lock_free``, so a
+                    # turn this command did not open — a job-result delivery, a
+                    # wake, a catch-up — had its terminal event read as this
+                    # command's failure. A queued ``lop exec`` turn that ran,
+                    # landed and ended clean was reported failed by the delivery
+                    # turn's error (agent review round 1, MAJOR-1, reproduced in
+                    # ``test_a_turn_that_failed_during_the_wait_is_not_this_commands_failure``),
+                    # and the waited-out turn's tool boundary was noted against
+                    # this command's journal note through the same subscription.
+                    return
                 if isinstance(event, AgentEndEvent) and (event.error or event.aborted):
                     emitted_failure = True
                 # The last COMPLETED tool boundary, recorded while the turn is
@@ -3369,6 +3587,8 @@ class ServingSessionHandle(SessionHandle):
             # goal loop submits its next turn after the model already failed.
             unsubscribe_outcome = self._session.subscribe(observe_end)
             try:
+                if command.wait_for_turn:
+                    await self._await_turn_lock_free()
                 parameters = inspect.signature(self._session.prompt).parameters
                 if "message_id" in parameters:
                     fields: dict[str, Any] = {
@@ -3395,6 +3615,13 @@ class ServingSessionHandle(SessionHandle):
                 succeeded = not emitted_failure
             except asyncio.CancelledError:
                 if not command.admitted.done():
+                    # RELEASED for the same reason the failing arm below releases:
+                    # a cancelled admission is not in the transcript, so an id
+                    # left reserved here would answer a retry "already admitted"
+                    # — Q1-5's silent drop, rearranged. Today only ``dispose``
+                    # cancels this drain and clears the map two statements later,
+                    # which is what makes this latent rather than live.
+                    self._command_reservations.reject(command.command_id)
                     command.admitted.set_exception(
                         RuntimeError("session closed before the prompt was admitted")
                     )
@@ -3409,14 +3636,12 @@ class ServingSessionHandle(SessionHandle):
                 raise
             except Exception as exc:  # noqa: BLE001 — admitted turns need terminal handling
                 if not command.admitted.done():
-                    from local_operator.session.errors import TurnInFlight
-
-                    self._command_reservations.reject(
-                        command.command_id,
-                        transfer_to_steer=(
-                            isinstance(exc, TurnInFlight) or "already streaming" in str(exc)
-                        ),
-                    )
+                    # RELEASED, whatever the refusal was. The producer is about
+                    # to be told this command failed, so its retry of the same id
+                    # has to admit it for real — see
+                    # ``CommandReservations.reject`` for the silent drop the old
+                    # ``prompt-transfer`` parking caused on exactly that retry.
+                    self._command_reservations.reject(command.command_id)
                     command.admitted.set_exception(exc)
                 # Provider, transcript, and tool failures are all terminal for
                 # this one admission. Surface the failure asynchronously, then
@@ -3463,11 +3688,7 @@ class ServingSessionHandle(SessionHandle):
             if _already_bounded(images)
             else await _image_blocks_async(cast(list[dict[str, str]] | None, images))
         )
-        if not self._command_reservations.reserve(
-            command_id,
-            kind="steer",
-            prompt_transfer=True,
-        ):
+        if not self._command_reservations.reserve(command_id, kind="steer"):
             return "already admitted"
         # THE UPDATE WINDOW, and a steer is the one admission that cannot simply
         # wait: ``Session.steer`` queues against a TURN, and this runtime is idle
@@ -3879,6 +4100,104 @@ class ServingSessionHandle(SessionHandle):
         self._session.set_model(spec, explicit=True)
         self._refresh_state()
         return f"model: {self._projection.model_label}"
+
+    @_on_session_loop
+    async def receive_peer_model(
+        self,
+        provider: str,
+        model_id: str,
+        *,
+        sender: dict[str, Any] | None = None,
+    ) -> str:
+        """Another local session switching this one's model (``peer_set_model``).
+
+        Four steps, in this order, all on the session's own loop (design D1):
+        validate against THIS runtime's config and credentials (off the loop —
+        the catalogue and the credential store are blocking reads), apply
+        through :meth:`set_model_effort` — the same switch the phone's model
+        sheet uses, so effort falls to the model's own default (effort is not on
+        the wire in v1) — read back the model actually in force, and record a
+        record-only peer card naming the sender, the old model and the new one.
+
+        A refusal raises ``ValueError`` BEFORE anything is mutated, so it cannot
+        half-switch; the dispatch turns it into the error frame the sender
+        prints. A switch that validated but did not take is also a refusal: the
+        answer comes from the read-back, never from the switch's own receipt.
+        """
+        self._check_loop_thread()
+        from local_operator.mobile import peer_model
+        from local_operator.model.configure import ModelSelectionRefused
+
+        provider, model_id = peer_model.normalise_pair(provider, model_id)
+        session = self._session
+        old_label = peer_model.selected_label(session)
+        try:
+            spec = await asyncio.to_thread(peer_model.validate_peer_selection, provider, model_id)
+        except ModelSelectionRefused as refused:
+            raise ValueError(
+                peer_model.refusal_detail(refused.message, _effective_label(session))
+            ) from refused
+        new_label = f"{spec.provider}/{spec.model_id}"
+        if peer_model.already_selected(session, new_label):
+            return peer_model.already_on_detail(new_label)
+        # Re-selecting the model a pinned fallback displaced: the selection will
+        # not move, the pin will be withdrawn (review round 2, N5).
+        dropped = peer_model.pinned_fallback_label(session) if old_label == new_label else ""
+        # Read BEFORE the switch: the question is whether a call was in flight
+        # when the switch landed, which is what decides the "mid-turn" wording.
+        busy = self.is_conversationally_active()
+        calling = peer_model.provider_call_in_flight(session)
+        apply_error: Exception | None = None
+        try:
+            await self.set_model_effort(spec.provider, spec.model_id, None)
+        except Exception as error:  # noqa: BLE001 — the read-back below decides the answer
+            # ``Session.set_model`` assigns the spec BEFORE its journal writes and
+            # stream notify, so a raise from a later step can leave the switch in
+            # force. The answer is read back from the session, never inferred from
+            # the raise (review round 1, N1).
+            apply_error = error
+        # "Did it take" is the SELECTION test, never the effective label (review
+        # round 2, M2): while a fallback serves the requested model the effective
+        # label already equals it, so an apply that never ran would read as a
+        # switch and write a false card. The effective label names what the
+        # session is really on in the refusal.
+        if not peer_model.already_selected(session, new_label):
+            raise ValueError(
+                peer_model.refusal_detail(
+                    f"the switch to {new_label} did not take effect", _effective_label(session)
+                )
+            ) from apply_error
+        await self._record_peer_model_switch(
+            peer_model.audit_body(old_label, new_label, sender, dropped_fallback=dropped),
+            sender or {},
+        )
+        if apply_error is not None:
+            return peer_model.partial_switch_detail(
+                old_label, new_label, apply_error, dropped_fallback=dropped
+            )
+        return peer_model.switched_detail(
+            old_label,
+            new_label,
+            busy=busy,
+            calling=calling,
+            running_subagents=peer_model.running_subagent_count(session),
+            dropped_fallback=dropped,
+        )
+
+    async def _record_peer_model_switch(self, body: str, sender: dict[str, Any]) -> None:
+        """The target-side audit card (design D6), best effort.
+
+        Record-only (``mailbox``, no wake) through the ordinary peer receive path,
+        so it lands as the peer card every front end already renders with the
+        sender's name, pid and model, and it never opens a turn. The switch has
+        ALREADY happened when this runs; a failed card must not turn a switch
+        into a reported failure, because the sender would then retry a switch
+        that stuck.
+        """
+        try:
+            await self.receive_peer_message(body, mode="mailbox", wake=False, sender=sender)
+        except Exception:  # noqa: BLE001 — the switch stands whatever the card does
+            logger.warning("the remote model switch's audit card was not recorded", exc_info=True)
 
     @_on_session_loop
     async def set_effort(self, effort: str) -> str:
@@ -7239,7 +7558,61 @@ class ServingSessionHandle(SessionHandle):
             return
         raise RuntimeError("this session cannot accept that op right now")
 
-    def _refresh_state(self) -> None:
+    def _schedule_roster_refresh(self) -> None:
+        """Republish the child roster once per :data:`_ROSTER_REFRESH_COALESCE_S`.
+
+        WHY. ``set_subagent_details`` is one linear pass over a registry capped
+        at ``MAX_RECORDS`` (256), and it ran inline for EVERY root event — which,
+        on a parent with live lanes, is token rate: every lane's progress, every
+        streamed delta of the parent's own turn. Linear is not free at that rate.
+        Sampled on a runtime with 12 stepping lanes and a 240-record roster
+        (``scripts/bench_send_admission.py --condition roster --sample``), 557 of
+        1,846 loop samples (30%) sat in ``set_subagent_details`` after the
+        transcript-probe fix, and a prompt waited 0.8 s p50 behind it to be
+        admitted. The loop that runs this is the loop that admits the user's
+        next message.
+
+        WHY NOTHING IS LOST. The scheduled pass reads the LIVE registry when it
+        fires, so it can never publish a roster older than the one an inline
+        call would have; it only folds a burst of N events into one pass. The
+        repaint it feeds is already coalesced at the same 50 ms by
+        ``RuntimeServer._schedule_push``, so a viewer sees roster movement at
+        most one push tick later than before. Everything else the handler
+        publishes (scalar state, todos, busy, gates) still refreshes inline, and
+        the two events whose fold REPLACES a row refresh inline as well (see the
+        handler).
+
+        Mirrors ``Session._schedule_frontend_jobs``, the coalescer the full-TUI
+        roster has used for the same reason.
+        """
+        if self._roster_refresh_scheduled:
+            return
+        self._roster_refresh_scheduled = True
+        try:
+            self._loop.call_later(_ROSTER_REFRESH_COALESCE_S, self._flush_roster_refresh)
+        except RuntimeError:
+            # No running loop to defer onto (a closing loop, a synchronous test
+            # host): publish now rather than drop the roster.
+            self._roster_refresh_scheduled = False
+            self._refresh_roster()
+
+    def _flush_roster_refresh(self) -> None:
+        self._roster_refresh_scheduled = False
+        if self._disposing:
+            return
+        try:
+            self._refresh_roster()
+        except Exception:  # noqa: BLE001 — a panel refresh never fails the loop
+            logger.debug("deferred roster refresh failed", exc_info=True)
+            return
+        self._notify()
+
+    def _refresh_roster(self) -> None:
+        comms = getattr(self._session, "_subagent_comms", None)
+        if comms is not None:
+            self._fold.set_subagent_details(comms)
+
+    def _refresh_state(self, *, roster: bool = True) -> None:
         self._fold.set_state(
             model_label=_effective_label(self._session),
             model_selector=_selector(self._session),
@@ -7267,10 +7640,10 @@ class ServingSessionHandle(SessionHandle):
         # The cost is the one the TUI already pays per folded event: one linear
         # registry pass, plus a job-row lookup and the outcome/error text caps
         # per node (both listed as unaddressed in the PR). No child transcript
-        # ever leaves with it.
-        comms = getattr(self._session, "_subagent_comms", None)
-        if comms is not None:
-            self._fold.set_subagent_details(comms)
+        # ever leaves with it. ``roster=False`` is the per-event path, which
+        # defers this half to ``_schedule_roster_refresh``.
+        if roster:
+            self._refresh_roster()
 
     def _reconcile_streaming(self) -> None:
         """Seed/align ``streaming`` from the session flag at attach and command

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.62.26"
+version = "0.62.39"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Radient Inc.", email = "contact@radienthq.com" }]
@@ -244,6 +244,17 @@ local_operator = [
     # 0. The `!` lines in it are the fix: see the file's own comment and
     # tailwindlabs/tailwindcss#19844. A wheel that dropped it would put back
     # the unstyled-phone bug in the one tree that cannot rebase its way out.
+    # THE MACOS KEY AGENT IS NOT HERE, on purpose, and the omission is load-bearing.
+    # An .app is a SIGNED artefact: it cannot be built on a host without the signing
+    # identity and the provisioning profile, so it is never in a source tree — the
+    # release job builds it and `packaging/macos/make_macos_wheel.py` injects it at
+    # `local_operator/operator/macos/lop-keyagent.app/`, which is where
+    # `keyagent.helper_bundle_path()` looks. A source install or a non-macOS wheel
+    # therefore has no helper at all, and `lop operator status` says so in as many
+    # words (a broken install, not a host without a presence store) rather than
+    # silently dropping to a file-backed key. `packaging/macos/` ships in the sdist
+    # because it is referenced from the repository root, and that is the point: the
+    # build inputs are public, the signed output is not committed.
     "mobile/web/.gitignore",
     "mobile/web/pnpm-workspace.yaml",
     "mobile/web/index.html",
@@ -335,7 +346,12 @@ reportPrivateImportUsage = false
 # themselves prepend the same directory in their conftest, and the SPAWNED tests
 # install the real built wheel into a real interpreter rather than relying on
 # either mechanism — which is what keeps this from masking a packaging break.
-extraPaths = ["benchmarks/osworld_v2_adapter/src"]
+# `packaging/macos/` holds build tools that are NOT package code but ARE imported by
+# tests (`make_macos_wheel.py`, exercised by `tests/unit/operator/test_macos_wheel.py`).
+# The test prepends the directory to `sys.path` at run time; this is the same path for
+# the ANALYZER, so the import resolves instead of being reported missing. Same reasoning
+# as the adapter entry above: a type-resolution path only, no runtime import change.
+extraPaths = ["benchmarks/osworld_v2_adapter/src", "packaging/macos"]
 # `exclude` REPLACES pyright's built-in defaults, it does not extend them, so
 # the four defaults must be restated here alongside any addition of our own.
 # THE COUNT IS VERSION-COUPLED. It became FOUR at 1.1.414, which added

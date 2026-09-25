@@ -112,41 +112,72 @@ async def send_peer_message(
 ) -> str:
     """Deliver one message to ``record``'s session and return the ack detail.
 
-    Dials as a daemon-class connection: a daemon-class dial receives an
-    unsolicited ``welcome``/``projection`` push first, so we must read frames
-    until the ``ack``/``error`` matching our request id, skipping intervening
-    ``projection`` pushes — the same req-matching the attach client does.
+    A thin wrapper over :func:`send_control_op` with the ``peer_message`` op, so
+    the message sender and the model switch read the SAME frames the same way.
 
     Raises ``RuntimeError`` on an ``error`` reply (e.g. an older registrant
     that does not know the op, or a handle that cannot receive), and
     ``ConnectionError`` if the session closes before acking. Both are soft
     failures the CLI surfaces as a human-readable message with a non-zero exit,
     never a traceback.
+    """
+    return await send_control_op(
+        record,
+        "peer_message",
+        {"text": text, "mode": mode, "wake": wake, "sender": sender},
+        deadline_s=deadline_s,
+        default_detail="delivered",
+        default_error="delivery failed",
+    )
+
+
+class ControlDialFailed(ConnectionError):
+    """The control socket could not be OPENED, so no request byte was sent.
+
+    A ``ConnectionError`` subclass on purpose: every existing caller that folds
+    connection faults into "may or may not have arrived" keeps doing so, and a
+    caller that can say more (``switch_peer_model``) catches this first.
+    """
+
+
+async def send_control_op(
+    record: SessionRecord,
+    op: str,
+    fields: dict[str, Any],
+    *,
+    deadline_s: float = 5.0,
+    default_detail: str = "ok",
+    default_error: str = "request failed",
+) -> str:
+    """Send ONE control op to ``record``'s session and return its ack detail.
+
+    Dials as a daemon-class connection: a daemon-class dial receives an
+    unsolicited ``welcome``/``projection`` push first, so we must read frames
+    until the ``ack``/``error`` matching our request id, skipping intervening
+    ``projection`` pushes — the same req-matching the attach client does.
+
+    Raises ``RuntimeError`` carrying the error frame's message on an ``error``
+    reply — the peer ANSWERED no, including an older registrant's
+    ``unknown op: '<op>'`` — ``ConnectionError`` if the session closes before
+    acking, and ``TimeoutError`` when a read outlives ``deadline_s``. The split
+    is load-bearing for callers: only the first means nothing happened.
 
     Frames are read through ``_FrameReader`` so an oversized ``welcome``
-    projection (the target's own large transcript, not our body) is tolerated
-    rather than crashing the sender; the CLI still caps the body well below any
-    memory limit so a huge paste can never become a silently dropped line.
+    projection (the target's own large transcript, not our request) is
+    tolerated rather than crashing the sender.
     """
-    reader, writer = await asyncio.open_connection("127.0.0.1", record.control_port)
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", record.control_port)
+    except OSError as exc:
+        # Nothing was written, so nothing can have landed: a distinct class lets
+        # a caller say "not delivered" instead of "may or may not have landed".
+        raise ControlDialFailed(str(exc) or type(exc).__name__) from exc
     try:
         # Auth frame: the bare key (no ``client``) => daemon-class connection.
         writer.write(json.dumps({"key": record.control_key}).encode() + b"\n")
         await writer.drain()
         req = 1
-        writer.write(
-            json.dumps(
-                {
-                    "op": "peer_message",
-                    "req": req,
-                    "text": text,
-                    "mode": mode,
-                    "wake": wake,
-                    "sender": sender,
-                }
-            ).encode()
-            + b"\n"
-        )
+        writer.write(json.dumps({**fields, "op": op, "req": req}).encode() + b"\n")
         await writer.drain()
         frames = _FrameReader(reader)
         while True:
@@ -165,8 +196,8 @@ async def send_peer_message(
             # only our matching ack/error terminates the read.
             if frame.get("req") == req and frame.get("op") in ("ack", "error"):
                 if frame["op"] == "error":
-                    raise RuntimeError(str(frame.get("message", "delivery failed")))
-                return str(frame.get("detail", "delivered"))
+                    raise RuntimeError(str(frame.get("message", default_error)))
+                return str(frame.get("detail", default_detail))
     finally:
         writer.close()
         try:

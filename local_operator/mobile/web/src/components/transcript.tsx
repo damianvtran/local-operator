@@ -14,6 +14,7 @@ import { ToolRow } from "./tool-row"
 import { RowBoundary } from "./row-boundary";
 import { getHistory, getSubagentHistory, imageUrl } from "../api";
 import { cn } from "../lib/cn";
+import { pendingEchoCaption, type PendingEcho } from "../pending-echo";
 import type { TranscriptEntry } from "../types";
 
 const PAGE = 120;
@@ -259,11 +260,81 @@ function Entry({ entry, pid }: { entry: TranscriptEntry; pid: string }) {
 	}
 }
 
+/** The row for one command that is in flight — what the user just sent.
+ *
+ * It exists because the receipt is not instant: before it, the user's words were
+ * only ever in the composer's textarea, so a send on a phone link looked like
+ * nothing had happened until the daemon answered and the message appeared out of
+ * nowhere. This row is painted at submit and replaced by the real one under the
+ * same id (`pending-echo.ts`).
+ *
+ * It takes the box of the row its OP settles into — the user bubble for a
+ * prompt, the quieter steer row for a steer — so that reconciliation is the
+ * caption leaving rather than a row changing register. Before this, a steer's
+ * pending row was the prompt bubble (surface ground, 14px, 77.4px tall) settling
+ * into the steer row (no ground, 13px, 49.0px), which the design round measured
+ * and refused (D2). The two deliberate departures from a settled row are the
+ * same in both variants and both are the pending signal itself: no accent
+ * leading edge for a prompt (the accent means "this is what the turn is on", and
+ * an unadmitted message is not that yet) and dimmer ink.
+ *
+ * It carries NO spinner and no shimmer. `WorkingLine` is this surface's ONE
+ * in-progress animation (D25), and a second one per row is exactly the
+ * competing-patterns defect that rule exists for — so the pending state is said
+ * in words and ink, not in motion. */
+function PendingEchoRow({ echo, streaming }: { echo: PendingEcho; streaming: boolean }) {
+	const count = echo.imageCount;
+	const attachments = count > 0 ? (
+		<span className="text-meta text-ink-dim">
+			{count === 1 ? "1 image attached" : `${count} images attached`}
+		</span>
+	) : null;
+	const caption = pendingEchoCaption(echo, streaming);
+	return (
+		/* `data-pending-echo` is the row's identity for anything that needs to ask
+		   "is this command's row still pending" from outside React — the same use
+		   `data-completion-anchor` has below, and the only stable hook here that is
+		   not a presentation class. */
+		<div className="flex min-w-0 justify-end" data-pending-echo={echo.commandId}>
+			{echo.op === "steer" ? (
+				/* The steer row's own box: `transcript.tsx`'s `case "steer"`. */
+				<div className="max-w-[85%] rounded-md border border-hairline px-3 py-1 text-body-sm text-ink-muted">
+					{/* Attachments ride as a count, like the TUI's own prompt receipt. The
+					   BYTES are never duplicated here: the composer keeps its previews and
+					   revokes them on acknowledgement, so a second holder of those object
+					   URLs would be a revoke this row cannot see coming. */}
+					{attachments}
+					{echo.text ? (
+						<div className="break-words whitespace-pre-wrap">{echo.text}</div>
+					) : null}
+					<span className="text-meta text-ink-dim">{caption}</span>
+				</div>
+			) : (
+				/* The user bubble's own box: `transcript.tsx`'s `case "user"`, minus the
+				   accent leading edge and with `text-ink-muted` in place of the settled
+				   row's full ink. Its `gap-1.5` is the settled bubble's gap, matched
+				   rather than harmonised to the 4px ramp, so the two agree (design D5). */
+				<div className="flex max-w-[85%] flex-col gap-1.5 rounded-md border border-hairline bg-surface px-3 py-1.5 text-body">
+					{attachments}
+					{echo.text ? (
+						<div className="leading-normal break-words whitespace-pre-wrap text-ink-muted">
+							{echo.text}
+						</div>
+					) : null}
+					<span className="text-meta text-ink-dim">{caption}</span>
+				</div>
+			)}
+		</div>
+	);
+}
+
 export function Transcript({
 	pid,
 	entries,
 	jobId,
 	scrollKey = `${pid}:${jobId ?? "root"}`,
+	pending = [],
+	streaming = false,
 	tailContent,
 	emptyContent,
 }: {
@@ -271,6 +342,17 @@ export function Transcript({
 	entries: TranscriptEntry[];
 	jobId?: string;
 	scrollKey?: string;
+	/** Commands this device sent that the session has not written a row for yet.
+	 *  Rendered as the LAST rows of the conversation, which is where the real rows
+	 *  will land, and boxed like the row each op settles into (`PendingEchoRow`)
+	 *  — so reconciliation keeps the row where it is and drops its caption, rather
+	 *  than moving it or changing its register (design round 1, D2). */
+	pending?: PendingEcho[];
+	/** Whether a turn is live, which the pending rows' caption's tense needs —
+	 *  a steer queued when its turn has already ended is waiting for the NEXT
+	 *  message rather than for the step running now. Defaults to false, which is
+	 *  what the subagent transcript (no pending rows) means by it. */
+	streaming?: boolean;
 	/** Lifecycle outcomes belong in the conversation's one discoverable scroll
 	 * surface, not in a clipped nested footer beneath it. */
 	tailContent?: ReactNode;
@@ -309,7 +391,12 @@ export function Transcript({
 	   expansion that re-rendered then snapped scrollTop to the very bottom
 	   and the tapped row flew off-screen (read as "the screen went blank"). */
 	const tail = entries[entries.length - 1];
-	const growthSignal = `${entries.length}:${tail?.id ?? ""}:${tail?.text?.length ?? 0}:${tail?.final ?? ""}`;
+	/* The pending row is part of the tail for the SAME reason a new entry is: a
+	   row that appeared below the fold with no scroll is a send the user watches
+	   happen off-screen. Keyed by id, so resolution (which swaps the pending row
+	   for the real one, one entry longer) is a change here too. */
+	const pendingKey = pending.map((echo) => echo.commandId).join(",");
+	const growthSignal = `${entries.length}:${tail?.id ?? ""}:${tail?.text?.length ?? 0}:${tail?.final ?? ""}:${pendingKey}`;
 
 	/* De-dupe: an older page can overlap the live window's head when the fold
 	   re-caps between the fetch and the render. Key on id, older first. */
@@ -459,7 +546,14 @@ export function Transcript({
 					</div>
 				</RowBoundary>
 			))}
-			{visible.length === 0 ? emptyContent : null}
+			{visible.length === 0 && pending.length === 0 ? emptyContent : null}
+			{/* After the last projected row, because that is where the session will
+			    write them. */}
+			{pending.map((echo) => (
+				<RowBoundary key={echo.commandId}>
+					<PendingEchoRow echo={echo} streaming={streaming} />
+				</RowBoundary>
+			))}
 			{tailContent}
 		</div>
 	);

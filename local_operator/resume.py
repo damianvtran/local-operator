@@ -20,7 +20,7 @@ import json
 import logging
 import os
 import re
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -460,6 +460,18 @@ PREVIEW_MAX_CHARS = 200
 #: equal, so a rename cannot silently turn this scan into one that matches
 #: nothing (which would degrade to the house sentence and look like "this
 #: session had no failure" rather than like a bug).
+#:
+#: ``SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE`` is deliberately NOT added to
+#: this scan or to any replay path in this module, and that is worth stating
+#: because it moved out of ``session_incident`` — a reader could reasonably
+#: expect a second literal here. Two reasons it needs none. (1) The only use of
+#: this literal is :func:`session_failure_summary` below, which reads
+#: ``details.raw``; the credential record has never carried ``raw`` (it carries
+#: ``text``, ``tool``, ``shapes``, ``summary``), so this scan could not return
+#: that record even while it was a ``session_incident``. (2) Nothing in this
+#: module re-injects an incident into a model context — a resumed session
+#: replays through ``transcript.replay_entries`` into
+#: ``harness/render.py``'s allow-list, which is where the new type is excluded.
 _SESSION_INCIDENT_TYPE = "session_incident"
 
 #: The marker that says a fragment is a user message, and the first COMPLETE
@@ -952,7 +964,12 @@ def write_goal_record(session_dir: Path, payload: dict[str, Any]) -> None:
         return
 
 
-def backfill_session_origins(config_dir: Path, limit: int = 500) -> int:
+def backfill_session_origins(
+    config_dir: Path,
+    limit: int = 500,
+    *,
+    should_stop: Callable[[], bool] | None = None,
+) -> int:
     """Stamp pre-existing subagent directories once, and return how many.
 
     Without this the fix only applies to sessions created after the upgrade,
@@ -982,6 +999,23 @@ def backfill_session_origins(config_dir: Path, limit: int = 500) -> int:
     the cut stamped 0 on three consecutive startups. Deciding a session's
     origin by where its random name falls in an alphabet is not a policy
     anyone would choose deliberately.
+
+    ``should_stop`` is a cooperative halt for a runtime that is LEAVING, and it
+    defaults to ``None`` so every existing caller is byte-identical in
+    behaviour: the CLI ``--resume`` sweeps call this to FINISH, and a predicate
+    they do not pass cannot change what they do. The store-maintenance thread
+    passes the same event that halts the pass sequence (see
+    :func:`local_operator.session_factory.request_store_maintenance_stop`),
+    which is what turns a walk worth minutes (measured on the fleet's own store:
+    10,737 directories at 16.7-38.4 ms each, i.e. 3-7 minutes per pass) into one
+    that leaves within a directory of the request — one step of this loop. It is
+    checked once per ITERATION rather than once per call because the pass IS the
+    expensive unit: every directory between one check and the next is a
+    directory a departing runtime paid to stat. Stopping between directories is
+    safe at any point — the two writes below are atomic and idempotent, and
+    nothing is carried across iterations — and the caller's completed-sequence
+    guard reads the same event, so a partial sweep is never published as a
+    completed one (``_run_store_maintenance``).
     """
     stamped = 0
     sessions = config_dir / "sessions"
@@ -990,6 +1024,8 @@ def backfill_session_origins(config_dir: Path, limit: int = 500) -> int:
     except OSError:
         return 0
     for directory in directories:
+        if should_stop is not None and should_stop():
+            break
         if stamped >= limit:
             break
         try:
@@ -1122,7 +1158,12 @@ def _write_title_scan_sentinel(session_dir: Path) -> None:
         return
 
 
-def backfill_session_titles(config_dir: Path, limit: int = 500) -> int:
+def backfill_session_titles(
+    config_dir: Path,
+    limit: int = 500,
+    *,
+    should_stop: Callable[[], bool] | None = None,
+) -> int:
     """Write the title sidecar for sessions that predate it, and return how many.
 
     Mirrors :func:`backfill_session_origins` exactly, and for the same reason:
@@ -1161,6 +1202,13 @@ def backfill_session_titles(config_dir: Path, limit: int = 500) -> int:
     list instead would leave any session sorting past the cut unvisited on
     every run forever, because the list sorts by hex name and the same prefix
     is recomputed each startup.
+
+    ``should_stop`` is the cooperative halt :func:`backfill_session_origins`
+    documents at length, checked once per directory for the same reason: this
+    is the sweep a teardown dump most often caught mid-walk, and the title scan
+    is the most expensive single step here (``_scan_all_titles`` reads a whole
+    transcript), so a departing runtime must not have to finish one. Defaults to
+    ``None``, which is the byte-identical behaviour every existing caller has.
     """
     written = 0
     sessions = config_dir / "sessions"
@@ -1169,6 +1217,8 @@ def backfill_session_titles(config_dir: Path, limit: int = 500) -> int:
     except OSError:
         return 0
     for directory in directories:
+        if should_stop is not None and should_stop():
+            break
         if written >= limit:
             break
         try:
@@ -3359,6 +3409,13 @@ def session_failure_summary(session_dir: Path, *, max_chars: int = PREVIEW_MAX_C
     why the previous turn ended. Take it into account before repeating the same
     request." — an instruction addressed to the model, which on a lock screen
     reads as nonsense. ``raw`` is the sentence a human wants.
+
+    A credential-redaction record (``session_credential_redaction``, which left
+    ``session_incident`` on 2026-09-24) is NOT matched here, and the reason is
+    the same as before the split rather than a consequence of it: it carries no
+    ``raw`` field at all, so a notification's failure text was never composed
+    from one. ``notifications/compose.py``'s ``error`` body therefore still
+    takes its text only from a real failed turn, which is what that body claims.
 
     No new durable path is introduced. ``incidents.py`` already journals this
     record on every classified failure, precisely so a resumed session can

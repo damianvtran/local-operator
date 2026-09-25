@@ -23,6 +23,7 @@
  * box they are bounded by, so they tighten exactly when the space does.
  */
 import { useEffect, useRef, useState } from "react";
+import { setSessionPin } from "../api";
 import { ModelSheet } from "../components/model-sheet";
 import { Composer } from "../components/composer";
 import { GateSheet } from "../components/gate-sheet";
@@ -31,15 +32,49 @@ import { SubagentsPanel } from "../components/subagents-panel";
 import { TodosPanel } from "../components/todos-panel";
 import { Transcript } from "../components/transcript";
 import { WorkingLine } from "../components/working-line";
+import { cn } from "../lib/cn";
 import { COLUMN_HEIGHT_VAR } from "../lib/column";
 import { navigate } from "../router";
 import { useCompletionView } from "../use-completion-view";
+import { usePendingEchoes } from "../pending-echo";
 import { AgentScreen } from "./agent-view";
 import {
+	applySessionPin,
+	clearSessionPinMark,
 	retainProjectionStream,
+	retainSessionListStream,
+	usePinMarks,
 	useProjection,
+	useSessions,
 } from "../store";
 import type { SessionProjection } from "../types";
+
+/** The header strip's control box, and the HIT SLOP that widens its target.
+
+    The strip is one compact line, so each control is a 32px box (`min-h-8`
+    `min-w-8`) — the size the back button has always been. 32px is below the
+    44px touch floor the rest of the phone UI honours (the composer's controls
+    are `min-h-11`), and a small target is a real cost on a phone even when the
+    glyph is legible.
+
+    The fix is SLOP, not a taller box: an absolutely-positioned pseudo-element
+    extends the touchable area 6px each side while the painted strip keeps its
+    height, so the header does not grow and the layout the composer sits under
+    does not move.
+
+    THE TARGET IS NOT A CLEAN 44px, and the measured truth is stated rather than
+    the arithmetic (design round 2, D7): the controls sit `gap-2` (8px) apart, so
+    two 6px slops OVERLAP by 4px between neighbours and the effective horizontal
+    target is ~40px, not 44 (the vertical IS 44). The overlap is not a tap-steal
+    — the later sibling wins its 4px — and 40px is still a large improvement on
+    32. Recorded because the earlier version of this comment claimed "32 + 12 =
+    44", which the rendered pixels do not support.
+
+    One constant rather than the classes repeated inline, for the reason every
+    shared class here is shared: three copies drift. */
+const HEADER_CONTROL =
+	"relative flex min-h-8 min-w-8 items-center justify-center rounded-sm " +
+	"before:absolute before:-inset-1.5 before:content-[''] active:bg-elevated";
 
 function Header({
 	projection,
@@ -71,6 +106,45 @@ function Header({
 	   an earlier version set it inside the sheet, which unmounted before it could
 	   paint (design round 6, D2). */
 	const [gateReceipt, setGateReceipt] = useState("");
+	/* THE PIN STATE COMES FROM THE LIST STORE, which is the same row the daemon
+	   serves on the list frame — so this control and the list's ★ agree by
+	   construction rather than by two reads of the pin file. `undefined` (an
+	   older daemon, or a session the list has not carried yet) reads as unpinned,
+	   which is the honest default: the button then offers to pin, and the next
+	   list repaint corrects it if that was wrong.
+
+	   The MARK the user just made wins over the confirmed flag for what this
+	   control RENDERS, exactly as it does for the list row's ★: the press must
+	   answer immediately. Only the list's own sectioning waits for the daemon —
+	   see the mark/section split in `store.ts` for why a row must not move until
+	   the pin is confirmed. */
+	const { sessions } = useSessions();
+	const pinMarks = usePinMarks();
+	const row = sessions.find((r) => r.session_id === sessionId);
+	const pinned = pinMarks.get(sessionId) ?? Boolean(row?.pinned);
+	const togglePin = async () => {
+		const next = !pinned;
+		/* Optimistic mark, then confirmed: the ★ flips at once and the daemon's
+		   next repaint is the authority for the list. */
+		applySessionPin(sessionId, next);
+		try {
+			const saved = await setSessionPin(sessionId, next);
+			/* The route answers with the state it READ BACK, so a 200 that disagrees
+			   is the daemon saying it did not pin the row. The mark must go now:
+			   `settlePinMarks` retires a mark only when a later frame AGREES with it,
+			   so a disagreeing one never settles and the ★ would stay on a row the
+			   daemon never pinned. */
+			if (saved.pinned !== next) clearSessionPinMark(sessionId);
+		} catch {
+			/* A refusal takes the mark back with it, and that is the whole of the
+			   response this screen shows: the reason the daemon gave is not rendered
+			   here (the refusal band was removed from this change and is being rebuilt
+			   on its own PR). The list would otherwise keep showing a ★ the daemon
+			   never accepted until its next repaint, which is the one thing this
+			   screen cannot promise. */
+			clearSessionPinMark(sessionId);
+		}
+	};
 	return (
 		<>
 		<header className="flex items-center gap-2 border-b border-hairline px-1 py-1 pt-[max(env(safe-area-inset-top),0.25rem)]">
@@ -78,13 +152,31 @@ function Header({
 				type="button"
 				onClick={() => navigate("/")}
 				aria-label="back to sessions"
-				className="flex min-h-8 min-w-8 items-center justify-center rounded-sm text-ink-muted active:bg-elevated"
+				className={cn(HEADER_CONTROL, "text-ink-muted")}
 			>
 				‹
 			</button>
 			<span className="min-w-0 flex-1 truncate text-body-sm font-medium">
 				{projection.conversation_name || "untitled"}
 			</span>
+			{/* THE DISCOVERABLE PIN. The list also pins on a long-press, but a gesture
+			    with no affordance is undiscoverable on its own — this header control is
+			    where a reader finds the feature, and it is the SAME shared store, so
+			    pinning here moves the list's ★ Pinned section too. `★`/`☆` rather than a
+			    word: the header is width-starved and the star is the mark the section
+			    heading already uses, so the two cannot be read as different things. */}
+			<button
+				type="button"
+				onClick={() => void togglePin()}
+				aria-label={pinned ? "unpin this session" : "pin this session"}
+				aria-pressed={pinned}
+				className={cn(
+					HEADER_CONTROL,
+					pinned ? "text-accent" : "text-ink-muted",
+				)}
+			>
+				{pinned ? "★" : "☆"}
+			</button>
 			{/* THE GATE CONTROL (stage D). On the phone this is the LOOSEN surface:
 			    `/approvals auto` is authority-increasing, so it asks the runtime for a
 			    per-action challenge and signs it with this phone's non-extractable key.
@@ -96,7 +188,7 @@ function Header({
 				type="button"
 				onClick={() => setGateOpen(true)}
 				aria-label="approvals in this session"
-				className="flex min-h-8 items-center justify-center rounded-sm px-2 text-meta text-ink-muted active:bg-elevated"
+				className={cn(HEADER_CONTROL, "!min-w-0 px-2 text-meta text-ink-muted")}
 			>
 				{projection.pending ? "needs you" : "approvals"}
 			</button>
@@ -130,11 +222,29 @@ export function SessionScreen({
 	jobId?: string;
 }) {
 	const { projection, connected } = useProjection(sessionId);
+	/* Commands this device has sent that the session has not written a row for
+	 * yet. Read above the `!projection` return because hooks cannot be called
+	 * after it, and resolved against the transcript by id — see `pending-echo.ts`. */
+	const pendingEchoes = usePendingEchoes(sessionId, projection?.transcript);
 	const [modelsOpen, setModelsOpen] = useState(false);
 	const [effortOpen, setEffortOpen] = useState(false);
 	const rootRef = useRef<HTMLDivElement>(null);
 
 	useEffect(() => retainProjectionStream(sessionId), [sessionId]);
+	/* THE LIST STREAM TOO, so the header's ☆/★ reflects the shared pin
+	   authoritatively rather than optimistically forever (review round 1, MINOR 1).
+	   This header reads its pin state from the LIST store (`useSessions`); without
+	   retaining that stream a session opened directly by URL would never receive a
+	   repaint, so a pin set here — or cleared on another surface — would not
+	   correct itself until navigation.
+
+	   STATED RATHER THAN CALLED "FREE": the stream is refcounted per MOUNT, and
+	   React destroys before it creates, so navigating between the list and a
+	   session closes and reopens the SSE (measured: `{opened:1,closed:0}` ->
+	   `{opened:2,closed:1}`). That is acceptable — one reconnect on a user-driven
+	   navigation, over a short-lived socket — but it is not free, and a reader
+	   should not plan around it being. (Review round 2, M2-3.) */
+	useEffect(() => retainSessionListStream(), []);
 
 	useCompletionView(sessionId, projection, rootRef,
 		!connected || Boolean(jobId) || modelsOpen || effortOpen);
@@ -184,7 +294,7 @@ export function SessionScreen({
 						type="button"
 						onClick={() => navigate("/")}
 						aria-label="back to sessions"
-						className="flex min-h-8 min-w-8 items-center justify-center rounded-sm text-ink-muted active:bg-elevated"
+						className={cn(HEADER_CONTROL, "text-ink-muted")}
 					>
 						‹
 					</button>
@@ -199,6 +309,13 @@ export function SessionScreen({
 			</div>
 		);
 	}
+
+	/* An empty session shows the placeholder only while it is genuinely empty. A
+	   prompt this device just sent makes the column non-empty the instant it
+	   leaves the composer, and hiding its row behind "no messages yet" would put
+	   the placeholder in front of the very message that proves the send worked. */
+	const showEmptyState =
+		projection.transcript.length === 0 && !projection.streaming && pendingEchoes.length === 0;
 
 	return (
 		<div
@@ -215,7 +332,7 @@ export function SessionScreen({
 			) : <>
 			<Header projection={projection} sessionId={sessionId} />
 
-			{projection.transcript.length === 0 && !projection.streaming ? (
+			{showEmptyState ? (
 				/* A just-started session has no messages yet. An empty scroll
 				   area reads as "did it break?"; this placeholder says the
 				   session is ready and what to do next. Hidden the moment a
@@ -228,7 +345,12 @@ export function SessionScreen({
 					</p>
 				</div>
 			) : (
-				<Transcript pid={sessionId} entries={projection.transcript} />
+				<Transcript
+					pid={sessionId}
+					entries={projection.transcript}
+					pending={pendingEchoes}
+					streaming={projection.streaming}
+				/>
 			)}
 
 			{/* The aggregate working line — pinned at the foot of the transcript

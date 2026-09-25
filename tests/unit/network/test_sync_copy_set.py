@@ -400,6 +400,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``_MARKER`` (``.build-stamp``): the notifier app's own build stamp, written into its "
         "package directory",
     ),
+    # ---- the signed helper app the macOS wheel ships ----
+    "local_operator/operator/macos/keyagent.py": (
+        2,
+        "``BUNDLE_NAME``/``EXECUTABLE_NAME``: the Developer-ID-signed ``lop-keyagent.app`` "
+        "helper that ships INSIDE the wheel and is run as a one-shot subprocess, so its "
+        "bundle and its binary are artefacts of this install (the same class of fact as "
+        "``tui/resume_click.py``'s desktop bundle name) rather than entries of any "
+        "session directory",
+    ),
     # ---- an adapter's own scratch ----
     "local_operator/evaluation/adapters/supervisor.py": (
         1,

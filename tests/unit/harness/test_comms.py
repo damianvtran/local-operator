@@ -16,12 +16,17 @@ import asyncio
 import json
 import time
 from collections import Counter
+from pathlib import Path
 from typing import Any, Callable, cast
 
 import pytest
 
+from local_operator.harness import comms as comms_module
 from local_operator.harness.comms import SubagentComms, extract_parent_message
-from local_operator.harness.message_types import HUB_MESSAGE_TYPE
+from local_operator.harness.message_types import (
+    HUB_MESSAGE_TYPE,
+    SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
+)
 from local_operator.harness.subagent import MCP_DENIED_ATTR
 from local_operator.harness.types import (
     AgentEvent,
@@ -2888,6 +2893,38 @@ def test_an_explicit_range_cannot_bypass_the_step_ceiling():
     assert (lo, hi) == (100, 100 + PEEK_MAX_STEPS - 1)
 
 
+@pytest.mark.asyncio
+async def test_the_credential_redaction_row_peeks_with_a_human_heading(tmp_path):
+    """Agent review round 1 (F1-3): the peek view must not print a wire type.
+
+    ``_render_custom_step``'s generic arm uses the raw ``custom_type`` as the
+    step heading, which for this record read as
+    ``system / session_credential_redaction / …`` beside neighbours that all
+    carry a human phrase. The MCP types also ride that arm, but this record
+    lands in a peek far more often and is the one the operator is meant to
+    READ, so it gets the phrase the live receipt already uses. The body is
+    unchanged — only the heading.
+
+    Driven through a REAL transcript row (append, then render the steps the peek
+    builds from the entries) rather than a hand-built payload dict, so a drift
+    in ``encode_message_payload`` or in the entry shape fails here too.
+    """
+    from local_operator.harness.comms import _render_transcript_steps
+
+    transcript = Transcript(tmp_path / "child")
+    await transcript.append_message(
+        CustomMessage(
+            custom_type=SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
+            attribution="system",
+            details={"text": "[credential redaction] rotate it — a token reached bash"},
+        )
+    )
+    steps = _render_transcript_steps(transcript.entries())
+    assert [step.heading for step in steps] == ["credential masked"]
+    assert SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE not in steps[0].heading
+    assert "rotate it" in steps[0].body
+
+
 def test_hub_peek_and_list_are_read_tier_while_control_stays_write():
     """Observing children must never prompt; controlling them still does."""
     from local_operator.tools.builtin import build_hub_tool
@@ -3086,6 +3123,147 @@ def test_status_counts_counts_the_same_population_nodes_reports(tmp_path) -> Non
     assert [node.job_id for node in nodes].count("job-0001") == 2
     assert len(nodes) == 5, "4 records + 1 aliased duplicate, and no dangling row"
     assert counts["completed"] == 5
+
+
+def test_node_status_is_describes_status_for_every_arm(tmp_path) -> None:
+    """``node().status`` reads ``_lifecycle`` directly and must equal ``describe``'s.
+
+    ``RosterPass.node`` used to build a whole ``ChildInfo`` -- resumable verdict,
+    transcript ``stat()`` and all -- only to read its ``status``. It now reads the
+    status straight from ``_lifecycle``, which is sound ONLY while ``describe``
+    passes that status through unchanged on every arm. One record per arm of the
+    ladder, so a future ``describe`` that rewrites a status fails here rather
+    than silently splitting the roster from the nodes.
+    """
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    arms: dict[str, Callable[[Any], None]] = {}
+
+    def running(record: Any) -> None:
+        record.child = FakeChild()
+
+    def queued(record: Any) -> None:
+        jobs.jobs[record.job_id].queued = True
+
+    def pausing(record: Any) -> None:
+        record.paused = True
+
+    def paused(record: Any) -> None:
+        record.paused = True
+        jobs.jobs[record.job_id].status = "cancelled"
+
+    def completed(record: Any) -> None:
+        record.outcome = "completed"
+        jobs.jobs[record.job_id].status = "completed"
+
+    def swept(record: Any) -> None:
+        record.settled = True
+        del jobs.jobs[record.job_id]
+
+    arms.update(
+        running=running,
+        queued=queued,
+        pausing=pausing,
+        paused=paused,
+        completed=completed,
+        swept=swept,
+    )
+    for name, arm in arms.items():
+        jobs.add(name, status="running")
+        comms.record_launch(name, name)
+        session_dir = tmp_path / name
+        session_dir.mkdir()
+        (session_dir / TRANSCRIPT_FILENAME).write_text("{}\n")
+        comms._records[name].session_dir = session_dir
+        arm(comms._records[name])
+
+    read = comms.roster_pass()
+    described = {record.job_id: read.describe(record).status for record in read.records}
+    noded = {node.job_id: node.status for node in read.nodes()}
+    assert noded == described
+    # The fixture must actually reach distinct arms, or equality is vacuous.
+    assert len(set(described.values())) >= 5, described
+
+
+def test_nodes_make_no_filesystem_probe(tmp_path, monkeypatch) -> None:
+    """``nodes()`` answers from memory; the transcript probe belongs to ``roster()``.
+
+    ``nodes()`` runs on the runtime host's per-event projection and on every
+    roster tick, so a ``stat()`` per record there is a per-event syscall per
+    child the parent ever launched (up to ``MAX_RECORDS``). Structural rather
+    than timed: the probe is counted, and ``nodes()`` must make none of them.
+    """
+    comms = _settled_roster(16, tmp_path)
+    from pathlib import Path
+
+    probes: list[Path] = []
+    original = Path.exists
+
+    def counting_exists(self: Path, *args: Any, **kwargs: Any) -> bool:
+        probes.append(self)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", counting_exists)
+    nodes = comms.roster_pass().nodes()
+    assert len(nodes) == 16
+    assert probes == [], f"nodes() probed the filesystem {len(probes)} times"
+    comms.roster_pass().roster()
+    assert probes, "the probe moved: roster() must still check the transcript is on disk"
+
+
+def test_lifecycles_agree_with_the_roster_on_every_field_they_share(tmp_path) -> None:
+    """``lifecycles()`` is ``roster()`` minus the resumable verdict, never a rival.
+
+    The projection folds these four facts per root event; the roster answers
+    ``hub op='list'``. Both must read one derivation, so every shared field is
+    compared across a registry that reaches the distinct arms, including a
+    running child with an age and a settled one with terminal text.
+    """
+    comms = _settled_roster(6, tmp_path)
+    jobs = cast(FakeJobs, comms._session.jobs)
+    live = jobs.jobs["job-0000"]
+    live.status = "running"
+    # ``AsyncJob.start_time`` is what the age reads; ``FakeJob`` does not model
+    # it, so it is set the way a real row carries it.
+    setattr(live, "start_time", 900.0)
+    comms._records["job-0000"].settled = False
+    comms._records["job-0000"].child = FakeChild()
+    comms._records["job-0001"].outcome = "failed"
+    comms._records["job-0001"].error_text = "boom"
+    jobs.jobs["job-0001"].status = "running"
+    comms._records["job-0002"].paused = True
+
+    read = comms.roster_pass(now=1_234.0)
+    roster = {row.job_id: row for row in read.roster()}
+    lifecycles = read.lifecycles()
+    assert set(lifecycles) == set(roster)
+    for job_id, row in roster.items():
+        cycle = lifecycles[job_id]
+        assert (cycle.status, cycle.result_text, cycle.error_text, cycle.age_s) == (
+            row.status,
+            row.result_text,
+            row.error_text,
+            row.age_s,
+        ), job_id
+    assert lifecycles["job-0000"].age_s == pytest.approx(334.0)
+    assert lifecycles["job-0001"].error_text == "boom"
+
+
+def test_lifecycles_make_no_filesystem_probe(tmp_path, monkeypatch) -> None:
+    """The per-event read answers from memory, like ``nodes()``."""
+    comms = _settled_roster(16, tmp_path)
+    from pathlib import Path
+
+    probes: list[Path] = []
+    original = Path.exists
+
+    def counting_exists(self: Path, *args: Any, **kwargs: Any) -> bool:
+        probes.append(self)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", counting_exists)
+    assert len(comms.roster_pass().lifecycles()) == 16
+    assert probes == []
 
 
 def test_the_roster_touches_each_record_a_constant_number_of_times(tmp_path) -> None:
@@ -3467,3 +3645,50 @@ def test_resume_names_a_pre_attach_failure_rather_than_saying_never_started() ->
     result2, reason2 = comms.resume("parked", "carry on")
     assert result2 is None
     assert reason2 is not None and "never started" in reason2
+
+
+# -- the transcript probe outlives one pass, bounded by a TTL -------------------
+#
+# A roster pass runs once per root event; a probe memoised only per pass was
+# still one ``stat`` per settled child per EVENT -- 52% of a loaded runtime's
+# loop samples (``scripts/bench_send_admission.py --condition roster
+# --sample``). Counted, not timed.
+
+
+def test_consecutive_passes_share_one_transcript_probe(tmp_path, monkeypatch) -> None:
+    comms = _settled_roster(8, tmp_path)
+    probes: list[Path] = []
+    original = Path.exists
+
+    def counting(self: Path, *args: Any, **kwargs: Any) -> bool:
+        if self.name == TRANSCRIPT_FILENAME:
+            probes.append(self)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", counting)
+    for _ in range(20):
+        assert all(row.resumable for row in comms.roster())
+    assert len(probes) == 8, f"20 passes over 8 children probed {len(probes)} times"
+
+
+def test_a_cached_probe_expires_and_a_vanished_transcript_is_seen(tmp_path, monkeypatch) -> None:
+    comms = _settled_roster(1, tmp_path)
+    [row] = comms.roster()
+    assert row.resumable
+    (tmp_path / "job-0000" / TRANSCRIPT_FILENAME).unlink()
+    clock = [comms_module.time.monotonic() + comms_module.TRANSCRIPT_PROBE_TTL_S + 1]
+    monkeypatch.setattr(comms_module.time, "monotonic", lambda: clock[0])
+    [row] = comms.roster()
+    assert row.resumable is False
+    assert row.detail == "transcript is gone from disk"
+
+
+def test_attaching_a_child_forgets_its_directorys_cached_probe(tmp_path) -> None:
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    session_dir = tmp_path / "child"
+    session_dir.mkdir()
+    assert comms._transcript_on_disk(session_dir) is False
+    (session_dir / TRANSCRIPT_FILENAME).write_text("{}\n")
+    comms.attach("job-1", FakeChild(), session_dir)  # type: ignore[arg-type]
+    assert comms._transcript_on_disk(session_dir) is True

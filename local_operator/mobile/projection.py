@@ -32,6 +32,11 @@ from typing import Any
 from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
 from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
 from local_operator.harness.comms import extract_parent_message
+
+# ``job_result`` is declared beside the job manager that writes it, not with the
+# harness markers above — imported from its own home so this fold cannot drift
+# from the type the writer stamps on the row.
+from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE
 from local_operator.harness.message_types import (
     HUB_MESSAGE_TYPE,
     PEER_MESSAGE_MESSAGE_TYPE,
@@ -46,6 +51,7 @@ from local_operator.harness.rows import (
     assistant_stop_notice,
     compaction_refused_notice,
     gate_timeout_notice,
+    held_delivery_notice,
     is_harness_chrome,
     is_harness_notice_row,
     output_limit_call_receipt,
@@ -373,6 +379,13 @@ def _reasoning_tail(text: str, limit: int = REASONING_PREVIEW_CHARS) -> str:
     if len(collapsed) <= limit:
         return collapsed
     return "…" + collapsed[-(limit - 1) :]
+
+
+#: The phone's own cap on a notice row's text. Named because TWO callers have to
+#: agree on it now: the shared held-delivery decision reserves the marker's room
+#: against it, and this fold applies it to the composed result (design round 3,
+#: D15). A second literal would let the two drift and cut the sentence away again.
+_NOTICE_CHARS = 400
 
 
 def _compact(text: str, limit: int) -> str:
@@ -1284,6 +1297,37 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                     )
                 )
                 continue
+            if message.custom_type == JOB_RESULT_MESSAGE_TYPE:
+                # A child's report that was HELD for a later turn, and the tier
+                # the shared decision gives it (review round 2 MINOR-B, D9, U8).
+                #
+                # This arm is why ``held_delivery_notice`` can honestly say the
+                # two surfaces agree: Round 1 added the TUI branch alone, and on
+                # the phone a held row and a delivered one painted as identical
+                # ``notice``s — the exact U6 defect, on the surface where by
+                # Round 1's own U2 reasoning this row is load-bearing rather than
+                # a duplicate of the assistant's answer.
+                #
+                # A DELIVERED row keeps the generic fallback below, which is the
+                # phone's existing behaviour and not this change's business; only
+                # the held row takes the shared decision.
+                # ``report_budget`` is this fold's own 400-character cap, handed
+                # to the shared decision so the MARKER keeps its room (design round
+                # 3, D15): capping the composed string instead cut the sentence
+                # away on any realistic report, and at 400+ characters the held row
+                # and its delivered twin folded byte-identical.
+                held = held_delivery_notice(message.details or {}, report_budget=_NOTICE_CHARS)
+                if held is not None:
+                    text, severity = held
+                    entries.append(
+                        TranscriptEntry(
+                            id=message.id,
+                            kind="notice",
+                            text=_compact(text, _NOTICE_CHARS),
+                            details={"severity": severity},
+                        )
+                    )
+                    continue
             text = _message_text(message)
             if text:
                 entries.append(
@@ -2417,7 +2461,12 @@ class ProjectionFold:
         fourth walk added below would put it straight back.
         """
         read = comms.roster_pass()
-        roster = {item.job_id: item for item in read.roster()}
+        # ``lifecycles()`` rather than ``roster()``: this runs per root event,
+        # and ``roster()``'s resumable verdict (a transcript ``stat()`` per
+        # record) is a field this fold never reads. Called directly, with no
+        # ``roster()`` fallback: a fallback is a second path only test doubles
+        # would reach, and the doubles are what must match production.
+        roster = read.lifecycles()
         nodes = read.nodes()
         by_id = {node.job_id: node for node in nodes}
         children: dict[str | None, list[Any]] = {}

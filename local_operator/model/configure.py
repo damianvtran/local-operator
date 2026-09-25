@@ -739,17 +739,23 @@ def deepseek_effort_ladder(provider: str, model_id: str) -> tuple[str, ...]:
 #: two channels -- ``reasoning_content`` for the thinking, ``content`` for the
 #: answer -- and the closing half of the template's boundary token is emitted at
 #: the joint, so the reply the harness assembles begins with ``</mm:think>``
-#: welded to a byte-perfect action batch. The strict decoder refuses a reply that
-#: does not START with a JSON value (``_decode_leading_json``, deliberately: it
-#: must never guess where a value begins), so the whole turn was billed and
-#: discarded as ``malformed-json``. Measured over the sealed campaign (329
-#: rejection artifacts, 17 replies carrying the token, all at offset 0, all
-#: CLOSING tags and zero opening tags -- see ``ModelSpec
-#: .reasoning_boundary_markers`` for why that asymmetry is an authorship
-#: signature rather than prose).
+#: welded to a byte-perfect action batch. At the time this row was added the
+#: decoder refused a reply that did not START with a JSON value
+#: (``_decode_leading_json``, deliberately: it must never guess where a value
+#: begins), so the whole turn was billed and discarded as ``malformed-json``.
+#: Measured over the sealed campaign (329 rejection artifacts, 17 replies
+#: carrying the token, all at offset 0, all CLOSING tags and zero opening tags
+#: -- see ``ModelSpec.reasoning_boundary_markers`` for why that asymmetry is an
+#: authorship signature rather than prose). The decoder now also reads a
+#: decision behind leading junk when it is the reply's ONLY decision, so a
+#: tagged reply is no longer lost by omission; the row is kept because it is
+#: still the only thing that removes the token, and the reply text is what the
+#: model reads back in its own history.
 #:
 #: **Why an empty fallback rather than a guess.** A token this table does not
-#: list is not stripped, and the reply keeps the strict parser and the ordinary
+#: list is not stripped, so the token stays welded to the head of the reply the
+#: context carries -- the DECISION behind it is still read whenever it is the
+#: reply's only one, and a reply with no readable decision keeps the ordinary
 #: corrective re-prompt it has today. Adding a row is an evidence-backed claim
 #: that the model's rendered chat template puts that exact string at the head of
 #: the content channel; the cost of being wrong is asymmetric, because a strip
@@ -1228,6 +1234,101 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         supports_fast_mode=supports_fast_mode(canonical, model_name),
         display_name=resolved_name,
     )
+
+
+# ---------------------------------------------------------------------------
+# Selection validation — "could a session actually run on this pair?"
+# ---------------------------------------------------------------------------
+
+
+class ModelSelectionRefused(ValueError):
+    """A provider/model pick no session could serve, with a stable ``code``.
+
+    ``code`` is the machine half (the desktop draft route returns it verbatim in
+    its 422 body) and ``message`` the sentence a person reads. Both are part of
+    a wire contract, so they are composed ONCE, here, and every caller maps the
+    exception onto its own transport rather than re-wording it.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def validate_model_selection(
+    provider: str,
+    model_id: str,
+    *,
+    usable: Callable[[str], bool] | None = None,
+) -> ModelSpec:
+    """The spec ``provider``/``model_id`` resolves to, or :class:`ModelSelectionRefused`.
+
+    ONE validator for every route that accepts a pair from outside the session
+    that will run it — the desktop draft (``_draft_model_spec``) and a peer's
+    remote switch (``peer_set_model``). Two copies would drift, and the drift
+    fails in the direction that hurts: a pair one route accepts and the engine
+    then fails on at the next turn.
+
+    ``build_model_spec`` alone is NOT a check: measured in an isolated config
+    dir, it builds ``nosuchprov/x`` (``base_url=None``) and
+    ``deepseek/not-a-model`` without complaint, so a switch onto a typo would
+    only fail on the next turn, reading as a network or auth error. The checks,
+    in order:
+
+    * the provider is known (``get_provider_definition``, which resolves the
+      registry's legacy aliases);
+    * it is not decision-only — such a provider 400s every chat completion, and
+      ``offered_model_ids`` cannot catch it (it answers ``None`` for it);
+    * the catalogue offers the model — ``None`` means "cannot enumerate offline"
+      (an aggregator, a local endpoint) and is ACCEPTED, because "we have not
+      looked" is not "it does not exist";
+    * when ``usable`` is given, the provider has a credential the session could
+      run on (``ProviderController.is_usable``: the store, an env key, or a
+      provider that needs none). Optional because the desktop draft never
+      checked it and its 422 contract must not move;
+    * the spec builds.
+
+    Pure apart from the catalogue cache read and the ``usable`` callable, and
+    raises before anything is mutated — a refusal cannot half-switch. Callers
+    run it OFF the event loop (the catalogue read and, for an unregistered
+    model, the metadata resolution are blocking).
+    """
+    from local_operator.model.discovery import offered_model_ids
+    from local_operator.providers.registry import (
+        get_provider_definition,
+        is_decision_only,
+    )
+
+    if get_provider_definition(provider) is None:
+        raise ModelSelectionRefused("provider_unknown", f"'{provider}' is not a known provider.")
+    if is_decision_only(provider):
+        raise ModelSelectionRefused(
+            "provider_decision_only",
+            (
+                f"'{provider}' serves decision-model calls, not chat completions, "
+                "so no session can run on it."
+            ),
+        )
+    served = offered_model_ids(provider)
+    if served is not None and model_id not in served:
+        raise ModelSelectionRefused(
+            "model_unknown", f"'{model_id}' is not a model {provider} serves."
+        )
+    if usable is not None and not usable(provider):
+        raise ModelSelectionRefused(
+            "provider_unusable",
+            (
+                f"no usable credential for '{provider}' in that session's config — "
+                f"log in there (/login {provider}) or set its API key first."
+            ),
+        )
+    try:
+        return build_model_spec(provider, model_id)
+    except Exception as error:  # noqa: BLE001 — a spec we cannot build is a refusal, not a crash
+        raise ModelSelectionRefused(
+            "model_unavailable", f"'{model_id}' could not be resolved."
+        ) from error
 
 
 # ---------------------------------------------------------------------------
@@ -2458,9 +2559,20 @@ def resolve_model_info_paint(provider: str, model_id: str) -> tuple[ModelInfo, b
     """
     bucket = int(time.time() // DEFAULT_TTL_S)
     info = _paint_memo.get((provider, model_id, bucket))
+    # SHALLOW copies, and the isolation they give is exactly what a deep copy
+    # gave: every ``ModelInfo`` field is a scalar (float/int/str/bool/None --
+    # ``test_paint_resolution_isolates_the_memo_with_a_shallow_copy`` pins that),
+    # so a caller assigning a field on its copy still cannot reach the memo or
+    # the registry row, and there is no nested container to share. What the
+    # deep copy cost was pydantic's ``__deepcopy__`` walk on every call, and
+    # this is called once per usage COMPONENT on every roster tick: at 16
+    # children the parent's 50 ms coalescer priced ~113 components per tick,
+    # and the deep copies were ~0.2 s of every second of that loop's CPU
+    # (``scripts/bench_subagent_fanout.py --profile``), paid on the same
+    # thread that runs every child's turn.
     if info is None:
-        return _registry_fallback(provider, model_id).model_copy(deep=True), False
-    return info.model_copy(deep=True), True
+        return _registry_fallback(provider, model_id).model_copy(), False
+    return info.model_copy(), True
 
 
 #: The effort ladder the PROVIDER'S OWN listing stated for a model, keyed the

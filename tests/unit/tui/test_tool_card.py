@@ -2534,6 +2534,53 @@ def test_send_summary_marks_the_quiet_drop_and_now() -> None:
     assert "now" in row
 
 
+def test_send_summary_names_a_model_switch_not_a_delivery_mode() -> None:
+    """A switch starts no turn, so the row must not claim ``wake``; the leading
+    marker names the act and the target model follows the peer."""
+    card = ToolCard("t", "send", {"pid": 48213, "model": "deepseek/deepseek-flash"})
+    row = card._build_row(100).plain
+    assert "wake" not in row
+    assert row.index("model") < row.index("pid 48213") < row.index("deepseek/deepseek-flash")
+
+
+def test_settled_switch_rows_lead_with_their_outcome() -> None:
+    """D6: switched, already-on and pending must not paint the same `✓` row."""
+    rows = {}
+    for outcome in ("switched", "unchanged", "pending"):
+        card = ToolCard("t", "send", {"pid": 48213, "model": "deepseek/deepseek-flash"})
+        card.mark_done("receipt", {"outcome": outcome})
+        rows[outcome] = card._build_row(80).plain
+    assert "switched · pid 48213" in rows["switched"]
+    assert "no change · pid 48213" in rows["unchanged"]
+    assert "pending · pid 48213" in rows["pending"]
+    # A replayed settle does not stack a second word.
+    card = ToolCard("t", "send", {"pid": 1, "model": "a/b"})
+    card.mark_done("receipt", {"outcome": "switched"})
+    card.mark_done("receipt", {"outcome": "switched"})
+    assert card._build_row(80).plain.count("switched") == 1
+    # An unknown outcome (a future target's wording) keeps the argument row.
+    card = ToolCard("t", "send", {"pid": 1, "model": "a/b"})
+    card.mark_done("receipt", {"outcome": "mystery"})
+    assert "model · pid 1" in card._build_row(80).plain
+
+
+def test_a_switch_that_raised_after_it_took_paints_the_warning_glyph() -> None:
+    """D9: `switched (error)` must not sit beside a clean ✓; the partial glyph
+    carries the warning, and "Partial" (which would misname a whole switch) is
+    not painted. A message send's partial result keeps its label."""
+    from local_operator.tui.widgets.tool_card import ICON_PARTIAL, ICON_SUCCESS
+
+    card = ToolCard("t", "send", {"pid": 48213, "model": "deepseek/deepseek-flash"})
+    card.mark_done("receipt", {"outcome": "partial", "partial_result": True})
+    row = card._build_row(100).plain
+    assert "switched (error) · pid 48213" in row
+    assert ICON_PARTIAL in row and ICON_SUCCESS not in row
+    assert "Partial" not in row
+    message = ToolCard("t", "send", {"pid": 1, "message": "hi"})
+    message.mark_done("ok", {"partial_result": True})
+    assert "Partial" in message._build_row(80).plain
+
+
 def test_send_modes_never_collide_at_narrow_widths() -> None:
     """The defect the leading marker fixes: with the mode to the RIGHT of a long
     target it was truncated away, so a wake, a quiet drop and a mid-turn steer

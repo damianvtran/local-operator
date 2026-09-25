@@ -43,7 +43,8 @@ from local_operator.evaluation.action_surface import (
 )
 from local_operator.evaluation.adapters.supervisor import verify_artifact
 from local_operator.evaluation.evidence.models import RouteIdentity
-from local_operator.evaluation.protocol import ActionBatch, Observation
+from local_operator.evaluation.protocol import ActionBatch, FinishAction, Observation
+from local_operator.evaluation.runner.completion import finish_claim
 from local_operator.evaluation.runner.model import (
     CompactionRecord,
     DecisionRejected,
@@ -74,6 +75,7 @@ from local_operator.evaluation.runner.public_reply import (
     REJECTED_PUBLIC_REPLY,
     DecisionParseError,
     _decode_leading_json,
+    _states_a_decision,
     bind_compact_actions,
     is_public_reply,
     is_quotable_key,
@@ -384,8 +386,7 @@ def classify_rejection(reason: str) -> str:
         # failures that used to share one key and one hint (see
         # ``_LEADING_DELIMITER_RULE``). The offset is the discriminator: a
         # decode that cannot start is a reply whose FIRST byte is not a JSON
-        # value -- a preamble, a code fence, or a provider reasoning boundary
-        # token -- while a decode that starts and then breaks is a reply whose
+        # value, while a decode that starts and then breaks is a reply whose
         # object was cut off or double-escaped. Keyed on the parser's own
         # reported position and not on the reply text, because this classifier
         # must run over sealed artifacts too, 271 of whose 311 reply sections
@@ -395,6 +396,17 @@ def classify_rejection(reason: str) -> str:
         # also how trailing text and duplicate keys fail -- so it lands in the
         # residual, which is why that half's hint names text outside the object
         # as one of its causes.
+        #
+        # What the leading key MEANS moved when the decoder learned to read a
+        # decision behind leading junk (``_locate_leading_object``): the shapes
+        # this comment used to name as its causes -- a preamble, a code fence, a
+        # provider reasoning boundary token, a native call-syntax wrapper -- are
+        # now absorbed when the reply carries exactly one decision. What is still
+        # recorded under this key is a reply whose offset 0 could not start a
+        # value AND whose body holds no single readable decision: prose only, a
+        # fragment of a call's own markup, two objects that could each be the
+        # decision. The key and its trigger are unchanged, so the class table
+        # stays comparable across the change; only the population shrank.
         if _LEADING_DELIMITER_RULE.search(reason):
             return "leading-delimiter"
         return "incomplete-json"
@@ -756,22 +768,25 @@ def rejection_hint(
         )
     if class_key == "leading-delimiter":
         # The half of the old ``malformed-json`` class whose reply could not be
-        # READ AT ALL: the first byte is not the start of a JSON value, so the
-        # decoder had nothing to start from. The named causes are the shapes
-        # that put something else in front of the object -- a preamble, a code
-        # fence, a native tool-call syntax wrapper -- because those three are
-        # what the old hint named and none of them is absorbed. The fourth,
-        # a provider reasoning delimiter, IS absorbed before this point when the
-        # model declares one (``strip_reasoning_boundary_markers``), and naming
-        # a defect the harness has already absorbed would spend the model's one
-        # correction on a rule it is not breaking. The accepted-shape example is
-        # what actually corrects all four.
+        # READ AT ALL: nothing at the head of the reply started a JSON value, so
+        # the offset-0 decode had nothing to read. The class is NOT a statement
+        # that something sat in front of the object: a preamble, a code fence and
+        # a native tool-call syntax wrapper are all absorbed now, when the reply
+        # still carries exactly one decision (``_locate_leading_object``), and a
+        # provider reasoning delimiter is removed before this point when the
+        # model declares one (``strip_reasoning_boundary_markers``). What is left
+        # under this key is a reply with no readable decision in it at all, or
+        # with more than one: so the hint must not send the model after a
+        # preamble it may not have written -- that would spend its one correction
+        # on a rule it is not breaking. It states the accepted shape and the
+        # uniqueness rule, which is the one instruction that repairs every
+        # remaining cause.
         return (
-            "the reply did not begin with the JSON object -- its first character "
-            "was not '{', so no decision could be read from it. A preamble, a "
-            "code fence or a native tool-call syntax wrapper before the object "
-            "is not skipped. Reply with exactly one JSON object, beginning with "
-            "'{', and nothing else: "
+            "the reply did not begin with the JSON object, and no single complete "
+            "decision could be read from it: either nothing in the reply is a "
+            "readable action batch, or more than one object in it could have been "
+            "the decision and which one you meant has to be unambiguous. Reply "
+            "with exactly one JSON object, beginning with '{', and nothing else: "
             f"{_example_json(surface, observation, shape)}"
         )
     if class_key == "incomplete-json":
@@ -1061,13 +1076,20 @@ def _extra_action_key_hint(
     observation: Observation,
     shape: HintShape = HintShape(),
 ) -> str:
-    """Name the field that is not accepted, and where it IS accepted.
+    """Name the field that is not accepted, and the fields the kind does take.
 
     The useful half is not "extra inputs are not permitted" -- the model knows
-    something was refused -- but WHICH key, and which action kind the field it
-    sent actually belongs to. The common real case is a field borrowed from a
-    neighbouring kind (``frame_id`` on a ``wait``), so naming the kinds that
-    take it turns an opaque refusal into a one-line correction.
+    something was refused -- but WHICH key, followed by the shape the kind it
+    named actually accepts.
+
+    It used to have a second half: naming the kinds that DO take a borrowed
+    field, because the common real case was a field from a neighbouring kind
+    (``frame_id`` on a ``wait``). That case is no longer refused at all -- it is
+    dropped and reported by ``public_reply.drop_sibling_action_fields``, which
+    reads the model's required ``kind`` tag as the statement of what it chose --
+    so the clause could never print again and is gone rather than kept as a
+    paragraph no payload can reach. What reaches this hint is a name NO kind
+    declares, and for that there are no owners to name.
 
     The path is taken from the ``extra_forbidden`` ENTRY rather than from the
     first location in the rendering, because one payload can break two rules at
@@ -1083,19 +1105,10 @@ def _extra_action_key_hint(
     if len(path) < 4 or path[0] != "actions":
         return _example_json_hint(surface, observation, "an extra field in an action", shape)
     kind, name = path[2], path[3]
-    owners = sorted(
-        _action_kind_of(model)
-        for model in surface.models
-        if name in model.model_fields and _action_kind_of(model) != kind
+    return (
+        f'"{name}" is not a field of a "{kind}" action'
+        f'. a "{kind}" action takes exactly {_action_line(surface, kind, shape)}'
     )
-    parts = [f'"{name}" is not a field of a "{kind}" action']
-    if owners:
-        parts.append(
-            f"it belongs to the {', '.join(json.dumps(owner) for owner in owners)} "
-            f'action kind(s) -- check that "{kind}" is the kind you meant'
-        )
-    parts.append(f'a "{kind}" action takes exactly {_action_line(surface, kind, shape)}')
-    return ". ".join(parts)
 
 
 def _action_line(surface: ActionSurface, kind: str, shape: HintShape = HintShape()) -> str:
@@ -1437,6 +1450,9 @@ its batch. Their fields are listed above; what the list cannot tell you is what
 they MEAN:
 
 * "finish" -- you believe the task is done. The episode is then scored.
+  Declaring it does not make it so: your "reason" is a claim about the state you
+  produced, and the newest observation is the only evidence for it, so check
+  that screen against what the task asked for before you say it is finished.
 {ask_text}
 """
 
@@ -1465,11 +1481,17 @@ def strip_reasoning_boundary_markers(
     own text: a provider template emits the closing half of its reasoning
     boundary token at the joint between the reasoning channel and the content
     channel, so the assembled reply starts with ``</mm:think>`` welded to a
-    byte-perfect action batch. The strict decoder refuses a reply that does not
-    START with a JSON value -- by design, because hunting forward for the first
-    ``{`` can silently execute a batch the model never sent -- so the whole
-    billed turn was discarded as ``malformed-json``. The token is DECLARED per
-    model (``ModelSpec.reasoning_boundary_markers``), never recognised here.
+    byte-perfect action batch. When this strip was added the decoder refused a
+    reply that did not START with a JSON value, so the whole billed turn was
+    discarded as ``malformed-json``. The decoder now reads a decision behind
+    leading junk too, whenever it is the reply's ONLY decision
+    (``public_reply._locate_leading_object``), which covers these replies without
+    the declaration -- so the strip's remaining licence is the byte-precise half
+    of the job rather than the readability half: it removes DECLARED template
+    bytes, so the ``public_reply`` text the next turn carries is the model's own
+    reply instead of that reply with a provider token welded to its head. The
+    token is DECLARED per model (``ModelSpec.reasoning_boundary_markers``), never
+    recognised here.
 
     Returns the text to judge and the markers actually removed, in order. Two
     properties the caller depends on:
@@ -1479,9 +1501,9 @@ def strip_reasoning_boundary_markers(
       leading whitespace, which the decoder lstrips anyway, so the whitespace is
       not part of the decision either way). A token inside a string value, or
       behind a character of prose, is not touched and the reply is judged on its
-      original bytes. No ``find``, no substring surgery, and no balanced-object
-      extraction from prose -- the last is the salvage operation this module's
-      strictness exists to refuse.
+      original bytes. No ``find``, no substring surgery: which bytes in front of
+      the object are framing is the DECODER's question, and this function answers
+      only the narrower one about a declared head.
     * **An undeclared marker is not a marker.** ``markers`` empty -- every
       model the table does not list -- returns the input unchanged and nothing
       removed, so this is a declaration-driven tolerance and not a global
@@ -1553,10 +1575,12 @@ def parse_decision(
     meant.
     """
 
-    decoded, trailing = _decode_leading_json(payload)
+    decoded, trailing, leading_framing_bytes = _decode_leading_json(payload)
     if not isinstance(decoded, Mapping):
         raise DecisionParseError("decision must be a JSON object")
-    actions, note = normalise_public_reply(decoded, action_binding=action_binding)
+    actions, note, tolerated_action_fields = normalise_public_reply(
+        decoded, action_binding=action_binding
+    )
     if action_binding == COMPACT_ACTION_BINDING:
         try:
             actions = bind_compact_actions(decoded, actions, observation.observation_id)
@@ -1654,6 +1678,13 @@ def parse_decision(
         prompt_cache_key=prompt_cache_key,
         context_tokens=context_tokens,
         compaction=compaction,
+        # The decoder's own counts, set here rather than attached afterwards:
+        # they are facts about the REPLY's bytes -- how much framing preceded
+        # the decision, how many action fields the kind mismatch cost -- while
+        # the provenance ``decide`` attaches (``stripped_reply_markers``) is
+        # about how the reply was assembled before this function saw it.
+        tolerated_action_fields=tolerated_action_fields,
+        leading_framing_bytes=leading_framing_bytes,
     )
 
 
@@ -1684,6 +1715,71 @@ _UNSPECIFIED_STOP = "unspecified"
 #: validated: a marker that failed a pattern would fail the record, and this
 #: record exists to describe a refusal, not to become one.
 _MAX_STOP_MARKER_CHARS = 64
+
+#: Longest single tool-call NAME recorded in a stream shape, and how many names
+#: are recorded before the rest are counted instead. Both bounds exist for the
+#: reason ``_MAX_STOP_MARKER_CHARS`` does -- the name is model-authored text of
+#: no fixed vocabulary (a model that invents a tool name can invent a long one),
+#: and the record describes a refusal rather than becoming one.
+_MAX_TOOL_CALL_NAME_CHARS = 64
+_MAX_TOOL_CALL_NAMES = 8
+
+
+def _offered_tool_names(request: Any) -> tuple[str, ...]:
+    """The tool names a request PUT ON THE WIRE, in order.
+
+    Read back off the request rather than assumed: the sole-offer rule that
+    reads an arbitrarily-named call as the reply (``harness/reply_channel``) is
+    only sound because THIS request advertised nothing else, and a rule that
+    rests on what was offered has to read what was offered. A caller that adds a
+    second tool to this request silently narrows the rule back to the exact-name
+    test, which is the behaviour that is correct there.
+    """
+
+    return tuple(
+        str(getattr(tool, "name", "") or "") for tool in getattr(request, "tools", None) or ()
+    )
+
+
+def _bounded_call_names(calls: Sequence[Any]) -> str:
+    """The names of the stream's tool calls, quoted and bounded.
+
+    Recorded so a refusal that arrived on the tool channel is diagnosable from a
+    sealed bundle: the delta counts said a call happened and nothing said what it
+    was called, which is why 178 of the arm's 204 ``leading-delimiter`` refusals
+    could not be explained after the fact (recounted 2026-09-25 over
+    ``~/worktrees/osworld/runs``; see ``harness/reply_channel``). Empty means the
+    stream carried no call, which is a reading rather than an absence.
+
+    Each name is JSON-QUOTED, and that is not decoration: a name that itself
+    carries the separator (``apply,apply``) would otherwise render exactly like
+    two calls, and a reader of a sealed bundle has only this field to go on. The
+    one thing the builder appends -- the ``+N more`` count for names the record
+    does not show -- is deliberately left UNQUOTED, so a model-authored name can
+    never be mistaken for the harness's own marker (quoting escapes a quote or a
+    backslash inside a name).
+
+    Names ride through ``_header_value`` at render time, so this escapes nothing
+    itself; it only keeps the field from growing with a model that names its call
+    a kilobyte of prose. The bound is on the RAW name (``_MAX_TOOL_CALL_NAMES``
+    names of at most ``_MAX_TOOL_CALL_NAME_CHARS`` characters), so the RENDERED
+    field is larger than that: quoting can add two bytes per name, a character
+    the quoting escapes is up to six (``\\uXXXX``), and ``_header_value`` then
+    doubles each backslash the quoting produced. Measured, the worst case -- 8
+    names of 64 non-ASCII characters each -- renders to 3607 characters against a
+    multi-megabyte reply. Stated against the post-escape figure because that is
+    what the artifact carries; the property that matters is that it is a
+    CONSTANT, not a function of the reply, so the record describes a refusal
+    rather than becoming one.
+    """
+
+    names = [str(getattr(call, "name", "") or "") for call in calls]
+    shown = [name[:_MAX_TOOL_CALL_NAME_CHARS] for name in names[:_MAX_TOOL_CALL_NAMES]]
+    rendered = ",".join(json.dumps(name) for name in shown)
+    hidden = len(names) - len(shown)
+    if hidden > 0:
+        rendered += f",+{hidden} more"
+    return rendered
 
 
 class ProviderStreamAbortedError(RuntimeError):
@@ -1861,7 +1957,7 @@ class _ContextBuilder:
         # would fail the next observation loudly, which is the design. Frames
         # that are too large are a TRANSPORT problem and are handled by
         # dropping whole frames (``_enforce_wire_fit``), never by resizing one.
-        from local_operator.harness.types import ImageContent, Message, TextContent
+        from local_operator.harness.types import Message, TextContent
 
         observation = turn.observation
         text = observation.text
@@ -1906,11 +2002,25 @@ class _ContextBuilder:
             lines.append(UNCHANGED_FRAMES_NOTE)
         lines.extend(["", rendered_text])
         content: list[Any] = [TextContent(text="\n".join(lines))]
+        content.extend(self._frame_content(observation))
+        return Message(role="user", content=content)
+
+    def _frame_content(self, observation: Observation) -> list[Any]:
+        """An observation's frames as provider image blocks, in order.
+
+        Bytes come through the SAME reader the runner verifies frames with
+        (O_NOFOLLOW, size, digest): a frame the runner would refuse to publish
+        is a frame the model must not be shown, and a second reader here would
+        be a second place for that check to drift. Factored out because the
+        completion challenge re-attaches the CURRENT observation's frames, and
+        a second inline copy of this loop is exactly how the two readers would
+        come to disagree -- the property is "one reader", not "two calls that
+        look alike today".
+        """
+        from local_operator.harness.types import ImageContent
+
+        content: list[Any] = []
         for frame in observation.frames:
-            # Bytes come through the SAME reader the runner verifies frames
-            # with (O_NOFOLLOW, size, digest): a frame the runner would refuse
-            # to publish is a frame the model must not be shown, and a second
-            # reader here would be a second place for that check to drift.
             data = verify_artifact(self._artifact_root, frame.artifact)
             content.append(
                 ImageContent(
@@ -1918,7 +2028,39 @@ class _ContextBuilder:
                     mime_type=frame.artifact.media_type,
                 )
             )
-        return Message(role="user", content=content)
+        return content
+
+    def append_challenge(self, reply: str, challenge: str, observation: Observation) -> None:
+        """Fold a completion challenge into the history, frames included.
+
+        ``append_rejection``'s shape, with one addition: the challenge owns the
+        claim that the end state is the only evidence, so the end state rides in
+        the SAME user message -- the current observation's frames, re-attached
+        through the one frame reader. The pair is APPENDED, so the prefix cache
+        survives: re-attaching an observation by rewriting the message that
+        already carried it would cost the whole cached entry, while a new
+        trailing message costs only the new tokens.
+
+        Frames are re-attached even though the same pixels were already sent as
+        this turn's observation message. That is deliberate: the challenge asks
+        the model to compare the task against THIS frame, and a request to
+        compare against an image several messages up is a request to reason from
+        memory instead. The cost is one uncached frame per episode (the frame
+        budget sees it, so ``rebuild_due`` can move forward one turn), which is
+        the price of the comparison being made against something rather than
+        nothing.
+        """
+        from local_operator.harness.types import Message, TextContent
+
+        shown = reply
+        if len(shown) > MAX_REJECTED_REPLY_CHARS:
+            shown = shown[:MAX_REJECTED_REPLY_CHARS] + "\n[... reply truncated]"
+        self._messages.append(
+            Message(role="assistant", content=[TextContent(text=shown or "(empty reply)")])
+        )
+        content: list[Any] = [TextContent(text=challenge)]
+        content.extend(self._frame_content(observation))
+        self._messages.append(Message(role="user", content=content))
 
     def append_rejection(self, reply: str, diagnostic: str) -> None:
         """Fold a rejected reply into the history so the next call corrects it.
@@ -2323,6 +2465,25 @@ class ProviderModelClient:
         tool_call_count = outcome.tool_call_count
         stream_shape = outcome.shape
         stripped_reply_markers = outcome.stripped_reply_markers
+        # WHICH channel was judged, not merely what came out of it. ``None`` means
+        # the tool-call channel carried no reply at all (read the prose); anything
+        # else -- including the empty string a call with no usable arguments
+        # yields -- means the channel WAS the reply channel for this attempt, and
+        # a reader of the refusal needs that fact: a ``leading-delimiter`` refusal
+        # of the model's prose and one of a call's own arguments are different
+        # defects with different repairs.
+        channel_read = channel_reply is not None
+        # How much PROSE this attempt wrote, published as ``prose=<n>`` beside
+        # ``channel=read`` on the refusal artifact. Without it the two facts are
+        # invisible in a sealed bundle: ``content_deltas`` counts stream EVENTS,
+        # not the text the decoder was handed, so a turn that wrote prose AND
+        # emitted a call -- the collateral of reading the call channel, and the
+        # reason the widening is gated on this very question -- is
+        # indistinguishable from a turn that said nothing on the prose channel.
+        # The number is CHARACTERS of the text the decoder would have judged,
+        # taken after the provider template strip that
+        # ``stripped_reply_markers`` beside it accounts for.
+        prose_chars = len(text)
         if channel_reply:
             # The model answered on the offered channel. Its arguments ARE the
             # envelope, so the raw JSON goes to the same decoder the prose path
@@ -2536,6 +2697,16 @@ class ProviderModelClient:
                 # already gone, so this count is the only record in the artifact
                 # that the reply arrived with one -- see ``_rejection_detail``.
                 stripped_reply_markers=stripped_reply_markers,
+                # Which channel was judged, and how many calls the stream carried.
+                # The count was left at its 0 default here, which is the same
+                # defect class as the missing name: a refusal whose reply arrived
+                # as a tool call recorded ``tool_call_count=0``, so a sealed bundle
+                # read as "the model called nothing" on the very refusals where it
+                # called something. ``tool_call_count`` is the honest count for
+                # the attempt that was already sent and billed.
+                channel_read=channel_read,
+                channel_prose_chars=prose_chars,
+                tool_call_count=tool_call_count,
                 # Raw and UNBOUNDED here: the publisher scans the whole reply
                 # before applying the bound, because a reply cut first and
                 # scanned afterwards returns clean over a severed canary.
@@ -2556,6 +2727,48 @@ class ProviderModelClient:
                 context_tokens=_estimate_context(messages),
                 compaction=compaction,
             ) from error
+
+    async def challenge_completion(
+        self,
+        observation: Observation,
+        history: Sequence[EpisodeTurn],
+        *,
+        batch: ActionBatch,
+        instruction: str,
+    ) -> str:
+        """Ask the model to check a ``done`` claim against the end state.
+
+        See ``EpisodeModelClient.challenge_completion`` for the contract; this
+        is its provider-backed implementation. Three details belong here:
+
+        * the claim is replayed with the rule the history already uses for a
+          batch (``append_new_turns``): the model's public reply when it wrote
+          one, its canonical action batch otherwise. The message it is asked to
+          re-examine is therefore the message it would have been shown had the
+          episode continued, not a paraphrase of it.
+        * ``append_new_turns`` is called first, so the current observation is in
+          the conversation whatever the caller's ordering was. It renders only
+          what is new (the builder keeps cursors), so a normal call -- the
+          finish was just decided on this observation -- appends nothing.
+        * nothing here calls the provider. The challenge is appended in-process
+          and the billing happens on the next ``decide``, which is what keeps
+          the runner's own accounting of model cycles the only account.
+        """
+
+        self._context.append_new_turns(history)
+        claim = finish_claim(batch)
+        challenge = build_completion_challenge(
+            claim=claim,
+            instruction=instruction,
+            observation=observation,
+        )
+        turn = history[-1] if history else None
+        if turn is not None and turn.public_reply is not None:
+            shown = turn.public_reply
+        else:
+            shown = batch.to_canonical_json().decode("utf-8")
+        self._context.append_challenge(shown, challenge, observation)
+        return challenge
 
     async def _maybe_compact(self) -> tuple[CompactionRecord | None, ModelUsage | None, int]:
         """Run one compaction pass when the frame budget or the resolved trigger says so.
@@ -3048,7 +3261,44 @@ class ProviderModelClient:
         # ``None`` when the model did not use the channel (read the prose
         # instead); the empty string when it did and sent nothing usable, which
         # is a rejection the decoder must still report.
-        channel_reply = envelope_from_tool_call(calls, name=REPLY_CHANNEL_TOOL_NAME)
+        #
+        # ``_offered_tool_names`` is passed so the channel survives the model
+        # naming the call something else, which is sound here and ONLY here:
+        # this client offers one tool, whose parameters ARE the reply envelope,
+        # and the episode drives the environment through the action protocol
+        # rather than through harness tools, so a call cannot be an action
+        # request. 178 of the arm's 204 ``leading-delimiter`` refusals were a
+        # complete decision arriving on this channel under a name we did not
+        # read (counted 2026-09-25 over ``~/worktrees/osworld/runs``, when the
+        # corpus stood at 56 episodes in 29 runs; both figures move with it);
+        # see ``harness/reply_channel.envelope_from_tool_call``.
+        #
+        # WITHHELD when the prose already states a decision, and that condition
+        # is the widening's own bound rather than a preference. The coercion is
+        # a RECOVERY of a decision that would otherwise be lost, so a turn that
+        # answered on BOTH channels must be judged on the prose it wrote:
+        # reading the call there discards a complete decision and refuses the
+        # turn on the call's bytes instead, which turned an ACCEPTED reply into
+        # a ``batch-shape`` refusal for a call whose arguments were
+        # ``{"query": "weather"}``. The prose's own verdict is the strict name
+        # test either way, so a call named as the channel still wins over prose
+        # exactly as it always did. Where the prose states nothing -- 178 of
+        # those 204 refusals, all ``content_deltas=0`` -- the widening applies
+        # unchanged.
+        offered_names = _offered_tool_names(request)
+        # ``calls`` is part of the condition rather than an optimisation: with no
+        # calls the widening cannot fire anyway (``envelope_from_tool_call``
+        # matches nothing and returns ``None`` for any ``offered_names``), so
+        # asking the decoder unconditionally would JSON-decode every prose-only
+        # reply a second time -- ``parse_decision`` decodes it again a few lines
+        # below -- and add a decoder call on the one path that never needed it.
+        if calls and _states_a_decision(text):
+            offered_names = None
+        channel_reply = envelope_from_tool_call(
+            calls,
+            name=REPLY_CHANNEL_TOOL_NAME,
+            offered_names=offered_names,
+        )
         return _StreamOutcome(
             text=text,
             usage=usage,
@@ -3059,14 +3309,20 @@ class ProviderModelClient:
             stream_error=stream_error,
             channel_reply=channel_reply,
             # Every call the stream carried, including any the model made to a
-            # name we never offered. Recorded in the evidence bundle rather
-            # than acted on: a model reaching for a tool that does not exist is
-            # a signal about the prompt, not something to salvage.
+            # name we never offered. Counted for the evidence bundle, and now
+            # also READ when it is the sole offered name -- but never executed:
+            # a model reaching for a tool that does not exist is a signal about
+            # the prompt, and the reply it carried is judged by the same decoder
+            # a prose reply is judged by.
             tool_call_count=len(calls),
             shape=StreamShape(
                 content_deltas=content_deltas,
                 reasoning_deltas=reasoning_deltas,
                 tool_call_deltas=tool_call_deltas,
+                # Bounded and escaped here rather than at the renderer, the same
+                # division ``stop`` above uses: the artifact must stay bounded
+                # whatever the model named its call.
+                tool_call_names=_bounded_call_names(calls),
                 # The provider's RAW marker, never the normalized stop: a
                 # reader bucketing attempts needs ``length``/``toolUse``/whatever
                 # the wire said, and ``_UNSPECIFIED_STOP`` when it said nothing
@@ -3131,6 +3387,74 @@ def _rejection_prompt(reason: str, observation: Observation) -> str:
         "Nothing was executed. Reply again for this same observation "
         f"(Observation ID: {observation.observation_id}; Frames: "
         f"{_frames_line(observation)}) with a corrected JSON batch and nothing else."
+    )
+
+
+#: How much of the task text, and of the model's own claim, one challenge may
+#: quote back. Both source fields are bounded at 10_000 characters on the wire
+#: (``Observation.text``, ``FinishAction.reason``) and quoting either in full
+#: buys nothing: the challenge is read for its INSTRUCTION, and the measured
+#: claims were a sentence. The bound also keeps a challenge's own cost a
+#: constant rather than a function of how verbose the model happened to be.
+MAX_CHALLENGE_QUOTE_CHARS = 4_000
+
+
+def _bounded_quote(text: str) -> str:
+    """``text`` for the challenge, cut to the quote bound with a marker."""
+
+    stripped = text.strip()
+    if len(stripped) <= MAX_CHALLENGE_QUOTE_CHARS:
+        return stripped
+    return stripped[:MAX_CHALLENGE_QUOTE_CHARS] + "\n[... truncated]"
+
+
+def build_completion_challenge(
+    *, claim: FinishAction, instruction: str, observation: Observation
+) -> str:
+    """The user turn that asks the model to check a ``done`` claim.
+
+    WHY THE WORDING IS SHAPED THIS WAY, and it is not a polite "are you sure?".
+    The measured failure is not a model that did not look -- its claim was TRUE
+    about the frame it was bound to -- but a model that never compared that
+    frame against the task. So the challenge has to do three things:
+
+    * name the ``reason`` as a CLAIM rather than as evidence, because the claim
+      is the thing that was mistaken for proof of the work;
+    * restate the task as it was stated, because the comparison has no second
+      operand otherwise (the instruction is never summarised away -- every
+      compaction in the corpus is ``strategy="prune"`` with no summary);
+    * re-attach the end state and say it is the only evidence that counts, so
+      "done" has to be defended against a picture rather than a memory.
+
+    BOTH replies are named, including the one that changes nothing. Re-declaring
+    the SAME finish is the correct answer when the observation already shows
+    every required outcome, and a challenge that did not say so would be an
+    instruction to find work that does not exist -- which is a false-positive
+    cost the gate must not have. The observation id and frame ids are restated
+    for the reason ``_rejection_prompt`` gives: the reply has to bind to this
+    observation, and getting that wrong costs a billed rejection.
+    """
+
+    return (
+        "You declared this task finished. That declaration is a CLAIM, and it is "
+        "not accepted yet: check it against what the environment actually shows.\n\n"
+        f'Your stated reason was: "{_bounded_quote(claim.reason)}"\n\n'
+        "That is your own account of what you did. It is NOT evidence that the task "
+        "is complete.\n\n"
+        "The task you were given was:\n"
+        f"{_bounded_quote(instruction)}\n\n"
+        "The screenshot below is the state your LAST action produced. It is the only "
+        "evidence that counts. Read it, and for each thing the task requires, ask "
+        "whether THIS observation shows it. If any required outcome is not visible "
+        "here, the task is not finished.\n\n"
+        "Reply in exactly one of these two ways:\n"
+        "* the SAME finish action, unchanged, if this observation already shows every "
+        "required outcome; or\n"
+        "* a batch of actions that closes the gap you can see.\n\n"
+        "Do no optional extra work, and do not restate your plan. Reply with a JSON "
+        "batch for this same observation "
+        f"(Observation ID: {observation.observation_id}; Frames: "
+        f"{_frames_line(observation)}) and nothing else."
     )
 
 

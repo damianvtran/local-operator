@@ -22,9 +22,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import signal
+import subprocess
+import sys
 import time
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -52,6 +57,7 @@ from local_operator.session.runtime.reclaim import (
     ancestor_pids,
     config_root_of,
     etime_seconds,
+    parse_process_row,
     process_row,
     reclaim_runtimes,
     record_file,
@@ -127,14 +133,15 @@ def fleet(
 
 
 def reread(pid: int, *, age_s: float = 3600.0, cpu_s: float = 0.0, root: str | Path = ""):
-    """The SIGNAL-TIME re-read's seam: one row, with the environment ``-Eww`` adds.
+    """The SIGNAL-TIME re-read's seam: one row, with the environment appended to it.
 
     ``reclaim_runtimes`` re-reads the candidate's single row immediately before
-    signalling it, in one ``ps -Eww`` fork that carries the process's own
-    environment, and refuses on any change. A test that drives a synthetic census
-    must answer for that read too, which is what this is: ``runtime_processes``'
-    row shape, with ``LOCAL_OPERATOR_CONFIG_DIR`` appended the way ``ps -Eww``
-    appends it.
+    signalling it, in one fork carrying the process's own environment — ``ps -Eww``
+    on macOS/BSD, ``ps -ww`` plus a ``/proc/<pid>/environ`` read on Linux, where
+    ``-E`` is not an option (:func:`pid_environment`) — and refuses on any change. A
+    test that drives a synthetic census must answer for that read too, which is what
+    this is: ``runtime_processes``' row shape, with ``LOCAL_OPERATOR_CONFIG_DIR``
+    appended the way both spellings append it.
     """
     command = f"/usr/bin/python3 -P -m {reclaim.RUNTIME_MODULE}"
     if root:
@@ -149,6 +156,63 @@ def env_text(root: str, *, session: str = "", home: str | None = None) -> str:
     if session:
         parts.append(f"LOP_MOBILE_CHILD_RESUME={session}")
     return " ".join(parts)
+
+
+#: The width ``ps`` cuts to when it cannot read a display width and its stdout is not
+#: a terminal — i.e. the width every caller of this module's census gets on Linux.
+#: ``ps(1)`` refuses to promise the number ("the output width is undefined (it may be
+#: 80, unlimited, determined by the TERM variable, and so on)"), and 80 is the value
+#: the Linux CI shard measured, twice, as the cut that cost a shard.
+NARROW_WIDTH = 80
+
+#: The interpreter an ``argv[0]`` here is forged with, at a real CI path length: a
+#: runner's checkout, its ``.venv`` and ``python``. It is what makes the row below
+#: long enough for the narrow cut to matter, and it is deliberately a path that is NOT
+#: this host's — the row must be shaped like the one Linux prints, not like macOS's.
+LONG_INTERPRETER = "/home/runner/work/local-operator/local-operator/.venv/bin/python"
+
+
+@contextmanager
+def live_contract_row() -> Iterator[tuple[int, str]]:
+    """A REAL process wearing the spawn contract, and the REAL row a census reads for it.
+
+    The row's SHAPE is the whole subject: a Linux ``ps`` truncates the last column to
+    the display width, so the row that loses its ``-m <module>`` pair is the row whose
+    command column is long — which a synthetic one-line ``ps`` output cannot show,
+    because it never crosses the cut. So this forks a real child with a real long
+    ``argv[0]`` (the kernel stores ``argv[0]`` verbatim, the trick
+    ``test_launch_arbitration`` uses for the same reason) running ``sys.executable -c``
+    — it never imports this package, and it is reaped before the caller's assertions.
+
+    Yields ``(pid, row)``, where ``row`` is the line the census's OWN argv produced for
+    that pid: the runner is real ``ps``, so a change to that argv is a change to what
+    the assertions below are handed.
+    """
+    forged = f"{LONG_INTERPRETER} -P -m {reclaim.RUNTIME_MODULE}"
+    child = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+        [forged, "-c", "import time; time.sleep(20)"],
+        executable=sys.executable,
+        text=True,
+    )
+    try:
+        raw = ""
+
+        def capture(command, timeout_s):
+            # THE CENSUS'S OWN ARGV, run for real: this records the text those args
+            # produce rather than fabricating a row, so what the cells below cut is a
+            # row this module's reader actually sees.
+            nonlocal raw
+            raw = subprocess.run(  # noqa: S603 — fixed argv, no shell
+                list(command), capture_output=True, text=True, timeout=timeout_s
+            ).stdout
+            return raw
+
+        runtime_processes(run=capture)
+        row = next(line for line in raw.splitlines() if line.split(None, 1)[0] == str(child.pid))
+    finally:
+        child.kill()
+        child.wait(timeout=10)
+    yield child.pid, row
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +254,77 @@ def test_census_matches_the_spawn_contract_and_ignores_the_searcher() -> None:
     assert [item.pid for item in found] == [123]
     assert found[0].parent_pid == 1
     assert found[0].age_s == pytest.approx(122673.0)
+
+
+def test_the_census_asks_for_the_whole_command_column() -> None:
+    """THE WIDTH FLAG, ASSERTED ON THE ARGV RATHER THAN ON THIS HOST'S ``ps``.
+
+    On Linux, ``command`` is the row's last column, so a piped ``ps`` extends it only
+    to the display width it cannot determine — measured by this repository's own CI
+    rounds at 80 columns, severing a runtime's ``-m <module>`` pair and so reporting
+    a machine with runtimes on it as having none. ``ps -ww`` is unlimited width.
+
+    The width cannot be asserted THROUGH ``ps`` here: macOS does not truncate this
+    column at all (measured, same row with and without ``COLUMNS=80`` through a pipe),
+    so a green run on this host says nothing about the Linux one. The argv is the
+    instrument, so the argv is what is pinned — and with the real runner's real
+    ordering, because a flag in the wrong place is a flag ``ps`` may not apply.
+    """
+    calls: list[list[str]] = []
+
+    def run(command, timeout_s):
+        calls.append(list(command))
+        return ""
+
+    assert runtime_processes(run=run) == []
+    assert len(calls) == 1, "the census is ONE fork for the whole fleet"
+    argv = calls[0]
+    assert argv[0] == "ps"
+    assert "-ww" in argv, f"the census must ask for unlimited width: {argv}"
+    # The width flag belongs with ``ps``'s other display options, ahead of the format
+    # that names the column it widens — the shape this module's three sibling readers
+    # already use (``-Eww`` before ``-p``/``-eo``), and the shape a reader grepping for
+    # the flag alone would not catch.
+    assert argv.index("-ww") < argv.index("-eo"), f"the width flag comes after the format: {argv}"
+    assert argv[-1] == "pid=,ppid=,etime=,time=,command="
+    # AND NOT THE ENVIRONMENT. ``-Eww`` would widen the row too, but it appends each
+    # process's own environment to the very column ``parse_process_row`` word-splits
+    # and matches the spawn contract in, at ~4.4x the output (1.7 MB against 385 KB
+    # for the whole fleet, measured for :func:`process_env`). The census has no use for
+    # it: the environment is read per CANDIDATE by ``process_env``/``process_envs``.
+    assert not any(flag.startswith("-E") for flag in argv), f"the census asked for env: {argv}"
+
+
+def test_a_narrow_row_is_not_evidence_that_no_runtime_is_running() -> None:
+    """THE SILENT ZERO ITSELF, against a real process's real row.
+
+    Both cut rows below are THE SAME LIVE RUNTIME the census just found, seen through
+    the two widths a Linux ``ps`` may pick for a piped row: the documented common 80,
+    and one landing inside the module name. ``parse_process_row`` may only answer
+    ``None`` for them — a severed runtime and a stranger are the same input to it, and
+    it must not guess which it has — so the assertions state the consequence rather
+    than papering over it: this reader CANNOT tell absence from truncation, and the
+    width flag is therefore the only thing standing between a busy machine and a
+    census that reports zero.
+    """
+    with live_contract_row() as (pid, row):
+        wide = parse_process_row(row)
+        assert wide is not None and wide.pid == pid, f"the wide row is not a runtime row: {row!r}"
+        assert wide.command.startswith(LONG_INTERPRETER)
+
+        cut = row[:NARROW_WIDTH]
+        assert (
+            reclaim.RUNTIME_MODULE not in cut
+        ), f"this row is too short to model the Linux cut ({len(row)} cols): {row!r}"
+        assert parse_process_row(cut) is None
+
+        # The second width: the cut lands INSIDE the module name, so the ``-m`` this
+        # reader keys on IS present and the module word is not (this is the shape the
+        # spare-count helper read as "no spare" on the Linux shard).
+        severed = row[: row.index(reclaim.RUNTIME_MODULE) + 20]
+        assert "-m" in severed.split()
+        assert severed.split()[-1] == reclaim.RUNTIME_MODULE[:20]
+        assert parse_process_row(severed) is None
 
 
 def test_socket_table_gives_a_recordless_runtime_a_port_and_an_attach() -> None:
@@ -820,7 +955,11 @@ def test_the_summary_reports_the_window_the_pass_used(tmp_path: Path) -> None:
 
 
 def test_the_batch_env_reader_is_one_fork_and_keys_by_pid() -> None:
-    # The fleet path: one `ps -Eww -eo pid=,command=` instead of a fork per runtime.
+    # The fleet path: ONE ``ps`` over the process table instead of a fork per runtime
+    # (``-Eww -eo pid=,command=`` where the environment comes in that fork, ``-ww``
+    # where it does not — see :func:`pid_environment`, and the spelling cells at the
+    # end of this file). On Linux the environment per row is a ``/proc`` read, which
+    # is a file read and not a fork, so ``len(calls) == 1`` holds on both platforms.
     calls: list[list[str]] = []
 
     def run(command, timeout_s):
@@ -845,12 +984,13 @@ def test_the_batch_env_reader_is_one_fork_and_keys_by_pid() -> None:
 
 
 def test_process_row_reads_one_pid_and_its_environment_in_one_fork() -> None:
-    # ONE FORK, for two of the four facts the re-identification rests on: ``-Eww``
-    # appends the process's own environment to the ``command`` column, so the same
-    # call that says "this pid is still a runtime, this old" also carries the config
-    # root the verdict attributed it to. The alternative costs a second fork per
-    # candidate on the one path that must not be slow enough to widen the window it
-    # is closing.
+    # ONE FORK, for two of the four facts the re-identification rests on: the
+    # environment is appended to the ``command`` column — in that fork where the
+    # platform's ``ps`` can carry it (``-Eww`` on macOS/BSD), from ``/proc`` where it
+    # cannot (Linux, which has no ``-E`` at all) — so the same call that says "this pid
+    # is still a runtime, this old" also carries the config root the verdict
+    # attributed it to. The alternative costs a second fork per candidate on the one
+    # path that must not be slow enough to widen the window it is closing.
     calls: list[list[str]] = []
 
     def run(command, timeout_s):
@@ -862,8 +1002,13 @@ def test_process_row_reads_one_pid_and_its_environment_in_one_fork() -> None:
         )
 
     row = process_row(4242, run=run)
-    assert len(calls) == 1
-    assert calls[0][:3] == ["ps", "-Eww", "-p"]
+    assert len(calls) == 1, calls
+    # THE PLATFORM'S OWN SPELLING: ``-Eww`` where ``-E`` exists (it is what carries
+    # the environment in this fork), ``-ww`` where it does not, and never ``-E`` on a
+    # platform whose ``ps`` refuses it.
+    expected_env_flag = "-ww" if reclaim._IS_LINUX else "-Eww"
+    assert calls[0][:3] == ["ps", expected_env_flag, "-p"], calls[0]
+    assert no_bsd_env_flag(calls[0]) or not reclaim._IS_LINUX, calls[0]
     assert calls[0][3] == "4242"
     assert row is not None
     assert row.pid == 4242
@@ -954,3 +1099,363 @@ def test_the_confirm_window_cannot_be_asked_for_shorter_than_the_cpu_rung(
     # command itself: the window this pass documents as its safety property.
     assert parser.parse_args(["sessions", "reclaim"]).confirm_s is None
     assert parser.parse_args(["sessions", "reclaim", "--confirm-s", "90"]).confirm_s == 90
+
+
+# ---------------------------------------------------------------------------
+# The environment's SOURCE: ``-E`` is a BSD/macOS option, procps has none
+# ---------------------------------------------------------------------------
+#
+# Every other environment test in this file injects ``run``, which is exactly why
+# none of them could see that ``ps -Eww`` is not a procps option: the seam kept
+# answering with canned text while the real reader answered nothing at all. The
+# cells below therefore read a REAL child's environment through the module's REAL
+# spelling, and assert the SPELLING itself per platform.
+
+#: A variable only the children below have, so "the reader found it" cannot be an
+#: inherited coincidence of the suite's own environment.
+_ENV_PROBE_NAME = "LO_RECLAIM_ENV_PROBE"
+_ENV_PROBE_VALUE = "probe-4f0c9a"
+
+
+def no_bsd_env_flag(argv: Sequence[str]) -> bool:
+    """No token in ``argv`` is the BSD-only ``-E``/``-Eww`` spelling."""
+    return not any(part.startswith("-E") for part in argv)
+
+
+class _EnvChild:
+    """A real child process: the argv the census matches, and its own environment.
+
+    NO RUNTIME IS STARTED. The child is this interpreter running a sleep, with the
+    spawn contract's two tokens (``-m local_operator.session.runtime.process``) behind
+    a first non-option word, so CPython stops parsing its OWN options and hands them
+    to ``sys.argv`` instead of booting the module — booting a real runtime here would
+    create a store and publish a record, which a unit test may not do. What this
+    module reads is the ``ps`` command column, and those tokens are in it.
+
+    ``sys.executable``, i.e. this suite's own python, and not a platform binary,
+    because of a measured macOS 27 property: ``ps -Eww`` returned the environment of a
+    python child (3318 bytes) and of NONE of ``/bin/sleep`` (14), ``/bin/sh`` (9),
+    ``/bin/bash`` (9), ``/usr/bin/tail`` (27) or ``/usr/bin/yes`` (13). A live runtime
+    is a python process, so the reader works where the product needs it and a test
+    child that is not one would measure the platform's exception rather than the rule.
+    """
+
+    def __init__(self, root: Path, *, sleep_s: float = 30.0) -> None:
+        self.root = root
+        self.process = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+            [
+                sys.executable,
+                "-P",
+                "-c",
+                f"import time; time.sleep({sleep_s})",
+                # The word that ends CPython's option parsing, so ``-m <module>``
+                # lands in ``sys.argv`` (verified: ``sys.argv`` came back as
+                # ``['-c', 'stand-in', '-m', 'local_operator...process']``).
+                "stand-in",
+                "-m",
+                reclaim.RUNTIME_MODULE,
+            ],
+            env={
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                reclaim.CONFIG_DIR_ENV: str(root),
+                "HOME": f"{root}-home",
+                _ENV_PROBE_NAME: _ENV_PROBE_VALUE,
+            },
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            # Its own session, so the reap below is a kill by the pid THIS test
+            # created and can reach nothing else on the machine.
+            start_new_session=True,
+        )
+
+    @property
+    def pid(self) -> int:
+        return self.process.pid
+
+    def reap(self) -> None:
+        try:
+            os.killpg(os.getpgid(self.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            self.process.wait(timeout=10)
+        except subprocess.TimeoutExpired:  # pragma: no cover — killpg precedes
+            pass
+
+
+@pytest.fixture
+def env_child(tmp_path: Path) -> Iterator[_EnvChild]:
+    child = _EnvChild(tmp_path / "probe-root")
+    try:
+        yield child
+    finally:
+        child.reap()
+
+
+@pytest.fixture
+def fresh_failure_reports() -> Iterator[None]:
+    """``_REPORTED_FAILURES`` is process state: a test asserting on it starts clean.
+
+    ``getattr`` rather than an attribute read so that a run against a module WITHOUT
+    the report channel fails inside the test's own assertions (the log is empty)
+    instead of erroring in setup — the difference between a red behavioural proof and
+    a red harness.
+    """
+    reported: set[tuple[str, str]] = getattr(reclaim, "_REPORTED_FAILURES", set())
+    reported.clear()
+    try:
+        yield
+    finally:
+        reported.clear()
+
+
+def test_a_real_childs_environment_is_read_by_the_real_reader(env_child: _EnvChild) -> None:
+    """NO INJECTED ``run``: the platform's own spelling, against a real process.
+
+    This is the cell that fails on Linux without the fix — there ``ps -Eww`` is an
+    invalid option, ``_run_command`` answered ``""``, and both readers below
+    returned nothing while every injected test in this file stayed green.
+    """
+    env = reclaim.process_env(env_child.pid)
+    assert f"{_ENV_PROBE_NAME}={_ENV_PROBE_VALUE}" in env
+    assert config_root_of(env) == str(env_child.root)
+
+    batch = reclaim.process_envs()
+    assert f"{_ENV_PROBE_NAME}={_ENV_PROBE_VALUE}" in batch.get(env_child.pid, "")
+    assert config_root_of(batch[env_child.pid]) == str(env_child.root)
+
+
+def test_the_signal_time_row_reader_reads_a_real_child_and_its_root(
+    env_child: _EnvChild,
+) -> None:
+    """The re-read path end to end: ``process_row`` -> ``target_changed`` -> signal.
+
+    On Linux this is the ``/proc`` append inside ``process_row``; before the fix the
+    row itself came back ``None``, so no candidate could pass the re-read and the
+    sweep could never signal anything at all.
+    """
+    row = process_row(env_child.pid)
+    assert row is not None, "the real reader did not recognise a real child's argv"
+    assert row.pid == env_child.pid
+    assert config_root_of(row.command) == str(env_child.root)
+
+    item = reclaim.Verdict(
+        process=RuntimeProcess(
+            pid=env_child.pid,
+            parent_pid=os.getpid(),
+            age_s=0.1,
+            cpu_s=0.0,
+            command=row.command,
+        ),
+        config_root=str(env_child.root),
+    )
+    # "" is "still the process the pass decided about": the one answer that lets the
+    # signal go out, and the one the broken instrument could never produce.
+    assert reclaim.target_changed(item, row_of=process_row, roots=[]) == ""
+
+
+def test_the_spelling_is_the_one_this_platform_should_use(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``-E`` on Linux is a FAILURE here, not a silent zero.
+
+    ``_IS_LINUX`` is a NAME rather than an inline ``sys.platform`` test so both arms
+    are drivable from either host, and the constant is re-derived from
+    ``sys.platform`` in the same breath so a constant that had drifted from the host
+    cannot pass either.
+    """
+    assert reclaim._IS_LINUX == sys.platform.startswith("linux")
+
+    census_row = (
+        " 4242      1     05:00  0:00.02 /usr/bin/python3 -P -m "
+        f"{reclaim.RUNTIME_MODULE} LOCAL_OPERATOR_CONFIG_DIR=/tmp/one HOME=/tmp/one-home\n"
+    )
+
+    # --- THE LINUX ARM, from any host: no ``-E`` anywhere, and no fork for the env.
+    monkeypatch.setattr(reclaim, "_IS_LINUX", True)
+    calls: list[list[str]] = []
+
+    def run(command, timeout_s):
+        calls.append(list(command))
+        return census_row
+
+    assert process_row(4242, run=run) is not None
+    assert calls[0][:3] == ["ps", "-ww", "-p"], calls[0]
+    assert no_bsd_env_flag(calls[0]), calls[0]
+    linux_row = process_row(4242, run=run)
+    assert linux_row is not None
+    assert config_root_of(linux_row.command) == "/tmp/one"
+
+    def forbidden(command, timeout_s):
+        raise AssertionError(f"the Linux environment must come from /proc: {command}")
+
+    # The environment read itself forks nothing on Linux, and its answer IS what
+    # /proc says — the equality is the assertion on Linux CI and trivially true here.
+    assert reclaim.pid_environment(4242, run=forbidden) == reclaim.proc_environ_text(4242)
+
+    calls.clear()
+    envs = reclaim.process_envs(run=run)
+    assert set(envs) == {4242}
+    # The value is the row's COMMAND COLUMN (everything after the pid), which is the
+    # shape this reader has always returned; a prefix rather than an equality because
+    # on Linux a /proc read for the same pid appends whatever that process holds.
+    command_column = census_row.strip().split(" ", 1)[1].strip()
+    assert envs[4242].startswith(command_column)
+    assert config_root_of(envs[4242]) == "/tmp/one"
+    assert calls[0][:2] == ["ps", "-ww"], calls[0]
+    assert no_bsd_env_flag(calls[0]), calls[0]
+
+    # --- THE BSD/macOS ARM, from any host: the environment in the SAME fork.
+    monkeypatch.setattr(reclaim, "_IS_LINUX", False)
+    seen: list[list[str]] = []
+
+    def recorded(command, timeout_s):
+        seen.append(list(command))
+        return "row-with-env"
+
+    assert reclaim.pid_environment(4242, run=recorded) == "row-with-env"
+    assert seen == [["ps", "-Eww", "-p", "4242", "-o", "command="]]
+
+    seen.clear()
+
+    def recorded_row(command, timeout_s):
+        seen.append(list(command))
+        return census_row
+
+    row = process_row(4242, run=recorded_row)
+    assert row is not None
+    assert seen[0][:3] == ["ps", "-Eww", "-p"], seen[0]
+    assert len(seen) == 1, "the macOS arm must not fork a second time for the environment"
+    assert config_root_of(row.command) == "/tmp/one"
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="procps and /proc are Linux; there is nothing for this cell to measure here",
+)
+def test_on_linux_proc_holds_the_environment_and_ps_rejects_the_bsd_flag(
+    env_child: _EnvChild, caplog: pytest.LogCaptureFixture
+) -> None:
+    """THE TWO FACTS, measured on the platform they are about — CI here, not macOS.
+
+    (1) ``/proc/<pid>/environ`` is where this platform's environment is, and it is
+    what the fix reads. THE SUBJECT IS A REAL CHILD, launched with the variable, and
+    never this process: the file is the snapshot taken at EXEC — the same rule
+    ``ps -E`` has, and the one ``tools/shell_env`` states — so a variable a test sets
+    on ITSELF is in ``os.environ`` and in neither source. CI rejected the earlier
+    version of this cell for asserting exactly that, which is the trap this comment
+    exists to keep out.
+
+    (2) ``ps -Eww`` — what the module built here before the fix — is REFUSED by
+    procps: non-zero, with the complaint on stderr, and nothing on stdout that could
+    parse into a row. The exit-code assertion is also the alarm for the day procps
+    grows ``-E``, at which point this branch can be simplified rather than kept "just
+    in case".
+    """
+    # (1) the kernel's own snapshot, for a process that is not this one.
+    own = reclaim.proc_environ_text(env_child.pid)
+    assert f"{_ENV_PROBE_NAME}={_ENV_PROBE_VALUE}" in own
+    assert config_root_of(own) == str(env_child.root)
+
+    # (2) procps refuses the spelling this module used to build here.
+    rejected = ["ps", "-Eww", "-p", str(env_child.pid), "-o", "command="]
+    done = subprocess.run(  # noqa: S603 — fixed argv, no shell
+        rejected, capture_output=True, text=True, check=False
+    )
+    assert done.returncode != 0, "procps accepted -E; this branch can be simplified"
+    assert done.stderr.strip(), "a rejected option is refused WITH a message"
+
+    # ...and the module's own reader now REPORTS that, instead of swallowing it. What
+    # it got on the pipe is checked by its consequence — no census row — rather than
+    # by an exact stdout, so the cell does not pin where a usage message is printed.
+    caplog.clear()
+    reclaim._REPORTED_FAILURES.clear()
+    caplog.set_level(logging.WARNING, logger=reclaim.__name__)
+    refused = reclaim._run_command(rejected, 5.0)
+    assert len(caplog.records) == 1, [record.getMessage() for record in caplog.records]
+    assert reclaim.parse_process_row(refused) is None
+
+
+def test_a_probe_that_cannot_run_reports_once_and_still_returns_empty(
+    caplog: pytest.LogCaptureFixture, fresh_failure_reports: None
+) -> None:
+    """A tool that is not on this machine is no longer indistinguishable from one
+    that found nothing — and a per-candidate reader does not reprint it per pid."""
+    caplog.set_level(logging.WARNING, logger=reclaim.__name__)
+    missing = ["/nonexistent/ps-probe-4f0c9a"]
+    assert reclaim._run_command(missing, 5.0) == ""
+    assert len(caplog.records) == 1, [record.getMessage() for record in caplog.records]
+    assert "no such file" in caplog.text.lower() or "No such file" in caplog.text
+
+    caplog.clear()
+    assert reclaim._run_command(missing, 5.0) == ""
+    assert caplog.records == [], "the same breakage must be one line, not one per pid"
+
+
+def test_a_message_less_non_zero_exit_is_this_module_s_ordinary_answer(
+    caplog: pytest.LogCaptureFixture, fresh_failure_reports: None
+) -> None:
+    """REPORTED: a rejection that complains. NOT reported: a quiet non-zero exit.
+
+    Simulated with real commands because the platform that rejects ``-E`` (Linux) is
+    not this host: what is simulated is the COMMAND's behaviour, never the code under
+    test. The quiet arm is the module's normal answer — ``ps -p <gone>`` and ``lsof``
+    with an empty table both exit non-zero in silence — and a warning on that path
+    would print on every sweep, which is how a real warning stops being read.
+    """
+    caplog.set_level(logging.WARNING, logger=reclaim.__name__)
+    rejected = ["sh", "-c", "echo 'ps: invalid option -- E' 1>&2; exit 1"]
+    assert reclaim._run_command(rejected, 5.0) == ""
+    assert len(caplog.records) == 1, [record.getMessage() for record in caplog.records]
+    assert "invalid option" in caplog.text
+
+    caplog.clear()
+    assert reclaim._run_command(["sh", "-c", "exit 1"], 5.0) == ""
+    assert caplog.records == []
+
+    # AND THE SIX CALL SITES' CONTRACT IS UNCHANGED: a failing command that printed
+    # something still hands its stdout back, which is what callers read before.
+    assert reclaim._run_command(["sh", "-c", "echo partial; exit 3"], 5.0) == "partial\n"
+
+
+def test_a_rejected_probe_withholds_the_signal_instead_of_signalling(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, fresh_failure_reports: None
+) -> None:
+    """THE BUG'S CONSEQUENCE, END TO END: fail-closed, and now audible.
+
+    The stand-in answers exactly as procps answers ``ps -Eww`` — a message on stderr,
+    a non-zero exit, nothing on stdout — and the pass is the real one: the candidate
+    is admitted, the signal-time re-read cannot read a row, the signal is withheld
+    (``REFUSAL_CHANGED``), and the reason is on the log exactly once. NOTHING
+    DANGEROUS HAPPENED while this was broken — the sweep just stopped working, which
+    is what a silent instrument looks like.
+    """
+    rejecting = ["sh", "-c", "echo 'ps: invalid option -- E' 1>&2; exit 1"]
+
+    def instrument(command, timeout_s):
+        # The same reader, pointed at a command that refuses the argv.
+        return reclaim._run_command(rejecting, timeout_s)
+
+    def row_of(pid: int) -> RuntimeProcess | None:
+        return process_row(pid, run=instrument)
+
+    caplog.set_level(logging.WARNING, logger=reclaim.__name__)
+    kill: list[tuple[int, int]] = []
+    sightings = Sightings()
+    report = None
+    for now in (NOW, NOW + CONFIRM_S):
+        report = reclaim_runtimes(
+            tmp_path,
+            apply=True,
+            sightings=sightings,
+            processes=[proc()],
+            env_of=_recordless_env(tmp_path),
+            row_of=row_of,
+            fleet=fleet(tmp_path),
+            kill=lambda pid, sig: kill.append((pid, sig)),
+            now=now,
+        )
+    assert kill == [], "a probe that cannot read the row must never end a runtime"
+    assert report is not None
+    assert report.refusals() == {REFUSAL_CHANGED: 1}
+    assert len(caplog.records) == 1, [record.getMessage() for record in caplog.records]

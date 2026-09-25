@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any
+from typing import Any, Final
 
 from rich.console import RenderableType
 from rich.style import Style
@@ -383,6 +383,12 @@ class TodoAffordance(Static):
             panel.request_toggle()
 
 
+#: Marks a plan read from the ROOT session's ``todos`` in the frontend memo, as
+#: opposed to a child's canonical plan (which carries its own missing/empty
+#: distinction). A sentinel because ``None`` already means "child plan missing".
+_ROOT_TODOS: Final = object()
+
+
 class TodoPanel(Container):
     """The session's todo list, rendered in the dock band above the input.
 
@@ -603,10 +609,10 @@ class TodoPanel(Container):
         Never raises: a status surface must not be able to take the app down.
         """
         try:
-            frontend = getattr(session, "frontend_state", None)
             selected_id = (
                 session_id if session_id is not None else getattr(session, "session_id", "")
             )
+            frontend, memo = self._frontend_read(session, selected_id)
             selection = (selected_id, transcript_directory)
             if selection != self._selection:
                 self._selection = selection
@@ -614,7 +620,16 @@ class TodoPanel(Container):
                 if self._scroll.is_mounted:
                     self._scroll.scroll_home(animate=False)
             empty_state = ""
-            if frontend is not None:
+            if memo is not None:
+                phases, canonical_missing = memo
+                if canonical_missing is not None:
+                    empty_state = (
+                        ("Loading todos" if loading else "Todos unavailable")
+                        if canonical_missing
+                        else "No todos"
+                    )
+            elif frontend is not None:
+                canonical: Any = _ROOT_TODOS
                 if selected_id == getattr(session, "session_id", ""):
                     phases = [phase.model_dump(mode="json") for phase in frontend.todos]
                 else:
@@ -641,6 +656,7 @@ class TodoPanel(Container):
                         if canonical is None
                         else "No todos"
                     )
+                self._remember_frontend_read(session, selected_id, phases, canonical)
             else:
                 restored = None
                 if transcript_directory is not None:
@@ -750,6 +766,49 @@ class TodoPanel(Container):
             self._painted_rows = min(body_lines, max(1, budget - affordance_rows)) + affordance_rows
         except Exception:
             self.display = False
+
+    def _frontend_read(self, session: Any, selected_id: str) -> tuple[Any, Any]:
+        """``(frontend_state, None)``, or ``(None, memo)`` when nothing it feeds moved.
+
+        ``frontend_state`` is a deep copy of the WHOLE canonical state -- every
+        job on the roster -- taken to read one plan, and this runs once per band
+        settle pass: three times per band refresh. On a viewer of a 252-child
+        roster that was ~2.5 ms a read and the largest item left in the band's
+        profile. The plan is derived only from ``todos`` and ``jobs``, so while the
+        session's collection revision is unchanged the last derivation is still
+        exactly what a fresh read would produce (the phases are only read here,
+        never mutated). A host with no revision reads every time, as before.
+        """
+        revision_of = getattr(session, "frontend_revision", None)
+        if not callable(revision_of):
+            return getattr(session, "frontend_state", None), None
+        try:
+            revision = revision_of()
+        except Exception:  # noqa: BLE001 -- not synchronized: read as before
+            return getattr(session, "frontend_state", None), None
+        key = (selected_id, revision)
+        cached = getattr(self, "_frontend_memo", None)
+        if cached is not None and cached[0] == key and cached[1] is session:
+            return None, cached[2]
+        self._frontend_memo_key = (key, session)
+        return getattr(session, "frontend_state", None), None
+
+    def _remember_frontend_read(
+        self,
+        session: Any,
+        selected_id: str,
+        phases: list[dict[str, Any]],
+        canonical: Any,
+    ) -> None:
+        pending = getattr(self, "_frontend_memo_key", None)
+        self._frontend_memo_key = None
+        if pending is None or pending[1] is not session or pending[0][0] != selected_id:
+            return
+        # ``None`` = the root plan (no empty-state wording); otherwise whether the
+        # child's canonical plan was missing, which picks between "Loading" and
+        # "unavailable" against the CURRENT ``loading`` flag rather than a stale one.
+        missing = None if canonical is _ROOT_TODOS else canonical is None
+        self._frontend_memo = (pending[0], session, (phases, missing))
 
     def _hidden_phase_names(self, phases: list[dict[str, Any]]) -> frozenset[str]:
         """Phase names the VIEW hides right now (never the store — design §7.4).

@@ -10,6 +10,18 @@ router = APIRouter(tags=["Capabilities"])
 
 @router.get("/v1/capabilities", response_model=CRUDResponse)
 async def capabilities():
+    # IMPORTED HERE, NOT AT MODULE SCOPE, and the two precedents are the ones
+    # `tests/unit/test_import_graph.py`'s server guard names in its own comment:
+    # `routes.desktop_profiles` imports `tools.agent_tool` per profile write and
+    # `routes.auth` imports `tunnels.report` per request, both for this reason.
+    # `references` reaches `tools.builtin` (~160 ms), and a module-scope import
+    # puts that back on EVERY `lop serve` startup, before the first request - the
+    # guard fails outright ("`local_operator.tools.builtin` is back on the startup
+    # path"), which is how this was found rather than reasoned about. Deferred,
+    # the cost is paid once per process, on the first `/v1/capabilities` request
+    # and never again; that route is the app's cold negotiation, not a hot path.
+    from local_operator.references import at_references_enabled
+
     return CRUDResponse(
         status=200,
         message="Backend capabilities retrieved.",
@@ -59,6 +71,37 @@ async def capabilities():
                 # and pays the cold engage on its first send, exactly as
                 # before. Gating nothing, it needs no key of its own.
                 "session_catalogue": 3,
+                # A catalogue that can be asked for ONE scope at a time, resumed
+                # by an opaque cursor, and counted per group: the
+                # `scope_kind`/`scope_name`/`cursor`/`with_counts` parameters on
+                # GET /v1/desktop/sessions, and `next_cursor`/`cursor_missing`/
+                # `scope`/`counts` on its answer.
+                #
+                # ITS OWN KEY, not a bump of `session_catalogue`, by the rule
+                # `session_pins` states below: a key exists so an EXISTING surface
+                # keeps working against a backend that lacks the new one, and the
+                # existing surface here is the whole chats list. The failure mode
+                # a bump would not fix is why this is not cosmetic: FastAPI
+                # SILENTLY IGNORES unknown query parameters, so an un-gated client
+                # that sent `scope_kind=team&scope_name=lopdev` to an older daemon
+                # would receive the UNSCOPED page and draw other teams'
+                # conversations under that team, and an un-gated `cursor` would
+                # receive page one again and duplicate it. The client must be able
+                # to ASK whether the daemon understands the parameters, before it
+                # sends them — which is the one thing a capability key can answer
+                # and a version bump of a working surface cannot.
+                #
+                # ONE KEY FOR THREE PROMISES (scoping, paging, the census),
+                # because they are one contract revision: a client that had the
+                # counts without the scope could not draw a group's count
+                # consistently with that group's paged rows.
+                #
+                # Absent ⇒ the client makes ONE unscoped request exactly as today
+                # (`limit=500`, no scope, no cursor, no counts) and renders exactly
+                # as today, with today's latency. `session_catalogue` and
+                # `session_pins` are untouched: no row changes shape, and the
+                # pin's own promise is unchanged.
+                "session_catalogue_page": 1,
                 # Searching past conversations by their CONTENT (name, id, exact
                 # body, bounded soft match) rather than by the page a client
                 # already holds. Its own key rather than a bump of
@@ -145,6 +188,22 @@ async def capabilities():
                 # serve a child transcript", not "this renderer cannot show a
                 # roster".
                 "subagent_transcript": 1,
+                # The child reader's LIVE half, and a NEW KEY rather than a bump
+                # of `subagent_transcript` above (design § 1, D3.4).
+                #
+                # The reader's admission gate asks for `subagent_transcript` with
+                # no minimum version, so bumping it would leave an older backend
+                # still passing that gate — the gate could not tell "the reader
+                # may open" apart from "the live part exists" without asking a
+                # second question of a key that already answered one. A separate
+                # key keeps the reader's floor exactly where it is and makes the
+                # live question its own: absent ⇒ the reader is today's pager,
+                # issues no watch, and looks exactly as it does now. That is the
+                # POST/DELETE pair on
+                # `/v1/desktop/sessions/{id}/children/{job}/trajectory` plus the
+                # `job_trajectory_appends`/`job_trajectory_replacements` field
+                # pair those ops turn on for that job.
+                "subagent_trajectory": 1,
                 # Moving a live session's working directory
                 # (POST /v1/desktop/sessions/{id}/working-directory).
                 #
@@ -368,6 +427,72 @@ async def capabilities():
                 # nothing.
                 "peers": 1,
                 "session_transfer": 1,
+                # ``@path`` in an ordinary submitted message, which
+                # :meth:`Session.prompt` expands into an
+                # ``<operator-references>`` block before the model sees the turn
+                # (`references.expand_references`; `prompt` is the single
+                # expansion site EVERY NON-ASIDE SURFACE reaches — the CLI,
+                # headless runs, the server, the scheduler, the mobile service and
+                # every subagent — and `references.py`'s docstring counts the
+                # other expanding caller, the TUI's aside worker, beside it).
+                #
+                # WHAT THIS KEY DOES NOT COVER, stated because a client that
+                # assumed otherwise would paint a chip over literal text: this
+                # server's send route takes ``mode: "prompt" | "steer"``, and a
+                # STEER bypasses `prompt` — :meth:`Session.steer` queues the
+                # message and expands nothing. `session/session.py` lists the
+                # three entry paths that predate the feature and leave an `@path`
+                # as inert prose: `steer`, a wake delivery, and an aside FORK —
+                # and that last one is true only of the adopted ROW, because the
+                # TUI's own aside worker expands the text it hands the model
+                # (`tui/app.py`'s `_expand_references` is that call, and
+                # `references.py` names it as one of the TWO expanding callers).
+                # So the key means "this backend expands a reference in a
+                # PROMPT", never "in any text a client sends", and a composer
+                # that can send either must withhold the affordance for the
+                # steer — which is what the shipped one does, `!busy` beside
+                # this gate.
+                #
+                # THIS IS THE WRITER THE RENDERER HAS BEEN WAITING FOR. The app
+                # ships the `@` picker, the inline chips and the composer tip,
+                # and withholds all three until a backend advertises this key —
+                # so on every backend older than this line the affordance is
+                # dark BY DESIGN, `@path` stays the plain text such a backend
+                # sends, and the composer says why. The key is the whole switch;
+                # nothing else about the app changed to light it up.
+                #
+                # CONDITIONAL, and it is the only key in this map whose PRESENCE
+                # is a runtime fact rather than a build fact.
+                # ``LOCAL_OPERATOR_AT_REFERENCES``
+                # (:data:`local_operator.references.AT_REFERENCES_ENV`) is a kill
+                # switch read per call, so a process told not to expand must not
+                # advertise a picker that paints chips for an expansion it will
+                # not perform: a client that believed the key would show the
+                # user a reference the model never receives, which is the one
+                # lie this gate exists to prevent. That variable has exactly ONE
+                # reader, :func:`~local_operator.references.at_references_enabled`,
+                # which is called here rather than re-read, so this payload and
+                # the expansion THIS PROCESS performs cannot disagree.
+                #
+                # AND THAT LAST CLAUSE IS SCOPED TO THIS PROCESS, which is a real
+                # boundary rather than a hedge: a turn is admitted over a socket
+                # to whichever process OWNS the session, and a runtime's
+                # environment is the snapshot it was spawned with. So a daemon
+                # whose switch is on can advertise the key while an owner engaged
+                # from a shell that exported the switch off sends the literal
+                # `@path`. No value read here can fix that, and it needs no new
+                # handling: the owner's behaviour is the same absent-key
+                # behaviour a client already implements, and the case that
+                # matters — every backend older than this line — is decided by
+                # presence alone.
+                #
+                # ITS OWN KEY rather than a bump, by the rule `session_search`
+                # states above: the composer renders perfectly well without it —
+                # an unexpanded `@path` is prose the model reads as prose — so
+                # gating that working composer on a newer version would take a
+                # surface away to advertise nothing. A client that does not see
+                # the key must send the draft as typed and offer no affordance.
+                **({"references": 1} if at_references_enabled() else {}),
             },
         },
     )

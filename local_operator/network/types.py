@@ -476,6 +476,14 @@ INNER_OP_CAPABILITY: dict[str, str] = {
     "new_conversation": "prompt",
     "complete_aside": "prompt",
     "peer_message": "prompt",
+    # ``peer_set_model`` is main's newer sibling of ``peer_message`` (a peer
+    # switching THIS session's model over the control frame, added after this
+    # table was written). It lands on the SAME capability as its two nearest
+    # rows: ``set_model``, the local verb with the identical effect, and
+    # ``peer_message``, the peer verb beside it. Without a row it is refused
+    # closed on the relay's inner-frame path (``unknown_op``), which is how a
+    # peer's switch would fail rather than how it would be authorised.
+    "peer_set_model": "prompt",
     "variables": "prompt",
     # steer
     "steer": "steer",

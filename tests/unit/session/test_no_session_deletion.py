@@ -951,10 +951,12 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "temp FILE -> state, dir_fd-bound to an evidence root",
     ),
     # The mcp config writer: a temp file BESIDE its target and ``os.replace`` onto
-    # it. Its two call sites are the ``add_key`` header bind and the rollback that
-    # undoes a refused one, and both take the scope FILE ``_scope_path`` resolved
-    # for a server this module owns — the replaced path is a file it just read,
-    # never a directory, so no session DIRECTORY is removed, renamed or replaced.
+    # it. It is EVERY mcp.json write in ``mcp/config.py``: its callers are
+    # ``_write_json_atomic`` (add, OAuth set, remove, and the unbind fallback), the
+    # ``add_key`` header bind, and the byte-exact rollback of a refused bind. Every
+    # one passes the scope FILE ``_scope_path`` resolved — the replaced path is an
+    # mcp.json, never a directory, so no session DIRECTORY is removed, renamed or
+    # replaced. A new caller with any other path is what this row does not cover.
     (
         "local_operator/mcp/config.py::_write_bytes_atomic",
         "os.replace",

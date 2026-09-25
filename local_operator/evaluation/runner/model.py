@@ -87,6 +87,34 @@ class ModelDecision(ProtocolModel):
     #: which counts how the model answered: a bundle showing a call against a
     #: request that offered nothing is a state the wire cannot produce.
     offered_tool_count: SafeCount = 0
+    #: How many of this attempt's action fields the reply put on a kind that
+    #: does not take them (``drop_sibling_action_fields``), dropped before the
+    #: batch was validated. Recorded on the ACCEPTED path, which is the whole
+    #: point: the replies this tolerance recovers stop producing rejection
+    #: artifacts, so without a count the class that justified the change becomes
+    #: uncountable from the bundles -- and a tolerance nobody can count is
+    #: indistinguishable from one that stopped firing. A count rather than the
+    #: names: the names are a bounded ``kind.field`` vocabulary reported in the
+    #: log line, while the bundle is signed and published.
+    #:
+    #: Sealed by the runner as its own ``reply_tolerance`` event
+    #: (:class:`~local_operator.evaluation.evidence.models.ReplyTolerancePayload`)
+    #: rather than as a field of ``ModelResponsePayload``: an event's id is a
+    #: digest over its payload, so a field added to a payload model that already
+    #: has sealed events makes every one of them fail verification. This
+    #: structure is runner-side and is never hashed, which is what makes it the
+    #: safe place to carry the count until the writer seals it.
+    tolerated_action_fields: SafeCount = 0
+    #: How many UTF-8 bytes of framing preceded this attempt's decision, after
+    #: leading whitespace. Zero for the ordinary reply, which begins with its
+    #: decision; non-zero says the decoder had to LOCATE the decision behind a
+    #: preamble, a code fence or a native call-syntax wrapper
+    #: (``_locate_leading_object``). Carried because that recovery is otherwise
+    #: invisible in a sealed bundle: a reply read through the tolerance produces
+    #: no rejection artifact, so the class would leave the histogram entirely
+    #: rather than showing as recovered. Sealed by the ``reply_tolerance`` event,
+    #: for the reason stated on ``tolerated_action_fields``.
+    leading_framing_bytes: SafeCount = 0
     #: How many DECLARED provider reasoning-boundary markers were stripped from
     #: the head of this attempt's reply before it was judged. Recorded on the
     #: ACCEPTED path as well as the rejected one, and that is the whole point:
@@ -158,6 +186,25 @@ class StreamShape(ProtocolModel):
     content_deltas: SafeCount = 0
     reasoning_deltas: SafeCount = 0
     tool_call_deltas: SafeCount = 0
+    #: The NAMES of the tool calls this attempt's stream carried, JSON-quoted in
+    #: stream order and bounded by the builder. Empty when the stream carried
+    #: none, which is a real reading and not an absence: a reply with
+    #: ``content_deltas=0`` and this empty said nothing on either channel.
+    #:
+    #: It exists because the name was the ONE thing a refusal could not be
+    #: diagnosed from. 178 of the arm's 204 ``leading-delimiter`` refusal
+    #: artifacts were a decision that arrived as a tool call the harness did not
+    #: read, recounted 2026-09-25 over ``~/worktrees/osworld/runs`` (see
+    #: ``harness/reply_channel.envelope_from_tool_call``); the bundle kept the
+    #: delta count and nothing else, so whether the model invented a name, called
+    #: a real tool of its own, or reused the offered one with different casing was
+    #: unknowable after the fact — and unanswerable without paying for the run
+    #: again. The count says a call happened; this says what it was called.
+    #:
+    #: Model-controlled text, so it is escaped by the renderer exactly as ``stop``
+    #: is: a name carrying a newline would otherwise open a line that reads like
+    #: another artifact header.
+    tool_call_names: str = ""
     #: The provider's raw terminal marker, recorded VERBATIM and deliberately a
     #: plain ``str`` rather than a ``StrictIdentifier``. The vocabulary here
     #: belongs to the provider: a marker our identifier pattern would reject
@@ -211,6 +258,8 @@ class DecisionRejected(Exception):
         class_key: str | None = None,
         evidence_reply: str | None = None,
         stream_shape: StreamShape | None = None,
+        channel_read: bool = False,
+        channel_prose_chars: int | None = None,
         stripped_reply_markers: int = 0,
         reasoning_effort: str | None = None,
         empty_length_truncation: bool = False,
@@ -252,6 +301,37 @@ class DecisionRejected(Exception):
         # reply can be told apart from a discarded one.
         self.class_key = class_key
         self.stream_shape = stream_shape
+        # WHICH channel this refusal was judged on, carried as a fact rather than
+        # left for a reader to infer. The class key alone cannot say it: a
+        # ``leading-delimiter`` refusal is the bytes not starting with ``{``, and
+        # whether those bytes came from the model's prose or from the arguments
+        # of a call it made is the difference between a model that framed its
+        # reply badly and a harness that read the wrong channel -- the exact
+        # misdiagnosis that let 178 of the arm's 204 refusals sit undiagnosed
+        # (see ``harness/reply_channel.envelope_from_tool_call``; recounted
+        # 2026-09-25 over ``~/worktrees/osworld/runs``). ``True`` means
+        # the tool-call channel was read and its bytes are what was judged;
+        # ``False`` means the prose was judged (or there was none).
+        #
+        # A harness fact beside the shape, not a property of the provider's
+        # stream, which is the same reason ``stripped_reply_markers`` rides
+        # here: reading a channel is something the harness did to the reply.
+        self.channel_read = channel_read
+        # How much prose the judged-vs-published question had to choose over, in
+        # CHARACTERS of the text the decoder would have been handed. Together with
+        # ``channel_read`` this is what makes the widening's collateral
+        # countable from a sealed bundle: ``channel=read(prose=0)`` is the silent
+        # reply the widening exists for, ``channel=read(prose=26)`` is a turn that
+        # also wrote prose the channel reader set aside -- a combination no
+        # artifact could show before, because a ``content_deltas`` count is
+        # events rather than the bytes judged.
+        #
+        # ``None`` means the client did not RECORD the count, and the renderer
+        # omits the clause rather than printing ``prose=0``: zero is a READING
+        # of a genuinely silent turn, which is the class the widening exists
+        # for, so guessing it would make an unrecorded refusal indistinguishable
+        # from that class in a sealed bundle.
+        self.channel_prose_chars = channel_prose_chars
         # The reply-assembly tally, for the same reason the class key is here:
         # a refusal whose reply LOST a provider boundary token explains itself
         # differently from one that arrived already broken, and only the count
@@ -287,6 +367,49 @@ class DecisionRejected(Exception):
 
 
 @runtime_checkable
+class CompletionChallenger(Protocol):
+    """A model client that can re-present the end state on request.
+
+    THE RUNNER'S GATE ASKS FOR THIS AND THIS ALONE, and it is a SEPARATE
+    protocol rather than a member of :class:`EpisodeModelClient` on purpose. The
+    gate has to survive a client that cannot do it -- that is the whole reason
+    the driver refuses to seal a gate-on run whose client has no
+    ``challenge_completion`` -- and a REQUIRED member would make that case
+    impossible to express: every double, scripted client and third-party client
+    would have to implement a method whose only job is to say something the
+    client may have no way to say. Membership is therefore optional, declared
+    here, and asked for by ``isinstance``.
+
+    The contract, for an implementation (see
+    ``ProviderModelClient.challenge_completion`` for the shipped one):
+
+    * ``batch`` is the terminal batch the model just declared -- one
+      ``FinishAction``, alone in its batch -- and ``instruction`` is the task
+      text as the reset observation published it.
+    * Append the model's OWN declaration as the assistant message it would have
+      been replayed as, then a user message carrying the challenge AND the
+      current observation's frames, read through the same ``verify_artifact``
+      reader the observation itself was rendered with. The
+      ``append_rejection`` shape, reused: an APPEND, never a rewrite, because
+      the prefix cache is keyed on the bytes already sent.
+    * Return the challenge text as appended, so the runner can publish exactly
+      what the model was shown.
+    * Raising is the contract for an unrecoverable failure, exactly as in
+      ``decide``: the challenge is appended in-process and the provider is not
+      called until the next ``decide``.
+    """
+
+    async def challenge_completion(
+        self,
+        observation: Observation,
+        history: Sequence[EpisodeTurn],
+        *,
+        batch: ActionBatch,
+        instruction: str,
+    ) -> str: ...
+
+
+@runtime_checkable
 class EpisodeModelClient(Protocol):
     """Chooses the next action batch for an episode.
 
@@ -309,6 +432,13 @@ class EpisodeModelClient(Protocol):
       and finalizes the episode unscored on a still-live session. Internal
       retries for transport faults therefore belong inside the implementation,
       below this boundary.
+
+    A client MAY also implement :class:`CompletionChallenger`. The runner's
+    completion gate asks the model once to check a ``done`` declaration against
+    the observation it is bound to, and a client that cannot re-present the end
+    state simply does not satisfy that protocol -- so the gate does not fire and
+    ``scripts/run_episode.py`` refuses to seal a gate-on run rather than record a
+    manifest claiming a gate that never ran.
     """
 
     async def decide(

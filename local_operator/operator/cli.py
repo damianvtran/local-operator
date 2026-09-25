@@ -103,6 +103,16 @@ def add_parser(subparsers: Any) -> None:
     )
     sign_parser.add_argument("--session", default="", help="The session id to bind to")
     sign_parser.add_argument("--request-id", default="", help="The card id, for approve")
+    sign_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=180.0,
+        metavar="SECONDS",
+        help=(
+            "How long the OS presence prompt may take (default 180). On expiry the key "
+            "agent is killed and nothing is signed"
+        ),
+    )
 
 
 def main(args: argparse.Namespace) -> int:

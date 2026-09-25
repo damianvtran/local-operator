@@ -271,7 +271,37 @@ def _secret_ref_states(cfg: Any, base: Path) -> list[dict[str, str]]:
 #: real key header out of ``add_key`` (review round 3, R3-M1); erring narrow is
 #: what offers a second key header, so a name that merely mentions a key is
 #: counted as one.
-_CREDENTIAL_HEADER_TOKENS = ("auth", "key", "token", "secret", "credential", "password")
+#:
+#: ``cookie``, ``bearer``, ``session`` and ``signature`` name a credential
+#: carrier without containing any of the first six: a literal ``Cookie`` session
+#: credential read as "sends no key", so the row offered ``add_key`` and said
+#: its headers could not carry one (review round 5, m2). ``session`` also
+#: matches the transport's own ``Mcp-Session-Id``, which is why
+#: :func:`_headers_carry_credential` excludes transport-owned names.
+#:
+#: ``auth`` is NOT in this tuple: it is matched by :data:`_AUTH_WORD` instead.
+_CREDENTIAL_HEADER_TOKENS = (
+    "key",
+    "token",
+    "secret",
+    "credential",
+    "password",
+    "cookie",
+    "bearer",
+    "session",
+    "signature",
+)
+
+#: ``auth`` as a credential word, not as a substring (review round 5, m3). A
+#: plain substring caught ``X-Author``/``X-Authority``, which name a person or an
+#: issuer, and a server with ``auth.type: apikey`` sending one reached the dead
+#: end R4-M1 closed: ``needs_sign_in`` after a 401 beside ``signed_in: true`` and
+#: no key action. A word boundary cannot express the fix — ``\bauth`` still
+#: matches ``Author`` and ``auth\b`` loses ``Authorization`` — so the rule is
+#: "``auth`` not followed by ``or``, unless it continues as ``oriz``/``oris``":
+#: ``Authorization``/``Proxy-Authorization``/``X-Authorisation``, ``X-Auth-Token``,
+#: ``X-OAuth``, ``Authentication`` and camel-case ``XAuthToken`` all still count.
+_AUTH_WORD = re.compile(r"auth(?!or(?!i[sz]))")
 
 
 def _headers_carry_credential(headers: Any) -> bool:
@@ -291,6 +321,19 @@ def _headers_carry_credential(headers: Any) -> bool:
     list the header write refuses to bind), and a name that says nothing about a
     credential (``X-Tenant-Id``, ``X-Request-Id``). Nothing else is narrowed:
     the URL arm stays as wide as :func:`_url_carries_credential`.
+
+    The transport exclusion is load-bearing for exactly one name today:
+    ``Mcp-Session-Id`` contains the ``session`` token, but the protocol assigns
+    it per connection and no key travels in it. Without the exclusion a keyless
+    ``apikey`` server that echoes it would read as already sending a key and
+    lose ``add_key`` — the R4-M1 dead end again (review round 5, n1: before
+    ``session`` was a token, no transport-owned name matched and the exclusion
+    changed no result).
+
+    The name is the only evidence, so two residuals remain, both deliberate.
+    A name that mentions a key without being one (``X-Idempotency-Key``) counts
+    as a carrier; a key sent under a name with no credential word
+    (``X-Custom``) does not, and that row is offered ``add_key``.
     """
     from local_operator.mcp.config import TRANSPORT_OWNED_HEADERS
 
@@ -298,7 +341,10 @@ def _headers_carry_credential(headers: Any) -> bool:
         return False
     return any(
         lowered not in TRANSPORT_OWNED_HEADERS
-        and any(token in lowered for token in _CREDENTIAL_HEADER_TOKENS)
+        and (
+            _AUTH_WORD.search(lowered) is not None
+            or any(token in lowered for token in _CREDENTIAL_HEADER_TOKENS)
+        )
         for lowered in (str(name).lower() for name in headers)
     )
 
@@ -422,17 +468,27 @@ def _auth_facts(cfg: Any, refs: list[dict[str, str]]) -> dict[str, Any]:
     return {"kind": kind, "signed_in": signed_in, "secret_refs": refs, "_unbound": unbound}
 
 
-def _last_seen_tools(name: str, cfg: Any, digest: str, tool_cache: Any) -> int | None:
+def _last_seen_tools(name: str, cfg: Any, digest: str, tool_cache: Any) -> tuple[int, float] | None:
+    """The cached tool count for this exact config, and WHEN it was listed.
+
+    The time is the cache row's ``saved_at`` (epoch seconds), written only after
+    a successful ``tools/list``. It travels with the count because a count with
+    no age is what a client cannot render honestly after a reload: the row's
+    ``status_observed_at`` is null on the ``stored`` basis by design, so without
+    this the desktop had a number and nothing to say how old it was.
+    """
     if tool_cache is None:
         return None
-    cached = tool_cache.get(name, digest)
-    if not cached:
+    entry = tool_cache.get_entry(name, digest)
+    if entry is None or not entry[0]:
         return None
-    return sum(
+    cached, saved_at = entry
+    count = sum(
         1
-        for entry in cached
-        if isinstance(entry, dict) and tool_enabled_by_config(cfg, str(entry.get("name", "")))
+        for item in cached
+        if isinstance(item, dict) and tool_enabled_by_config(cfg, str(item.get("name", "")))
     )
+    return count, saved_at
 
 
 def _row(
@@ -528,9 +584,12 @@ def _row(
         else:
             status = "not_started"
 
+    last_seen_at: float | None = None
     if tool_count is None:
-        tool_count = _last_seen_tools(name, cfg, digest, tool_cache)
-        tool_basis = "last_seen" if tool_count is not None else None
+        seen = _last_seen_tools(name, cfg, digest, tool_cache)
+        if seen is not None:
+            tool_count, last_seen_at = seen
+            tool_basis = "last_seen"
 
     actions: list[str] = []
     if not errors:
@@ -582,6 +641,11 @@ def _row(
         "auth": auth,
         "tool_count": tool_count,
         "tool_count_basis": tool_basis,
+        # Epoch SECONDS, set iff ``tool_count_basis == "last_seen"``: when that
+        # count was listed. Deliberately NOT ``status_observed_at`` — a stored
+        # status is not an observation, and that field keeps its live/probe
+        # meaning. A client that reads it as milliseconds renders a date in 1970.
+        "last_seen_at": last_seen_at,
         "actions": actions,
     }
 

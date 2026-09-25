@@ -68,9 +68,10 @@ from local_operator.mobile.types import (
     SubagentRow,
 )
 from local_operator.procstate import detached_popen_kwargs
-from local_operator.session.creation import session_category, session_created_at
+from local_operator.session.creation import session_created_at
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.types import reported_subagent_count
+from local_operator.tui.sidebar_pins import PINS_FILE, read_pins, set_pin
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,11 @@ logger = logging.getLogger(__name__)
 #: session starts or dies); the scan is cheap, and 2 s makes a new terminal
 #: session appear on the phone before the user reaches for it.
 SCAN_INTERVAL_S = 2.0
+
+#: The pin-file fingerprint before the first scan has looked. Distinct from
+#: ``None`` ("no file"), which is a real observation the first tick must still
+#: compare against -- see ``MobileDaemon._refresh_pins_if_changed``.
+_PINS_UNREAD = object()
 
 #: Backoff before re-dialing a refused control socket. A registrant whose
 #: record is fresh but whose socket refuses is mid-restart; hammering it
@@ -297,6 +303,121 @@ class SessionEntry:
         return self._req_seq
 
 
+def _rank_row(
+    session_id: str,
+    *,
+    entry: SessionEntry | None,
+    row: Any,
+    created_at: float,
+    mtime: float,
+    attention: dict[str, Any],
+    pending_kind: str,
+    provisional: bool = False,
+) -> tuple[tuple[int, int, float, str], bool]:
+    """``(rank, active)`` for one merged summary, taken from the SHARED home.
+
+    WHY THIS EXISTS AT ALL — the jitter it removes. The phone used to sort on a
+    key it derived here, out of whatever the merge happened to hold, while the
+    terminal and the desktop app both sort on ``catalog.entry_for(...).rank``.
+    Two homes for one order is exactly the drift this codebase forbids
+    elsewhere, and it produced a list the operator could watch move:
+
+    * **Membership was the live-entry test, not the shared ``active`` rule.**
+      ``section`` came from "a live SessionEntry exists", but the shared rule is
+      ``pending or unseen or live_state``. So a durable-only conversation that
+      finished while nobody was watching carried an unseen receipt, ranked tier
+      1 in the catalogue, and still landed under Previous here — the two
+      surfaces disagreeing about which list a row is in.
+    * **A brand-new session tied at birth zero.** ``created_at`` fell back to
+      ``self._creation_dates.get(session_id, 0.0)`` for a live session whose
+      durable row had not been built yet, so a just-started conversation sorted
+      below every real birth and JUMPED to the top the moment the 1 s durable
+      refresh resolved its date. Two rows sharing that 0.0 also swapped places
+      on the id tie-break, which is a different order on every poll whose set of
+      unresolved ids changed.
+    * **``busy`` was the projection's ``streaming``, not the record's state.**
+      Those are different facts — ``streaming`` is what the phone's fold has
+      seen, ``busy`` is the runtime's own published flag — and the terminal and
+      desktop rank on the latter. A session whose fold has not yet observed a
+      turn start (a mid-turn attach, a frame that arrived before the projection
+      did) therefore ranked one tier differently here than in the sidebar. It is
+      the same class of defect as the two above: a ranking input read from
+      whatever local state happened to be in hand instead of from the shared
+      source.
+
+    So this builds the SAME :class:`~local_operator.resume.SessionRow` the
+    catalogue's own decorator builds, hands it the same attention state, and
+    asks :func:`~local_operator.session.catalog.entry_for` for the key. The
+    ``live_state`` mapping below is ``decorate_rows``'s, deliberately — that
+    function is the other reader of a record's liveness, and a second spelling
+    of ``busy``/``attached``/``idle`` is the drift this change removes.
+
+    ``pending`` prefers the RECORD (what the catalogue reads) and falls back to
+    the live projection's gate for the window where the record has not caught
+    up, so a phone-visible gate is never unranked.
+
+    ``provisional`` is the PHONE-WOKEN window: a ``/wake`` accepted by this
+    daemon but whose runtime has not yet been discovered (``retain_provisional_active``
+    holds the marker for one scan interval). That row has no ``SessionEntry`` yet,
+    so the shared ``active`` rule would file it under Previous and it would pop
+    into Active a moment later — the same jump this change exists to remove,
+    arriving by another route. It is ranked as a live ``idle`` row instead, which
+    is what it is about to become and what the wake path's own comment promises
+    the list shows. Deliberately ranked as ``idle`` rather than as whatever the
+    sidebar would say: the sidebar has no equivalent window because its wake
+    transition is not observed the same way, so there is no second mode to
+    match — the honest statement of a row in this window is "active and doing
+    nothing yet".
+
+    ONE DELIBERATE DIVERGENCE FROM THE SIDEBAR, stated rather than hidden: the
+    catalogue's key carries a ``wake_rank`` band inside Previous, and these
+    summaries carry no wake data at all (``decorate_rows`` reads the wake index;
+    the mobile durable rows come from ``recent_session_rows``, which does not).
+    So the wake band is a constant here. See ``CatalogEntry.rank``'s docstring,
+    which names this asymmetry itself. Order within Active and Previous is
+    otherwise identical to the sidebar's, because it is the same key.
+    """
+    from local_operator.resume import SessionRow
+    from local_operator.session.catalog import entry_for
+
+    live_state = ""
+    pending: str | None = None
+    if entry is not None:
+        record = entry.record
+        # The catalogue's own mapping, so the two surfaces cannot disagree about
+        # what a record means. ``wedged`` first: a stopped owner outranks the
+        # busy flag, which may be a stale True from before the beat went quiet.
+        heartbeat = float(getattr(record, "heartbeat_at", 0.0) or 0.0)
+        if heartbeat > 0.0 and time.time() - heartbeat > registry.HEARTBEAT_TIMEOUT_S:
+            live_state = "wedged"
+        elif getattr(record, "busy", False):
+            live_state = "busy"
+        elif not getattr(record, "detached", False):
+            live_state = "attached"
+        else:
+            live_state = "idle"
+        pending = getattr(record, "pending", None) or None
+    if entry is None and provisional:
+        # The phone-woken window: ranked as the live idle row it is becoming.
+        live_state = "idle"
+    if pending is None and pending_kind:
+        # The record has not carried the gate yet (the live projection saw it
+        # first). Same vocabulary the catalogue ranks on, so the row is ranked
+        # rather than left in the idle band for a poll.
+        pending = "approval" if pending_kind == "approval" else "answer"
+
+    shared = SessionRow(
+        session_id,
+        mtime,
+        str(getattr(row, "name", "") or ""),
+        created_at=created_at,
+        live_state=live_state,
+        pending=pending,
+    )
+    built = entry_for(shared, attention)
+    return built.rank, built.active
+
+
 def _advertisable_counts(entry: SessionEntry | None) -> tuple[int | None, int | None]:
     """This entry's ``(running, queued)`` children, or ``(None, None)``.
 
@@ -415,6 +536,17 @@ class SessionTable:
         self._summaries_task: asyncio.Task[list[dict[str, Any]]] | None = None
         self._attention_states: dict[str, dict[str, Any]] = {}
         self._creation_dates: dict[str, float] = {}
+        #: The sidebar's durable pinned session ids, newest pin first, read by
+        #: ``_merge_summaries``. Kept as table state rather than read per row so
+        #: a pin change made in the terminal reaches the phone through exactly
+        #: one read, and so the merge itself stays pure in-memory. WRITTEN ONLY
+        #: BY THE TWO PIN PATHS that wake the list stream as they publish it --
+        #: ``MobileDaemon._refresh_pins_if_changed`` (the periodic pass, which
+        #: owns pins written by another surface) and :meth:`set_pins` (this
+        #: daemon's own route). A reader that republished this without waking
+        #: would swallow the wake; see the invariant in
+        #: ``_refresh_pins_if_changed``.
+        self.pins: tuple[str, ...] = ()
 
     def invalidate_summaries_cache(self) -> None:
         """Drop both summaries caches so the next read rescans.
@@ -491,6 +623,16 @@ class SessionTable:
             for session_id in live_ids - rows.keys():
                 if session_id not in ("", ".", "..") and Path(session_id).name == session_id:
                     dates[session_id] = session_created_at(directory / "sessions" / session_id)
+            # THE PINS ARE DELIBERATELY *NOT* READ HERE. This load runs off the
+            # loop and unannounced whenever something wants a listing — a second
+            # client's first frame is enough — so a pins read here landed on
+            # ``self.pins`` twice over: it made the pass's own comparison ("is
+            # the set I just read the one the phone already has?") read true and
+            # swallowed the wake for a list that was ALREADY open, and an
+            # in-flight read finishing after a pass republished its older value
+            # over the newer one the pass had just announced (review round 7,
+            # F1/F2). See ``MobileDaemon._refresh_pins_if_changed``: the pin file
+            # has exactly one reader that may publish ``SessionTable.pins``.
             return rows, dates
 
         async def _load() -> dict[str, Any]:
@@ -644,6 +786,41 @@ class SessionTable:
         self._summaries_at = time.monotonic()
         return out
 
+    def set_pins(self, session_id: str, pinned: bool) -> bool:
+        """Set one session's durable pin and refresh the table's copy.
+
+        Delegates to :mod:`local_operator.tui.sidebar_pins` — the ONE pin store —
+        so a pin made on the phone is the same pin the terminal's ``F10`` and the
+        desktop app's row action read and write. This is the whole reason the
+        phone's pin rides this file rather than a relay-local list: a pin is a
+        durable user statement about a conversation, not a per-surface view
+        preference, and a second store would make the surfaces disagree about
+        which conversations are pinned.
+
+        BLOCKING WORK ONLY — the disk write and the read-back. It is called
+        through ``asyncio.to_thread`` (see ``api_session_pin``), so it must NOT
+        touch the loop: ``notify_list_changed`` does ``asyncio.Queue.put_nowait``
+        on the SSE queues, and doing that from a foreign thread is not safe and
+        can drop the repaint until the next keepalive (review round 1, MAJOR 2).
+        The caller wakes the stream on the loop, right after this returns.
+
+        Invalidates the summaries cache here rather than in the caller because
+        that is plain in-memory state (``_summaries_cache = None``), which is
+        safe off-loop and belongs beside the change that made it stale: the pin
+        is membership in a display section, so the row must move even though
+        nothing else about it changed.
+
+        Returns the state the READER now reports, not ``set_pin``'s answer: the
+        two differ exactly when the reader prunes the id (its folder is gone),
+        and the phone must be told what its list will show (QA round 1, Q2).
+        """
+        from local_operator.paths import config_dir
+
+        set_pin(config_dir(), session_id, pinned)
+        self.pins = tuple(read_pins(config_dir()))
+        self.invalidate_summaries_cache()
+        return session_id in self.pins
+
     def _merge_summaries(self, durable: dict[str, Any]) -> list[dict[str, Any]]:
         """Merge cached durable rows with fresh live state into summary rows.
 
@@ -658,17 +835,60 @@ class SessionTable:
             if prior is None or entry.record.heartbeat_at > prior.record.heartbeat_at:
                 active[entry.record.session_id] = entry
         out: list[dict[str, Any]] = []
+        ranks: dict[str, tuple[tuple[int, int, float, str], bool]] = {}
         for session_id in set(durable) | set(active):
             entry = active.get(session_id)
             counts = _advertisable_counts(entry)
             p = entry.projection if entry else None
             row = durable.get(session_id)
+            attention = self._attention_states.get(f"session/{session_id}", {})
+            # BIRTH, AND THE FALLBACK IS THE RUNTIME'S OWN START, never 0.0.
+            # ``_creation_dates`` is resolved off-loop by ``_refresh_durable_rows``
+            # for a live session the bounded history listing did not carry — but
+            # there is a window (a session just started from the phone, before the
+            # 1 s durable refresh runs) where neither a durable row NOR a resolved
+            # date exists. Falling back to 0.0 there put a brand-new conversation
+            # at the BOTTOM of its tier and then JUMPED it to the top the moment
+            # the real date landed: the highest-sorting ``-created_at`` term
+            # flips ends when a zero becomes a large number. ``started_at`` is the
+            # runtime's own clock, which for a conversation that was just created
+            # (and so was just started) is its birth to within the process
+            # handshake — close enough that the row holds its place across the
+            # transition instead of leaping, and honest about the fact that the
+            # exact birth is not known yet. The id tie-break below makes the order
+            # total for any remaining equal values.
+            created_at = (
+                row.created_at
+                if row
+                else self._creation_dates.get(session_id)
+                or (float(getattr(entry.record, "started_at", 0.0) or 0.0) if entry else 0.0)
+            )
+            mtime = row.mtime if row else entry.record.started_at if entry else 0
+            rank, is_active = _rank_row(
+                session_id,
+                entry=entry,
+                row=row,
+                created_at=created_at,
+                mtime=mtime,
+                attention=attention,
+                pending_kind=(p.pending.kind if p and p.pending else ""),
+                # THE PHONE-WOKEN WINDOW (review MAJOR 1): a /wake this daemon
+                # accepted but has not yet seen register a record. Ranking it as a
+                # live row is what makes it land in Active at once instead of
+                # flashing under Previous until the runtime publishes.
+                provisional=session_id in self.provisional_active,
+            )
+            ranks[session_id] = (rank, is_active)
             out.append(
                 {
                     "session_id": session_id,
-                    "section": (
-                        "active" if entry or session_id in self.provisional_active else "previous"
-                    ),
+                    # SECTION IS THE SHARED ``active`` RULE, not "a live entry
+                    # exists". See ``_rank_row``: a durable-only conversation
+                    # with an unseen completion is Active on every other surface,
+                    # and calling it Previous here is what put one conversation
+                    # in two different lists depending on where you looked.
+                    "section": "active" if is_active else "previous",
+                    "pinned": session_id in self.pins,
                     "conversation_name": (p.conversation_name if p else "")
                     or (entry.record.conversation_name if entry else "")
                     or (row.name if row else ""),
@@ -730,34 +950,25 @@ class SessionTable:
                         for todo in phase.items
                         if todo.status in ("pending", "blocked")
                     ),
-                    "mtime": row.mtime if row else entry.record.started_at if entry else 0,
-                    "created_at": (
-                        row.created_at if row else self._creation_dates.get(session_id, 0.0)
-                    ),
-                    "completion_kind": self._attention_states.get(f"session/{session_id}", {}).get(
-                        "kind"
-                    )
-                    or "",
+                    "mtime": mtime,
+                    # The SAME value the rank used, so the wire and the order
+                    # cannot disagree about a row's birth (see the resolution
+                    # note above).
+                    "created_at": created_at,
+                    "completion_kind": attention.get("kind") or "",
                     # Shared completion receipts, not transcript activity or
                     # heartbeat freshness, decide whether an outcome is unread.
                     "unseen": self._is_unseen(session_id, row, entry),
                 }
             )
-        out.sort(
-            key=lambda summary: (
-                summary["section"] != "active",
-                session_category(
-                    pending=summary["needs_attention"],
-                    busy=summary["streaming"],
-                    unseen=summary["unseen"],
-                    kind=summary["completion_kind"],
-                    live=summary["section"] == "active",
-                ),
-                # Token/heartbeat refreshes must not move a finger's target.
-                -summary["created_at"],
-                summary["session_id"],
-            )
-        )
+        # THE SHARED RANK, straight from ``_rank_row`` — not a key re-derived
+        # here. Pins are NOT part of this sort: like the sidebar's ★ Pinned
+        # section, a pin is a DISPLAY lift applied by the client (see
+        # ``session-list.tsx``), so pinning a row never moves it within Active or
+        # Previous and the two surfaces keep agreeing about the ranking itself.
+        # The id tie-break inside ``entry_for``'s key makes the order total, so
+        # two rows of equal birth cannot swap places between polls.
+        out.sort(key=lambda summary: ranks[summary["session_id"]][0])
         return out
 
     def notify_list_changed(self) -> None:
@@ -874,6 +1085,20 @@ def _entry_for_session(daemon: "MobileDaemon", session_id: str) -> SessionEntry 
         if entry.record.session_id == session_id and not entry.ended
     ]
     return max(candidates, key=lambda entry: entry.record.heartbeat_at, default=None)
+
+
+def _session_folder_exists(session_id: str) -> bool:
+    """Whether ``session_id`` has a folder under ``sessions/`` -- the pin reader's
+    own keep rule (``sidebar_pins.read_pins`` prunes every id without one).
+
+    Called after the route has already resolved the id to a known conversation,
+    and name-checked again anyway so the join can never leave ``sessions/``.
+    """
+    from local_operator.paths import config_dir
+
+    if session_id in ("", ".", "..") or Path(session_id).name != session_id:
+        return False
+    return (config_dir() / "sessions" / session_id).is_dir()
 
 
 def _durable_user_session_dir(session_id: str) -> Path | None:
@@ -1935,6 +2160,7 @@ class MobileDaemon:
             self._attention_bootstrapped = True
         from local_operator.session.attention import AttentionStore
 
+        await self._refresh_pins_if_changed()
         revision = await asyncio.to_thread(AttentionStore().revision)
         if revision != getattr(self, "_attention_revision", None):
             self._attention_revision = revision
@@ -2106,6 +2332,95 @@ class MobileDaemon:
             # durable listing itself may have moved.
             self.table.invalidate_summaries_cache()
             self.table.notify_list_changed()
+
+    async def _refresh_pins_if_changed(self) -> None:
+        """Wake the list stream when ANOTHER surface changed the shared pins.
+
+        The pin store is shared with the terminal's ``F10`` and the desktop app
+        (``local_operator.tui.sidebar_pins``), but the table's copy of it was
+        refreshed only inside ``_refresh_durable_rows`` -- which runs only when
+        something asks for the listing, and the list stream asks only after
+        ``notify_list_changed``. Nothing rang that bell for a pin written
+        outside this daemon's own route, so a terminal pin stayed invisible on
+        an open phone until some unrelated event (a session registering, a
+        completion) happened to repaint the list: QA round 1 measured no frame
+        after 40 s and 110 s on an idle fleet (Q1).
+
+        ONE ``stat`` PER SCAN TICK, riding the pass that already runs every
+        ``SCAN_INTERVAL_S`` rather than a watcher or a poll of its own, so a
+        terminal pin reaches the phone within one interval at the price of a
+        single syscall. The file is re-read only when its fingerprint moves.
+        The fingerprint is ``(st_ino, st_size, st_mtime_ns)`` -- the desktop
+        feed's ``_fingerprint`` for this same file -- and the inode is what
+        separates two writes that share an mtime tick and a size: every write is
+        a same-directory ``os.replace`` onto a fresh ``mkstemp`` file, so the
+        name lands on a different inode AS LONG AS the filesystem has not handed
+        the replaced file's freed inode number straight back to that temp file.
+        It is not airtight: ext4 does reuse a freed number at once (review round
+        8, R8-1), so two same-size replaces inside one mtime tick CAN fingerprint
+        equal there, and the pin is then picked up by the next write that moves
+        size, mtime or inode. That residue is bounded to a burst of writes on one
+        clock tick, which ``st_mtime_ns`` already makes rare. ``None`` (no file)
+        is a fingerprint too, so the file appearing or being removed is a change
+        like any other.
+
+        Re-reads through ``read_pins`` (the one reader, with its store prune)
+        and drops only the MERGED summaries cache, not the durable rows: a pin
+        is membership in a display section, recomputed from ``self.table.pins``
+        by the merge, so re-walking a hundred session directories for it would
+        be waste. The first tick always reads, which also seeds the table's
+        pins for a daemon no one has listed yet.
+
+        THE INVARIANT: this pass and the pin route (``SessionTable.set_pins``,
+        reached only through ``api_session_pin``) are the only writers of
+        ``self.table.pins``, and each wakes the stream in the same breath as it
+        publishes -- so the set compared below can never be moved by a path that
+        would not also have repainted the list for it. No other reader may
+        republish the pins, however cheap it looks: a publisher that does not
+        wake either swallows the wake for a list that is already open (the set
+        it just read then LOOKS current -- review round 7, F1) or, being a read
+        that started before the write and lands after it, rolls the phone back
+        to a set this pass has already replaced (F2). ``_refresh_durable_rows``
+        is exactly that kind of reader, which is why it no longer touches the
+        file.
+
+        WHAT THAT COSTS, stated: a listing built in the window between an
+        out-of-band write and the next pass reports the pins this pass last
+        published, so it can lag the file by up to one pass. The pass that
+        follows it drops the merged cache and repaints every subscriber
+        (``notify_list_changed``), so the phone converges inside
+        ``SCAN_INTERVAL_S`` -- the bound the list already promises.
+        """
+        from local_operator.paths import config_dir
+
+        directory = config_dir()
+
+        def fingerprint() -> tuple[int, int, int] | None:
+            try:
+                stat = (directory / PINS_FILE).stat()
+            except OSError:
+                return None
+            return (stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+        # Off the loop like every other filesystem touch in this pass: a stat on
+        # a wedged or network-backed home must not stall every SSE stream.
+        current = await asyncio.to_thread(fingerprint)
+        if getattr(self, "_pins_fingerprint", _PINS_UNREAD) == current:
+            return
+        self._pins_fingerprint = current
+        pins = tuple(await asyncio.to_thread(read_pins, directory))
+        if pins == self.table.pins:
+            # The file moved but the pinned SET did not (a rewrite of the same
+            # list, or this daemon's own route, which published and woke in the
+            # same breath): nothing on the phone would change, so no repaint is
+            # owed. Sound to compare against the table BECAUSE of the invariant
+            # above -- every writer of it wakes the stream itself.
+            return
+        self.table.pins = pins
+        self.table._summaries_cache = None
+        self.table._summaries_at = 0.0
+        # On the loop, where ``notify_list_changed``'s ``put_nowait`` is safe.
+        self.table.notify_list_changed()
 
     def retain_provisional_active(self, session_id: str) -> None:
         """Hold a wake transition until discovery or one scan interval wins."""
@@ -2980,6 +3295,81 @@ def build_app(daemon: MobileDaemon):
         daemon.table.notify_list_changed()
         return JSONResponse({"ok": True, "attention": state})
 
+    async def api_session_pin(request: Request) -> Response:
+        """Set a conversation's durable pin to the state the caller asked for.
+
+        THE SHARED STORE, through ``SessionTable.set_pins`` ->
+        :mod:`local_operator.tui.sidebar_pins`. A pin made here is the SAME pin
+        the terminal's ``F10`` and the desktop app's row action read and write,
+        which is the requirement this route exists for: a pin is a durable
+        statement about a conversation, and the moment the phone keeps its own
+        list the three surfaces disagree about which conversations are pinned.
+
+        DESIRED STATE, NOT A TOGGLE, matching ``POST
+        /v1/desktop/sessions/{id}/pin`` rather than the TUI's keypress. A
+        dropped response must not flip the pin BACK when the caller retries, so
+        the body names the state wanted and a retry lands on the same one;
+        re-pinning an already-pinned session is a no-op, which is also what
+        keeps a re-pin from reordering the newest-pin-first store.
+
+        Refused for an id this machine has no conversation for, exactly like
+        ``/seen`` beside it — a live generation OR a durable user session — so
+        the route cannot be used to plant arbitrary ids in the store, and a pin
+        to a conversation that never existed cannot appear and then linger as an
+        entry that resolves to nothing.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        session_id = str(request.path_params["session_id"])
+        entry = _entry_for_session(daemon, session_id)
+        if entry is None and _durable_user_session_dir(session_id) is None:
+            return JSONResponse({"error": "unknown session"}, status_code=404)
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            return JSONResponse({"error": "pinned (a boolean) is required"}, status_code=422)
+        pinned = body.get("pinned") if isinstance(body, dict) else None
+        # STRICT, for the reason the desktop route spells out: a truthy
+        # int/string is not a state the client meant, and accepting it would
+        # store a pin whose provenance nobody can reconstruct.
+        if not isinstance(pinned, bool):
+            return JSONResponse({"error": "pinned (a boolean) is required"}, status_code=422)
+        # A PIN NEEDS THE CONVERSATION'S FOLDER, because that is what the one
+        # reader keeps: ``read_pins`` prunes every id with no directory under
+        # ``sessions/``. A live session in the window before its conversation
+        # materialises passes the known-session check above yet has no folder, so
+        # accepting it answered 200 ``pinned: true`` for a row that stayed
+        # unpinned, and left the id in the file to pin itself silently once the
+        # folder appeared (QA round 1, Q2). Refused rather than deferred: a 409
+        # the phone shows as "could not save the pin" is honest, and the same
+        # press works a moment later. The stream is woken so the client's
+        # optimistic star is replaced by the listing's truth at once. Unpinning
+        # stays allowed -- it cannot plant anything, and it answers ``false``.
+        #
+        # THE BODY CARRIES ONLY THE HALF THE WRAPPER CANNOT: both screens render
+        # this as "Could not save the pin: <this>", so a body that also said the
+        # pin was not saved read as two clauses doing one job -- and its second
+        # clause landed on `message` for a screen that had just said there are
+        # none (design round 5, D13). What is left names the reason and the
+        # remedy in one sentence, from either surface: the list's long-press has
+        # no composer in reach, so the advice is what to send, not where.
+        if pinned and not await asyncio.to_thread(_session_folder_exists, session_id):
+            daemon.table.notify_list_changed()
+            return JSONResponse(
+                {"error": "no saved messages yet — pin it after you send one"},
+                status_code=409,
+            )
+        state = await asyncio.to_thread(daemon.table.set_pins, session_id, pinned)
+        # THE STREAM WAKE IS THE LOOP'S, not the worker's (review round 1, MAJOR 2).
+        # ``notify_list_changed`` puts onto asyncio queues, which is only safe on the
+        # loop; doing it inside the ``to_thread`` above could drop the repaint until
+        # the next keepalive, so the pin would appear late for no reason.
+        daemon.table.notify_list_changed()
+        # The caller gets the state the list will show (the read-back), so a retry
+        # is idempotent and the answer cannot claim a pin the reader pruned.
+        return JSONResponse({"ok": True, "pinned": state})
+
     async def api_subagent_detail(request: Request) -> Response:
         """Full state for the one descendant named by the active phone route."""
         denied = gate(request)
@@ -3626,6 +4016,7 @@ def build_app(daemon: MobileDaemon):
         Route("/api/sessions/search", api_search_sessions),
         Route("/api/sessions/{session_id:str}/events", api_session_events),
         Route("/api/sessions/{session_id:str}/seen", api_session_seen, methods=["POST"]),
+        Route("/api/sessions/{session_id:str}/pin", api_session_pin, methods=["POST"]),
         Route("/api/sessions/{session_id:str}/agents/{job_id:str}", api_subagent_detail),
         Route(
             "/api/sessions/{session_id:str}/agents/{job_id:str}/history",

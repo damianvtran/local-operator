@@ -204,8 +204,22 @@ def _segments(command: str) -> list[tuple[str, bool]]:
     on the SEGMENTS so a piped downstream stage is distinguishable from a fresh
     command after ``&&``/``;``/``||``/``&``/newline.
     """
+    return [(text, piped) for text, piped, _ in _split(command)]
+
+
+def _split(command: str) -> list[tuple[str, bool, str]]:
+    """:func:`_segments` plus the operator run that ENDED each segment.
+
+    The third field is ``"&"``, ``"&&"``, ``";"``, ``"|"``, ``"||"``, ``"\\n"``
+    (a run of newlines collapses to one) or ``""`` for the last segment. The
+    search guard never needs it; ``sleep_guard`` does, because a segment ended
+    by a single ``&`` runs in the background of the shell and blocks nothing —
+    which is the one fact about a ``sleep`` that decides whether it holds the
+    tool call. One splitter serves both guards so they cannot disagree about
+    where a command ends.
+    """
     command = _strip_heredocs(command)
-    out: list[tuple[str, bool]] = []
+    out: list[tuple[str, bool, str]] = []
     buf: list[str] = []
     quote: str | None = None
     piped = False
@@ -241,7 +255,7 @@ def _segments(command: str) -> list[tuple[str, bool]]:
                 j += 1
             text = "".join(buf).strip()
             if text:
-                out.append((text, piped))
+                out.append((text, piped, command[i:j] if ch != "\n" else "\n"))
             buf = []
             piped = ch == "|" and (j - i) == 1
             i = j
@@ -250,7 +264,7 @@ def _segments(command: str) -> list[tuple[str, bool]]:
         i += 1
     text = "".join(buf).strip()
     if text:
-        out.append((text, piped))
+        out.append((text, piped, ""))
     return out
 
 

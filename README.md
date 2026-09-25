@@ -500,7 +500,8 @@ per account and a hop would re-pay to rebuild it.
   windows and account spend; `/accounts` lists every signed-in provider account
   (the `lop secret` store is separate); `/session` reports the current session's
   cost, cache, and request
-  diagnostics. One exception: QwenCloud's personal Token Plan window needs a
+  diagnostics, and `/session --copy` copies the session ID. One exception:
+  QwenCloud's personal Token Plan window needs a
   [console ticket](./local_operator/guides/qwencloud/GUIDE.md) stored alongside
   the login.
 
@@ -596,7 +597,7 @@ with its title and age:
 | `/btw` | Ask a side question off the record; it never joins the conversation |
 | `/compact` | Compact the context now (it also happens automatically) |
 | `/usage`, `/context` | Provider quota and account spend · what's occupying the context window |
-| `/session` | Current-session recorded usage, combined cost, cache, and request diagnostics |
+| `/session` | Current-session recorded usage, combined cost, cache, and request diagnostics; `/session --copy` copies the session ID to the clipboard |
 | `/failovers` | The model cascade for this session, and which account is serving |
 | `/provider`, `/login`, `/logout`, `/accounts` | Manage providers and signed-in accounts |
 | `/credential` | Hand over a secret: type it after `/credential` and a space to have it masked and captured; a paste your terminal delivers as text is captured the same way; the composer's own paste key (`Ctrl+V` on macOS) is not. Bare `/credential` lists this session's credentials, and `/credential --persist <KEY>` saves one to the long-term store. See [Credentials and secrets](#credentials-and-secrets) |
@@ -1200,7 +1201,12 @@ duplicate — paths and sizes only, never the contents.
 
 Project-level `AGENTS.md` / `CLAUDE.md` files are discovered separately by
 walking up from your working directory, and can be disabled with
-`LOCAL_OPERATOR_CONTEXT_FILES=0`.
+`LOCAL_OPERATOR_CONTEXT_FILES=0`. Inside a git repository under your home
+directory, the walk continues past the repository root to the folder just
+below home, so a folder that groups several repos can carry their shared
+guidance; the guidance file in home itself is not included. A repository
+under a dot-named folder such as `~/.codex`, or itself dot-named, still stops
+at its own root.
 
 ## 🌟 Radient: automatic model selection and agent sharing
 

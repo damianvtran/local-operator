@@ -83,6 +83,8 @@ from local_operator.agent_shell import AGENT_SHELL_ENV, MAY_DELEGATE_ENV
 from local_operator.config import CONFIG_FILE_NAME, ConfigManager
 from local_operator.harness.approval import ask_approval
 from local_operator.harness.redaction import report_shape_hits
+from local_operator.harness.secret_sinks import refusal_text as _secret_sink_refusal
+from local_operator.harness.secret_sinks import scan_command as _scan_secret_sinks
 from local_operator.harness.subagent import (
     configured_effort_tiers,
     describe_effort_tiers,
@@ -162,7 +164,7 @@ from local_operator.scratchpad import (
     scratchpad_env_injection,
 )
 from local_operator.text_bounds import OUTPUT_TRUNCATION_MARKER, clip_head_tail
-from local_operator.tools import group_reaper, search_guard, shell_env
+from local_operator.tools import group_reaper, search_guard, shell_env, sleep_guard
 from local_operator.tools.spill import (
     SPILL_ENTRY_LIMIT_BYTES,
     SPILL_SCHEME,
@@ -3014,9 +3016,15 @@ class _PipeRedactor:
         BOUNDED BY THE CAP: only a block whose BEGIN-to-END-line span fits
         :data:`_PIPE_DEFERRAL_LIMIT` is treated as a unit — that is the size main can
         hold whole, and a larger one is split by the cap on main too, where the open
-        block's line state is what masks it. The extra hold is therefore at most one
-        cap. The same raw ``-----BEGIN``/``-----END`` literals as the hold above, so
-        the two rules cannot disagree about where a block starts.
+        block's line state is what masks it. The extra hold here is therefore at most
+        one cap, and it composes, in the same call, with the floor's own
+        line-boundary retreat, which moves the cut up to one cap further left before
+        this rule is asked. What the floor can retain is thus bounded by
+        ``self.hold + 2 * _PIPE_DEFERRAL_LIMIT`` rather than by ``hold + cap``
+        (round-4 review, R4-1): the number matters because that window is memory, and
+        a bound stated one cap short is a bound a future reader would trust. The same
+        raw ``-----BEGIN``/``-----END`` literals as the hold above, so the two rules
+        cannot disagree about where a block starts.
         """
         begin = text.rfind("-----BEGIN", 0, cut)
         if begin < 0:
@@ -3570,6 +3578,24 @@ async def execute_bash(
         if _si_block:
             return _error(tool_call_id, "bash", interception)
         logger.warning("bash: %s", interception)
+    # Long-sleep refusal: a FOREGROUND call that is mostly `sleep 1500; tail
+    # log` holds the session where a hub note cannot reach it (notes are
+    # delivered at tool boundaries, and a running bash is not one) — measured
+    # on child f7318cc06bdd, whose parent's three notes each waited out a
+    # 15-30 min sleep. A background call is exempt by construction: its sleep
+    # holds no turn. Blocks with the replacement (background + `wait`), never
+    # rewrites; see tools/sleep_guard.py for the predicate and the escape hatch.
+    if not params.background:
+        long_sleep = sleep_guard.check_long_sleep(params.command)
+        if long_sleep is not None:
+            # The SAME fault marker the plan-time hook reports, so the two paths
+            # of one guard cannot land the same call in two different buckets —
+            # ``invalid_arguments`` is a MODEL fault and this path used to be an
+            # unmarked ``execution`` one (review A2 on #1546). Reachable with
+            # direct ``execute`` callers, where no planning hook runs.
+            return _error(
+                tool_call_id, "bash", long_sleep, details={FAULT_KEY: FAULT_INVALID_ARGUMENTS}
+            )
     # Approval for write/exec tiers is the LOOP's gate (it fires after
     # tool_execution_start so the UI shows the pending call). A second gate
     # here made the user answer twice per action, with the tier name rendered
@@ -3592,6 +3618,30 @@ async def execute_bash(
     store = context.variables if context is not None else None
     credential_env = getattr(store, "credential_env", None)
     extra = credential_env() if callable(credential_env) else None
+
+    # Refuse a call in which a stored secret would be PRINTED, before any child
+    # exists. The control this replaces is an output filter (the redaction
+    # ledger's `str.replace`), and a filter decides after the decision to print
+    # has been made and only for the spellings it holds — a Minerva QA session
+    # lost a credential to `v=$(lop secret get "$k") && echo "$k = $v"`, whose
+    # value was in the transcript, and then printed a masked hostname reversed
+    # to read it. The rule keys on the DATA FLOW (a value source reaching a
+    # printing sink), so a re-spelling is refused too.
+    #
+    # `_error`, not `_invalid_arguments`: a printing construct is a policy
+    # refusal, not a malformed argument, and not a prompt — `execute_bash`
+    # deliberately has no second approval gate (the loop's gate already ran), so
+    # asking here would be the double-answer that comment exists to prevent.
+    # The source is the store: a command that never names `lop secret` is
+    # untouched, so ordinary work — and the session-credential flow, which rides
+    # the child's environment and is the mask's business — is unaffected.
+    scan = _scan_secret_sinks(params.command)
+    if scan.refused:
+        return _error(
+            tool_call_id,
+            "bash",
+            _secret_sink_refusal(scan, text=params.command, tool_name="bash"),
+        )
     injections: dict[str, str] = dict(NON_INTERACTIVE_ENV)
     # The DELEGATION ALLOWANCE rides the child environment for the same reason
     # the marker in ``NON_INTERACTIVE_ENV`` does: a `lop exec` run by a session
@@ -4653,8 +4703,41 @@ def build_bash_tool() -> AgentTool:
         # commands, and exclusive would serialize the common case.
         concurrency="shared",
         interruptible=True,
+        # Plan-time refusal for the long-sleep shape, so an interactive operator
+        # is never asked to approve a call the tool then refuses (review Q-2 on
+        # #1546). The execute-time check below stays as the backstop for the
+        # direct ``execute`` callers no hook reaches.
+        refuse_args=_long_foreground_sleep_refusal,
         execute=execute_bash,
     )
+
+
+def _long_foreground_sleep_refusal(args: dict[str, Any], offered: frozenset[str]) -> str | None:
+    """The plan-time half of the long-sleep guard (see ``tools/sleep_guard``).
+
+    Reads the COERCED params, not the raw arguments, because the raw dict is
+    what the model wrote and a JSON ``false`` is not the only spelling of an
+    absent background flag: ``"false"``, ``"no"``, ``"0"``, ``"off"``, ``"n"``,
+    ``"f"``, ``"FALSE"`` all pass ``validate_tool_arguments`` and are TRUTHY as
+    strings — so reading ``args.get("background")`` let a foreground call through
+    the hook to the approval gate, which then asked the operator to approve work
+    ``execute_bash`` refuses (review A1 on #1546). ``BashParams`` is the same
+    coercion the body uses, so the two halves of this guard cannot disagree
+    about what ``background`` means.
+
+    Never raises: the loop skips a hook that throws, and a skipped hook means
+    the call reaches the gate this exists to pre-empt. A shape ``BashParams``
+    rejects is left to the body's own validation error.
+    """
+    try:
+        params = BashParams(**args)
+    except ValidationError:
+        return None
+    if params.background:
+        return None
+    # ``offered`` is the calling session's live inventory (the loop passes it),
+    # so the refusal names only replacements this reader actually holds.
+    return sleep_guard.check_long_sleep(params.command, offered=offered)
 
 
 # ---------------------------------------------------------------------------
@@ -11600,9 +11683,19 @@ class SendParams(BaseModel):
         default=None,
         description=("Exact session id of the peer. Use INSTEAD of target, never alongside it."),
     )
-    message: str = Field(
-        min_length=1,
+    # Optional at the SCHEMA level only because ``model`` is its alternative:
+    # exactly one of the two is required, which ``execute_send`` enforces with a
+    # sentence (a JSON-schema ``oneOf`` would cost more schema than the field).
+    message: str | None = Field(
+        default=None,
         description="The message body; it lands in the peer's transcript as an inbound card.",
+    )
+    model: str | None = Field(
+        default=None,
+        description=(
+            "Instead of a message: switch the peer's model to <provider>/<model-id> "
+            "(live sessions only)."
+        ),
     )
     wake: bool = Field(
         default=True,
@@ -11672,6 +11765,11 @@ def _describe_send_approval(args: dict[str, Any], cwd: str) -> str:
     an intended 60 and wrapped the prompt onto a second line (design round 1, D4).
     """
     who = peer_send_target_label(args)
+    model = " ".join(str(args.get("model") or "").split())
+    if model:
+        # A different commitment from a message, so it says so: the peer's
+        # billing moves with it (design §4).
+        return f"switch {who}'s model to {model} (changes that session's billing)"
     mode = peer_send_mode_label(args)
     body = _truncate_approval_body(" ".join(str(args.get("message") or "").split()))
     return f"to {who} ({mode}): {body}" if body else f"to {who} ({mode})"
@@ -11733,6 +11831,106 @@ def build_send_tool(context: ToolContext) -> AgentTool | None:
     )
 
 
+async def _send_sender_identity(context: ToolContext | None) -> dict[str, Any]:
+    """This session's identity for a peer's card: the registry, else the context.
+
+    Off the loop: the ancestry walk runs a registry scan and a ``ps`` per hop.
+    It matches on the first hop here (the tool IS the session process), but the
+    cost is not structurally bounded and must not sit on the loop. Shared by the
+    message and the model-switch paths so both name the sender identically.
+    """
+    from local_operator.mobile.peer_send import peer_sender_identity_async
+
+    sender = await peer_sender_identity_async(os.getpid())
+    if "session_id" not in sender and context is not None:
+        # No registry record named this process (a reduced host that never
+        # published one): fall back to the ToolContext identity so the peer's
+        # inbound indicator can still name the sender. The name maps to
+        # ``conversation_name`` because that is the key the indicator reads.
+        if context.session_id:
+            sender["session_id"] = context.session_id
+        name = _peer_sender_conversation_name(context)
+        if name:
+            sender["conversation_name"] = name
+    return sender
+
+
+async def _execute_send_model(
+    tool_call_id: str, params: SendParams, context: ToolContext | None
+) -> ToolResult:
+    """``send(model=…)``: switch a LIVE, engaged peer's model (design D4).
+
+    The sender checks syntax only; the target validates the pair against its own
+    config and credentials, applies it, reads back what is in force and answers
+    with its own sentence, which this echoes (design D3, §2). A stored or closed
+    session is refused rather than engaged: a cold switch would write into a
+    transcript no running owner holds (D1's overturn condition).
+    """
+    from local_operator.mobile.peer_send import (
+        PeerModelUnconfirmed,
+        candidate_lines,
+        parse_model_selector,
+        resolve_switch_target,
+        switch_outcome,
+        switch_peer_model,
+        switch_receipt,
+    )
+
+    parsed = parse_model_selector(params.model or "")
+    if isinstance(parsed, str):
+        return _error(tool_call_id, "send", parsed)
+    provider, model_id = parsed
+    record, candidates, error = await asyncio.to_thread(
+        resolve_switch_target,
+        target=params.target,
+        pid=params.pid,
+        session=params.session,
+    )
+    if candidates:
+        lines = [
+            f"{len(candidates)} sessions match; drop `target` and retry with pid=<n> "
+            f"instead (passing both is refused):"
+        ]
+        lines.extend(candidate_lines(candidates, indent="  ", prefix="pid="))
+        return _error(tool_call_id, "send", "\n".join(lines))
+    if record is None:
+        return _error(tool_call_id, "send", error or "no target resolved")
+    if record.pid == os.getpid():
+        return _error(
+            tool_call_id,
+            "send",
+            "that target is this session; a session cannot switch its own model through "
+            "send — use /model",
+        )
+    sender = await _send_sender_identity(context)
+    try:
+        detail = await switch_peer_model(
+            record, provider=provider, model_id=model_id, sender=sender
+        )
+    except PeerModelUnconfirmed as exc:
+        return _error(tool_call_id, "send", switch_receipt(record, str(exc)))
+    except RuntimeError as exc:
+        # The peer ANSWERED no — a refusal, an unengaged or incapable handle, or
+        # an older build — or it could not be reached; nothing changed, and the
+        # sentence leads so the collapsed error slot shows the reason (D2).
+        return _error(tool_call_id, "send", switch_receipt(record, str(exc)))
+    outcome = switch_outcome(detail)
+    return _text(
+        tool_call_id,
+        "send",
+        switch_receipt(record, detail),
+        details={
+            "pid": record.pid,
+            "model": f"{provider}/{model_id}",
+            "outcome": outcome,
+            # A switch that took but raised afterwards paints the card's
+            # partial-result glyph and tint rather than a clean ✓ (design round
+            # 2, D9), through the existing flag instead of a second mechanism.
+            "partial_result": outcome == "partial",
+        },
+    )
+
+
 def _peer_sender_conversation_name(context: ToolContext) -> str:
     """The name a peer's inbound card should show for THIS session.
 
@@ -11778,10 +11976,29 @@ async def execute_send(
     except ValidationError as exc:
         return _validation_error(tool_call_id, "send", exc)
 
+    if params.model is not None:
+        if params.message is not None:
+            # Two acts with two different receipts and two different failure
+            # modes; one call doing both could half-succeed (design §4).
+            return _error(
+                tool_call_id,
+                "send",
+                "pass either message or model, not both — send the note in a second call",
+            )
+        if params.now:
+            return _error(
+                tool_call_id,
+                "send",
+                "now=True does not apply to a model switch — it always lands at the peer's "
+                "next provider call",
+            )
+        return await _execute_send_model(tool_call_id, params, context)
+    if params.message is None:
+        return _error(tool_call_id, "send", "pass a message (or model= to switch the peer's model)")
+
     from local_operator.mobile.peer_send import (
         candidate_lines,
         live_scan_found_nothing,
-        peer_sender_identity_async,
         resolve_peer_target,
         session_id_unowned,
         skipped_clause,
@@ -11900,25 +12117,13 @@ async def execute_send(
             "fold the note into your own work instead",
         )
 
-    body_error = validate_peer_body(params.message)
+    message = params.message
+    body_error = validate_peer_body(message)
     if body_error:
         return _error(tool_call_id, "send", body_error)
 
     mode = "steer" if params.now else "mailbox"
-    # Also off the loop: the ancestry walk runs a registry scan and a ``ps`` per
-    # hop. It matches on the first hop here (the tool IS the session process),
-    # but the cost is not structurally bounded and must not sit on the loop.
-    sender = await peer_sender_identity_async(os.getpid())
-    if "session_id" not in sender and context is not None:
-        # No registry record named this process (a reduced host that never
-        # published one): fall back to the ToolContext identity so the peer's
-        # inbound indicator can still name the sender. The name maps to
-        # ``conversation_name`` because that is the key the indicator reads.
-        if context.session_id:
-            sender["session_id"] = context.session_id
-        name = _peer_sender_conversation_name(context)
-        if name:
-            sender["conversation_name"] = name
+    sender = await _send_sender_identity(context)
 
     from local_operator.mobile.peer_send import deliver_peer_message
 
@@ -11928,7 +12133,7 @@ async def execute_send(
         detail = await deliver_peer_message(
             record,
             session_id=(record.session_id if record is not None else cold_session_id),
-            text=params.message,
+            text=message,
             mode=mode,
             wake=bool(params.wake),
             sender=sender,
@@ -18996,9 +19201,96 @@ def _launched_line(entry: Mapping[str, Any], context: ToolContext | None) -> str
     # (R-1). Today's only call site renders at launch, where the two agree — this
     # keeps the next one honest.
     owns = _job_owns_model(context, job_id)
+    return f"- {label} ({agent}) {_model_clause(model, owns, session_model)}: job {job_id}"
+
+
+def _model_clause(model: str, owns: bool | None, session_model: str) -> str:
+    """``on <model>`` or ``on this session's model (<model>)``.
+
+    Shared by the ``task`` launch line and the ``hub op='resume'`` receipt
+    because both state the same fact, and a resume is a second launch that
+    follows the same model rule. See :func:`_launched_line` for why the owns
+    stamp is read alongside the label comparison and never instead of it.
+    """
     if owns is not True and model == session_model:
-        return f"- {label} ({agent}) on this session's model ({model}): job {job_id}"
-    return f"- {label} ({agent}) on {model}: job {job_id}"
+        return f"on this session's model ({model})"
+    return f"on {model}"
+
+
+def _row_model(comms: Any, job_id: str) -> tuple[str, bool | None]:
+    """``(model_label, owns_model)`` off a job row the comms registry can see.
+
+    Read through ``comms.job`` rather than ``ToolContext.jobs``: a resume
+    registers the new job on the comms ROOT's manager, so a nested manager
+    calling ``hub`` would not find it in its own. ``("", None)`` for an
+    unknown row or a reduced host, and the caller then names no model.
+    """
+    try:
+        job = comms.job(job_id)
+    except Exception:  # noqa: BLE001 — a label is decoration, never a resume
+        return "", None
+    owns = getattr(job, "owns_model", None)
+    return str(getattr(job, "model_label", None) or ""), owns if isinstance(owns, bool) else None
+
+
+def _resumed_line(
+    comms: Any,
+    label: str,
+    from_id: str,
+    new_job_id: str | None,
+    previous_model: str,
+    session_model: str,
+) -> str:
+    """One resumed child, naming the model it will run on.
+
+    A resume follows the LAUNCH rule, not the child's history: an inheriting
+    child takes the parent's model as it is now, and a pinned child re-resolves
+    its tier from current config. So a resumed child can run on a different
+    model from its previous run, and a different model is a different bill.
+    The line says which model applies, and says so again when it changed, so
+    the delegating model learns it from the call that caused it.
+    """
+    line = f"- {label} ({from_id}): resumed as job {new_job_id}"
+    model, owns = _row_model(comms, new_job_id) if new_job_id else ("", None)
+    if not model:
+        return line
+    # A fallback (D9.2, D9.3) is said out loud, never silent: an unannounced
+    # model is how the cost incident behind this receipt went unnoticed.
+    note_of = getattr(comms, "resume_model_note", None)
+    note = note_of(new_job_id) if callable(note_of) and new_job_id else ""
+    on_parent = getattr(comms, "resumed_on_parent_model", None)
+    if note:
+        # The note names the model's source, so the clause must not name a
+        # second one: "on this session's model (X) (its parent's model could not
+        # be found; ...)" would state two sources for one model (review R7).
+        line += f" on {model} ({note})"
+        return line
+    if callable(on_parent) and new_job_id and on_parent(new_job_id):
+        # Inherited from an ancestor rather than from this session (D9.4): "on
+        # this session's model" would be false, and a bare "on <model>" reads
+        # as a pin.
+        line += f" on its parent's model ({model})"
+    else:
+        line += f" {_model_clause(model, owns, session_model)}"
+    if previous_model and previous_model != model:
+        line += f" (its previous run was on {previous_model})"
+    return line
+
+
+def _previous_model(comms: Any, job_id: str) -> str:
+    """The model a child last ran on, read before its resume replaces the row.
+
+    ``comms.last_model_label`` also covers a nested child after a restart,
+    whose job row was not rehydrated (QA round 1, Q2). The row read is the
+    degrade for a reduced registry that lacks the method.
+    """
+    reader = getattr(comms, "last_model_label", None)
+    if callable(reader):
+        try:
+            return str(reader(job_id) or "")
+        except Exception:  # noqa: BLE001 — a label is decoration, never a resume
+            return ""
+    return _row_model(comms, job_id)[0]
 
 
 @_guard("task")
@@ -20165,7 +20457,7 @@ async def execute_hub(
         )
     if comms.is_child(context.job_id if context else None):
         return await _execute_hub_child(tool_call_id, args, comms, context)
-    return await _execute_hub_parent(tool_call_id, args, comms)
+    return await _execute_hub_parent(tool_call_id, args, comms, context)
 
 
 async def _execute_hub_child(
@@ -20189,6 +20481,7 @@ async def _execute_hub_parent(
     tool_call_id: str,
     args: dict[str, Any],
     comms: Any,
+    context: ToolContext | None = None,
 ) -> ToolResult:
     try:
         params = HubParams(**args)
@@ -20262,11 +20555,17 @@ async def _execute_hub_parent(
         # returns a ``(new_job_id, error)`` tuple rather than a ``Delivery``, so
         # we collect per-target receipts here and format them like the
         # send/steer/cancel block below without borrowing the Delivery shape.
+        # The previous run's model is read BEFORE resuming: once the new child
+        # attaches, the old record folds into it and the old id aliases to the
+        # new attempt, so reading it afterwards would compare the new row with
+        # itself.
+        previous_models = {job_id: _previous_model(comms, job_id) for job_id in ids}
         resumed: list[tuple[str, str | None, str | None]] = [
             # (resumed-from id, new job id, error)
             (job_id, *comms.resume(job_id, message))
             for job_id in ids
         ]
+        session_model = str(getattr(context, "session_model_label", "") or "")
         acted = [receipt for receipt in resumed if receipt[2] is None]
         header = (
             f"resume: {len(acted)}/{len(resumed)} subagent(s)"
@@ -20280,7 +20579,16 @@ async def _execute_hub_parent(
                 # Each success carries the NEW job id it was resumed as; the
                 # transcript-replay guidance is stated once in the footer
                 # rather than repeated on every line.
-                lines.append(f"- {label} ({from_id}): resumed as job {new_job_id}")
+                lines.append(
+                    _resumed_line(
+                        comms,
+                        label,
+                        from_id,
+                        new_job_id,
+                        previous_models.get(from_id, ""),
+                        session_model,
+                    )
+                )
             else:
                 lines.append(f"- {label} ({from_id}): failed \u2014 {error}")
         lines.extend(f"- {error}" for error in errors)

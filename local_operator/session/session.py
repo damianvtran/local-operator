@@ -90,6 +90,7 @@ from local_operator.harness.message_types import (
     HUB_MESSAGE_TYPE,
     PEER_MESSAGE_MESSAGE_TYPE,
     SESSION_CREDENTIAL_MESSAGE_TYPE,
+    SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
     SESSION_INCIDENT_MESSAGE_TYPE,
     SESSION_MCP_RECOVERY_MESSAGE_TYPE,
     SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
@@ -368,6 +369,44 @@ _NAME_PERSIST_MAX_PASSES = 3
 #: keeps. Five seconds is comfortably above any real append and still a pause a
 #: person will sit through once on ctrl+d.
 _NAME_FLUSH_TIMEOUT_S = 5.0
+
+#: The full-viewer job-roster tick (``Session._schedule_frontend_jobs``): its
+#: floor, the loop share it may take, and the longest a roster may wait.
+_FRONTEND_JOBS_FLOOR_S = 0.05
+_FRONTEND_JOBS_MAX_SHARE = 0.25
+_FRONTEND_JOBS_CEILING_S = 1.0
+
+
+def _frontend_jobs_delay(last_cost_s: float) -> float:
+    """How long to wait before the next job-roster tick, given the last one's cost.
+
+    WHY IT ADAPTS. The tick was a fixed 50 ms regardless of what it cost, so a
+    tick that costs as much as its own period takes the whole loop — and this is
+    the loop that admits the user's next message. Measured on a runtime with 12
+    stepping lanes and a 240-record roster under one full viewer
+    (``scripts/bench_send_admission.py --condition roster``): ``refresh_jobs``
+    cost 22.6 ms CPU p50 / 61 ms p95 per call, and after the other two fixes in
+    this change it was still 46% of all loop samples, with a prompt waiting
+    0.5-0.8 s to be admitted behind it.
+
+    Spacing the next tick by ``cost / share`` bounds this publisher to
+    ``_FRONTEND_JOBS_MAX_SHARE`` of the loop whatever the roster's size, while a
+    cheap tick (the common case: a handful of children) keeps the 50 ms floor
+    and so repaints exactly as before. The ceiling keeps a pathological roster
+    live at ≥1 Hz rather than letting its cadence grow without bound.
+
+    NOTHING GOES STALE BY THIS: each tick reads the live manager when it fires,
+    so a later tick publishes everything an earlier one would have; only the
+    number of intermediate snapshots a viewer sees drops, and those are
+    snapshots of state the next one supersedes.
+    """
+    if last_cost_s <= 0.0:
+        return _FRONTEND_JOBS_FLOOR_S
+    return min(
+        _FRONTEND_JOBS_CEILING_S,
+        max(_FRONTEND_JOBS_FLOOR_S, last_cost_s / _FRONTEND_JOBS_MAX_SHARE - last_cost_s),
+    )
+
 
 #: How long the session waits between attempts to REPUBLISH a completion whose
 #: first publication lost to a contended ``attention.db``, in seconds.
@@ -822,6 +861,26 @@ _PERSISTABLE_CUSTOM_TYPES: frozenset[str] = frozenset(
         "session_state",
         SESSION_INCIDENT_MESSAGE_TYPE,
         SESSION_MODEL_SWITCH_MESSAGE_TYPE,
+        # SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE IS persisted, and it is the
+        # member whose persistence is easiest to mistake for an oversight: the
+        # record is operator-facing and enters no model context (see its own
+        # note in ``harness/message_types.py``, and the exclusion comment in
+        # ``harness/render.py``). Persisting it is what makes the OPERATOR's
+        # ticket durable — the row survives the process so a resumed session
+        # still shows what the guard masked and what to rotate — and the value
+        # stays contained across that resume because the store re-registers it
+        # from the redaction the transcript itself holds. Its writer
+        # (``journal_shape_incident``) appends through ``append_message``
+        # directly rather than routing through :func:`_is_persistable_message`,
+        # so membership is NOT what keeps the row persisted today, and its
+        # absence would not have made the notice live-only. The member line is
+        # kept for two reasons and only these: symmetry with its twin
+        # ``session_incident``, a member written by the same explicit-append
+        # shape, and so that a future path which DOES route through the
+        # predicate cannot silently drop the operator's ticket while every
+        # call site still looks right. The MODEL is kept out of this record by
+        # the RENDERER's allow-list, not by this one.
+        SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
         # SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE IS persisted, unlike the
         # recovery record below: an MCP server going away is a historical fact
         # about the session, and every surface already renders the row, so a
@@ -953,11 +1012,19 @@ def _pair_spliced_tool_results(messages: list[Message]) -> list[Message]:
     Relative order among several interlopers is preserved, and moving them is
     safe ONLY because everything that can land in that window is a
     harness-authored notice (``session_model_switch``, ``session_incident``,
-    ``session_mcp_unavailable``): reordering advisory chrome against a tool
+    ``session_credential_redaction``, ``session_mcp_unavailable``): reordering
+    advisory chrome against a tool
     batch changes nothing the user wrote. **If a custom type is ever added that
     carries user-authored text, this assumption needs revisiting** — moving a
     user's words past a tool batch would silently reorder the conversation they
     see.
+
+    ``session_credential_redaction`` is in that list and is the newest member:
+    it is appended to the LIVE context (``journal_shape_incident`` -
+    ``_append_or_park_journal``) exactly like the others, and it belongs on the
+    safe side of the assumption for the same reason — its text is the harness's
+    own sentence about a value the guard masked, and it carries nothing the
+    operator typed.
 
     Linear in ``len(messages)``, and that has to stay true because this sits on
     every provider call. Each batch's inner scan stops at the next assistant
@@ -2155,6 +2222,14 @@ class Session:
         #: round 1, R1-1). Holding the object keeps ``consumed`` observable
         #: too, since ``wait`` flips it on this same instance.
         self._deferred_job_results: dict[str, tuple[Any, str]] = {}
+        #: Armed by the serving handle when this session's runtime has COMMITTED
+        #: to leaving (``retire_job_deliveries_to_transcript``, called from
+        #: ``ServingSessionHandle.begin_drain`` / ``begin_retire``). While it is
+        #: set, a settled job's result is made durable and opens NO turn: the
+        #: run such a delivery would open could only ever be aborted by the
+        #: disposal that follows it. Released by ``end_drain``'s abandon arm,
+        #: which keeps serving the same runtime.
+        self._leaving_deliveries = False
         self._job_label = job_label
         self._parent_display_name = parent_display_name
         self._subagent_comms = subagent_comms
@@ -4606,7 +4681,12 @@ class Session:
         # old fallback after `/model` is the same stale frame this state
         # exists to prevent. Persisted (with the new primary) so a resume does
         # not restore a pin the user already switched away from.
-        if self._active_fallback is not None:
+        #
+        # The withdrawal ANNOUNCES the new primary itself, so the switch below
+        # must not announce it a second time: one ``ModelChangeEvent`` per
+        # switch, whichever edge produced it.
+        announced = self._active_fallback is not None
+        if announced:
             self._drop_fallback_pin(model, "model switched")
         notify = getattr(self._stream_fn, "on_model_changed", None)
         if callable(notify):
@@ -4620,6 +4700,14 @@ class Session:
         # "now running as X (was Y)", so a "Reason: model switched" line would
         # only repeat it. ``reason`` is reserved for failover causes (R3).
         self.refresh_frontend_state()
+        if not announced:
+            # Every host keys its model display off this event, and a genuine
+            # switch used to emit NONE: the runtime's projection (and so the
+            # discovery record `lop sessions` reads) kept the old label until
+            # the next turn's route event, which on an idle session is never.
+            # A switch typed into a TUI by another process (herdr) hit exactly
+            # that. Front ends treat it as a repaint, never a transcript row.
+            self._spawn_model_change(model, "model switched")
         self._spawn_background(
             self.journal_model_switch(
                 f"{model.provider}/{model.model_id}",
@@ -4672,6 +4760,16 @@ class Session:
         self._active_fallback = None
         self._active_route = None
         self._spawn_background(self._persist_active_route(primary))
+        self._spawn_model_change(primary, reason)
+
+    def _spawn_model_change(self, primary: ModelSpec, reason: str) -> None:
+        """Announce ``primary`` as the model now serving, from sync code.
+
+        Background because both callers (``set_model`` and the pin withdrawal)
+        are synchronous and run on the UI loop. One constructor for the two, so
+        a deliberate switch and a withdrawal cannot drift in what they tell a
+        front end.
+        """
         self._spawn_background(
             self._emit(
                 ModelChangeEvent(
@@ -8023,17 +8121,30 @@ class Session:
             return
         self._frontend_jobs_refresh_scheduled = True
         try:
-            asyncio.get_running_loop().call_later(0.05, self._flush_frontend_jobs)
+            asyncio.get_running_loop().call_later(
+                _frontend_jobs_delay(getattr(self, "_frontend_jobs_last_cost_s", 0.0)),
+                self._flush_frontend_jobs,
+            )
         except RuntimeError:
             self._frontend_jobs_refresh_scheduled = False
             store.refresh_jobs(self)
 
     def _flush_frontend_jobs(self) -> None:
-        """Coalesce a burst of child trajectory/progress mutations per loop tick."""
+        """Coalesce a burst of child trajectory/progress mutations per loop tick.
+
+        Records the tick's own wall cost so the NEXT tick is spaced by it (see
+        :func:`_frontend_jobs_delay`). Wall, not CPU: what the loop cannot do
+        while this runs — admit a prompt, relay a frame — is wall time, and on
+        a contended host that includes the GIL waits inside the tick.
+        """
         self._frontend_jobs_refresh_scheduled = False
         store = getattr(self, "_frontend_state_store", None)
         if store is not None:
-            store.refresh_jobs(self)
+            started = time.perf_counter()
+            try:
+                store.refresh_jobs(self)
+            finally:
+                self._frontend_jobs_last_cost_s = time.perf_counter() - started
 
     def note_cut_off(self, cause: str, detail: str = "") -> None:
         """Record WHY the current turn is being cut off, before it ends.
@@ -9965,7 +10076,11 @@ class Session:
             self._discard_queued_notices()
             self._signal = None
             self._is_streaming = False
-            self._deliver_deferred_job_results()
+            # Awaited, and that is load-bearing on the leaving arm: the durability
+            # write of a HELD batch has to land before the turn releases the lock and
+            # this process can decide it is finished -- a spawned write is precisely
+            # what ``dispose`` cancels in flight.
+            await self._deliver_deferred_job_results()
 
     async def _drop_pre_aborted_turn(
         self,
@@ -10757,7 +10872,8 @@ class Session:
         that a credential the session never knew about reached a tool result: a
         live production DSN was found in a transcript with nothing anywhere saying
         it had happened, and every such miss today is discovered by accident. One
-        :data:`SESSION_INCIDENT_MESSAGE_TYPE` row names the tool and the shapes, so
+        :data:`SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE` row names the tool and
+        the shapes, so
         it becomes a ticket rather than a footnote — but ONLY for the case that is
         a ticket: readable material the model can see. A value the pass masked
         whole is contained, nothing was leaked to the transcript, and it files
@@ -10867,13 +10983,27 @@ class Session:
     async def journal_shape_incident(
         self, tool: str, labels: list[str], summary: str, *, reached_model: bool = True
     ) -> None:
-        """Tell the model (and the transcript) that READABLE material was masked.
+        """Tell the OPERATOR (transcript, live receipt) that READABLE material was masked.
 
         Rendered rather than classified: this is not a FAILURE, and running it
         through :func:`~local_operator.incidents.classify_incident` would attach
         a failure category and a "this is why the previous turn ended" tail to a
         turn that ended for its own reasons — the same reason a credential
         change and a model switch carry their own formatter.
+
+        **The MODEL is deliberately NOT told**, which is where this record now
+        differs from every other notice in :mod:`local_operator.incidents`: it
+        carries :data:`SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE`, a type the
+        renderer's allow-list excludes, so the row reaches the transcript and the
+        live operator receipt and never enters the model's context. It rode
+        ``session_incident`` until 2026-09-24, which injected it as a user turn —
+        measured at 1,493 unnamed notices across 1,080 sessions on this machine,
+        plus the named ones. The notice names a value the guard ALREADY masked out
+        of the text the model received, so the model never held it, cannot rotate
+        it, and the guard's own false positives (a usage counter, a DSN whose
+        username is its password) had agents ending turns over leaks that had not
+        happened. See ``harness/message_types.py`` for the full argument and
+        ``harness/render.py`` for the exclusion, which is load-bearing.
 
         ``reached_model`` is the severity, and its default is the ESCALATED one so
         that a caller which does not know cannot make the quieter claim. In-tree it
@@ -10897,7 +11027,7 @@ class Session:
             return
         text = format_shape_incident_message(tool, labels, summary, reached_model=reached_model)
         message = CustomMessage(
-            custom_type=SESSION_INCIDENT_MESSAGE_TYPE,
+            custom_type=SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
             attribution="system",
             details={
                 "text": text,
@@ -10919,7 +11049,8 @@ class Session:
             logger.warning("could not journal a credential-shape incident", exc_info=True)
             return
         # THE LIVE RECEIPT, and the reason this method exists in the shape it
-        # does: a row written to the transcript and to the model's context is not
+        # does: a row written to the transcript — and, until this change, to the
+        # model's context — is not
         # a ticket — the operator has to SEE it. Measured before this
         # emit: the row reached the model, persisted, and painted on no operator
         # surface at all, live or on replay.
@@ -11133,6 +11264,17 @@ class Session:
             return
         if getattr(job, "consumed", False) or job.type not in ("task", "bash"):
             return
+        if self._leaving_deliveries:
+            # A result that arrives AFTER the departure latch must not be
+            # DEFERRED: ``_deferred_job_results`` is memory, and this process is
+            # on its way out, so parking it there destroys it. The no-turn arm
+            # is durable, so routing through ``_deliver_job_results`` holds the
+            # result exactly as an idle arrival would. Checked BEFORE the
+            # streaming test, because that test's answer ("a turn is running")
+            # does not make deferral safe here -- both spellings of "wait for a
+            # later turn" assume a later turn in THIS process.
+            await self._deliver_job_results([(job_id, text, job)])
+            return
         if self._is_streaming:
             # DEFERRED, never dropped. Returning here used to be the whole
             # story, on the theory that a streaming turn "either waited or can
@@ -11149,10 +11291,10 @@ class Session:
             # through ``wait`` from arriving twice.
             self._deferred_job_results[job_id] = (job, text)
             return
-        self._deliver_job_results([(job_id, text, job)])
+        await self._deliver_job_results([(job_id, text, job)])
 
-    def _deliver_job_results(self, results: list[tuple[str, str, Any]]) -> None:
-        """Queue settled jobs' results as ONE fresh idle-time turn.
+    async def _deliver_job_results(self, results: list[tuple[str, str, Any]]) -> None:
+        """Queue settled jobs' results for one fresh turn -- or for the next one.
 
         One turn for the whole batch, not one per job: N children that settle
         during one parent turn are one piece of news, and a turn per child cost
@@ -11161,15 +11303,216 @@ class Session:
         single live delivery has always produced -- so every consumer that reads
         one (the transcript, the stopped-work residue check, the TUI) sees the
         rows it already understands.
+
+        The COUNT is one, the CARRIER is not always a turn: while this session's
+        runtime has committed to leaving the batch is written durably instead
+        (``_hold_job_results_for_next_turn``), because the turn it would
+        otherwise open could only ever be aborted by the disposal that follows
+        (the incident this change fixes, session a81ceec0982b).
         """
         if not results:
+            return
+        if self._leaving_deliveries:
+            # THE DEPARTURE LATCH. A job delivery is NOT an admission, which is
+            # what makes this arm necessary: ``ServingSessionHandle.begin_drain``
+            # and ``begin_retire`` refuse ``prompt`` and ``receive_peer_message``
+            # from the instant the runtime commits to leaving ("invariant (i), no
+            # new work after the commit"), but a settled child enters through
+            # HERE -- harness-initiated, no client waiting on a receipt -- so
+            # nothing refused it. The run it opened could then only ever end one
+            # way: the disposal that follows aborts it, and the conversation gets
+            # a cut-off ERROR row ("Stopped with an error") about a batch of
+            # results that were already durable, on a turn the operator never
+            # asked for. Measured: session a81ceec0982b, 2026-09-24 22:22:28 -- a
+            # finishing turn's ``finally`` flushed nine settled children into one
+            # delivery turn, which the exit's disposal aborted before the first
+            # provider call, 650 ms after that turn's own honest ``complete``.
+            #
+            # AWAITED, not spawned: the durability has to have landed BEFORE
+            # anything can decide this session is finished, and a spawned task is
+            # exactly what ``dispose`` cancels in flight (see the comment on the
+            # name/model flushes there). ``_hold_job_results_for_next_turn``
+            # never raises, so no caller needs its own guard.
+            #
+            # ONE arm, not two (review round 2, MINOR-A). An earlier revision
+            # left this comment on a second ``_leaving_deliveries`` test placed
+            # AFTER the message build, which the arm above had already made
+            # unreachable; the branch that could write a held row as DELIVERED
+            # is the one that must not exist, so the held build lives here and
+            # the latch is tested once.
+            held = [
+                self._job_result_message(job_id, text, job, held=True)
+                for job_id, text, job in results
+            ]
+            await self._hold_job_results_for_next_turn(results, held)
             return
         messages = [self._job_result_message(job_id, text, job) for job_id, text, job in results]
         self._spawn_background(self._prompt_messages(list(messages)))
 
+    async def _hold_job_results_for_next_turn(
+        self, results: list[tuple[str, str, Any]], messages: list[CustomMessage]
+    ) -> None:
+        """Make a settled batch DURABLE, and open NO turn.
+
+        The no-turn arm of :meth:`_deliver_job_results`, taken when this
+        session's runtime has committed to leaving. It is the same contract
+        ``_drop_pre_aborted_turn`` states for the pre-aborted case: the arriving
+        messages are made durable HERE, before this method returns, and reach the
+        model on the session's next real turn -- ``SESSION_INCIDENT``-style rows
+        ride the render allow-list (``harness/render.py`` lists
+        ``JOB_RESULT_MESSAGE_TYPE``), so a durable ``job_result`` row is an
+        injected user message to whoever turns next. **This drops the model call,
+        never the message.**
+
+        Both halves of that contract are needed and neither is redundant. The
+        transcript append is what survives this process; the live-context append
+        is what a turn in THIS process reads, and it parks behind ``_turn_lock``
+        when a turn still holds it (``_append_or_park_journal``), rejoining at
+        the next turn boundary.
+
+        Per-batch failure is LOUD and never falls back to opening the turn: a
+        turn is exactly what the latch forbids, and silence would be the silent
+        data loss this arm exists to prevent (§4.1 of the incident plan). ONE row
+        reports the whole batch (design review round 1, D4): the incident's own
+        batch was nine children, and a per-result notice painted nine
+        near-identical warning paragraphs restating one reason — the shape this
+        file's delivery contract argues against ("N children that settle during
+        one parent turn are one piece of news"). Per-job detail goes to the log.
+        """
+        failed: list[tuple[str, str]] = []
+        reason = ""
+        for (job_id, _text, job), message in zip(results, messages):
+            try:
+                await self._transcript.append_message(message)
+            except Exception as exc:  # noqa: BLE001 - one lost row must not lose the batch
+                logger.error(
+                    "could not persist the result of job %s for the next turn "
+                    "(the runtime is leaving)",
+                    job_id,
+                    exc_info=True,
+                )
+                # The ID travels with the label: the row's own remedy is
+                # addressed by id, and a reader who is shown only a label has
+                # nothing to substitute into it (UX round 2, U9).
+                failed.append((job_id, str(getattr(job, "label", job_id) or job_id)))
+                reason = reason or (str(exc) or exc.__class__.__name__)
+                continue
+            self._append_or_park_journal(message)
+        if failed:
+            await self._journal_held_delivery_failure(failed, reason)
+
+    async def _journal_held_delivery_failure(
+        self, jobs: list[tuple[str, str]], reason: str
+    ) -> None:
+        """Report the job results that could not be held for the next turn.
+
+        The one honest outcome when the durability write fails: the runtime is
+        leaving, so the alternative the delivery would otherwise take -- open a
+        turn -- is forbidden by the same latch that got us here, and quietly
+        returning is a result the operator never learns they lost. Never raises:
+        it is called from a turn's ``finally`` (through
+        ``_deliver_deferred_job_results``) and from the job manager's settle
+        hook, and neither may fail because a report failed.
+
+        THE SENTENCE IS AUTHORED IN ``incidents.py`` (design review round 1, D2),
+        not hand-written here: every operator- and model-facing incident row in
+        this codebase is built in that one place, and a paragraph written at a
+        call site carries no head, no ``suggested action:`` slot and none of the
+        structure a reader uses to tell a system record from the agent's prose —
+        measured in a rendered frame, where this row sat directly under the MCP
+        warning's labelled shape and read as the agent narrating. The formatter
+        owns the route it names too, so the pointer cannot drift from what the
+        stores actually do (D1/D3).
+
+        AND IT IS DURABLE EVEN WHEN THE DISPOSAL WON (QA round 2, Q-R2-2).
+        ``journal_incident`` returns early on ``self._disposed`` — right for a row
+        that has to reach a live model's context, wrong here: in the ordering
+        this whole change is about, the disposal reaches the turn BEFORE its
+        flush, so the one path whose entire purpose is "do not lose this quietly"
+        was allowed to end as an ERROR log line and nothing else. The transcript
+        accepts appends until the very end of ``dispose`` (the same fact MAJOR-1
+        rests on), so the disposed case writes the row directly. The live-context
+        half is skipped rather than faked: there is no turn in this process to
+        read it, and the row's reader is the next one.
+        """
+        from local_operator.harness.message_types import SESSION_INCIDENT_MESSAGE_TYPE
+        from local_operator.harness.types import CustomMessage
+        from local_operator.incidents import format_held_delivery_message
+
+        rendered = format_held_delivery_message(jobs, reason=reason)
+        raw = (
+            f"could not hold {len(jobs)} background job result(s) while the runtime "
+            f"was leaving: {reason}"
+        )
+        try:
+            if self._disposed:
+                message = CustomMessage(
+                    custom_type=SESSION_INCIDENT_MESSAGE_TYPE,
+                    attribution="system",
+                    details={"text": rendered, "raw": raw[:1000]},
+                )
+                await self._transcript.append_message(message, preserve_mtime=True)
+            else:
+                await self.journal_incident(raw, rendered=rendered)
+        except Exception:  # noqa: BLE001 - a failed report must not raise either
+            logger.error(
+                "could not journal the lost delivery of %s (the ERROR log above is the "
+                "only record)",
+                [job_id for job_id, _label in jobs],
+                exc_info=True,
+            )
+
+    def retire_job_deliveries_to_transcript(self) -> None:
+        """From now on, a settled job's result is durable and opens NO turn.
+
+        The mirror of :meth:`retire_wakes_to_inbox` for the OTHER
+        harness-initiated arrival, and it holds the invariant that would
+        otherwise break: the departure latches refuse ADMISSIONS, and a job
+        delivery is not one, so without this the delivery opens a turn on a
+        runtime that has already committed to leaving -- a turn whose only
+        possible end is the following disposal's abort (see
+        ``_deliver_job_results`` for the measured incident).
+
+        Installed by ``ServingSessionHandle.begin_drain`` (the build drain and
+        the signal drain) and by ``begin_retire`` (the idle exit, the viewer's
+        rotate, ``/move``), in the same synchronous step that commits the exit,
+        so a delivery cannot slip between the two. Idempotent and never raises:
+        both latches can run, and a session that reports it has already armed is
+        an answer, not a failure.
+
+        NOT installed by the update WINDOW (``begin_update``), deliberately: a
+        window QUEUES admissions instead of refusing them and its handover only
+        commits at the boundary, so a delivery turn opened inside it is work the
+        runtime intends to finish -- whether it does is the latch's question, and
+        ``begin_retire``/``begin_drain`` answer it.
+        """
+        self._leaving_deliveries = True
+
+    def resume_job_deliveries_to_turns(self) -> None:
+        """Release :meth:`retire_job_deliveries_to_transcript` -- the move was abandoned.
+
+        For ``end_drain``'s give-up arm (``process._abandon_move``): a runtime
+        that is serving again must be able to deliver again, or the children that
+        settle for the rest of its life are held until someone types something.
+        The rows already held need no undoing -- they are durable and ride the
+        next turn either way -- which is why this only clears the flag.
+        """
+        self._leaving_deliveries = False
+
     @staticmethod
-    def _job_result_message(job_id: str, text: str, job: Any) -> CustomMessage:
-        """The model-facing row for one settled job's result."""
+    def _job_result_message(
+        job_id: str, text: str, job: Any, *, held: bool = False
+    ) -> CustomMessage:
+        """The model-facing row for one settled job's result.
+
+        ``held`` marks a row written by the leaving arm rather than delivered by
+        a turn, and it is the ONE difference between the two (UX round 1, U6):
+        the text and every other detail stay byte-identical, so the row the model
+        reads is the same row it has always read, while a surface can tell the
+        two apart. Without it the held row is indistinguishable from a delivered
+        one, and the operator cannot see that a report is waiting for their next
+        turn rather than already answered.
+        """
         label = getattr(job, "label", job_id)
         status = getattr(job, "status", "completed")
         summary = (text or "").strip()
@@ -11180,20 +11523,25 @@ class Session:
             if summary
             else f"background job '{label}' {status}."
         )
+        details: dict[str, Any] = {"job_id": job_id, "text": delivery}
+        if held:
+            details["held"] = True
         return CustomMessage(
             custom_type=JOB_RESULT_MESSAGE_TYPE,
             attribution="user",
-            details={"job_id": job_id, "text": delivery},
+            details=details,
         )
 
-    def _deliver_deferred_job_results(self) -> None:
+    async def _deliver_deferred_job_results(self) -> None:
         """Hand over job results that settled while a turn was streaming.
 
         Called from the turn pipeline's ``finally`` AFTER ``_is_streaming`` is
         cleared, so it runs exactly when ``_on_job_completed`` would have
         accepted the delivery in the first place. Everything deferred during
         the turn goes out as ONE ``_prompt_messages`` turn (see
-        ``_deliver_job_results``), in settle order.
+        ``_deliver_job_results``), in settle order -- unless the runtime has
+        committed to leaving, in which case the batch is HELD durably and opens
+        no turn at all (the no-turn arm in ``_deliver_job_results``).
 
         Reads the JOB OBJECT captured at settle time, never a fresh ledger
         lookup: the manager sweeps a settled row five minutes after it settles,
@@ -11201,15 +11549,24 @@ class Session:
         row gone and drop the result -- the very loss this path exists to close
         (review round 1, R1-1). The one re-check that remains is ``consumed``,
         read on that same object: a result the turn collected with ``wait`` is
-        not delivered a second time. A disposed session delivers nothing.
-        Never raises into the turn's ``finally``.
+        not delivered a second time. Never raises into the turn's ``finally``.
+
+        THE BATCH IS NOT DROPPED WHEN THE DISPOSAL GOT HERE FIRST (review round
+        1, MAJOR-1). ``dispose`` reaches an in-flight turn before this flush can
+        run whenever its bounded wait for that turn expires (a teardown with a
+        batch of durability writes behind it is exactly that shape), and the
+        batch must still be written: the transcript is closed for APPENDS only
+        at the very end of ``dispose``, after this window, so a row written here
+        lands. Clearing the dict first and returning would destroy it -- no row,
+        no incident, no log -- which is the silent loss this whole change exists
+        to prevent, one ordering over. The leaving arm is what makes it
+        addressable at all: it routes to the durable no-turn write instead of
+        the turn the disposal just refused to let run.
         """
         if not self._deferred_job_results:
             return
         pending = list(self._deferred_job_results.items())
         self._deferred_job_results.clear()
-        if self._disposed:
-            return
         results: list[tuple[str, str, Any]] = []
         for job_id, (job, text) in pending:
             try:
@@ -11218,8 +11575,12 @@ class Session:
                 results.append((job_id, text, job))
             except Exception:  # noqa: BLE001 - a delivery must not fail the turn's teardown
                 logger.warning("deferred job delivery failed for %s", job_id, exc_info=True)
+        if self._disposed and not self._leaving_deliveries:
+            # Off the latch a disposed session has no arm that can write, and the
+            # old behaviour stands: nothing is delivered.
+            return
         try:
-            self._deliver_job_results(results)
+            await self._deliver_job_results(results)
         except Exception:  # noqa: BLE001 - a delivery must not fail the turn's teardown
             logger.warning("deferred job delivery failed", exc_info=True)
 
@@ -15261,7 +15622,17 @@ class Session:
         saved = selection_from_payloads(
             row.payload for row in self._transcript.entries() if row.type == ENTRY_CUSTOM
         )
-        if self._model_source == "flag":
+        # A child is skipped like a flag, because its model was also chosen
+        # deliberately just before construction: ``run_subagent`` resolved the
+        # launch rule (a tier or role pin, else the parent's CURRENT model).
+        # Restoring the child's own journal row here silently returned every
+        # ``hub op='resume'`` to the model the child was born on. That defeated
+        # a parent ``/model`` switch and a re-configured tier alike: after the
+        # operator moved a session to a cheaper model, a paused child resumed
+        # on the expensive one. The first resumed turn
+        # still journals a fresh row (``_selection_needs_initial_write`` stays
+        # True), so the transcript records the model it actually ran on.
+        if self._model_source in ("flag", "child"):
             return
         if saved is None:
             self._model_migration_notice = bool(self._transcript.entries())

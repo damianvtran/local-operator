@@ -1295,6 +1295,31 @@ class AgentTool(BaseModel):
     call_approval_tier: Callable[[dict[str, Any]], Literal["read", "write", "exec"]] | None = Field(
         default=None, exclude=True
     )
+    #: PLAN-TIME refusal: ``(validated args, offered tool names) -> message |
+    #: None``. Runs during planning, before the batch, so a call this tool will
+    #: not run is refused
+    #: without a card being announced and — the reason this exists — WITHOUT an
+    #: approval prompt. Without it the operator is asked to approve a call the
+    #: tool then refuses itself, which reads as the harness wasting their
+    #: decision (review Q-2 on #1546: a foreground ``sleep 1500`` is exec-tier,
+    #: so the gate fired first).
+    #:
+    #: The refusal is reported as a MODEL fault (``FAULT_INVALID_ARGUMENTS``),
+    #: like a schema violation, because the shape is one the harness declines to
+    #: run and the result tells the model how to re-shape it — the same posture
+    #: as a rejected line range. A tool with a hook keeps its execute-time check
+    #: too: this path covers the loop, and ``execute`` is also reachable
+    #: directly (tests, the dispatch bridge), from where no hook runs.
+    #:
+    #: The SECOND argument is the names of the tools the calling session
+    #: actually holds (``_plan_call`` reads them off ``context.tools``), and it
+    #: is there because a refusal that names a replacement the reader does not
+    #: have routes it straight into ``Tool not found`` — the failure the first
+    #: refusal in this family exists to remove. A hook that cannot tell must not
+    #: guess; the loop always can.
+    refuse_args: Callable[[dict[str, Any], frozenset[str]], str | None] | None = Field(
+        default=None, exclude=True
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1934,6 +1959,8 @@ class ModelChangeEvent(AgentEvent[Literal["model_change"]]):
     provider: str
     model_id: str
     effort: str | None = None
+    # A route edge (pin, recovery, switch) must carry its cause; a display-only
+    # refresh sets ``context_metadata`` instead, and headless text skips it.
     reason: str = ""
     is_fallback: bool = False
     # The model-in-force's own window, carried so consumers that hold only the
@@ -2385,10 +2412,13 @@ class ModelSpec(BaseModel):
     # kept as narrow as the evidence: a declared token at the very start of the
     # assembled reply, removed whole. Nothing is searched for, nothing is
     # removed from the middle, and a token inside a string value or behind a
-    # character of prose is left alone and judged as the bytes it is. Extracting
-    # the first balanced JSON object from prose -- the other way to rescue these
-    # replies -- remains refused for the reason ``_decode_leading_json`` gives:
-    # it can execute a batch the model never sent.
+    # character of prose is left alone and judged as the bytes it is. A reply
+    # behind an UNdeclared token is no longer lost either, and that is the
+    # decoder's doing rather than this table's: ``_decode_leading_json`` reads a
+    # decision behind leading junk when it is the reply's only decision
+    # (``public_reply._locate_leading_object``), so what the declaration still
+    # decides is whether the token is REMOVED from the reply the context carries
+    # -- the byte-precise half of the job -- not whether the turn survives.
     reasoning_boundary_markers: tuple[str, ...] = ()
     # Whether this ROUTE can serve this model at the provider's fast tier, and
     # whether the user has asked it to. Same division of labour as the effort

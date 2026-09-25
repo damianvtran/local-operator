@@ -28,7 +28,11 @@ endpoint's admission rule and the composer's planner both read:
 * `argument_shape` / `argument_words` — the third source, for text the desktop
   VALIDATES or FORWARDS rather than completes. `argument_words` is the vocabulary
   the first token must come from, empty meaning any word:
-  - `word` — one whitespace-free selector token (`/usage on`, `/stop now`);
+  - `word` — one whitespace-free selector token (`/usage on`, `/stop now`).
+    `/session --copy` is a `word` row with a one-word vocabulary
+    (`argument_words: ["--copy"]`): the copy is terminal-only, so the command
+    route refuses it with "--copy works only in the terminal; the /session view
+    shows the ID" rather than opening the view and dropping the flag;
   - `provider` — one token naming a provider this install knows, so `/login
     openai` is the command and `/login zzz` is a message;
   - `subcommand` — `<subcommand> [name]`, the MCP shape, at most two tokens, so
@@ -600,10 +604,9 @@ its `scope` (`global`/`project`, where it APPLIES) with `project_cwd` set iff
 `project`, a `transport`/`endpoint` pair with a redacted URL when the URL carried
 user-info, a query or a fragment, `status`/`status_reason`/`status_observed_at`/
 `status_basis`, an `auth` block (`kind`, `signed_in`, and the state of each
-`secret_refs` id), a `tool_count` with its basis, and the closed `actions` list —
-`test`, `sign_in`, `set_key`, `add_key`, `reauth`, `sign_out`, `remove`, `connect`,
-`disconnect`. It
-is generated in `mcp/catalog.py` — the ONE row builder behind this route — so no
+`secret_refs` id), a `tool_count` with its basis and `last_seen_at`, and the closed
+`actions` list — `test`, `sign_in`, `set_key`, `add_key`, `reauth`, `sign_out`,
+`remove`, `connect`, `disconnect`. It is generated in `mcp/catalog.py` — the ONE row builder behind this route — so no
 client derives any of it; `docs/fixtures/mcp-catalog.json` is a pinned sample of the
 shape (with one row per status, one project row, one foreign-import row and a
 running operation) for the UI's own parity tests, and a unit test fails if the
@@ -619,38 +622,52 @@ measured this server yet — `status_observed_at` is null), or `stored` (config,
 grant store, the encrypted store). The bases are kept apart so a client never draws
 a settled result for an operation still in flight.
 
-**Keys: `set_key` vs `add_key`.** `set_key` appears when the config declares `${ID}`
-references (`auth.secret_refs` non-empty): the client asks for each listed id and
-posts `{name, values:{<id>: <value>}, confirmed_replace?}`. `add_key` appears INSTEAD
-of `sign_in` for a REMOTE server we own (`source.editable`) that declares no
-reference, SENDS no credential of its own (no header that could CARRY one, and no
-user-info or query in its URL) and is known to need a key: its config says
-`auth.type: apikey`,
-or a Test in this daemon watched it answer 401/403 while discovery found no OAuth
-authorization server. Such a row reads `auth.kind: api_key`, `signed_in: false`,
-`needs_sign_in`, and never offers `sign_in` (which could only fail with "No OAuth
-authorization server was discovered"). A server that already sends a literal key
-header is never this row: it has somewhere its key already travels, so it reads
-`not_started` (or whatever its probe measured) rather than `needs_sign_in`, and its
-fix is the header it already has — `add_key` could only bind a second one.
-A header counts as a place a key travels only when its NAME can be one and the
-transport does not own it: `Accept` is invented by the protocol (every streamable
-HTTP client sends it) and `X-Tenant-Id` says nothing about a credential, so a
-keyless server sending either is still this row — it keeps `add_key`, and
-`status_reason` says why it needs a key despite sending headers.
-The client asks for the header name (e.g. `Authorization` or `X-Api-Key`), a key id
-(a `[A-Za-z_][A-Za-z0-9_]*` name) and the value, and posts `{name, header,
-values:{<id>: <value>}}` — exactly one id. The server binds
-`headers[<header>] = "${<id>}"` into the file that defines the server
-(only a reference ever enters config), then stores the value; a refused store rolls
-the binding back — including the FILE's own bytes, so a hand-formatted `mcp.json`
-comes back exactly as it was. It refuses a header the server already sets (in ANY
-case, since HTTP header names are case-insensitive), a transport-owned
-header, a foreign row, and a row the catalog would not offer `add_key` on at all
-(an explicit OAuth server, a server that already sends a credential header, a stdio
-server),
-with `code: invalid_target` and nothing written. `add_key` is refused for the last
-of those on purpose: a second credential header bound beside the one the server
+**Both timestamps are epoch SECONDS (a float), never milliseconds** — a client that
+multiplies by nothing and hands one to a millisecond clock renders a date in 1970,
+which is how "Worked 20700 d ago" happened. `status_observed_at` is set on `live` and
+`probe` rows only: a `stored` status is not an observation, so it stays null there.
+`last_seen_at` is the other time, and it dates the COUNT, not the status: it is set
+exactly when `tool_count_basis` is `last_seen`, to the moment this machine last
+listed that server's tools under its current config (the tool cache's save time — a
+successful connect or refresh, in any process). It survives a daemon restart, which
+is the point: after a reload it is the only honest answer to "when did this last
+work?", and it is null whenever the count came from a live runtime or a probe
+(whose time is `status_observed_at`) or when nothing was ever listed. A config edit
+changes the digest the cache is keyed on, so an edited server has no `last_seen_at`
+until it is reached again.
+
+**Keys: `set_key` vs `add_key`.** `set_key` appears when the config declares
+`${ID}` references (`auth.secret_refs` non-empty): the client asks for each listed
+id and posts `{name, values:{<id>: <value>}, confirmed_replace?}`. `add_key`
+appears INSTEAD of `sign_in` for a REMOTE server we own (`source.editable`) that
+declares no reference, SENDS no credential of its own (no header that could CARRY
+one, and no user-info or query in its URL) and is known to need a key: its config
+says `auth.type: apikey`, or a Test in this daemon watched it answer 401/403 while
+discovery found no OAuth authorization server. Such a row reads `auth.kind:
+api_key`, `signed_in: false`, `needs_sign_in`, and never offers `sign_in` (which
+could only fail with "No OAuth authorization server was discovered"). A server that
+already sends a literal key header is never this row: it has somewhere its key
+already travels, so it reads `not_started` (or whatever its probe measured) rather
+than `needs_sign_in`, and its fix is the header it already has — `add_key` could
+only bind a second one. A header counts as a place a key travels only when its NAME
+can be one and the transport does not own it (it contains `key`, `token`, `secret`,
+`credential`, `password`, `cookie`, `bearer`, `session` or `signature`, or `auth`
+as a word — `Authorization` and `X-Auth-Token` count, `X-Author` does not):
+`Accept` is invented by the protocol (every streamable HTTP client sends it) and
+`X-Tenant-Id` says nothing about a credential, so a keyless server sending either
+is still this row — it keeps `add_key`, and `status_reason` says why it needs a key
+despite sending headers. The client asks for the header name (e.g. `Authorization`
+or `X-Api-Key`), a key id (a `[A-Za-z_][A-Za-z0-9_]*` name) and the value, and
+posts `{name, header, values:{<id>: <value>}}` — exactly one id. The server binds
+`headers[<header>] = "${<id>}"` into the file that defines the server (only a
+reference ever enters config), then stores the value; a refused store rolls the
+binding back — including the FILE's own bytes, so a hand-formatted `mcp.json` comes
+back exactly as it was. It refuses a header the server already sets (in ANY case,
+since HTTP header names are case-insensitive), a transport-owned header, a foreign
+row, and a row the catalog would not offer `add_key` on at all (an explicit OAuth
+server, a server that already sends a credential header, a stdio server), with
+`code: invalid_target` and nothing written. `add_key` is refused for the last of
+those on purpose: a second credential header bound beside the one the server
 already sends would look like a saved key while the server kept failing. After it
 the row carries the new reference and offers `set_key`. The challenge observation
 lives in this daemon's memory, so after a restart such a row reads `unknown` +

@@ -50,6 +50,7 @@ from local_operator.harness.redaction import (
 from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
+    CustomMessage,
     LoopConfig,
     Message,
     ModelSpec,
@@ -69,7 +70,7 @@ from local_operator.redaction_shapes import (
     scrub_shapes,
     scrub_shapes_with_hits,
 )
-from local_operator.session.session import Session
+from local_operator.session.session import Session, _default_convert_to_llm
 from local_operator.session.transcript import Transcript
 from local_operator.tools import builtin
 from local_operator.variables import VariableStore, redact_secret_values
@@ -3182,13 +3183,20 @@ def test_an_exposed_hit_still_files_one_incident_per_tool_and_shape_set() -> Non
 
 @pytest.mark.asyncio
 async def test_the_queued_incident_reaches_the_transcript(tmp_path: Path) -> None:
-    """Flushed at the boundary, and PERSISTED: a resumed session still knows.
+    """Flushed at the boundary, and PERSISTED — on the OPERATOR's surface only.
 
     Persisted rather than live-only because what it records is still true
     tomorrow, which is the opposite of the MCP-recovery record's reason for not
     persisting. Driven with the EXPOSED case, which is the only one that files
     now: a contained hit has nothing to persist, and its own end-to-end absence
     test is below.
+
+    The row is asserted under its OWN type (``session_credential_redaction``),
+    which is the half this test has to keep proving now that the record left
+    ``session_incident``: a type that reached the transcript but no fold would
+    paint nowhere on a resume, and the operator's whole ticket would be lost.
+    The MODEL half of the split is
+    ``test_the_queued_incident_never_reaches_the_model`` below.
     """
     session = Session(
         model=ModelSpec(provider="test", model_id="unit-model", context_window=1000),
@@ -3204,9 +3212,81 @@ async def test_the_queued_incident_reaches_the_transcript(tmp_path: Path) -> Non
     await session._flush_shape_incidents()
 
     body = (tmp_path / "incident" / "transcript.jsonl").read_text()
-    assert "session_incident" in body
+    assert "session_credential_redaction" in body
     assert "rotate" in body
     assert REDACTION_MARKER not in body
+
+
+@pytest.mark.asyncio
+async def test_the_queued_incident_never_reaches_the_model(tmp_path: Path) -> None:
+    """The model-side half of the split, asserted on the RENDER — not the journal.
+
+    Measured live before this change: 1,493 unnamed credential notices across
+    1,080 sessions were injected as user turns, plus the named ones, so agents
+    and their subagents were being told about a value the guard had already
+    masked out of the text they received. The record now carries
+    ``session_credential_redaction``, a type the renderer's allow-list excludes.
+
+    **Asserted on the render output rather than on the journal row**, because
+    that is the surface the defect was on: a journal assertion would pass while
+    the renderer still injected, which is exactly the state the old tests pinned
+    in the wrong direction. Both halves are checked here so the assertion cannot
+    go vacuous — the row IS on disk (the operator keeps it, see the test above),
+    and it is NOT in what the provider would be handed.
+
+    Both call sites are covered, because they are different code paths and only
+    one of them is live:
+
+    * the LIVE context render (``_render_history`` over the real context the
+      notice was just parked in), which is every subsequent request, and
+    * the RESUME replay (``Transcript.build_llm_history`` rehydrates the
+      persisted row, then the same renderer runs over it), which is the half a
+      live-only test would miss.
+    """
+    session = Session(
+        model=ModelSpec(provider="test", model_id="unit-model", context_window=1000),
+        stream_fn=_never_streams,
+        tools=[],
+        transcript=Transcript(tmp_path / "incident"),
+        system_blocks_provider=lambda *_a: [],
+        yolo=True,
+        cwd=str(tmp_path),
+        variables=VariableStore(cwd=str(tmp_path)),
+    )
+    session._redact_tool_result_text(_exposed_text())
+    await session._flush_shape_incidents()
+
+    # The instrument is not dead: the live record really is in the context the
+    # renderer is about to be handed, so an empty render cannot mean "nothing
+    # was ever queued". ``isinstance`` rather than a ``getattr`` comparison: the
+    # context holds ``Message``s too, and only a ``CustomMessage`` carries
+    # ``details`` — the runtime never had a Message here, but the type of the
+    # list says it might, and a type-checker cannot see the inequality the
+    # string test relies on.
+    parked = [
+        message
+        for message in session._context.messages
+        if isinstance(message, CustomMessage)
+        and message.custom_type == "session_credential_redaction"
+    ]
+    assert parked, "the notice never reached the live context, so the render proves nothing"
+    assert "rotate" in str(parked[-1].details.get("text", ""))
+
+    # 1. The LIVE render: the notice is dropped as bookkeeping, like every other
+    #    allow-list miss, and nothing of its wording is anywhere in the request.
+    live = _default_convert_to_llm(list(session._context.messages))
+    live_text = "\n".join(str(getattr(message, "text", "")) for message in live)
+    assert "[credential redaction]" not in live_text, live_text
+    assert "rotate it" not in live_text
+    assert not any(
+        getattr(message, "custom_type", None) == "session_credential_redaction" for message in live
+    ), "the credential-redaction record was rendered into the model's context"
+
+    # 2. The RESUME replay: the same exclusion, through the persisted row.
+    resumed = _default_convert_to_llm(Transcript(tmp_path / "incident").build_llm_history())
+    resumed_text = "\n".join(str(getattr(message, "text", "")) for message in resumed)
+    assert "[credential redaction]" not in resumed_text, resumed_text
+    assert "rotate it" not in resumed_text
 
 
 def test_the_tool_identity_travels_with_the_redaction() -> None:
@@ -3760,7 +3840,9 @@ async def test_the_incident_row_reaches_the_operator_live_and_on_replay(
     new string on the same path and the failure mode this test exists for — a row
     that paints nowhere — does not care which wording it is carrying.
     """
-    from local_operator.harness.message_types import SESSION_INCIDENT_MESSAGE_TYPE
+    from local_operator.harness.message_types import (
+        SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
+    )
     from local_operator.harness.types import NoticeEvent
 
     session = Session(
@@ -3784,8 +3866,12 @@ async def test_the_incident_row_reaches_the_operator_live_and_on_replay(
     assert notices[0].kind == "warning"
     assert marker in notices[0].text
 
-    # Replay: the same record, folded through the real settlement path.
-    rows = _fold_incident_row(SESSION_INCIDENT_MESSAGE_TYPE, notices[0].text)
+    # Replay: the same record, folded through the real settlement path. The
+    # type is the record's OWN (``session_credential_redaction``, since
+    # 2026-09-24) — folding it as a ``session_incident`` would test a branch the
+    # shipped record no longer takes, and would leave the new type's own fold
+    # uncovered, which is the direction a resume breaks in.
+    rows = _fold_incident_row(SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE, notices[0].text)
     assert rows, "the incident row folded to nothing"
     assert any(marker in row for row in rows)
 
@@ -3801,7 +3887,6 @@ def _fold_incident_row(custom_type: str, text: str) -> list[str]:
     """
     from unittest.mock import MagicMock
 
-    from local_operator.harness.types import CustomMessage
     from local_operator.tui import session_presentation as presentation
 
     class _Target:
@@ -4889,6 +4974,76 @@ def test_the_grading_separates_contained_from_exposed() -> None:
     assert not any(h.exposed for h in pem_hits), "a masked truncated key is not an exposure"
 
 
+def test_the_exposure_claim_has_a_floor_and_a_substance_test() -> None:
+    """The unnamed-escalation defect, at the site that produced it.
+
+    ``exposed`` is the whole severity classification — it is what raises the rotation
+    notice — and it used to fire for a match of ANY length. A two-to-four character
+    ordinary word's characters reappear in the same text for innocent reasons, so the
+    fragment test answered YES and the session escalated with ``labels=()``, filing
+    "a credential the shape table could not name" for a Python keyword: a census of
+    this machine's transcripts found 2,133 ``rotate it`` incidents across 1,080
+    sessions, of which 1,493 (70%) were that unnamed state, firing on ordinary
+    results — a ``read`` of a file path, a ``grep`` of a directory, a ``web_search``
+    for a village mayor.
+
+    Both halves are pinned here because either one alone lets the defect back:
+    the WIDTH floor (:data:`rs._EXPOSURE_MIN_VALUE_LEN`) and the SUBSTANCE consult
+    (:func:`rs._value_is_not_a_credential`), which the masking floor already made
+    and this site did not. The registration floor is not a second caller of the
+    whole predicate — it consults only its placeholder half plus its own length
+    floor — so this site is that predicate's SECOND caller.
+    """
+    import local_operator.redaction_shapes as rs
+
+    # WIDTH. A four-character value is refused whatever the text says — including the
+    # case that motivated it, a value whose characters are all over the text it was
+    # read out of.
+    assert not rs._value_may_be_claimed_exposed("pass")
+    assert not rs._value_may_be_claimed_exposed("abcd")
+    assert rs._value_may_be_claimed_exposed("grace")  # five: the floor's edge
+
+    # SUBSTANCE. A value that is code, a reference, a type or a path is not credential
+    # material at any length above the floor — the clause the exposed path lacked.
+    for not_a_credential in (
+        "_node_order",
+        'started["token"]',
+        "_tokens(query)",
+        "providers.anthropic.cache_ttl_1h_min_context_tokens",
+        "/Users/example/project",
+        "${CI_JOB_TOKEN}",
+    ):
+        assert not rs._value_may_be_claimed_exposed(not_a_credential), not_a_credential
+
+    # ...and a value that IS credential material keeps the claim, which is the
+    # direction the whole control exists for.
+    for credential in ("correct-horse-battery", "hunter2hunter2", "S3cr3t/val+ue"):
+        assert rs._value_may_be_claimed_exposed(credential), credential
+
+
+def test_a_marker_carrying_value_is_judged_by_survival_not_by_substance() -> None:
+    """The one carve-out the substance consult needs, pinned so it is not mistaken
+    for a loophole.
+
+    The failure it exists for came from a PLAIN WORD, not a placeholder: a second rule
+    matched the marker the first rule had just inserted, so the exposed hit's own value
+    WAS ``[redacted]`` — and the old region-search read its own marker back as readable
+    material and filed a rotation demand for the two ``.npmrc`` ``_authToken`` cases
+    and a cookie header (pinned in ``test_a_marker_valued_hit_no_longer_escalates``
+    just below). Adding the substance consult for that defect would re-break it here,
+    one layer up: a value carrying the marker has ``[`` and ``]``, which are
+    :data:`rs._EXPRESSION_CHARS`, so the predicate would refuse a claim for a value
+    that is text a MASK wrote rather than code the agent reads. The carve-out hands
+    such a value back to the survival question instead — the documented limit on
+    :func:`rs._credential_fragments_survive` — so the WHOLLY surviving copy still
+    escalates and only the partial survivor is given up.
+    """
+    import local_operator.redaction_shapes as rs
+
+    value = f"tok{rs.REDACTION_MARKER}tail"
+    assert rs._value_may_be_claimed_exposed(value), "the marker carve-out stopped applying"
+
+
 #: The positives that ESCALATE, named by the case's own reason string.
 #:
 #: An EXACT set, in both directions, like the partial-mask ratchet further down: a
@@ -5022,10 +5177,10 @@ def test_a_duplicated_placeholder_reference_does_not_escalate() -> None:
     ``$VAR`` readable (``is_placeholder_component`` is what keeps it unmasked), so
     the fragment test found that survivor under the hit's own value and read it as
     a partial mask — the loud ``rotate it`` notice for a value that never was
-    credential material. The exposed decision site is now the third place the
-    predicate is consulted (the masking floor and the registration floor are the
-    others), which is the whole of the fix: no word-list change reaches it, because
-    the value is correctly a placeholder already.
+    credential material. The exposed decision site is now the second place the
+    predicate is consulted (the masking floor is the other; the registration floor
+    consults only its placeholder half), which is the whole of the fix: no word-list
+    change reaches it, because the value is correctly a placeholder already.
 
     Every literal is built by concatenation on purpose — a credential-shaped
     literal written into a source file is exactly what the scrubber is for.
@@ -6070,6 +6225,114 @@ def test_a_compact_json_pair_keeps_its_neighbouring_key_and_files_nothing() -> N
     assert masked.count(REDACTION_MARKER) == 2, masked
     report = redaction_shapes.shape_report(hits)
     assert not report.reached_model, report
+
+
+def test_a_short_but_real_credential_keeps_its_escalation() -> None:
+    """The direction the floor must NOT trade away, measured on the real specimens.
+
+    The module's own notes name a five-character DSN password and a seven-character
+    ``-pass`` value as real, and the corpus's one escalating case is the ``amqp`` DSN
+    whose username is its password. A floor that swallowed any of them would be a
+    silent missed leak, which is the unrecoverable direction — a spurious rotation
+    demand is recoverable, a missed one is not — so both are pinned here, in the
+    half the fix could have broken.
+    """
+    import local_operator.redaction_shapes as rs
+
+    # The corpus's escalating case, derived from it so this file spells no
+    # credential-shaped literal of its own: five characters, username == password,
+    # still ``labels=()`` with ``reached_model`` — an escalation the table cannot
+    # name, which is the state the notice must keep describing truthfully.
+    case = next(c for c in POSITIVE_CASES if c.reason == "amqp DSN")
+    masked, hits = scrub_shapes_with_hits(case.text)
+    report = rs.shape_report(hits)
+    assert report.reached_model, "the amqp username==password DSN stopped escalating"
+    assert report.labels == (), "the unnamed escalation gained an invented label"
+    assert any(
+        h.exposed and len(h.value) == 5 for h in hits
+    ), "the five-character survivor is no longer graded exposed: the floor is too high"
+
+    # The seven-character ``-pass`` value, printed twice in the clear.
+    flag = "-p"
+    value = "S3cr3t7"
+    repeated = f"mysql -u root {flag}{value} dump then {flag}{value} again"
+    masked7, hits7 = scrub_shapes_with_hits(repeated)
+    assert REDACTION_MARKER in masked7, "a short ``-p`` value stopped being masked"
+    assert rs.shape_report(hits7).reached_model, "a 7-character ``-p`` value stopped escalating"
+
+
+def test_a_sub_floor_partial_survivor_is_given_up_deliberately() -> None:
+    """The ONE severity cost this floor accepts, asserted so it is a decision, not a slip.
+
+    Measured, both revisions: a four-character DSN password that is masked inside the
+    URL and printed a SECOND time in the clear is a genuine partial survivor — the
+    fragment test finds its own characters in the model-visible text. At base that
+    graded ``exposed`` and filed a rotation demand (``rotate it``); at head the width
+    floor refuses the claim, so the same input is announced as CONTAINED ("nothing
+    entered your context") and no rotation is demanded. A four-character value cannot
+    be told from prose anywhere in the text, which is the whole of the reason, and the
+    trade is deliberate: a spurious-but-recoverable rotation is surrendered textually
+    for the 1,493 unnamed false rotations the fix removes. The MASK is untouched — only
+    the severity claim is withheld.
+
+    The at-floor control is the same shape one character wider and must keep demanding
+    the rotation, so a floor raised past five fails here rather than passing quietly.
+    This is the mirror of ``test_a_short_but_real_credential_keeps_its_escalation``
+    directly above: that pins the values the floor must NOT give up, and this pins the
+    one it does.
+    """
+    import local_operator.redaction_shapes as rs
+
+    scheme = "post" + "gres"
+    sub_floor = "abcd"
+    sub_text = f"{scheme}://u:{sub_floor}@host/db\n# and again {sub_floor}"
+    sub_masked, sub_hits = scrub_shapes_with_hits(sub_text)
+    assert REDACTION_MARKER in sub_masked, "the sub-floor DSN password stopped being masked"
+    assert (
+        rs.shape_report(sub_hits).reached_model is False
+    ), f"a sub-floor partial survivor files a rotation demand again: {sub_masked!r}"
+    assert rs.shape_report(sub_hits).labels == (
+        "dsn-password-plain",
+    ), "the withheld claim must still be NAMED, not silently unnamed"
+
+    # The at-floor control: one character wider, and the survivor is still real.
+    at_floor = "abcdz"
+    at_text = f"{scheme}://u:{at_floor}@host/db\n# and again {at_floor}"
+    _at_masked, at_hits = scrub_shapes_with_hits(at_text)
+    assert rs.shape_report(
+        at_hits
+    ).reached_model, "a five-character partial survivor stopped escalating: the floor rose"
+
+
+def test_a_below_floor_escalation_now_names_its_label_and_reads_contained() -> None:
+    """The notice-path flip the fix produces, pinned so it cannot be broken silently.
+
+    The user-visible half of this change is not only "fewer escalations" but "the
+    previously-UNNAMED escalation now names its shape and reads as contained": at
+    base, a sub-floor match whose own characters reappear in the text escalated with
+    ``labels=()`` and ``reached_model=True`` — the state the formatter renders as "a
+    credential the shape table could not name", which is what the loop.py false
+    positive wore. The label class here is the SAME rule (``client-inline-password``,
+    a four-character ``-p`` value) as that loop.py hit, so this is the same class of
+    input driven synthetically rather than read off a harness file.
+
+    The gate can stay correct while the notice path breaks — re-deriving ``labels``
+    from ``exposed``, or keeping ``complete=False`` for a refused hit — so the two
+    halves are asserted together: the claim is withheld (``reached_model is False``)
+    AND the hit is still named.
+    """
+    import local_operator.redaction_shapes as rs
+
+    flag = "-p"
+    value = "abcd"
+    repeated = f"mysql -u root {flag}{value} dump then {flag}{value} again"
+    masked, hits = scrub_shapes_with_hits(repeated)
+    report = rs.shape_report(hits)
+    assert REDACTION_MARKER in masked, "a sub-floor ``-p`` value stopped being masked"
+    assert report.reached_model is False, "the below-floor claim is back: it escalates again"
+    assert report.labels == (
+        "client-inline-password",
+    ), f"the notice path lost the label: {report.labels}"
 
 
 def test_a_genuinely_exposed_compact_credential_still_files_an_incident() -> None:

@@ -34,6 +34,8 @@ from local_operator.server.models.desktop_sessions import (
     AnswerReceipt,
     ArchiveState,
     AttentionState,
+    ChildTrajectoryRelease,
+    ChildTrajectoryWindow,
     ChildTranscriptPage,
     CommandReceipt,
     CreatedSession,
@@ -85,6 +87,11 @@ from local_operator.server.utils.store_failures import (
 )
 from local_operator.session.attached import RuntimeUnresponsiveError
 from local_operator.session.attention import SupersededCompletionToken
+from local_operator.session.catalog import (
+    SCOPE_KINDS,
+    SCOPE_NAME_MAX_LENGTH,
+    CatalogueScope,
+)
 from local_operator.session.cold_model import synthesise_cold_state
 from local_operator.session.errors import (
     MoveIndeterminate,
@@ -98,6 +105,7 @@ from local_operator.session.frontend_state import (
 )
 from local_operator.session.runtime.presence import PRESENCE_TTL_S
 from local_operator.slash_commands import (
+    SESSION_COPY_FLAG,
     command_argument_refusal,
     slash_command_for,
     whole_draft_command,
@@ -855,60 +863,23 @@ def _draft_model_spec(model: DraftModel) -> ModelSpec:
     a model the registry does not describe, resolves metadata (memoised, and
     disk-cached in the common case the picker just filled it).
     """
-    from local_operator.model.configure import build_model_spec
-    from local_operator.model.discovery import offered_model_ids
-    from local_operator.providers.registry import (
-        get_provider_definition,
-        is_decision_only,
+    from local_operator.model.configure import (
+        ModelSelectionRefused,
+        validate_model_selection,
     )
 
     provider = model.provider.strip()
     model_id = model.model_id.strip()
-    if get_provider_definition(provider) is None:
-        raise HTTPException(
-            422,
-            {
-                "code": "provider_unknown",
-                "message": f"'{provider}' is not a known provider.",
-            },
-        )
-    if is_decision_only(provider):
-        # A decision-only provider (TypeSafe's Jev) rejects ``chat/completions`` on
-        # every host we reach it through, so accepting this pick would store a
-        # session model that 400s on its first turn — the failure the model
-        # catalogue and the ranking already refuse to offer. It must be refused HERE,
-        # before the enumeration below, because that check CANNOT catch it:
-        # ``offered_model_ids`` answers ``None`` for a provider whose catalogue is not
-        # enumerable offline, and ``None`` means "we have not looked, accept the
-        # pair" — which is the right reading for an aggregator or a local endpoint
-        # and the wrong one for a provider whose catalogue is empty by construction.
-        raise HTTPException(
-            422,
-            {
-                "code": "provider_decision_only",
-                "message": (
-                    f"'{provider}' serves decision-model calls, not chat completions, "
-                    "so no session can run on it."
-                ),
-            },
-        )
-    served = offered_model_ids(provider)
-    if served is not None and model_id not in served:
-        raise HTTPException(
-            422,
-            {
-                "code": "model_unknown",
-                "message": f"'{model_id}' is not a model {provider} serves.",
-            },
-        )
-    effort = (model.reasoning_effort or "").strip().lower()
+    # The pair checks (known provider, not decision-only — which must precede the
+    # catalogue check because ``offered_model_ids`` answers ``None`` for such a
+    # provider — offered by the catalogue, buildable) live in the ONE validator
+    # the peer model switch shares. No ``usable`` probe: this route never
+    # refused on credentials, and its 422 bodies are a pinned wire contract.
     try:
-        spec = build_model_spec(provider, model_id)
-    except Exception as error:  # noqa: BLE001 — a spec we cannot build is a 422, not a 500
-        raise HTTPException(
-            422,
-            {"code": "model_unavailable", "message": f"'{model_id}' could not be resolved."},
-        ) from error
+        spec = validate_model_selection(provider, model_id)
+    except ModelSelectionRefused as refused:
+        raise HTTPException(422, {"code": refused.code, "message": refused.message}) from refused
+    effort = (model.reasoning_effort or "").strip().lower()
     if effort:
         if not spec.reasoning_efforts:
             raise HTTPException(
@@ -1668,13 +1639,91 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         raise _store_refusal(request, failure, error) from None
 
 
+def _requested_scope(scope_kind: str, scope_name: str) -> CatalogueScope | None:
+    """The scope a request asked for, or ``None`` for the head listing.
+
+    REFUSES BY NAME, which is why the query parameters are declared as plain
+    strings and bounded here rather than left to ``Query(max_length=...)``: this
+    codebase's rule for bad input on this route is that the answer names the
+    offending field, and a framework-shaped validation error names a location
+    instead. A HALF-SCOPE IS A CLIENT BUG, not an empty listing: a client that
+    sent ``scope_kind`` and no name has concatenated a URL, and answering it with
+    the whole catalogue would draw every team's rows under one team.
+
+    An EMPTY STRING IS ABSENCE, not a scope named "". ``?scope_kind=&scope_name=``
+    is what a client sends for "no scope", and a session's stored binding can
+    never be empty (``write_session_attachment`` strips, and an empty name is how
+    the file records "unattached"), so treating it as a refusal would refuse the
+    ordinary case.
+
+    Names are STRIPPED, matching the writer: ``write_session_attachment`` stores
+    stripped values, so a trailing space in a query would otherwise look up a
+    group that cannot exist and answer an empty page.
+    """
+    kind = scope_kind.strip()
+    name = scope_name.strip()
+    if kind and not name:
+        raise HTTPException(
+            422,
+            {
+                "code": "scope_name_required",
+                "message": "scope_name is required when scope_kind is given.",
+            },
+        )
+    if name and not kind:
+        raise HTTPException(
+            422,
+            {
+                "code": "scope_kind_required",
+                "message": "scope_kind is required when scope_name is given.",
+            },
+        )
+    if not kind:
+        return None
+    if kind not in SCOPE_KINDS:
+        raise HTTPException(
+            422,
+            {
+                "code": "scope_kind_unknown",
+                "message": f"scope_kind must be one of {', '.join(SCOPE_KINDS)}.",
+            },
+        )
+    if len(name) > SCOPE_NAME_MAX_LENGTH:
+        raise HTTPException(
+            422,
+            {
+                "code": "scope_name_too_long",
+                "message": f"scope_name must be at most {SCOPE_NAME_MAX_LENGTH} characters.",
+            },
+        )
+    return CatalogueScope(kind, name)
+
+
 @router.get("/v1/desktop/sessions", response_model=CRUDResponse[SessionList])
 async def list_sessions(
     request: Request,
     limit: int = Query(default=100, ge=1, le=500),
     include_archived: bool = Query(default=False),
     include_peers: bool = Query(default=False),
+    # THE SCOPED, PAGED PARAMETERS, all optional and all defaulted so that a
+    # request which sends none of them is answered exactly as it was before this
+    # existed. Declared as strings rather than as ``Literal``/``max_length``
+    # because the refusals are answered BY NAME by ``_requested_scope`` and by
+    # ``decode_cursor``'s tolerance, not by the framework's validation shape.
+    scope_kind: str = Query(default=""),
+    scope_name: str = Query(default=""),
+    cursor: str = Query(default=""),
+    # THE CENSUS IS OPT-IN, and its POPULATION is fixed: visible sessions that are
+    # NOT ARCHIVED (``ScopeCounts``' own docstring carries the reasoning -- every
+    # default list in the app hides archived rows, and a badge inflated by rows
+    # the panel cannot draw is the defect this route's change answers). This
+    # request's ``include_archived`` still governs which ROWS come back; a client
+    # that asks for archived rows gets them and the counts do not move.
+    with_counts: bool = Query(default=False),
 ):
+    # REFUSED BEFORE THE STORE IS TOUCHED, so a malformed scope costs no scan and
+    # cannot be answered by anything the store says.
+    scope = _requested_scope(scope_kind, scope_name)
     # Wrapped like its neighbours: the list gained a receipt-store read, and an
     # unmapped failure there answered the app's primary navigation surface with
     # a bare 500. The decoration is already omitted per row inside `list()`;
@@ -1696,6 +1745,9 @@ async def list_sessions(
             status_stamps=stamps,
             include_archived=include_archived,
             include_peers=include_peers,
+            scope=scope,
+            cursor=cursor or None,
+            with_counts=with_counts,
         )
         # THE PAGE, THEN THE PINNED CONVERSATIONS IT DID NOT CARRY, as ONE list.
         # DECIDED, not left open: concatenated on the wire rather than published
@@ -1742,6 +1794,20 @@ async def list_sessions(
                 "truncated": page.truncated,
                 "limit": limit,
                 "degraded": degraded,
+                # THE FOUR PAGING FIELDS, always present and defaulted (see
+                # ``SessionList``): the position to resume this scope from, whether
+                # the cursor the client sent could be used, an echo of the scope
+                # this page answers, and the census when it was asked for.
+                #
+                # ``scope`` is echoed from the REQUEST rather than read off the
+                # answer's rows, because a page may land after the operator
+                # collapsed the group that asked for it: the client must be able to
+                # attribute an answer to the request that produced it without
+                # relying on the ordering of its own promises.
+                "next_cursor": page.next_cursor,
+                "cursor_missing": page.cursor_missing,
+                "scope": None if scope is None else {"kind": scope.kind, "name": scope.name},
+                "counts": page.counts,
             }
         )
 
@@ -2254,6 +2320,71 @@ async def child_transcript(
         )
 
 
+@router.post(
+    "/v1/desktop/sessions/{session_id}/children/{child_id}/trajectory",
+    response_model=CRUDResponse[ChildTrajectoryWindow],
+)
+async def child_trajectory(session_id: str, child_id: str, request: Request) -> Any:
+    """Seed AND subscribe to one child JOB's live trajectory window.
+
+    The child reader's live path, and the read route beside it is the durable
+    one: that one pages the child's own transcript off disk, this one hands over
+    the in-memory event window its runtime is retaining and keeps it growing.
+    ``child_id`` is the JOB id, not the child's session id — the window lives on
+    the job, and a child with a superseded attempt has two job ids over one
+    directory. Containment (a job of THIS conversation's own children) is the
+    route adapter's proof, never the caller's claim.
+
+    ONE op rather than a fetch plus a `watch`, deliberately: a client that did
+    both would lose whatever events landed between the two calls and would need
+    a third state ("resubscribe and re-fetch if the window moved") that the
+    seed-then-subscribe shape makes unnecessary.
+
+    The two ways it can answer WITHOUT rows are not the same fact and are not
+    flattened into one: ``unsupported`` is a job type that records no trajectory
+    (stop asking), ``no-owner`` is nothing live to read it from (keep polling).
+    Both ride a 200, because neither is a failure of the request — a refusal
+    (404 ``child_not_found``) is reserved for an id that is not one of this
+    conversation's children.
+
+    The subscription this opens must be closed by the ``DELETE`` of the same
+    path. It is counted per job on the session's shared bridge, so closing one
+    window does not stop another window's stream — but it must still be sent, or
+    the owner keeps relaying a window nobody is reading.
+
+    The bridge comes from the pool's own door, in the READ envelope, so this
+    route is covered by the refusal matrix like every other bridge-taking route
+    (the alternative — a pool adapter that acquires the bridge itself — reads
+    identically at the call site and drops out of
+    ``test_serve_retire``'s AST walk, which is the guard that keeps that matrix
+    complete).
+    """
+    async with errors(request), host(request).session(session_id, read=True) as bridge:
+        return reply(await bridge.load_child_trajectory(child_id))
+
+
+@router.delete(
+    "/v1/desktop/sessions/{session_id}/children/{child_id}/trajectory",
+    response_model=CRUDResponse[ChildTrajectoryRelease],
+)
+async def child_trajectory_release(session_id: str, child_id: str, request: Request) -> Any:
+    """Release one reader's subscription to a child's live window.
+
+    Idempotent, and deliberately built to be safe to send MORE often than it is
+    needed: a release for a job nobody is watching, or for a session with no
+    resident bridge, is an answer rather than an error, because this is what a
+    client sends on unmount and after a reconnect. The reply states how many
+    readers are left, which is the one thing a closing window cannot otherwise
+    observe.
+
+    It never BUILDS a bridge: materialising a session's bridge is the cost and
+    the side effect (an attach, a warm task) that a cleanup must not pay, and a
+    session with no bridge has nothing outstanding to release.
+    """
+    async with errors(request):
+        return reply(await host(request).unload_child_trajectory(session_id, child_id))
+
+
 @router.get(
     "/v1/desktop/sessions/{session_id}/children/{child_id}/attachments/{digest}",
     # Same declaration as the parent's route, and for the same reason: the
@@ -2586,6 +2717,16 @@ async def command(session_id: str, body: Command, request: Request):
         # every draft as `send`.
         raise HTTPException(
             422, "Enter credentials in the masked credential form, not command text"
+        )
+    if spec.name == "session" and body.args.strip() == SESSION_COPY_FLAG:
+        # Beside `/credential` because it is the same kind of refusal: a sentence
+        # naming where the gesture works, not a shape check. Forwarding it would
+        # open the view and silently drop `--copy` (`native_action` has no
+        # `session` branch), the `/compact hello` class. The copy is a terminal
+        # gesture (decision D3); any other `/session` text forwards as before.
+        raise HTTPException(
+            422,
+            f"{SESSION_COPY_FLAG} works only in the terminal; the /session view shows the ID",
         )
     refusal = command_argument_refusal(spec, body.args)
     if refusal is not None:

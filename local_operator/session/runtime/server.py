@@ -1436,6 +1436,12 @@ class SessionHandle(Protocol):
     #   Optional (getattr-probed in _dispatch) so reduced test handles and
     #   non-interactive exec hosts that never wired it keep working — a handle
     #   lacking it answers "this session cannot receive peer messages".
+    # receive_peer_model(provider, model_id, *, sender=None) -> str: another
+    #   local session switching this one's model (`send model=`, `lop model`).
+    #   Validates against THIS session's config, applies through the host's own
+    #   switch, reads back the model in force, and records a peer audit card.
+    #   Raises ValueError("refused: …; still on …") on refusal. Optional and
+    #   getattr-probed like receive_peer_message.
     # cancel_gracefully() -> str: stop the turn at the POST-TOOL boundary
     #   instead of cutting the running tool (Session.request_graceful_cancel).
     #   Serves the ``cancel`` op's default mode. Deliberately distinct from
@@ -1874,6 +1880,11 @@ class RuntimeServer:
         #: the latch already set and never parks at all.
         self._close_event: asyncio.Event | None = None
         self._push_scheduled = False
+        #: A change landed while a push was already past its snapshot. That push
+        #: cannot carry it, and on an idle session (an idle `/new`/`/resume`) no
+        #: later event would schedule one, so the record waited for the 15 s
+        #: heartbeat. Set by ``_push_soon``; spent by ``_push_later``'s finally.
+        self._push_dirty = False
         # One warning per contiguous run of oversized frames, not one per
         # frame: a busy session repaints ~30x/s and a per-frame warning is the
         # log flood the cap exists to prevent. Reset when a frame fits again.
@@ -2916,6 +2927,7 @@ class RuntimeServer:
         if self._push_task is task:
             self._push_task = None
         self._push_scheduled = False
+        self._push_dirty = False
 
     async def _attention_loop(self) -> None:
         """Reconcile read receipts without making a liveness heartbeat a read."""
@@ -4336,6 +4348,36 @@ class RuntimeServer:
             )
         except Exception:  # noqa: BLE001 — a stale marker is not worth an exception
             logger.debug("could not republish the session record", exc_info=True)
+
+    def _republish_identity(self) -> None:
+        """Carry a changed model or title from the projection into the record.
+
+        `lop sessions` reads the RECORD, and only the 15 s heartbeat used to
+        copy these two fields into it, so a `/model` switch showed the old model
+        for up to a heartbeat — and ``_republish`` above does not carry them at
+        all. Called from every coalesced push, so the comparison is the steady
+        cost and a record write happens only on an actual change.
+
+        ``session_id`` moves WITH the title: after ``/resume`` or ``/new`` on a
+        TUI host the projection carries both, and writing the title alone paired
+        the new conversation's name with the old id until the heartbeat — an id
+        someone copies from `lop sessions` to resume the wrong conversation.
+        """
+        publisher = getattr(self, "_publisher", None)
+        if publisher is None:
+            return
+        try:
+            seed = self._handle.session_projection_seed
+            identity = {
+                "session_id": seed.session_id,
+                "model_label": seed.model_label,
+                "conversation_name": seed.conversation_name,
+            }
+            if all(getattr(self._record, key) == value for key, value in identity.items()):
+                return
+            publisher.heartbeat(**identity)
+        except Exception:  # noqa: BLE001 — the heartbeat still corrects it within 15 s
+            logger.debug("could not republish the session identity", exc_info=True)
 
     def attach_clients(self) -> int:
         """Live terminal viewers or leased desktop delivery surfaces.
@@ -6099,6 +6141,42 @@ class RuntimeServer:
                 wake=bool(frame.get("wake", False)),
                 sender=frame.get("sender") or {},
             )
+        if op == "peer_set_model":
+            # Another local session switching THIS one's model (design D1). The
+            # same two gates as ``peer_message`` directly above, for the same
+            # reasons: an unengaged session is refused here because a sender on
+            # an older build cannot be trusted to have refused it, and the
+            # capability is getattr-probed so a reduced or older handle answers
+            # a sentence instead of an AttributeError.
+            #
+            # A NEW op rather than ``set_model`` on purpose: every older runtime
+            # already knows ``set_model`` and would apply it unvalidated and
+            # unaudited, while an unknown op fails closed — the sender maps that
+            # to "runs an older lop … nothing changed" (D7). The handle owns the
+            # validation, the hop to the session's own loop/thread, the read-back
+            # and the audit card; nothing here touches the Session.
+            if not self._started:
+                from local_operator.mobile.peer_send import (
+                    MODEL_SWITCH_CAPABILITY,
+                    unengaged_label,
+                    unengaged_refusal,
+                )
+
+                raise ValueError(
+                    unengaged_refusal(
+                        unengaged_label(pid=self._record.pid, session_id=self._record.session_id),
+                        capability=MODEL_SWITCH_CAPABILITY,
+                    )
+                )
+            receive_model = getattr(h, "receive_peer_model", None)
+            if not callable(receive_model):
+                raise ValueError("this session cannot switch models remotely")
+            typed_receive_model = cast(Callable[..., Awaitable[str]], receive_model)
+            return await typed_receive_model(
+                str(frame["provider"]),
+                str(frame["model_id"]),
+                sender=frame.get("sender") or {},
+            )
         if op == "stop":
             # PR 3 (the kill switch): the graceful rung of the stop ladder
             # (session/runtime/control.py). The plan is deny parked gates →
@@ -6945,7 +7023,11 @@ class RuntimeServer:
     def _push_soon(self) -> None:
         # A callback may already be queued when close flips the cross-thread
         # event. Recheck here so shutdown cannot create new work behind itself.
-        if self._closed.is_set() or self._push_scheduled:
+        if self._closed.is_set():
+            return
+        if self._push_scheduled:
+            # Coalesced, never dropped: the in-flight push owes one more.
+            self._push_dirty = True
             return
         self._push_scheduled = True
         self._push_task = asyncio.create_task(self._push_later())
@@ -6954,10 +7036,19 @@ class RuntimeServer:
         try:
             # One short delay lets the current event batch fold before snapshot.
             await asyncio.sleep(0.05)
+            # Cleared at the SNAPSHOT, not at scheduling: a change marked during
+            # the delay above is read by the push below, so only one that lands
+            # after this point is owed a follow-up.
+            self._push_dirty = False
             if not self._closed.is_set():
                 await self._push()
         finally:
             self._push_scheduled = False
+            if self._push_dirty:
+                # ONE follow-up, however many marks arrived; ``_push_soon``
+                # re-checks ``_closed``, so shutdown cannot re-arm it.
+                self._push_dirty = False
+                self._push_soon()
 
     def _projection_recipients(self) -> list[_ClientConn]:
         """Who still wants projection *repaints*.
@@ -6987,6 +7078,9 @@ class RuntimeServer:
         Full-TUI attach clients are skipped (see ``_projection_recipients``).
         Phone daemon frames stay byte-identical.
         """
+        # FIRST, ahead of the no-recipients return: a detached owner has nobody
+        # to repaint, but `lop sessions` still reads its record.
+        self._republish_identity()
         recipients = self._projection_recipients()
         if not recipients:
             # Detached owners and full-TUI-only viewers have nobody consuming

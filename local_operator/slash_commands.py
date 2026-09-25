@@ -47,6 +47,13 @@ from local_operator.tui.autocomplete import ArgumentMode, ArgumentShape, SlashCo
 #: instead of truncating, and the `/help` row is reachable at any width.
 PERSIST_HINT = "/model default saves this for new sessions"
 
+#: The one flag ``/session`` takes: copy the current session ID instead of
+#: opening the view. Exact and case-sensitive, like every WORD vocabulary here
+#: (``_is_single_word``). The TUI handler and the desktop route's refusal compare
+#: against THIS constant, and the catalogue publishes it, so the three cannot
+#: disagree about the spelling.
+SESSION_COPY_FLAG = "--copy"
+
 
 #: The subcommand vocabulary of ``/network`` — and, because the CLI's verbs and
 #: the TUI's must be ONE list, the words :func:`_network_command` accepts as its
@@ -685,9 +692,18 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # has the session-scoped read it needs (`/v1/desktop/analytics?session_id=`);
     # like `/context`, it is a read-only view with no owner execution, so it
     # needs no `native_action` branch or `OWNER_COMMANDS` entry.
+    #
+    # WORD with a one-word vocabulary (`SESSION_COPY_FLAG`, via
+    # `command_argument_words`) rather than NONE, because `--copy` is a control:
+    # under NONE the messages endpoint admitted `/session --copy` as a paid model
+    # turn. Deliberately NOT a value list (`ArgumentMode.OPTIONAL`): a one-row
+    # list RUNS on a single Enter, so `/session ` + Enter would copy instead of
+    # opening the view — the description teaches the flag instead, the way
+    # `/fork --switch` is taught. 54 cells, inside the ~55 the column wraps past.
     SlashCommand(
         "session",
-        "Current-session usage, cost and request diagnostics",
+        "Usage, cost, diagnostics; --copy copies the session ID",
+        argument_shape=ArgumentShape.WORD,
         desktop_destination="session.diagnostics",
     ),
     # Beside `/session` because it is the same family — a read-only diagnostic
@@ -1206,6 +1222,8 @@ def command_argument_words(spec: SlashCommand) -> tuple[str, ...]:
         from local_operator.network.peers import known_peer_names
 
         return known_peer_names()
+    if spec.name == "session":
+        return (SESSION_COPY_FLAG,)
     return ()
 
 

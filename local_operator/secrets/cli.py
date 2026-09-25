@@ -135,9 +135,15 @@ def add_parser(subparsers: Any) -> None:
     describe_parser.add_argument(
         "--fingerprint",
         action="store_true",
+        # The caveat is the product's own (``crypto.value_fingerprint``): the digest
+        # is keyed on the store's master key, so it identifies a value WITHIN one
+        # store and key generation and not across them. "stable" said the opposite,
+        # and a `rotate` or a second store would then be misread as "the secret
+        # changed".
         help=(
-            "Include a stable, non-reversible fingerprint of the value for comparison "
-            "(never the value)"
+            "Include a fingerprint of the value for comparison (never the value). "
+            "It matches only within one store and key generation, and changes after "
+            "lop secret rotate"
         ),
     )
 
