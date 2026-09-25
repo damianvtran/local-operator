@@ -1806,6 +1806,11 @@ class RuntimeServer:
         #: the latch already set and never parks at all.
         self._close_event: asyncio.Event | None = None
         self._push_scheduled = False
+        #: A change landed while a push was already past its snapshot. That push
+        #: cannot carry it, and on an idle session (an idle `/new`/`/resume`) no
+        #: later event would schedule one, so the record waited for the 15 s
+        #: heartbeat. Set by ``_push_soon``; spent by ``_push_later``'s finally.
+        self._push_dirty = False
         # One warning per contiguous run of oversized frames, not one per
         # frame: a busy session repaints ~30x/s and a per-frame warning is the
         # log flood the cap exists to prevent. Reset when a frame fits again.
@@ -2848,6 +2853,7 @@ class RuntimeServer:
         if self._push_task is task:
             self._push_task = None
         self._push_scheduled = False
+        self._push_dirty = False
 
     async def _attention_loop(self) -> None:
         """Reconcile read receipts without making a liveness heartbeat a read."""
@@ -6779,7 +6785,11 @@ class RuntimeServer:
     def _push_soon(self) -> None:
         # A callback may already be queued when close flips the cross-thread
         # event. Recheck here so shutdown cannot create new work behind itself.
-        if self._closed.is_set() or self._push_scheduled:
+        if self._closed.is_set():
+            return
+        if self._push_scheduled:
+            # Coalesced, never dropped: the in-flight push owes one more.
+            self._push_dirty = True
             return
         self._push_scheduled = True
         self._push_task = asyncio.create_task(self._push_later())
@@ -6788,10 +6798,19 @@ class RuntimeServer:
         try:
             # One short delay lets the current event batch fold before snapshot.
             await asyncio.sleep(0.05)
+            # Cleared at the SNAPSHOT, not at scheduling: a change marked during
+            # the delay above is read by the push below, so only one that lands
+            # after this point is owed a follow-up.
+            self._push_dirty = False
             if not self._closed.is_set():
                 await self._push()
         finally:
             self._push_scheduled = False
+            if self._push_dirty:
+                # ONE follow-up, however many marks arrived; ``_push_soon``
+                # re-checks ``_closed``, so shutdown cannot re-arm it.
+                self._push_dirty = False
+                self._push_soon()
 
     def _projection_recipients(self) -> list[_ClientConn]:
         """Who still wants projection *repaints*.
