@@ -193,17 +193,19 @@ def test_a_read_only_config_root_costs_the_archive_and_not_the_caller(
     assert read_archived(tmp_path) == []
 
 
-def test_a_failed_write_reports_no_eviction(
+def test_a_failed_write_reports_no_change_and_no_eviction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Review round 2, NIT-2: the clause describes what happened to the FILE.
+    """Review round 2, NIT-2, and Q-INT-4: both elements describe the FILE.
 
-    ``archive_change`` returns the ids the cap dropped so the receipt can name the
-    conversation that came back into every list. On a config root this process
-    cannot write, nothing came back — the file did not change — so reporting the
-    ids the slice computed would promise a revocation of the archive that did not
-    happen. The STATE echo stays the desired state (that is the pin route's
-    contract, asserted in the test above); the eviction report does not.
+    ``archive_change`` returns whether the index CHANGED and the ids the cap
+    dropped, so the receipt can name the conversation that came back into every
+    list. On a config root this process cannot write, nothing changed and nothing
+    came back — reporting the ids the slice computed would promise a revocation of
+    the archive that did not happen, and reporting a change would be the same
+    untruth in the other direction. The DESIRED-STATE echo is
+    :func:`set_archived`'s and is asserted in the test above; the two are separate
+    questions, which is the split QA round 1's Q-INT-4 forced.
     """
     from local_operator.session.archived import archive_change
 
@@ -214,7 +216,33 @@ def test_a_failed_write_reports_no_eviction(
         raise OSError("read-only")
 
     monkeypatch.setattr(os, "replace", explode)
-    state, evicted = archive_change(tmp_path, A, True)
+    changed, evicted = archive_change(tmp_path, A, True)
 
-    assert state is True
+    assert changed is False, "the file did not change, so the index did not either"
     assert evicted == [], "nothing was dropped, because nothing was written"
+
+
+def test_archive_change_reports_the_change_it_made_in_both_directions(
+    tmp_path: Path,
+) -> None:
+    """Q-INT-4: the flag a receipt reports is about the FILE, both ways round.
+
+    The mesh's ``--archive``/``--unarchive`` receipt appends "already ... here"
+    when nothing changed, so this element has to be a real answer rather than the
+    state that was asked for — which is what it used to be, making every restore of
+    an archived session read as ``changed: false`` while the peer's index went from
+    one entry to none. Asserted with the FILE as the witness, not with the return
+    value alone: the value is checked against what ``read_archived`` then says.
+    """
+    from local_operator.session.archived import archive_change
+
+    _session(tmp_path, A)
+    assert read_archived(tmp_path) == []
+    assert archive_change(tmp_path, A, True) == (True, [])
+    assert read_archived(tmp_path) == [A]
+    # The no-op in the same direction changes nothing and says so.
+    assert archive_change(tmp_path, A, True) == (False, [])
+    # AND THE RESTORE, which is the direction the receipt got wrong.
+    assert archive_change(tmp_path, A, False) == (True, [])
+    assert read_archived(tmp_path) == []
+    assert archive_change(tmp_path, A, False) == (False, [])

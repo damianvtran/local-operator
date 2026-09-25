@@ -70,11 +70,18 @@ class SessionRow(BaseModel):
     #: they are DECLARED here rather than left to ``extra="allow"`` so the shape
     #: a renderer can rely on is written down where the rest of it is.
     #:
-    #: ``locality`` and ``peer`` are the transport's two: ``"local"`` with
-    #: ``peer: null`` for a row on this device, ``"remote"`` with the peer block
-    #: for one another device holds. A client groups by ``peer.name`` and treats
-    #: an absent ``peer`` as the local group, which is why it is always present
-    #: with both values here rather than omitted for the local case.
+    #: ``locality`` and ``peer`` are the transport's two, and ONLY ``locality`` is a
+    #: field every row carries an answer in: ``"local"`` for a row on this device,
+    #: ``"remote"`` for one another device holds. ``peer`` is ``null`` on BOTH — the
+    #: nested block is deliberately not published by the federated listing, because a
+    #: client that grouped by ``peer.name`` filed every remote row under one heading
+    #: in the first review, and the flat locality fields below are what a renderer
+    #: groups and labels from instead (Addendum 2 B). So a reader must take
+    #: ``peer: null`` as "this row carries no nested block" and never as "this row is
+    #: local": ``locality`` is the only field that answers which it is, and it is
+    #: always present. This comment said the opposite of both — that ``remote`` came
+    #: with the block — while ``remote_session_rows`` was omitting it on purpose, and
+    #: a renderer mirrors this shape by hand (QA round 1 integration, Q-INT-5).
     locality: Literal["local", "remote"] = "local"
     peer: dict[str, Any] | None = None
     #: -- THE FLAT LOCALITY FIELDS (mesh build plan, Addendum 2 B). The renderer

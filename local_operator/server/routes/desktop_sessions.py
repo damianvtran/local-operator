@@ -1571,7 +1571,8 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         # Server Error" and nothing else.
         #
         # 503 RATHER THAN 409, because every code it carries is a RETRY condition
-        # (``session.relay_unavailable``: this device's relay is not answering;
+        # (``session.relay_unavailable``: no answer came back inside the engage
+        # bound, so a first send to a cold session is worth sending again;
         # ``session.peer_refused``: the peer would not start the session). The 409
         # ``session_is_remote`` above is the UNOPENABLE case, where retrying changes
         # nothing; a link that is down is the opposite of that.

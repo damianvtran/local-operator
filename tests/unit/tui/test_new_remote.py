@@ -177,11 +177,16 @@ class _FakeRecord:
 class _Recorder:
     calls: list[list[str]] = dataclasses.field(default_factory=list)
     ok: bool = True
+    #: What the CLI printed. The real receipt's shape (its first line is
+    #: ``session: <id>``) because the surface now READS that line to open what it
+    #: created — a stand-in the reader cannot parse would exercise the miss path
+    #: in every test that is not about the miss.
+    stdout: str = "session: 9f2ac1e0b7d2\ncreated on damian-mbp\nprompt admitted\n"
 
     def __call__(self, args: list[str], **kwargs: Any) -> NetworkRun:
         self.calls.append(list(args))
         if self.ok:
-            return NetworkRun(tuple(args), 0, stdout="session: 9f2c\nadmitted: True\n")
+            return NetworkRun(tuple(args), 0, stdout=self.stdout)
         return NetworkRun(
             tuple(args),
             1,
@@ -233,6 +238,53 @@ def _notices(app: Any) -> list[str]:
         for block in app.query_one(TranscriptView).blocks()
         if isinstance(block, NoticeBlock)
     ]
+
+
+def _transcript_text(app: Any) -> str:
+    """Everything the transcript holds, notices and receipts together."""
+    from rich.console import Group
+    from rich.padding import Padding
+    from rich.text import Text
+
+    def flatten(renderable: Any) -> str:
+        if isinstance(renderable, Text):
+            return renderable.plain
+        if isinstance(renderable, Group):
+            return "\n".join(flatten(child) for child in renderable.renderables)
+        if isinstance(renderable, Padding):
+            return flatten(renderable.renderable)
+        return renderable if isinstance(renderable, str) else ""
+
+    return "\n".join(
+        flatten(getattr(block, "renderable", "")) for block in app._transcript_view().blocks()
+    )
+
+
+#: The id the stubbed CLI's receipt names — the session the peer "minted".
+MINTED = "9f2ac1e0b7d2"
+
+
+@pytest.fixture(autouse=True)
+def _peer_catalogue_is_stubbed(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """The catalogue READ, stubbed, and the ttl of every read recorded.
+
+    ``peer_session_rows`` dials this device's relay: a TUI test that let it dial
+    would reach whatever relay the machine running the suite happens to have, which
+    is the same reason ``run_network`` is stubbed in the tests below. The real read
+    is exercised by the network tests that own it; what these tests are about is
+    what THIS surface asks for — and the recorded ``ttl_s`` is how the forced
+    read after a create (``0``) is asserted rather than asserted about.
+    """
+    from local_operator.session import peer_rows as peer_rows_mod
+
+    reads: list[float] = []
+
+    def read(root: Any = None, *, ttl_s: float = 20.0, **kwargs: Any) -> tuple[Any, ...]:
+        reads.append(ttl_s)
+        return ()
+
+    monkeypatch.setattr(peer_rows_mod, "peer_session_rows", read)
+    return reads
 
 
 @pytest.mark.asyncio
@@ -599,3 +651,136 @@ def test_every_peerless_notice_rung_names_the_joiner_verb() -> None:
     # `_fitted_notice` pick by `cell_len` rather than by index.
     widths = [len(rung) for rung in NO_PEERS_NOTICE_RUNGS]
     assert widths == sorted(widths, reverse=True), widths
+
+
+# ---------------------------------------------------------------------------
+# the create and the view are ONE act (QA round 1 integration, Q-INT-2)
+# ---------------------------------------------------------------------------
+
+
+def test_the_create_receipt_names_the_id_the_surface_opens(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The reader is pinned to the WRITER, not to a shape this end guessed.
+
+    ``/new remote`` opens the session it created, and the id reaches this surface in
+    ``lop network sessions --create``'s own receipt (its first line is
+    ``session: <id>``) — the CLI is a subprocess here, so a payload would have to be
+    printed into the transcript instead. This drives the CLI's create branch, the
+    handler argv dispatches to, with only the relay's answer faked, and asserts the
+    id the peer minted is the id ``created_session_id`` recovers from the lines it
+    printed. A reworded receipt fails HERE rather than silently leaving every
+    ``/new remote`` on the session it stood in before.
+    """
+    import argparse
+
+    from local_operator.cli import build_cli_parser
+    from local_operator.network import cli as network_cli
+    from local_operator.tui.network_cli import created_session_id
+    from tests.unit.network import conftest as net_fixtures
+
+    parser: Any = build_cli_parser()
+    for name in ("network", "sessions"):
+        parser = net_fixtures.subcommands_of(parser)[name]
+    assert isinstance(parser, argparse.ArgumentParser)
+
+    monkeypatch.setattr(
+        network_cli,
+        "_relay_answer",
+        lambda op, **fields: {"session_id": MINTED, "admitted": True, "detail": "prompt admitted"},
+    )
+    args = parser.parse_args(["--peer", "damian-mbp", "--create", "--prompt", "hello"])
+    assert network_cli._cmd_sessions(args) == 0
+    printed = capsys.readouterr().out.splitlines()
+    assert any(line.strip() == f"session: {MINTED}" for line in printed), printed
+    assert created_session_id(printed) == MINTED
+    # ``_reported`` refuses a create whose answer carries no id, so a receipt with
+    # no id line at all is the shape to read as "nothing to open" — never as an id
+    # to go looking for.
+    assert created_session_id(["created on damian-mbp", "prompt admitted"]) == ""
+    assert created_session_id(["the session: is not this line"]) == ""
+
+
+@pytest.mark.asyncio
+async def test_a_remote_create_opens_the_session_it_created(
+    monkeypatch: pytest.MonkeyPatch, _peer_catalogue_is_stubbed: list[float]
+) -> None:
+    """Q-INT-2's headline: the pane follows the session onto the peer.
+
+    The receipt was always right and the pane was always somewhere else, so the
+    next prompt, a steer and the prompt after that all landed in the LOCAL session
+    the user was standing in. A local ``/new`` never left that gap — it rebuilds
+    onto the session it made — so the remote form now opens what it created.
+    """
+    _peers(monkeypatch, [KnownPeer(device_id="d_aaaa", name="damian-mbp", role="admin")])
+    run = _Recorder()
+    monkeypatch.setattr("local_operator.tui.app.run_network", run)
+    opened: list[str] = []
+
+    def _record(self: Any, session_id: str, root: Any) -> bool:
+        opened.append(session_id)
+        return True
+
+    monkeypatch.setattr("local_operator.tui.app.OperatorApp._open_session_or_refuse", _record)
+    app = _app_fixture()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/new remote damian-mbp")
+        await app.workers.wait_for_complete()
+        # THE RECEIPT IS STILL THE USER'S, and it is painted BEFORE the open: the CLI's
+        # own lines are what the verb reported.
+        assert f"session: {MINTED}" in _transcript_text(app), _transcript_text(app)
+        assert opened == [MINTED], "the session this create made on the peer was not opened"
+        # THE ROW IS RE-READ, not taken from the sidebar's 20 s cache: the session was
+        # minted a moment ago, and a cache-first miss would read as "cannot open what it
+        # just made".
+        assert _peer_catalogue_is_stubbed == [0.0], _peer_catalogue_is_stubbed
+
+
+@pytest.mark.asyncio
+async def test_a_session_this_device_cannot_list_yet_says_where_it_went(
+    monkeypatch: pytest.MonkeyPatch, _peer_catalogue_is_stubbed: list[float]
+) -> None:
+    """Q-INT-2's second half: the pane must not IMPLY the remote session is driven.
+
+    The peer answered, the receipt named the session and the id, and this device's
+    own catalogue does not carry a row for it (the stub returns none) — so nothing
+    was opened, and the user is standing in a LOCAL conversation. Silence there is
+    the finding: they would type on believing the pane is the session they named.
+    Says the id, the device, where they are, and the one command that opens it.
+    """
+    _peers(monkeypatch, [KnownPeer(device_id="d_aaaa", name="damian-mbp", role="admin")])
+    run = _Recorder()
+    monkeypatch.setattr("local_operator.tui.app.run_network", run)
+    app = _app_fixture()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/new remote damian-mbp")
+        await app.workers.wait_for_complete()
+        said = [text for text in _notices(app) if MINTED in text]
+        assert said, f"nothing told the user where the session went: {_notices(app)}"
+        assert f"/resume {MINTED}" in said[-1], said[-1]
+        assert "damian-mbp" in said[-1], said[-1]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_create_opens_nothing(
+    monkeypatch: pytest.MonkeyPatch, _peer_catalogue_is_stubbed: list[float]
+) -> None:
+    """A refusal is the CLI's sentence and there is no session to open."""
+    _peers(monkeypatch, [KnownPeer(device_id="d_aaaa", name="damian-mbp", role="admin")])
+    run = _Recorder(ok=False)
+    monkeypatch.setattr("local_operator.tui.app.run_network", run)
+    opened: list[str] = []
+    monkeypatch.setattr(
+        "local_operator.tui.app.OperatorApp._open_session_or_refuse",
+        lambda self, session_id, root: (opened.append(session_id), True)[1],
+    )
+    app = _app_fixture()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/new remote damian-mbp")
+        await app.workers.wait_for_complete()
+        assert opened == [], opened
+        assert _peer_catalogue_is_stubbed == [], "a refusal re-read the catalogue"
+        assert any("relay is not running" in text for text in _notices(app)), _notices(app)

@@ -251,6 +251,7 @@ from local_operator.tui.network_cli import (
     PEER_CALL_TIMEOUT_S,
     QUICK_TIMEOUT_S,
     NetworkRun,
+    created_session_id,
     run_network,
 )
 from local_operator.tui.notify import Notifier, notifications_enabled
@@ -16859,7 +16860,17 @@ class OperatorApp(App[None]):
           why the registry's new shape accepts one token as well as the two-token
           remote form.
         * ``/new remote <peer> [prompt]`` — create the session ON ``<peer>``,
-          with any trailing text as its first prompt.
+          with any trailing text as its first prompt, and OPEN it here.
+
+        THE REMOTE FORM OPENS WHAT IT CREATED (QA round 1 integration, Q-INT-2),
+        which is what the local form has always done: ``/new`` rebuilds the app onto
+        the session it just made (``_start_new_local_session``), so a user who types
+        ``/new`` and then a prompt is addressing the session they named. The remote
+        form used to stop at the receipt — the session was born on the peer and the
+        pane stayed on the LOCAL conversation it was showing, so the next prompt, a
+        steer and the next prompt after that all landed in a session the user had
+        not named while the pane said ``running bash`` about it. The adoption is
+        ``_adopt_created_remote_session``, below.
         """
         tail = arg.strip()
         if tail:
@@ -16952,7 +16963,68 @@ class OperatorApp(App[None]):
         if prompt:
             argv += ["--prompt", prompt]
         self._run_network_cli(
-            argv, notice, timeout=PEER_CALL_TIMEOUT_S, verb="create a remote session"
+            argv,
+            notice,
+            timeout=PEER_CALL_TIMEOUT_S,
+            verb="create a remote session",
+            on_settled=partial(self._adopt_created_remote_session, peer),
+        )
+
+    async def _adopt_created_remote_session(self, peer: Any, result: NetworkRun) -> None:
+        """OPEN the session the create just minted on ``peer``, once the CLI answered.
+
+        ``peer`` is a ``network.peers.KnownPeer`` (the handler resolves it above and
+        the mesh package stays function-local in this module), annotated ``Any`` for
+        the reason ``_open_remote_session``'s row is: importing the type here would
+        put a mesh import on the TUI's module path for an annotation.
+
+        A REFUSAL ADOPTS NOTHING and is already reported: the CLI's own sentence is
+        the receipt, and there is no id to open.
+
+        THE ID COMES FROM THE RECEIPT. ``created_session_id`` reads it out of the
+        line ``lop network sessions --create`` already prints, which is the only
+        channel the CLI gives this surface — a second ``--json`` call for the same
+        fact would print a payload into the transcript (see that function's
+        docstring).
+        """
+        if not result.ok:
+            return
+        session_id = created_session_id(result.lines)
+        if not session_id:
+            self._system_notice(
+                f"{peer.label} answered without naming the session it created, so "
+                f"nothing was opened here — /network sessions --peer {peer.token} "
+                "lists what that device holds.",
+                "warning",
+            )
+            return
+        from local_operator.paths import config_dir
+        from local_operator.session.peer_rows import peer_session_rows
+
+        # ONE FORCED CATALOGUE READ, because the session was minted a moment ago and
+        # the peer catalogue is cached for ``peer_rows._TTL_S`` (20 s) against the
+        # sidebar's poll: a cache-first lookup would miss the row it was just
+        # handed, and the miss reads as "this device cannot open what it just made".
+        # ``ttl_s=0`` re-asks the relay once — the same fan-out the sidebar's next
+        # poll pays — and costs nothing when the row is already there.
+        try:
+            await asyncio.to_thread(peer_session_rows, config_dir(), ttl_s=0)
+        except Exception:  # noqa: BLE001 — an unreadable catalogue is the guard's own miss
+            logger.debug("could not re-read the peer catalogue", exc_info=True)
+        # THE ONE GUARD every other way of naming a remote session uses, so its
+        # cache policy, its unreachable-peer sentence and its transition are not
+        # re-derived here (``/resume`` reaches it through the same call).
+        if self._open_session_or_refuse(session_id, config_dir()):
+            return
+        # THE PANE MUST NOT IMPLY THE REMOTE SESSION IS BEING DRIVEN, and it is not
+        # driving it: say where the session went and how to get to it, naming the
+        # session the user is actually standing in (Q-INT-2's second half).
+        here = self._adopted_session_id or "this device's own session"
+        self._system_notice(
+            f"{session_id} was created on {peer.label} but this device's catalogue does "
+            f"not list it yet, so this terminal is still on {here} — /resume {session_id} "
+            "opens it.",
+            "warning",
         )
 
     def _start_new_local_session(self, notice: NoticeFn) -> None:
@@ -40953,6 +41025,7 @@ class OperatorApp(App[None]):
         *,
         timeout: float = QUICK_TIMEOUT_S,
         verb: str = "",
+        on_settled: Callable[[NetworkRun], Awaitable[None]] | None = None,
     ) -> None:
         """Run one ``lop network`` call off the loop and report what it said.
 
@@ -40960,6 +41033,13 @@ class OperatorApp(App[None]):
         second listing queued behind the first would each pay the peer-probe
         budget for one answer. The flag is a boolean rather than a lock because
         the second caller's correct answer is a sentence, not a wait.
+
+        ``on_settled`` is the CALLER's own follow-up on a call that has already
+        reported itself, awaited here so a verb whose receipt is not the whole act
+        can carry on with the result — ``/new remote`` opens the session it just
+        created (Q-INT-2). It runs AFTER ``_publish_network_run``, never before:
+        the verb's own sentence is what the user is owed first, and a follow-up
+        that painted over it would replace the CLI's receipt with its own.
         """
         if getattr(self, "_network_action_busy", False):
             self._system_notice("a network command is already running.", "warning")
@@ -40973,6 +41053,8 @@ class OperatorApp(App[None]):
             finally:
                 self._network_action_busy = False
             self._publish_network_run(result, label)
+            if on_settled is not None:
+                await on_settled(result)
 
         # `run_worker(..., thread=False)`: the call itself is a blocking subprocess
         # and it is off the loop by `asyncio.to_thread` INSIDE the coroutine, so

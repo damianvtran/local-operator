@@ -2083,6 +2083,42 @@ def _link_for_move(server: "RelayServer", device_id: str, name: str) -> "PeerLin
     return link
 
 
+def _move_phases(server: "RelayServer", session_id: str) -> list[MovePhaseStamp]:
+    """What this move went THROUGH: the durable stamps, plus what memory saw.
+
+    A UNION, NOT A PREFERENCE (QA round 1 integration, Q-INT-3). The two sources are
+    partial in different directions, and a receipt that took disk whenever disk had
+    anything at all reported an offload as ``['committed']`` (0.75) — so a renderer
+    drawing progress from this list showed every offload stuck at three quarters,
+    while the model documents ``prepared`` 0.25 … ``done`` 1.0 and a recall
+    publishes all four:
+
+    * the JOURNAL and the TOMBSTONE survive a restart but forget what is behind a
+      completed commit — an offload's journal entry is cleared once the source is
+      retired, so all the disk can still prove is the tombstone, and the phases
+      before it are gone;
+    * ``_Progress`` recorded the transitions the journal cannot prove afterwards
+      (see its own docstring: after the commit the journal is gone, and ``committed``
+      cannot be re-derived from a file that no longer says it) but it dies with the
+      process, so it is the weaker half after a restart rather than in general.
+
+    ORDERED BY THE CONTRACT (``MOVE_RESULT_PHASES``), never by ``at``:
+    :func:`_phases_from_disk` synthesises its timestamps when it READS, so a disk
+    stamp can carry a later time than a memory stamp for an earlier phase, and
+    sorting by time would put ``committed`` after ``done``. Where both have a phase,
+    memory's stamp wins — its ``at`` is when the transition happened rather than when
+    somebody looked.
+    """
+    order = {phase: index for index, phase in enumerate(MOVE_RESULT_PHASES)}
+    stamps: dict[str, MovePhaseStamp] = {}
+    for stamp in _phases_from_disk(server.root, session_id):
+        stamps.setdefault(str(stamp.get("phase") or ""), stamp)
+    for stamp in progress_for(server).phases(session_id):
+        stamps[str(stamp.get("phase") or "")] = stamp
+    stamps.pop("", None)
+    return sorted(stamps.values(), key=lambda stamp: order.get(str(stamp["phase"]), len(order)))
+
+
 def _phases_from_disk(root: Path, session_id: str) -> list[MovePhaseStamp]:
     """Rebuild what a restarted relay can still prove about a move, in order."""
     from local_operator.session.placement import handoff_in_flight
@@ -2623,7 +2659,7 @@ def _offload(
         server, session_id, budget=budget, invited=target_device
     )
     if committed:
-        phases = _phases_from_disk(server.root, session_id) or progress.phases(session_id)
+        phases = _move_phases(server, session_id)
         if not phases:
             phases = [{"phase": "prepared", "at": time.time()}]
         if str(phases[-1]["phase"]) not in MOVE_OPENABLE_PHASES:
@@ -2644,7 +2680,7 @@ def _offload(
                 "phases": phases,
             },
         )
-    phases = _phases_from_disk(server.root, session_id) or progress.phases(session_id)
+    phases = _move_phases(server, session_id)
     reached = phases[-1]["phase"] if phases else None
     try:
         entry = handoff_in_flight(server.root, session_id)
