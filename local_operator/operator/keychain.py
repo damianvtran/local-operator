@@ -565,8 +565,10 @@ def secure_enclave_refusal_message(refusals: dict[tuple[str, int, str], list[str
 #:
 #: WHAT ACTUALLY IMPROVED IS THE SHAPE, NOT THE LINE COUNT (design round 2, D3). The
 #: remediation comment claimed the first remedy token "moves from wrapped line 4 to line
-#: 2"; measured, the block renders as one MORE display line than the paragraph at 100 and
-#: at 80 columns, and ``reinstall`` lands on the line its own label occupies. That claim is
+#: 2"; measured, the block renders one MORE display line than the paragraph at 100 columns
+#: and one FEWER at 80 (6 -> 7 and 8 -> 7), and ``reinstall`` lands on the line its own
+#: label occupies (QA round 3, Q3-1: the earlier "at 100 and at 80" form overstated the 80
+#: case, where the block is a line SHORTER). That claim is
 #: withdrawn here rather than left standing: the block earns its place because a reader
 #: SCANS IT BY LABEL instead of reading a paragraph in order, which is a property of the
 #: ``label : value`` shape and not of where a token falls.

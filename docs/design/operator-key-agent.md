@@ -308,12 +308,20 @@ mode (`--timestamp`, default `secure`) instead of depending on `codesign`'s defa
 this certificate type, and step 5c FAILS the build if the signed result carries no
 `Timestamp=` line — an unreachable Apple timestamp authority fails the release rather
 than shipping an artefact that stops working in 2031. `--timestamp=none` exists for a
-local build on a host that cannot reach the TSA: it warns loudly, skips the assertion,
-and must never reach a release. QA round 2 reported that a universal2 binary could not
-obtain a timestamp on this host and signed its own artefact through a shim; that did not
-reproduce on 2026-09-25 (three fresh universal2 binaries and this very bundle all carried
-a real `Timestamp=`), so it is recorded as a transient TSA outage rather than a property
-of fat binaries — and either way the check is what makes shipping it silently impossible.
+local build on a host that cannot reach the TSA: it REFUSES unless the caller sets
+`LOP_KEYAGENT_ALLOW_UNTIMESTAMPED_BUILD=1`, which no release job sets — a warning alone
+was judged insufficient (agent review round 3, R3-1), because a message reports the state
+instead of preventing it, and "must never reach a release" was prose. Set deliberately,
+it then warns, skips the assertion, and is for a local build only. QA round 2 reported
+that a universal2 binary could not obtain a timestamp on this host and signed its own
+artefact through a shim; that did not reproduce on 2026-09-25 under the same conditions
+(three fresh universal2 binaries and this very bundle all carried a real `Timestamp=`),
+which refutes the property — a universal2 binary is not untimestampable — but leaves the
+MECHANISM unknown, and unknown is what this document records: three fat-binary failures
+in a row while thin binaries succeeded on the same host does not fit an outage, and
+nothing further was measured. What the release relies on is measured, not inferred: step
+5c reads the timestamp back and fails the build closed, so an artefact without one cannot
+ship silently whatever the cause.
 
 **The two wheels are OFFERED, never passed as two paths** (QA round 1, Q5).
 `uv pip install --find-links <dir> local-operator==<v>` lets the resolver choose, and

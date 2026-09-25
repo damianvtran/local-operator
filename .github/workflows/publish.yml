@@ -298,15 +298,19 @@ jobs:
       # `Timestamp=` line is present, so an unreachable Apple timestamp authority FAILS
       # this job rather than shipping an artefact that stops working in 2031. There is no
       # fallback in this job and no `--timestamp=none`: that mode exists for a local build
-      # on a host that cannot reach the TSA, warns loudly, and must never reach a release.
+      # on a host that cannot reach the TSA, refuses without a deliberate non-release
+      # override (`LOP_KEYAGENT_ALLOW_UNTIMESTAMPED_BUILD=1`, which this job never sets),
+      # warns loudly, and must never reach a release.
       #
       # UNPROVEN, stated rather than implied: this job has never executed — it first runs
       # on the next release — so timestamp retrieval in CI is unmeasured. Measured locally
       # on 2026-09-25 with this identity: three fresh universal2 binaries and the assembled
-      # bundle all signed with a real `Timestamp=`, which is why QA round 2's report that a
-      # universal2 binary could not be timestamped on this host is recorded as a transient
-      # TSA outage and not as a property of fat binaries (the check above is what makes
-      # that distinction moot: either way it cannot ship silently).
+      # bundle all signed with a real `Timestamp=`, which refutes QA round 2's report that
+      # a universal2 binary could not be timestamped on this host as a property — but its
+      # MECHANISM is deliberately left unstated: three fat-binary failures in a row while
+      # thin binaries succeeded on the same host does not fit a TSA outage, and nothing
+      # further was measured. Only the refutation is claimed, and the check above is what
+      # makes the distinction moot: either way it cannot ship silently.
       - name: Assemble and sign lop-keyagent.app
         env:
           PROFILE_BASE64: ${{ secrets.MACOS_SIGNING_PROFILE_BASE64 }}

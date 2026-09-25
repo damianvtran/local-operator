@@ -20,7 +20,8 @@
 #     property goes unasserted — a TSA that is unreachable, or a default that
 #     changes, leaves an artefact that looks fine here and dies in 2031. So the mode
 #     is named (`--timestamp`, default `secure`) and the SIGNED RESULT is read back
-#     for the timestamp rather than trusted.
+#     for the timestamp rather than trusted; the one mode that skips that read-back
+#     refuses unless a named, deliberate non-release override is set (R3-1).
 #
 # usage:
 #   assemble_keyagent_bundle.sh --out APP --identity ID --profile FILE [options]
@@ -31,8 +32,10 @@
 #   --keychain FILE    a throwaway keychain holding the identity (CI)
 #   --timestamp MODE   ``secure`` (default) or ``none``. ``none`` is NOT for a
 #                      release: it is for a local build on a host whose timestamp
-#                      authority cannot be reached, it is warned about loudly, and
-#                      the timestamp assertion below is skipped for it.
+#                      authority cannot be reached. It REFUSES unless the caller
+#                      sets LOP_KEYAGENT_ALLOW_UNTIMESTAMPED_BUILD=1 (no release
+#                      job sets it), is then warned about loudly, and the
+#                      timestamp assertion below is skipped for it.
 #   --asan             build a sanitizer variant: -fsanitize=address, -O1 -g, and
 #                      NO hardened runtime. Hardened runtime blocks the sanitizer
 #                      runtime's library load, and the sanitizer variant is a QA
@@ -74,7 +77,27 @@ if [ -z "$OUT" ] || [ -z "$IDENTITY" ] || [ -z "$PROFILE" ]; then
 fi
 [ -f "$PROFILE" ] || { echo "no provisioning profile at $PROFILE" >&2; exit 2; }
 case "$TIMESTAMP_MODE" in
-  secure|none) ;;
+  secure) ;;
+  none)
+    # REFUSED UNLESS A DELIBERATE NON-RELEASE OVERRIDE IS SET (agent review round 3,
+    # R3-1). The step-5c warning below is a message, not a mechanism: it scrolls past,
+    # and it leaves an untimestamped artefact one copy-pasted argv away from a release
+    # job — which is the exact property this whole file exists to make impossible. A
+    # warning alone was judged insufficient for that reason: it reports the state
+    # rather than preventing it, and "must never reach a release" stayed prose. A named
+    # override no release job sets makes reaching `none` a deliberate act, so a release
+    # that took this path can be seen to have taken it. The `secure` default and the
+    # read-back assertion below are untouched.
+    if [ "${LOP_KEYAGENT_ALLOW_UNTIMESTAMPED_BUILD:-}" != "1" ]; then
+      echo "assemble_keyagent_bundle.sh: refusing --timestamp=none. A signature with no" >&2
+      echo "secure timestamp stops validating when the Developer ID certificate expires," >&2
+      echo "for every wheel already installed, so it must never reach a release. It is for" >&2
+      echo "a local build on a host whose timestamp authority cannot be reached: set" >&2
+      echo "LOP_KEYAGENT_ALLOW_UNTIMESTAMPED_BUILD=1 to build it anyway. Never set that in" >&2
+      echo "a release job." >&2
+      exit 2
+    fi
+    ;;
   *)
     echo "assemble_keyagent_bundle.sh: --timestamp takes 'secure' or 'none', not '$TIMESTAMP_MODE'" >&2
     exit 2
@@ -270,13 +293,18 @@ PY
 # timestamp stops validating when the certificate expires — for every wheel already
 # installed (design doc §8, which the rotation plan depends on). QA round 2 reported
 # that this host could not obtain a timestamp for a universal2 binary and signed its own
-# artefact with `--timestamp=none` through a shim. That does NOT reproduce here — three
-# fresh universal2 binaries and this very bundle all signed with a real `Timestamp=` at
-# 2026-09-25 08:43-08:44 — so the reported failure is a transient TSA outage, not a
-# property of fat binaries or of this identity; either way, "could not obtain one" must
-# never ship silently. This is the check that makes that true.
+# artefact with `--timestamp=none` through a shim. That did NOT reproduce on 2026-09-25,
+# under the same conditions — three fresh universal2 binaries and this very bundle all
+# signed with a real `Timestamp=` at 08:43-08:44 — so a universal2 binary is NOT
+# untimestampable. The MECHANISM of round 2's failure is NOT established and is not
+# asserted here (QA round 3, the timestamp section): three fat-binary failures in a row
+# while thin binaries succeeded on the same host is not what a TSA outage looks like, and
+# nothing further was measured. Only what is measured is claimed: the failure did not
+# reproduce under the same conditions later. This assertion is what makes the class moot
+# — it fails closed, so "could not obtain one" can never ship silently whatever the cause.
 if [ "$TIMESTAMP_MODE" = "none" ]; then
-  echo "  WARNING: signed WITHOUT a secure timestamp (--timestamp=none)." >&2
+  echo "  WARNING: signed WITHOUT a secure timestamp (--timestamp=none), under the" >&2
+  echo "  LOP_KEYAGENT_ALLOW_UNTIMESTAMPED_BUILD=1 override this run was started with." >&2
   echo "  This signature stops validating when the Developer ID certificate expires, so" >&2
   echo "  this artefact must NOT be released or published. It is for a local build on a" >&2
   echo "  host whose timestamp authority cannot be reached." >&2
