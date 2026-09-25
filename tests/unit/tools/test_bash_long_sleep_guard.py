@@ -83,15 +83,28 @@ def test_the_measured_commands_from_the_live_child_are_refused(command: str) -> 
     # `wait_ms` in ms.
     assert "the wait is cancelled" in message
     assert "`wait_ms` in ms" in message
-    # D1: every bullet LEADS with its actionable token, because the operator's
-    # failed-call card paints each advice line as ONE cropped row whose measure
-    # is 94 cells at a 100-column frame and 74 at 80 — the unhedged copy put
-    # `wait` at cells 86-92 and the hatch variable at 57-90, so both were cut
-    # exactly on the frames operators run.
-    for bullet in (line for line in message.splitlines() if line.startswith("  - ")):
-        first_token = bullet.index("`")
-        assert first_token <= 8, bullet
-        assert bullet.index("`", first_token + 1) <= _ADVICE_TOKEN_LEAD_CELLS, bullet
+    # D1: every bullet LEADS with its actionable token, because a failed-call
+    # card paints each advice line as ONE cropped row (91 cells at a 100-column
+    # frame, 72 at 80, 52 at 60, 41 at 50) — the unhedged copy put `wait` at cells
+    # 86-92 and the hatch variable at 57-90, so both were cut exactly on the
+    # frames operators run. This pins the copy the MODEL reads and the operator
+    # reads once the card is rebuilt; the plan-time refusal's LIVE row is the
+    # not-run ending, which is clipped at 200 chars before any widget sees it and
+    # is not what this assertion describes (design review D6).
+    bullets = [line for line in message.splitlines() if line.startswith("  - ")]
+    assert bullets, message
+    for bullet in bullets:
+        spans = _token_spans(bullet)
+        assert spans, bullet
+        assert spans[0][0] <= 8, bullet
+        assert spans[0][1] <= _ADVICE_TOKEN_LEAD_CELLS, bullet
+        # A SECOND token on the same line is what an operator on a narrow pane
+        # loses first: with `background: true` leading bullet 1, `wait` ended at
+        # cell 52 against the 52-cell lane at 60 columns and painted as an
+        # unclosed `` then `wait… `` (design review D7).
+        if len(spans) > 1:
+            assert spans[1][0] <= _ADVICE_TOKEN_LEAD_CELLS, bullet
+    assert _token_spans(bullets[0])[1][1] <= 52, bullets[0]
 
 
 #: The same child's SHORT sleeps, which must keep working.
@@ -340,9 +353,23 @@ def test_a_reader_with_none_of_the_three_is_told_so_and_led_to_the_hatch() -> No
     message = sleep_guard.check_long_sleep("sleep 1500; tail log", offered=frozenset({"bash"}))
     assert message is not None
     lines = message.splitlines()
-    assert "offers no `wait`, `jobs` or `wake`" in message
+    assert "No `wait`, `jobs` or `wake` here." in message
     first_bullet = next(line for line in lines if line.startswith("  - "))
     assert sleep_guard.ALLOW_ENV in first_bullet
+
+
+def test_the_none_class_statement_fits_a_50_column_lane_and_keeps_the_lead_in() -> None:
+    """D8: the statement used to be one 108-cell line ending `…nothing here to
+    hand the waiting to. Do one of:` — painted as `…so there is nothing he…`
+    with the bullets' lead-in swallowed at every width. Every other class puts
+    `Do one of:` on its own 11-cell line, so this one must too."""
+    message = sleep_guard.check_long_sleep("sleep 1500; tail log", offered=frozenset({"bash"}))
+    assert message is not None
+    lines = message.splitlines()
+    statement = next(line for line in lines if line.startswith("No `wait`"))
+    assert len(statement) <= 41, statement
+    assert "Do one of:" not in statement
+    assert lines[lines.index(statement) + 1] == "Do one of:"
 
 
 @pytest.mark.asyncio
@@ -359,8 +386,8 @@ async def test_the_loop_hands_the_hook_the_readers_own_inventory(tmp_path) -> No
         planned = await _plan(tools, context, {"command": "sleep 1500; tail log"})
         assert planned.failure is not None
         text = planned.failure.text
-        assert "offers no `wait`, `jobs` or `wake`" in text
-        assert "`wait` on its job id" not in text
+        assert "No `wait`, `jobs` or `wake` here." in text
+        assert "`wait` on the job id" not in text
     finally:
         await manager.dispose()
 
@@ -406,6 +433,17 @@ async def test_the_loop_never_prompts_approval_for_a_refused_long_sleep(tmp_path
 #: may name. Passed explicitly so a test that is not ABOUT the inventory still
 #: exercises the fully-offered copy rather than the speculative ``None`` path.
 _ALL_TOOLS = frozenset({"bash", "read", "grep", "wait", "jobs", "wake", "hub"})
+
+
+def _token_spans(line: str) -> list[tuple[int, int]]:
+    """1-based ``(start, end)`` cells of each backticked token on ``line``.
+
+    Backticks are paired left to right, which is how the copy writes them: a
+    token is one ``...`` pair, never a stray backtick.
+    """
+    starts = [index + 1 for index, char in enumerate(line) if char == "`"]
+    return [(starts[i], starts[i + 1]) for i in range(0, len(starts) - 1, 2)]
+
 
 #: How far into a bullet its actionable token may run. The operator's failed-call
 #: card crops each advice line at 74 cells in the canonical 80-column frame (54 at
