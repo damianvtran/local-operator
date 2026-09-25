@@ -1176,9 +1176,23 @@ cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
 
 1. `open` supplies `{subscription_id,gap,watch_ttl_seconds}`. Its seq is connection
    metadata, **not** permission to discard replay up through that number.
+   `gap:false` is a claim the bridge can honour, and it means exactly this: every
+   frame this bridge published after the cursor supplied on the query is in the
+   replay that follows, in order. It does **not** mean the painted state is
+   current — the `snapshot` after the replay is authoritative either way, and a
+   client that holds paint across a gap-free reopen must still apply it.
+   `gap:true` means the replay cannot cover the cursor (a fresh attach that
+   supplied no epoch, a cursor from a previous epoch, or a cursor older than the
+   oldest retained frame), and the snapshot is then the only reconciliation.
 2. If retained, ordered frames after the supplied receipt cursor are replayed.
    This includes semantic `event` frames already covered by newer paint state.
-3. `snapshot` follows replay, with `{frontend:FrontendSync,history,cold,`
+3. Frames published BEFORE the snapshot's own state is read are not delivered at
+   all: they are already inside the `snapshot` that follows, and the handshake
+   drops them rather than let a cold engage's burst overflow a queue nothing has
+   read yet. Frames published after that point are delivered after the snapshot,
+   in order — the snapshot's `seq` is the watermark, and every delivered frame
+   has a `seq` above it.
+4. `snapshot` follows replay, with `{frontend:FrontendSync,history,cold,`
    `cold_reason,attaching}`. `cold_reason` is the token that says WHICH cold
    (see "A read never needs an answering owner" above); `attaching` says an
    authenticated dial is retained and its state has not arrived yet. Its
@@ -1219,7 +1233,7 @@ cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
    attach carries on behind the frame, ending in a `frontend.replace` whose
    `cold` flag is the verdict (`false` once it lands, or the classified
    `cold_reason` if it does not).
-4. New frames continue in receipt order: `frontend.update` is a canonical field
+5. New frames continue in receipt order: `frontend.update` is a canonical field
    delta, and `event` carries a typed canonical AgentEvent. Apply the snapshot
    after replay so an old cumulative record cannot repaint newer snapshot text.
    Preserve runtime sequence/epoch checks independently of semantic event dedupe.
@@ -1231,13 +1245,13 @@ cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
    carry the same `cold`/`cold_reason`/`attaching` triple the snapshot does,
    which is what lets a viewer that opened cold against a busy runtime learn from
    the rollover frame that it is live again.
-5. `notification` carries one bridge-composed banner:
+6. `notification` carries one bridge-composed banner:
    `{contract,kind,title,status,body,body_is_snippet,body_is_failure,`
    `title_is_session_name,dedupe_key,completion_token,session_name,`
    `focus_policy}`. It is NOT an `AgentEvent` and must not be painted into the
    transcript; a renderer that does not know the type ignores it and still
    advances its receipt cursor.
-6. `admission.accepted` carries `{request_id,mode}` and is published the instant
+7. `admission.accepted` carries `{request_id,mode}` and is published the instant
 the host takes a `/messages` submit — BEFORE the session's bridge is acquired and
 before any runtime is engaged (see "A submit is ACKNOWLEDGED on the stream"
 above). It is NOT an `AgentEvent` and must not be painted into the transcript: it
@@ -1246,7 +1260,7 @@ type ignores it and still advances its receipt cursor. Never emitted by a daemon
 that has latched against new work, and emitted at most once per `request_id` PER
 ATTACHMENT (bounded memory on the bridge, cleared when the epoch rolls) — see the
 qualifier under "A submit is ACKNOWLEDGED" for what that is worth.
-7. `admission.failed` carries `{request_id,mode,status,detail}` when the INLINE
+8. `admission.failed` carries `{request_id,mode,status,detail}` when the INLINE
    `/messages` admission it acknowledged is refused, and
    `{request_id,command,status,detail}` for a `/commands` admission whose receipt
    answered `pending` and which then failed (see "Every action receipt..." and
@@ -1362,10 +1376,28 @@ watermark: `unseen` and the sidebar mark survive it untouched.
 A cold reconnect, HTTP restart, detached interval, expired replay cursor or future
 cursor requires a gap snapshot. One live shared bridge retains at most256frames
 and8MiB; each subscriber has the same backlog bounds. Overflow emits `gap` and
-closes instead of silently losing semantic events. Max32subscribers per session,
-64cached bridges; only idle bridges are evicted. Job trajectories stay out of
+closes instead of silently losing semantic events — and an OVERFLOW is only
+reached by a subscriber that has already been served its snapshot. A subscriber
+that has not opened yet is never disconnected for backlog: the frames it would
+have held are the ones the snapshot supersedes (see item 3 under "Stream ordering
+and lifecycle"), so they are dropped rather than closed over. Max32subscribers per
+session, 64cached bridges; only idle bridges are evicted. Job trajectories stay out of
 snapshots and deltas, through existing canonical serializers. Per-job trajectory
 retrieval is not exposed by this HTTP checkpoint yet.
+
+**A bridge outlives its last viewer's transport for a bounded dwell**
+(`RECONNECT_DWELL_S`, 20 s, strictly inside the 45 s watch lease). The renderer's
+own retry schedule runs 500 ms to 8 s, so a break inside that window is not a new
+subscription: it is the same bridge, the same epoch, the same runtime, and a
+replay that has been recording the whole time — which is what makes `gap:false` a
+claim the bridge can keep. During the dwell the bridge asserts the viewer's
+presence to the runtime as RESIDENCY ONLY (`can_notify`, never `visible`): the
+runtime is not torn down under a returning viewer, and the notification ladder is
+not told a person is reading a session they have walked away from. A dwell is
+never armed by a subscription the bridge itself revoked, it is deliberately not a
+term in the daemon's retirement drain, and it is cancelled outright — with the
+subscription and the facade — by a session delete, by pool shutdown, and by a
+dwell of zero (which is the detach-immediately behaviour).
 
 Watch ownership belongs to an active SSE subscription, not an arbitrary window
 ID. Visibility and native-notification delivery are aggregated independently
