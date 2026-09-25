@@ -3000,32 +3000,25 @@ asyncio.run(main())
 def test_the_progress_leg_fires_on_a_spinning_loop_that_never_advances(tmp_path: Path) -> None:
     """The reproduction, on the REAL plumbing: alive, ticking, and going nowhere.
 
-    WHAT THIS CELL PINNED BEFORE, AND WHAT REPLACED IT. It read ``rc == 1`` — the
-    progress verdict ENDED the runtime. That ending was the C timer's: the verdict
-    armed a native timer for ``MIN_REARM_S`` and the timer's expiry took the dump and
-    the process with it. There is no native timer to arm any more, and the verdict the
-    sampler records in Python does not end a runtime (see the module docstring: a fire
-    is evidence, and the exit leg is the arm's). So the child leaves on its OWN terms
-    after four bounds and reports that it was still healthy while it did — which is
-    what keeps "it survived the spin" a fact the child states rather than a missing
-    exit status.
+    THE INCIDENT: a process burning a core while both of its loops kept their cadence,
+    so every liveness leg was satisfied and only the composite predicate could see it —
+    12 s short of the deadline that eventually needed an operator. Nothing here is a
+    double: the spin is real CPU on a real runtime.
 
-    WHAT IS STILL PROVEN, and it is the whole subject of the cell: the predicate
-    FIRED. The incident was never "the process died", it was "the process burned a
-    core to produce nothing and nothing said so" — a session whose loops were alive and
-    ticking while the work went nowhere, 12 s short of the liveness deadline. The
-    verdict is still recorded, still names its leg, and still lands in the module's own
-    dump, so a reader can now tell a spin from a silence. THIS is the leg the C timer
-    was there to deliver, and it is the one that must not go quiet.
+    THIS CELL IS THE REGRESSION THE 2026-09-24 DEFECT WOULD HAVE TO REINTRODUCE, and it
+    is why it asserts a DEATH rather than a recorded line. With the C timer gone the
+    sampler is the only thread in the process that can take a deadline, so the loop
+    reads the recorded deadline BEFORE it asks the predicate again; a leg that ended the
+    sampler first — which is what shipped for a few hours — leaves the deadline it just
+    recorded with nobody to honour it: one "no progress" line, no all-thread dump, and a
+    loop that burns for ever. Measured, then fixed on #1517: the verdict alone is not
+    the guard, the FIRE is.
 
-    THE GAP THIS CELL NOW NAMES RATHER THAN PINS, because a reader of the next fire
-    will ask: the progress verdict writes its MARKER through this module's own writer
-    but does not reach :func:`_fire`, so the all-thread dump the liveness leg takes is
-    not taken here — the sampler stops on its own verdict (``_sample`` returns True
-    when the arm is not held) before the recorded deadline is honoured. Whether an idle
-    spin should also have its stacks dumped, and whether it should still be cut, is a
-    policy question for this change's owner; what this cell pins is that the verdict
-    itself is recorded, which is a claim no redesign of the exit leg can make false.
+    Each assertion is one part of that: the process LEFT (rc 1); both planes had run, so
+    this is a process whose loops were alive rather than one that never started; the
+    fired marker and the all-thread dump are both in the module's own file; and the dump
+    names the source file the spin is in, which is the line nothing in the process could
+    report before this bound existed.
     """
     result = _run_script(
         _SPINNING_CHILD,
@@ -3033,14 +3026,15 @@ def test_the_progress_leg_fires_on_a_spinning_loop_that_never_advances(tmp_path:
         args=(str(CHILD_BOUND_S), str(tmp_path), str(REPO)),
         timeout=120.0,
     )
+    # THE FIRE ENDS THE RUNTIME, and this cell is what pins that. The sampler is the
+    # only thread that can take a deadline now, so it reads the recorded deadline before
+    # re-asking the predicate; a leg that ended the sampler first would leave the
+    # deadline it had just recorded with nobody to honour it — one "no progress" line,
+    # no dump, and a loop that burns for ever. That is the 2026-09-24 defect, and this
+    # assertion is the regression it would need to come back.
     assert (
-        result.returncode == 0
-    ), f"the spinning child did not leave on its own terms: {result.stdout!r} {result.stderr!r}"
-    waited = float(result.stdout.split("still-alive:", 1)[1].split()[0])
-    assert waited >= CHILD_BOUND_S * 3, (
-        f"the child did not actually spin past the bound ({waited}s), so it proves "
-        f"nothing: {result.stdout!r}"
-    )
+        result.returncode == 1
+    ), f"the spinning loop was not ended by the progress leg: {result.stdout!r} {result.stderr!r}"
     assert "both-planes-ran" in result.stdout, (
         f"the planes never ran, so this says nothing about a process whose loops were "
         f"ALIVE: {result.stdout!r} {result.stderr!r}"
@@ -3049,12 +3043,13 @@ def test_the_progress_leg_fires_on_a_spinning_loop_that_never_advances(tmp_path:
     pid = int(result.stdout.split("armed:", 1)[1].split()[0])
     text = _dump_for(tmp_path, pid).read_text(encoding="utf-8")
     assert stall_watchdog.FIRED_MARKER in text, text
-    # THE FIRING PATH NAMED ITS CLASS AND ITS LEG. A bound that fires without
-    # saying which predicate ended the runtime leaves the next reader unable to
-    # tell a fire from a silent non-fire — the defect this class exists for.
+    # THE FIRING PATH NAMED ITS CLASS AND ITS LEG, and the all-thread dump is there
+    # beside it: with the deadline taken by the sampler, the same ``_fire`` the liveness
+    # leg uses writes both, which is what makes this fire evidence rather than a line.
     assert stall_watchdog.PROGRESS_MARKER in text, text
     assert incidents.STALL_BOUND_CAUSE in text, text
     assert stall_watchdog.fired_leg(pid, tmp_path / "logs") == stall_watchdog.LEG_PROGRESS
+    assert "parked_child.py" in text, f"the dump does not name the spinning loop: {text}"
 
 
 def test_the_progress_leg_spares_a_genuine_long_await(tmp_path: Path) -> None:
