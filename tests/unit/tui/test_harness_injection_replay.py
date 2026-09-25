@@ -293,7 +293,14 @@ async def test_a_held_child_report_replays_as_a_warning_and_a_delivered_one_does
     # The child's own text is carried unchanged, and the notice line is what
     # distinguishes it from a delivered row.
     assert "background job 'qa-r2' completed" in held._text
-    assert "held for your next turn" in held._text
+    # The marker between the child's own words and the harness's sentence (design
+    # review round 2, D11), and a claim that stays TRUE after the report has been
+    # read — the first wording said "no turn has read it yet", which the durable
+    # row can never retract and which U7 measured still painting after the
+    # successor's turn had answered both reports.
+    assert "[session note] held when it arrived" in held._text
+    assert "no turn ran for it at that point" in held._text
+    assert "has read it yet" not in held._text
     # The delivered row's own arrival is the answer it bought, which is not in
     # this history — so nothing licenses painting it here.
     assert "rev-r6" not in shown

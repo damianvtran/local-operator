@@ -607,13 +607,30 @@ def wake_receipt_headline(text: str) -> str:
 
 
 #: Painted under a child's report that arrived after this session's runtime had
-#: committed to leaving, so the row is durable and the model has NOT seen it yet.
+#: committed to leaving, so the row is durable and no turn ran for it at the time.
 #: The report above it is the child's own words (the same text a delivered row
-#: carries); this line is what says the difference, because without it a held row
+#: carries); this line is what says how it arrived, because without it a held row
 #: and a delivered one read identically (UX round 1, U6).
+#:
+#: A FACT ABOUT THE ARRIVAL, NEVER A PRESENT-TENSE CLAIM ABOUT NOW (design review
+#: round 2, D10; UX round 2, U7). The first wording said "held for your next turn …
+#: no turn has read it yet", which the durable row cannot ever retract: it is
+#: written once and painted on EVERY later replay, so after the successor's turn
+#: had read and answered the reports, a resumed session still told the operator a
+#: delegated report was owed — a permanent false alarm on the primary surface, in
+#: exactly the family this change exists to remove. "no turn ran for it at that
+#: point" stays true forever, and still separates the two rows.
+#:
+#: The bracketed lead-in marks where the harness's own words begin (design review
+#: round 2, D11): the row is one block on one ink carrying the child's report and
+#: then this sentence, and the sibling rows in the same frame state their
+#: provenance with a ``[session …]`` head. It is NOT listed in
+#: ``_HARNESS_NOTICE_HEADS`` and needs no entry: that list exists for texts a
+#: persisted row can prove provenance by (the pre-stamp era), while this sentence
+#: is composed at fold time and never persisted.
 HELD_DELIVERY_NOTICE = (
-    "held for your next turn — this report arrived while the session was leaving, "
-    "so no turn has read it yet"
+    "[session note] held when it arrived — this report reached the session while its "
+    "runtime was leaving, so no turn ran for it at that point"
 )
 
 
@@ -631,7 +648,12 @@ def held_delivery_notice(details: dict[str, Any]) -> tuple[str, NoticeSeverity] 
     for the fold decisions the two surfaces share (see
     ``docs/design/history-fold-convergence.md`` §3): the phone and the TUI must
     agree on the words and the tier, and a tier decided inside one renderer is a
-    tier the other does not have.
+    tier the other does not have. **Both folds call this**, which is what makes
+    that rule true of this row rather than aspirational: Round 1 added the TUI
+    branch alone and the rationale was measured false on the phone, where a held
+    row and a delivered one still read identically (review round 2 MINOR-B,
+    design D9, UX U8). A single caller would be a single opinion wearing a shared
+    home's name.
 
     ``warning``, because the row is a state the operator has to know about and
     cannot otherwise see: nothing ran, nothing acknowledged it, and the only
