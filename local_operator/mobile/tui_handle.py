@@ -796,8 +796,14 @@ class TuiSessionHandle(SessionHandle):
 
         def apply() -> dict[str, Any]:
             session = self._session()
+            before = peer_model.selected_label(session)
             state: dict[str, Any] = {
-                "before": peer_model.selected_label(session),
+                "before": before,
+                # Re-selecting the model a pinned fallback displaced (review
+                # round 2, N5): the selection will not move, the pin will go.
+                "dropped": (
+                    peer_model.pinned_fallback_label(session) if before == new_label else ""
+                ),
                 "busy": bool(getattr(session, "is_streaming", False)),
                 "calling": peer_model.provider_call_in_flight(session),
                 "already": peer_model.already_selected(session, new_label),
@@ -807,6 +813,7 @@ class TuiSessionHandle(SessionHandle):
             }
             if state["already"]:
                 state["after"] = _effective_label(session)
+                state["took"] = True
                 return state
             try:
                 self._app._run_slash_command(f"/model {new_label}")
@@ -817,16 +824,22 @@ class TuiSessionHandle(SessionHandle):
                 # before a raise is what is in force, and no later command can
                 # land between the switch and the answer.
                 state["pending"] = getattr(self._app, "_model_activation_pending", None) is not None
-                state["after"] = _effective_label(self._session())
+                current = self._session()
+                # "Did it take" is the SELECTION test, never the effective label
+                # (review round 2, M2): a pinned fallback already serving the
+                # requested model makes the effective label equal it whether or
+                # not `/model` ran. The effective label is kept for "still on".
+                state["took"] = peer_model.already_selected(current, new_label)
+                state["after"] = _effective_label(current)
                 state["children"] = peer_model.running_subagent_count(session)
             return state
 
         state = await self._on_app(apply)
         self._refresh_state()
-        before, after = state["before"], state["after"]
+        before, after, dropped = state["before"], state["after"], state["dropped"]
         if state["already"]:
             return peer_model.already_on_detail(new_label)
-        if after != new_label:
+        if not state["took"]:
             if state["pending"] and state["error"] is None:
                 # The capacity probe runs after this hop, so the outcome is not
                 # known yet. The card still records WHO asked (QA round 1, Q2):
@@ -840,16 +853,20 @@ class TuiSessionHandle(SessionHandle):
                 peer_model.refusal_detail(f"the switch to {new_label} did not take effect", after)
             ) from state["error"]
         await self._record_peer_model_card(
-            peer_model.audit_body(before, after, sender or {}), sender
+            peer_model.audit_body(before, new_label, sender or {}, dropped_fallback=dropped),
+            sender,
         )
         if state["error"] is not None:
-            return peer_model.partial_switch_detail(before, after, state["error"])
+            return peer_model.partial_switch_detail(
+                before, new_label, state["error"], dropped_fallback=dropped
+            )
         return peer_model.switched_detail(
             before,
-            after,
+            new_label,
             busy=state["busy"],
             calling=state["calling"],
             running_subagents=state["children"],
+            dropped_fallback=dropped,
         )
 
     async def _record_peer_model_card(self, body: str, sender: dict[str, Any] | None) -> None:

@@ -3583,12 +3583,26 @@ def _cli_switch_sender() -> "dict[str, Any]":
     finds that session and the card names it. From a plain terminal it finds
     nothing, and the bare pid it falls back to is this short-lived process —
     gone before the owner reads the card, and a different number every run
-    (UX round 1, U2). That case is labelled as what it is: a human at a
-    terminal, and where.
+    (UX round 1, U2). That case is labelled as what it is.
+
+    SHORT, because the label is the card's header and the new model follows it
+    on the same clipped row (design round 2, D7; UX U9; QA Q5): the header says
+    ``terminal``, and WHERE rides in ``cwd``, which the card body appends after
+    the models and the expansion shows. The cwd is best effort: ``/`` has no
+    basename and a deleted working directory raises, and neither may cost the
+    switch its sender (review round 2, NIT-4).
     """
+    from local_operator.mobile.peer_model import TERMINAL_SENDER
+
     sender = _peer_sender_identity()
-    if not str(sender.get("session_id") or "").strip():
-        sender["conversation_name"] = f"lop model (terminal, {os.path.basename(os.getcwd())})"
+    if str(sender.get("session_id") or "").strip():
+        return sender
+    sender["conversation_name"] = TERMINAL_SENDER
+    sender["via"] = TERMINAL_SENDER
+    try:
+        sender["cwd"] = os.getcwd()
+    except OSError:
+        sender.pop("cwd", None)
     return sender
 
 

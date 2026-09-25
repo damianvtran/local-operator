@@ -87,8 +87,7 @@ def test_a_keyless_provider_is_usable_with_no_credential(fake_store):
             0,
             [
                 "switched to b/y (was a/x)",
-                "mid-turn: the call in flight finishes on the old model; later calls use the "
-                "new one",
+                "mid-turn: the call in flight finishes on the old model",
             ],
         ),
         (
@@ -97,8 +96,7 @@ def test_a_keyless_provider_is_usable_with_no_credential(fake_store):
             0,
             [
                 "switched to b/y (was a/x)",
-                "mid-turn: the current step finishes on the old model; later calls use the "
-                "new one",
+                "mid-turn: the current step finishes on the old model",
             ],
         ),
         (
@@ -108,7 +106,7 @@ def test_a_keyless_provider_is_usable_with_no_credential(fake_store):
             [
                 "switched to b/y (was a/x)",
                 "its next turn runs on it",
-                "1 running subagent keeps its model; new and resumed ones use the new one",
+                "1 running subagent stays on the old model; new and resumed ones switch",
             ],
         ),
         (
@@ -118,7 +116,7 @@ def test_a_keyless_provider_is_usable_with_no_credential(fake_store):
             [
                 "switched to b/y (was a/x)",
                 "its next turn runs on it",
-                "3 running subagents keep their model; new and resumed ones use the new one",
+                "3 running subagents stay on the old model; new and resumed ones switch",
             ],
         ),
     ],
@@ -147,15 +145,50 @@ def test_the_other_receipts_lead_with_a_distinct_outcome() -> None:
     )
 
 
-def test_the_audit_card_leads_with_the_new_model_and_names_the_sender() -> None:
-    """D3/U3: on resume the card is the only trace, and it is clipped from the right."""
-    assert peer_model.audit_body("a/x", "b/y", {"conversation_name": "fleet boss"}) == (
-        "[remote model switch] now on b/y (was a/x) — switched by fleet boss"
+def test_the_audit_card_leads_with_the_new_model_and_never_repeats_the_header() -> None:
+    """D3/U3, then D7/U9/Q5: on resume the card is the only trace, clipped from the
+    right. The header names the sender, so the body does not repeat it; a
+    terminal sender's directory is the one fact the header cannot hold."""
+    body = "[remote model switch] now on b/y (was a/x)"
+    assert peer_model.audit_body("a/x", "b/y", {"conversation_name": "fleet boss"}) == body
+    assert peer_model.audit_body("a/x", "b/y", {"pid": 7}) == body
+    assert peer_model.audit_body("a/x", "b/y") == body
+    terminal = {"conversation_name": "terminal", "via": "terminal", "cwd": "/srv/work/"}
+    assert peer_model.audit_body("a/x", "b/y", terminal) == body + " — from a terminal in work"
+
+
+@pytest.mark.parametrize("cwd", ["/", "", None])
+def test_a_terminal_sender_with_no_usable_directory_names_none(cwd) -> None:
+    """NIT-4: `/` has no basename and a deleted cwd reports none."""
+    sender = {"conversation_name": "terminal", "via": "terminal", "cwd": cwd}
+    assert peer_model.audit_body("a/x", "b/y", sender) == (
+        "[remote model switch] now on b/y (was a/x)"
     )
-    assert peer_model.audit_body("a/x", "b/y", {"pid": 7}) == (
-        "[remote model switch] now on b/y (was a/x) — switched by pid 7"
+
+
+def test_reclaiming_the_displaced_selection_reads_back_on_it() -> None:
+    """N5: re-selecting the model a pinned fallback displaced is not
+    `switched to X (was X)`; the fallback was dropped."""
+    detail = peer_model.switched_detail(
+        "a/x", "a/x", busy=False, running_subagents=0, dropped_fallback="b/y"
     )
-    assert peer_model.audit_body("a/x", "b/y") == "[remote model switch] now on b/y (was a/x)"
+    assert detail.splitlines()[0] == "back on a/x (was on fallback b/y)"
+    assert peer_model.audit_body("a/x", "a/x", dropped_fallback="b/y") == (
+        "[remote model switch] back on a/x (was on fallback b/y)"
+    )
+
+
+def test_every_line_fits_an_expanded_card_at_80_columns() -> None:
+    """D8: the busiest receipt's lines stay inside the ~72-cell body at 80 columns
+    (the first line carries the ids, which are whatever length they are)."""
+    detail = peer_model.switched_detail(
+        "anthropic/claude-opus-5",
+        "deepseek/deepseek-flash",
+        busy=True,
+        calling=True,
+        running_subagents=12,
+    )
+    assert max(len(line) for line in detail.splitlines()[1:]) <= 72, detail
 
 
 def test_a_call_in_flight_is_told_apart_from_an_open_tool_batch() -> None:
@@ -222,8 +255,7 @@ async def test_serving_switches_reads_back_and_records_the_card(monkeypatch) -> 
     ]
     assert cards == [
         (
-            "[remote model switch] now on deepseek/deepseek-flash (was test/mock) — switched by "
-            "fleet boss",
+            "[remote model switch] now on deepseek/deepseek-flash (was test/mock)",
             sender,
         )
     ]
@@ -282,8 +314,8 @@ async def test_serving_busy_switch_names_the_call_in_flight(monkeypatch) -> None
     session.is_streaming = True
     session.running_children = 2
     detail = await handle.receive_peer_model("deepseek", "deepseek-flash", sender={})
-    assert "mid-turn: the call in flight finishes on the old model; later calls use" in detail
-    assert "2 running subagents keep their model" in detail
+    assert "mid-turn: the call in flight finishes on the old model" in detail
+    assert "2 running subagents stay on the old model" in detail
 
 
 @pytest.mark.asyncio
@@ -334,3 +366,63 @@ async def test_serving_a_raise_before_the_switch_took_is_a_refusal_on_the_real_m
         "refused: the switch to deepseek/deepseek-flash did not take effect; still on test/mock"
     )
     assert cards == []
+
+
+def _pinned(monkeypatch, *, selected: str, fallback: str):
+    """A serving handle whose session SELECTS ``selected`` while a pinned fallback
+    serves ``fallback`` (the real ``Session`` shape: effective = the fallback)."""
+    from types import SimpleNamespace
+
+    handle, session, applied, cards = _serving(monkeypatch)
+    session.model_label = selected
+    session.effective_model_label = fallback
+    provider, _, model_id = fallback.partition("/")
+    setattr(session, "active_fallback", SimpleNamespace(provider=provider, model_id=model_id))
+    return handle, session, applied, cards
+
+
+@pytest.mark.asyncio
+async def test_serving_pinned_on_the_request_but_the_apply_never_ran_is_a_refusal(
+    monkeypatch,
+) -> None:
+    """M2: the effective label ALREADY equals the request while the fallback
+    serves it, so it cannot say whether the switch took. The selection can."""
+    handle, session, applied, cards = _pinned(
+        monkeypatch, selected="anthropic/claude-opus-5", fallback="deepseek/deepseek-flash"
+    )
+
+    async def never_applied(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise RuntimeError("metadata fetch timed out")  # before Session.set_model
+
+    monkeypatch.setattr(handle, "set_model_effort", never_applied)
+    with pytest.raises(ValueError) as caught:
+        await handle.receive_peer_model("deepseek", "deepseek-flash", sender={})
+    assert str(caught.value) == (
+        "refused: the switch to deepseek/deepseek-flash did not take effect; "
+        "still on deepseek/deepseek-flash"
+    )
+    assert cards == [], "a switch that did not happen must not write a card"
+    assert session.model_label == "anthropic/claude-opus-5"
+
+
+@pytest.mark.asyncio
+async def test_serving_reclaiming_the_displaced_selection_says_back_on(monkeypatch) -> None:
+    """N5 on the serving host."""
+    handle, session, applied, cards = _pinned(
+        monkeypatch, selected="anthropic/claude-opus-5", fallback="deepseek/deepseek-flash"
+    )
+
+    def set_model(spec, explicit=False):  # noqa: ANN001
+        applied.append((spec, explicit))
+        setattr(session, "active_fallback", None)
+        session.effective_model_label = session.model_label
+
+    monkeypatch.setattr(session, "set_model", set_model, raising=False)
+    detail = await handle.receive_peer_model("anthropic", "claude-opus-5", sender={})
+    assert detail.splitlines()[0] == (
+        "back on anthropic/claude-opus-5 (was on fallback deepseek/deepseek-flash)"
+    )
+    assert [text for text, _ in cards] == [
+        "[remote model switch] back on anthropic/claude-opus-5 "
+        "(was on fallback deepseek/deepseek-flash)"
+    ]

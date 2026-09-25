@@ -194,13 +194,15 @@ def test_lop_model_switches_a_live_session_and_audits_it(headless_tui_env: Path)
         # The audit card (D6): a record-only peer card naming from and to.
         cards = _custom(rows, "peer_message")
         assert len(cards) == 1
-        # New model FIRST, then the old one, then who asked: the CLI from a
-        # plain terminal is named as that, never as its own short-lived pid.
+        # New model FIRST, then the old one. A CLI from a plain terminal is the
+        # sender `terminal` (short, for the card header) and the body ends with
+        # where it ran; never its own short-lived pid.
         body = cards[0]["details"]["body"]
         assert body.startswith(
-            "[remote model switch] now on deepseek/deepseek-flash (was test/mock) — switched by "
-            "lop model (terminal, "
+            "[remote model switch] now on deepseek/deepseek-flash (was test/mock) — from a "
+            "terminal in "
         ), body
+        assert cards[0]["details"]["sender"]["conversation_name"] == "terminal"
         # The durable selection a resume keeps, and the model-visible notice.
         assert _custom(rows, "selected_model")[-1]["details"]["selector"] == (
             "deepseek/deepseek-flash"
@@ -271,8 +273,8 @@ def test_lop_model_on_a_busy_session_says_the_call_in_flight_finishes(
         # Which of the two true sentences depends on whether the first call has
         # been answered yet; the unit tests pin each wording to its state.
         assert lines[1] in (
-            "mid-turn: the current step finishes on the old model; later calls use the new one",
-            "mid-turn: the call in flight finishes on the old model; later calls use the new one",
+            "mid-turn: the current step finishes on the old model",
+            "mid-turn: the call in flight finishes on the old model",
         ), switched.stdout
         # THE SEMANTICS, not just the sentence: the call already answered ran on
         # the old model, and the NEXT call in the same turn — the one after the

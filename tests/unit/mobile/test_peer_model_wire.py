@@ -241,8 +241,7 @@ async def test_a_refused_dial_is_not_delivered_and_nothing_changed() -> None:
     with pytest.raises(RuntimeError) as caught:
         await switch_peer_model(record, provider="deepseek", model_id="x", sender={})
     assert not isinstance(caught.value, PeerModelUnconfirmed)
-    assert str(caught.value).startswith("could not reach that session (")
-    assert str(caught.value).endswith("); nothing changed")
+    assert str(caught.value).startswith("could not reach that session; nothing changed (")
 
 
 @pytest.mark.asyncio

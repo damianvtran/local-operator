@@ -86,8 +86,7 @@ async def test_an_idle_tui_switch_is_read_back_in_the_same_hop(tmp_path, monkeyp
             ]
             assert session.peer_cards == [
                 (
-                    "[remote model switch] now on deepseek/deepseek-flash (was test/mock) — "
-                    "switched by fleet boss",
+                    "[remote model switch] now on deepseek/deepseek-flash (was test/mock)",
                     sender,
                 )
             ]
@@ -108,9 +107,8 @@ async def test_a_busy_tui_switch_names_the_call_in_flight(tmp_path, monkeypatch)
             detail = await handle.receive_peer_model("deepseek", "deepseek-flash", sender={})
             assert detail.splitlines() == [
                 "switched to deepseek/deepseek-flash (was test/mock)",
-                "mid-turn: the call in flight finishes on the old model; later calls use the "
-                "new one",
-                "1 running subagent keeps its model; new and resumed ones use the new one",
+                "mid-turn: the call in flight finishes on the old model",
+                "1 running subagent stays on the old model; new and resumed ones switch",
             ]
     finally:
         store.close()
@@ -172,7 +170,7 @@ class _FallbackSession(_SwitchableSession):
 
     def __init__(self) -> None:
         super().__init__()
-        self._label = "anthropic/claude-opus-4"
+        self._label = "anthropic/claude-opus-5"
         self.active_fallback: Any = object()
 
     @property
@@ -197,7 +195,7 @@ async def test_a_tui_switch_onto_the_active_fallback_is_a_real_switch(
             handle = await _handle(app, pilot)
             detail = await handle.receive_peer_model("deepseek", "deepseek-flash", sender={})
             assert detail.splitlines()[0] == (
-                "switched to deepseek/deepseek-flash (was anthropic/claude-opus-4)"
+                "switched to deepseek/deepseek-flash (was anthropic/claude-opus-5)"
             )
             assert [(m.model_id, e) for m, e in session.applied] == [("deepseek-flash", True)]
             assert session.model_label == "deepseek/deepseek-flash"
@@ -256,8 +254,77 @@ async def test_an_accepted_local_switch_still_records_who_asked(tmp_path, monkey
             assert session.applied == []
             assert [text for text, _ in session.peer_cards] == [
                 "[remote model switch] switch to deepseek/deepseek-flash requested (on "
-                "test/mock until it applies) — requested by fleet boss"
+                "test/mock until it applies)"
             ]
     finally:
         app._model_activation_pending = None
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_tui_pinned_on_the_request_whose_model_command_never_ran_is_a_refusal(
+    tmp_path, monkeypatch
+) -> None:
+    """M2 on the TUI host: `/model` refused by the app's own gate (nothing applied)
+    while a fallback already serves the requested model."""
+    session = _FallbackSession()
+    app, store = await _app(session, tmp_path, monkeypatch)
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            handle = await _handle(app, pilot)
+            monkeypatch.setattr(app, "_run_slash_command", lambda *_a, **_k: None)
+            with pytest.raises(ValueError) as caught:
+                await handle.receive_peer_model("deepseek", "deepseek-flash", sender={})
+            assert "did not take effect" in str(caught.value)
+            assert session.applied == [] and session.peer_cards == []
+            assert session.model_label == "anthropic/claude-opus-5"
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_tui_pending_local_switch_onto_the_pinned_fallback_stays_pending(
+    tmp_path, monkeypatch
+) -> None:
+    """M2's second face: a local-setup activation whose provider IS the pinned
+    fallback must answer `pending`, not `switched`."""
+    session = _FallbackSession()
+    app, store = await _app(session, tmp_path, monkeypatch)
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            handle = await _handle(app, pilot)
+
+            def pending_only(*_a, **_k):  # noqa: ANN002, ANN003
+                app._model_activation_pending = 1
+
+            monkeypatch.setattr(app, "_run_slash_command", pending_only)
+            detail = await handle.receive_peer_model("deepseek", "deepseek-flash", sender={})
+            assert detail.startswith("pending: "), detail
+            assert [text for text, _ in session.peer_cards] == [
+                "[remote model switch] switch to deepseek/deepseek-flash requested (on "
+                "anthropic/claude-opus-5 until it applies)"
+            ]
+    finally:
+        app._model_activation_pending = None
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_tui_reclaiming_the_displaced_selection_says_back_on(tmp_path, monkeypatch) -> None:
+    """N5 on the TUI host: asking for the selection a fallback displaced."""
+    session = _FallbackSession()
+    app, store = await _app(session, tmp_path, monkeypatch)
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            handle = await _handle(app, pilot)
+            detail = await handle.receive_peer_model("anthropic", "claude-opus-5", sender={})
+            assert detail.splitlines()[0] == (
+                "back on anthropic/claude-opus-5 (was on fallback deepseek/deepseek-flash)"
+            )
+            assert session.active_fallback is None
+            assert [text for text, _ in session.peer_cards] == [
+                "[remote model switch] back on anthropic/claude-opus-5 "
+                "(was on fallback deepseek/deepseek-flash)"
+            ]
+    finally:
         store.close()
