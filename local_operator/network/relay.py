@@ -77,7 +77,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from local_operator.network import dial as session_dial
-from local_operator.network import store, wire
+from local_operator.network import projection, store, wire
 from local_operator.network.audit import AuditEvent, AuditLog
 from local_operator.network.authorizer import Authorizer, NetworkState
 from local_operator.network.handshake import (
@@ -5982,7 +5982,16 @@ class RelayServer:
             message = str(
                 (reply or {}).get("message") or "the device holding that session did not answer"
             )
-            self._drop_stream(stream_id)
+            # THE REFUSAL IS NOT A CLOSE (agent review round 2, MAJOR 1). This stream
+            # never opened — the open row is emitted only after the owner acks — so
+            # reporting it through `_drop_stream` wrote a `session_stream_closed` with
+            # no `session_stream_opened` to pair with, an empty machine cause (the one
+            # close row outside §4.3's four members, uncountable by all four filters)
+            # and `outcome="ok"` on a refusal. It is discarded without a row instead:
+            # the attempt is already in the trail where the knowledge is, as the
+            # REFUSING device's durable `authorisation_refused` (authorizer._refused),
+            # and the opener is answered with the refusal's sentence.
+            self._discard_unopened_stream(stream_id)
             return {"op": "error", "req": req, "message": message}, None
         self.audit.record(
             AuditEvent(
@@ -6067,12 +6076,32 @@ class RelayServer:
         self._close_stream(stream_id, notify_peer=False, cause="peer-closed")
         return True
 
-    def _drop_stream(self, stream_id: str, *, cause: str = "") -> None:
-        """Forget a stream without touching either socket."""
+    def _drop_stream(self, stream_id: str, *, cause: str) -> None:
+        """Forget a stream without touching either socket, and REPORT the close.
+
+        ``cause`` is required rather than defaulted: this path ends a pipe that
+        existed, so it always has a reason to name, and the default it used to carry
+        is what let a call site report a close for a stream that never opened
+        (agent review round 2, MAJOR 1). A caller with no pipe to report wants
+        :meth:`_discard_unopened_stream`.
+        """
         with self._streams_lock:
             stream = self._streams.pop(stream_id, None)
         if stream is not None:
             self._report_stream_closed(stream, cause)
+
+    def _discard_unopened_stream(self, stream_id: str) -> None:
+        """Forget a stream that was never OPENED: no row, because no pipe existed.
+
+        EVERY ``session_stream_closed`` HAS AN OPEN TO PAIR WITH, which is the whole
+        value of the event pair — the leak this trail was built to expose was found
+        by counting one side against the other (Q-XH-2: 5 opens, 0 closes). A stream
+        is in the table before it is known to have opened (``_open_viewer_stream``
+        registers it, then asks the owner), so the refusal path has something to
+        remove and nothing to report.
+        """
+        with self._streams_lock:
+            self._streams.pop(stream_id, None)
 
     def _report_stream_closed(self, stream: "_Stream", cause: str) -> None:
         """The close half of ``session_stream_opened``, once per stream.
@@ -6080,7 +6109,16 @@ class RelayServer:
         THE POP IS THE GATE: ``_close_stream`` and ``_drop_stream`` both remove the
         stream from the table, and only the call that actually removed it reports,
         so a stream's open and close counts balance without a "reported" flag to
-        keep in step. ``role`` distinguishes the two halves, because the leak this
+        keep in step.
+
+        AND ONLY A PIPE THAT OPENED IS REPORTED. The third removal path,
+        :meth:`_discard_unopened_stream`, reports nothing: it is the open that was
+        REFUSED, so there is no ``session_stream_opened`` for a close to pair with
+        and a row there would be a close with no open, an empty cause and
+        ``outcome="ok"`` on a refusal — which is what the pop-gate rule above was
+        claimed to prevent and did not, because the claim was about the removals
+        rather than about the OPENS (agent review round 2, MAJOR 1). ``role``
+        distinguishes the two halves, because the leak this
         answers was diagnosed by counting exactly one side of it (the OWNER held 5
         opens and 0 closes while the viewer's own table was clean — cross-host QA,
         Q-XH-2). No guard around the write: ``AuditLog.record`` never raises by its
@@ -6930,6 +6968,28 @@ class RelayServer:
                         break
                     continue
                 if stream is not None:
+                    # A LOCAL CLOSE IS NOT A SESSION FRAME. Once this connection has
+                    # become a stream every line is forwarded verbatim, so the §2.5
+                    # `stream_close` a front end sends to ITS OWN relay used to travel
+                    # to the peer as a session frame, fail there, and then be recorded
+                    # as `peer-stopped-answering` — a machine cause saying "the peer"
+                    # about a close the viewer's own front end asked for, while
+                    # `_ctl_stream_close` (whose word is `viewer-requested`) never ran
+                    # (agent review round 2, MINOR 2). Recognise it here, answer it
+                    # with the same envelope the control dispatch uses, and let the
+                    # close tell the peer — `notify_peer` stays at its default.
+                    if str(frame.get("op") or "") == projection.OP_STREAM_CLOSE:
+                        self._close_stream(stream.stream_id, cause="viewer-requested")
+                        sock.sendall(
+                            wire.encode_line(
+                                {
+                                    "op": "ack",
+                                    "req": frame.get("req"),
+                                    "detail": {"stream": stream.stream_id, "closed": True},
+                                }
+                            )
+                        )
+                        break
                     self._forward_stream_frame(stream, frame)
                     if stream.closed:
                         break
@@ -8146,8 +8206,9 @@ def _remaining_of(record: NetworkRecord | None, invite_id: str) -> float:
     leaving a token standing after a delay cannot extend it.
 
     The 60 s fallback covers an invite this device cannot read — a record that went away
-    mid-ceremony, or a call with none at all: a minute is the shortest wait this
-    ceremony has ever shipped, so an unreadable token errs toward refusing rather than
+    mid-ceremony, or a call with none at all. Sixty is a POLICY default for "no life
+    known", not a floor: the wait it feeds is ``min(remaining, 180)``, so a token with
+    30 s left ships a 30 s wait, and an unreadable one errs toward refusing rather than
     toward parking a listener for another three minutes.
     """
     if record is None:

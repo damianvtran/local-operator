@@ -501,10 +501,13 @@ def consume(
 ) -> InviteRecord:
     """Write ``consumed`` — the terminal state, whatever the outcome was.
 
-    Admitted, aborted, SAS mismatch, timeout: all four consume. A mismatched SAS
-    that left the invite usable would let an attacker try again with the same
-    token, which is exactly the ~2²⁰ grind the design accepts only once per human
-    action.
+    Admitted and aborted consume. A mismatched SAS and a timeout are RELEASED rather
+    than consumed (Q-XH-6, and see :func:`release`): the token goes back to ``minted``
+    with the failure recorded, a delay spending no code-guess budget at all and a
+    mistype spending one of :data:`PAIRING_MAX_FORGIVEN_FAILURES`. What keeps the grind
+    bounded is that bound and not this function — a mismatched SAS that retried without
+    limit would let an attacker try again with the same token, which is exactly the
+    ~2²⁰ grind the design accepts only once per human action.
     """
     invite = record.invite(invite_id)
     if invite is None:
