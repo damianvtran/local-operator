@@ -425,11 +425,45 @@ INNER_OP_CAPABILITY: dict[str, str] = {
     "unwatch_job": "view",  # the matching unsubscribe
     "viewer_watch": "view",  # "someone is displaying this" — residency hint only
     "desktop_watch": "view",  # the desktop's presence lease — same hint, other surface
+    # event_mute and its UNMUTE are a PAIR and must never be split across two
+    # decisions. Both do the same thing to the same connection — ``event_mute``
+    # stops delta-grade frames on THIS one, ``event_unmute`` resumes them — so
+    # the narrowest capability covering either covers both. Round 1 shipped the
+    # mute alone, and the omission was worse than a refused optimisation:
+    # ``_forward_stream_frame`` (relay.py) writes an ``unknown_op`` error back
+    # and CLOSES the stream, so a viewer that parked its event controller and
+    # unparked it lost the whole session stream, silently and one-way.
+    # Reachable from a real viewer, not in theory: ``EventController.set_parked``
+    # → ``AttachedSession.set_event_mute`` → ``RemoteSessionClient`` → this op,
+    # and the runtime advertises ``EVENT_MUTE_CAPABILITY`` unconditionally
+    # (session/runtime/server.py ``_welcome_frame``). The pair is pinned by
+    # ``tests/unit/network/test_stream_op_gate.py``, which derives the ops a
+    # viewer sends from ``mobile/attach_client.py`` rather than listing them —
+    # the hand-written list is what missed this row.
     "event_mute": "view",  # stop sending THIS connection deltas; affects nobody else
-    "acknowledge_attention": "view",  # clear an unread-completion mark this viewer rendered
+    "event_unmute": "view",  # the matching resume, on the same connection
+    # session-scoped WRITE, not a per-viewer mark: it clears the OWNER's own
+    # attention state (serving.py ``acknowledge_attention`` →
+    # ``Session.acknowledge_attention``), and the runtime then pushes the new
+    # state to EVERY viewer (server.py ``_schedule_push``) — so one peer's
+    # viewer clears the mark the owner's desktop is showing. ``view`` is the
+    # narrowest capability whose WORDS cover that (the 36-character completion
+    # token is what bounds who may do it, not the capability), and the row says
+    # so rather than claiming a local-only effect. Round 1's comment claimed a
+    # per-viewer mark the op does not have.
+    "acknowledge_attention": "view",  # clears session-scoped attention for every viewer
     # slash — the authoritative slash seam. The owner's own dispatch decides what
     # each command does and refuses the terminal-only ones
     # (serving.py ``run_slash_authoritative`` / ``slash``: "terminal-only here").
+    #
+    # ``slash`` IS NOT THE WHOLE STORY FOR EVERY VERB: three of the commands the
+    # owner's dispatch answers with a real ACTION — ``/archive``, ``/unarchive``
+    # and ``/delete`` — produce exactly the effect ``delete`` is reserved for
+    # (``OP_CAPABILITY["net_session_lifecycle"]``, ``CAPABILITY_WORDS["delete"]``),
+    # so they are gated on ``delete`` at the point where the verb is chosen.
+    # See :data:`DELETE_SCOPED_SLASH` for why that gate cannot live in this
+    # table: the table authorises the SEAM, and only the dispatch knows which
+    # verb travelled down it.
     "slash_result": "slash",
     # prompt — session-scoped WRITES. The threshold is design §3.3: a member that
     # may prompt can already make the agent (which has a shell) do each of these.
@@ -475,6 +509,239 @@ INNER_OP_CAPABILITY: dict[str, str] = {
     # produces material a surface uses to SIGN as the operator, and no capability
     # in the transport's set grants a peer that authority.
 }
+
+
+#: The routed slash commands whose EFFECT the peer vocabulary already reserves
+#: for ``delete``.
+#:
+#: ``/archive``, ``/unarchive`` and ``/delete`` write the OWNER's archive index
+#: and its session store — the same acts as ``net_session_lifecycle``
+#: (``OP_CAPABILITY["net_session_lifecycle"] == "delete"``, whose words are
+#: "archive or delete a session here"). They reach the owner as ROUTED slash
+#: commands, and every carrier of those is authorised on ``slash`` — a ``drive``
+#: role holds ``slash`` and ``delete`` is not part of it. So over the mesh, a
+#: member that may not take the lifecycle lane could take the same action through
+#: a routed slash command, and the only thing that ever refused it was the
+#: owner's LIVE-LEASE guard — which a session whose writer has exited does not
+#: have.
+#:
+#: TWO CARRIERS, ONE RULE. ``slash_result`` returns a typed receipt and ``slash``
+#: renders one; both are admitted on ``slash``, so a gate on either alone leaves
+#: the effect one door over. Round 1's first fix sat on ``slash_result`` only, and
+#: a ``drive`` member's imaged ``{"op": "slash", "command": "archive"}``
+#: still archived the owner's session — measured over two real relays.
+#:
+#: WHY THE GATE IS NOT A TABLE ROW. ``INNER_OP_CAPABILITY`` authorises the SEAM:
+#: the frames that arrive are ``slash_result`` and ``slash``, and every routed
+#: command travels under them. Which VERB was typed is only known at the dispatch
+#: that chooses it, so the check belongs there — held here, beside the vocabulary
+#: it reads, because THREE hosts answer this way (``ServingSessionHandle`` in
+#: ``session/runtime/serving.py``, ``OperatorApp`` in ``tui/app.py``, and
+#: ``TuiSessionHandle`` in ``mobile/tui_handle.py``, whose carrier runs the line in
+#: the owner's own terminal rather than reaching a dispatcher at all) and a second
+#: copy of the set is free to drift on one host alone. Round 2 found that the
+#: terminal carrier cannot be closed by naming effects at all — it reaches the
+#: terminal's WHOLE local verb set, ``/move --to`` and ``/exit`` included — so round
+#: 3 replaced the naming with a LANE decision (``/move`` and friends go to the typed
+#: dispatcher, which has no branch for them, rather than to a refusal list:
+#: :func:`may_run_slash_in_the_owners_terminal`). This set stays what the three
+#: ROUTED hosts check, and what the terminal carrier checks for a delete-scoped verb
+#: before letting a capable member run it there.
+DELETE_SCOPED_SLASH: frozenset[str] = frozenset({"archive", "unarchive", "delete"})
+
+
+def may_run_delete_scoped_slash(locality: str | None, capabilities: frozenset[str] | None) -> bool:
+    """Whether a client at ``locality`` holding ``capabilities`` may run one.
+
+    A LOCAL client is a process on this machine asked by its own user — the pane
+    that owns its own gate — and is allowed, the same way the approval gate
+    treats a caller whose ``may_loosen`` it can answer for itself. A RELAYED
+    client is allowed only if the CONNECTION proved ``delete``: these verbs
+    archive or delete a session on THIS owner, so a member the lifecycle lane
+    refuses must not reach the same effect down this one.
+
+    ``None`` is "the caller has not said", and it FAILS CLOSED — the direction
+    the ``may_loosen`` default takes one call over, and the only safe reading of
+    "unknown authority" for a verb that writes the owner's store. ``None`` covers
+    BOTH the locality and the capability, because a caller that forwarded one and
+    not the other has told us nothing it can prove. Any locality that is not
+    ``"local"`` is treated as relayed for the same reason: a gate whose default is
+    "allow" is not a gate, which is the property every forgotten forward in this
+    slice has violated so far.
+    """
+    if locality == "local":
+        return True
+    return "delete" in (capabilities or frozenset())
+
+
+def delete_scope_refusal_sentence(command: str) -> str:
+    """The ONE sentence both slash hosts give for a delete-scoped verb refused.
+
+    Written once because both hosts need it and neither may drift: a session is
+    owned either by a detached runtime (``ServingSessionHandle._slash_result``)
+    or by the TUI (``OperatorApp._slash_result``), a follower may reach either,
+    and the two refuse the SAME act — so the receipt has to read the same
+    whichever host answered, the rule this repo keeps for every host pair.
+
+    It names the capability and no remedy on purpose: neither host can see who
+    the operator is or which device would have to grant it, and a viewer told to
+    ask for something it cannot name has been handed a task instead of a fact.
+    It also says what the CONNECTION did not resolve rather than what it holds,
+    because the callers refused here are not all mesh members: the phone sends
+    ``locality="remote"`` with no capability set at all, so a sentence claiming it
+    "holds 'slash' without 'delete'" would be false about the caller it is told to
+    (agent review round 3, R3-4).
+    """
+    return (
+        f"/{command} archives or deletes a session on this machine, which needs the "
+        "'delete' capability. This connection did not resolve it, so the command was "
+        "refused and nothing was changed."
+    )
+
+
+def delete_scope_refusal(
+    command: str, locality: str | None, capabilities: frozenset[str] | None
+) -> str | None:
+    """The ONE refusal for a delete-scoped verb this connection may not run.
+
+    ``None`` means "may run". The three routed hosts ask this and wrap the sentence
+    in their own shape (a ``SlashResult`` for the two dispatchers, a receipt for the
+    terminal carrier), which is why the decision and the words live here and not in
+    each host: they were copied into three places in round 1, and R2-5 asked for one.
+
+    A RELAYED caller with NO capability set fails closed here, and that half is not
+    implied by the locality half — ``capabilities=None`` means "not said", not
+    "said none", and both refuse. Round 3's review found the surviving mutation on
+    exactly this asymmetry, so see the cells in ``test_stream_op_gate.py`` and
+    ``test_serving.py`` that pin it.
+
+    ``command`` must already be the registry PRIMARY name. This module is
+    stdlib-only by contract — ``cli.py`` imports the network package for every
+    ``lop`` invocation, ``--version`` included — and ``slash_commands`` pulls in the
+    TUI's autocomplete tables, so alias resolution stays with the caller. Every
+    host resolves first (round 1's review verified that for the routed carriers).
+    """
+    if command not in DELETE_SCOPED_SLASH:
+        return None
+    if may_run_delete_scoped_slash(locality, capabilities):
+        return None
+    return delete_scope_refusal_sentence(command)
+
+
+#: The slash commands a RELAYED connection may run through the ONE carrier that
+#: types the line into the OWNER's own terminal.
+#:
+#: WHY A LIST AT ALL, WHEN EVERYTHING ELSE IS ROUTED. The other carriers answer
+#: from a dispatcher whose verb set is known and gated per verb (``slash_result`` →
+#: ``ServingSessionHandle._slash_result`` / ``OperatorApp._slash_result``). This
+#: carrier is different in kind: it hands the line to the owner's LOCAL command
+#: dispatch (``OperatorApp._run_slash_command``), where the verbs are the
+#: terminal's own — ``/exit`` ends the owner's app, ``/update`` rebuilds its
+#: install, ``/resume``/``/new``/``/clear`` drive its session store, and
+#: ``/move <id> --to <device>`` hands a session's custody to another device or
+#: copies its whole transcript there with ``--keep``. That set is not enumerable
+#: from here and it grows, so a denylist is always one round behind: naming three
+#: verbs closed three verbs, and the fourth was a review's blocker.
+#:
+#: SO A RELAYED COMMAND THAT IS NOT LISTED HERE GOES TO THE TYPED DISPATCHER
+#: rather than being refused (:func:`may_run_slash_in_the_owners_terminal` decides
+#: which lane a command gets). That is what keeps the operator's PHONE working: the
+#: phone composer sends every typed ``/…`` line as the ``slash`` op
+#: (``mobile/web/src/components/composer.tsx``), and the phone daemon authenticates
+#: with ``"locality": "remote"`` and no capabilities (``mobile/daemon.py``), so a
+#: refusal here is a refusal for the phone. The dispatcher is the right lane for it
+#: because it gates per verb, answers with a typed receipt, and has NO branch for
+#: ``/move``, ``/exit`` or ``/update`` — the verbs that made this carrier dangerous
+#: — so those come back as its own honest sentence.
+#:
+#: WHY THESE THREE. ``goal`` and ``compact`` are the set the RUNTIME host runs down
+#: this same op (``ServingSessionHandle.slash`` runs them and answers
+#: "terminal-only here" for everything else), so a follower's un-imaged command is
+#: run by both hosts alike instead of one host running in its terminal what the
+#: other refuses; both are session-scoped work with no machine-local effect.
+#: ``stop`` is the kill switch, and it is the one verb in this family the routed
+#: dispatcher has no branch for — so it stays here, and its SCOPE is pinned
+#: separately below. Round 4 (V4-1) measured why that pin is load-bearing: this lane
+#: hands over the WHOLE LINE, and ``/stop``'s local handler is argument-sensitive,
+#: so a relayed ``/stop all`` armed the owner's machine-wide fan-out on the caller's
+#: screen and ``/stop <pid>`` reached a session the caller does not host.
+#: ``CAPABILITY_WORDS["stop"]`` is "stop a session here", SINGULAR: the argument
+#: forms name the fleet or another session, which no row in the mesh vocabulary
+#: grants a relayed caller.
+#:
+#: THE IMAGED TWIN USES THE SAME RULE, because the rule is about the CARRIER — does
+#: this reach a terminal — not about the frame's payload.
+RELAYED_TERMINAL_SLASH: frozenset[str] = frozenset({"goal", "compact", "stop"})
+
+#: The subset of :data:`RELAYED_TERMINAL_SLASH` whose ARGUMENTS change WHAT IT ACTS
+#: ON, and which a relayed caller may therefore run only in its BARE, session-scoped
+#: form (round 4, V4-1).
+#:
+#: ``/stop`` bare is the kill switch for the session the caller is looking at — the
+#: one session this carrier is attached to, and exactly what ``stop``'s capability
+#: words promise. ``/stop all`` sweeps every agent on the machine (``_stop_all`` in
+#: ``tui/app.py``), ``/stop <pid>`` resolves through the send vocabulary to another
+#: session, and a flag is answered with a remedy that names both. The other two
+#: verbs in the set are not here on purpose: ``/goal <text>`` acts on THIS session
+#: (it submits a turn for it) and ``/compact`` takes no argument that changes its
+#: target.
+ARG_SCOPED_TERMINAL_SLASH: frozenset[str] = frozenset({"stop"})
+
+
+def may_run_slash_in_the_owners_terminal(
+    command: str,
+    locality: str | None,
+    capabilities: frozenset[str] | None = None,
+    *,
+    args: str = "",
+) -> bool:
+    """Whether this connection's command may be TYPED INTO the owner's terminal.
+
+    THREE WAYS TO BE ALLOWED, and nothing else is:
+
+    * a LOCAL caller — it is the user's own terminal, and ``/exit`` must still exit;
+    * a relayed command in :data:`RELAYED_TERMINAL_SLASH` — the session-scoped set
+      the runtime host runs down this same op — in its BARE form when it is also in
+      :data:`ARG_SCOPED_TERMINAL_SLASH`;
+    * a delete-scoped verb the connection RESOLVED (``delete``), because those have
+      no other lane that keeps their receipt: the routed dispatcher would archive on
+      the owner and answer with a typed notice, while the caller that holds the
+      capability asked this carrier and has always got ``ran /archive``.
+
+    ``args`` is READ, because the LANE is chosen by the LINE and not by the verb: this
+    carrier types the whole line into the owner's local dispatch, whose handlers are
+    argument-sensitive. Round 4 (V4-1) measured the cost of a verb-only test — a
+    relayed ``/stop all`` reached ``_stop_all`` and ``/stop <pid>`` reached another
+    session — so a verb whose arguments change its target is allowed here only when it
+    carries none. It is KEYWORD-ONLY for that reason (round 5, R5-2): a positional
+    caller cannot reach the bare form by accident, because the argument that decides
+    the scope must be named at the call site rather than remembered. A default only
+    some callers honour is how a forgotten forward goes unnoticed; this one cannot be
+    omitted silently AND silently mean "bare", which is the permissive reading for the
+    one verb it governs. The argument form is not refused BY THIS MODULE: it falls out of the
+    terminal lane and takes the routed dispatcher, which has no ``stop`` branch and
+    answers with its own honest sentence.
+
+    THE DEFAULT IS THE FIX, NOT THE LIST. ``locality`` is ``None`` when a caller did
+    not forward the connection's facts, and ``None`` is read as RELAYED — so a
+    carrier that forgets to pass them routes to the dispatcher rather than into the
+    owner's terminal. Round 1 shipped the opposite reading
+    (``locality: str = "local"``), which made every forgotten forward permissive:
+    V2 survived its first fix that way, and a ``drive`` member's ``/move --to``
+    survived its second.
+
+    ``command`` must already be the registry PRIMARY name; see
+    :func:`delete_scope_refusal` for why this module cannot resolve it.
+    """
+    if locality == "local":
+        return True
+    if command in RELAYED_TERMINAL_SLASH:
+        # Bare only for the argument-scoped subset: the line's ARGUMENTS are what
+        # widen its scope, and a verb-only test cannot see them (V4-1).
+        if command in ARG_SCOPED_TERMINAL_SLASH and args.strip():
+            return False
+        return True
+    return command in DELETE_SCOPED_SLASH and may_run_delete_scoped_slash(locality, capabilities)
 
 
 # ---------------------------------------------------------------------------

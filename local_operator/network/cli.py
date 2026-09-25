@@ -71,6 +71,14 @@ _ACTIONS = (
     "doctor",
     "identity",
     "uninstall",
+    # The credential broker's surfaces (mesh-credentials.md; build plan §2.2).
+    # ``credentials`` (plural) is the READ: what this device owns and what it
+    # borrows. ``credential`` (singular) is the ACT: share or revoke one, on the
+    # device that owns it. The two spellings are the family's own convention
+    # (``peers`` lists, ``member`` acts) and the split is deliberate: a listing
+    # that could also mutate is a listing nobody can run to find out what is true.
+    "credentials",
+    "credential",
     # The session plane's client half (mesh-session-mobility.md §9.3): listing what
     # the peers hold, and driving a session that lives on one of them.
     "sessions",
@@ -394,6 +402,53 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     identity_rotate.add_argument("--json", action="store_true")
     identity_show = identity_actions.add_parser("show", help="This device's id and fingerprint")
     identity_show.add_argument("--json", action="store_true")
+
+    actions.add_parser(
+        "credentials",
+        help="What this device owns, and what it borrows from whom",
+    ).add_argument("--json", action="store_true")
+
+    credential = actions.add_parser("credential", help="Share or revoke one credential")
+    credential_actions = credential.add_subparsers(dest="credential_command")
+    cred_share = credential_actions.add_parser(
+        "share", help="Let another device borrow a credential this one holds"
+    )
+    cred_share.add_argument("key", help="A provider name, or mcp:<server-url>")
+    cred_share.add_argument(
+        "--with",
+        required=True,
+        dest="device",
+        help="The device that may borrow it (name or device id)",
+    )
+    cred_share.add_argument(
+        "--scope",
+        choices=("session", "device"),
+        default="session",
+        help="'session' bounds the grant to the session that asks (the default)",
+    )
+    # ``--network`` ON BOTH VERBS, because the handler resolves one (QA round 1, Q1):
+    # it read ``args.network`` and the parser never defined it, so every share and
+    # revoke typed at a shell died with ``AttributeError`` — the only test set the
+    # attribute by hand. Empty resolves the one network this device is in, exactly
+    # like ``invite``/``log``; with several, ``_resolve`` asks for the name.
+    cred_share.add_argument(
+        "--network", default="", help="Network name or id (default: the only one)"
+    )
+    cred_share.add_argument("--json", action="store_true")
+    cred_revoke = credential_actions.add_parser(
+        "revoke", help="Stop letting a device borrow a credential"
+    )
+    cred_revoke.add_argument("key", help="A provider name, or mcp:<server-url>")
+    cred_revoke.add_argument(
+        "--from",
+        required=True,
+        dest="device",
+        help="The device that may no longer borrow it (name or device id)",
+    )
+    cred_revoke.add_argument(
+        "--network", default="", help="Network name or id (default: the only one)"
+    )
+    cred_revoke.add_argument("--json", action="store_true")
 
     uninstall = actions.add_parser(
         "uninstall", help="Remove the LaunchAgent (and --purge the store)"
@@ -931,45 +986,13 @@ def _cmd_member_caps(args: argparse.Namespace) -> int:
     """
     verb = args.member_command
     caps = [str(item) for item in args.capabilities]
-    # ``Any`` because the two spellings carry a differently-named keyword list; a
-    # narrower annotation makes pyright read ``**fields`` as a ``timeout`` conflict.
-    fields: dict[str, Any] = {"grant": caps} if verb == "grant" else {"revoke": caps}
-    from local_operator.network import store
-    from local_operator.network.relay import (
-        CapabilityChange,
-        capability_change_event,
-        capability_change_lines,
-        set_member_capabilities,
-    )
-
     record = _resolve(args.network)
-    live = _relay_call(
-        "net_member_caps",
-        network=record.network_id,
-        device_id=args.device,
-        allow_no_answer=True,
-        **fields,
-    )
-    if live is not None:
-        change = CapabilityChange(
-            device_id=str(live.get("device_id") or args.device),
-            name=_member_name(record, args.device),
-            added=tuple(live.get("added") or ()),
-            removed=tuple(live.get("removed") or ()),
-            capabilities=tuple(live.get("capabilities") or ()),
-        )
-        applied = "relay"
-    else:
-        from local_operator.network.audit import AuditLog
+    from local_operator.network.relay import capability_change_lines
 
-        with store.mutate(record.network_id) as fresh:
-            change = set_member_capabilities(fresh, device_id=args.device, **fields)
-            if change.changed:
-                store.save(fresh)
-                log = AuditLog()
-                log.record(capability_change_event(fresh, change))
-                log.close()
-        applied = "locally (relay not running)"
+    if verb == "grant":
+        change, applied = _apply_capability_change(record, args.device, grant=caps)
+    else:
+        change, applied = _apply_capability_change(record, args.device, revoke=caps)
     payload = {
         "ok": True,
         "network_id": record.network_id,
@@ -982,6 +1005,499 @@ def _cmd_member_caps(args: argparse.Namespace) -> int:
         "applied": applied,
     }
     return _emit(args, payload, capability_change_lines(change, network_name=record.name))
+
+
+def _apply_capability_change(
+    record: Any,
+    device_id: str,
+    *,
+    grant: list[str] | tuple[str, ...] = (),
+    revoke: list[str] | tuple[str, ...] = (),
+) -> tuple[Any, str]:
+    """Edit ``device_id``'s LOCAL member row, through the relay or in-process.
+
+    ONE IMPLEMENTATION, extracted from ``_cmd_member_caps`` and shared with
+    ``credential share`` — which must grant ``broker_credential`` on the owner for the
+    device it just shared with, and must do it the same way ``member grant`` does.
+    Two copies of this two-path write (relay when running, the same primitive under the
+    same lock when not) would be two places for the lock and the audit record to be
+    forgotten in one of them.
+
+    ``Any`` for the change, not ``CapabilityChange``: it is defined in ``relay.py``,
+    which this module imports lazily so ``lop network --help`` stays stdlib-fast.
+    """
+    from local_operator.network import store
+    from local_operator.network.relay import (
+        CapabilityChange,
+        capability_change_event,
+        set_member_capabilities,
+    )
+
+    fields: dict[str, Any] = {"grant": list(grant)} if grant else {"revoke": list(revoke)}
+    live = _relay_call(
+        "net_member_caps",
+        network=record.network_id,
+        device_id=device_id,
+        allow_no_answer=True,
+        **fields,
+    )
+    if live is not None:
+        return (
+            CapabilityChange(
+                device_id=str(live.get("device_id") or device_id),
+                name=_member_name(record, device_id),
+                added=tuple(live.get("added") or ()),
+                removed=tuple(live.get("removed") or ()),
+                capabilities=tuple(live.get("capabilities") or ()),
+            ),
+            "relay",
+        )
+    from local_operator.network.audit import AuditLog
+
+    with store.mutate(record.network_id) as fresh:
+        change = set_member_capabilities(fresh, device_id=device_id, **fields)
+        if change.changed:
+            store.save(fresh)
+            log = AuditLog()
+            log.record(capability_change_event(fresh, change))
+            log.close()
+    return change, "locally (relay not running)"
+
+
+def _cmd_credentials(args: argparse.Namespace) -> int:
+    """``lop network credentials [--json]``: who owns what, and what this device borrows.
+
+    THE PULL COMES FIRST. A share happens on the OWNER, and until this device has
+    heard about it the local document does not know the key exists — so a listing that
+    only read the file would report "nothing is shared with you" immediately after
+    the operator shared something. The relay asks every other active member for its
+    document (one bounded ``net_broker`` frame each), and the listing renders what it
+    learned. ``allow_no_answer`` because a listing must still work with the relay
+    down: it then shows what this device already knew, which is honest.
+    """
+    from local_operator.network.credentials.state import PlacementState
+    from local_operator.network.identity import load as load_identity
+
+    pulled = _relay_call("credential_placement", timeout=_listing_timeout(), allow_no_answer=True)
+    identity = load_identity()
+    self_device = identity.device_id if identity is not None else ""
+    self_name = identity.name if identity is not None else ""
+
+    # ENUMERATED FROM THE DOCUMENTS, NOT THE NETWORK RECORDS, and the difference is
+    # not stylistic: the placement files are the authority for "what is shared", and a
+    # device that has been shared a credential but whose record has not been re-read
+    # would otherwise print "nothing is shared" — the exact state this listing exists
+    # to make visible. The record is joined only for the NAME.
+    networks: list[dict[str, Any]] = []
+    lines: list[str] = []
+    for document in _placement_documents():
+        record = _record_for(document.network_id)
+        network_name = record.name if record is not None else document.network_id
+        state = PlacementState.load(document.network_id)
+        keys: list[dict[str, Any]] = []
+        if not document.entries:
+            continue
+        for key in sorted(document.entries):
+            entry = document.entries[key]
+            row: dict[str, Any] = {
+                "key": key,
+                "kind": entry.kind,
+                "owner_device": entry.owner_device,
+                "owner_device_name": entry.owner_device_name,
+                "identity_label": entry.identity_label,
+                "owned_here": entry.owner_device == self_device,
+                "holders": [
+                    {
+                        "device": h.device,
+                        "name": _member_name(record, h.device) if record is not None else "",
+                        "scope": h.scope,
+                    }
+                    for h in entry.holders
+                ],
+            }
+            if not row["owned_here"] and entry.is_holder(self_device):
+                row["observation"] = state.status(key) or "not_asked"
+            keys.append(row)
+        if not keys:
+            lines.append(f"{network_name}: nothing is shared in this network yet")
+        else:
+            lines.append(f"{network_name}:")
+            for row in keys:
+                owner = (
+                    "this device"
+                    if row["owned_here"]
+                    else (row["owner_device_name"] or row["owner_device"])
+                )
+                who = f" ({row['identity_label']})" if row["identity_label"] else ""
+                lines.append(f"  {row['key']:<14} {row['kind']:<15} owner: {owner}{who}")
+                for holder in row["holders"]:
+                    # The owner's own row and this device's are not "shares": the first
+                    # is what makes the entry coherent and the second is the reader.
+                    if holder["device"] in (self_device, row["owner_device"]):
+                        continue
+                    lines.append(
+                        f"      shared with {holder['name'] or holder['device']} "
+                        f"({holder['scope']})"
+                    )
+                if row.get("observation") and row["observation"] not in ("active", "not_asked"):
+                    lines.append(f"      borrowed: {row['observation']}")
+        networks.append(
+            {
+                "network_id": document.network_id,
+                "network": network_name,
+                "credentials": keys,
+            }
+        )
+    payload = {
+        "ok": True,
+        "self_device": self_device,
+        "self_device_name": self_name,
+        "networks": networks,
+        "refreshed": bool(pulled),
+    }
+    # A MEMBER WHOSE DOCUMENT COULD NOT BE MERGED IS SAID OUT LOUD (review round 5,
+    # NIT 2). ``pull_placement`` refuses one unreadable document BY NAME and merges the
+    # rest, which is the resilience we want — but that reply reached no surface: this
+    # listing reduced the whole pull to ``bool(pulled)``, so a merge that used to raise
+    # became INVISIBLE. Trading a loud failure for a silent one is not resilience. The
+    # names go to STDERR (the listing's own output is the payload, and a machine
+    # reading ``--json`` parses one document, not two), and the same list rides the
+    # payload so a script can branch on it.
+    skipped = [row for row in (pulled or {}).get("skipped") or [] if isinstance(row, dict)]
+    if skipped:
+        payload["skipped"] = skipped
+        for row in skipped:
+            device = str(row.get("device") or "")
+            name = _device_name_anywhere(device)
+            reason = str(row.get("reason") or "unreadable_document")
+            print(
+                f"\033[1;33m{name or device}: its sharing list could not be read "
+                f"({reason}); the rest were merged. Nothing was changed for it — it is "
+                f"merged on the next listing, or ask that device to re-share.\033[0m",
+                file=sys.stderr,
+            )
+    return _emit(args, payload, lines)
+
+
+def _cmd_credential(args: argparse.Namespace) -> int:
+    """``credential share|revoke <key> --with/--from <dev>``: the owner's own verb.
+
+    BOTH HALVES ARE REQUIRED AND NEITHER IS SUFFICIENT. The placement document is
+    what the broker reads (``holders`` is the authorisation, and absence is a
+    refusal), and ``broker_credential`` on the borrower's LOCAL member row is what the
+    transport's chokepoint checks before the frame is even dispatched. A share that
+    wrote only one of them would look granted and refuse at runtime, naming the
+    capability rather than the share — so the two are written in one command and the
+    payload reports both.
+    """
+    from local_operator.network.credentials import placement as placement_mod
+    from local_operator.network.identity import load as load_identity
+    from local_operator.network.types import MeshRefusal
+
+    verb = str(getattr(args, "credential_command", "") or "")
+    key = str(args.key)
+    record = _resolve(args.network)
+    identity = load_identity()
+    if identity is None:
+        raise MeshRefusal("no_identity", "this device has no key yet; join a network first")
+    device = _resolve_device(record, args.device)
+    if device is None:
+        raise MeshRefusal(
+            "not_a_member",
+            f"{args.device!r} is not a device in {record.name}; run 'lop network show' for "
+            "the member list",
+        )
+    if device == identity.device_id:
+        raise MeshRefusal(
+            "not_owner",
+            "this device already uses its own login; a share is for ANOTHER device",
+        )
+
+    if verb == "share":
+        kind, provider, label = _credential_shape(key)
+        _require_local_credential(key, provider)
+    else:
+        kind, provider, label = "", "", ""
+
+    with placement_mod.mutate(record.network_id, self_device=identity.device_id) as document:
+        entry = document.entry(key)
+        if verb == "share":
+            if entry is None:
+                # DECLARED BY THE DEVICE THAT HOLDS IT, which is why this verb only
+                # runs where the credential is. ``declare`` refuses on behalf of another
+                # device, so a share can never move ownership by accident.
+                entry = document.declare(
+                    key,
+                    owner_device=identity.device_id,
+                    owner_device_name=identity.name,
+                    provider=provider,
+                    kind=kind,
+                    identity_label=label,
+                    by=identity.device_id,
+                )
+            entry = document.grant(key, device, scope=str(args.scope), by=identity.device_id)
+            action = "sharing"
+        else:
+            entry = document.revoke(key, device, by=identity.device_id)
+            action = "revoked"
+        entry_json = entry.to_json()
+
+    capability = ""
+    if verb == "share":
+        _change, capability = _apply_capability_change(record, device, grant=["broker_credential"])
+    else:
+        # The capability goes with the share. Leaving ``broker_credential`` on a device
+        # that no longer holds anything is a grant that can only ever be refused, and
+        # the next reader of the member table would have to guess why.
+        held = _held_keys(record, device)
+        if not held:
+            _change, capability = _apply_capability_change(
+                record, device, revoke=["broker_credential"]
+            )
+    _audit_placement(record, identity.device_id, device, key, entry=entry_json, action=action)
+    holders = [row["device"] for row in entry_json.get("holders") or []]
+    payload = {
+        "ok": True,
+        "action": action,
+        "key": key,
+        "network_id": record.network_id,
+        "network": record.name,
+        "device": device,
+        "device_name": _member_name(record, device),
+        "scope": str(getattr(args, "scope", "") or ""),
+        "holders": holders,
+        "capability_applied": capability,
+        "owner_device": entry_json.get("owner_device", ""),
+    }
+    name = _member_name(record, device) or device
+    lines = [
+        f"{action} {key!r} with {name}" if verb == "share" else f"{action} {key!r} from {name}",
+        f"borrowers now: {', '.join(holders) or 'none'}",
+        f"broker_credential on {name}: {capability or 'unchanged'}",
+    ]
+    if verb == "revoke":
+        # THE TRUE REVOCATION LATENCY, said where the operator acts (QA round 1, Q5;
+        # design §3.7). A revoke stops NEW grants at once, but no provider offers a
+        # per-bearer revoke: an access token already lent keeps working AT THE
+        # PROVIDER until it expires. This build's borrower drops it at the grant's
+        # expiry (``grant_ttl_s``); a copy taken out of that process lives until the
+        # token's own expiry. An incident response that believed "revoked" meant
+        # "dead" would stop looking too early, so the payload and the lines say both.
+        from local_operator.network.credentials import grant_ttl_s
+
+        ttl_s = int(grant_ttl_s())
+        # WHAT A COPY OUTLIVES DEPENDS ON THE CREDENTIAL IN HAND (review round 3, F3).
+        # An OAuth access token dies at its own expiry; a STATIC API KEY never expires,
+        # so "until the token expires" was a bound that does not exist — false in
+        # exactly the case where the remedy matters most. Read from the entry the
+        # revoke just wrote, so the receipt describes what was actually lent.
+        static = str(entry_json.get("kind") or "") == "api-key-static"
+        copied = (
+            "valid at the provider until the key is rotated there (a static key never expires)"
+            if static
+            else "valid at the provider until the token expires"
+        )
+        payload["revocation"] = {
+            "new_grants": "refused now",
+            "lent_grant_max_s": ttl_s,
+            "copied_bearer": copied,
+        }
+        lines.append(
+            f"new borrows by {name}: refused now; a grant already lent is dropped by "
+            f"{name} within {ttl_s} s"
+        )
+        if static:
+            lines.append(
+                f"a copy of the key taken out of that device never expires: to end it, "
+                f"rotate the {key!r} key at the provider"
+            )
+        else:
+            lines.append(
+                "a bearer copied out of that device stays valid at the provider until the "
+                f"token expires: to end it now, sign out of {key!r} at the provider"
+            )
+    return _emit(args, payload, lines)
+
+
+def _credential_shape(key: str) -> tuple[str, str, str]:
+    """``(placement kind, provider, identity label)`` for a key.
+
+    Read from the OWNER's own store, so the document records what is actually signed
+    in rather than what the operator typed: a ``kind`` that disagreed with the row
+    would make the broker's narrowing rule and the operator's expectation diverge.
+    """
+    from local_operator.network.credentials.types import is_mcp_key, mcp_url_from_key
+
+    config = _config_dir()
+    if is_mcp_key(key):
+        url = mcp_url_from_key(key)
+        try:
+            from local_operator.mcp.auth import McpTokenStorage
+
+            if McpTokenStorage(url).has_stored_row():
+                return "mcp-rotating", "mcp-oauth", ""
+        except Exception:  # noqa: BLE001 — an unreadable store is "not signed in"
+            pass
+        return "mcp-rotating", "mcp-oauth", ""
+    rows = _provider_rows(key, config)
+    if not rows:
+        return "oauth-rotating", key, ""
+    row = rows[0]
+    label = str(row.data.get("email") or row.data.get("account_id") or "")
+    kind = "oauth-rotating" if row.credential_type == "oauth" else "api-key-static"
+    return kind, key, label
+
+
+def _require_local_credential(key: str, provider: str) -> None:
+    """Refuse to share something this device does not hold.
+
+    A declared entry for a credential that is not here would put a row in every
+    device's document whose owner cannot serve it — the borrow would fail at
+    ``no_local_credential`` with a sentence telling the operator to sign in on the
+    device they just shared FROM, which is the confusing half of a lazy check.
+    """
+    from local_operator.network.credentials.types import is_mcp_key, mcp_url_from_key
+    from local_operator.network.types import MeshRefusal
+
+    if is_mcp_key(key):
+        try:
+            from local_operator.mcp.auth import McpTokenStorage
+
+            if McpTokenStorage(mcp_url_from_key(key)).has_stored_row():
+                return
+        except Exception:  # noqa: BLE001
+            pass
+        raise MeshRefusal(
+            "no_local_credential",
+            f"this device has no MCP login for {mcp_url_from_key(key)}; run '/mcp login "
+            f"{mcp_url_from_key(key)}' here first",
+        )
+    rows = _provider_rows(provider, _config_dir())
+    if not rows:
+        raise MeshRefusal(
+            "no_local_credential",
+            f"this device has no credential for {provider!r}; run 'lop login {provider}' "
+            "here first — a share is only meaningful on the device that holds the login",
+        )
+
+
+def _provider_rows(provider: str, config: Any) -> list[Any]:
+    """This device's rows for a provider, or ``[]``. Never raises."""
+    try:
+        from local_operator.providers.auth_store import AuthStore
+
+        return list(AuthStore(config_dir=config).list_credentials(provider))
+    except Exception:  # noqa: BLE001 — an unreadable store is "no credential here"
+        return []
+
+
+def _config_dir() -> Any:
+    from local_operator.paths import config_dir
+
+    return config_dir()
+
+
+def _networks() -> list[Any]:
+    from local_operator.network import store
+
+    return list(store.list_networks())
+
+
+def _placement_documents() -> list[Any]:
+    """Every placement document on this device, loaded. The listing's authority."""
+    from local_operator.network.credentials import placement as placement_mod
+
+    return [
+        placement_mod.PlacementDocument.load(path.parent.name)
+        for path in sorted(
+            placement_mod.credentials_root().glob(f"*/{placement_mod.PLACEMENT_FILENAME}")
+        )
+    ]
+
+
+def _record_for(network_id: str) -> Any:
+    """This device's record for ``network_id``, or ``None``. For the NAME only."""
+    for record in _networks():
+        if record.network_id == network_id:
+            return record
+    return None
+
+
+def _held_keys(record: Any, device: str) -> list[str]:
+    """Keys ``device`` still holds in ``record``'s network, so a revoke can decide
+    whether the peer's ``broker_credential`` capability is still earning its place."""
+    from local_operator.network.credentials import placement as placement_mod
+
+    document = placement_mod.PlacementDocument.load(record.network_id)
+    return [key for key in sorted(document.entries) if document.is_holder(key, device)]
+
+
+def _resolve_device(record: Any, name: str) -> str | None:
+    """A device id from a name, an id, or an unambiguous tail of one.
+
+    Members are addressed by NAME in every human-facing surface and by ID on the
+    wire, and an operator reading `lop network show` has both. Matching either here
+    (and refusing an ambiguous tail) is what stops a share from silently landing on
+    the wrong device — a mistargeted share spends the wrong machine's quota.
+    """
+    wanted = str(name or "").strip()
+    if not wanted:
+        return None
+    for member in record.active_members():
+        if member.device_id == wanted or member.name == wanted:
+            return str(member.device_id)
+    matches = [m for m in record.active_members() if m.device_id.endswith(wanted)]
+    return str(matches[0].device_id) if len(matches) == 1 else None
+
+
+def _audit_placement(
+    record: Any, self_device: str, device: str, key: str, *, entry: dict[str, Any], action: str
+) -> None:
+    """One ``credential.placement`` record for a share or a revoke.
+
+    Best effort: a log that cannot be written must not make a share the operator just
+    made appear to have failed — the document is the record of truth, and this is the
+    audit trail beside it.
+    """
+    try:
+        from local_operator.network.audit import AuditEvent, AuditLog
+
+        log = AuditLog()
+        log.record(
+            AuditEvent(
+                event="credential.placement",
+                actor=self_device,
+                subject=device,
+                network_id=record.network_id,
+                epoch=record.epoch,
+                actor_kind="device",
+                detail={
+                    "credential_key": key,
+                    "act": self_device,
+                    "sub": device,
+                    "owner_device": str(entry.get("owner_device") or ""),
+                    "holders": len(entry.get("holders") or []),
+                },
+            )
+        )
+        log.close()
+    except Exception:  # noqa: BLE001 — see the docstring
+        pass
+
+
+def _device_name_anywhere(device_id: str) -> str:
+    """A device's display name from ANY of this device's records, or ``""``.
+
+    Searched across records rather than one network's: the pull reports the members it
+    dialled, and this CLI renders a NAME beside an id wherever it has one (``_member_name``
+    for a known network). A name is never load-bearing — an unresolved device prints its
+    id — so a lookup that finds nothing is not a failure.
+    """
+    for record in _networks():
+        name = _member_name(record, device_id)
+        if name:
+            return name
+    return ""
 
 
 def _member_name(record: Any, device_id: str) -> str:
@@ -3027,6 +3543,26 @@ def _audit(event: str, **fields: Any) -> None:
     log.close()
 
 
+def _guard_credential_subcommand(args: argparse.Namespace) -> int:
+    """``lop network credential`` with no verb is a usage error, not a default act.
+
+    Neither verb is safe as a default: ``share`` widens who may spend the operator's
+    account, and ``revoke`` silently cuts a working device off. So the verb is
+    required and the message names both, which is the same rule ``member`` states.
+    """
+    verb = getattr(args, "credential_command", None)
+    if verb in ("share", "revoke"):
+        return _cmd_credential(args)
+    print(
+        "usage: lop network credential share  <provider|mcp:<url>> --with <device> "
+        "[--scope session|device]\n"
+        "       lop network credential revoke <provider|mcp:<url>> --from <device>\n"
+        "       lop network credentials [--json]   # what is shared, and with whom",
+        file=sys.stderr,
+    )
+    return 2
+
+
 def _guard_member_subcommand(args: argparse.Namespace) -> int:
     """``lop network member`` with no verb is a usage error, not the destructive one.
 
@@ -3179,4 +3715,9 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "doctor": _cmd_doctor,
     "identity": _guard_identity_subcommand,
     "uninstall": _cmd_uninstall,
+    # ``credential`` has a sub-verb, so it needs the same "tell me what you meant"
+    # guard ``member`` and ``identity`` have: running bare `lop network credential`
+    # must print the two verbs rather than doing nothing.
+    "credentials": _cmd_credentials,
+    "credential": _guard_credential_subcommand,
 }

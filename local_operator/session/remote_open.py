@@ -26,6 +26,31 @@ if TYPE_CHECKING:
     from local_operator.session.attached import AttachedSession
 
 
+def unreachable_peer_sentence(session_id: str, row: "SessionRow") -> str:
+    """The ONE sentence for "that conversation is on a device we cannot reach".
+
+    WHY IT IS A FUNCTION AND NOT A STRING AT EACH SURFACE. The TUI refuses the
+    pick with it and the desktop backend answers the same state with it, and the
+    requirement is that one situation is not described two ways on two surfaces
+    (``mesh-ui.md`` §1.3's degraded states). The peer's own name, the reason in
+    words and the command that diagnoses the link are three facts that came
+    apart the first time they were written twice — so they are composed here, in
+    the module that already owns "a peer row becomes a viewer".
+
+    ``peer_reason_words`` rather than the raw token: the transport's reason is a
+    token (``connect_failed:ConnectionRefusedError``), and a user surface that
+    printed it named a Python class at the operator.
+    """
+    from local_operator.resume import UNNAMED_DEVICE, peer_reason_words
+
+    device = row.owner_label or UNNAMED_DEVICE
+    return (
+        f"{session_id} is on {device}, which is unreachable "
+        f"({peer_reason_words(row.unreachable_reason)}). /network doctor "
+        f"{row.owner_device_name or row.owner_device} diagnoses the link."
+    )
+
+
 def remote_row_for(session_id: str, root: Path) -> "SessionRow | None":
     """The peer's row for ``session_id``, or ``None`` when it is not a peer's.
 
