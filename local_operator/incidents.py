@@ -1267,8 +1267,13 @@ def format_mcp_unavailable_message(server: str, reason: str) -> str:
     return "\n".join(lines)
 
 
-def format_held_delivery_message(job_labels: Sequence[str], *, reason: str = "") -> str:
-    """Render the row for job results the harness had to HOLD instead of writing.
+def format_held_delivery_message(jobs: Sequence[tuple[str, str]], *, reason: str = "") -> str:
+    """Render the row for job results the harness FAILED to hold for the next turn.
+
+    ``jobs`` is ``(job_id, label)`` per result. The ID is carried as well as the
+    label because the row's own remedy is addressed by id, and a reader shown only
+    a label has nothing to substitute into it (UX round 2, U9 — the rendered head
+    used to name labels while the suggested action said ``<job id>``).
 
     A dedicated formatter, authored HERE rather than as a paragraph at the call
     site, for the reason :func:`format_mcp_unavailable_message` gives: every
@@ -1278,6 +1283,13 @@ def format_held_delivery_message(job_labels: Sequence[str], *, reason: str = "")
     tell a system record from the agent's own prose (design review round 1, D2 —
     measured in a rendered frame, where this row sat directly under the MCP
     warning's labelled shape and read as the agent narrating).
+
+    IT LEADS WITH WHAT FAILED, because this row has exactly one caller — the
+    failure arm of ``Session._hold_job_results_for_next_turn`` — and an earlier
+    revision spent its first clause on the hold it did NOT achieve ("so they were
+    held for the next turn"), contradicting its own parenthetical in the one path
+    where acting is time-boxed: a reader told the reports were held has no reason
+    to go and read them (design review round 2, D7; UX round 2, U10).
 
     The incident HEAD, because this is a session-level fact the next turn has to
     know before it trusts the conversation; but NOT ``Incident.render``'s
@@ -1293,47 +1305,56 @@ def format_held_delivery_message(job_labels: Sequence[str], *, reason: str = "")
     parent turn are one piece of news"). The count and the ids carry the
     multiplicity; the per-job detail belongs in the log.
 
-    THE ROUTE IT NAMES IS ONE THAT SURVIVES THE DEPARTURE (design review round 1,
-    D1; UX round 1, U4). The first draft sent the reader to the job ledger
-    ("read it with the jobs tool now"), which is refuted twice over by
-    measurement: ``retention_expired`` drops a settled row on any read after
-    ``DEFAULT_RETENTION_MS`` — five minutes, while this row's reader is a turn
-    that may be hours away — and in a SUCCESSOR the row is ``restored``, which is
-    exempt from that window but carries no result text at all (the roster
-    sidecar's field list has no ``result_text``), so ``wait`` answers with a bare
-    header there. What does survive is the child's own transcript, which the
-    sweep never touches and which ``hub op='peek'`` reads. The bound is rendered
-    from the constant that enforces it rather than typed, like every other bound
-    in this file (design review round 1, D3).
+    THE ROUTES IT NAMES ARE THE ONES THAT ACTUALLY WORK, and it says what does
+    not (design round 1 D1/D3; UX round 2, U9). The first draft sent the reader to
+    the job ledger, refuted twice over: ``retention_expired`` drops a settled row
+    on any read after ``DEFAULT_RETENTION_MS`` — five minutes, while this row's
+    reader is a turn that may be hours away — and a successor's row is
+    ``restored``, exempt from that window but carrying NO result text (the roster
+    sidecar persists none), so ``wait`` answers with a bare header there.
+    ``hub op='peek'`` reads the child's own transcript, which the sweep never
+    touches — but only a SUBAGENT child has one: ``_on_job_completed`` also
+    accepts background ``bash``, whose output lives in the job ledger and nowhere
+    else. So the row names the transcript route for the children that have one,
+    names the ledger route with its bound for the ones that do not, and does not
+    pretend the same instruction covers both. The bound is rendered from the
+    constant that enforces it rather than typed, like every other bound in this
+    file (design review round 1, D3).
     """
     from local_operator.harness.jobs import DEFAULT_RETENTION_MS
     from local_operator.session.runtime.types import bound_text
 
-    names = [label for label in job_labels if label]
-    shown = ", ".join(names[:5])
-    if len(names) > 5:
-        shown += f", +{len(names) - 5} more"
-    count = len(names) or 1
+    named = [
+        f"{label} ({job_id})" if label and label != job_id else job_id for job_id, label in jobs
+    ]
+    shown = ", ".join(named[:5])
+    if len(named) > 5:
+        shown += f", +{len(named) - 5} more"
+    count = len(named) or 1
     noun = "result" if count == 1 else "results"
-    pronoun = "it was" if count == 1 else "they were"
+    them = "it" if count == 1 else "them"
     head = (
-        f"[session incident] held delivery: {count} background job {noun} "
-        f"({' '.join(filter(None, [shown]))}) arrived after this session's runtime "
-        "had committed to leaving, so "
-        f"{pronoun} held for the next turn rather "
-        "than written into this conversation"
+        f"[session incident] held delivery: {count} background job {noun} could NOT be "
+        f"held for the next turn — {them} arrived after this session's runtime had "
+        f"committed to leaving, and the harness could not write {them} into this "
+        "conversation"
     )
     if reason.strip():
         head += f" ({reason.strip()[:200]})"
-    return "\n".join(
-        [
-            head + ".",
-            "suggested action: read the child's own transcript with "
-            "hub op='peek' <job id>, which is not swept; the job ledger keeps a "
-            f"result for only {bound_text(DEFAULT_RETENTION_MS / 1000.0)} after it "
-            "settles, and a successor's restored row carries none.",
-        ]
+    lines = [head + "."]
+    # The ids on their own line, in the register the MCP row's ``Reason:`` slot
+    # established: the batch's identities are reference material, not part of the
+    # sentence a reader skims (design review round 2, D11's spirit — the harness's
+    # own words are marked as such rather than run together with the child's).
+    if shown:
+        lines.append(f"Jobs: {shown}")
+    lines.append(
+        f"suggested action: nothing has read {them} — a subagent child keeps its own "
+        "transcript, readable by id with hub op='peek' <job id> (paging with start=), "
+        "and a background bash command keeps only its job row, dropped on the first "
+        f"read after {bound_text(DEFAULT_RETENTION_MS / 1000.0)} past settling."
     )
+    return "\n".join(lines)
 
 
 def format_mcp_recovery_message(server: str, tool_count: int) -> str:

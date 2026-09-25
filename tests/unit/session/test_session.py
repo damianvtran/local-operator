@@ -4756,12 +4756,77 @@ async def test_a_delivery_that_cannot_be_made_durable_is_reported(tmp_path, monk
     assert len(incidents) == 1, "the loss must be durable and model-visible"
     text = incidents[0].payload["details"]["text"]
     assert "j1" in text and "no space left on device" in text
-    # ...and it says where the result still is, rather than implying it is gone.
-    assert "jobs" in text
+    # It says what FAILED, in the row that exists because the hold did not happen
+    # (design review round 2, D7 / UX U10): an earlier revision spent its first
+    # clause on the hold it never achieved, which told the reader there was
+    # nothing to go and read.
+    assert "could NOT be held" in text
+    # ...and names a route the reader can actually follow, by ID — the head used
+    # to print labels only, so ``<job id>`` had nothing to substitute into it
+    # (UX round 2, U9).
+    assert "hub op='peek'" in text and "Jobs: j1" in text
+    # Both shapes are told the truth about their own store: a subagent child has
+    # a transcript, a background bash command does not.
+    assert "bash command keeps only its job row" in text
     assert any(
         "could not persist the result of job j1" in record.message for record in caplog.records
     )
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_hold_is_still_durable_when_the_disposal_won(tmp_path, monkeypatch, caplog):
+    """QA round 2, Q-R2-2: the failure path must not lose the batch SILENTLY.
+
+    The whole point of this row is "do not lose this without saying so", and in the
+    ordering this change exists for — the disposal reaching the turn before its
+    flush — ``journal_incident`` returns early on ``self._disposed``, so the one
+    path that must never be quiet ended as an ERROR log line and nothing else.
+    Measured before the disposed-tolerant arm: ``job_result`` rows ``[]`` and
+    ``session_incident`` rows ``0`` with the batch gone.
+
+    Both halves are asserted: the failure is reported at all, and it is reported
+    when the session is already disposed. The transcript is what makes the second
+    possible — it accepts appends until the very end of ``dispose``, which is the
+    same fact MAJOR-1's fix rests on.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("start a job")
+    transcript = session._transcript
+    real_append = transcript.append_message
+
+    async def exploding_append(message, **kwargs):
+        if getattr(message, "custom_type", None) == JOB_RESULT_MESSAGE_TYPE:
+            raise OSError("no space left on device")
+        return await real_append(message, **kwargs)
+
+    # The ORDER is the incident's, and each step is load-bearing: the child settles
+    # into a streaming turn (so it DEFERS rather than delivering), the departure is
+    # latched, and only then does the disposal win — before the flush.
+    monkeypatch.setattr(transcript, "append_message", exploding_append)
+    session._is_streaming = True
+    await session._on_job_completed("j1", "one", _settled_job("j1"))
+    assert session._deferred_job_results, "precondition: the batch is deferred"
+    session.retire_job_deliveries_to_transcript()
+    with caplog.at_level(logging.ERROR):
+        session._disposed = True
+        await session._deliver_deferred_job_results()
+
+    incidents = [
+        entry
+        for entry in session._transcript.entries()
+        if entry.type == "message"
+        and entry.payload.get("custom_type") == SESSION_INCIDENT_MESSAGE_TYPE
+    ]
+    assert len(incidents) == 1, (
+        "a failure in the disposal-first ordering must still leave a durable row, "
+        f"not only a log line: {incidents!r}"
+    )
+    assert "could NOT be held" in incidents[0].payload["details"]["text"]
+    assert any(
+        "could not persist the result of job j1" in record.message for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio
