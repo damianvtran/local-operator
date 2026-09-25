@@ -23,12 +23,12 @@ import pytest
 
 from local_operator.evaluation.protocol import ActionBatch
 from local_operator.evaluation.runner.model import DecisionRejected
+from local_operator.evaluation.runner.provider_client import parse_decision
 from local_operator.evaluation.runner.public_reply import (
     decode_public_reply,
     public_reply_contract,
     public_reply_schema,
 )
-from local_operator.evaluation.runner.provider_client import parse_decision
 from local_operator.harness.reply_channel import (
     REPLY_CHANNEL_TOOL_NAME,
     build_reply_channel_tool,
