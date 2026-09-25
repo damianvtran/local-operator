@@ -136,6 +136,16 @@ async def test_reopening_after_last_detach_invalidates_receipt_epoch(tmp_path):
 
 @pytest.mark.asyncio
 async def test_slow_subscriber_overflow_is_explicit_and_bounded(tmp_path, monkeypatch):
+    """The POST-OPEN half of the overflow policy, and the boundary's other side.
+
+    The two ``anext`` calls below are what makes this a slow READER rather than a
+    cold subscriber: they complete the handshake, so ``sub.opened`` is True and a
+    full queue is genuine backpressure. Its twin,
+    ``test_a_subscriber_that_has_not_opened_survives_the_burst``, is the same
+    burst delivered BEFORE the handshake, where the frames are superseded by the
+    snapshot and closing would kill the stream whose own engage caused them. The
+    pair is what pins the boundary; neither alone says where it is.
+    """
     monkeypatch.setattr(module, "REPLAY_BYTES", 400)
     pool = DesktopSessions(tmp_path)
     sid = await pool.create(str(tmp_path))
@@ -154,6 +164,127 @@ async def test_slow_subscriber_overflow_is_explicit_and_bounded(tmp_path, monkey
         with pytest.raises(StopAsyncIteration):
             await anext(stream)
         assert not bridge.subscribers
+
+
+@pytest.mark.asyncio
+async def test_a_subscriber_that_has_not_opened_survives_the_burst(tmp_path):
+    """A cold engage's burst must not kill the stream that caused it.
+
+    The subscriber is registered before the response headers exist and NOTHING
+    reads its queue until ``events`` has built its snapshot, while a cold engage
+    publishes hundreds to thousands of frames in that window. ``publish`` used to
+    answer a full queue by disconnecting the subscriber -- so the burst killed
+    the very stream whose engage produced it, the client reconnected, and the
+    reconnect's own cold engage published the next burst.
+
+    Before the handshake completes every frame in the queue is at or below the
+    watermark the snapshot carries, so the oldest is EVICTED rather than fatal.
+    """
+    burst = module.REPLAY_COUNT + 100
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        sub = bridge.subscribe()
+        for n in range(burst):
+            bridge.publish("event", {"value": n})
+        assert sub.queue.full(), "the burst filled a queue nothing is reading yet"
+        assert not sub.opened, "and the handshake has not started"
+        cutoff = bridge.sequence
+
+        stream = bridge.events(sub, epoch=bridge.epoch, after_seq=cutoff)
+        assert (await anext(stream))["type"] == "open"
+        snapshot = await anext(stream)
+        assert snapshot["type"] == "snapshot"
+        assert snapshot["seq"] == cutoff
+
+        assert not sub.overflow, "a subscriber that has not opened is never disconnected"
+        assert sub.queue.empty(), "the handshake drained what the snapshot supersedes"
+        assert sub.opened, "and the window is closed before the first yield"
+        await stream.aclose()
+    assert bridge.users == 0
+
+
+@pytest.mark.asyncio
+async def test_the_pre_open_drop_is_exactly_the_watermark(tmp_path, monkeypatch):
+    """The split is the WATERMARK, not a count, and the watermark is read LAST.
+
+    A frame published from inside the snapshot's own ``history()`` read is the
+    sharpest case there is: it is published before the state and the sequence are
+    captured, so it sits AT the watermark and is inside the state the snapshot
+    serves -- which is exactly why it is safe to drop, and why nothing may await
+    between the state read and the sequence read.
+
+    A frame published after the snapshot returns is above the watermark and must
+    be delivered, in order, after the snapshot.
+    """
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        original = bridge.history
+        during: list[int] = []
+
+        async def history_and_publish():
+            bridge.publish("event", {"during": "the read"})
+            during.append(bridge.sequence)
+            return await original()
+
+        monkeypatch.setattr(bridge, "history", history_and_publish)
+        sub = bridge.subscribe()
+        for n in range(module.REPLAY_COUNT + 5):
+            bridge.publish("event", {"value": n})
+        cutoff = bridge.sequence
+
+        stream = bridge.events(sub, epoch=bridge.epoch, after_seq=cutoff)
+        assert (await anext(stream))["type"] == "open"
+        snapshot = await anext(stream)
+        assert snapshot["type"] == "snapshot"
+        assert during == [snapshot["seq"]], (
+            "the watermark is captured AFTER the history await, so a frame "
+            "published during that read is AT it - and therefore dropped with "
+            "the rest of the superseded set, not delivered behind the snapshot"
+        )
+
+        # Everything published after the snapshot is above the watermark and is
+        # delivered, in order, right after it.
+        bridge.publish("event", {"after": "the snapshot"})
+        delivered = await anext(stream)
+        assert delivered["seq"] > snapshot["seq"]
+        assert delivered["payload"] == {"after": "the snapshot"}
+        await stream.aclose()
+    assert bridge.users == 0
+
+
+@pytest.mark.asyncio
+async def test_nothing_awaits_between_the_snapshot_state_and_its_watermark(
+    tmp_path, monkeypatch
+):
+    """The guard for the ordering the pre-open drain depends on.
+
+    ``snapshot()`` captures its state and its sequence with NOTHING awaiting
+    between them, so no frame can be published after the state it describes and
+    still be counted as superseded. A regression that moved the capture back
+    above the ``history()`` await would make the frame's sequence equal to the
+    SNAPSHOT's sequence -- which is what this asserts, from the frame's side.
+    """
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        original = bridge.history
+        published: list[int] = []
+
+        async def history_and_publish():
+            bridge.publish("event", {"during": "the read"})
+            published.append(bridge.sequence)
+            return await original()
+
+        monkeypatch.setattr(bridge, "history", history_and_publish)
+        snapshot = await bridge.snapshot()
+        assert published, "the patched read ran"
+        assert snapshot["seq"] == published[-1], (
+            "the snapshot's sequence must be read AFTER the history await; if "
+            "it is read before, a frame published during that read lands above "
+            "the watermark and the drain's supersession proof is void"
+        )
 
 
 @pytest.mark.asyncio
