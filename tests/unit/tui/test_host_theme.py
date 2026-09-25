@@ -76,11 +76,30 @@ def test_brand_ramps_cannot_be_unregistered() -> None:
         theme.unregister_theme("dark")
 
 
-def test_a_remote_session_skips_the_probe_unless_the_theme_was_chosen(monkeypatch) -> None:
+@pytest.mark.parametrize("var", ["SSH_TTY", "SSH_CONNECTION"])
+def test_a_remote_session_skips_the_probe_unless_the_theme_was_chosen(monkeypatch, var) -> None:
     calls = []
-    monkeypatch.setenv("SSH_TTY", "/dev/ttys001")
-    monkeypatch.setattr(host_theme, "probe", lambda: calls.append(1) or b"")
+    monkeypatch.delenv("SSH_TTY", raising=False)
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.setenv(var, "remote")
+    monkeypatch.setattr(host_theme, "probe", lambda timeout: calls.append(timeout) or b"")
     assert not host_theme.install("dark")
     assert calls == []
     host_theme.install(host_theme.NAME)
-    assert calls == [1]
+    assert calls == [1.0]
+
+
+def test_install_registers_the_theme_and_refreshes_the_settings_choices(monkeypatch) -> None:
+    from local_operator import settings_io
+
+    monkeypatch.delenv("SSH_TTY", raising=False)
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.setattr(host_theme, "probe", lambda timeout: BLUE_REPLY)
+    theme.unregister_theme(host_theme.NAME)
+    settings_io._theme_choices()  # a snapshot taken before the theme exists
+    try:
+        assert host_theme.install("dark")
+        assert host_theme.NAME in {choice.label for choice in settings_io._theme_choices()}
+    finally:
+        theme.unregister_theme(host_theme.NAME)
+        settings_io._theme_choices.cache_clear()
