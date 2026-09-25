@@ -42,7 +42,7 @@ class _ModelHandle(FakeHandle):
         self.calls.append(("receive_peer_model", (provider, model_id), {"sender": sender}))
         if provider == "nosuchprov":
             raise ValueError("refused: 'nosuchprov' is not a known provider; still on test/model")
-        return f"switched to {provider}/{model_id} (was test/model); its next turn runs on it"
+        return f"switched to {provider}/{model_id} (was test/model)\nits next turn runs on it"
 
 
 class _OldHandle(FakeHandle):
@@ -103,7 +103,7 @@ async def test_the_op_reaches_the_handle_and_its_sentence_comes_back() -> None:
             record, provider="deepseek", model_id="deepseek-flash", sender={"pid": 7}
         )
         assert detail == (
-            "switched to deepseek/deepseek-flash (was test/model); its next turn runs on it"
+            "switched to deepseek/deepseek-flash (was test/model)\nits next turn runs on it"
         )
         assert handle.calls[-1] == (
             "receive_peer_model",
@@ -183,9 +183,11 @@ async def test_an_older_registrant_is_named_as_older_and_nothing_changed() -> No
         record = await _wait_record()
         with pytest.raises(RuntimeError) as caught:
             await switch_peer_model(record, provider="deepseek", model_id="x", sender={})
+        # No pid inside the sentence: every surface prints the address beside
+        # it, and naming it twice was QA Q1 / UX U6.
         assert str(caught.value) == (
-            f"pid {record.pid} runs an older lop that cannot switch models remotely; nothing "
-            "changed — update it (lop update) or run /model in that session"
+            "older lop: it cannot switch models remotely; nothing changed — "
+            "update it (lop update) or run /model in that session"
         )
     finally:
         runtime.close()
@@ -214,6 +216,61 @@ async def test_a_lost_ack_is_unconfirmed_not_failed(monkeypatch) -> None:
         await switch_peer_model(record, provider="deepseek", model_id="x", sender={})
     assert "may or may not have landed" in str(caught.value)
     assert "lop sessions" in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_dial_is_not_delivered_and_nothing_changed() -> None:
+    """N3: the socket never opened, so no byte of the op was sent."""
+    import socket
+
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    free_port = probe.getsockname()[1]
+    probe.close()  # nothing listens here now
+    record = registry.SessionRecord(
+        pid=4321,
+        kind="tui",
+        session_id="s",
+        conversation_name="n",
+        cwd="/tmp",
+        model_label="test/model",
+        control_port=free_port,
+        control_key="k",
+        started=True,
+    )
+    with pytest.raises(RuntimeError) as caught:
+        await switch_peer_model(record, provider="deepseek", model_id="x", sender={})
+    assert not isinstance(caught.value, PeerModelUnconfirmed)
+    assert str(caught.value).startswith("could not reach that session (")
+    assert str(caught.value).endswith("); nothing changed")
+
+
+@pytest.mark.asyncio
+async def test_the_sender_waits_longer_than_the_tui_hop(monkeypatch) -> None:
+    """N2: a busy TUI target has 10 s to answer; the sender must outwait it."""
+    import local_operator.mobile.peer_client as peer_client
+    from local_operator.mobile.tui_handle import _APP_HOP_TIMEOUT_S
+
+    seen: dict[str, float] = {}
+
+    async def fake(record, op, fields, *, deadline_s=5.0, **_kw):  # noqa: ANN001
+        seen["deadline_s"] = deadline_s
+        return "ok"
+
+    monkeypatch.setattr(peer_client, "send_control_op", fake)
+    record = registry.SessionRecord(
+        pid=4321,
+        kind="tui",
+        session_id="s",
+        conversation_name="n",
+        cwd="/tmp",
+        model_label="test/model",
+        control_port=1,
+        control_key="k",
+        started=True,
+    )
+    await switch_peer_model(record, provider="deepseek", model_id="x", sender={})
+    assert seen["deadline_s"] > _APP_HOP_TIMEOUT_S
 
 
 # ---------------------------------------------------------------------------
@@ -260,10 +317,13 @@ async def test_the_tool_switches_a_peer_and_echoes_its_sentence() -> None:
             _context(),
         )
         assert result.is_error is False, result.text
-        assert result.text == (
-            f"pid {alias.pid} 'peer-target': switched to deepseek/deepseek-flash "
-            "(was test/model); its next turn runs on it"
-        )
+        # Outcome first, address last in `lop send`'s grammar (D1, D4).
+        assert result.text.splitlines() == [
+            "switched to deepseek/deepseek-flash (was test/model)",
+            "its next turn runs on it",
+            f"→ peer-target (pid {alias.pid})",
+        ]
+        assert (result.details or {})["outcome"] == "switched"
         assert handle.calls[-1][0:2] == ("receive_peer_model", ("deepseek", "deepseek-flash"))
     finally:
         runtime.close()
@@ -277,7 +337,10 @@ async def test_the_tool_reports_a_refusal_as_an_error() -> None:
             "m2", {"pid": alias.pid, "model": "nosuchprov/x"}, None, None, _context()
         )
         assert result.is_error is True
-        assert "refused: 'nosuchprov' is not a known provider; still on test/model" in result.text
+        # The reason LEADS so the collapsed error slot shows it, not the address (D2).
+        assert result.text.startswith(
+            "refused: 'nosuchprov' is not a known provider; still on test/model\n→ "
+        ), result.text
     finally:
         runtime.close()
 
@@ -290,9 +353,8 @@ async def test_the_tool_names_an_older_peer() -> None:
             "m3", {"pid": alias.pid, "model": "deepseek/deepseek-flash"}, None, None, _context()
         )
         assert result.is_error is True
-        assert "runs an older lop that cannot switch models remotely; nothing changed" in (
-            result.text
-        )
+        assert result.text.startswith("older lop: it cannot switch models remotely"), result.text
+        assert result.text.count(str(alias.pid)) == 1, "the pid is printed once (Q1/U6)"
     finally:
         runtime.close()
 
