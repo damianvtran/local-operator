@@ -680,10 +680,12 @@ class LoopContext:
     # arguments``), kept for persistence/replay, while the tool that ran saw
     # the ORIGINAL -- so a guard reading the arguments back out of ``messages``
     # is handed a different string than the reader resolved. Recorded at the
-    # dispatch point and consumed (popped) by ``_call_arguments`` when the
-    # result is redacted one step later, so a long session does not retain every
-    # call's arguments -- a ``write`` carries whole file contents -- alive for
-    # the length of that session.
+    # dispatch point and consumed (popped) where the result is redacted one step
+    # later -- ``_call_arguments`` on the native path, the eval bridge's own pop
+    # for a nested call -- and popped again on the CANCELLATION path, where no
+    # result is ever redacted: without that second pop a long session would
+    # retain every cancelled call's arguments (a ``write`` carries whole file
+    # contents), and a later call reusing the id would consume a stale record.
     original_call_args: dict[str, dict[str, Any]] = field(default_factory=dict)
     # R3-2: the guard-area exemption verdict of every call the loop actually
     # dispatched, keyed by ``tool_call_id`` -- the SAME key and the same
@@ -695,8 +697,10 @@ class LoopContext:
     # never saw -- the agent's bytes get read and masked. Recording the verdict
     # at dispatch, where ``item.args`` is in hand and the reader inside
     # ``tool.execute`` resolves the same value, makes the two agree by
-    # construction. Consumed (popped) at redaction, so it does not outlive the
-    # result it belongs to.
+    # construction. Consumed (popped) by BOTH redaction sites -- the native
+    # ``_append_results`` path and the eval bridge, which hands the popped value
+    # to ``_redact_content`` -- and popped on cancellation, so it does not
+    # outlive the result it belongs to.
     exempt_source_verdicts: dict[str, bool] = field(default_factory=dict)
 
 
@@ -3289,6 +3293,21 @@ class AgentLoop:
                             intent=planned.intent,
                         )
                     )
+                    # The verdict ``_runner_result`` recorded at dispatch, KEPT
+                    # for the redaction below. Both record kinds are written
+                    # there; only the arguments record is dropped in the
+                    # ``finally`` (this bridge redacts with ``planned.args``
+                    # directly and never reaches ``_call_arguments``), while the
+                    # verdict is the answer this site must CONSUME -- leaving it
+                    # to be re-resolved at redaction time is the R3-2 defect one
+                    # surface along, and it is reachable here without a batch:
+                    # an agent-authored symlink moved between the nested reader's
+                    # resolution and this redaction decides the verdict for bytes
+                    # the reader already read (R4-1 against PR #1502, measured
+                    # 7 of 30 attempts clearing the escalation for a NON-exempt
+                    # file). Initialised here so the value is bound on every path
+                    # through the ``finally`` below.
+                    nested_verdict: bool | None = None
                     try:
                         result = await self._runner_result(planned, context, config, signal, queue)
                     except asyncio.CancelledError:
@@ -3312,13 +3331,16 @@ class AgentLoop:
                         # the redaction hook (R3-1) and, beside them, the
                         # guard-area verdict (R3-2). This bridge redacts with
                         # ``planned.args`` directly below and never reaches
-                        # ``_call_arguments``/``_exempt_source_verdict`` to
-                        # consume either, so drop both records here or an
-                        # eval-heavy session accumulates one entry per nested
-                        # call. ``finally`` because the cancellation path raises
-                        # out before the redaction runs.
+                        # ``_call_arguments`` to consume the arguments record, so
+                        # drop it here or an eval-heavy session accumulates one
+                        # entry per nested call. The VERDICT is not dropped: it
+                        # is popped into ``nested_verdict`` and handed to the
+                        # redaction below, exactly as the native site hands over
+                        # the same record. ``finally`` because the cancellation
+                        # path raises out before the redaction runs, and that
+                        # path must not leave the record behind either.
                         context.original_call_args.pop(nested.id, None)
-                        context.exempt_source_verdicts.pop(nested.id, None)
+                        nested_verdict = context.exempt_source_verdicts.pop(nested.id, None)
                     # Redact before the result crosses back into arbitrary
                     # Python, the same text policy used for native history.
                     if config.redact_tool_result is not None:
@@ -3334,6 +3356,7 @@ class AgentLoop:
                                     name,
                                     planned.args,
                                     execution_context.cwd,
+                                    nested_verdict,
                                 )
                             }
                         )
@@ -3370,6 +3393,19 @@ class AgentLoop:
                 )
             return await tool.execute(call.id, item.args, signal, on_update, execution_context)
         except asyncio.CancelledError:
+            # A CANCELLED call's result never reaches ``_append_results``, so the
+            # two records written just above would otherwise be retained for the
+            # life of the session -- and ``LoopContext`` is session-scoped, while
+            # a ``write``'s arguments carry whole file contents. Worse, a later
+            # call reusing this ``tool_call_id`` (the id is the model wire's, not
+            # ours) would pop a STALE record and be judged on the arguments and
+            # the verdict of a call that already ended, which can hand a reading
+            # tool over-exemption and mislabel the notice's summary (R4-3 against
+            # PR #1502). Popping here is unconditional and cheap: an absent key
+            # is a no-op, and a call cancelled BEFORE the records were written
+            # leaves none.
+            context.original_call_args.pop(call.id, None)
+            context.exempt_source_verdicts.pop(call.id, None)
             raise
         except InvalidToolArgumentsError as exc:
             # An argument-SHAPE rejection raised from inside a tool body. This
