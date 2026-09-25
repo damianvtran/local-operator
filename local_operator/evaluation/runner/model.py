@@ -91,21 +91,29 @@ class ModelDecision(ProtocolModel):
     #: does not take them (``drop_sibling_action_fields``), dropped before the
     #: batch was validated. Recorded on the ACCEPTED path, which is the whole
     #: point: the replies this tolerance recovers stop producing rejection
-    #: artifacts, so without a field here the class that justified the change
-    #: becomes uncountable from the bundles -- and a tolerance nobody can count
-    #: is indistinguishable from one that stopped firing. A count rather than
-    #: the names: the names are a bounded ``kind.field`` vocabulary reported in
-    #: the log line, while the bundle is signed and published. Defaulted, so
-    #: every bundle written before this field reads as zero, which is what those
-    #: runs meant.
+    #: artifacts, so without a count the class that justified the change becomes
+    #: uncountable from the bundles -- and a tolerance nobody can count is
+    #: indistinguishable from one that stopped firing. A count rather than the
+    #: names: the names are a bounded ``kind.field`` vocabulary reported in the
+    #: log line, while the bundle is signed and published.
+    #:
+    #: Sealed by the runner as its own ``reply_tolerance`` event
+    #: (:class:`~local_operator.evaluation.evidence.models.ReplyTolerancePayload`)
+    #: rather than as a field of ``ModelResponsePayload``: an event's id is a
+    #: digest over its payload, so a field added to a payload model that already
+    #: has sealed events makes every one of them fail verification. This
+    #: structure is runner-side and is never hashed, which is what makes it the
+    #: safe place to carry the count until the writer seals it.
     tolerated_action_fields: SafeCount = 0
-    #: How many bytes of framing preceded this attempt's decision, after leading
-    #: whitespace. Zero for the ordinary reply, which begins with its decision;
-    #: non-zero says the decoder had to LOCATE the decision behind a preamble, a
-    #: code fence or a native call-syntax wrapper (``_locate_leading_object``).
-    #: Carried because that recovery is otherwise invisible in a sealed bundle:
-    #: a reply read through the tolerance produces no rejection artifact, so the
-    #: class would leave the histogram entirely rather than showing as recovered.
+    #: How many UTF-8 bytes of framing preceded this attempt's decision, after
+    #: leading whitespace. Zero for the ordinary reply, which begins with its
+    #: decision; non-zero says the decoder had to LOCATE the decision behind a
+    #: preamble, a code fence or a native call-syntax wrapper
+    #: (``_locate_leading_object``). Carried because that recovery is otherwise
+    #: invisible in a sealed bundle: a reply read through the tolerance produces
+    #: no rejection artifact, so the class would leave the histogram entirely
+    #: rather than showing as recovered. Sealed by the ``reply_tolerance`` event,
+    #: for the reason stated on ``tolerated_action_fields``.
     leading_framing_bytes: SafeCount = 0
     #: How many DECLARED provider reasoning-boundary markers were stripped from
     #: the head of this attempt's reply before it was judged. Recorded on the

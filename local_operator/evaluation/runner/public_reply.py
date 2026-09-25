@@ -400,11 +400,14 @@ _ABSENT = object()
 def _decode_leading_json(payload: str) -> tuple[Any, str, int]:
     """Decode the leading JSON value and return it with any trailing noise.
 
-    Returns the value, its trailing text, and the byte offset at which the value
-    itself begins (0 for the ordinary reply, which starts with its decision; the
-    size of the framing the leading tolerance skipped otherwise). The offset is
-    carried rather than recomputed by the caller so that a bundle's record of
-    "this reply was read through the tolerance" is this decoder's own answer.
+    Returns the value, its trailing text, and how many UTF-8 BYTES of framing
+    preceded the value itself (0 for the ordinary reply, which starts with its
+    decision; the size of the framing the leading tolerance skipped otherwise).
+    The count is carried rather than recomputed by the caller so that a bundle's
+    record of "this reply was read through the tolerance" is this decoder's own
+    answer -- and it is counted in BYTES, which is what the sealed field states
+    and what a consumer slicing the reply's own prefix needs (the framing this
+    tolerance reads is not always ASCII: ``思考中：``, a fullwidth-bar DSML wrapper).
 
     ``json.loads`` demands that the WHOLE string be one value, so a model that
     emitted a complete, correct batch and then appended a stray token lost the
@@ -423,16 +426,16 @@ def _decode_leading_json(payload: str) -> tuple[Any, str, int]:
     * **Leading noise** (``Sure, here you go: {...}``) is TOLERATED under the
       rule :func:`_locate_leading_object` states and measures: the reply's FIRST
       ``{`` must begin a complete, decodable, decision-shaped JSON value, and
-      NOTHING may follow it. The hazard the earlier build refused every leading
-      byte for is real -- hunting forward for the first bare ``{`` guesses where
-      the value begins, and a preamble that itself carries a brace makes that
-      guess wrong SILENTLY, executing a DIFFERENT batch than the model sent --
-      and the rule is structural rather than a count of candidates because of
-      the shape that counting let through: when this turn's decision is
-      unreadable, a SUPERSEDED decision quoted in the framing region is the only
-      readable one, and executing it is worse than the rejection the tolerance
-      removed. See that function for the four conditions and the measurement
-      behind them.
+      NOTHING but the markers of a closing code fence may follow it. The hazard
+      the earlier build refused every leading byte for is real -- hunting
+      forward for the first bare ``{`` guesses where the value begins, and a
+      preamble that itself carries a brace makes that guess wrong SILENTLY,
+      executing a DIFFERENT batch than the model sent -- and the rule is
+      structural rather than a count of candidates because of the shape that
+      counting let through: when this turn's decision is unreadable, a SUPERSEDED
+      decision quoted in the framing region is the only readable one, and
+      executing it is worse than the rejection the tolerance removed. See that
+      function for the three conditions and the measurement behind them.
     * **A second batch for the SAME observation**, anywhere in the remainder,
       is genuinely ambiguous -- which one did the model mean? -- so it is NOT
       tolerated. Taking the first would execute a decision the model may have
@@ -500,12 +503,12 @@ def _decode_leading_json(payload: str) -> tuple[Any, str, int]:
     # part of any decision, so skipping it changes nothing; every other byte
     # before the value is the leading-noise tolerance's question, below.
     payload = payload.lstrip()
-    #: The byte offset at which the decision's own value began, after leading
-    #: whitespace: 0 for a reply that began with its decision, and the size of the
-    #: framing the tolerance skipped otherwise. Carried out rather than
-    #: recomputed by the caller, so a bundle's record of "this reply was read
-    #: through the leading tolerance" is the decoder's own answer.
-    value_offset = 0
+    #: How many UTF-8 bytes of framing preceded the decision's own value, after
+    #: leading whitespace: 0 for a reply that began with its decision, and the
+    #: size of the framing the tolerance skipped otherwise. Carried out rather
+    #: than recomputed by the caller, so a bundle's record of "this reply was
+    #: read through the leading tolerance" is the decoder's own answer.
+    framing_bytes = 0
     try:
         decoded, end = decoder.raw_decode(payload)
     except (ValueError, RecursionError) as error:
@@ -529,7 +532,14 @@ def _decode_leading_json(payload: str) -> tuple[Any, str, int]:
             located = _locate_leading_object(payload, decoder)
             if located is None:
                 raise DecisionParseError(f"decision is not valid JSON: {error}") from error
-            decoded, end, value_offset = located
+            decoded, end, value_start = located
+            # Bytes, not code points. The located start is a character index
+            # because that is what ``raw_decode`` takes, so the conversion
+            # happens HERE, at the boundary where a character offset becomes the
+            # sealed count -- a code-point index under-reports every non-ASCII
+            # framing (``思考中：`` counted 5 where the reply carries 13 bytes), and
+            # the field and its consumers are stated in bytes.
+            framing_bytes = len(payload[:value_start].encode("utf-8"))
         else:
             raise DecisionParseError(f"decision is not valid JSON: {error}") from error
     trailing = payload[end:].strip()
@@ -541,7 +551,42 @@ def _decode_leading_json(payload: str) -> tuple[Any, str, int]:
                 "decision carries a second action batch for the same observation; "
                 "send exactly one action batch"
             )
-    return decoded, trailing, value_offset
+    return decoded, trailing, framing_bytes
+
+
+#: One line of a Markdown code fence: at least three backticks and, optionally,
+#: an info string (``json``, ``python``) -- and nothing else on the line. An
+#: anchor like ``\A``/``\Z`` rather than ``fullmatch`` with ``$`` so a trailing
+#: newline cannot count as marker-only slack for text on the same line.
+_FENCE_MARKER_LINE = re.compile(r"\A`{3,}[A-Za-z0-9_+.\-]*\Z")
+
+
+def _is_fence_marker_only(remainder: str) -> bool:
+    """Whether the text after a located decision is code-fence markers and whitespace.
+
+    The one exception to "nothing may follow the located object", and it is safe
+    for the reason the exception exists: a fence marker is not a value. It cannot
+    carry a decision, a competition, or the context a quoted decision arrives
+    with, so a remainder made only of marker lines leaves the located object the
+    reply's ONLY readable statement -- which is the property condition 3 is
+    there to guarantee. Refusing it bought nothing and cost the shape a model
+    that follows Markdown actually writes: the closed fence
+    (```` ```json\\n{decision}\\n``` ````) has been read by the offset-0 path since
+    before this tolerance existed, and was refused by the located path's first
+    form, while the unclosed fence -- the half-written spelling -- is what the
+    tests happened to pin.
+
+    Deliberately narrow: a header, prose, or anything beside the marker on its
+    own line is not a fence marker, and any brace anywhere in the remainder still
+    refuses the reply. Only backtick fences are recognised; a ``~~~`` fence has
+    never been observed in this arm's traffic, and widening on that guess is
+    exactly the kind of enumeration the rest of this rule avoids.
+    """
+
+    return all(
+        not stripped or _FENCE_MARKER_LINE.match(stripped)
+        for stripped in (line.strip() for line in remainder.splitlines())
+    )
 
 
 def _locate_leading_object(payload: str, decoder: json.JSONDecoder) -> tuple[Any, int, int] | None:
@@ -561,7 +606,10 @@ def _locate_leading_object(payload: str, decoder: json.JSONDecoder) -> tuple[Any
       object that is not a decision is an EXAMPLE -- the model demonstrating the
       shape it is about to use, or echoing the harness's own feedback -- and
       reading it would execute a decision the model did not make.
-    * **Nothing may follow it at all.** No second brace, no prose.
+    * **Nothing may follow it but the markers of a closing code fence.** No
+      second brace, no prose, no header -- a remainder holding anything with a
+      value in it refuses the reply (see :func:`_is_fence_marker_only` for why a
+      bare marker is the one thing that cannot carry a competing decision).
 
     Why the third condition is not "and no OTHER decision follows". Counting
     decision-SHAPED objects reads a superseded decision as this turn's: when
@@ -589,10 +637,10 @@ def _locate_leading_object(payload: str, decoder: json.JSONDecoder) -> tuple[Any
     object is handed over untouched.
 
     Cost: a constant number of operations -- one ``find``, one ``raw_decode``,
-    one test over the remainder -- so this needs no attempt bound and states
-    none. There is no scan whose exhaustion could leave a candidate unexamined,
-    which is a property the earlier candidate-counting form had to earn with a
-    bound and did not have.
+    one test over the remainder (two when that remainder is not empty) -- so this
+    needs no attempt bound and states none. There is no scan whose exhaustion
+    could leave a candidate unexamined, which is a property the earlier
+    candidate-counting form had to earn with a bound and did not have.
     """
 
     start = payload.find("{")
@@ -608,7 +656,7 @@ def _locate_leading_object(payload: str, decoder: json.JSONDecoder) -> tuple[Any
         return None
     if not _is_decision_shaped(candidate):
         return None
-    if payload[end:].strip():
+    if payload[end:].strip() and not _is_fence_marker_only(payload[end:]):
         # A second brace -- a competing decision, an example, or an object that
         # did not survive -- or the context a quoted decision arrives with.
         # Either way the reply does not END at the decision it was read from.
@@ -1287,8 +1335,11 @@ def drop_sibling_action_fields(actions: list[Any]) -> tuple[list[Any], int]:
     count is indistinguishable from one that stopped firing, and this one's
     whole justification is a measured rate. The dropped names themselves are
     model-text-free (``kind.field`` out of a fixed vocabulary) but the signed
-    bundle carries only the count -- see ``ModelDecision.tolerated_action_fields``
-    for why the sealed record is a number and the log line is the roster.
+    bundle carries only the count, and it carries it as its own
+    ``reply_tolerance`` event (``ReplyTolerancePayload``) rather than as a field
+    of the response it belongs to: that event is what makes the rate countable
+    from bundles written now WITHOUT re-baselining the ``model_response`` events
+    every earlier bundle was sealed with. The log line keeps the roster.
 
     Precondition: ``actions`` is a list of the reply's own action values. Every
     caller has already established that -- a reply whose ``actions`` is not a

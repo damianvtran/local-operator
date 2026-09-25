@@ -24,6 +24,7 @@ from local_operator.evaluation.evidence.models import (
     ActionBatchPayload,
     ModelRequestPayload,
     ModelResponsePayload,
+    ReplyTolerancePayload,
     canonical_digest,
 )
 from local_operator.evaluation.evidence.verify import verify_bundle
@@ -955,12 +956,19 @@ async def test_a_tolerated_reply_reaches_the_bundle_with_its_counts(
     """Both tolerances' rates are readable from a SEALED, verified bundle.
 
     Why this is a bundle test and not one more unit assertion on the decision: a
-    reply the tolerance RECOVERS produces no rejection artifact, so without these
-    counts the class left the bundle the moment the tolerance started working --
+    reply the tolerance RECOVERS produces no rejection artifact, so without a
+    record the class left the bundle the moment the tolerance started working --
     which is exactly when a campaign needs to know whether the model is still
     confused. The first reply needs BOTH tolerances at once (a decision behind a
     preamble, and ``frame_id`` on a kind that does not take it); the second needs
-    neither, so the zeros are a measurement rather than an absence.
+    neither, so its ABSENCE is a measurement rather than a gap.
+
+    The record is its own event kind, not fields of the response, and the
+    ``verify_bundle`` above is the reason: a field added to a payload model that
+    already has sealed events moves every one of those events' ids. What makes
+    this test load-bearing is that it asserts the tolerant reply's counts AND
+    that the tolerant-free reply contributes no record at all -- a reader
+    computing the recovered rate divides these by the ``model_response`` count.
     """
 
     preamble = "Working out where to wait.\n"
@@ -1011,10 +1019,12 @@ async def test_a_tolerated_reply_reaches_the_bundle_with_its_counts(
     assert root is not None
     assert verify_bundle(root).valid
     responses = payloads(root, ModelResponsePayload)
-    assert responses[0].leading_framing_bytes == len(preamble)
-    assert responses[0].tolerated_action_fields == 1
-    assert responses[1].leading_framing_bytes == 0
-    assert responses[1].tolerated_action_fields == 0
+    tolerances = payloads(root, ReplyTolerancePayload)
+    # Exactly one record, on the reply that needed a tolerance, keyed to that
+    # attempt; the reply that needed neither seals nothing.
+    assert [record.request_id for record in tolerances] == [responses[0].request_id]
+    assert tolerances[0].leading_framing_bytes == len(preamble.encode("utf-8"))
+    assert tolerances[0].tolerated_action_fields == 1
 
 
 def test_an_unsafe_reply_degrades_without_losing_the_rejection() -> None:
