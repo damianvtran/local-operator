@@ -164,6 +164,20 @@ CAUSES: frozenset[str] = frozenset(
         # `sas_mismatch` (the codes disagreed) and from `timeout` (nobody answered).
         "declined",
         "unanswered",
+        # WHY A FORWARDED STREAM CLOSED (Q-XH-2's close record). Four countable
+        # classes, not one per caller: a viewer-ended stream, one the peer relay
+        # ended, one whose owning runtime went away, and one the link could not
+        # carry. The FINER word — which of the viewer shapes it was, whether the
+        # owner's socket hit EOF or a write error — rides `detail.cause`, which is
+        # whitelisted for these events and is where an incident reader looks for
+        # the specific story. Deliberately four and not nine: this is the COUNTING
+        # surface ("a cause can be counted without parsing an English sentence"),
+        # and a lifecycle's worth of hyphenated words inside a snake_case enum of
+        # refusal reasons would be a second vocabulary in the same field.
+        "viewer_left",
+        "peer_closed",
+        "owner_gone",
+        "peer_unreachable",
     }
 )
 

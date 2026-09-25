@@ -2394,6 +2394,42 @@ class StoreView(NetworkState):
         return str(read_replica_cursor(self._root, session_id).get("owner_device") or "")
 
 
+#: The stream-close vocabulary: the SPECIFIC word a call site passes -> the MACHINE
+#: cause recorded on the event.
+#:
+#: WHY A MAP AND NOT NINE ENUM MEMBERS. ``audit.CAUSES`` is §4.2's *counting*
+#: surface — "a cause can be counted without parsing an English sentence" — and a
+#: forwarded stream closes for four countable reasons: the viewer ended it, the peer
+#: relay ended it, the owning runtime went away, or the link could not carry it. The
+#: finer word (which of the viewer shapes it was; whether the owner's socket hit EOF
+#: or a write error) stays in ``detail.cause``, which is whitelisted for this event
+#: and is where an incident reader looks for the specific story.
+#:
+#: AN EMPTY WORD IS AN EMPTY CAUSE, never a claim: the machine field is ``""`` (also
+#: an enum member, and what ``session_stream_opened`` carries) when no call site named
+#: a reason, and ``internal`` — audit.py's own rule for an unknown cause — when a word
+#: is missing from this table. The second case cannot ship quietly:
+#: ``test_every_stream_close_word_is_mapped_to_a_machine_cause`` walks this module's
+#: own source for the words its call sites pass and fails on one that is not a key.
+STREAM_CLOSE_MACHINE_CAUSES: dict[str, str] = {
+    "viewer-gone": "viewer_left",
+    "viewer-requested": "viewer_left",
+    "peer-requested": "peer_closed",
+    "peer-closed": "peer_closed",
+    "owner-gone": "owner_gone",
+    "owner-socket-gone": "owner_gone",
+    "no-peer-link": "peer_unreachable",
+    "peer-stopped-answering": "peer_unreachable",
+}
+
+
+def stream_close_machine_cause(cause: str) -> str:
+    """The enum member for one close word. See :data:`STREAM_CLOSE_MACHINE_CAUSES`."""
+    if not cause:
+        return ""
+    return STREAM_CLOSE_MACHINE_CAUSES.get(cause, "internal")
+
+
 #: How long a mesh-requested engage may take before the op answers with a
 #: sentence. Longer than a local caller's own budget because this one spans a
 #: spawn plus a construction on a machine that may be busy with its own work,
@@ -6059,12 +6095,19 @@ class RelayServer:
                 outcome="ok",
                 network_id=(link.network_id if link is not None else ""),
                 epoch=(link.epoch if link is not None else None),
-                cause=cause or "closed",
+                # THE MACHINE FIELD COMES FROM THE ENUM, THE SPECIFIC WORD FROM DETAIL.
+                # ``AuditLog._render`` writes a cause outside ``CAUSES`` as ``internal``,
+                # so passing each call site's own hyphenated word here made every one of
+                # these rows read as an internal fault on a working mesh — nine new
+                # words, none in the enum, and the first emitted causes it had ever seen
+                # from outside it (agent review round 1, MAJOR 1). The table below is
+                # the one place that translation happens.
+                cause=stream_close_machine_cause(cause),
                 detail={
                     "stream": stream.stream_id,
                     "peer": stream.peer_device_id,
                     "role": "owner" if stream.dial is not None else "viewer",
-                    "cause": cause or "closed",
+                    "cause": cause,
                 },
             )
         )
@@ -6138,7 +6181,7 @@ class RelayServer:
         """
         invite = record.invite(invite_id)
         role = (invite.role if invite is not None else "read") or "read"
-        window = pair_timeout_seconds(invite.ttl_s if invite is not None else 0.0)
+        window = pair_timeout_seconds(_remaining_of(record, invite_id))
         pending = PendingPairing(
             invite_id=invite_id,
             network_id=record.network_id,
@@ -6290,7 +6333,7 @@ class RelayServer:
         # one ceremony disagreed about how long a human has. `pair_timeout_seconds`
         # is the one owner of that number, and `invite.joiner_prompt` prints the same
         # number to the person, so the promise and the wait cannot drift again.
-        deadline = wire.deadline_in(pair_timeout_seconds(_ttl_of(record, invite_id)))
+        deadline = wire.deadline_in(pair_timeout_seconds(_remaining_of(record, invite_id)))
         member_row: MemberRecord | None = None
         try:
             try:
@@ -6479,7 +6522,16 @@ class RelayServer:
                             # and a mistype past the forgiving budget — still consumes,
                             # which is what keeps the design's anti-grind property.
                             if _pairing_retryable(reason, current, invite_id):
-                                release(current, invite_id, outcome=reason)
+                                release(
+                                    current,
+                                    invite_id,
+                                    outcome=reason,
+                                    # ONLY A COMPARED CODE SPENDS THE BUDGET (NIT 2): a
+                                    # delay is charged to nothing, because no guess was
+                                    # made, while the ceremony is already bounded by the
+                                    # invite's remaining life on both sides.
+                                    spent_an_attempt=reason == "sas_mismatch",
+                                )
                             else:
                                 consume(current, invite_id, outcome=reason)
                             store.save(current, self.root)
@@ -8079,11 +8131,31 @@ def _net_summary(record: NetworkRecord | None) -> dict[str, Any]:
     }
 
 
-def _ttl_of(record: NetworkRecord | None, invite_id: str) -> float:
+def _remaining_of(record: NetworkRecord | None, invite_id: str) -> float:
+    """What is LEFT of this invite's life, for a wait that belongs to a person.
+
+    ``ttl_s`` is the minted DURATION, and using it here meant the inviter's waits were
+    bounded by the token's original life rather than by what remained of it: a token
+    carried to the other device and left for eight minutes still bought a 180 s wait,
+    while the joiner's own read — the other end of the same ceremony — waits
+    ``pair_timeout_seconds(remaining)``. Three quantities, two of which agreed, and the
+    odd one out was the side holding the socket (agent review round 1, MAJOR 2).
+
+    It also makes :func:`_pairing_retryable`'s claim true: a delay is bounded by the
+    invite's OWN remaining life, which the join path checks locally before it dials, so
+    leaving a token standing after a delay cannot extend it.
+
+    The 60 s fallback covers an invite this device cannot read — a record that went away
+    mid-ceremony, or a call with none at all: a minute is the shortest wait this
+    ceremony has ever shipped, so an unreadable token errs toward refusing rather than
+    toward parking a listener for another three minutes.
+    """
     if record is None:
         return 60.0
     invite = record.invite(invite_id)
-    return invite.ttl_s if invite else 60.0
+    if invite is None:
+        return 60.0
+    return max(0.0, invite.expires_at - time.time())
 
 
 def _invite_role(record: NetworkRecord, invite_id: str) -> str:
@@ -8101,7 +8173,10 @@ def _invite_capabilities(record: NetworkRecord, invite_id: str) -> set[str]:
 #:
 #: ``sas_mismatch`` is the one with a bound: it is forgiven up to
 #: ``invite.PAIRING_MAX_FORGIVEN_FAILURES``, because a wrong digit is the ordinary
-#: typo but an unbounded retry would be the ~2^20 grind ``consume`` documents.
+#: typo but an unbounded retry would be the ~2^20 grind ``consume`` documents. A
+#: ``timeout`` is bounded instead by what remains of the invite's own life — the
+#: listener and the parked question both wait `_remaining_of`, and the join path
+#: refuses an expired token locally before it dials anything.
 _RETRYABLE_PAIRING_REASONS: frozenset[str] = frozenset({"timeout", "sas_mismatch"})
 
 
@@ -8110,9 +8185,10 @@ def _pairing_retryable(reason: str, record: NetworkRecord, invite_id: str) -> bo
     if reason not in _RETRYABLE_PAIRING_REASONS:
         return False
     if reason == "timeout":
-        # A delay is bounded by the invite's OWN life, which the join path checks
-        # locally before it dials anything: leaving the token standing cannot extend
-        # it past that, so there is nothing to cap here.
+        # A delay is bounded by the invite's OWN REMAINING life: the listener's wait and
+        # the parked question's window are both `pair_timeout_seconds(_remaining_of(...))`,
+        # and the join path refuses an expired token locally before it dials. So leaving
+        # the token standing cannot extend it past that, and there is nothing to cap here.
         return True
     return not failures_exhausted(record, invite_id)
 

@@ -49,7 +49,9 @@ rendering is not a contract.
    `lop network join @<token-file>` (or with the token itself).
    The joining device prints the inviter, the network, the offered role, its
    derived `code` (`481 926`) and a `fingerprint`, then asks for the code, and
-   says how long the person has (180 s) to type it. The inviter admits the device
+   says how long the person has (up to 180 s, and it reports the time **left** on
+   the invite rather than the duration it was minted with, so a token that has
+   been carried around for a while shows a smaller window). The inviter admits the device
    only if the typed value matches its **own** derivation. A mismatch refuses the
    join, and the human must check that the network and role are the ones they
    asked for and that the code agrees on both screens: **a delay and a mistyped

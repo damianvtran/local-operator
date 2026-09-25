@@ -524,9 +524,11 @@ def consume(
 #: cost a fresh invite minted on the other device, which is a HUMAN action on the
 #: device the person is NOT sitting at (cross-host QA, Q-XH-6: a person who took ~15 s
 #: to read six digits off another screen lost the token twice and had to ask for a new
-#: one). Leaving the retry unbounded gives the grind away. Three forgiven failures
-#: keeps the property the design wanted — an online grind of 3 × 2^20 is still
-#: hopeless beside the token's own TTL — while making a mistyped digit recoverable.
+#: one). Leaving the retry unbounded gives the grind away. Three forgiven failures keeps
+#: the property the design wanted — an online grind of FOUR code guesses per token
+#: (three forgiven, the fourth consuming) is still hopeless beside the token's own TTL —
+#: while making a mistyped digit recoverable. Only a compared-and-disagreed code spends
+#: one of the three (see :func:`release`); a delay spends nothing.
 #: The count lives on the invite record, so a relay restart cannot reset it.
 PAIRING_MAX_FORGIVEN_FAILURES = 3
 
@@ -536,6 +538,7 @@ def release(
     invite_id: str,
     *,
     outcome: str,
+    spent_an_attempt: bool,
 ) -> InviteRecord:
     """Undo ``redeemed`` for a ceremony that never reached an answer.
 
@@ -558,7 +561,15 @@ def release(
     invite = record.invite(invite_id)
     if invite is None:
         raise PairingRefusal(REASON_INVALID, "that invite was never minted by this device")
-    invite.attempts += 1
+    if spent_an_attempt:
+        # ONE COUNTER, ONE QUESTION: ``attempts`` bounds CODE GUESSES, so only a code
+        # that was compared and disagreed spends it. A delay costs the token nothing —
+        # no guess was made and nothing was learned, and the ceremony is already bounded
+        # by the invite's own remaining life (checked before the joiner dials) plus the
+        # inviter's parked window. Charging a timeout here made two slow humans plus one
+        # typo the third and final forgiven failure, which is a budget nobody reading the
+        # design would expect (agent review round 1, NIT 2).
+        invite.attempts += 1
     invite.outcome = outcome
     invite.state = "minted"
     invite.redeemed_by = ""
@@ -643,9 +654,11 @@ def joiner_prompt(envelope: InviteEnvelope, sas: str, fingerprint: str) -> str:
     network = envelope.network_name or envelope.network_id
     # HOW LONG THE HUMAN HAS, IN WORDS, because they are reading a code off ANOTHER
     # screen while this prompt waits and the inviter's listener is blocked on their
-    # keystroke. The window is the confirm budget; the invite's own TTL is the outer
-    # bound, so the smaller of the two is what to promise (Q-XH-6).
-    seconds = pair_timeout_seconds(envelope.ttl_s)
+    # keystroke. The window is what is LEFT of the invite, capped at the confirm budget
+    # (Q-XH-6) — the same expression the joiner's own read uses, so the number printed
+    # and the number granted are one value rather than two that drift with the token's
+    # age (agent review round 1, MAJOR 2).
+    seconds = pair_timeout_seconds(remaining_seconds(envelope))
     return (
         f"{inviter} ({network}) offers role {envelope.role} — code {sas_display(sas)}\n"
         f"  fingerprint {fingerprint}\n"
@@ -653,6 +666,27 @@ def joiner_prompt(envelope: InviteEnvelope, sas: str, fingerprint: str) -> str:
         " and a mistake can be retried with the same token\n"
         "type the code shown there:"
     )
+
+
+def remaining_seconds(envelope: InviteEnvelope, *, now: float | None = None) -> float:
+    """What is LEFT of this invite's life, by the minting device's own arithmetic.
+
+    ONE OWNER FOR THE NUMBER A PERSON IS PROMISED. ``ttl_s`` is the duration the token
+    was minted with, not the window a late joiner gets: the joiner's own read waits
+    ``pair_timeout_seconds(remaining)`` (``network/cli.py``) and the listener waits the
+    same remaining life (``relay._remaining_of``), so the prompt has to name the value
+    all three agree on. It named the full duration instead, so a token carried to the
+    other device and left for eight minutes promised three minutes and gave two, and a
+    window a person budgets their attention on is worse over-stated than simply absent
+    (agent review round 1, MAJOR 2).
+
+    ``issued_at`` travels in the envelope and is compared against THIS device's clock,
+    exactly as the joiner's read does. The token's own freshness is enforced by the
+    inviter against ITS clock (:meth:`InviteRecord.is_fresh`); this number is a
+    courtesy about the wait, not an authority on the token.
+    """
+    moment = time.time() if now is None else now
+    return max(0.0, envelope.issued_at + envelope.ttl_s - moment)
 
 
 def _minutes(seconds: float) -> str:

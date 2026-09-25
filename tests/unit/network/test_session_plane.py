@@ -37,6 +37,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.network import audit as audit_mod
 from local_operator.network import dial as session_dial
 from local_operator.network import projection, relay, store
 from local_operator.session.cleanup import mark_store
@@ -1673,12 +1674,15 @@ def test_a_viewer_leaving_releases_the_owner_s_stream(
     _seed(server_a.root, SESSION)
     served = _serve(monkeypatch, server_a.root)
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
+    # DECLARED BEFORE THE TRY, so the `finally` below can reap it even when the cell
+    # fails before the spawn (pyright reads the inner binding as possibly unbound, and
+    # a leaked killable viewer is exactly what this cell must not leave behind).
+    child: Any = None
     try:
         _warm(server_a.root, SESSION)
         _viewer(server_b)
         assert _dial_to(server_b, record, host_a, port_a) is not None
 
-        child: Any = None
         if how == "killed-viewer":
             script = tmp_path / "killed_viewer.py"
             script.write_text(_KILLABLE_VIEWER, encoding="utf-8")
@@ -1770,7 +1774,19 @@ def test_a_viewer_leaving_releases_the_owner_s_stream(
         ]
         assert len(owner_opens) == 1, owner_opens
         assert len(owner_closes) == 1, owner_closes
-        assert (owner_closes[0].get("detail") or {}).get("cause"), owner_closes[0]
+        # THE MACHINE FIELD, NOT ONLY THE DETAIL (agent review round 1, MAJOR 1). The
+        # detail word is the story an incident reader wants, but `cause` is the field
+        # they FILTER on, and the writer substitutes `internal` for any value outside
+        # `audit.CAUSES` — so asserting the detail alone let nine unmapped close words
+        # ship with every record reading as an internal fault. This is the live path
+        # (a real viewer left a real stream), so the row here is written by the writer
+        # that does the substitution.
+        machine = owner_closes[0].get("cause")
+        assert machine in audit_mod.CAUSES, owner_closes[0]
+        assert machine not in ("", "internal"), owner_closes[0]
+        assert (owner_closes[0].get("detail") or {}).get("cause") in (
+            relay.STREAM_CLOSE_MACHINE_CAUSES
+        ), owner_closes[0]
 
         # …and quit safety is untouched by any of this: the runtime is alive.
         calls_after = len(served[SESSION].handle.calls)
