@@ -295,13 +295,13 @@ jobs:
           # anywhere but looked fine locally.
           #
           # MEASURED, 2026-09-25, on a host where the identity exists ONLY in the
-          # throwaway keychain (the runner's condition), same keychain, same identity
-          # SHA, all with the p12 imported, the partition list set and the G2
-          # intermediate imported:
+          # throwaway keychain, same keychain, same identity SHA, all with the p12
+          # imported, the partition list set and the G2 intermediate imported:
           #
           #   keychain NOT in the user search list:
           #     find-identity -p codesigning "$KC"     -> 1 (it IS in the keychain)
-          #     find-identity -v -p codesigning "$KC"  -> 0 (chain eval uses the list)
+          #     find-identity -v -p codesigning "$KC"  -> 0 here; 1 in the v0.62.39
+          #                                               release's own log
           #     find-identity -p codesigning           -> 0 (the list can't reach it)
           #     codesign --keychain "$KC"              -> errSecInternalComponent
           #     codesign (no --keychain)               -> "<sha>: no identity found"
@@ -309,6 +309,17 @@ jobs:
           #     all four forms report the identity; both argvs sign and verify
           #   keychain NOT in the list, set as the DEFAULT one  -> still fails
           #   keychain NOT in the list, Apple ROOT CA imported -> still fails
+          #
+          # THE `-v` ROW IS DELIBERATELY WRITTEN AS TWO HOSTS DISAGREEING, because
+          # they do: `-v` lists only identities whose certificate chain VALIDATES, so
+          # it is a validity report and not a presence check, and whether the chain
+          # validates here depends on what else the search list can see. The v0.62.39
+          # release held exactly the state this table describes — throwaway keychain
+          # absent from the list — and its own `find-identity -v -p codesigning
+          # "$KEYCHAIN"` printed ONE valid identity (job 108212042305), which is why
+          # the job's gate looked fine right up to the failure. So neither reading of
+          # `-v` generalises, and the presence check the help text names uses the
+          # non-`-v` form for that reason.
           #
           # THE STRINGS ARE NOT THE RELEASE'S and this comment does not claim they
           # are: the rig produces errSecInternalComponent, v0.62.39 produced
@@ -526,10 +537,18 @@ jobs:
           # THE SEARCH LIST IS RESTORED FIRST, while the keychain still exists: the
           # runner's `security list-keychains` preference outlives the keychain file,
           # so deleting first would leave the list naming a keychain that is gone. The
-          # guard tests that the variable is NOT SET — the import step died before
-          # exporting it — and not that it is empty: an empty list is a real state a
-          # runner could have, and treating it as "nothing to restore" would leave the
-          # list naming the keychain deleted on the next line (reviewer round 1, R1-5).
+          # THE GUARD CANNOT TELL "NOT SET" FROM "EMPTY", and it does not try to:
+          # `[ -n "${KEYCHAIN_SEARCH_PREV:-}" ]` is false for an unset variable AND for
+          # a set-but-empty one, so the empty case takes the else branch — where the
+          # message ("the import step did not export one") is then inaccurate. THAT IS
+          # DELIBERATE, and the alternative was measured and declined rather than
+          # overlooked: gating on `${KEYCHAIN_SEARCH_PREV+set}` would run
+          # `security list-keychains -d user -s` with no paths in exactly that case,
+          # EMPTYING the user's search list — a worse failure than leaving a stale
+          # entry behind, and the one round 2 flagged. Latent on this runner shape:
+          # the append above always saves at least `login.keychain-db` (the dispatch
+          # log shows it as the sole previous entry) and this cleanup is the job's
+          # last step, on a VM nothing else shares.
           #
           # THE EFFECT IS ECHOED, because it is the one new side effect no other part
           # of the log shows: `$GITHUB_ENV`'s echo reports the SAVED value, which says

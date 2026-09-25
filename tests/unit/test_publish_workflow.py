@@ -2,9 +2,11 @@
 
 ``publish.yml`` is the only workflow that can push to PyPI or attach an asset to a
 GitHub Release, and until this module existed **no test read it at all** — the three
-workflow parsers in ``tests/`` all load ``ci.yml`` specifically, and the only
-occurrence of the string ``publish.yml`` under ``tests/`` was a docstring. So both
-failure directions of the manual trigger added in #1588 were silent:
+workflow parsers in ``tests/`` all load ``ci.yml`` specifically, and the only two
+occurrences of the string ``publish.yml`` under ``tests/`` were prose in files that do
+not read it (``tests/unit/mobile/test_web_bundle_guard.py`` and
+``tests/unit/operator/test_operator_authority.py``). So both failure directions of the
+manual trigger added in #1588 were silent:
 
 - drop ``github.event_name == 'release'`` from a publisher's ``if:`` and a
   ``workflow_dispatch`` rehearsal — which exists to be run *before* a release, and
@@ -20,6 +22,15 @@ writes outside the repository.
 The invariant: **any job that can publish to PyPI or attach a Release asset must
 require ``github.event_name == 'release'``** — not merely the job it depends on,
 because a dispatched run satisfies every ``needs``-based condition by construction.
+
+WHERE THE GUARD STOPS, said out loud because that sentence is broader than the check:
+a job is publish-capable here only when a step's ``uses:`` names one of
+:data:`PUBLISHING_ACTIONS`. A publisher expressed another way — ``run: twine upload``,
+``gh release upload``, ``uv publish`` — is outside it, and supporting one means adding
+its ref to that tuple. Every publisher this workflow has today goes through one of the
+two, and ``test_the_workflow_has_publish_capable_jobs_to_guard`` fails if that stops
+being true, so the boundary cannot go silently stale — but it is an enumeration, not
+a proof over every way a job could publish.
 
 Each assertion below is mutation-tested against the defect it claims to catch, so a
 checker that silently stopped discriminating cannot pass this module.
