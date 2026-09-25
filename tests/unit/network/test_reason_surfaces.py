@@ -79,6 +79,17 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # code-to-sentence map is what a person reads (Q-R3-3).
     ("local_operator/network/cli.py", "_join_one", "detail"): (1, "input to the sentence map"),
     ("local_operator/network/cli.py", "_join_one", "reason"): (1, "input to the sentence map"),
+    # The credential listing's `skipped` rows (review round 5, NIT 2). THIS VOCABULARY
+    # IS THIS DEVICE'S OWN, which is why the token is shown rather than glossed or
+    # mapped to prose: `pull_placement` BUILDS the list in-process (`busy`,
+    # `malformed_document` — two literals in `credentials/client.py`), so no peer's
+    # prose can ever reach it, unlike the mesh reasons the glosses exist for. The
+    # remedy in that sentence is authored here, and the same token rides the `--json`
+    # payload for a script.
+    ("local_operator/network/cli.py", "_cmd_credentials", "reason"): (
+        1,
+        "the credential client's own two-token vocabulary, not a peer's prose",
+    ),
     # Carried into the catalog row (a ``str()`` coercion, not a render). The row is
     # painted by ``network_cli._peer_line`` and the TUI panel, both through the gloss.
     ("local_operator/network/projection.py", "RelayPeerCatalog.peers", "reason"): (

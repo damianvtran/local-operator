@@ -2481,7 +2481,17 @@ def browser_command(args: argparse.Namespace) -> int:
                 print("Invalid session id; no action taken.")
                 return 1
             try:
-                result = asyncio.run(cleanup_exact(sessions / args.session_id, args.generation))
+                # THE CONFIG ROOT TRAVELS WITH THE CALL (review round 3, NIT 1): the
+                # cleanup path takes the execution lease directly, and the move guard it
+                # consults must be asked about the store THIS session belongs to rather
+                # than one derived from the path shape.
+                result = asyncio.run(
+                    cleanup_exact(
+                        sessions / args.session_id,
+                        args.generation,
+                        config_dir=sessions.parent,
+                    )
+                )
             except Exception as exc:
                 # The bridge and lease errors already carry operator-grade
                 # sentences naming the command that fixes them; printing the
@@ -8436,10 +8446,18 @@ def _preflight_api_key(
     try:
         import asyncio
 
-        from local_operator.providers.auth_store import AuthStore
+        from local_operator.network.credentials import build_auth_store
         from local_operator.providers.registry import credential_provider_id
 
-        auth_store = AuthStore(config_dir=config_dir)
+        # THE STORE THE SESSION WILL USE, not a plain ``AuthStore`` (mesh credentials,
+        # QA round 1, Q3). On a device that borrows a login from another device the
+        # plain store holds no row, so a foreground ``lop exec`` refused to start with
+        # "RADIENT_API_KEY is required" while ``exec --background`` and the TUI — which
+        # build the session's store — ran fine. ``build_auth_store`` returns the very
+        # same ``AuthStore`` on a device that borrows nothing, and lists a synthetic
+        # row for a borrowable key otherwise; either way this stays a presence check
+        # with no network call, which is the rule this function's docstring states.
+        auth_store = build_auth_store(config_dir)
         try:
             storage_provider = credential_provider_id(canonical)
             if auth_store.list_credentials(provider=storage_provider):
@@ -8832,25 +8850,72 @@ def main() -> int:
             try:
                 args.resume = resolve_resume_id(config_dir(), str(args.resume))
             except ResumeNotFound as error:
-                print(f"\033[31m{error}\033[0m", file=sys.stderr)
-                # With the age: a column of bare 12-hex ids gives the reader
-                # nothing to choose between, and the recency the listing already
-                # sorted by is the one fact that makes them recognisable.
-                # Ten explicitly: this is an error path printing to stderr after
-                # a typo'd id, where a short list of the most recent sessions is
-                # the help and the whole store would bury it. ``recent_sessions``
-                # returns everything by default, so the cap belongs here where a
-                # reader can see the listing is deliberately short.
-                available = recent_sessions(config_dir(), limit=RESUME_RECOVERY_LISTING)
-                if available:
-                    now = time.time()
-                    print("recent sessions (newest first):", file=sys.stderr)
-                    for session_id, mtime in available:
-                        print(
-                            f"  {session_id}   {format_age(now - mtime)}",
-                            file=sys.stderr,
-                        )
-                return 1
+                # A CONVERSATION ANOTHER DEVICE HOLDS IS NOT A TYPO. The resolver
+                # above only answers for a directory on THIS disk, so a peer's id
+                # reached the "no session to resume" sentence and the listing of
+                # this machine's recent conversations — while the TUI's OWN
+                # ``/resume`` opened the same id as a remote viewer, because that
+                # path asks the peer-projection guard first. That is one situation
+                # described two ways on two surfaces of the same build, and it made
+                # a shell ``lop --resume <peer's id>`` impossible against a session
+                # the sidebar lists perfectly well.
+                #
+                # THE LOOKUP IS THE SAME PRODUCER THE SIDEBAR READS
+                # (``remote_open.remote_row_for``: cache-first, one cached
+                # projection read on a miss, and nothing at all on a machine in no
+                # network), so what the user can SEE is what resumes. The id is
+                # deliberately left AS TYPED rather than resolved: it names a
+                # conversation this device does not hold, and the viewer factory
+                # below is what opens it.
+                from local_operator.session.remote_open import (
+                    remote_row_for,
+                    unreachable_peer_sentence,
+                )
+
+                remote_row = remote_row_for(str(args.resume), config_dir())
+                if remote_row is None:
+                    print(f"\033[31m{error}\033[0m", file=sys.stderr)
+                    # With the age: a column of bare 12-hex ids gives the reader
+                    # nothing to choose between, and the recency the listing already
+                    # sorted by is the one fact that makes them recognisable.
+                    # Ten explicitly: this is an error path printing to stderr after
+                    # a typo'd id, where a short list of the most recent sessions is
+                    # the help and the whole store would bury it. ``recent_sessions``
+                    # returns everything by default, so the cap belongs here where a
+                    # reader can see the listing is deliberately short.
+                    available = recent_sessions(config_dir(), limit=RESUME_RECOVERY_LISTING)
+                    if available:
+                        now = time.time()
+                        print("recent sessions (newest first):", file=sys.stderr)
+                        for session_id, mtime in available:
+                            print(
+                                f"  {session_id}   {format_age(now - mtime)}",
+                                file=sys.stderr,
+                            )
+                    return 1
+                if not remote_row.reachable:
+                    # The peer is the reason this id does not open, and the TUI
+                    # refuses exactly this state with exactly this sentence.
+                    print(
+                        f"\033[31m{unreachable_peer_sentence(str(args.resume), remote_row)}\033[0m",
+                        file=sys.stderr,
+                    )
+                    return 1
+                # AND NOTHING IS PRINTED FOR THE OPENABLE CASE, deliberately. This
+                # arm used to announce "lives on <device> — opening it remotely",
+                # which was a PROMISE THIS METHOD CANNOT KEEP: whether a viewer can
+                # be hosted is decided LATER and elsewhere (`session_factory`'s
+                # remote branch, gated on `has_ui` — and `has_ui` depends on
+                # `use_tui`/`isatty`, which this pre-check does not know yet).
+                # Measured with the output piped: the line was printed, the factory
+                # then had no front end to host the viewer, and the run died with
+                # `ResumeNotFound` — a promise followed by a traceback.
+                #
+                # WHERE THE WORDS BELONG: `session_factory` opens the viewer when a
+                # front end exists (the TUI paints the peer's conversation, which is
+                # the statement), and answers the run that cannot host one with a
+                # sentence naming the device and the way in that works there. One
+                # decider, one message, and no claim made before the decision.
 
             # Cold live-session resumes now stay on the ordinary TUI launch
             # path. ``create_session(has_ui=True)`` returns a AttachedSession when
@@ -9626,6 +9691,47 @@ def main() -> int:
                     # server, and the mobile daemon's own attach path. Those
                     # are not the TUI and are deliberately left alone.
                     raise RuntimeError("a viewer never takes over a session")
+
+                if resume_id:
+                    # A PEER'S SESSION IS OPENED AS ITS VIEWER, through the SAME
+                    # seam the TUI's sidebar pick and its ``/resume`` use
+                    # (``session.remote_open.open_remote_viewer``), so a shell
+                    # ``lop --resume <peer's id>`` reaches what the terminal's own
+                    # resume reaches. Without it the id fell through to the LOCAL
+                    # cold viewer below — a viewer for a conversation this device
+                    # does not hold, whose first write would engage a runtime HERE
+                    # under somebody else's id, the INV-1 two-writer case the seam
+                    # exists to make unreachable.
+                    #
+                    # IT ANSWERS ``None`` WITH NO DIAL when this device holds the
+                    # directory or runs no relay, so the local path below pays
+                    # nothing for this check — the same zero-peer property the
+                    # TUI's guard and the desktop pool rely on.
+                    from local_operator.resume import UNNAMED_DEVICE
+                    from local_operator.session.remote_open import (
+                        open_remote_viewer,
+                        remote_row_for,
+                        unreachable_peer_sentence,
+                    )
+
+                    peer_row = await asyncio.to_thread(remote_row_for, session_id, config_directory)
+                    if peer_row is not None:
+                        if not peer_row.reachable:
+                            raise ValueError(unreachable_peer_sentence(session_id, peer_row))
+                        try:
+                            peer_viewer = await open_remote_viewer(
+                                session_id,
+                                config_dir=config_directory,
+                                takeover=take_over,
+                                row=peer_row,
+                            )
+                        except Exception as error:  # noqa: BLE001 — reported, not swallowed
+                            raise ValueError(
+                                f"could not open {session_id} on "
+                                f"{peer_row.owner_label or UNNAMED_DEVICE}: {error}"
+                            ) from error
+                        if peer_viewer is not None:
+                            return peer_viewer
 
                 record = None
                 if resume_id:

@@ -1140,15 +1140,20 @@ async def test_delete_on_a_peer_removes_it_there_and_forgets_it_here(
 
 
 @pytest.mark.asyncio
-async def test_opening_a_peers_conversation_says_where_it_lives(
+async def test_an_unreachable_peers_conversation_refuses_in_the_tuis_own_words(
     mesh_api, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A visible remote row must not answer "not found" about the user's own chat.
 
-    The desktop cannot open a peer's conversation until the viewer is wired to its
-    bridge; what it must NOT do meanwhile is answer the shared 404 with a sentence
-    that is false. The refusal names the device and both ways to work with it, and
-    the device is looked for only when no local directory holds the id.
+    The row OPENS when the peer can be reached — mesh slice DB2, pinned against
+    the pool and the ladder in ``tests/unit/server/test_desktop_remote_open.py``
+    and over two real relays in ``tests/unit/network/test_remote_viewer.py``. What
+    this cell keeps is the case that STILL refuses, and the point of it is the
+    SENTENCE: it is ``remote_open.unreachable_peer_sentence``, the same composer
+    the TUI's own pick refuses this exact state with, so one situation is never
+    described two ways on two surfaces. The device is looked for only when no
+    local directory holds the id, which is why a machine in no network is
+    unaffected.
     """
     client, root = mesh_api
     (root / "network" / "networks").mkdir(parents=True, exist_ok=True)
@@ -1159,16 +1164,26 @@ async def test_opening_a_peers_conversation_says_where_it_lives(
         # and a stub one layer down would leave the cache unfilled and the answer
         # come from the ordinary miss path instead.
         "local_operator.session.remote_open.remote_row_for",
-        # ONLY the peer's id is a peer's row: the second half of this test asserts
-        # that an id nobody holds is still the ordinary 404.
-        lambda session_id, root=None: _peer_row(id=session_id) if session_id == OTHER else None,
+        # ONLY the peer's id is a peer's row, and it is the UNREACHABLE shape: the
+        # second half of this test asserts that an id nobody holds is still the
+        # ordinary 404.
+        lambda session_id, root=None: (
+            _peer_row(
+                id=session_id,
+                reachable=False,
+                unreachable_reason="connect_failed:ConnectionRefusedError",
+            )
+            if session_id == OTHER
+            else None
+        ),
     )
     response = await client.get(f"/v1/desktop/sessions/{OTHER}")
     assert response.status_code == 409, response.text
     detail = response.json()["detail"]
     assert detail["code"] == "session_is_remote"
     assert "build-box" in detail["message"], detail
-    assert "--to local" in detail["message"], detail
+    assert "/network doctor build-box" in detail["message"], detail
+    assert "ConnectionRefusedError" not in detail["message"], "the raw token reached the user"
     # AND A LOCAL ID IS UNTOUCHED: the ordinary miss is still the ordinary 404.
     missing = await client.get(f"/v1/desktop/sessions/{'f' * 12}")
     assert missing.status_code == 404, missing.text
