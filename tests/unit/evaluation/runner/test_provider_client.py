@@ -4122,6 +4122,13 @@ def test_a_decision_behind_leading_junk_is_read(
         "Here is my decision.\n\n",
         "<tool_call>\n",
         "Thinking about it: ",
+        # Non-ASCII framing, which is what makes the count's UNIT observable:
+        # a code-point index reports 5 here where the reply carries 13 bytes.
+        # The three recoveries this tolerance exists for include exactly this
+        # shape (DeepSeek's ``思考``-prefixed preamble and its fullwidth-bar DSML
+        # wrapper), so this is the measured population rather than a curiosity.
+        "思考中：\n",
+        "原始内容：\n",
     ],
 )
 def test_a_preamble_needs_no_particular_spelling(prefix: str) -> None:
@@ -4136,6 +4143,10 @@ def test_a_preamble_needs_no_particular_spelling(prefix: str) -> None:
 
     ``leading_framing_bytes`` is asserted rather than ignored: it is the sealed
     bundle's only record that this reply was read through the tolerance at all.
+    The assertion is written in BYTES because that is the field's unit and the
+    unit a consumer slicing the reply's prefix needs -- for the ASCII prefixes
+    above the two readings coincide, which is precisely why the non-ASCII ones
+    are in the list.
     """
 
     current = observation()
@@ -4145,8 +4156,74 @@ def test_a_preamble_needs_no_particular_spelling(prefix: str) -> None:
 
     reference = parse_decision(payload, current, route=ROUTE)
     assert decision.action_batch.to_canonical_json() == (reference.action_batch.to_canonical_json())
-    assert decision.leading_framing_bytes == len(prefix)
+    assert decision.leading_framing_bytes == len(prefix.encode("utf-8"))
     assert reference.leading_framing_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        # A model that follows Markdown writes a CLOSED fence, and this is the
+        # shape the offset-0 path has always read (``{decision} and then text``
+        # is tolerated there). Only the located path refused it, because the
+        # closing marker is something after the object -- and the half-written,
+        # UNCLOSED spelling is the one the first form of this tolerance pinned.
+        "```json\n{decision}\n```",
+        "```json\n{decision}\n```\n",
+        "Here is my decision:\n```json\n{decision}\n```\n",
+    ],
+)
+def test_a_closed_code_fence_around_the_decision_is_read(reply: str) -> None:
+    """A fence marker is not a value, so it cannot hide a competing decision.
+
+    Condition 3 refuses a located object whose remainder could carry a statement
+    -- a second batch, an example, the context a quoted decision arrives with.
+    A remainder made only of fence markers and whitespace is the one case that
+    cannot: it holds no brace, so the located object stays the reply's only
+    readable decision, which is the property the condition exists to guarantee.
+    """
+
+    current = observation()
+    candidate = reply.replace("{decision}", type_payload(current))
+
+    decision = parse_decision(candidate, current, route=ROUTE)
+
+    assert decision.action_batch.to_canonical_json() == (
+        parse_decision(type_payload(current), current, route=ROUTE).action_batch.to_canonical_json()
+    )
+    assert decision.leading_framing_bytes > 0
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        # The marker, then text that is not a marker: prose a model wrote about
+        # its own reply is exactly the context the property refuses to guess at.
+        "```json\n{decision}\n``` and that is my final answer.",
+        "```json\n{decision}\n```\nNote: the fence is closed now.",
+        # A fence and then a courteous line: the line is prose, so the located
+        # object no longer ends the reply, which is the whole of condition 3.
+        "```\n{decision}\n```\nThank you.",
+        # A header line is not a marker either, and neither is a marker with
+        # something appended to it.
+        "```json\n{decision}\n```\n# Done",
+    ],
+)
+def test_text_after_a_closing_fence_is_still_refused(reply: str) -> None:
+    """The fence exception is marker-only, and this pins where it stops.
+
+    Without this case the exception could be widened by accident -- a ``startswith``
+    on the remainder would accept all three of these and swallow the prose the
+    quote rule exists to refuse.
+    """
+
+    current = observation()
+    candidate = reply.replace("{decision}", type_payload(current))
+
+    with pytest.raises(DecisionParseError) as info:
+        parse_decision(candidate, current, route=ROUTE)
+
+    assert classify_rejection(str(info.value)) == "leading-delimiter"
 
 
 @pytest.mark.parametrize(

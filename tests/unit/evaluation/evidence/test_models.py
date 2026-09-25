@@ -27,6 +27,7 @@ from local_operator.evaluation.evidence.models import (
     ObservationPayload,
     PreflightPayload,
     ReconciliationPayload,
+    ReplyTolerancePayload,
     RouteIdentity,
     ScoreArtifact,
     ScoringResultPayload,
@@ -124,6 +125,14 @@ def test_manifest_golden_bytes_are_deterministic() -> None:
                 output_tokens=2,
                 reasoning_tokens=0,
                 tool_call_count=0,
+            ),
+        ),
+        (
+            "reply_tolerance",
+            ReplyTolerancePayload(
+                request_id="request",
+                tolerated_action_fields=2,
+                leading_framing_bytes=13,
             ),
         ),
         (
