@@ -671,6 +671,7 @@ def may_run_slash_in_the_owners_terminal(
     command: str,
     locality: str | None,
     capabilities: frozenset[str] | None = None,
+    *,
     args: str = "",
 ) -> bool:
     """Whether this connection's command may be TYPED INTO the owner's terminal.
@@ -691,7 +692,12 @@ def may_run_slash_in_the_owners_terminal(
     argument-sensitive. Round 4 (V4-1) measured the cost of a verb-only test — a
     relayed ``/stop all`` reached ``_stop_all`` and ``/stop <pid>`` reached another
     session — so a verb whose arguments change its target is allowed here only when it
-    carries none. The argument form is not refused BY THIS MODULE: it falls out of the
+    carries none. It is KEYWORD-ONLY for that reason (round 5, R5-2): a positional
+    caller cannot reach the bare form by accident, because the argument that decides
+    the scope must be named at the call site rather than remembered. A default only
+    some callers honour is how a forgotten forward goes unnoticed; this one cannot be
+    omitted silently AND silently mean "bare", which is the permissive reading for the
+    one verb it governs. The argument form is not refused BY THIS MODULE: it falls out of the
     terminal lane and takes the routed dispatcher, which has no ``stop`` branch and
     answers with its own honest sentence.
 
