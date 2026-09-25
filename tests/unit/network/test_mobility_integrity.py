@@ -1049,3 +1049,77 @@ def test_a_source_that_changes_while_it_is_being_prepared_is_refused(
     assert read_handoff_journal(server_a.root) == {}
     assert not (server_b.root / "sessions" / SESSION).exists()
     assert not sync.staging_dir(server_b.root, SESSION).exists()
+
+
+def test_a_destination_entry_with_bytes_still_staged_is_never_settled(
+    tmp_path: Path,
+) -> None:
+    """THE DISCRIMINATOR BETWEEN "IT ARRIVED" AND "IT IS STILL BEING RECEIVED".
+
+    MEASURED AS A RED CELL (review round 4's cross-check with ``session_factory``).
+    ``settle_promoted_handoff`` used to decide on a session directory plus a transcript,
+    and ``session_factory``'s opener calls ``recover_stale_handoff`` and then the handoff
+    guard — so a recovery that settled the entry on that evidence disarmed the refusal it
+    runs immediately before: a destination entry whose VERIFIED COPY IS STILL STAGED (the
+    owner may already have deleted its own bytes, so that copy is the only one left) was
+    cleared instead of refused, and ``test_session_factory``'s
+    ``test_the_factory_refuses_a_session_whose_move_is_in_flight`` went red on this branch
+    while green at the base and at the tip. ``_promote`` is ONE ``os.replace``, so a
+    promote that landed CONSUMED this device's staging directory; a staging directory that
+    is still here means the handoff has not finished, whatever else is on disk.
+
+    Both directions are asserted, because the fail-safe reading would be useless if it also
+    blocked the ``p1c`` case it exists beside: with the bytes staged, nothing is cleared and
+    the guard still refuses; once the promote has consumed them, the entry is settled and
+    the conversation opens.
+    """
+    from local_operator.session.placement import (
+        handoff_guard_refusal,
+        handoff_in_flight,
+        read_handoff_journal,
+        write_handoff_entry,
+    )
+
+    root = tmp_path / "store"
+    session_id = "abc123"
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True)
+    (directory / "transcript.jsonl").write_text(
+        json.dumps({"id": "e1", "type": "user", "content": "hello"}) + "\n", encoding="utf-8"
+    )
+    write_handoff_entry(
+        root,
+        session_id,
+        {
+            "role": "destination",
+            "phase": "handing-off",
+            "from_device": "d_" + "a" * 32,
+            "from_name": "build-box",
+            "to_device": "d_" + "b" * 32,
+            "instance_id": "i_live",
+            "at": 1.0,
+        },
+    )
+    # THE UNPROMOTED DESTINATION: its verified bytes are here, not in ``sessions/``.
+    staging = sync.staging_dir(root, session_id)
+    staging.mkdir(parents=True)
+    ready = staging / "ready.json"
+    ready.write_text(
+        json.dumps({"version": 1, "content_digest": "sha256:" + "a" * 64}), encoding="utf-8"
+    )
+
+    assert (
+        mobility.settle_promoted_handoff(root, session_id) is False
+    ), "a destination entry with its verified copy still staged is a handoff in flight"
+    assert handoff_in_flight(root, session_id) is not None, "the entry must survive"
+    assert (
+        handoff_guard_refusal(root, session_id) != ""
+    ), "the guard must still refuse: this is the refusal the settle call was disarming"
+    assert ready.is_file(), "the staged bytes are untouched"
+
+    # WHAT THE PROMOTE DOES: one ``os.replace``, which takes the whole directory with it.
+    shutil.rmtree(staging)
+
+    assert mobility.settle_promoted_handoff(root, session_id) is True
+    assert read_handoff_journal(root).get(session_id) is None
+    assert handoff_guard_refusal(root, session_id) == ""
