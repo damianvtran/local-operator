@@ -826,25 +826,30 @@ def note_spare_gone(spare: "_Standby", reason: str, *, terminate: bool = False) 
         except ValueError:
             pass
     life = _now() - spare.spawned_at
-    retry_class = reason in (
-        "warm-failed",
-        "warm-wedged",
-        "bad-handshake",
-        "adoption-failed",
-        "declined-thrice",
-    ) or (reason == "exited" and life < REWARM_MIN_LIFE_S) or (
-        reason.startswith("retired") and life < REWARM_MIN_LIFE_S
+    retry_class = (
+        reason
+        in (
+            "warm-failed",
+            "warm-wedged",
+            "bad-handshake",
+            "adoption-failed",
+            "declined-thrice",
+        )
+        or (reason == "exited" and life < REWARM_MIN_LIFE_S)
+        or (reason.startswith("retired") and life < REWARM_MIN_LIFE_S)
     )
     if reason == "adopted":
+        # A spare was consumed: success, so the backoff resets and the
+        # replacement is DUE NOW (the supervisor's next pass forks it).
         with _LOCK:
             _ATTEMPTS[0] = 0
-            _NEXT_AT[0] = min(_NEXT_AT[0], _now())
+            _NEXT_AT[0] = _now()
         logger.info("standby adopted; a replacement is scheduled")
         return
     if not retry_class:
         with _LOCK:
             _ATTEMPTS[0] = 0
-            _NEXT_AT[0] = min(_NEXT_AT[0], _now())
+            _NEXT_AT[0] = _now()
         logger.info("standby gone (%s) after %.1fs; replacing now", reason, life)
         return
     delay = _note_attempt_failure(reason)
@@ -1244,7 +1249,7 @@ def try_adopt(
                     else:
                         declined = True
                         logger.info(
-                            "runtime standby declined this spawn (%s); it stays warm for its own host",
+                            "runtime standby declined this spawn (%s); keeping it warm",
                             reply["reason"],
                         )
                 else:
