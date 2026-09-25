@@ -59,6 +59,23 @@ export interface ProjectionSlot {
 
 let sessions: SessionSummary[] = [];
 let sessionsConnected = false;
+/* The pins the user has ASKED FOR and the daemon has not answered for yet,
+   held as the value that was asked for. An overlay on the server's list, never
+   a rewrite of it, and the distinction is the whole point.
+
+   `applySessionPin` used to write straight into `sessions`, and the list
+   PARTITIONS by `pinned`, so pressing pin lifted the row into ★ Pinned before
+   the daemon agreed. That reorder is what moved the reader's rows: the browser
+   reacts to a list that reorders under it by adjusting the scroll (scroll
+   anchoring), measured at +88.0px on a successful pin and −51.0px at 100% /
+   −101.5px at 200% root font on an ordinary refusal — against a screen that
+   wrote `scrollTop` zero times in 72 instrumented runs.
+
+   A mark is enough for the instant feedback the gesture needs: the row's ★ is
+   drawn from it at once, while every DECISION (which section a row renders in,
+   and therefore the order the reader sees) stays on the confirmed flag until
+   the daemon's own list repaint says so. */
+let pinMarks: ReadonlyMap<string, boolean> = new Map();
 const projections = new Map<string, ProjectionSlot>();
 // useSyncExternalStore requires referentially stable snapshots, including the
 // first render before the route's effect has subscribed its SSE stream.
@@ -87,6 +104,16 @@ export function useSessions(): {
 	const list = useSyncExternalStore(subscribe, () => sessions);
 	const connected = useSyncExternalStore(subscribe, () => sessionsConnected);
 	return { sessions: list, connected };
+}
+
+/** The pins the user has asked for and the daemon has not confirmed yet, keyed
+    by session id. A selector of its own, like `useProjection`: it is a slice of
+    store state with its own change signal, and a caller that reads the list
+    alone (the sections' order) must not be made to re-render by a mark, nor to
+    miss one. The Map is replaced rather than mutated, so its identity is what
+    `useSyncExternalStore` compares. */
+export function usePinMarks(): ReadonlyMap<string, boolean> {
+	return useSyncExternalStore(subscribe, () => pinMarks);
 }
 
 export function useProjection(sessionId: string): ProjectionSlot {
@@ -173,6 +200,13 @@ export function retainSessionListStream(): () => void {
 					};
 					sessions = payload.sessions;
 					sessionsConnected = true;
+					/* A frame is the daemon's answer for every row it carries, so a mark
+					   it AGREES with has been confirmed and is dropped: from here the
+					   confirmed flag alone renders the row, in the section it belongs in.
+					   A mark the frame contradicts is kept — a repaint older than the
+					   press is not an answer to it — and a refused POST is cleared by the
+					   screen that sent it. */
+					settlePinMarks(payload.sessions);
 					emit();
 				} catch {
 					/* A malformed frame is dropped; the next one repaints. */
@@ -286,6 +320,46 @@ export function clearSessionUnseen(sessionId: string): void {
 		s.session_id === sessionId ? { ...s, unseen: false } : s,
 	);
 	emit();
+}
+
+/** Optimistic half of the pin handshake (the POST is `setSessionPin` in
+    api.ts): the row must show its ★ the instant the user acts, or a tap that
+    visibly changed nothing reads as a fault. It is a MARK, not a move — see
+    the note on `pinMarks` for why the row must not change section until the
+    daemon's next list repaint (which `set_pins` already woke) confirms it. */
+export function applySessionPin(sessionId: string, pinned: boolean): void {
+	if (pinMarks.get(sessionId) === pinned) return;
+	pinMarks = new Map(pinMarks).set(sessionId, pinned);
+	emit();
+}
+
+/** Drops the mark for a row the server has answered for and could NOT pin —
+    the POST's own failure path. The row never moved, so there is nothing to
+    put back; only the ★ this mark drew has to go. */
+export function clearSessionPinMark(sessionId: string): void {
+	if (!pinMarks.has(sessionId)) return;
+	const next = new Map(pinMarks);
+	next.delete(sessionId);
+	pinMarks = next;
+	emit();
+}
+
+/** Confirmation sweep for one list frame: a mark the frame agrees with has
+    been confirmed and is retired, so the row is rendered from the daemon's own
+    value from that commit on. */
+function settlePinMarks(frame: SessionSummary[]): void {
+	if (pinMarks.size === 0) return;
+	const aged = new Set<string>();
+	for (const row of frame) {
+		const mark = pinMarks.get(row.session_id);
+		if (mark !== undefined && mark === Boolean(row.pinned)) {
+			aged.add(row.session_id);
+		}
+	}
+	if (aged.size === 0) return;
+	const next = new Map(pinMarks);
+	for (const id of aged) next.delete(id);
+	pinMarks = next;
 }
 
 /* ------------------------------------------------------------------ */

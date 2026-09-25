@@ -271,6 +271,12 @@ export interface SessionProjection {
 export interface SessionSummary {
 	session_id: string;
 	section: "active" | "previous";
+	/** True when this conversation is in the shared durable pin store
+	    (`sidebar-pins.json`) — the SAME pin the terminal's F10 and the desktop
+	    app's row action read and write, so the phone's ★ Pinned section and
+	    theirs always agree. Additive and defaulted: an older daemon omits it, and
+	    a reader must treat absence as `false`. */
+	pinned?: boolean;
 	conversation_name: string;
 	cwd: string;
 	model_label: string;
