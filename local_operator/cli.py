@@ -3053,6 +3053,48 @@ def _peer_red(message: str) -> None:
     print(f"\n\033[1;31m{message}\033[0m", file=sys.stderr)
 
 
+def _hold_sigint() -> None:
+    """Ignore further Ctrl-C while an interrupt notice is being printed.
+
+    A second Ctrl-C landing inside the ``except KeyboardInterrupt`` arm would
+    raise again mid-print and put back the traceback the arm exists to replace
+    (PR #1587 QA round 2, the double Ctrl-C cell). :func:`_die_of_sigint` then
+    restores the default before it re-delivers.
+    """
+    import signal
+
+    try:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    except (OSError, ValueError):  # not the main thread: nothing to hold
+        pass
+
+
+def _die_of_sigint() -> int:
+    """End the process BY SIGINT once a Ctrl-C notice has been printed.
+
+    Returning 130 is not the same thing to a shell. bash stops a script loop on
+    Ctrl-C only when the foreground child itself DIED of SIGINT ("wait and
+    cooperative exit"); a child that caught it and exited 130 reads as an
+    ordinary failure, so ``for i in 1 2 3; do lop send …; done`` sent the rest
+    of the batch after the user pressed Ctrl-C (PR #1587 review round 2,
+    MINOR-4). Restoring the default disposition and re-delivering the signal
+    gives the shell the status it expects, and ``$?`` still reads 130.
+
+    POSIX only: on Windows ``os.kill`` with SIGINT is a TerminateProcess, not a
+    console interrupt, so the 130 return stands there. Also the fallback if the
+    re-delivery is refused.
+    """
+    import signal
+
+    if os.name == "posix":
+        try:
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
+            os.kill(os.getpid(), signal.SIGINT)
+        except (OSError, ValueError):
+            pass
+    return 130
+
+
 def _format_bytes(value: "int | None") -> str:
     """Human-readable memory size, or an em dash when the probe returned None.
 
@@ -3245,6 +3287,7 @@ def send_command(args: argparse.Namespace) -> int:
     from local_operator.mobile.peer_send import (
         candidate_lines,
         deliver_peer_message,
+        interrupted_send_detail,
         skipped_clause,
         validate_peer_body,
     )
@@ -3450,6 +3493,13 @@ def send_command(args: argparse.Namespace) -> int:
                 sender=sender,
             )
         )
+    except KeyboardInterrupt:
+        # Same wait, same rule as the timeout arm below: stopping it does not
+        # un-send an op that may already be written (PR #1587 UX round 1, U1).
+        # Then die OF the signal, so a shell loop around this stops too.
+        _hold_sigint()
+        _peer_red(interrupted_send_detail())
+        return _die_of_sigint()
     except TimeoutError as exc:
         # NOT "could not deliver": a read deadline expiring means no
         # ACKNOWLEDGED result, not an undelivered message — the mutation op is
@@ -3490,12 +3540,15 @@ def model_command(args: argparse.Namespace) -> int:
     import asyncio
 
     from local_operator.mobile.peer_send import (
+        PEER_MODEL_WAIT_NOTICE_S,
         PeerModelUnconfirmed,
         candidate_lines,
+        interrupted_switch_detail,
         parse_model_selector,
         resolve_switch_target,
         switch_peer_model,
         switch_receipt,
+        waiting_for_switch_detail,
     )
 
     if getattr(args, "model", None) or getattr(args, "hosting", None):
@@ -3565,10 +3618,35 @@ def model_command(args: argparse.Namespace) -> int:
     if record.pid == sender.get("pid"):
         _peer_red("that target is this session; use /model in it")
         return 1
-    try:
-        detail = asyncio.run(
-            switch_peer_model(record, provider=provider, model_id=model_id, sender=sender)
+
+    async def switch() -> str:
+        # A stopped or wedged target is silent for the whole ack deadline, so
+        # after a short grace the wait is said out loud (UX round 3, U11). On
+        # stderr: stdout carries only the receipt, which callers may parse.
+        # Cancelled the moment an answer arrives, so a healthy switch prints
+        # nothing extra.
+        notice = asyncio.get_running_loop().call_later(
+            PEER_MODEL_WAIT_NOTICE_S,
+            lambda: print(waiting_for_switch_detail(record), file=sys.stderr, flush=True),
         )
+        try:
+            return await switch_peer_model(
+                record, provider=provider, model_id=model_id, sender=sender
+            )
+        finally:
+            notice.cancel()
+
+    try:
+        detail = asyncio.run(switch())
+    except KeyboardInterrupt:
+        # Ctrl-C during the wait is the natural answer to the waiting line, and
+        # it stops only the WAIT: the op may already be in the target's buffer
+        # (PR #1587 UX round 1, U1). One honest notice, not a traceback that
+        # says nothing about the switch — then die OF the signal, so a shell
+        # loop around this stops too (review round 2, MINOR-4).
+        _hold_sigint()
+        _peer_red(switch_receipt(record, interrupted_switch_detail()))
+        return _die_of_sigint()
     except (PeerModelUnconfirmed, RuntimeError) as exc:
         _peer_red(switch_receipt(record, str(exc)))
         return 1

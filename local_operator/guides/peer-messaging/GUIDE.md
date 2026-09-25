@@ -196,7 +196,7 @@ collapsed row shows it as `switched`, `no change` or `pending`):
   the old model` — the target was waiting on a provider call; every later call
   uses the new one. `the current step` instead of `the call in flight` when it
   was in a tool or an approval.
-- `back on <model> (was on fallback <fallback>)` — you asked for the model the
+- `back on <model>` / `was on fallback <fallback>` — you asked for the model the
   session had selected while a provider fallback was serving instead; the
   fallback was dropped.
 - `<n> running subagent(s) stay(s) on the old model; new and resumed ones
@@ -208,14 +208,23 @@ collapsed row shows it as `switched`, `no change` or `pending`):
   switch is in force, but a later step of it raised. The send row shows
   `switched (error)` with the warning glyph.
 - `refused: <reason>; still on <old>` — nothing changed (non-zero exit for
-  `lop model`). A switch that did not take is reported this way even when a
-  fallback happens to be serving the requested model already.
+  `lop model`). While a fallback is serving, it reads `still on <fallback>
+  (fallback for <selected>)`. A switch that did not take is reported this way
+  even when a fallback happens to be serving the requested model already.
 - `older lop: it cannot switch models remotely; nothing changed — update it
   (lop update) or run /model in that session`.
 - `could not reach that session; nothing changed (…)` — the socket never
   opened.
-- `no answer — the switch may or may not have landed; check lop sessions
-  before retrying` — the op was sent and no answer came back within 15 s.
+- `no answer — the switch is unconfirmed and may still apply` / `check lop
+  sessions before retrying` — the op was sent and the target then sent nothing
+  for 15 s. That is an idle limit, not a total: a target that keeps sending
+  screen updates can hold the wait longer. `lop model` prints `no answer yet from
+  <name> (pid N)…` on stderr once 2 s pass with no answer, so a stopped target
+  does not look like a hang. Ctrl-C ends the wait with `interrupted — the
+  switch is unconfirmed and may still apply`; it does not cancel the switch,
+  which can still land after `lop sessions` shows the old model. The command
+  then exits by SIGINT (`$?` 130), so a shell loop around it stops too; the
+  same holds for `lop send`.
 
 The target's transcript records the switch twice: the usual `[model switch]`
 notice, and a peer card whose header names the sender and whose body reads
@@ -223,8 +232,11 @@ notice, and a peer card whose header names the sender and whose body reads
 resume this card is the only trace of the switch. A `lop model` from a plain
 terminal is the sender `terminal`, and the body ends `— from a terminal in
 <dir>`; one run inside a lop session names that session. A pending local switch
-writes `switch to <new> requested (on <old> until it applies)` instead. The card
-is record-only; it does not start a turn.
+writes `switch to <new> requested (on <old> until it applies)` instead. While a
+provider fallback is serving, it names the fallback, `(on fallback <fallback>
+until it applies)`, and reads `switch back to <new>` when `<new>` is the model
+that fallback displaced. The card is record-only; it does
+not start a turn.
 
 ## `lop sessions` — what is running and what it costs
 

@@ -10,6 +10,7 @@ user would read.
 from __future__ import annotations
 
 import os
+import signal
 from typing import Any
 from unittest.mock import patch
 
@@ -69,6 +70,8 @@ async def test_a_name_and_a_model_switch_the_peer(no_self, capsys) -> None:
             "its next turn runs on it",
             f"→ experiment one (pid {alias.pid})",
         ]
+        # NIT-1: a healthy switch prints nothing extra — no waiting line.
+        assert out.err == ""
     finally:
         runtime.close()
 
@@ -230,3 +233,140 @@ def test_a_terminal_switch_is_attributed_to_the_terminal(monkeypatch, tmp_path) 
         lambda: {"pid": 7, "session_id": "s1", "conversation_name": "fleet boss"},
     )
     assert _cli_switch_sender()["conversation_name"] == "fleet boss"
+
+
+class _SilentHandle(_ModelHandle):
+    """A target that answers only once the CLI has said it is waiting (U11)."""
+
+    def __init__(self, noticed: "Any") -> None:
+        super().__init__()
+        self._noticed = noticed
+
+    async def receive_peer_model(self, provider, model_id, *, sender=None):  # noqa: ANN001, ANN201
+        import asyncio
+
+        # Event-driven, not a sleep: the answer is held until the notice fired.
+        assert await asyncio.to_thread(self._noticed.wait, 30), "the waiting notice never printed"
+        return await super().receive_peer_model(provider, model_id, sender=sender)
+
+
+@pytest.mark.asyncio
+async def test_a_slow_target_is_announced_on_stderr_while_it_is_waited_for(
+    no_self, monkeypatch, capsys
+) -> None:
+    """U11: a stopped target held `lop model` silent for the whole 15 s ack
+    deadline. After a short grace the CLI says who it is waiting for, on stderr
+    so stdout stays the receipt alone, and the receipt still follows."""
+    import asyncio
+    import threading
+
+    from local_operator.mobile import peer_send
+
+    noticed = threading.Event()
+    real = peer_send.waiting_for_switch_detail
+
+    def notice(record: Any) -> str:
+        noticed.set()
+        return real(record)
+
+    monkeypatch.setattr(peer_send, "PEER_MODEL_WAIT_NOTICE_S", 0.01)
+    monkeypatch.setattr(peer_send, "waiting_for_switch_detail", notice)
+    runtime = RuntimeServer(_SilentHandle(noticed), kind="tui")
+    runtime.start()
+    runtime.set_record_started(True)
+    try:
+        alias = _alias(await _wait_record())
+        rc = await asyncio.to_thread(_run, ["--pid", str(alias.pid), "deepseek/deepseek-flash"])
+        out = capsys.readouterr()
+        assert rc == 0, out.err
+        assert out.err.strip().splitlines() == [
+            f"no answer yet from experiment one (pid {alias.pid})…"
+        ]
+        assert "waiting" not in out.out
+        assert out.out.startswith("switched to deepseek/deepseek-flash")
+    finally:
+        runtime.close()
+
+
+def test_the_waiting_line_promises_no_total_and_fits_60_columns() -> None:
+    """MINOR-3: the ack deadline is an idle bound the target's pushes reset, so
+    the line quotes no total. D13: one row at 60 columns for a 25-char name."""
+    from types import SimpleNamespace
+
+    from local_operator.mobile.peer_send import waiting_for_switch_detail
+
+    record = SimpleNamespace(conversation_name="n" * 25, session_id="s", pid=4194304)
+    line = waiting_for_switch_detail(record)
+    assert "up to" not in line and "15" not in line, line
+    assert len(line) <= 60, (len(line), line)
+
+
+@pytest.mark.parametrize("command", ["model", "send"])
+def test_ctrl_c_while_waiting_is_one_honest_line_not_a_traceback(
+    command, no_self, monkeypatch, capsys
+) -> None:
+    """U1: Ctrl-C during the wait stops the WAIT, not an op that may already be
+    written. Exit 130 with one line saying it may still land."""
+    from local_operator.cli import send_command
+
+    record = registry.SessionRecord(
+        pid=os.getppid(),
+        kind="tui",
+        session_id="ctrlc-session",
+        conversation_name="experiment one",
+        cwd="/tmp",
+        model_label="test/model",
+        control_port=1,
+        control_key="k",
+        started=True,
+    )
+
+    def interrupted(coro):  # noqa: ANN001, ANN202
+        coro.close()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("asyncio.run", interrupted)
+    # The real re-delivery would kill the test runner; what it must be called
+    # with is asserted below, and a real bash loop proves the effect (MINOR-4).
+    delivered: list[tuple[int, int]] = []
+    monkeypatch.setattr("local_operator.cli.os.kill", lambda pid, sig: delivered.append((pid, sig)))
+    monkeypatch.setattr("signal.signal", lambda *_a: None)
+    if command == "model":
+        monkeypatch.setattr(
+            "local_operator.mobile.peer_send.resolve_switch_target",
+            lambda **_k: (record, [], ""),
+        )
+        argv = ["model", "experiment", "deepseek/deepseek-flash"]
+        needle = "interrupted — the switch is unconfirmed and may still apply"
+    else:
+        monkeypatch.setattr(
+            "local_operator.cli._resolve_peer_target", lambda *_a, **_k: (record, [], "")
+        )
+        argv = ["send", "experiment", "hello"]
+        needle = "interrupted — delivery is UNCONFIRMED"
+    handler = model_command if command == "model" else send_command
+    try:
+        rc = handler(build_cli_parser().parse_args(argv))
+    except KeyboardInterrupt:
+        # Caught HERE so a regression fails this test instead of aborting the run.
+        pytest.fail("Ctrl-C escaped as a traceback")
+    err = capsys.readouterr().err
+    assert rc == 130
+    assert needle in err and "Traceback" not in err, err
+    # MINOR-4: exiting 130 is not enough for bash to stop a loop around the
+    # command; the process must die OF SIGINT, after the notice is printed.
+    assert delivered == [(os.getpid(), signal.SIGINT)]
+
+
+def test_the_unconfirmed_switch_lines_fit_60_columns_and_look_forward() -> None:
+    """U3: the op can still sit unread in a stalled target, so both receipts say
+    the switch may still apply — never "may or may not have landed", which a
+    `lop sessions` run straight away seemed to answer. Each row fits 60 columns."""
+    from local_operator.mobile.peer_send import (
+        interrupted_switch_detail,
+        unconfirmed_switch_detail,
+    )
+
+    for detail in (interrupted_switch_detail(), unconfirmed_switch_detail()):
+        assert "may still apply" in detail and "may or may not" not in detail, detail
+        assert max(len(line) for line in detail.splitlines()) <= 60, detail
