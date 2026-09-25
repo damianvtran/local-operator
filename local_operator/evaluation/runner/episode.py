@@ -2610,6 +2610,20 @@ def _rejection_detail(rejected: Any, redactions: RedactionSet | None) -> str:
             f"reasoning_deltas={shape.reasoning_deltas} "
             f"tool_call_deltas={shape.tool_call_deltas} "
             f"stop={_header_value(shape.stop)} "
+            # WHICH channel was judged and what arrived on it, beside the counts
+            # that say how much arrived. The counts alone cannot separate the two
+            # refusals that look identical in a bundle and are not: the model's
+            # PROSE not beginning with '{', and a complete decision arriving as a
+            # tool call under a name the harness did not read. The second was 174
+            # of this arm's 199 ``leading-delimiter`` refusals, and nothing in the
+            # artifact named the channel or the call, so the class was
+            # undiagnosable without paying for the run again. ``channel=read``
+            # states the harness read the tool-call channel; ``tool_calls=[...]``
+            # is what the stream called its calls, empty when it carried none.
+            # Both are model-authored text and go through ``_header_value`` for
+            # the reason ``stop`` does: a name is not a line of its own.
+            f"channel={'read' if getattr(rejected, 'channel_read', False) else 'prose'} "
+            f"tool_calls=[{_header_value(shape.tool_call_names)}] "
             f"stripped_reply_markers={getattr(rejected, 'stripped_reply_markers', 0)}"
         )
     # ``evidence_reply`` is the boundary that may carry the reply into evidence;

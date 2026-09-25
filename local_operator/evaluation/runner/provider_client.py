@@ -1711,6 +1711,53 @@ _UNSPECIFIED_STOP = "unspecified"
 #: record exists to describe a refusal, not to become one.
 _MAX_STOP_MARKER_CHARS = 64
 
+#: Longest single tool-call NAME recorded in a stream shape, and how many names
+#: are recorded before the rest are counted instead. Both bounds exist for the
+#: reason ``_MAX_STOP_MARKER_CHARS`` does -- the name is model-authored text of
+#: no fixed vocabulary (a model that invents a tool name can invent a long one),
+#: and the record describes a refusal rather than becoming one.
+_MAX_TOOL_CALL_NAME_CHARS = 64
+_MAX_TOOL_CALL_NAMES = 8
+
+
+def _offered_tool_names(request: Any) -> tuple[str, ...]:
+    """The tool names a request PUT ON THE WIRE, in order.
+
+    Read back off the request rather than assumed: the sole-offer rule that
+    reads an arbitrarily-named call as the reply (``harness/reply_channel``) is
+    only sound because THIS request advertised nothing else, and a rule that
+    rests on what was offered has to read what was offered. A caller that adds a
+    second tool to this request silently narrows the rule back to the exact-name
+    test, which is the behaviour that is correct there.
+    """
+
+    return tuple(
+        str(getattr(tool, "name", "") or "") for tool in getattr(request, "tools", None) or ()
+    )
+
+
+def _bounded_call_names(calls: Sequence[Any]) -> str:
+    """The names of the stream's tool calls, comma-joined and bounded.
+
+    Recorded so a refusal that arrived on the tool channel is diagnosable from a
+    sealed bundle: the delta counts said a call happened and nothing said what it
+    was called, which is why 174 of the arm's 199 ``leading-delimiter`` refusals
+    could not be explained after the fact. Empty means the stream carried no
+    call, which is a reading rather than an absence.
+
+    Names ride through ``_header_value`` at render time, so this escapes nothing
+    itself; it only keeps the field from growing with a model that names its call
+    a kilobyte of prose.
+    """
+
+    names = [str(getattr(call, "name", "") or "") for call in calls]
+    shown = [name[:_MAX_TOOL_CALL_NAME_CHARS] for name in names[:_MAX_TOOL_CALL_NAMES]]
+    rendered = ",".join(shown)
+    hidden = len(names) - len(shown)
+    if hidden > 0:
+        rendered += f",[+{hidden} more]"
+    return rendered
+
 
 class ProviderStreamAbortedError(RuntimeError):
     """The stream ended abnormally without producing any usable content.
@@ -2349,6 +2396,14 @@ class ProviderModelClient:
         tool_call_count = outcome.tool_call_count
         stream_shape = outcome.shape
         stripped_reply_markers = outcome.stripped_reply_markers
+        # WHICH channel was judged, not merely what came out of it. ``None`` means
+        # the tool-call channel carried no reply at all (read the prose); anything
+        # else -- including the empty string a call with no usable arguments
+        # yields -- means the channel WAS the reply channel for this attempt, and
+        # a reader of the refusal needs that fact: a ``leading-delimiter`` refusal
+        # of the model's prose and one of a call's own arguments are different
+        # defects with different repairs.
+        channel_read = channel_reply is not None
         if channel_reply:
             # The model answered on the offered channel. Its arguments ARE the
             # envelope, so the raw JSON goes to the same decoder the prose path
@@ -2562,6 +2617,15 @@ class ProviderModelClient:
                 # already gone, so this count is the only record in the artifact
                 # that the reply arrived with one -- see ``_rejection_detail``.
                 stripped_reply_markers=stripped_reply_markers,
+                # Which channel was judged, and how many calls the stream carried.
+                # The count was left at its 0 default here, which is the same
+                # defect class as the missing name: a refusal whose reply arrived
+                # as a tool call recorded ``tool_call_count=0``, so a sealed bundle
+                # read as "the model called nothing" on the very refusals where it
+                # called something. ``tool_call_count`` is the honest count for
+                # the attempt that was already sent and billed.
+                channel_read=channel_read,
+                tool_call_count=tool_call_count,
                 # Raw and UNBOUNDED here: the publisher scans the whole reply
                 # before applying the bound, because a reply cut first and
                 # scanned afterwards returns clean over a severed canary.
@@ -3074,7 +3138,20 @@ class ProviderModelClient:
         # ``None`` when the model did not use the channel (read the prose
         # instead); the empty string when it did and sent nothing usable, which
         # is a rejection the decoder must still report.
-        channel_reply = envelope_from_tool_call(calls, name=REPLY_CHANNEL_TOOL_NAME)
+        #
+        # ``_offered_tool_names`` is passed so the channel survives the model
+        # naming the call something else, which is sound here and ONLY here:
+        # this client offers one tool, whose parameters ARE the reply envelope,
+        # and the episode drives the environment through the action protocol
+        # rather than through harness tools, so a call cannot be an action
+        # request. 174 of the arm's 199 ``leading-delimiter`` refusals were a
+        # complete decision arriving on this channel under a name we did not
+        # read; see ``harness/reply_channel.envelope_from_tool_call``.
+        channel_reply = envelope_from_tool_call(
+            calls,
+            name=REPLY_CHANNEL_TOOL_NAME,
+            offered_names=_offered_tool_names(request),
+        )
         return _StreamOutcome(
             text=text,
             usage=usage,
@@ -3085,14 +3162,20 @@ class ProviderModelClient:
             stream_error=stream_error,
             channel_reply=channel_reply,
             # Every call the stream carried, including any the model made to a
-            # name we never offered. Recorded in the evidence bundle rather
-            # than acted on: a model reaching for a tool that does not exist is
-            # a signal about the prompt, not something to salvage.
+            # name we never offered. Counted for the evidence bundle, and now
+            # also READ when it is the sole offered name -- but never executed:
+            # a model reaching for a tool that does not exist is a signal about
+            # the prompt, and the reply it carried is judged by the same decoder
+            # a prose reply is judged by.
             tool_call_count=len(calls),
             shape=StreamShape(
                 content_deltas=content_deltas,
                 reasoning_deltas=reasoning_deltas,
                 tool_call_deltas=tool_call_deltas,
+                # Bounded and escaped here rather than at the renderer, the same
+                # division ``stop`` above uses: the artifact must stay bounded
+                # whatever the model named its call.
+                tool_call_names=_bounded_call_names(calls),
                 # The provider's RAW marker, never the normalized stop: a
                 # reader bucketing attempts needs ``length``/``toolUse``/whatever
                 # the wire said, and ``_UNSPECIFIED_STOP`` when it said nothing
