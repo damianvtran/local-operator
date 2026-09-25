@@ -7214,7 +7214,41 @@ class OperatorApp(App[None]):
             if card is not None:
                 if owns_card and key is not None and not card.settled:
                     snapshot = card.snapshot_state()
-                    snapshot.focused = source.draft.focus_id == "@gate"
+                    # WHICH CARD CLAIMS THE KEYBOARD ON THE WAY BACK, read from
+                    # the live facts and not from one lagging record.
+                    #
+                    # `snapshot_state()` has already asked the card itself
+                    # (`card.has_focus`); this line used to REPLACE that answer
+                    # with the mirror `source.draft.focus_id == "@gate"`, and the
+                    # mirror is a message hop behind the fact it mirrors:
+                    # `on_descendant_focus` writes it, that event is posted to the
+                    # widget's PARENT and climbs one hop per node
+                    # (textual/widget.py:4766), and its handler is skipped while a
+                    # swap is in flight (`_swapping_session`). TWO windows follow
+                    # from that, both measured under load on this fleet, and both
+                    # recorded `focused=False` for a card the app was routing keys
+                    # to: the card had taken the keyboard but the mirror did not
+                    # say so yet, and the card was ATTACHED with its mount still
+                    # in flight, so nothing had said so yet. `on_mount` reads that
+                    # back as `_restored_focus=False` and declines the keyboard,
+                    # while the band goes on saying "Answer the question above" —
+                    # and the Enter that instruction names is declined by the
+                    # composer (a bare Enter has no `character`, app.py:21189), so
+                    # it points at a dead key.
+                    #
+                    # The third term is not a guess about the card: it is the
+                    # decision the card's own mount rule is about to make, read
+                    # through the same predicate that rule reads
+                    # (`AskPickerScreen.on_mount` asks `_composer_has_draft`, so
+                    # the two cannot drift), for the one state in which the card
+                    # never got to make it. `is_mounted` turns true immediately
+                    # AFTER `on_mount` returns (textual/message_pump.py:612), so it
+                    # is exactly "that decision is still owed".
+                    snapshot.focused = (
+                        card.has_focus
+                        or source.draft.focus_id == "@gate"
+                        or (not card.is_mounted and not card._composer_has_draft())
+                    )
                     source.gate_draft = (key, snapshot)
                 card.disabled = True
             keep_answer = owns_card and bool(
