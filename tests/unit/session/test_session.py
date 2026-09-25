@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import logging
 import sys
 import textwrap
 import time
@@ -13,11 +14,12 @@ import types
 import warnings
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from local_operator.compaction.api import CompactionSettings
-from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE
+from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE, AsyncJob
 from local_operator.harness.message_types import (
     HUB_MESSAGE_TYPE,
     SESSION_CREDENTIAL_MESSAGE_TYPE,
@@ -4539,6 +4541,195 @@ async def test_a_job_result_cannot_restart_a_stopped_session(tmp_path):
 
     assert len(stream.requests) == spent_before
     assert session._abort_requested is True
+    await session.dispose()
+
+
+def _settled_job(job_id: str) -> AsyncJob:
+    """A job that has settled, as the manager hands it to ``_on_job_completed``.
+
+    The real object rather than a stand-in: the delivery guard reads ``type``,
+    ``consumed`` and (for the message text) ``label``/``status``, and a cell that
+    fakes those would not be testing the path the manager drives.
+    """
+    return AsyncJob(
+        id=job_id,
+        type="task",
+        status="completed",
+        label=job_id,
+        start_time=1.0,
+        result_text=f"{job_id} done",
+    )
+
+
+def _job_result_rows(session) -> list[Any]:
+    """The durable ``job_result`` message rows, in transcript order."""
+    return [
+        entry
+        for entry in session._transcript.entries()
+        if entry.type == "message" and entry.payload.get("custom_type") == JOB_RESULT_MESSAGE_TYPE
+    ]
+
+
+def _attention_starts(session) -> list[Any]:
+    """The durable ``attention_started`` rows — one per RUN that opened."""
+    return [
+        entry
+        for entry in session._transcript.entries()
+        if entry.type == "custom" and entry.payload.get("custom_type") == "attention_started"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_job_result_opens_no_turn_on_a_leaving_runtime(tmp_path):
+    """A delivery that lands after the departure latch is DURABLE, not run.
+
+    The measured defect (session a81ceec0982b, 2026-09-24): a finishing turn's
+    ``finally`` flushed nine settled children into ONE delivery turn, the exit's
+    disposal aborted that turn before its first provider call, and the operator
+    got a cut-off error card 650 ms after their own honest ``complete``. The
+    latches refuse ``prompt``/``receive_peer_message``, but a job result is not
+    an admission — it entered through ``_deliver_job_results`` and nothing
+    refused it.
+
+    Three facts, and all three are the contract: no provider call, no run
+    opened, and every result still durable in settle order.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("start a job")
+    spent_before = len(stream.requests)
+    session.retire_job_deliveries_to_transcript()
+
+    await session._deliver_job_results(
+        [("j1", "one", _settled_job("j1")), ("j2", "two", _settled_job("j2"))]
+    )
+
+    assert len(stream.requests) == spent_before, "the latch must not buy a provider call"
+    assert len(_attention_starts(session)) == 1, "only the prompt's own run may exist"
+    assert [row.payload["details"]["job_id"] for row in _job_result_rows(session)] == ["j1", "j2"]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_batch_is_held_durably_when_the_latch_beats_its_flush(tmp_path):
+    """The incident's exact shape: a turn's ``finally`` flushes a deferred batch
+    onto a runtime that has already committed to leaving.
+
+    Same three facts as the cell above, reached through the flush rather than
+    through ``_deliver_job_results`` directly — because the flush is the path the
+    incident took, and because it is the one that runs while the pipeline still
+    holds ``_turn_lock``.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("start a job")
+    spent_before = len(stream.requests)
+    session._is_streaming = True
+    await session._on_job_completed("j1", "one", _settled_job("j1"))
+    await session._on_job_completed("j2", "two", _settled_job("j2"))
+    assert session._deferred_job_results, "precondition: the batch is deferred"
+    session.retire_job_deliveries_to_transcript()
+
+    await session._deliver_deferred_job_results()
+
+    assert len(stream.requests) == spent_before
+    assert [row.payload["details"]["job_id"] for row in _job_result_rows(session)] == ["j1", "j2"]
+    assert not session._deferred_job_results
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_job_result_settling_after_the_latch_is_not_left_in_memory(tmp_path):
+    """A result arriving post-latch must not be DEFERRED onto a dying process.
+
+    ``_deferred_job_results`` is memory, and the process that holds it is on its
+    way out, so the deferral branch is a second way to lose the result — the one
+    the latch makes reachable, because a turn can still be streaming when it is
+    taken (the exit waits for that turn to finish).
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("start a job")
+    spent_before = len(stream.requests)
+    session.retire_job_deliveries_to_transcript()
+    session._is_streaming = True  # the turn the exit is waiting out
+
+    await session._on_job_completed("j1", "one", _settled_job("j1"))
+
+    assert session._deferred_job_results == {}, "nothing may be parked in dying memory"
+    assert len(stream.requests) == spent_before
+    assert [row.payload["details"]["job_id"] for row in _job_result_rows(session)] == ["j1"]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_delivery_that_cannot_be_made_durable_is_reported(tmp_path, monkeypatch, caplog):
+    """A failed durability write is LOUD: an incident row, not silence and not a turn.
+
+    The fix must not become silent data loss. The two fallbacks that look
+    tempting are both wrong: opening the turn anyway re-creates the incident on a
+    runtime that is leaving, and returning quietly is a result the operator never
+    learns they lost.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("start a job")
+    spent_before = len(stream.requests)
+    session.retire_job_deliveries_to_transcript()
+    transcript = session._transcript
+    real_append = transcript.append_message
+
+    async def exploding_append(message, **kwargs):
+        if getattr(message, "custom_type", None) == JOB_RESULT_MESSAGE_TYPE:
+            raise OSError("no space left on device")
+        return await real_append(message, **kwargs)
+
+    monkeypatch.setattr(transcript, "append_message", exploding_append)
+    with caplog.at_level(logging.ERROR):
+        await session._deliver_job_results([("j1", "one", _settled_job("j1"))])
+
+    assert len(stream.requests) == spent_before, "a failure must not open the forbidden turn"
+    incidents = [
+        entry
+        for entry in session._transcript.entries()
+        if entry.type == "message"
+        and entry.payload.get("custom_type") == SESSION_INCIDENT_MESSAGE_TYPE
+    ]
+    assert len(incidents) == 1, "the loss must be durable and model-visible"
+    text = incidents[0].payload["details"]["text"]
+    assert "j1" in text and "no space left on device" in text
+    # ...and it says where the result still is, rather than implying it is gone.
+    assert "jobs" in text
+    assert any(
+        "could not persist the result of job j1" in record.message for record in caplog.records
+    )
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_job_result_still_opens_exactly_one_turn_off_the_latch(tmp_path):
+    """THE NEGATIVE CONTROL for the latch, and the guard against over-fixing.
+
+    Consult the latch on the wrong side and every child's report in the fleet is
+    held instead of delivered — silent under-delivery, the very bug the deferral
+    path was written to fix (see ``_deferred_job_results``). Off the latch, N
+    results are still exactly ONE batched turn.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("start a job")
+    spent_before = len(stream.requests)
+    assert session._leaving_deliveries is False, "precondition: no latch is taken"
+
+    await session._deliver_job_results(
+        [("j1", "one", _settled_job("j1")), ("j2", "two", _settled_job("j2"))]
+    )
+    deadline = asyncio.get_running_loop().time() + 10.0
+    while len(stream.requests) == spent_before:
+        assert asyncio.get_running_loop().time() < deadline, "the batched turn never ran"
+        await asyncio.sleep(0.01)
+
+    assert len(stream.requests) == spent_before + 1, "one turn for the whole batch"
     await session.dispose()
 
 

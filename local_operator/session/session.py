@@ -2193,6 +2193,14 @@ class Session:
         #: round 1, R1-1). Holding the object keeps ``consumed`` observable
         #: too, since ``wait`` flips it on this same instance.
         self._deferred_job_results: dict[str, tuple[Any, str]] = {}
+        #: Armed by the serving handle when this session's runtime has COMMITTED
+        #: to leaving (``retire_job_deliveries_to_transcript``, called from
+        #: ``ServingSessionHandle.begin_drain`` / ``begin_retire``). While it is
+        #: set, a settled job's result is made durable and opens NO turn: the
+        #: run such a delivery would open could only ever be aborted by the
+        #: disposal that follows it. Released by ``end_drain``'s abandon arm,
+        #: which keeps serving the same runtime.
+        self._leaving_deliveries = False
         self._job_label = job_label
         self._parent_display_name = parent_display_name
         self._subagent_comms = subagent_comms
@@ -9969,7 +9977,11 @@ class Session:
             self._discard_queued_notices()
             self._signal = None
             self._is_streaming = False
-            self._deliver_deferred_job_results()
+            # Awaited, and that is load-bearing on the leaving arm: the durability
+            # write of a HELD batch has to land before the turn releases the lock and
+            # this process can decide it is finished -- a spawned write is precisely
+            # what ``dispose`` cancels in flight.
+            await self._deliver_deferred_job_results()
 
     async def _drop_pre_aborted_turn(
         self,
@@ -11137,6 +11149,17 @@ class Session:
             return
         if getattr(job, "consumed", False) or job.type not in ("task", "bash"):
             return
+        if self._leaving_deliveries:
+            # A result that arrives AFTER the departure latch must not be
+            # DEFERRED: ``_deferred_job_results`` is memory, and this process is
+            # on its way out, so parking it there destroys it. The no-turn arm
+            # is durable, so routing through ``_deliver_job_results`` holds the
+            # result exactly as an idle arrival would. Checked BEFORE the
+            # streaming test, because that test's answer ("a turn is running")
+            # does not make deferral safe here -- both spellings of "wait for a
+            # later turn" assume a later turn in THIS process.
+            await self._deliver_job_results([(job_id, text, job)])
+            return
         if self._is_streaming:
             # DEFERRED, never dropped. Returning here used to be the whole
             # story, on the theory that a streaming turn "either waited or can
@@ -11153,9 +11176,9 @@ class Session:
             # through ``wait`` from arriving twice.
             self._deferred_job_results[job_id] = (job, text)
             return
-        self._deliver_job_results([(job_id, text, job)])
+        await self._deliver_job_results([(job_id, text, job)])
 
-    def _deliver_job_results(self, results: list[tuple[str, str, Any]]) -> None:
+    async def _deliver_job_results(self, results: list[tuple[str, str, Any]]) -> None:
         """Queue settled jobs' results as ONE fresh idle-time turn.
 
         One turn for the whole batch, not one per job: N children that settle
@@ -11169,7 +11192,144 @@ class Session:
         if not results:
             return
         messages = [self._job_result_message(job_id, text, job) for job_id, text, job in results]
+        if self._leaving_deliveries:
+            # THE DEPARTURE LATCH. A job delivery is NOT an admission, which is
+            # what makes this arm necessary: ``ServingSessionHandle.begin_drain``
+            # and ``begin_retire`` refuse ``prompt`` and ``receive_peer_message``
+            # from the instant the runtime commits to leaving ("invariant (i), no
+            # new work after the commit"), but a settled child enters through
+            # HERE -- harness-initiated, no client waiting on a receipt -- so
+            # nothing refused it. The run it opened could then only ever end one
+            # way: the disposal that follows aborts it, and the conversation gets
+            # a cut-off ERROR row ("Stopped with an error") about a batch of
+            # results that were already durable, on a turn the operator never
+            # asked for. Measured: session a81ceec0982b, 2026-09-24 22:22:28 -- a
+            # finishing turn's ``finally`` flushed nine settled children into one
+            # delivery turn, which the exit's disposal aborted before the first
+            # provider call, 650 ms after that turn's own honest ``complete``.
+            #
+            # AWAITED, not spawned: the durability has to have landed BEFORE
+            # anything can decide this session is finished, and a spawned task is
+            # exactly what ``dispose`` cancels in flight (see the comment on the
+            # name/model flushes there). ``_hold_job_results_for_next_turn``
+            # never raises, so no caller needs its own guard.
+            await self._hold_job_results_for_next_turn(results, messages)
+            return
         self._spawn_background(self._prompt_messages(list(messages)))
+
+    async def _hold_job_results_for_next_turn(
+        self, results: list[tuple[str, str, Any]], messages: list[CustomMessage]
+    ) -> None:
+        """Make a settled batch DURABLE, and open NO turn.
+
+        The no-turn arm of :meth:`_deliver_job_results`, taken when this
+        session's runtime has committed to leaving. It is the same contract
+        ``_drop_pre_aborted_turn`` states for the pre-aborted case: the arriving
+        messages are made durable HERE, before this method returns, and reach the
+        model on the session's next real turn -- ``SESSION_INCIDENT``-style rows
+        ride the render allow-list (``harness/render.py`` lists
+        ``JOB_RESULT_MESSAGE_TYPE``), so a durable ``job_result`` row is an
+        injected user message to whoever turns next. **This drops the model call,
+        never the message.**
+
+        Both halves of that contract are needed and neither is redundant. The
+        transcript append is what survives this process; the live-context append
+        is what a turn in THIS process reads, and it parks behind ``_turn_lock``
+        when a turn still holds it (``_append_or_park_journal``), rejoining at
+        the next turn boundary.
+
+        Per-result failure is LOUD and never falls back to opening the turn: a
+        turn is exactly what the latch forbids, and silence would be the silent
+        data loss this arm exists to prevent (§4.1 of the incident plan). The
+        durable ``session_incident`` row is what the next turn's model and the
+        operator's ``[session incident]`` card read, and it says the job's own
+        record still holds the text rather than implying it is gone.
+        """
+        for (job_id, _text, job), message in zip(results, messages):
+            try:
+                await self._transcript.append_message(message)
+            except Exception as exc:  # noqa: BLE001 - one lost row must not lose the batch
+                label = getattr(job, "label", job_id)
+                logger.error(
+                    "could not persist the result of job %s for the next turn "
+                    "(the runtime is leaving)",
+                    job_id,
+                    exc_info=True,
+                )
+                await self._journal_held_delivery_failure(job_id, label, exc)
+                continue
+            self._append_or_park_journal(message)
+
+    async def _journal_held_delivery_failure(
+        self, job_id: str, label: str, exc: BaseException
+    ) -> None:
+        """Report a job result that could not be held for the next turn.
+
+        The one honest outcome when the durability write fails: the runtime is
+        leaving, so the alternative the delivery would otherwise take -- open a
+        turn -- is forbidden by the same latch that got us here, and quietly
+        returning is a result the operator never learns they lost. Never raises:
+        it is called from a turn's ``finally`` (through
+        ``_deliver_deferred_job_results``) and from the job manager's settle
+        hook, and neither may fail because a report failed.
+        """
+        reason = str(exc) or exc.__class__.__name__
+        try:
+            await self.journal_incident(
+                f"could not persist the result of background job {job_id!r} "
+                f"while the runtime was leaving: {reason}",
+                rendered=(
+                    f"The result of background job '{label}' arrived after this session's "
+                    "runtime had committed to leaving, and the harness could not write it "
+                    f"into this conversation ({reason}). Nothing is lost yet: the job's own "
+                    "record still holds the full text -- read it with the jobs tool now, "
+                    "because a settled job's row is swept a few minutes after it settles."
+                ),
+            )
+        except Exception:  # noqa: BLE001 - a failed report must not raise either
+            logger.error(
+                "could not journal the lost delivery of job %s (the ERROR log above is the "
+                "only record)",
+                job_id,
+                exc_info=True,
+            )
+
+    def retire_job_deliveries_to_transcript(self) -> None:
+        """From now on, a settled job's result is durable and opens NO turn.
+
+        The mirror of :meth:`retire_wakes_to_inbox` for the OTHER
+        harness-initiated arrival, and it holds the invariant that would
+        otherwise break: the departure latches refuse ADMISSIONS, and a job
+        delivery is not one, so without this the delivery opens a turn on a
+        runtime that has already committed to leaving -- a turn whose only
+        possible end is the following disposal's abort (see
+        ``_deliver_job_results`` for the measured incident).
+
+        Installed by ``ServingSessionHandle.begin_drain`` (the build drain and
+        the signal drain) and by ``begin_retire`` (the idle exit, the viewer's
+        rotate, ``/move``), in the same synchronous step that commits the exit,
+        so a delivery cannot slip between the two. Idempotent and never raises:
+        both latches can run, and a session that reports it has already armed is
+        an answer, not a failure.
+
+        NOT installed by the update WINDOW (``begin_update``), deliberately: a
+        window QUEUES admissions instead of refusing them and its handover only
+        commits at the boundary, so a delivery turn opened inside it is work the
+        runtime intends to finish -- whether it does is the latch's question, and
+        ``begin_retire``/``begin_drain`` answer it.
+        """
+        self._leaving_deliveries = True
+
+    def resume_job_deliveries_to_turns(self) -> None:
+        """Release :meth:`retire_job_deliveries_to_transcript` -- the move was abandoned.
+
+        For ``end_drain``'s give-up arm (``process._abandon_move``): a runtime
+        that is serving again must be able to deliver again, or the children that
+        settle for the rest of its life are held until someone types something.
+        The rows already held need no undoing -- they are durable and ride the
+        next turn either way -- which is why this only clears the flag.
+        """
+        self._leaving_deliveries = False
 
     @staticmethod
     def _job_result_message(job_id: str, text: str, job: Any) -> CustomMessage:
@@ -11190,14 +11350,16 @@ class Session:
             details={"job_id": job_id, "text": delivery},
         )
 
-    def _deliver_deferred_job_results(self) -> None:
+    async def _deliver_deferred_job_results(self) -> None:
         """Hand over job results that settled while a turn was streaming.
 
         Called from the turn pipeline's ``finally`` AFTER ``_is_streaming`` is
         cleared, so it runs exactly when ``_on_job_completed`` would have
         accepted the delivery in the first place. Everything deferred during
         the turn goes out as ONE ``_prompt_messages`` turn (see
-        ``_deliver_job_results``), in settle order.
+        ``_deliver_job_results``), in settle order -- unless the runtime has
+        committed to leaving, in which case the batch is HELD durably and opens
+        no turn at all (the no-turn arm in ``_deliver_job_results``).
 
         Reads the JOB OBJECT captured at settle time, never a fresh ledger
         lookup: the manager sweeps a settled row five minutes after it settles,
@@ -11223,7 +11385,7 @@ class Session:
             except Exception:  # noqa: BLE001 - a delivery must not fail the turn's teardown
                 logger.warning("deferred job delivery failed for %s", job_id, exc_info=True)
         try:
-            self._deliver_job_results(results)
+            await self._deliver_job_results(results)
         except Exception:  # noqa: BLE001 - a delivery must not fail the turn's teardown
             logger.warning("deferred job delivery failed", exc_info=True)
 
