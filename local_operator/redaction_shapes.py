@@ -4649,8 +4649,11 @@ _SHAPE_ANCHORS: tuple[str, ...] = (
 #: alternation of 61 literals costs one attempt per alternative AT EVERY
 #: POSITION — measured at 1.7 s for 730 KB of ordinary log text, i.e. worse than
 #: the table it was meant to skip. ``str.__contains__`` is the C-level search the
-#: engine does not do for us: 61 of them cost ~25 ms for the same text, and the
-#: first miss short-circuits nothing but nothing needs it to.
+#: engine does not do for us: 61 of them cost ~25 ms for the same text — the
+#: count the alternation was measured against, and the tuple has since grown to
+#: 74, which scales both sides of that comparison together and does not reopen
+#: the choice. A MISS reaches the end of the table, which is the case worth
+#: shaping the loop around; see the note under the signature for its cost.
 def has_shape_anchor(text: str) -> bool:
     lowered = text.lower()
     # An explicit loop, not the equivalent ``any(anchor in lowered for anchor in
