@@ -31,7 +31,11 @@ from local_operator.session.frontend_state import FrontendSubscription
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.runtime.serving import ServingSessionHandle
-from local_operator.session.runtime.types import ATTACH_MAX_CLIENTS, PROTOCOL_VERSION
+from local_operator.session.runtime.types import (
+    ATTACH_MAX_CLIENTS,
+    LEAVING_FOR_BUILD,
+    PROTOCOL_VERSION,
+)
 
 
 class FakeHandle:
@@ -2059,6 +2063,70 @@ async def test_the_record_directory_is_fixed_for_an_in_process_runtime(
         )
     finally:
         await server.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_write_through_survives_a_delayed_publisher_install(tmp_path, monkeypatch) -> None:
+    """A write-through that lands while the runtime is still installing its
+    publisher must be readable once the record is.
+
+    THE WINDOW this pins is the boot's own: the publisher's constructor used to
+    publish the record, and ``_serve`` assigned ``self._publisher`` only after
+    the constructor returned, so the record could already be READ while
+    ``_republish`` still answered "no publisher" — a write-through landing
+    there (``note_leaving``, ``set_record_started``) was set on the record
+    object, no-opped against the unset attribute, and the readable file kept
+    its pre-write state until the next 15 s heartbeat. Preemption alone opens
+    it on a loaded runner, which is how it flaked:
+    ``test_a_draining_session_hands_a_cold_facade_its_canonical_sync`` read
+    ``leaving == ''`` and ``test_started_survives_the_republish`` read
+    ``started`` False on CI shards.
+
+    The hold below parks the runtime thread inside the construction (what a
+    descheduled thread is), runs both write-throughs while it is parked, and
+    reads the record back. On the tree that published from the constructor the
+    parked thread has already left a readable pre-write file behind, so the
+    facts read back empty — this test failed deterministically there, and
+    passes once the publish waits until the instance is installed.
+    """
+    entered = threading.Event()
+    release = threading.Event()
+    original_init = registry.RecordPublisher.__init__
+
+    def holding_init(self, record, *args, **kwargs):  # noqa: ANN001, ANN202
+        original_init(self, record, *args, **kwargs)
+        entered.set()
+        release.wait(30)
+
+    monkeypatch.setattr(registry.RecordPublisher, "__init__", holding_init)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    server = RuntimeServer(FakeHandle(), kind="tui")
+    server.start()
+    try:
+        try:
+            assert await asyncio.to_thread(
+                entered.wait, 30
+            ), "the publisher's construction never started"
+            # What a reader in this window sees. Stated here rather than
+            # asserted, because the guarantee under test is read back below;
+            # this is the context a failure needs (on the pre-fix tree it is a
+            # live record whose ``leaving`` is still "").
+            while_held = registry.scan()
+            server.set_record_started(True)
+            server.note_leaving(LEAVING_FOR_BUILD)
+        finally:
+            release.set()
+        record = await _wait_record()
+        assert record.leaving == LEAVING_FOR_BUILD, (
+            f"leaving={record.leaving!r}; readable while the publisher was "
+            f"being installed: {while_held!r}"
+        )
+        assert record.started is True, (
+            f"started={record.started!r}; readable while the publisher was "
+            f"being installed: {while_held!r}"
+        )
+    finally:
+        server.close()
 
 
 @pytest.mark.asyncio

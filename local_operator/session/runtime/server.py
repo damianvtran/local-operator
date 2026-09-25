@@ -2570,7 +2570,31 @@ class RuntimeServer:
             )
             port = self._server.sockets[0].getsockname()[1]
             self._record.control_port = port
-            self._publisher = RecordPublisher(self._record, self._config_root)
+            # INSTALL THE PUBLISHER BEFORE ITS RECORD CAN BE READ, and the
+            # ordering is the guarantee rather than housekeeping: ``_republish``
+            # no-ops while ``self._publisher`` is unset, so a record made
+            # readable before the assignment (which the constructor's own
+            # publish did) leaves a window where a write-through — a drain's
+            # ``note_leaving``, a turn's ``set_record_started`` — lands on the
+            # record object, no-ops against the attribute, and the readable
+            # file keeps its pre-write state until the next 15 s heartbeat.
+            # Thread preemption alone opens it, which is how the CI shards
+            # flaked reading ``leaving == ''`` (test_cold_join_against_drain)
+            # and ``started`` False (test_started_survives_the_republish);
+            # reversing the order gives a reader the invariant the tests
+            # assume — a readable record is one whose write-throughs land.
+            publisher = RecordPublisher(self._record, self._config_root, defer_publish=True)
+            self._publisher = publisher
+            try:
+                publisher.publish()
+            except Exception:
+                # A failed first publish must leave the boot exactly as the
+                # constructor-native failure did — no publisher, so
+                # ``wait_until_published`` still answers False — rather than
+                # an installed publisher standing over a record that does not
+                # exist.
+                self._publisher = None
+                raise
             # BOTH BOOT REGISTRATIONS ARE PERFORMED ON THE SESSION'S LOOP. The
             # append itself is thread-tolerant, but the body of the same call is
             # not: ``subscribe`` folds the session's history, reconciles the
@@ -4230,6 +4254,11 @@ class RuntimeServer:
         failure costs a marker rather than a session. Called on every
         transition rather than left to the 15 s heartbeat because the value of
         these fields is that they are current when somebody looks.
+
+        The no-op below when the publisher is not installed yet cannot lose
+        anything a reader can see — ``_serve`` publishes the record only AFTER
+        installing the publisher, so a record that exists implies this call
+        finds one to write through.
         """
         publisher = getattr(self, "_publisher", None)
         if publisher is None:
