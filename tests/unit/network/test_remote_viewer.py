@@ -266,7 +266,7 @@ async def test_the_desktop_bridge_reads_and_prompts_a_peers_session(
         await asyncio.to_thread(created.stop)
 
 
-def _png_bytes(width: int = 240, height: int = 240) -> bytes:
+def _png_bytes(width: int, height: int) -> bytes:
     """A real, decodable PNG with enough entropy to clear the externalise floor.
 
     Noise rather than a flat colour on purpose: a constant image compresses to a
@@ -274,22 +274,23 @@ def _png_bytes(width: int = 240, height: int = 240) -> bytes:
     where the row keeps the payload inline and NOTHING about the store is
     exercised — a cell that would pass on the defect.
     """
-    import random
     import zlib
 
     def chunk(tag: bytes, data: bytes) -> bytes:
         return len(data).to_bytes(4, "big") + tag + data + zlib.crc32(tag + data).to_bytes(4, "big")
 
-    rng = random.Random(7)
-    rows = [
-        b"\x00"
-        + bytes(
-            value
-            for _ in range(width)
-            for value in (rng.randrange(256), rng.randrange(256), rng.randrange(256))
-        )
-        for _ in range(height)
-    ]
+    def pixel(x: int, y: int) -> tuple[int, int, int]:
+        # Deterministic, structured and COMPRESSIBLE, and both halves are
+        # load-bearing: a noise PNG at 1024 px is megabytes, and the desktop route
+        # refuses the body on its own bounds (``Image.data_b64`` max 1,000,000
+        # chars, ``Prompt``'s 900 KB canonical frame) long before the mesh sees it,
+        # so a sweep built from noise measures nothing but the route's 422. Flat
+        # tiles with a slow ramp give a real screenshot's byte budget: tens of KB
+        # at 1024 px, a few hundred at 2400.
+        tile = ((x // 32) * 6 + (y // 32) * 3) % 256
+        return (tile, (tile + 40) % 256, (tile + 90) % 256)
+
+    rows = [b"\x00" + bytes(v for x in range(width) for v in pixel(x, y)) for y in range(height)]
     return (
         b"\x89PNG\r\n\x1a\n"
         + chunk(
@@ -299,6 +300,75 @@ def _png_bytes(width: int = 240, height: int = 240) -> bytes:
         + chunk(b"IDAT", zlib.compress(b"".join(rows), 6))
         + chunk(b"IEND", b"")
     )
+
+
+def _rotated_jpeg(width: int, height: int) -> bytes:
+    """A JPEG whose EXIF ``Orientation`` says the pixels must be transposed.
+
+    The shape the shipped composer can put on the wire: ``bound-image.ts`` returns
+    an image VERBATIM when it is already within its own edge/byte bound, and a
+    phone or download JPEG within that bound keeps its ``Orientation`` tag — which
+    is exactly the tag the owner's ingest acts on (``imaging._needs_exif_rotation``
+    → a transposing re-encode), so the bytes it journals are not the bytes sent.
+    """
+    from local_operator.imaging import _needs_exif_rotation, pillow_image_module
+
+    image_module = pillow_image_module()
+    assert image_module is not None, "this rig needs Pillow to build the rotated shape"
+    image = image_module.new("RGB", (width, height))
+    pixels = image.load()
+    for y in range(height):
+        for x in range(width):
+            pixels[x, y] = (x % 256, y % 256, (x * y) % 256)
+    import io
+
+    buffer = io.BytesIO()
+    # 6 = "rotate 90 CW", the tag a phone camera writes for a landscape sensor
+    # held upright. Built through Pillow's own ``Exif`` rather than by hand:
+    # a hand-rolled APP1 block is malformed, ``_needs_exif_rotation`` reads it as
+    # "no rotation", and the row silently becomes a CONTROL row — which is what
+    # happened here first and is why the assertion below exists.
+    exif = image_module.Exif()
+    exif[0x0112] = 6
+    image.save(buffer, format="JPEG", quality=90, exif=exif)
+    payload = buffer.getvalue()
+
+    # THE ROW MUST REALLY BE ROTATED, checked with the owner's own predicate: a
+    # sweep row that quietly stops exercising its trigger is worse than no row,
+    # because it reads as coverage.
+    reopened = image_module.open(io.BytesIO(payload))
+    assert _needs_exif_rotation(reopened), "the rotated sweep row is not rotated"
+    return payload
+
+
+#: THE SWEEP, and every row is a shape whose bytes the owner's ingest may rewrite
+#: (``imaging.IMAGE_INGEST_MAX_EDGE`` is 1024 px; ``IMAGE_MAX_BYTES`` is 1 MiB; the
+#: ``not rotated`` conjunct is the third trigger). 1023/1024 are the control rows —
+#: the owner keeps those verbatim — and the three above them are the rows the
+#: round-1 cell missed by using a 240x240 control.
+_IMAGE_SHAPES: tuple[tuple[str, str, int, int, str], ...] = (
+    ("png_1023px", "png", 1023, 640, "image/png"),
+    ("png_1024px", "png", 1024, 640, "image/png"),
+    ("png_1025px", "png", 1025, 640, "image/png"),
+    ("png_2400x1600", "png", 2400, 1600, "image/png"),
+    ("jpeg_900x600_exif_rotated", "jpeg", 900, 600, "image/jpeg"),
+)
+
+
+def _shape_bytes(shape: tuple[str, str, int, int, str]) -> bytes:
+    """The image for one sweep row, built HERE rather than patched in from outside.
+
+    THE TRAP THIS AVOIDS, measured by round 1's reviewer: patching a module-level
+    builder through ``pytest_configure`` lands on a SECOND import of this module
+    and silently no-ops, so three E2E probes "passed" while still sending the stock
+    240x240 image — only the store trace caught it. Nothing here is patched: the
+    row's shape is a parametrize argument and the bytes are built from it inside
+    the test, so a row cannot silently become another row.
+    """
+    _name, kind, width, height, _mime = shape
+    if kind == "jpeg":
+        return _rotated_jpeg(width, height)
+    return _png_bytes(width, height)
 
 
 async def _desktop_route_client(root: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
@@ -315,7 +385,7 @@ async def _desktop_route_client(root: Path, monkeypatch: pytest.MonkeyPatch) -> 
     from local_operator.server.routes import desktop_sessions
     from local_operator.server.utils.desktop_sessions import DesktopSessions
 
-    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "mesh-image-token")
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "[redacted]")
     app = FastAPI()
     app.state.config_manager = ConfigManager(root)
     app.state.desktop_sessions = DesktopSessions(root)
@@ -323,13 +393,34 @@ async def _desktop_route_client(root: Path, monkeypatch: pytest.MonkeyPatch) -> 
     return app, AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://localhost",
-        headers={"Authorization": "Bearer mesh-image-token"},
+        headers={"Authorization": "Bearer [redacted]"},
     )
 
 
+def _journal_digests(created: _NamedRemoteCreate) -> list[str]:
+    """Every attachment digest the OWNER's journal rows carry, in order."""
+    import json
+
+    digests: list[str] = []
+    for entry in created.owner.transcript_entries():
+        payload = entry.get("payload") or {}
+        if payload.get("role") != "user":
+            continue
+        for block in payload.get("content") or ():
+            if isinstance(block, dict) and block.get("attachment"):
+                digests.append(str(block["attachment"]))
+        if "attachment" in json.dumps(payload) and not digests:
+            digests.append("")
+    return digests
+
+
 @pytest.mark.asyncio
-async def test_an_image_a_desktop_sends_to_a_peer_stays_readable_here(
-    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize("shape", _IMAGE_SHAPES, ids=[row[0] for row in _IMAGE_SHAPES])
+async def test_an_image_a_desktop_sends_to_a_peer_resolves_whatever_its_shape(
+    shape: tuple[str, str, int, int, str],
+    peer_pair: Devices,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """A peer-bound prompt's image must resolve on the device that SENT it.
 
@@ -340,10 +431,19 @@ async def test_an_image_a_desktop_sends_to_a_peer_stays_readable_here(
     runtime is another process with its own config dir, so it externalises the
     bytes into ITS store — the desktop held nothing, answered ``409
     attachment_on_peer`` over the picture the user had just sent, and the prompt
-    itself reported ``admitted``. So the desktop mirrors what it sends
-    (``DesktopSessionBridge.stage_peer_images``), and the digest being the
-    CONTENT key is what makes a local copy resolvable against a row written on
-    another machine.
+    itself reported ``admitted``.
+
+    AND THE HALF ROUND 1 FOUND: the owner does not keep what it is given. Its
+    ingest (``image_blocks`` → ``bound_image_for_model``) resizes anything over
+    ``IMAGE_INGEST_MAX_EDGE`` (1024 px), re-encodes anything over
+    ``IMAGE_MAX_BYTES``, and bakes an EXIF rotation into the pixels — so a mirror
+    of the RAW wire bytes names a blob the owner's row never references, and the
+    read still 409s. That is why the sweep carries three rows the round-1 cell
+    (a 240x240 control) could not reach, and why the fix bounds each image with
+    the owner's OWN ingest and sends exactly what it staged: the owner then
+    returns those bytes unchanged, so the two digests are the same name by
+    construction rather than by the coincidence that the shipped composer happens
+    to bound at the same edge.
 
     THE AMBIENT CONFIG DIR MOVES FOR THE ADMISSION, and that is the cell's own
     rigour rather than decoration: an in-process rig shares one
@@ -361,14 +461,13 @@ async def test_an_image_a_desktop_sends_to_a_peer_stays_readable_here(
         _create_named_session_on_a_real_peer,
         peer_pair,
         monkeypatch,
-        name="desktop-image",
+        name="desktop-image-" + shape[0],
         prompt="warm up",
     )
     try:
         await asyncio.to_thread(clear_cache)
         monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(created.server_a.root))
-        raw = _png_bytes()
-        digest = hashlib.sha256(raw).hexdigest()[:32]
+        raw = _shape_bytes(shape)
         app, client = await _desktop_route_client(created.server_a.root, monkeypatch)
         async with client:
             # BIND BEFORE THE ENV MOVES, so the dial this device makes resolves
@@ -385,7 +484,7 @@ async def test_an_image_a_desktop_sends_to_a_peer_stays_readable_here(
                     "images": [
                         {
                             "data_b64": base64.b64encode(raw).decode("ascii"),
-                            "mime_type": "image/png",
+                            "mime_type": shape[4],
                         }
                     ],
                 },
@@ -393,32 +492,138 @@ async def test_an_image_a_desktop_sends_to_a_peer_stays_readable_here(
             monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(created.server_a.root))
             assert response.status_code == 200, response.text
 
-            # THE OWNER GOT THE BYTES: its row references the digest of what was
-            # sent, which is the only way the two ends can name the same image.
+            # WHAT THE OWNER ACTUALLY JOURNALLED — the digest the desktop will
+            # repaint from, which is the ONLY name the read has to resolve.
             await asyncio.to_thread(created.owner.wait_for_turn)
-            rows = [
-                entry.get("payload") or {}
-                for entry in created.owner.transcript_entries()
-                if (entry.get("payload") or {}).get("role") == "user"
-            ]
-            assert digest in json.dumps(rows), rows
+            journalled = _journal_digests(created)
+            assert journalled, created.owner.transcript_entries()
 
             # THE PEER'S OWN COPY GOES WHERE PRODUCTION PUTS IT, so what remains
             # here is what this device really holds.
             peer_own = created.server_b.root / "attachments"
             peer_own.mkdir(parents=True, exist_ok=True)
             for suffix in (".bin", ".json"):
-                source = peer_store / "attachments" / f"{digest}{suffix}"
-                assert source.exists(), sorted(p.name for p in source.parent.glob("*"))
+                source = peer_store / "attachments" / f"{journalled[-1]}{suffix}"
+                assert source.exists(), (
+                    f"{shape[0]}: the peer externalised nothing for {journalled[-1]} "
+                    f"({sorted(p.name for p in (peer_store / 'attachments').glob('*'))})"
+                )
                 shutil.move(str(source), str(peer_own / source.name))
 
             read = await client.get(
-                f"/v1/desktop/sessions/{created.session_id}/attachments/{digest}"
+                f"/v1/desktop/sessions/{created.session_id}/attachments/{journalled[-1]}"
+            )
+            staged = created.server_a.root / "attachments" / f"{journalled[-1]}.bin"
+            print(
+                f"SWEEP {shape[0]}: posted={hashlib.sha256(raw).hexdigest()[:12]} "
+                f"journalled={journalled[-1][:12]} staged={staged.exists()} "
+                f"GET={read.status_code} bytes={len(read.content)}"
             )
             assert read.status_code == 200, (
-                "the desktop cannot show the image it just sent to its own peer "
-                f"session ({read.status_code}): {read.text[:200]}"
+                f"{shape[0]}: the desktop cannot show the image it just sent to its own "
+                f"peer session ({read.status_code}): {read.text[:200]}"
             )
-            assert read.content == raw, "the bytes served are not the bytes sent"
+            # BYTE-IDENTICAL TO THE BLOB THE OWNER'S ROW NAMES, which is what the
+            # local path serves too: a local session's runtime bounds the image
+            # with this same ingest, so the conversation shows the bounded bytes.
+            assert (
+                read.content == staged.read_bytes()
+            ), f"{shape[0]}: the bytes served are not the bytes this device staged"
+            # NOTHING UNREFERENCED IS LEFT BEHIND, which is the invariant stated as
+            # a file listing: the only blob this device holds is the name the
+            # owner's own row carries. The round-1 defect was exactly the other
+            # shape — a blob under a name no row referenced, and a row naming a
+            # blob nobody held.
+            held = sorted(
+                path.name for path in (created.server_a.root / "attachments").glob("*.bin")
+            )
+            assert held == [f"{journalled[-1]}.bin"], (
+                f"{shape[0]}: this device holds {held}, and the owner's row names "
+                f"{journalled[-1]}"
+            )
+    finally:
+        await asyncio.to_thread(created.stop)
+
+
+@pytest.mark.asyncio
+async def test_a_peer_bound_command_carries_its_image_to_the_owner(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """M3, CONFIRMED: the /command door can put a composer image in the owner's row.
+
+    Round 1's M3 asked whether ``route_shared_slash`` can admit an image at all —
+    the body claimed "both admission doors" while this third call carried composer
+    images to the owner and staged nothing. It can: the route decodes the body
+    with ``decode_images`` (the owner's own ingest), sends those blocks, and either
+    the owner's runtime completes the receipt for itself (``serving.slash_images``
+    admits them through the normal path) or this host re-admits the request with
+    the same bounded bytes at ``admit_receipt_request``. Measured here: the owner's
+    journal row carries a digest, and the sender can read it back.
+
+    So the door is COVERED rather than declared unreachable: the route stages the
+    payloads it sends (``stage_ingested_images``), before the call, because the
+    owner can journal that row while this request is still in flight.
+    """
+    import base64
+    import shutil
+
+    created = await asyncio.to_thread(
+        _create_named_session_on_a_real_peer,
+        peer_pair,
+        monkeypatch,
+        name="desktop-command-image",
+        prompt="warm up",
+    )
+    try:
+        await asyncio.to_thread(clear_cache)
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(created.server_a.root))
+        raw = _shape_bytes(("png_1025px", "png", 1025, 640, "image/png"))
+        app, client = await _desktop_route_client(created.server_a.root, monkeypatch)
+        async with client:
+            async with app.state.desktop_sessions.session(created.session_id, read=True) as b:
+                await b.snapshot()
+            peer_store = tmp_path / "peer-env"
+            monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(peer_store))
+            response = await client.post(
+                f"/v1/desktop/sessions/{created.session_id}/commands",
+                json={
+                    "request_id": str(uuid.uuid4()),
+                    "command": "goal",
+                    "args": "Preserve one identity",
+                    "images": [
+                        {
+                            "data_b64": base64.b64encode(raw).decode("ascii"),
+                            "mime_type": "image/png",
+                        }
+                    ],
+                },
+            )
+            monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(created.server_a.root))
+            assert response.status_code == 200, response.text
+            await asyncio.to_thread(created.owner.wait_for_turn)
+            journalled = _journal_digests(created)
+            assert journalled, (
+                "the /command door's image never reached an owner row, so this door "
+                f"needs no staging at all: {created.owner.transcript_entries()}"
+            )
+            peer_own = created.server_b.root / "attachments"
+            peer_own.mkdir(parents=True, exist_ok=True)
+            for suffix in (".bin", ".json"):
+                source = peer_store / "attachments" / f"{journalled[-1]}{suffix}"
+                assert source.exists(), sorted(
+                    p.name for p in (peer_store / "attachments").glob("*")
+                )
+                shutil.move(str(source), str(peer_own / source.name))
+            read = await client.get(
+                f"/v1/desktop/sessions/{created.session_id}/attachments/{journalled[-1]}"
+            )
+            print(
+                f"COMMAND DOOR: journalled={journalled[-1][:12]} GET={read.status_code} "
+                f"bytes={len(read.content)}"
+            )
+            assert read.status_code == 200, (
+                "the /command door's image is unreadable on the device that sent it: "
+                f"{read.status_code}: {read.text[:200]}"
+            )
     finally:
         await asyncio.to_thread(created.stop)

@@ -220,15 +220,37 @@ class FakeBridge:
         #: drop the mirror exists to prevent, and the assertion a cell needs is
         #: precisely that the route asked.
         self.staged: list[list[dict[str, str]]] = []
+        #: Payloads the /command door asked this bridge to stage, per call.
+        self.ingested: list[list[dict[str, str]]] = []
 
     async def refresh_watch(self) -> None:
         self.refreshes += 1
 
-    async def stage_peer_images(self, images: list[dict[str, str]]) -> None:
-        """The new door call, mirrored: nothing for a local conversation."""
+    async def prepare_peer_images(self, images: list[dict[str, str]]) -> list[dict[str, str]]:
+        """The door's call, mirrored: identity for a local conversation.
+
+        RECORDED as well as answered, because the assertion a cell needs is that
+        the route ASKED — a double that swallowed the call would hide the drop the
+        transform exists to prevent. The return value is the input, which is what
+        the real method does for a local session: bounding is the owner's own
+        ingest, and this device's runtime runs it for itself.
+        """
         if self.remote_row is None or not images:
-            return
+            return images
         self.staged.append([dict(image) for image in images])
+        return images
+
+    async def stage_ingested_images(self, payloads: list[dict[str, str]]) -> None:
+        """The /command door's call, mirrored — the same gate, the same record.
+
+        This door does not hand over a composer body: it sends what
+        ``decode_images`` (the owner's own ingest) made of it, so only the write
+        is owed. Recorded separately from the admission doors' ``staged``, because
+        a cell must be able to tell WHICH door staged without reading the payload.
+        """
+        if self.remote_row is None or not payloads:
+            return
+        self.ingested.append([dict(payload) for payload in payloads])
 
     async def acquire(self) -> FakeRemote:
         self.users += 1
@@ -1155,27 +1177,55 @@ def test_the_goal_flags_do_not_join_the_action_receipt_vocabulary() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _tiny_png(width: int = 32, height: int = 32) -> bytes:
+    """A real, decodable PNG — this door sends what the owner's ingest makes of it."""
+    import zlib
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return len(data).to_bytes(4, "big") + tag + data + zlib.crc32(tag + data).to_bytes(4, "big")
+
+    rows = [b"\x00" + bytes([(x * 8) % 256, 40, 90] * 1 * width) for x in range(width)] * height
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(
+            b"IHDR",
+            width.to_bytes(4, "big") + height.to_bytes(4, "big") + b"\x08\x02\x00\x00\x00",
+        )
+        + chunk(b"IDAT", zlib.compress(b"".join(rows), 6))
+        + chunk(b"IEND", b"")
+    )
+
+
 @pytest.mark.asyncio
-async def test_a_peer_bound_command_asks_the_bridge_to_stage_its_images(desktop) -> None:
-    """The second admission door stages too, and only for a PEER's conversation.
+async def test_a_peer_bound_command_stages_the_images_this_door_sends(desktop) -> None:
+    """The /command door stages, and it stages what it SENDS — the owner's own ingest.
 
-    ``admit_receipt_request`` is the path every action-carrying receipt takes
-    (``/goal``, ``/agent``, ``/team``, ``/loop``) and it can carry the composer's
-    images. Those images go to the OWNER, whose runtime externalises them into
-    ITS store — so unless this device mirrors them, the row the owner journals
-    references bytes this device cannot read, which is the 409 the transport cell
-    in ``tests/unit/network/test_remote_viewer.py`` reproduces over real relays.
+    WHY THIS DOOR IS DIFFERENT. ``admit_receipt_request`` hands the owner a
+    composer body, so the transform belongs there (``prepare_peer_images``). This
+    one does not: it decodes the body with ``decode_images`` — which IS the
+    owner's ingest, ``session.runtime.server.image_blocks`` — and sends THOSE
+    blocks, whether the owner's runtime completes the receipt for itself
+    (``serving.slash_images``: "the owner completes them through normal admission,
+    including images") or this host re-admits the request below. Either way the
+    row the owner journals names the digest of what crossed, so the file owed here
+    is the write, and it is owed for the payloads that were actually sent.
 
-    BOTH DIRECTIONS ARE ASSERTED, because the gate is the fix's other half: a
-    LOCAL conversation must stage nothing (its own runtime writes that very
-    store), and a call that happened for one would be a second write of the same
-    bytes.
+    A REAL IMAGE, deliberately: with junk in the body ``decode_images`` answers no
+    block at all, so a cell built on ``"aGk="`` would assert the drop rather than
+    the staging — which is exactly how the round-1 version of this cell went wrong
+    once the door changed. Both directions are asserted, because the gate is the
+    fix's other half: a LOCAL conversation must stage nothing on either method.
     """
+    import base64
+
     client, _remote, bridge = desktop
-    images = [{"data_b64": "aGk=", "mime_type": "image/png"}]
+    raw = _tiny_png()
+    encoded = base64.b64encode(raw).decode("ascii")
+    images = [{"data_b64": encoded, "mime_type": "image/png"}]
 
     local = await _goal(client, "Preserve one identity", images=images)
     assert local.status_code == 200, local.text
+    assert bridge.ingested == [], "a LOCAL conversation staged an image it already owns"
     assert bridge.staged == [], "a LOCAL conversation staged an image it already owns"
 
     bridge.remote_row = object()
@@ -1186,4 +1236,8 @@ async def test_a_peer_bound_command_asks_the_bridge_to_stage_its_images(desktop)
         client, "Preserve the other identity", request_id=str(uuid.uuid4()), images=images
     )
     assert peer.status_code == 200, peer.text
+    # THE SLASH DOOR staged the blocks it sent — the same bytes, since a 32x32 PNG
+    # is already inside every bound (the owner's ingest returns it verbatim).
+    assert bridge.ingested == [[images[0]]], bridge.ingested
+    # AND THE ADMISSION DOOR staged the body it re-admits for the receipt's action.
     assert bridge.staged == [images], bridge.staged

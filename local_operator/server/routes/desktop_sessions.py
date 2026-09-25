@@ -485,13 +485,13 @@ async def admit_receipt_request(
     queued = bool(getattr(remote, "is_streaming", False))
     await bridge.acquire()
     # THE BYTES STAY HERE, WHICH IS WHAT MAKES THE ROW THE OWNER WRITES RESOLVABLE
-    # ON THIS DEVICE (§§2.2: what a local session gets). Staged BEFORE the
-    # dispatch, because the owner's turn may journal the row the instant it
-    # admits, and the read that follows it is not ordered against this call.
-    # Only a PEER's conversation pays anything at all (``stage_peer_images``
-    # returns at once for a local one), and it is synchronous file work either
-    # way, so it cannot park the bound below.
-    await bridge.stage_peer_images(images)
+    # ON THIS DEVICE (§§2.2: what a local session gets) — and the list this
+    # returns is the one that must be admitted, because the owner journals the
+    # digest of what it RECEIVES. Staged BEFORE the dispatch, because the owner's
+    # turn may journal the row the instant it admits and the read that follows is
+    # not ordered against this call. A LOCAL conversation comes back untouched and
+    # pays nothing (``prepare_peer_images`` returns the list it was given).
+    images = await bridge.prepare_peer_images(images)
     # Non-``None`` only once the dispatch exists: before that the reference is
     # ours alone, with nothing to hand anywhere.
     task: asyncio.Task[tuple[str, bool]] | None = None
@@ -2373,13 +2373,16 @@ async def prompt(session_id: str, body: Prompt, request: Request):
                 async def admit():
                     nonlocal admitted
                     assert bridge.remote is not None
-                    images = [image.model_dump() for image in body.images]
                     # A PEER'S CONVERSATION KEEPS ITS PICTURES VISIBLE HERE: the
                     # owner externalises the payload into ITS store, so the row
-                    # carries a digest this device could not resolve (§§2.2, and
-                    # ``stage_peer_images`` states the invariant). Local sessions
-                    # are untouched — their own runtime writes this very store.
-                    await bridge.stage_peer_images(images)
+                    # carries a digest this device could not resolve (§§2.2).
+                    # ``prepare_peer_images`` bounds each image exactly as the
+                    # owner will, stages THOSE bytes, and returns the list to
+                    # admit — the owner journals what it receives, so sending
+                    # anything else is the defect. Local sessions are untouched.
+                    images = await bridge.prepare_peer_images(
+                        [image.model_dump() for image in body.images]
+                    )
                     detail, duplicate = await bridge.remote.admit_prompt(
                         body.text,
                         command_id=body.request_id,
@@ -2540,10 +2543,23 @@ async def command(session_id: str, body: Command, request: Request):
             assert bridge.remote is not None
             await bridge.remote.bind_runtime()
             await bridge.refresh_watch()
+            # THE THIRD DOOR, AND THE ONE THAT ALREADY BOUNDS ON THIS SIDE:
+            # ``decode_images`` IS the owner's ingest (``image_blocks``), so the
+            # blocks sent here are the bytes the owner journals — whether the
+            # RUNTIME completes the command's receipt for itself
+            # (``serving.slash_images``: "the owner completes them through normal
+            # admission, including images") or this host re-admits it below with
+            # the same bounded bytes. Only the write is owed, and it is owed
+            # before the call: the owner can journal the row while this request
+            # is still in flight.
+            slash_images = await decode_images(body.images)
+            await bridge.stage_ingested_images(
+                [{"data_b64": block.data, "mime_type": block.mime_type} for block in slash_images]
+            )
             outcome = await bridge.remote.route_shared_slash(
                 spec.name,
                 body.args,
-                images=await decode_images(body.images),
+                images=slash_images,
             )
             if outcome is None or outcome.get("kind") == "noop":
                 return {"command": spec.name, "result": native_action(spec, session_id, body.args)}
