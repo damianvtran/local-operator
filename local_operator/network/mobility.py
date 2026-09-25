@@ -1152,6 +1152,16 @@ def settle_promoted_handoff(root: Path, session_id: str) -> bool:
     The phase is required to be ``handing-off`` as well, so a ``prepared`` entry (the state
     a destination holds while its copy is still being made) is never touched.
 
+    AND THE BYTES STILL STAGED FOR THIS ID SAY IT HAS NOT ARRIVED (review round 4). A
+    session directory plus a transcript is NOT sufficient evidence: ``session_factory``'s
+    opener calls ``recover_stale_handoff`` and then the handoff guard, so a recovery that
+    settled the entry on that evidence alone disarmed the refusal it runs immediately
+    before — a destination entry whose verified copy is still in ``network/staging``
+    (the owner may already have deleted its own bytes, so that copy is the only one left)
+    was cleared instead of refused. ``_promote`` is ONE ``os.replace``, so a promote that
+    landed consumed this device's staging directory; a staging directory that is still
+    here is a handoff that has not finished, whatever else is on disk.
+
     ``ready.json`` goes with it: the marker is the move's own bookkeeping, and a promote
     that died before deleting it would otherwise leave it inside a conversation the user
     opens (``_reconcile_destination`` removes it for the same reason).
@@ -1168,6 +1178,14 @@ def settle_promoted_handoff(root: Path, session_id: str) -> bool:
         return False
     target = Path(root) / "sessions" / session_id
     if not (target / "transcript.jsonl").is_file():
+        return False
+    from local_operator.network import sync as sync_mod
+
+    # STAGED BYTES OUTRANK A PRESENT SESSION DIRECTORY (see the docstring's last
+    # paragraph). ``staging_dir``/``NETWORK_DIRNAME`` are the sync plane's own names, so
+    # they are read from it rather than re-spelled here — a second spelling of the store
+    # layout is how this check would drift away from the thing it is checking.
+    if sync_mod.staging_dir(Path(root), session_id).exists():
         return False
     (target / "ready.json").unlink(missing_ok=True)
     clear_handoff_entry(root, session_id)
