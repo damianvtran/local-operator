@@ -1,10 +1,23 @@
 # This workflow will upload a Python Package to PyPI when a new tag is pushed to main
+#
+# IT ALSO HAS A MANUAL TRIGGER, and it exists for exactly one job: `keyagent-macos`.
+# That job is the only place the signed macOS key agent is ever built, and until now
+# its first run was the release itself — so a broken signing path turned a release
+# into the test, which is what happened to v0.62.39 (`keyagent-macos` died, so
+# `pypi-publish` was SKIPPED and PyPI has no 0.62.39 at all). A dispatched run builds
+# and signs the bundle against the current ref and exercises every check the release
+# path does; it CANNOT publish, because `pypi-publish` is gated on the release event
+# and not merely on the jobs it needs.
 
 name: Upload Python Package
 
 on:
   release:
     types: [published]
+  # Manual, rehearsal-only: `gh workflow run publish.yml --ref <ref>`. It builds the
+  # wheel and the signed key agent exactly as a release does and stops there. It is
+  # the trigger that makes this path testable WITHOUT cutting a tag.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -29,6 +42,10 @@ jobs:
   # ---------------------------------------------------------------------------
   extension-release:
     runs-on: ubuntu-latest
+    # RELEASE ONLY. Everything in this job is derived from the release event's
+    # `github.event.release.tag_name` and it attaches an asset to that Release, so a
+    # manual dispatch — which has no release — must not run it at all.
+    if: ${{ github.event_name == 'release' }}
     # Bounded so a wedged step cannot hold one of the account's 20 concurrency
     # slots for GitHub's 360-minute default. This is the RELEASE path, so a
     # squatting job here blocks publishing, not just a branch's CI.
@@ -134,7 +151,9 @@ jobs:
       - name: Get release tag
         id: tag-check
         run: |
-          # Get the release tag from the GitHub event
+          # Get the release tag from the GitHub event. A manual dispatch has no
+          # release, so this prints empty and the build runs from the dispatched ref;
+          # nothing below consumes the tag, it is reported for the log.
           CURRENT_TAG=${{ github.event.release.tag_name }}
           echo "Release tag detected: $CURRENT_TAG"
           echo "skip_build=false" >> $GITHUB_OUTPUT
@@ -238,18 +257,101 @@ jobs:
           P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
         run: |
           set -euo pipefail
-          # The operator's login keychain is never touched: no `security
-          # default-keychain`, no import into `login.keychain-db`, and the whole
-          # throwaway keychain is deleted in the always() step below.
+          # The operator's login keychain is never touched: no import into
+          # `login.keychain-db` and no `security default-keychain`, and the whole
+          # throwaway keychain is deleted in the always() step below. The ONE thing
+          # that is touched outside $RUNNER_TEMP is the per-user keychain SEARCH
+          # LIST, which this step appends to and the cleanup step restores — see
+          # why it must be appended.
           KEYCHAIN="$RUNNER_TEMP/keyagent.keychain-db"
           KPW="$(uuidgen)"   # random, throwaway, and never a stored secret
-          {
-            echo "KEYCHAIN=$KEYCHAIN"
-            echo "KEYCHAIN_PW=$KPW"
-          } >> "$GITHUB_ENV"
+          # Only KEYCHAIN is exported, for the later steps that use it. The keychain
+          # password stays a shell variable: nothing outside this step reads it, and
+          # $GITHUB_ENV values are echoed verbatim into the job's public log, so
+          # exporting it printed a live (if throwaway) credential for no purpose.
+          echo "KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
           security create-keychain -p "$KPW" "$KEYCHAIN"
           security set-keychain-settings -lut 3600 "$KEYCHAIN"
           security unlock-keychain -p "$KPW" "$KEYCHAIN"
+
+          # THE KEYCHAIN MUST BE IN THE USER SEARCH LIST, AND `codesign --keychain`
+          # DOES NOT SUBSTITUTE FOR THAT. This is the v0.62.39 release failure:
+          #
+          #   error: The specified item could not be found in the keychain.
+          #
+          # raised by the `codesign` call in assemble_keyagent_bundle.sh AFTER
+          # `security find-identity -v -p codesigning "$KEYCHAIN"` had reported the
+          # identity VALID **in that run's own log** and the step above had exited 0.
+          # That scoped `-v` form is not a reliable signal in general — it reports 0
+          # in the same failing state on another host (last row group of the
+          # measurement below) — which is why the help text in the assembly script
+          # names a check that does discriminate instead. `--keychain FILE`
+          # narrows only the IDENTITY (certificate) lookup to that file; the
+          # PRIVATE KEY is resolved through the user keychain SEARCH LIST, so a
+          # throwaway keychain that holds the key but is not listed there cannot be
+          # signed with. On a runner nothing else holds this identity, so it fails
+          # there and not on a developer's Mac whose login keychain happens to
+          # carry the same identity — which is why this path was never green
+          # anywhere but looked fine locally.
+          #
+          # MEASURED, 2026-09-25, on a host where the identity exists ONLY in the
+          # throwaway keychain, same keychain, same identity SHA, all with the p12
+          # imported, the partition list set and the G2 intermediate imported:
+          #
+          #   keychain NOT in the user search list:
+          #     find-identity -p codesigning "$KC"     -> 1 (it IS in the keychain)
+          #     find-identity -v -p codesigning "$KC"  -> 0 here; 1 in the v0.62.39
+          #                                               release's own log
+          #     find-identity -p codesigning           -> 0 (the list can't reach it)
+          #     codesign --keychain "$KC"              -> errSecInternalComponent
+          #     codesign (no --keychain)               -> "<sha>: no identity found"
+          #   keychain APPENDED to the user search list:
+          #     all four forms report the identity; both argvs sign and verify
+          #   keychain NOT in the list, set as the DEFAULT one  -> still fails
+          #   keychain NOT in the list, Apple ROOT CA imported -> still fails
+          #
+          # THE `-v` ROW IS DELIBERATELY WRITTEN AS TWO HOSTS DISAGREEING, because
+          # they do: `-v` lists only identities whose certificate chain VALIDATES, so
+          # it is a validity report and not a presence check, and whether the chain
+          # validates here depends on what else the search list can see. The v0.62.39
+          # release held exactly the state this table describes — throwaway keychain
+          # absent from the list — and its own `find-identity -v -p codesigning
+          # "$KEYCHAIN"` printed ONE valid identity (job 108212042305), which is why
+          # the job's gate looked fine right up to the failure. So neither reading of
+          # `-v` generalises, and the presence check the help text names uses the
+          # non-`-v` form for that reason.
+          #
+          # THE STRINGS ARE NOT THE RELEASE'S and this comment does not claim they
+          # are: the rig produces errSecInternalComponent, v0.62.39 produced
+          # errSecItemNotFound ("The specified item could not be found in the
+          # keychain"). One condition, two spellings across two macOS versions. What
+          # establishes the cause is the RUNNER ladder, not that string — 36178040698
+          # (this append, with `--keychain` still passed) flipped the failing job green
+          # on macOS 15, and 36179085672 showed the later removal of `--keychain`
+          # changed nothing there. The two ruled-out rows above are measured on this
+          # host, not assumed, and they are the two a reader reaches for first.
+          #
+          # The previous list is saved and restored by the always() cleanup: the
+          # keychain is deleted there, and a search-list entry naming a deleted
+          # keychain breaks every later `security` invocation in the job.
+          PREV_SEARCH="$(security list-keychains -d user | tr -d '"' | tr '\n' ' ')"
+          echo "KEYCHAIN_SEARCH_PREV=$PREV_SEARCH" >> "$GITHUB_ENV"
+          # THE EXPANSION IS DELIBERATELY UNQUOTED: the saved value is a LIST of
+          # keychain paths, and quoting it would pass the whole list as one path. The
+          # round trip is faithful for paths without whitespace or double quotes, which
+          # is the shape a GitHub macOS runner has (a single `login.keychain-db` under
+          # `/Users/runner`); stated rather than left implicit.
+          #
+          # THE `shellcheck disable` BELOW IS NOT INERT, which is why it is kept: the
+          # repo wires no shellcheck or actionlint gate, but actionlint (brew, run by
+          # hand) does honour the directive — MEASURED 2026-09-25, with both directives
+          # in place it reports the one pre-existing SC2086 in `Get release tag`, and
+          # without them it reports three, two of which are these deliberate splits
+          # (reviewer round 1, R1-6; disposition on the PR).
+          # shellcheck disable=SC2086  # deliberate: the saved list is a list of paths
+          security list-keychains -d user -s "$KEYCHAIN" $PREV_SEARCH
+          echo "keychain search list now:"
+          security list-keychains -d user
 
           # 0600 under $RUNNER_TEMP: the p12 is one of the two things that must
           # never become an artefact (the keychain is the other).
@@ -258,11 +360,19 @@ jobs:
           # `security import -P` puts the password in argv, where `ps` on an
           # ephemeral runner can see it. Recorded as a residual rather than
           # papered over: there is no stdin form for this flag.
-          security import "$RUNNER_TEMP/identity.p12" -k "$KEYCHAIN" -P "$P12_PASSWORD" \
-            -T /usr/bin/codesign -T /usr/bin/security >/dev/null
-          # Without the partition list the identity imports and `codesign` still
-          # cannot use it.
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KPW" "$KEYCHAIN" >/dev/null 2>&1
+          if ! security import "$RUNNER_TEMP/identity.p12" -k "$KEYCHAIN" -P "$P12_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security; then
+            echo "::error::security import of the identity p12 failed — the secret store's MACOS_SIGNING_P12_PASSWORD may not match the p12 in MACOS_SIGNING_P12_BASE64"
+            exit 1
+          fi
+          # The partition list is what lets `codesign` read the key WITHOUT a UI
+          # prompt. Its output used to be discarded (`>/dev/null 2>&1`) and its
+          # status never named, so a failure here was invisible in the log — the
+          # output and the exit status are both reported now.
+          if ! security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KPW" "$KEYCHAIN"; then
+            echo "::error::security set-key-partition-list failed — without it codesign cannot read the identity's key even though the identity imports"
+            exit 1
+          fi
 
           # The G2 intermediate, fetched in-job (it is public). Without it the
           # identity imports but is not VALID: `find-identity -v` reports none and
@@ -273,8 +383,12 @@ jobs:
             -o "$RUNNER_TEMP/DeveloperIDG2CA.cer"
           echo "f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a  $RUNNER_TEMP/DeveloperIDG2CA.cer" \
             | shasum -a 256 -c -
-          security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -k "$KEYCHAIN" -T /usr/bin/codesign >/dev/null 2>&1
+          if ! security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -k "$KEYCHAIN" -T /usr/bin/codesign; then
+            echo "::error::security import of the Developer ID G2 intermediate failed — without it the identity is not VALID"
+            exit 1
+          fi
 
+          security find-identity -v -p codesigning "$KEYCHAIN"
           IDENTITY_SHA="$(security find-identity -v -p codesigning "$KEYCHAIN" | awk 'NR==1 {print $2}')"
           if [ -z "$IDENTITY_SHA" ]; then
             echo "::error::no valid code-signing identity in the throwaway keychain"
@@ -285,7 +399,6 @@ jobs:
           # whose app id the assembly script then checks against the profile and
           # the entitlements.
           echo "IDENTITY_SHA=$IDENTITY_SHA" >> "$GITHUB_ENV"
-          security find-identity -v -p codesigning "$KEYCHAIN"
 
       # THE SIGNATURE MUST CARRY A SECURE TIMESTAMP, AND THE SCRIPT READS IT BACK.
       # Decision, so it is not re-litigated: the entitlement is checked against the
@@ -320,10 +433,18 @@ jobs:
           printf '%s' "$PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/keyagent.provisionprofile"
           # No --timestamp flag on purpose: the default is `secure`, and step 5c of the
           # script fails this job if the signature comes back without a timestamp.
+          #
+          # NO --keychain, ON PURPOSE, and this is a measurement rather than a
+          # preference. `--keychain FILE` narrows only the IDENTITY lookup, so it was
+          # never what made the imported key usable (the SEARCH LIST is — see the
+          # import step), and the identity is already pinned by SHA in --identity, so
+          # passing it added nothing but the implication that it was load-bearing.
+          # Measured 2026-09-25 with the identity present only in the throwaway
+          # keychain and that keychain in the search list: signing and verification
+          # succeed identically with and without the flag.
           packaging/macos/assemble_keyagent_bundle.sh \
             --out "$RUNNER_TEMP/lop-keyagent.app" \
             --identity "$IDENTITY_SHA" \
-            --keychain "$KEYCHAIN" \
             --profile "$RUNNER_TEMP/keyagent.provisionprofile"
 
       - name: The helper's own ownership selftest
@@ -412,6 +533,37 @@ jobs:
           # ALWAYS, including on failure: the keychain holds the private key of the
           # signing identity and must not survive the job, and neither must the
           # p12 or the decoded profile.
+          #
+          # THE SEARCH LIST IS RESTORED FIRST, while the keychain still exists: the
+          # runner's `security list-keychains` preference outlives the keychain file,
+          # so deleting first would leave the list naming a keychain that is gone. The
+          # THE GUARD CANNOT TELL "NOT SET" FROM "EMPTY", and it does not try to:
+          # `[ -n "${KEYCHAIN_SEARCH_PREV:-}" ]` is false for an unset variable AND for
+          # a set-but-empty one, so the empty case takes the else branch — where the
+          # message ("the import step did not export one") is then inaccurate. THAT IS
+          # DELIBERATE, and the alternative was measured and declined rather than
+          # overlooked: gating on `${KEYCHAIN_SEARCH_PREV+set}` would run
+          # `security list-keychains -d user -s` with no paths in exactly that case,
+          # EMPTYING the user's search list — a worse failure than leaving a stale
+          # entry behind, and the one round 2 flagged. Latent on this runner shape:
+          # the append above always saves at least `login.keychain-db` (the dispatch
+          # log shows it as the sole previous entry) and this cleanup is the job's
+          # last step, on a VM nothing else shares.
+          #
+          # THE EFFECT IS ECHOED, because it is the one new side effect no other part
+          # of the log shows: `$GITHUB_ENV`'s echo reports the SAVED value, which says
+          # nothing about whether the restore ran or worked, so before this a wrong or
+          # skipped restore was indistinguishable from a correct one on the runner
+          # (reviewer round 1, R1-4). `|| true` stays: failing a release job during
+          # cleanup, after a successful sign, would be worse than the noise.
+          if [ -n "${KEYCHAIN_SEARCH_PREV:-}" ]; then
+            # shellcheck disable=SC2086  # deliberate: a list of paths, as at the append
+            security list-keychains -d user -s $KEYCHAIN_SEARCH_PREV || true
+            echo "keychain search list after the restore:"
+            security list-keychains -d user || true
+          else
+            echo "no saved search list to restore (the import step did not export one)"
+          fi
           security delete-keychain "$KEYCHAIN" >/dev/null 2>&1 || true
           rm -f "$RUNNER_TEMP/identity.p12" \
                 "$RUNNER_TEMP/keyagent.provisionprofile" \
@@ -429,7 +581,14 @@ jobs:
       # the design forbids — a fork with its own identity and profile substitutes
       # them (see `packaging/macos/keyagent.entitlements`) rather than skipping.
       - keyagent-macos
-    if: ${{ needs.release-build.result == 'success' && needs.release-build.outputs.skip_build == 'false' && needs.keyagent-macos.result == 'success' }}
+    # NO MANUAL DISPATCH REACHES PYPI, and this is the gate that keeps the manual
+    # trigger safe. Note the shape: every OTHER condition here is satisfied by a
+    # dispatched run — release-build succeeds, keyagent-macos succeeds, which is the
+    # entire point of the dispatch — so gating only on `needs` would publish a real
+    # release from a rehearsal. `github.event_name == 'release'` is what makes the
+    # dispatch rehearsal-only, and it is checked on the JOB so a dispatched run
+    # reports `pypi-publish: skipped` rather than a job that runs and declines.
+    if: ${{ github.event_name == 'release' && needs.release-build.result == 'success' && needs.release-build.outputs.skip_build == 'false' && needs.keyagent-macos.result == 'success' }}
     permissions:
       id-token: write
 
