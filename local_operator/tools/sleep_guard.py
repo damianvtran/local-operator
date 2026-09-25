@@ -218,12 +218,17 @@ def _block_message(seconds: float, offered: frozenset[str] | None = None) -> str
     * the MODEL always gets every line, uncropped — the refusal rides the tool
       result verbatim;
     * the operator sees the bullets on the failed-call card, whose advice rows
-      are painted as ONE cropped row each (91 cells at a 100-column frame, 72 at
-      80, 52 at 60, 41 at 50 — design review round 2's measure);
+      are painted as ONE cropped row each — a measured ``card_width - 2 -
+      OUTPUT_INDENT``, so 92 cells at a 100-column frame, 72 at 80, 52 at 60,
+      42 at 50 (design review round 3, D11: one measure for every site);
     * the operator does NOT see them on this refusal's LIVE row: a plan-time
       refusal settles on the not-run ending, whose reason is clipped at
       ``NOT_RUN_REASON_MAX_CHARS`` (200) by the producer and whose row cannot
-      expand, so the live frame carries ``blocked: this c…`` at every width.
+      expand, so the live frame carries ``blocked: this command…`` at 100
+      columns, ``blocked: this c…`` at 80, ``blocked:…`` at 60 and ``block…``
+      at 50 — the clip follows the width, and an earlier revision of this
+      comment claimed the 80-column reading at every width (design review
+      round 3, D10).
       That is a pre-existing property of the not-run surface, not of this copy,
       and it is recorded as a follow-up on the PR rather than fixed here — the
       row is a ``ToolCard``/loop change (design review D6).
