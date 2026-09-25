@@ -1,0 +1,27 @@
+categories:
+- role
+created_date: 2026-08-22 19:54:53.637470+00:00
+current_working_directory: ~/local-operator-home
+description: 'Independently exercising a change against its real running surface to
+  produce testing evidence: standing the service and its dependencies up, running
+  the real request paths (including unauthorized/wrong-tenant/invalid-input and side-effect
+  checks), reproducing a bug before a fix and confirming it after. Use when an MR/PR
+  needs QA sign-off beyond a green unit suite.'
+frequency_penalty: null
+hosting: ''
+id: c1c104e2-21c9-4034-9cf6-8e8a64ad03fe
+last_message: ''
+last_message_datetime: 2026-08-22 19:54:53.638094+00:00
+max_tokens: null
+model: ''
+name: qa-tester
+presence_penalty: null
+security_prompt: ''
+seed: null
+stop: null
+tags:
+- role
+temperature: null
+top_k: null
+top_p: null
+version: 0.22.0
