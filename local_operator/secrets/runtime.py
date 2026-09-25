@@ -43,6 +43,8 @@ import threading
 from collections.abc import Iterator, Mapping
 from typing import TYPE_CHECKING, Any
 
+from local_operator.redaction_shapes import scrub_values
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from pathlib import Path
 
@@ -134,11 +136,20 @@ class _RedactionLedger:
             return sorted(self._values, key=len, reverse=True)
 
     def scrub(self, text: str) -> str:
-        """Replace every registered value in ``text`` with ``[redacted]``."""
-        for value in self.values():
-            if value in text:
-                text = text.replace(value, "[redacted]")
-        return text
+        """Replace every registered value in ``text`` with ``[redacted]``.
+
+        Delegates to :func:`local_operator.redaction_shapes.scrub_values`, the one
+        place the spelling list lives: a value is masked in every form it may be
+        printed in (reversed, base64, hex, escaped, percent-encoded, JSON-escaped,
+        separator-spread), not only verbatim. The ledger keeps no policy of its
+        own — a second copy of this loop is how one surface's mask ends up weaker
+        than another's.
+
+        ``redaction_shapes`` is stdlib-only and is imported from
+        :mod:`local_operator.variables`, which sits on the CLI startup path, so
+        reaching for it here adds no import the process has not already paid.
+        """
+        return scrub_values(text, self.values())
 
 
 #: Process-wide ledger. Module-level because the eval worker's namespace is

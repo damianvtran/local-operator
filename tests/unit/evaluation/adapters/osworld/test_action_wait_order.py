@@ -26,7 +26,7 @@ from typing import Any
 import pytest
 from lop_osworld_v2_adapter import adapter as adapter_module
 
-from local_operator.evaluation.adapters.api import ExecuteParams
+from local_operator.evaluation.adapters.api import ExecuteParams, ScopedInfraValue
 from local_operator.evaluation.evidence.models import canonical_digest
 from local_operator.evaluation.protocol import (
     PROTOCOL_VERSION,
@@ -88,13 +88,16 @@ class _StubBuilder:
         return _observation("obs-2", kwargs.get("sequence", 2))
 
 
-def _adapter(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, _RecordingProvider]:
+def _adapter(
+    monkeypatch: pytest.MonkeyPatch, *, policy: str = "throughput"
+) -> tuple[Any, _RecordingProvider]:
     provider = _RecordingProvider()
     inst = adapter_module.OSWorldV2Adapter.__new__(adapter_module.OSWorldV2Adapter)
     inst._provider = provider  # type: ignore[attr-defined]
     inst._observation_builder = _StubBuilder()  # type: ignore[attr-defined]
     inst._current_observation = _observation("obs-1", 1)  # type: ignore[attr-defined]
     inst._sequence = 1  # type: ignore[attr-defined]
+    inst._action_settle_policy = policy  # type: ignore[attr-defined]
 
     async def fake_sleep(seconds: float) -> None:
         provider.calls.append(("sleep", round(seconds, 3)))
@@ -283,6 +286,127 @@ async def test_an_unsplit_batch_still_settles_once(
     await inst.execute(_params(_click(1, 1), _click(2, 2)))
 
     assert _settles(provider) == [True]
+
+
+@pytest.mark.asyncio
+async def test_paper_policy_settles_actions_and_after_waits_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inst, provider = _adapter(monkeypatch, policy="paper")
+    await inst.execute(
+        _params(
+            _click(),
+            WaitAction(observation_id="obs-1", duration_ms=2000),
+            TypeAction(observation_id="obs-1", text="hello"),
+        )
+    )
+
+    assert provider.calls == [
+        ("exec", ["pyautogui.click(x=10, y=20, button='left')"], True),
+        ("sleep", 2.0),
+        ("exec", [], True),
+        ("exec", ["pyautogui.typewrite('hello')"], True),
+        ("observe", None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_paper_policy_settles_each_consecutive_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inst, provider = _adapter(monkeypatch, policy="paper")
+    await inst.execute(_params(_click(1, 1), _click(2, 2), _click(3, 3)))
+
+    assert [call[0] for call in provider.calls] == [
+        "exec",
+        "exec",
+        "exec",
+        "observe",
+    ]
+    assert [len(call[1]) for call in provider.calls if call[0] == "exec"] == [1, 1, 1]
+    assert _settles(provider) == [True, True, True]
+
+
+@pytest.mark.asyncio
+async def test_paper_policy_pure_wait_settles_after_wait_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inst, provider = _adapter(monkeypatch, policy="paper")
+    await inst.execute(_params(WaitAction(observation_id="obs-1", duration_ms=500)))
+
+    assert provider.calls == [
+        ("sleep", 0.5),
+        ("exec", [], True),
+        ("observe", None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_paper_policy_scroll_compound_statement_settles_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_operator.evaluation.protocol import ScrollAction
+
+    inst, provider = _adapter(monkeypatch, policy="paper")
+    await inst.execute(
+        _params(
+            ScrollAction(
+                observation_id="obs-1",
+                frame_id="screen",
+                x=10,
+                y=20,
+                delta_x=0,
+                delta_y=5,
+            )
+        )
+    )
+
+    assert len([call for call in provider.calls if call[0] == "exec"]) == 1
+    assert _settles(provider) == [True]
+    assert len([call for call in provider.calls if call[0] == "observe"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_paper_policy_resume_observation_does_not_replay_or_settle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inst, provider = _adapter(monkeypatch, policy="paper")
+    params = _params(_click())
+    params = params.model_copy(update={"resume_observation": True})
+    monkeypatch.setattr(
+        inst,
+        "_resume_observation",
+        lambda: None,
+        raising=False,
+    )
+
+    # Exercise the branch with a fake builder and provider readback; no action
+    # execute or settle is permitted on a committed batch's recovery read.
+    def build(*args: Any, **kwargs: Any) -> Observation:
+        return _observation("obs-2", 2)
+
+    inst._observation_builder.build = build  # type: ignore[method-assign,attr-defined]
+    inst._current_observation = _observation("obs-1", 1)  # type: ignore[attr-defined]
+    await inst.execute(params)
+
+    assert provider.calls == [("observe", None)]
+    assert not any(call[0] == "exec" for call in provider.calls)
+
+
+@pytest.mark.asyncio
+async def test_invalid_settle_policy_fails_closed_before_provider_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(adapter_module.AdapterStateError, match="unsupported"):
+        adapter_module.OSWorldV2Adapter._resolve_action_settle_policy(
+            (
+                ScopedInfraValue(
+                    name="OSWORLD_ACTION_SETTLE_POLICY",
+                    purpose="benchmark_compute",
+                    value="fast",
+                ),
+            )
+        )
 
 
 @pytest.mark.asyncio

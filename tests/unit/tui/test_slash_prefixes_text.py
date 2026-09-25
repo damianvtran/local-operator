@@ -184,6 +184,12 @@ ARGUMENT_SHAPE_POLICY = {
     # sentence. An empty vocabulary is exactly what makes one token the control
     # and two the message.
     "notifications": ArgumentShape.WORD,
+    # ONE flag, `--copy`, from a one-word vocabulary (`SESSION_COPY_FLAG`). Its
+    # path USES the token — the terminal copies the ID, the desktop route refuses
+    # it by name — so `/session --copy` is the control while `/session more
+    # prose` and `/session --cpy` stay messages. NONE would have admitted the
+    # control as a paid turn (decision D1).
+    "session": ArgumentShape.WORD,
     # NONE, and the criterion is why: a shape is published only where the
     # desktop's command PATH uses the trailing text, and this one DROPS it —
     # `_slash_result` calls `_context_slash_result(SlashResult)` with no args and
@@ -214,7 +220,6 @@ ARGUMENT_SHAPE_POLICY = {
     "update": ArgumentShape.NONE,
     "sidebar": ArgumentShape.NONE,
     "failovers": ArgumentShape.NONE,
-    "session": ArgumentShape.NONE,
     "info": ArgumentShape.NONE,
     "mobile": ArgumentShape.NONE,
     # The operator's own row, and the reason it is NONE rather than ANY: the

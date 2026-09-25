@@ -327,6 +327,15 @@ class PrintRenderer:
             self.console.print(f"{glyph}{text}", style=style, highlight=False, markup=False)
         elif isinstance(event, RetryStartEvent):
             self.console.print(f"[dim]retry {event.attempt}: {event.error}[/dim]", highlight=False)
+        elif isinstance(event, ModelChangeEvent) and event.context_metadata:
+            # A context-metadata refresh (turn start/end, or a per-request
+            # window read) re-announces the model already in force. It is a
+            # display refresh, not a route edge: printed, it read as a recovery
+            # that never happened ("back to X") or a repeat of a pin already
+            # narrated ("fell back to X"). Keyed on the flag alone, NOT on an
+            # empty ``reason``: a route edge that forgot its reason must still
+            # print, not silently vanish from the only headless record of it.
+            pass
         elif isinstance(event, ModelChangeEvent):
             # The route edge in one line, both directions — the exec-mode
             # counterpart of the TUI band repaint: a reader of a long headless
@@ -334,10 +343,15 @@ class PrintRenderer:
             # The verbs pair with the failure notice's "falling back to"
             # (design D2): "serving from" reads as a location, not a route.
             selector = f"{event.provider}/{event.model_id}"
-            self.console.print(
-                f"[dim]{'fell back to' if event.is_fallback else 'back to'} " f"{selector}[/dim]",
-                highlight=False,
-            )
+            if event.is_fallback:
+                verb = "fell back to"
+            elif event.reason == "model switched":
+                # A deliberate switch (`/model`, the phone, a peer) is not a
+                # recovery: "back to" would claim a model this run never left.
+                verb = "switched to"
+            else:
+                verb = "back to"
+            self.console.print(f"[dim]{verb} {selector}[/dim]", highlight=False)
         elif isinstance(event, CompactionStartEvent):
             self.console.print("[dim]compacting context…[/dim]", highlight=False)
         elif isinstance(event, AgentEndEvent):

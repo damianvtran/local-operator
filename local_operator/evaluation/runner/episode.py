@@ -28,6 +28,7 @@ Run-level budget aggregation across episodes is deliberately out of scope.
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -83,6 +84,7 @@ from local_operator.evaluation.evidence.models import (
     OutcomeDraft,
     PreflightPayload,
     ReconciliationPayload,
+    ReplyTolerancePayload,
     RouteIdentity,
     ScoreArtifact,
     ScoringResultPayload,
@@ -192,6 +194,9 @@ DISCLOSED_INFRA_METADATA_KEYS: Mapping[str, str] = MappingProxyType(
         # Network policy changes comparability too: older adapters must refuse
         # this request rather than seal a disabled-policy claim while enabling it.
         "OSWORLD_ENABLE_PROXY": "osworld_enable_proxy_override",
+        # The settle frequency changes the benchmark's action pacing. The
+        # companion metadata is derived from this value by the run script.
+        "OSWORLD_ACTION_SETTLE_POLICY": "osworld_action_settle_policy",
     }
 )
 _DISCLOSED_INFRA_VALUES = frozenset(DISCLOSED_INFRA_METADATA_KEYS)
@@ -305,7 +310,10 @@ class EpisodeConfig:
     ``step_timeout`` and ``cleanup_timeout`` are FLOORS, not ceilings, for the
     two calls whose own request declares a duration. ``execute`` is funded for
     every ``wait`` its batch asked for and ``cleanup`` for the selected
-    actions' declared timeouts and attempts, both plus a fixed headroom; the
+    actions' declared timeouts and attempts, both plus a fixed headroom. An
+    evaluation-only ``execution_overhead_seconds_per_action`` can additionally
+    fund paper-settle time for mutating actions; its default of zero leaves every
+    ordinary caller's deadline unchanged.
     effective deadline is the greater of that and the value set here
     (``evaluation.deadlines``). Every other timeout is the whole deadline,
     because nothing in those requests declares how long their work takes. Read
@@ -332,6 +340,17 @@ class EpisodeConfig:
     max_decision_retries: int = 2
     observation_retry_attempts: int = 3
     observation_retry_delay: float = 5.0
+    execution_overhead_seconds_per_action: float = 0.0
+
+    def __post_init__(self) -> None:
+        rate = self.execution_overhead_seconds_per_action
+        if (
+            isinstance(rate, bool)
+            or not isinstance(rate, (int, float))
+            or not math.isfinite(rate)
+            or rate < 0.0
+        ):
+            raise ValueError("execution_overhead_seconds_per_action must be finite and nonnegative")
 
 
 @dataclass(frozen=True)
@@ -544,6 +563,9 @@ class EpisodeRunner:
             verifier,
             rescue_required=self._mark_rescue_required,
             answer_owner=self._answer_owner,
+            execution_overhead_seconds_per_action=(
+                self._config.execution_overhead_seconds_per_action
+            ),
         )
         self._session = session
 
@@ -1135,6 +1157,27 @@ class EpisodeRunner:
                 redacted_response=response_artifact,
             ),
         )
+        # The two reply tolerances are recorded on their OWN kind rather than as
+        # fields of the response above, and that is a compatibility constraint:
+        # ``event_id`` is a digest over the payload as the current model
+        # canonicalizes it, so a field added to ``ModelResponsePayload``
+        # re-baselines every ``model_response`` event ever sealed -- making every
+        # pre-change bundle fail ``verify_bundle`` and un-recoverable. See
+        # ``ReplyTolerancePayload`` for the measurement. Written only when a
+        # tolerance FIRED, so its absence reads as zero and an ordinary reply
+        # costs no journal line; the recovered rate is this kind's count over
+        # ``model_response``.
+        tolerated_action_fields = getattr(decision, "tolerated_action_fields", 0)
+        leading_framing_bytes = getattr(decision, "leading_framing_bytes", 0)
+        if tolerated_action_fields or leading_framing_bytes:
+            self._append(
+                "reply_tolerance",
+                ReplyTolerancePayload(
+                    request_id=request_id,
+                    tolerated_action_fields=tolerated_action_fields,
+                    leading_framing_bytes=leading_framing_bytes,
+                ),
+            )
         self._append(
             "usage_cost",
             UsageCostPayload(
@@ -1340,6 +1383,14 @@ class EpisodeRunner:
         for attempt in range(attempts + 1):
             try:
                 if attempt == 0:
+                    if self._config.execution_overhead_seconds_per_action:
+                        return await session.execute(
+                            params,
+                            timeout=self._config.step_timeout,
+                            execution_overhead_seconds_per_action=(
+                                self._config.execution_overhead_seconds_per_action
+                            ),
+                        )
                     return await session.execute(params, timeout=self._config.step_timeout)
                 # Each attempt is its own operation: the worker's replay cache
                 # is keyed by operation_id and would hand back the cached

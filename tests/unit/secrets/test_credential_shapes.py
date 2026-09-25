@@ -72,7 +72,7 @@ from local_operator.redaction_shapes import (
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from local_operator.tools import builtin
-from local_operator.variables import VariableStore
+from local_operator.variables import VariableStore, redact_secret_values
 from tests.unit.secrets.credential_shape_corpus import (
     COMPACT_TOKEN_PAIR,
     COUNT_QUALIFIER_NAMES,
@@ -83,8 +83,15 @@ from tests.unit.secrets.credential_shape_corpus import (
     NEGATIVE_CASES,
     POSITIVE_CASES,
     PRE_ESCAPED_LINE,
+    TYPE_ANNOTATION_NEGATIVES,
+    TYPE_ANNOTATION_POSITIVES,
     Case,
 )
+
+#: The angle brackets, assembled rather than spelled: this file is read by agents
+#: THROUGH the pass it describes, so the spellings below are built from ordinals and
+#: never appear as literals in the source.
+_LT, _GT = chr(60), chr(62)
 
 #: A synthetic credential. Never a real one, and never asserted into anything a
 #: human reads: the corpus carries the shapes, this carries the containment.
@@ -304,6 +311,482 @@ def test_the_incidents_own_line_is_a_regression_case() -> None:
     assert "agent_runtime_model_worker" in scrubbed, "the user must stay readable"
     assert "mongodb-prod.example.net" in scrubbed, "the host must stay readable"
     assert scrubbed.startswith("MONGO_DSN=mongodb+srv://agent_runtime_model_worker:")
+
+
+#: What the type clause is worth, as COUNTS rather than as a claim, and measured
+#: the way the rest of this file measures a guard: neutralise the arm, count the rows
+#: whose reading moves.
+#:
+#: Measured 2026-09-23 (``_corpus_grading()`` for the corpus under both modules). The
+#: first is how many of ``TYPE_ANNOTATION_NEGATIVES`` come back MASKED when the arm
+#: is removed — the rows that make the arm load-bearing at all; the second is how
+#: many of ``TYPE_ANNOTATION_POSITIVES`` come back READABLE when the arm is widened
+#: to everything — the rows that catch the clause over-reaching. Both are floors, not
+#: equalities: adding rows may raise them, and a change that lowers one has taken the
+#: arm's reach off a case that used to need it.
+#:
+#: The five negatives the first count does not include are the rows another rule
+#: already releases (a bare primitive below the value floor, an annotation carrying
+#: ``[``, a keyword argument in a function signature); they are in the corpus as
+#: regression rows, and the count says so rather than leaving a reader to wonder.
+#:
+#: The SECOND count is an EQUALITY since agent review R1-1, and deliberately: its
+#: number is the whole size of ``TYPE_ANNOTATION_POSITIVES``, because a wide arm must
+#: release every one of them. It was ``8`` while the table held eight rows only
+#: because a wide arm happened to release the eight the table happened to hold — the
+#: assertion proved nothing about the rows it did not name. Pinning it to
+#: ``len(TYPE_ANNOTATION_POSITIVES)`` means a row added to the table without a
+#: discriminating reading FAILS here rather than sitting inert in the corpus.
+_TYPE_CLAUSE_ROWS_THE_ARM_HOLDS = 15
+#: Asserted below as ``len(TYPE_ANNOTATION_POSITIVES)``: every positive must be
+#: released by a wide arm, so the row count IS the floor and no stale constant can
+#: drift away from the table it measures.
+_TYPE_CLAUSE_ROWS_THAT_CATCH_A_WIDE_ARM = len(TYPE_ANNOTATION_POSITIVES)
+
+#: The spellings the CONFINEMENT must mask — the digit, word-break and bare-path
+#: conditions — and the condition each one violates. They are the digit-carrying half
+#: of the residual class that had no row before agent review R1-1. They are asserted as
+#: VALUES rather than left to the corpus because the corpus only proves the whole-line
+#: reading: this table SAYS which condition of the documented release each spelling
+#: violates. The credential-stem half is in :data:`_STEM_BASE_MUST_MASK`, which is a
+#: different arm and has its own test.
+_CONFINEMENT_MUST_MASK: tuple[tuple[str, str], ...] = (
+    ("Pass" + _LT + "Word" + "7", "a digit in the ARGUMENT"),
+    ("Pass7" + _LT + "Word", "a digit in the BASE"),
+    ("Abc" + _LT + "Xyz" + "1", "both capitals, a digit in the argument"),
+    ("Correct" + "horse" + _LT + "Battery" + "7", "a digit, underscore removed"),
+    ("foo" + _LT + "Bar" + _GT, "a LOWERCASE base under a generic"),
+    ("abc" + "::" + "def" + _LT + "Bar" + _GT, "a lowercase-qualified leaf under a generic"),
+    ("Option" + _LT + "Sha256" + _GT, "a digit inside a NON-primitive type name"),
+    ("Sv" + "::" + "Secret", "a CamelCase MODULE segment in a bare path"),
+    ("Camel" + "::" + "Word9", "the same convention violation with a digit"),
+)
+
+#: The spellings a credential-STEM or credential-WORD base must mask, whatever the
+#: ARGUMENT is. The base is the discriminating fact: a type's own base is never a
+#: credential word, which is what keeps a real annotation released
+#: (:data:`_STEM_BASE_STAYS_RELEASED`).
+#:
+#: **This table is the R2-1 regression.** Each stem row below was released WHOLE, with
+#: no hit, at the head that round reviewed, and masks at ``origin/main``. The gate that
+#: let them through was the same inversion R1-2 made one spelling over — a refusal
+#: keyed on the ARGUMENT where the fact is the BASE — so a CamelCase argument or a
+#: nested application, neither of them a bare primitive, fell past it. A later widening
+#: of the ARGUMENT grammar must not be able to re-open that class, which is what
+#: asserting every argument shape over a fixed stem is for.
+_STEM_BASE_MUST_MASK: tuple[tuple[str, str], ...] = (
+    ("Pass" + _LT + "int" + _GT, "a credential-stem base over a bare primitive"),
+    ("Pass" + _LT + "any" + _GT, "the same: ``any`` is English, not a type"),
+    ("Secret" + _LT + "str" + _GT, "a credential WORD base over a primitive"),
+    ("Token" + _LT + "void" + _GT, "the same with ``void``"),
+    ("Pass" + _LT + "Phrase" + _GT, "a credential-stem base over a CamelCase argument"),
+    ("Passphrase" + _LT + "Word" + _GT, "a stem the whole-word test does not reach either"),
+    ("Passkey" + _LT + "Word" + _GT, "the same class one spelling over"),
+    ("Auth" + _LT + "Token" + _GT, "a credential-stem base over another credential stem"),
+    ("Auth" + _LT + "String" + _GT, "the same over a type name"),
+    ("Login" + _LT + "Secret" + _GT, "the same inversion on ``Login``"),
+    ("Login" + _LT + "String" + _GT, "the same over a type name"),
+    ("Pass" + _LT + "String" + _GT, "a stem base over a type name, digit-free"),
+    ("Pass" + _LT + "Vec" + _LT + "u8" + _GT + _GT, "a stem base over a NESTED application"),
+    ("Pass" + _LT + "Vec" + _LT + "Phrase" + _GT + _GT, "a nested application of names"),
+    ("Pass" + _LT + "Word" + _GT, "the residual BEFORE this round: a stem base masks"),
+    # --- the R3-1 class: the same refusal with a QUALIFICATION in front of the stem ---
+    # ``_base_is_a_credential_stem`` read the WHOLE base, so a qualified spelling hid the
+    # stem behind a module path and every row below was released whole, with NO hit, at
+    # the head that round reviewed — while masking at ``origin/main``. The last row is the
+    # same mistake with a REFERENCE MARKER in front of the name instead of a ``::`` path:
+    # the marker is spelling, the fact is the name after it. These rows are what reds if
+    # the leaf read is reverted; the corpus could not, because it had no qualified row
+    # (agent review R3-2).
+    ("foo" + "::" + "Pass", "a QUALIFIED stem base, no argument list"),
+    ("foo" + "::" + "Pass" + _LT + "Word" + _GT, "the same over a CamelCase argument"),
+    ("core" + "::" + "Secret", "a qualified credential WORD base, no argument list"),
+    (
+        "foo" + "::" + "Pass" + _LT + "Vec" + _LT + "u8" + _GT + _GT,
+        "the same over a nested application",
+    ),
+    ("foo" + "::" + "bar" + "::" + "Pass", "a stem leaf TWO segments deep"),
+    ("&" + "Pass" + _LT + "Word" + _GT, "a REFERENCE-marked stem base: the marker is not the name"),
+    # --- the R4-1 class: the stem in a MIDDLE segment, read by neither end of the path ---
+    # The R3-1 fix read the base's FIRST segment (whole-base ``startswith``) and its LAST
+    # (the leaf helper). Every segment BETWEEN them was invisible to BOTH, so each row
+    # below was released whole, with no hit, on this branch — 504 of 504 in the round-4
+    # grid — while masking at ``origin/main``. These rows are what REDS if the segment
+    # read is narrowed back to first-and-last; the corpus could not, because it carried
+    # no interior-stem row at all, which is the same blindness that let R3-1 survive two
+    # rounds (agent reviews R3-2 and R4-3). Both positions are covered, with and without a
+    # reference marker and with and without an argument list, because the miss was a
+    # POSITION inside a site and not a site.
+    ("foo" + "::" + "Pass" + "::" + "Word", "an INTERIOR stem, no argument list"),
+    (
+        "foo" + "::" + "Pass" + "::" + "Word" + _LT + "X" + _GT,
+        "the same interior stem over an argument list",
+    ),
+    (
+        "std" + "::" + "Secret" + "::" + "String",
+        "an interior credential WORD, a type name after it",
+    ),
+    (
+        "a" + "::" + "Pass" + "::" + "B",
+        "the shortest spelling of the class, terminated by a one-letter leaf",
+    ),
+    (
+        "a" + "::" + "B" + "::" + "Pass" + "::" + "C",
+        "two interior positions in a four-segment path",
+    ),
+    (
+        "&" + "Pass" + "::" + "Word" + _LT + "X" + _GT,
+        "an interior stem BEHIND a reference marker: both markers at once",
+    ),
+)
+
+#: The other side of :data:`_STEM_BASE_MUST_MASK`, in the same shape: a type's OWN base
+#: over the SAME argument shapes, which must stay released. Read as a pair, the two
+#: tables say the release is decided by the base and not by the argument.
+_STEM_BASE_STAYS_RELEASED: tuple[tuple[str, str], ...] = (
+    ("Vec" + _LT + "int" + _GT, "a type base over a bare primitive"),
+    ("Vec" + _LT + "Phrase" + _GT, "a type base over a CamelCase argument"),
+    ("Vec" + _LT + "String" + _GT, "a type base over a type name"),
+    ("Vec" + _LT + "Vec" + _LT + "u8" + _GT + _GT, "a type base over a nested application"),
+    ("Option" + _LT + "Vec" + _LT + "u8" + _GT + _GT, "the same one type down"),
+    ("Arc" + _LT + "Mutex" + _LT + "String" + _GT + _GT, "a two-level type application"),
+    # The same qualification over a type's OWN base, so the pair still reads as "the base
+    # decides": the leaf read must not mask a qualified path whose LEAF is a type name,
+    # and a reference marker is not a name either.
+    ("foo" + "::" + "Vec" + _LT + "String" + _GT, "a qualified type base over a type name"),
+    ("std" + "::" + "Option" + _LT + "String" + _GT, "the same one type over"),
+    ("foo" + "::" + "String", "a qualified path whose leaf is a type name, no argument list"),
+    ("foo" + "::" + "HashMap", "the same with a two-word type name"),
+    ("&" + "str", "a REFERENCE-marked primitive: the marker is not a name either"),
+    ("&&" + "str", "the same twice over"),
+    # The other side of the R4-1 rows: the same SEGMENTED shape over a type's own
+    # names, so the pair still reads as "the segment is the fact". The interior segments
+    # here are type-NEUTRAL lowercase names — a CamelCase module segment is refused by
+    # the PRE-EXISTING path convention (``segments[:-1]`` must be lowercase, which the
+    # ``Sv::Secret`` row of ``_CONFINEMENT_MUST_MASK`` pins), so a CamelCase control
+    # would measure that branch rather than this one. What these rows prove is that the
+    # segment read does not mask a qualified path whose every segment is a type name.
+    (
+        "foo" + "::" + "bar" + "::" + "String",
+        "an interior TYPE-NEUTRAL segment: nothing credential-shaped anywhere",
+    ),
+    (
+        "foo" + "::" + "bar" + "::" + "Vec" + _LT + "u8" + _GT,
+        "the same interior position over a nested application, no argument list",
+    ),
+)
+
+
+def test_the_type_annotation_clause_is_load_bearing_in_both_directions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Neither half of this corpus can pass without the arm, and each half proves it.
+
+    This is the "prove the test can still fail" test for the type clause, and it
+    exists because the clause is the kind of guard that is easy to believe without
+    evidence: it sits inside a value predicate, it releases rather than masks, and a
+    release is invisible unless something asserts the text survived.
+
+    Three readings of the same rows:
+
+    * IN PLACE: every negative comes back byte-identical, which is the fix;
+    * REMOVED: the arm returns ``False`` and the rows that depend on it come back
+      MASKED — so those rows are evidence for the arm and not for some other rule;
+    * WIDENED: the arm returns ``True`` and the positives come back READABLE — the
+      direction where the clause stops protecting a credential, which is the failure
+      a reader of the corpus alone cannot see.
+    """
+    import local_operator.redaction_shapes as rs
+
+    in_place = [
+        case for case in TYPE_ANNOTATION_NEGATIVES if rs.scrub_shapes(case.text) == case.text
+    ]
+    assert len(in_place) == len(TYPE_ANNOTATION_NEGATIVES), [
+        case.reason for case in TYPE_ANNOTATION_NEGATIVES if case not in in_place
+    ]
+
+    monkeypatch.setattr(rs, "_is_type_expression", lambda value: False)
+    held = [case for case in TYPE_ANNOTATION_NEGATIVES if rs.scrub_shapes(case.text) != case.text]
+    assert len(held) >= _TYPE_CLAUSE_ROWS_THE_ARM_HOLDS, [case.reason for case in held]
+
+    monkeypatch.setattr(rs, "_is_type_expression", lambda value: True)
+    released = [
+        case for case in TYPE_ANNOTATION_POSITIVES if rs.scrub_shapes(case.text) == case.text
+    ]
+    assert len(released) == _TYPE_CLAUSE_ROWS_THAT_CATCH_A_WIDE_ARM, [
+        case.reason for case in TYPE_ANNOTATION_POSITIVES if case not in released
+    ]
+
+
+def test_the_type_clause_masks_a_digit_carrying_spelling() -> None:
+    """The confinement the module documents is the confinement it ENFORCES (R1-1).
+
+    The documented release is the digit-free, symbol-free, single-token spelling
+    (``Ident<Ident>``). The first implementation documented that and enforced only
+    the symbol half: a digit on EITHER side released the value whole, with NO hit at
+    all — a real credential released with nothing in the report to notice, which is
+    the dangerous direction the corpus could not see because it pinned only the
+    digit-free spelling.
+
+    Each row below is a spelling the arm RELEASED before this round, measured on
+    that revision, and each names the condition of the documented release it
+    violates. They are asserted as VALUES rather than as corpus lines because this
+    block is what says WHICH condition failed — a corpus row proves only that the
+    whole line comes back unchanged.
+
+    The last row is the price of the digit rule and is asserted the other way: a
+    digit-carrying NON-primitive type name is now MASKED, so ``Option<Sha256>`` is
+    the false positive this re-admits. That is the safe direction — masking a type
+    is strictly better than releasing a credential — and pinning it here keeps the
+    trade visible instead of letting a later change discover it.
+    """
+    import local_operator.redaction_shapes as rs
+
+    for value, condition in _CONFINEMENT_MUST_MASK:
+        assert rs._is_type_expression(value) is False, condition
+        # ``API_KEY`` rather than ``DB_PASSWORD``: the name must not COLLIDE with the
+        # value, because ``_repeats_its_own_name`` releases a value that repeats its
+        # own variable name (``DB_PASSWORD=…password…``) — a pre-existing arm, not this
+        # clause, and one this block is not testing. ``API_KEY`` shares no substring
+        # with any row here, so the reading below is the type clause's alone.
+        text = "API" + "_KEY=" + value
+        assert rs.scrub_shapes(text) != text, f"released with no hit: {condition}"
+
+    # The primitives are UNCHANGED by the digit rule: they are type names by fiat.
+    for value in (
+        "Option" + _LT + "Vec" + _LT + "u8" + _GT + _GT,
+        "Vec" + _LT + "u8" + _GT,
+        "Cow" + _LT + "'a" + _GT,
+        "Arc" + _LT + "Mutex" + _LT + "T" + _GT + _GT,
+        "Option" + _LT + "str" + _GT,
+    ):
+        assert rs._is_type_expression(value) is True, value
+        assert rs._carries_a_non_primitive_digit(value) is False, value
+
+    # A bare primitive is proven by a NON-credential base and refused by a
+    # credential-stem one — the boundary R1-2 was about, in both directions.
+    assert rs._is_type_expression("Vec" + _LT + "u8" + _GT) is True
+    assert rs._is_type_expression("HashMap" + _LT + "u8,u8" + _GT) is True
+    assert rs._is_type_expression("Pass" + _LT + "int" + _GT) is False
+    assert rs._base_is_a_credential_stem("Pass") is True
+    assert rs._base_is_a_credential_stem("Vec") is False
+
+
+def test_the_type_clause_refuses_a_credential_stem_base_whatever_the_argument() -> None:
+    """The stem refusal is on the BASE, and this is the R2-1 regression (MAJOR).
+
+    ``_base_is_a_credential_stem`` used to be qualified by
+    ``_has_a_bare_primitive_argument``, so a credential-stem base whose argument was a
+    CamelCase NAME (``Pass<Phrase>``, ``Auth<Token>``, ``Login<Secret>``) or a nested
+    application (``Pass<Vec<u8>>``) fell past both gates and was released WHOLE, with
+    no hit at all, while masking at ``origin/main``. ``is_credential_name`` is a
+    whole-word test and is ``False`` for every stem but ``passwd``/``pwd``, so it never
+    covered them either.
+
+    The two tables are the assertion, and they must be read as a PAIR: every one of
+    :data:`_STEM_BASE_MUST_MASK` masks, and every one of
+    :data:`_STEM_BASE_STAYS_RELEASED` — the same argument shapes over a type's own base
+    — is released. Taken together that is the evidence the release is decided by the
+    BASE and not by the argument, which is the inversion both R1-2 and R2-1 shipped.
+
+    **R3-1 is the third spelling of the same inversion, and the qualified rows at the
+    end of each table are its regression (R3-2).** The gate read the WHOLE base, so a
+    module-qualified stem hid behind the path and the entire class — 5 module prefixes
+    x 12 stem leaves x 6 argument shapes — was released whole with no hit, on a spelling
+    that masks at ``origin/main``; a reference marker in front of the name defeated it
+    the same way, which is why the reference rows are in the same tables rather than in a
+    second one. Those rows are what REDS if the leaf read is reverted: the corpus cannot
+    red on it, because it has no qualified row at all, and that is exactly how the hole
+    survived two rounds (agent review R3-2).
+
+    **R4-1 is the same family one POSITION over, and it is why this enumeration is by
+    window rather than by call site (agent review R4-3).** R3-1's fix left the read as
+    the FIRST segment (``startswith`` on the whole base) and the LAST (the leaf), so a
+    stem in a MIDDLE segment was released whole — ``foo::Pass::Word<X>``,
+    ``std``+``::``+``Secret``+``::``+``String``, ``&Pass::Word<X>`` — 504 of 504 measured,
+    and 0 of 504 at ``origin/main``. That is a POSITION inside site 1 of the family hunt,
+    a site the enumeration marked FIXED: "no other SITE" was true and "no other HOLE"
+    was false. The interior rows above are its regression, and they are the third time a
+    hole survived because no row covered it (R3-2 was the last). Every release-side test
+    in this clause now reads an extraction that returns ALL of a base's ``::`` segments,
+    so a narrower window is not available to be chosen at any site.
+
+    Each mask must carry a real hit rather than being silent: a hit is what registers
+    the value for the exact-value pass, so a silent mask contains it only on this line.
+    """
+    import local_operator.redaction_shapes as rs
+
+    # The refusal reads EVERY ``::`` SEGMENT of the base, extracted by the one helper
+    # both release-side tests share — a marker or a path in front of the name is
+    # SPELLING, and neither is part of what the token is called. The tuple's FIRST entry
+    # is the whole token so the first-segment read is kept as well; the rest are the
+    # segments, which is what closes the interior position (agent review R4-1).
+    assert rs._type_token_segments("foo" + "::" + "bar" + "::" + "Pass") == (
+        "foo::bar::Pass",
+        "foo",
+        "bar",
+        "Pass",
+    )
+    assert rs._type_token_segments("&&" + "Pass") == ("Pass",)
+    assert rs._type_token_segments("&" + "str") == ("str",)
+    assert rs._type_token_segments("foo" + "::" + "Pass" + "::" + "Word") == (
+        "foo::Pass::Word",
+        "foo",
+        "Pass",
+        "Word",
+    )
+    assert rs._base_is_a_credential_stem("foo" + "::" + "Pass") is True
+    assert rs._base_is_a_credential_stem("&" + "Pass") is True
+    assert rs._base_is_a_credential_stem("foo" + "::" + "Pass" + "::" + "Word") is True
+    assert rs._base_is_a_credential_stem("foo" + "::" + "bar" + "::" + "Pass") is True
+    assert rs._base_is_a_credential_stem("foo" + "::" + "Vec") is False
+    assert rs._base_is_a_credential_stem("&" + "str") is False
+
+    for value, condition in _STEM_BASE_MUST_MASK:
+        assert rs._is_type_expression(value) is False, condition
+        # ``API_KEY`` and not ``DB_PASSWORD``: the name must not COLLIDE with the
+        # value, because ``_repeats_its_own_name`` releases a value that contains its
+        # own variable name (``DB_PASSWORD=…password…``). That arm is pre-existing and
+        # unchanged by this clause, and reading through it would measure the wrong one.
+        text = "API" + "_KEY=" + value
+        masked = rs.scrub_shapes(text)
+        assert masked != text, f"released with no hit: {condition}"
+        _, hits = rs.scrub_shapes_with_hits(text)
+        assert hits, f"a SILENT mask does not register the value: {condition}"
+        # The HIT is the assertion, not the mask. A hit is what registers the value for
+        # the rest of the session's exact-value pass, so a silent mask contains the
+        # credential on this line and nowhere else — and the LABEL says which arm filed
+        # it, which is how a row held by a different clause is caught. Measured for
+        # every row of all three tables: exactly one, always ``credential-assignment``.
+        assert [hit.label for hit in hits] == ["credential-assignment"], condition
+
+    for value, condition in _STEM_BASE_STAYS_RELEASED:
+        assert rs._is_type_expression(value) is True, condition
+        text = "API" + "_KEY=" + value
+        assert rs.scrub_shapes(text) == text, f"containment traded back: {condition}"
+
+
+def test_the_digit_rule_ignores_a_bare_integer_argument() -> None:
+    """A const generic's integer is not a NAME, so the digit rule must not read it.
+
+    ``ArrayVec<u8, 32>`` is a real annotation and its second argument is a bare
+    integer, which belongs to no :data:`_TYPE_NAME_TOKEN`. A digit rule that flagged
+    any digit in the value would mask every const-generic annotation — and one of
+    those is a corpus row that ESCALATED before the fix, so the regression would be
+    the exact incident this clause exists to remove.
+
+    The const-generic spelling is NOT released by the arm (the parser reads ``32`` as
+    a const argument and the corpus row is contained by another rule), so this test
+    asserts the digit rule's own reading and the primitives' rather than claiming the
+    row is arm-released. ``Sha256`` is the counter-example: a digit inside a NAME is
+    flagged, which is what the enforcement is for.
+    """
+    import local_operator.redaction_shapes as rs
+
+    assert rs._carries_a_non_primitive_digit("ArrayVec" + _LT + "u8, 32" + _GT) is False
+    assert rs._carries_a_non_primitive_digit("u8") is False
+    assert rs._carries_a_non_primitive_digit("f64") is False
+    assert rs._carries_a_non_primitive_digit("Sha256") is True
+    assert rs._carries_a_non_primitive_digit("Ident7") is True
+    assert rs._carries_a_non_primitive_digit("Option" + _LT + "Sha256" + _GT) is True
+
+
+def test_the_type_clause_needs_a_type_only_marker() -> None:
+    """The three markers, and the spelling the clause must NOT reach.
+
+    A type-only character — an angle bracket, a path separator, a reference — is what
+    makes a value decidable as a type WITHOUT any allowlist of type names, which is
+    what lets a custom annotation (``Option<SomeVeryLongTypeName>``) be released. The
+    other half of this test is the load-bearing one: a bare word or a bare path is not
+    decidable as a type, so ``API_KEY=averylonglowercasename`` keeps masking. A clause
+    that released any long lowercase value would be a leak dressed as a fix, and this
+    is the assertion that says so.
+    """
+    import local_operator.redaction_shapes as rs
+
+    assert rs._is_type_expression("Option<String>") is True
+    assert rs._is_type_expression("std::collections::HashMap") is True
+    assert rs._is_type_expression("&SomeVeryLongEnumName") is True
+    # ...and no marker at all is not a type, whatever it is spelled like.
+    assert rs._is_type_expression("averylonglowercasename") is False
+    assert rs._is_type_expression("public-catalogue-read") is False
+
+
+def test_the_type_clauses_arguments_must_be_types(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The argument half of the clause, and the list it rests on.
+
+    A generic application is only a type if what is INSIDE the angles is types. That
+    rule is what keeps ``API_KEY=MyPass<secret>`` masked — the spelling a person
+    reaches for when they write a passphrase with angle brackets in it — and it is
+    carried by two things that can each silently stop working: the argument test, and
+    ``_TYPE_PRIMITIVES``, which is what lets a lowercase argument (``u8``, ``str``,
+    ``string``) prove itself a type without admitting every lowercase word.
+
+    The primitive list being load-bearing is asserted rather than assumed: emptied,
+    the same spelling stops being a type, so a future edit that trims the list loses
+    ``Vec<u8>`` and fails here.
+    """
+    import local_operator.redaction_shapes as rs
+
+    assert rs._is_type_expression("Vec<u8>") is True
+    # A lifetime argument, in the spelling the value group actually delivers: the
+    # annotation ``Cow<'a, str>`` is cut at the comma-space by the assigned-value
+    # class, so the clause reads ``Cow<'a`` — the whole spelling never reaches it,
+    # and a test that fed it the whole one would be asserting about dead input.
+    assert rs._is_type_expression("Cow<'a") is True
+    # A generic whose only argument is a const integer is not a type application, and
+    # neither is one whose argument is a word.
+    assert rs._is_type_expression("PassWord<1>") is False
+    assert rs._is_type_expression("MyPass<secret>") is False
+
+    monkeypatch.setattr(rs, "_TYPE_PRIMITIVES", frozenset())
+    assert rs._is_type_expression("Vec<u8>") is False
+
+
+def test_the_type_clauses_accepted_residual_is_a_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one release this clause makes that is not a type annotation.
+
+    ``DB_PASSWORD=Correcthorse<Battery>`` is a credential spelled exactly as
+    ``Ident<Ident>``, and no spelling test separates that from a type application — a
+    type name and a chosen password use the same alphabet. It is pinned as a corpus row
+    rather than described in prose so a later change has to meet it, and the two
+    assertions here are what make it a boundary of THIS clause: the row survives today,
+    and it is released by this arm (removed, the same value masks).
+
+    **The residual NARROWED in agent review R2-1, and that is the assertion below.**
+    ``Pass<Word>`` used to sit here beside it, released as this residual was; its base
+    is a credential STEM (``Pass``), so the stem gate now refuses it whatever the
+    argument is, and it is a POSITIVE row. What stays released is a base no one chooses
+    a password with — which is the point: the refusal is on the BASE, not the argument.
+
+    The boundary is on BOTH sides, and this test asserts the widening that used to sit
+    beside it: the residual is the digit-free, symbol-free, single-token spelling, so
+    the digit-carrying sibling of the same row MASKS. Before the confinement was
+    enforced that sibling was released whole, which is why a test that only asserted the
+    residual would have passed while releasing credentials.
+    """
+    import local_operator.redaction_shapes as rs
+
+    residual = [case for case in NEGATIVE_CASES if "Ident<Ident>" in case.reason]
+    assert len(residual) == 1, [case.reason for case in residual]
+    case = residual[0]
+    assert rs.scrub_shapes(case.text) == case.text
+
+    monkeypatch.setattr(rs, "_is_type_expression", lambda value: False)
+    assert rs.scrub_shapes(case.text) != case.text, "the residual must be this arm's"
+
+    # ...and the credential-STEM spelling that used to be released beside it (agent
+    # review R2-1): the same ``Ident<Ident>`` shape, but over a base a person reaches
+    # for when they choose a password, so it MASKS rather than sitting in the residual.
+    monkeypatch.undo()
+    stem_spelling = "API" + "_KEY=" + "Pass" + _LT + "Word"
+    assert rs.scrub_shapes(stem_spelling) != stem_spelling, "a stem base must MASK"
+
+    # ...and the sibling that a wide arm used to take with it.
+    sibling = "DB" + "_PASSWORD=" + "Pass" + _LT + "Word" + "7"
+    assert rs.scrub_shapes(sibling) != sibling, "the digit-carrying sibling must MASK"
 
 
 def test_an_escape_is_neither_a_name_character_nor_a_line_the_value_may_cross() -> None:
@@ -700,18 +1183,29 @@ def test_the_hold_is_the_max_of_two_rules_and_stays_bounded() -> None:
     The older KNOWN-value rule holds whatever a registered value needs, because a
     registered value is a credential the session was told about and publishing it
     in two halves is the leak that rule exists to prevent. So the filter's total
-    hold is ``max(_PIPE_HOLD_LIMIT, len(value) + _PIPE_DEFERRAL_LIMIT)`` — a bound
-    over what the SESSION knows, never over what the child prints, which is the
-    property the cap is for. Asserted with a NON-EMPTY secret on purpose: an empty
-    one exercises only the first term, which is how this limit came to be
-    documented as the whole bound in the first place.
+    hold is ``max(_PIPE_HOLD_LIMIT, hold + widest spelling)`` — a bound over what
+    the SESSION knows, never over what the child prints, which is the property the
+    cap is for. Asserted with a NON-EMPTY secret on purpose: an empty one
+    exercises only the first term, which is how this limit came to be documented
+    as the whole bound in the first place.
+
+    **The second term is the SPELLING window, and it is 4x the value at the top
+    of its range** (round-1 review, F1/F4): the value rule no longer holds the
+    value's own bytes, it holds :func:`~local_operator.redaction_shapes.\
+    stream_hold_window` — the widest spelling, capped at ``_STREAM_HOLD_LIMIT`` —
+    plus the spelling the cut is being moved off. So the bound asserted here is
+    ``max(limit, window + widest spelling)``, which is a bound on what the SESSION
+    knows and is what makes the line-terminator leak unrepresentable rather than
+    merely unobserved. The old ``size + _PIPE_DEFERRAL_LIMIT`` shape is kept for
+    the sizes where the window is the value (a value whose widest spelling is the
+    escaped form is 4x, so the two agree only below the floor).
 
     ``getattr`` because this row is a guard on the filter as a whole rather than a
-    discriminator for this change — the rule it measures predates it and the
-    numbers are the same on the pre-fix source, so it must not fail there for a
-    missing symbol.
+    discriminator for this change: the SHAPE rule it measures predates it, so it
+    must not fail on a source where the value-window symbols do not exist.
     """
     limit = getattr(builtin, "_PIPE_HOLD_LIMIT", builtin._PIPE_DEFERRAL_LIMIT)
+    window = getattr(redaction_shapes, "stream_hold_window", None)
     worst = 0
     for size, read in ((1_000, 4096), (5_000, 4096), (24_576, 65536), (30_000, 65536)):
         secret = ("q7Xk2m" * (size // 6 + 1))[:size]
@@ -727,9 +1221,13 @@ def test_the_hold_is_the_max_of_two_rules_and_stays_bounded() -> None:
         assert (
             secret not in b"".join(published).decode()
         ), f"a registered value of {size} B was published at {read} B reads"
-        assert peak <= max(
-            limit, size + builtin._PIPE_DEFERRAL_LIMIT
-        ), f"holding a {size} B value at {read} B reads took {peak} B"
+        if window is None:  # a pre-window source: the old, smaller bound
+            ceiling = max(limit, size + builtin._PIPE_DEFERRAL_LIMIT)
+        else:
+            ceiling = max(
+                limit, window([secret]) + redaction_shapes.longest_redaction_form([secret])
+            )
+        assert peak <= ceiling, f"holding a {size} B value at {read} B reads took {peak} B"
         worst = max(worst, peak)
     assert (
         worst > limit
@@ -2133,6 +2631,478 @@ def test_an_open_block_consults_the_end_classifier_only_where_the_literal_is(
     redactor.feed(lines.encode())
     assert body_spy.calls >= 20, "the line loop did not run, so this proves nothing"
     assert end_spy.calls == 0, f"the END classifier was asked about {end_spy.calls} prose lines"
+
+
+# --- the exact-VALUE pass: which SPELLINGS of a known value are masked -------
+#
+# The incident these pin: an agent could not read a hostname the mask kept
+# replacing, so it printed the value REVERSED and walked straight past the
+# filter. A value's reversal, base64, hex, escape, percent and separator forms
+# are all the same credential, so all of them are masked; the negative half — an
+# ordinary string that merely LOOKS transformed must stay byte-identical — is as
+# much of the contract as the positive half, because this pass runs over every
+# tool result and a mask that eats ordinary output blinds the agent.
+
+#: Synthetic and opaque on purpose: no scheme, no issuer prefix, no spelling the
+#: SHAPE table recognises. What these tests measure is the exact-value policy,
+#: so a value the shape pass could mask by itself would prove nothing.
+SPELLED_VALUE = "q7fh2zp4mx9wk3ta6bn1dv8rs5"
+
+
+def _spellings(value: str) -> dict[str, str]:
+    """The cheap transforms of ``value``, in the spellings a command emits.
+
+    One place, so the family list cannot drift between the mask tests and the two
+    SWEEP tests (every offset, both chunked surfaces): the round-1 blocker was a
+    family that the sweep never saw because the corpus omitted it — the value's
+    own line terminator — so a missed family is the failure mode this dict exists
+    to prevent.
+    """
+    import base64
+    import json
+    import urllib.parse
+
+    raw = value.encode()
+    standard = base64.b64encode(raw).decode()
+    urlsafe = base64.urlsafe_b64encode(raw).decode()
+    pairs = [f"{byte:02x}" for byte in raw]
+    grouped = " ".join("".join(pairs[i : i + 2]) for i in range(0, len(pairs), 2))
+    quoted = urllib.parse.quote(value, safe="")
+    escaped_json = json.dumps(value)[1:-1]
+    return {
+        "verbatim": value,
+        "reversed (the incident's evasion)": value[::-1],
+        "base64": standard,
+        "base64 unpadded": standard.rstrip("="),
+        "base64 urlsafe": urlsafe,
+        "base64 urlsafe unpadded": urlsafe.rstrip("="),
+        "hex lower": raw.hex(),
+        "hex upper": raw.hex().upper(),
+        "hex, space-separated pairs": " ".join(pairs),
+        "hex, two-space-separated pairs": "  ".join(pairs),
+        "hex, xxd's 2-byte groups": grouped,
+        "backslash-x escaped": "".join(f"\\x{b:02x}" for b in raw),
+        "backslash-x escaped, upper digits": "".join(f"\\x{b:02X}" for b in raw),
+        "percent-encoded": quoted,
+        "percent-encoded, form": urllib.parse.quote_plus(value, safe=""),
+        "percent-encoded, lower-case digits": re.sub(
+            r"%[0-9A-Fa-f]{2}", lambda match: match.group(0).lower(), quoted
+        ),
+        "json escaped": escaped_json,
+        "json escaped, upper-case digits": re.sub(
+            r"\\u[0-9A-Fa-f]{4}", lambda match: match.group(0).upper(), escaped_json
+        ),
+        "space-spread": " ".join(value),
+        "dash-spread": "-".join(value),
+        "newline-spread": "\n".join(value),
+    }
+
+
+#: Values the sweeps run every family over. Three shapes on purpose: an opaque
+#: secret (the common case), one carrying the characters the encoders actually
+#: escape (so the percent and JSON families are not silently the verbatim string
+#: in a dedupe), and a MULTI-LINE value — the round-1 blocker was a registered
+#: value whose own line terminator made each line look like a decidable prefix
+#: to a line-oriented release point.
+SPELLED_SWEEP_VALUES = (
+    ("opaque", SPELLED_VALUE),
+    ("reserved characters", "p4/w+x=y?z&k n9"),
+    ("multi-line", '{"a": "' + SPELLED_VALUE + '",\n"b": "second line",\n"c": "third"}'),
+)
+
+
+@pytest.mark.parametrize("label", sorted(_spellings(SPELLED_VALUE)))
+def test_every_cheap_spelling_of_a_registered_value_is_masked(label: str) -> None:
+    """Every enumerated spelling, one case each, so a family cannot rot silently.
+
+    Parametrised rather than looped on purpose: a loop that stops early on the
+    first failure hides which families were never reached, and the whole point
+    of a closed spelling list is that each entry is inspectable on its own.
+    """
+    spelling = _spellings(SPELLED_VALUE)[label]
+    text = f"printed={spelling} done"
+    masked = redact_secret_values(text, [SPELLED_VALUE])
+    assert spelling not in masked, f"{label} survived the mask"
+    assert masked == "printed=[redacted] done"
+
+
+def test_the_incidents_own_evasion_is_a_regression_case() -> None:
+    """The reverse-printed hostname that started this, spelled as it was printed.
+
+    Not a generic reversal test: the incident's value is a HOSTNAME, printed
+    reversed because the mask kept replacing it, which is the deliberate
+    control bypass the policy has to contain rather than the accident it also
+    catches.
+    """
+    host = "qa-app.qa.gominerva.com"
+    assert host[::-1] == "moc.avrenimog.aq.ppa-aq"
+    masked = redact_secret_values(f"host is {host[::-1]}", [host])
+    assert "moc.avrenimog" not in masked
+    assert masked == "host is [redacted]"
+
+
+def test_a_value_under_the_floor_keeps_its_verbatim_coverage_only() -> None:
+    """The over-masking floor, stated as a contract rather than left implied.
+
+    A short value's permutations are strings ordinary output already contains
+    (``atled`` is ``delta`` backwards), so they are not enumerated. What must
+    not change is the pre-existing guarantee: the value ITSELF is still masked.
+    """
+    short = "k3y-8812"
+    assert len(short) < redaction_shapes._TRANSFORM_MIN_VALUE_LEN
+    assert redaction_shapes.credential_forms(short) == (short,)
+    assert redact_secret_values(f"id={short}", [short]) == "id=[redacted]"
+
+
+def test_ordinary_text_that_looks_transformed_is_left_byte_identical() -> None:
+    """The negative half: over-masking is a defect in this codebase.
+
+    Deliberately includes text that a naive "looks encoded" rule would eat — a
+    base64 blob, a hex dump, an escaped JSON body, a percent-encoded URL — and
+    the reversal of a real word, which is what a short value's family would
+    have masked.
+    """
+    ordinary = (
+        "payload=aGVsbG8gd29ybGQgdGhpcyBhIGJhc2U2NCBibG9i",
+        "0000  51 37 66 68 32 7a 70 34  6d 78 39 77 6b 33 74 61",
+        '{"note": "caf\\u00e9 \\"quoted\\" \\\\ path"}',
+        "https://example.test/a%20b/c%2Fd?x=1",
+        "the delta between atled and delta is nil",
+    )
+    for text in ordinary:
+        assert redact_secret_values(text, [SPELLED_VALUE]) == text
+
+
+def test_every_spelling_of_a_longer_value_is_masked_before_a_prefix_value() -> None:
+    """Longest-first ordering, preserved one level down under normalisation.
+
+    A value that is a prefix of another must not run first and leave the longer
+    one's remainder on screen — and the same rule has to hold for the SPELLINGS,
+    which is the part normalisation could silently get wrong.
+    """
+    shorter = SPELLED_VALUE
+    longer = SPELLED_VALUE + "EXTRA9TAIL"
+    for transform in (lambda text: text, lambda text: text[::-1]):
+        masked = redact_secret_values(
+            f"{transform(shorter)} {transform(longer)}", [shorter, longer]
+        )
+        assert transform(longer) not in masked
+        assert transform(shorter) not in masked
+        assert masked.count(REDACTION_MARKER) == 2
+
+
+def test_the_spelling_list_is_closed_and_bounded() -> None:
+    """A structural bound: the pass runs on every result, so its cost is a contract.
+
+    Asserted on the LIST rather than on a wall clock (see AGENTS.md, "Prefer a
+    structural invariant to a numeric one"): the number of spellings per value
+    is what makes the pass bounded, and a family added later without a bound
+    fails here rather than in a review conversation about CPU.
+    """
+    forms = redaction_shapes.credential_forms(SPELLED_VALUE)
+    assert len(forms) <= 24, f"the policy grew to {len(forms)} spellings per value"
+    assert len(set(forms)) == len(forms), "a duplicated spelling costs a whole-text search"
+    assert forms == tuple(sorted(forms, key=len, reverse=True)), "longest first"
+    # A longer value's escaped form is the widest term in the hold window, and a
+    # caller sizes its window from this — so it must be derived, not guessed.
+    assert redaction_shapes.longest_redaction_form([SPELLED_VALUE]) == max(len(f) for f in forms)
+
+
+@pytest.mark.parametrize("value_label,value", SPELLED_SWEEP_VALUES)
+@pytest.mark.parametrize("label", sorted(_spellings(SPELLED_VALUE)))
+def test_the_stream_masker_masks_a_spelling_split_at_every_offset(
+    value_label: str, value: str, label: str
+) -> None:
+    """The chunk-boundary hole, swept at every split point rather than sampled.
+
+    A window-sized hold is a claim about what can straddle a cut, so a test that
+    tried three offsets would pass with a window that happens to be long enough
+    for those three. Swept exhaustively, for every family, because the hold is
+    sized from the WIDEST spelling while the leak happens at the narrowest cut —
+    and over THREE VALUES, because a family that is the verbatim string for an
+    alphanumeric value (every percent and JSON spelling, by dedupe) is not
+    actually exercised by it, and because a multi-line value carries a line
+    terminator INSIDE the spelling, which is the case that got past the
+    line-oriented release point.
+    """
+    spelling = _spellings(value)[label]
+    payload = f"prefix {spelling} suffix\n"
+    for offset in range(len(payload) + 1):
+        masker = redaction_shapes.StreamMasker([value])
+        published = masker.push(payload[:offset]) + masker.push(payload[offset:])
+        published += masker.push("", final=True)
+        assert spelling not in published, f"{value_label}/{label} leaked at {offset}"
+        assert REDACTION_MARKER in published, f"{value_label}/{label} unmasked at {offset}"
+
+
+def test_the_stream_masker_delays_nothing_when_no_value_is_registered() -> None:
+    """The window is sized from the value set, so an empty set costs no latency."""
+    masker = redaction_shapes.StreamMasker([])
+    assert masker.push("a line with no terminator") == "a line with no terminator"
+    assert masker.withheld == 0
+
+
+def test_the_pipe_does_not_rebuild_its_spellings_when_the_values_are_unchanged() -> None:
+    """F5: the per-read cost of the policy, pinned structurally.
+
+    ``refresh`` runs once per 64 KiB read, and rebuilding every value's spelling
+    list there is real work — measured at ~21 µs for one ordinary secret before
+    this, and tens of ms for an oversized value, per read, for as long as the
+    value stays registered. The list is a pure function of the value set, so an
+    unchanged set must not recompute it: asserted on the object identity of the
+    list rather than on a wall clock (AGENTS.md, "Prefer a structural invariant
+    to a numeric one"), which also survives a slower or faster host.
+    """
+    redactor = builtin._PipeRedactor([SPELLED_VALUE])
+    first = redactor.forms
+    redactor.refresh([SPELLED_VALUE])
+    redactor.refresh([SPELLED_VALUE, SPELLED_VALUE])
+    assert redactor.forms is first, "an unchanged value set rebuilt the spelling list"
+    redactor.refresh([SPELLED_VALUE, "additional-credential-9931"])
+    assert redactor.forms is not first, "a widened value set must re-derive the list"
+    assert any("additional-credential-9931" in form for form in redactor.forms)
+
+
+def test_a_non_string_entry_is_skipped_rather_than_raised_on() -> None:
+    """F6: the docstring's promise, which the code did not keep.
+
+    ``sorted(..., key=len)`` applies ``len`` while it builds the list, so a
+    truthy non-``str`` entry raised ``TypeError`` from inside the mask — the one
+    failure a redaction pass must never have, because it turns a tool result
+    into a tool crash. The filter now lives in the generator.
+
+    The calls below are deliberately OFF-CONTRACT (the signature is
+    ``Iterable[Optional[str]]``), which is the point: the list is built by a
+    caller this module cannot see, and a bug in that builder is what the runtime
+    guard is for. ``cast`` rather than a widened signature, so the contract stays
+    meaningful for the callers the type checker actually protects.
+    """
+    assert redaction_shapes.scrub_values("ordinary text", cast("list[Any]", [123])) == (
+        "ordinary text"
+    )
+    assert redaction_shapes.scrub_values("ordinary text", cast("list[Any]", [None, b"bytes"])) == (
+        "ordinary text"
+    )
+    assert redaction_shapes.scrub_values("text", [""]) == "text"
+    assert redaction_shapes.credential_forms("") == ()
+
+
+def test_the_straddle_search_finds_only_a_form_that_spans_the_cut() -> None:
+    """The cut rule's search, on its own — it is shared by both chunked surfaces.
+
+    A one-character or empty form cannot straddle a position, and a form that
+    ends exactly AT the cut is fully released (nothing is split by it), so only a
+    form that begins strictly before the cut and ends strictly after it may move
+    the cut back.
+    """
+    find = redaction_shapes.straddling_form_start
+    assert find("xxABCxx", 4, ["ABC"]) == 2
+    assert find("xxABCxx", 2, ["ABC"]) == -1  # ends exactly at the cut: not split
+    assert find("xxABCxx", 6, ["ABC"]) == -1  # starts after the cut
+    assert find("ABC", 1, ["A"]) == -1  # a one-character form cannot straddle
+    assert find("", 0, ["ABC"]) == -1
+    assert find("abcabc", 4, ["abc"]) == 3  # the LATER occurrence straddles
+
+
+def test_a_transformed_spelling_split_across_feeds_is_still_masked_in_the_pipe() -> None:
+    """The bash pipe filter's cut rule, over every family, every value, every offset.
+
+    The pipe already held back for a verbatim value; a spelling is LONGER than
+    the value it comes from (the escaped form is four characters per byte), so
+    the cut could land inside one and publish it in two unmasked halves — in the
+    live view, which is the one surface no later pass re-reads. Swept per family
+    rather than once per value, so a family added to the policy is swept here the
+    day it is added.
+    """
+    for value_label, value in SPELLED_SWEEP_VALUES:
+        for label, spelling in _spellings(value).items():
+            payload = f"before {spelling} after\n".encode()
+            for offset in range(len(payload) + 1):
+                redactor = builtin._PipeRedactor([value])
+                published = redactor.feed(payload[:offset]) + redactor.feed(payload[offset:])
+                published += redactor.feed(b"", final=True)
+                assert (
+                    spelling.encode() not in published
+                ), f"{value_label}/{label} leaked in the stream when split at {offset}"
+
+
+@pytest.mark.parametrize("value_label,value", SPELLED_SWEEP_VALUES)
+def test_a_value_whose_spelling_carries_a_line_terminator_is_not_released_a_line_at_a_time(
+    value_label: str, value: str
+) -> None:
+    """F1/Q1: the line rule alone is not a guarantee, and this is the proof.
+
+    The release point publishes every complete LINE, which is decidable only for
+    a spelling that cannot CONTAIN a line terminator. A registered multi-line
+    value (a pretty-printed service-account JSON, a multi-line ``.env``) and the
+    ``\\n``-joined spelling both carry one, so a line-aligned writer made each of
+    the value's own lines look like a decidable prefix and the value was published
+    line by line into the live card and the job's peek tail — the one surface
+    nothing re-reads, so no later pass can repair it: a LINE is not one of the
+    enumerated spellings.
+
+    Fed every split point rather than line-aligned or byte-aligned samples, and
+    read BEFORE the stream ends: that is the surface the defect was measured on
+    (the live card and the peekable job tail while the command runs), and the
+    window's whole job is to hold a partial spelling back until it is complete.
+    The completed stream is checked in the same loop as the no-regression half.
+    """
+    spellings = (("the value itself", value), ("the newline-spread spelling", "\n".join(value)))
+    for spelling_label, spelling in spellings:
+        raw = spelling.encode()
+        for split in range(1, len(raw)):
+            redactor = builtin._PipeRedactor([value])
+            live = redactor.feed(raw[:split]).decode()
+            where = f"{value_label}/{spelling_label} split at {split}"
+            assert spelling not in live, f"{where}: the spelling painted live"
+            assert value not in live, f"{where}: the value painted live"
+            for line in value.splitlines():
+                assert line not in live, f"{where}: a value line painted live"
+            completed = live + redactor.feed(raw[split:]).decode()
+            completed += redactor.feed(b"", final=True).decode()
+            assert spelling not in completed, f"{where}: the completed stream published it"
+            assert value not in completed, f"{where}: the completed stream published the value"
+
+
+@pytest.mark.parametrize("chunk", [7, 64, 333, 4096])
+def test_the_spelling_window_floor_does_not_close_an_open_key_block(chunk: int) -> None:
+    """The floor above composed with the PEM line loop: a registered value must not
+    make an unrelated key block publish its body.
+
+    ``len(text) - hold`` is an arbitrary offset, so a floor applied as-is cut
+    mid-line in the ordinary case, where every release used to end on a line. The
+    short fragment it left at the START of the next release (``+Q\\n``) is a line
+    ``_mask_open_key_block`` reads as prose, so the block CLOSED on it and the rest
+    of the body went out raw — measured when this change was folded onto the
+    linear-PEM and unterminated-block work: 8 of 34 streams leaked, up to 1,873 of
+    2,000 body lines, with one 26-character value registered, against 0 without
+    one. The floor now retreats to a line boundary. Uses the PEM section's
+    armour helpers below (built from parts; see ``_pem_grammar_is_live``).
+    """
+    _pem_grammar_is_live()
+    stream = ("preamble line\n" + _PEM_HEADER + _body_lines(400) + _PEM_END + "after\n").encode()
+    redactor = builtin._PipeRedactor(["SYNTH-" + "q" * 20])
+    assert redactor.hold > 0, "no window is held, so this proves nothing"
+    published = b"".join(
+        redactor.feed(stream[i : i + chunk]) for i in range(0, len(stream), chunk)
+    ) + redactor.feed(b"", final=True)
+    leaked = _published_body_lines(published.decode())
+    assert leaked == [], f"{len(leaked)} body lines published at {chunk}-byte reads"
+
+
+@pytest.mark.parametrize("terminated", [True, False], ids=["with-end", "unterminated"])
+def test_a_body_line_wider_than_the_cap_does_not_close_an_open_key_block(
+    terminated: bool,
+) -> None:
+    """Round-2 review R2-1: the floor's line retreat is bounded by the cap (memory
+    must not depend on what the child prints), so on an UNWRAPPED body line — one
+    wider than ``_PIPE_DEFERRAL_LIMIT``, which ``pem_body_line`` accepts — the floor
+    still cut mid-line, and the few characters it left at the start of the next
+    release were a "line" the block loop read as prose. The block closed and every
+    following body line went out raw: 20 of 20 at most widths in this sweep with a
+    value registered, 0 with none, on the head before the start-side fragment rule.
+
+    The widths sweep the floor's offset across the line's last characters (16
+    consecutive widths put the cut at every fragment length below the body floor)
+    and the 7-byte read is a paced writer; the line is built from the base64
+    alphabet so it is body-shaped at any width.
+    """
+    _pem_grammar_is_live()
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    tail = _PEM_END + "after\n" if terminated else ""
+    for width in range(builtin._PIPE_DEFERRAL_LIMIT + 1, builtin._PIPE_DEFERRAL_LIMIT + 17):
+        wide = (alphabet * (width // len(alphabet) + 1))[:width]
+        stream = ("pre\n" + _PEM_HEADER + wide + "\n" + _body_lines(20) + tail).encode()
+        redactor = builtin._PipeRedactor(["SYNTH-" + "q" * 20])
+        assert redactor.hold > 0, "no window is held, so this proves nothing"
+        published = b"".join(
+            redactor.feed(stream[i : i + 7]) for i in range(0, len(stream), 7)
+        ) + redactor.feed(b"", final=True)
+        text = published.decode()
+        leaked = _published_body_lines(text)
+        assert leaked == [], f"width {width}: {len(leaked)} body lines published"
+        assert wide not in text, f"width {width}: the wide body line published"
+
+
+@pytest.mark.parametrize("value_length", [12, 20, 27, 49])
+def test_a_cut_inside_a_crlf_pair_does_not_close_an_open_key_block(value_length: int) -> None:
+    """Round-2 review R2-1's CRLF cell: a cut between ``\\r`` and ``\\n`` hands the
+    next release a lone ``\\n``, an empty line the block loop reads as prose. On
+    the head before the start-side fragment rule a CRLF block at 333-byte reads
+    published 7, 42, 31 and 44 body lines for these value lengths (the hold moves
+    the floor, so the length picks the alignment), and 0 with no value.
+    """
+    _pem_grammar_is_live()
+    stream = (
+        "pre\r\n"
+        + _PEM_HEADER.replace("\n", "\r\n")
+        + _body_lines(200).replace("\n", "\r\n")
+        + _PEM_END.replace("\n", "\r\n")
+        + "after\r\n"
+    ).encode()
+    redactor = builtin._PipeRedactor(["SYNTH-" + "q" * (value_length - 6)])
+    assert redactor.hold > 0, "no window is held, so this proves nothing"
+    published = b"".join(
+        redactor.feed(stream[i : i + 333]) for i in range(0, len(stream), 333)
+    ) + redactor.feed(b"", final=True)
+    leaked = _published_body_lines(published.decode())
+    assert leaked == [], f"{len(leaked)} body lines published"
+    assert published.decode().endswith("after\r\n"), "the stream's tail was not released"
+
+
+#: The RFC 1421 header lines a legacy-encrypted PEM carries between its armour and
+#: its body (``ssh-keygen -m PEM -N …``, ``openssl rsa -traditional -des3``). Each is
+#: PROSE to the body grammar, and that is the point: they close the open-block state.
+_LEGACY_PEM_HEADERS = "Proc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0A1B2C3D4E5F6071\n\n"
+
+
+@pytest.mark.parametrize(
+    "block_headers", [_LEGACY_PEM_HEADERS, "\n"], ids=["legacy-encrypted", "blank-separator"]
+)
+def test_the_window_floor_does_not_split_a_whole_block_under_the_cap(block_headers: str) -> None:
+    """Round-3 review R3-1 / QA round-2 Q2-1: the floor must not cut INTO a complete
+    block that fits the cap, because main holds that block whole.
+
+    Once END is in the buffer the floor (``len(text) - hold``) lands inside the
+    block, the first release carries the header and a non-body line that closes the
+    open-block state, and the held tail (body lines + END, with no header in front
+    of it for the table to match) goes out raw. Read BEFORE end of stream, because
+    that is the live card and the ``jobs(op='peek')`` tail — the surface the loop's
+    output hook never repairs; the settled result was clean on every tree. On the
+    head before the fix: 2 body lines at 7- and 4,096-byte reads and at every
+    two-chunk split offset that leaves the block whole in the second read, for this
+    26-character UNRELATED value; 0 with no value and 0 on main.
+    """
+    _pem_grammar_is_live()
+    # Output AFTER the block, longer than the hold, so the held tail is pushed out by
+    # an ordinary release while the command still runs — with only a short trailing
+    # line it would ride the final release instead, and a live-only assertion would
+    # pass on the unfixed head.
+    trailer = "".join(f"post line {index:02d} of ordinary output\n" for index in range(8))
+    stream = ("pre\n" + _PEM_HEADER + block_headers + _body_lines(26) + _PEM_END + trailer).encode()
+    assert len(stream) < builtin._PIPE_DEFERRAL_LIMIT, "the block must fit the cap"
+
+    def published_after(parts: list[bytes]) -> tuple[str, str]:
+        redactor = builtin._PipeRedactor(["SYNTH-" + "q" * 20])
+        assert redactor.hold > 0, "no window is held, so this proves nothing"
+        assert redactor.hold < len(trailer), "the trailer must push the held tail out live"
+        live = b"".join(redactor.feed(part) for part in parts)
+        settled = live + redactor.feed(b"", final=True)
+        assert settled.decode().endswith(trailer), "the stream's tail was not released"
+        return live.decode(), settled.decode()
+
+    for chunk in (7, 4096):
+        parts = [stream[i : i + chunk] for i in range(0, len(stream), chunk)]
+        live, settled = published_after(parts)
+        leaked = _published_body_lines(live)
+        assert leaked == [], f"{len(leaked)} body lines published live at {chunk}-byte reads"
+        assert _published_body_lines(settled) == [], f"body lines in the tail at {chunk}"
+    leaking = [
+        split
+        for split in range(1, len(stream))
+        if _published_body_lines(published_after([stream[:split], stream[split:]])[0])
+    ]
+    assert leaking == [], f"{len(leaking)} of {len(stream) - 1} split offsets published body lines"
 
 
 # --- the store: containment, and the incident path ---------------------------
@@ -3919,6 +4889,76 @@ def test_the_grading_separates_contained_from_exposed() -> None:
     assert not any(h.exposed for h in pem_hits), "a masked truncated key is not an exposure"
 
 
+def test_the_exposure_claim_has_a_floor_and_a_substance_test() -> None:
+    """The unnamed-escalation defect, at the site that produced it.
+
+    ``exposed`` is the whole severity classification — it is what raises the rotation
+    notice — and it used to fire for a match of ANY length. A two-to-four character
+    ordinary word's characters reappear in the same text for innocent reasons, so the
+    fragment test answered YES and the session escalated with ``labels=()``, filing
+    "a credential the shape table could not name" for a Python keyword: a census of
+    this machine's transcripts found 2,133 ``rotate it`` incidents across 1,080
+    sessions, of which 1,493 (70%) were that unnamed state, firing on ordinary
+    results — a ``read`` of a file path, a ``grep`` of a directory, a ``web_search``
+    for a village mayor.
+
+    Both halves are pinned here because either one alone lets the defect back:
+    the WIDTH floor (:data:`rs._EXPOSURE_MIN_VALUE_LEN`) and the SUBSTANCE consult
+    (:func:`rs._value_is_not_a_credential`), which the masking floor already made
+    and this site did not. The registration floor is not a second caller of the
+    whole predicate — it consults only its placeholder half plus its own length
+    floor — so this site is that predicate's SECOND caller.
+    """
+    import local_operator.redaction_shapes as rs
+
+    # WIDTH. A four-character value is refused whatever the text says — including the
+    # case that motivated it, a value whose characters are all over the text it was
+    # read out of.
+    assert not rs._value_may_be_claimed_exposed("pass")
+    assert not rs._value_may_be_claimed_exposed("abcd")
+    assert rs._value_may_be_claimed_exposed("grace")  # five: the floor's edge
+
+    # SUBSTANCE. A value that is code, a reference, a type or a path is not credential
+    # material at any length above the floor — the clause the exposed path lacked.
+    for not_a_credential in (
+        "_node_order",
+        'started["token"]',
+        "_tokens(query)",
+        "providers.anthropic.cache_ttl_1h_min_context_tokens",
+        "/Users/example/project",
+        "${CI_JOB_TOKEN}",
+    ):
+        assert not rs._value_may_be_claimed_exposed(not_a_credential), not_a_credential
+
+    # ...and a value that IS credential material keeps the claim, which is the
+    # direction the whole control exists for.
+    for credential in ("correct-horse-battery", "hunter2hunter2", "S3cr3t/val+ue"):
+        assert rs._value_may_be_claimed_exposed(credential), credential
+
+
+def test_a_marker_carrying_value_is_judged_by_survival_not_by_substance() -> None:
+    """The one carve-out the substance consult needs, pinned so it is not mistaken
+    for a loophole.
+
+    The failure it exists for came from a PLAIN WORD, not a placeholder: a second rule
+    matched the marker the first rule had just inserted, so the exposed hit's own value
+    WAS ``[redacted]`` — and the old region-search read its own marker back as readable
+    material and filed a rotation demand for the two ``.npmrc`` ``_authToken`` cases
+    and a cookie header (pinned in ``test_a_marker_valued_hit_no_longer_escalates``
+    just below). Adding the substance consult for that defect would re-break it here,
+    one layer up: a value carrying the marker has ``[`` and ``]``, which are
+    :data:`rs._EXPRESSION_CHARS`, so the predicate would refuse a claim for a value
+    that is text a MASK wrote rather than code the agent reads. The carve-out hands
+    such a value back to the survival question instead — the documented limit on
+    :func:`rs._credential_fragments_survive` — so the WHOLLY surviving copy still
+    escalates and only the partial survivor is given up.
+    """
+    import local_operator.redaction_shapes as rs
+
+    value = f"tok{rs.REDACTION_MARKER}tail"
+    assert rs._value_may_be_claimed_exposed(value), "the marker carve-out stopped applying"
+
+
 #: The positives that ESCALATE, named by the case's own reason string.
 #:
 #: An EXACT set, in both directions, like the partial-mask ratchet further down: a
@@ -4052,10 +5092,10 @@ def test_a_duplicated_placeholder_reference_does_not_escalate() -> None:
     ``$VAR`` readable (``is_placeholder_component`` is what keeps it unmasked), so
     the fragment test found that survivor under the hit's own value and read it as
     a partial mask — the loud ``rotate it`` notice for a value that never was
-    credential material. The exposed decision site is now the third place the
-    predicate is consulted (the masking floor and the registration floor are the
-    others), which is the whole of the fix: no word-list change reaches it, because
-    the value is correctly a placeholder already.
+    credential material. The exposed decision site is now the second place the
+    predicate is consulted (the masking floor is the other; the registration floor
+    consults only its placeholder half), which is the whole of the fix: no word-list
+    change reaches it, because the value is correctly a placeholder already.
 
     Every literal is built by concatenation on purpose — a credential-shaped
     literal written into a source file is exactly what the scrubber is for.
@@ -4769,6 +5809,132 @@ def _corpus_grading() -> str:
 #:    by a differential rather than stated by the table, which is the thing this constant
 #:    exists to stop.
 _CORPUS_GRADING_DIGEST = "a755ab0e8960419f719323ae343ef725e9f8662f278b1bfc66ba0eef58406f57"
+#: MOVED on 2026-09-23 by the fix for the TYPE-ANNOTATION false positive, and the
+#: argument is the measurement this constant's history always asks for, taken the
+#: same way: the 423 rows the constant above covered produce
+#: ``2a29fe4c…`` BYTE FOR BYTE under the fixed module (``git show
+#: origin/main:tests/unit/secrets/credential_shape_corpus.py`` loaded beside
+#: ``origin/main``'s module and this one, ``_corpus_grading()`` computed for that
+#: corpus under both and compared) — so not a masked text, not a label, not a
+#: value, not a window, not a ``complete``, not an ``exposed`` moved for any
+#: pre-existing row. The digest moves because the corpus grew to 452: 20 negatives
+#: for the type annotations the assignment rule was masking, 8 positives for the
+#: credentials spelled like them, and one negative for the residual this release
+#: accepts.
+#:
+#: FIFTEEN of the 20 added negatives move, and they all move the SAME way — from
+#: masked to readable — which is the whole claim of the fix; the other five were
+#: already released by another rule (a bare primitive below the value floor, an
+#: annotation carrying ``[``, a keyword argument in a function signature), so they
+#: are regression rows rather than behaviour rows. TWO of the fifteen ESCALATED
+#: before the fix, and that is the cost this change removes: a two-argument Rust
+#: generic and a two-primitive TypeScript generic both graded ``exposed``, because
+#: the mask covered the truncation of the type and left its tail readable — which
+#: is a rotation demand for a type annotation, and one of them stopped a release
+#: pending a verdict. NONE of the 8 added positives moves: they were masked before
+#: and they are masked now, which is what makes them evidence that the clause is
+#: scoped rather than broad.
+#: MOVED AGAIN on 2026-09-23, in the R1-1 remediation, and the argument has the same
+#: two halves as the move above it.
+#:
+#: 1. **The MODULE change moved no pre-existing row, measured.** The confinement is
+#:    now enforced (a digit outside a primitive name, and a lowercase base, each stop
+#:    the release — see :func:`_carries_a_non_primitive_digit`), and the 471 rows of
+#:    the recovered corpus graded with ``git show 7a0d3cbc:local_operator/redaction_shapes.py``
+#:    loaded as a second module produce ``bd30424e…`` BYTE FOR BYTE under BOTH modules.
+#:    That is the whole safety claim of this round: the enforcement narrowed the
+#:    release class the branch introduced and touched nothing the branch had not.
+#:
+#: 2. **The corpus grew by ELEVEN positives and ONE negative, which is what moves the
+#:    constant.** The eleven are the DIGIT-CARRYING and LOWERCASE-BASE half of the
+#:    residual class plus the primitive-argument spellings — all of them released WHOLE
+#:    with no hit at all before this round, and all of them things the corpus had no row
+#:    for because it pinned only the digit-free spelling (agent review R1-1). They sit
+#:    in ``TYPE_ANNOTATION_POSITIVES`` because they MUST mask, and the table's count
+#:    moved 8 -> 19 with them (``NEGATIVE_CASES`` moved 194 -> 195 for the one negative:
+#:    the same digit-free passphrase with its underscore removed, which the arm still
+#:    releases and is therefore a boundary of the confined arm rather than a miss). Both
+#:    figures are read off the assembled tuples rather than counted by hand, and the
+#:    whole-line totals agree: 471 graded rows became 483, which is 11 positives and 1
+#:    negative. The
+#:    wide-arm assertion is pinned to the table's length rather than to a stale ``8``, so
+#:    a positive row with no discriminating reading fails instead of sitting inert.
+#:
+#: MOVED ONCE MORE on 2026-09-23, in the R2-1 remediation, and the argument is again a
+#: measurement rather than a claim:
+#:
+#: 3. **The MODULE change moved exactly ONE pre-existing row, and it moved in the safe
+#:    direction.** The credential-stem base gate is applied to the BASE unconditionally
+#:    (``if _base_is_a_credential_stem(base): return False``, agent review R2-1), so
+#:    ``Pass<Word>`` — a credential stem over a CamelCase argument, previously the
+#:    ACCEPTED RESIDUAL and released whole with no hit — is now masked. Measured by
+#:    grading all 483 pre-existing rows under both modules: one row moves, and it is
+#:    that one. The other direction is measured too, because a base gate is only safe if
+#:    it is silent about a type's own base: ``Vec<String>``, ``Option<Vec<u8>>``,
+#:    ``Arc<Mutex<String>>``, ``Map<string, string>``, ``HashMap<String,String>``,
+#:    ``Result<String,Error>``, ``&str`` and ``std::collections::HashMap`` are released
+#:    identically before and after. The residual the arm still accepts is
+#:    ``Correcthorse<Battery>`` — ``Ident<Ident>`` with a base no one chooses a password
+#:    with — and it is a corpus row rather than a paragraph.
+#:
+#: 4. **The round's corpus change is ONE promotion and SIX additions.** ``Pass<Word>``
+#:    is promoted out of the released half, so ``NEGATIVE_CASES`` moved 195 -> 194: the
+#:    residual lost a member to the refusal rather than gaining one. Six credential-stem
+#:    positives are added beside it — ``Pass<Phrase>``, ``Passphrase<Word>``,
+#:    ``Passkey<Word>``, ``Auth<Token>``, ``Login<Secret>`` and ``Pass<Vec<u8>>`` — which
+#:    is what takes ``TYPE_ANNOTATION_POSITIVES`` 19 -> 26. Both counts are measured from
+#:    the assembled tuples, not counted by hand. The two digit rows whose reason line
+#:    named a condition the row does not exercise are corrected in the same change
+#:    (agent review R2-3).
+#:
+#: MOVED ONCE MORE on 2026-09-23, in the R3-1 remediation, and the argument has the two
+#: halves this constant's history asks for:
+#:
+#: 5. **The MODULE change moved NOTHING, and that was measured before the corpus grew.**
+#:    ``_base_is_a_credential_stem`` now reads the base's LEAF as well as the whole base,
+#:    and ``is_credential_name`` is handed that same leaf (agent review R3-1, through one
+#:    ``_type_token_leaf`` helper shared by both call sites), so the qualified class — 360
+#:    of 360 combinations of 5 module prefixes, 12 stem leaves and 6 argument shapes — went
+#:    from RELEASED with no hit to MASKED with a real hit, and the reference-marked spelling
+#:    went with it (the same read, the same fact one marker over). Graded against the corpus
+#:    as it stood, the digest was BYTE FOR BYTE the constant it replaced, computed under the
+#:    fixed module: no pre-existing row moves in either direction, because the corpus had NO
+#:    qualified or reference-marked stem row at all — which is precisely why nothing could
+#:    red on R3-1, and that is the gap R3-2 is about.
+#:
+#: 6. **The corpus change is THREE additions, and they are the whole of the move.** They are
+#:    a qualified credential-stem base with no argument list, the same qualification with an
+#:    argument list, and the reference-marked spelling. All three are masks, so
+#:    ``POSITIVE_CASES`` moves 295 -> 298 while ``NEGATIVE_CASES`` is unchanged at 194, and
+#:    ``TYPE_ANNOTATION_POSITIVES`` moves 26 -> 29. Both counts are measured from the
+#:    assembled tuples. Every added row is 8 characters or longer ON PURPOSE: below the
+#:    assignment rule's own value floor nothing matches at ANY revision (``a::Pass`` is
+#:    released at this head and at ``origin/main`` alike, while the type clause refuses it),
+#:    so a shorter row would pin a reading neither revision can reach.
+#:
+#: MOVED ONCE MORE on 2026-09-24, in the R4-1 remediation, and the argument again has the
+#: two halves this constant's history asks for:
+#:
+#: 7. **The MODULE change moved NOTHING, measured before the corpus grew.** The two
+#:    release-side gates now read EVERY ``::`` segment of the base through one
+#:    ``_type_token_segments`` extraction (agent reviews R3-1 and R4-1) instead of the
+#:    whole base plus its leaf, so the interior-stem class went from RELEASED with no hit
+#:    to MASKED with a real hit. Graded against the corpus as it stood, the digest is BYTE
+#:    FOR BYTE the constant it replaced, computed under the fixed module: no pre-existing
+#:    row moves in either direction, because no corpus row contained a ``a::b::c`` path
+#:    whose MIDDLE segment is credential-shaped — which is precisely why nothing could red
+#:    on R4-1, and that is the gap R4-3 is about. The widening can only ever refuse a
+#:    release, so the ``_STEM_BASE_STAYS_RELEASED`` half is unmoved by it.
+#:
+#: 8. **The corpus change is FIVE additions, and they are the whole of the move.** They are
+#:    an interior stem with no argument list, the same over an argument list, an interior
+#:    credential WORD with a type name after it, two interior positions in one path, and an
+#:    interior stem behind a reference marker. All five are masks, so ``POSITIVE_CASES``
+#:    moves 298 -> 303 while ``NEGATIVE_CASES`` is unchanged at 194, and
+#:    ``TYPE_ANNOTATION_POSITIVES`` moves 29 -> 34. Both counts are measured from the
+#:    assembled tuples. Every added row is 8 characters or longer ON PURPOSE, for the
+#:    floor reason recorded above.
+_CORPUS_GRADING_DIGEST = "21314d8fd9a7c0da42db2593e9cdc7fc357a68e0e82179234284fe5d26c51528"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:
@@ -4974,6 +6140,114 @@ def test_a_compact_json_pair_keeps_its_neighbouring_key_and_files_nothing() -> N
     assert masked.count(REDACTION_MARKER) == 2, masked
     report = redaction_shapes.shape_report(hits)
     assert not report.reached_model, report
+
+
+def test_a_short_but_real_credential_keeps_its_escalation() -> None:
+    """The direction the floor must NOT trade away, measured on the real specimens.
+
+    The module's own notes name a five-character DSN password and a seven-character
+    ``-pass`` value as real, and the corpus's one escalating case is the ``amqp`` DSN
+    whose username is its password. A floor that swallowed any of them would be a
+    silent missed leak, which is the unrecoverable direction — a spurious rotation
+    demand is recoverable, a missed one is not — so both are pinned here, in the
+    half the fix could have broken.
+    """
+    import local_operator.redaction_shapes as rs
+
+    # The corpus's escalating case, derived from it so this file spells no
+    # credential-shaped literal of its own: five characters, username == password,
+    # still ``labels=()`` with ``reached_model`` — an escalation the table cannot
+    # name, which is the state the notice must keep describing truthfully.
+    case = next(c for c in POSITIVE_CASES if c.reason == "amqp DSN")
+    masked, hits = scrub_shapes_with_hits(case.text)
+    report = rs.shape_report(hits)
+    assert report.reached_model, "the amqp username==password DSN stopped escalating"
+    assert report.labels == (), "the unnamed escalation gained an invented label"
+    assert any(
+        h.exposed and len(h.value) == 5 for h in hits
+    ), "the five-character survivor is no longer graded exposed: the floor is too high"
+
+    # The seven-character ``-pass`` value, printed twice in the clear.
+    flag = "-p"
+    value = "S3cr3t7"
+    repeated = f"mysql -u root {flag}{value} dump then {flag}{value} again"
+    masked7, hits7 = scrub_shapes_with_hits(repeated)
+    assert REDACTION_MARKER in masked7, "a short ``-p`` value stopped being masked"
+    assert rs.shape_report(hits7).reached_model, "a 7-character ``-p`` value stopped escalating"
+
+
+def test_a_sub_floor_partial_survivor_is_given_up_deliberately() -> None:
+    """The ONE severity cost this floor accepts, asserted so it is a decision, not a slip.
+
+    Measured, both revisions: a four-character DSN password that is masked inside the
+    URL and printed a SECOND time in the clear is a genuine partial survivor — the
+    fragment test finds its own characters in the model-visible text. At base that
+    graded ``exposed`` and filed a rotation demand (``rotate it``); at head the width
+    floor refuses the claim, so the same input is announced as CONTAINED ("nothing
+    entered your context") and no rotation is demanded. A four-character value cannot
+    be told from prose anywhere in the text, which is the whole of the reason, and the
+    trade is deliberate: a spurious-but-recoverable rotation is surrendered textually
+    for the 1,493 unnamed false rotations the fix removes. The MASK is untouched — only
+    the severity claim is withheld.
+
+    The at-floor control is the same shape one character wider and must keep demanding
+    the rotation, so a floor raised past five fails here rather than passing quietly.
+    This is the mirror of ``test_a_short_but_real_credential_keeps_its_escalation``
+    directly above: that pins the values the floor must NOT give up, and this pins the
+    one it does.
+    """
+    import local_operator.redaction_shapes as rs
+
+    scheme = "post" + "gres"
+    sub_floor = "abcd"
+    sub_text = f"{scheme}://u:{sub_floor}@host/db\n# and again {sub_floor}"
+    sub_masked, sub_hits = scrub_shapes_with_hits(sub_text)
+    assert REDACTION_MARKER in sub_masked, "the sub-floor DSN password stopped being masked"
+    assert (
+        rs.shape_report(sub_hits).reached_model is False
+    ), f"a sub-floor partial survivor files a rotation demand again: {sub_masked!r}"
+    assert rs.shape_report(sub_hits).labels == (
+        "dsn-password-plain",
+    ), "the withheld claim must still be NAMED, not silently unnamed"
+
+    # The at-floor control: one character wider, and the survivor is still real.
+    at_floor = "abcdz"
+    at_text = f"{scheme}://u:{at_floor}@host/db\n# and again {at_floor}"
+    _at_masked, at_hits = scrub_shapes_with_hits(at_text)
+    assert rs.shape_report(
+        at_hits
+    ).reached_model, "a five-character partial survivor stopped escalating: the floor rose"
+
+
+def test_a_below_floor_escalation_now_names_its_label_and_reads_contained() -> None:
+    """The notice-path flip the fix produces, pinned so it cannot be broken silently.
+
+    The user-visible half of this change is not only "fewer escalations" but "the
+    previously-UNNAMED escalation now names its shape and reads as contained": at
+    base, a sub-floor match whose own characters reappear in the text escalated with
+    ``labels=()`` and ``reached_model=True`` — the state the formatter renders as "a
+    credential the shape table could not name", which is what the loop.py false
+    positive wore. The label class here is the SAME rule (``client-inline-password``,
+    a four-character ``-p`` value) as that loop.py hit, so this is the same class of
+    input driven synthetically rather than read off a harness file.
+
+    The gate can stay correct while the notice path breaks — re-deriving ``labels``
+    from ``exposed``, or keeping ``complete=False`` for a refused hit — so the two
+    halves are asserted together: the claim is withheld (``reached_model is False``)
+    AND the hit is still named.
+    """
+    import local_operator.redaction_shapes as rs
+
+    flag = "-p"
+    value = "abcd"
+    repeated = f"mysql -u root {flag}{value} dump then {flag}{value} again"
+    masked, hits = scrub_shapes_with_hits(repeated)
+    report = rs.shape_report(hits)
+    assert REDACTION_MARKER in masked, "a sub-floor ``-p`` value stopped being masked"
+    assert report.reached_model is False, "the below-floor claim is back: it escalates again"
+    assert report.labels == (
+        "client-inline-password",
+    ), f"the notice path lost the label: {report.labels}"
 
 
 def test_a_genuinely_exposed_compact_credential_still_files_an_incident() -> None:

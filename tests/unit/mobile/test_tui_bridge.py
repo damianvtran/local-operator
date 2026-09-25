@@ -76,6 +76,62 @@ async def test_tui_same_id_concurrent_steers_cross_thread_once() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tui_a_refused_prompt_retried_as_a_prompt_is_really_admitted() -> None:
+    """QA on PR #1528, Q1-5, on the TUI-hosted handle.
+
+    A prompt the owner refused with ``TurnInFlight`` used to leave its id parked
+    as ``prompt-transfer``, so the same id retried as a PROMPT — what the phone
+    and the desktop's receipt journal send after a failed attempt — answered
+    "already admitted" and reached no transcript. The retry must reach the
+    session and its receipt must be the real admission.
+    """
+    from local_operator.session.errors import TURN_IN_FLIGHT, TurnInFlight
+
+    class Session(FakeSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attempts: list[str] = []
+
+        async def prompt(  # type: ignore[override]  # noqa: ANN001, ANN201
+            self, text, images=None, *, message_id=None, admitted=None
+        ):
+            self.attempts.append(text)
+            if len(self.attempts) == 1:
+                raise TurnInFlight(TURN_IN_FLIGHT)
+            assert admitted is not None
+            self._history = [Message.user(text, id=message_id)]
+            admitted.set_result(None)
+
+    class App:
+        """Runs hops ON the loop thread, as Textual does (see the aside test)."""
+
+        def __init__(self, session) -> None:  # noqa: ANN001
+            self._session = session
+            self._loop = asyncio.get_running_loop()
+
+        def call_from_thread(self, callback) -> None:  # noqa: ANN001
+            done = threading.Event()
+
+            def run() -> None:
+                try:
+                    callback()
+                finally:
+                    done.set()
+
+            self._loop.call_soon_threadsafe(run)
+            assert done.wait(timeout=5.0), "the app loop never ran the hop"
+
+    session = Session()
+    handle = TuiSessionHandle(App(session))  # type: ignore[arg-type]
+    with pytest.raises(TurnInFlight):
+        await handle.prompt("raced", command_id="retried-id")
+    assert await handle.prompt("raced", command_id="retried-id") == "prompt admitted"
+    assert session.attempts == ["raced", "raced"], "the retry never reached the session"
+    assert await handle.prompt("raced", command_id="retried-id") == "already admitted"
+    assert session.attempts == ["raced", "raced"]
+
+
+@pytest.mark.asyncio
 async def test_tui_stalled_steers_apply_owner_loop_backpressure() -> None:
     class Session(FakeSession):
         def __init__(self) -> None:
@@ -193,6 +249,10 @@ async def test_nested_child_detail_events_refresh_after_warm(monkeypatch) -> Non
 
         def roster(self):  # noqa: ANN201
             return []
+
+        def lifecycles(self):  # noqa: ANN201
+            # The per-event read ``set_subagent_details`` makes.
+            return {}
 
         def nodes(self):  # noqa: ANN201
             return [self.child]
@@ -822,3 +882,109 @@ async def test_tui_hop_names_itself_on_all_three_expiry_paths(monkeypatch) -> No
     assert messages[0], "the third expiry path reported an empty message"
     assert "did not answer within" in messages[0]
     assert handle._late_hop_tasks, "the in-flight hop is not held by the handle"
+
+
+class _IdentitySession(FakeSession):
+    """A fake whose id, title and model differ per instance, as a ``/new`` or
+    ``/resume`` target's do; ``FakeSession`` pins all three."""
+
+    def __init__(self, session_id: str, title: str, model: str) -> None:
+        super().__init__()
+        self._sid = session_id
+        self._title = title
+        self._model = model
+
+    @property
+    def session_id(self) -> str:
+        return self._sid
+
+    @property
+    def conversation_name(self) -> str:
+        return self._title
+
+    @property
+    def model_label(self) -> str:
+        return self._model
+
+    @property
+    def effective_model_label(self) -> str:
+        return self._model
+
+
+class _SwapApp:
+    def __init__(self, session: Any) -> None:
+        self._session = session
+
+    def call_from_thread(self, callback: Any) -> None:
+        callback()
+
+
+async def _record_after(server: Any, want: tuple[str, str, str], seconds: float = 3.0) -> Any:
+    """Poll the PUBLISHED record (what `lop sessions` scans) until it reads
+    ``want`` or the deadline passes — far inside the 15 s heartbeat."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + seconds
+    record: dict[str, Any] = {}
+    while loop.time() < deadline:
+        record = json.loads(server.record_path.read_text())
+        if (record["session_id"], record["conversation_name"], record["model_label"]) == want:
+            break
+        await asyncio.sleep(0.02)
+    return (record["session_id"], record["conversation_name"], record["model_label"])
+
+
+@pytest.mark.asyncio
+async def test_new_after_a_named_conversation_drops_the_old_title_from_the_record() -> None:
+    """QA Q3 (#1555). ``rebind`` reset the id but not the title, and
+    ``_refresh_state`` skips an empty title, so after ``/new`` on a TUI host the
+    record paired the NEW id with the OLD conversation's name — forever, since
+    every writer copies from that projection."""
+    from local_operator.session.runtime.server import RuntimeServer
+
+    named = _IdentitySession("synthnamed01", "triage the flaky shard", "test/model")
+    app = _SwapApp(named)
+    handle = TuiSessionHandle(app)  # type: ignore[arg-type]
+    server = RuntimeServer(handle, kind="tui")
+    await server.start_in_process()
+    try:
+        assert await _record_after(
+            server, ("synthnamed01", "triage the flaky shard", "test/model")
+        ) == ("synthnamed01", "triage the flaky shard", "test/model")
+
+        app._session = _IdentitySession("synthfresh01", "", "test/model")
+        handle.rebind()
+
+        assert handle.session_projection_seed.conversation_name == ""
+        assert await _record_after(server, ("synthfresh01", "", "test/model")) == (
+            "synthfresh01",
+            "",
+            "test/model",
+        )
+    finally:
+        await server.aclose()
+
+
+@pytest.mark.asyncio
+async def test_an_idle_resume_reaches_the_record_without_waiting_for_the_heartbeat() -> None:
+    """QA Q4 (#1555). An idle ``/resume`` emits no session event, so nothing
+    pushed and the record carried the previous conversation's identity until
+    the 15 s heartbeat. ``rebind`` now nudges the push tick itself; the poll
+    bound is 3 s and nothing else happens in between."""
+    from local_operator.session.runtime.server import RuntimeServer
+
+    first = _IdentitySession("synthfirst01", "first", "test/model")
+    app = _SwapApp(first)
+    handle = TuiSessionHandle(app)  # type: ignore[arg-type]
+    server = RuntimeServer(handle, kind="tui")
+    await server.start_in_process()
+    try:
+        await _record_after(server, ("synthfirst01", "first", "test/model"))
+
+        app._session = _IdentitySession("synthresum01", "the resumed one", "deepseek/flash")
+        handle.rebind()
+
+        assert await _record_after(
+            server, ("synthresum01", "the resumed one", "deepseek/flash")
+        ) == ("synthresum01", "the resumed one", "deepseek/flash")
+    finally:
+        await server.aclose()

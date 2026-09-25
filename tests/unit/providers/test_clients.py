@@ -2782,6 +2782,16 @@ def test_anthropic_sends_effort_as_output_config() -> None:
     assert body["output_config"] == {"effort": "xhigh"}
 
 
+def test_anthropic_sends_the_suggested_models_documented_default() -> None:
+    """Review round 1, #1: this PR makes Opus 5.5 the model a first-run Anthropic
+    user lands on, and `output_config.effort` IS sent, so seeding it a rung above
+    the model's own documented default is a real change to every turn."""
+    request = ChatRequest(
+        model=build_model_spec("anthropic", "claude-opus-5-5"), messages=[Message.user("hi")]
+    )
+    assert AnthropicClient()._build_body(request)["output_config"] == {"effort": "medium"}
+
+
 def test_anthropic_boots_carrying_its_documented_default() -> None:
     """No `/effort` typed: the level on the wire is the one the band shows from
     the first frame, which is only truthful because Anthropic documents `high`

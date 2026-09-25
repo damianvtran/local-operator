@@ -117,6 +117,7 @@ def backfill_analytics_session_names(
     *,
     limit: int = DEFAULT_BACKFILL_LIMIT,
     store: AnalyticsStore | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> int:
     """Name the ledger's unnamed sessions from their transcripts; return how many.
 
@@ -128,6 +129,12 @@ def backfill_analytics_session_names(
 
     Best-effort in the strongest sense, like every other maintenance pass: this
     may fail in any way at all without disturbing the session that triggered it.
+
+    ``should_stop`` is that family's cooperative halt, passed straight through to
+    the walk (:func:`_name_pending_sessions`): this pass was the DEEPEST frame in
+    40 of the 46 teardown dumps a design pass classified, i.e. the one a
+    departing runtime is most likely to be joined on. Defaults to ``None`` — no
+    existing caller passes one, and the behaviour without it is unchanged.
     """
     # Imported here rather than at module scope: ``resume`` is import-guarded to
     # stay free of the engine, and this keeps the dependency pointing one way
@@ -172,7 +179,9 @@ def backfill_analytics_session_names(
     owned = store is None
     store = store if store is not None else AnalyticsStore(db_path)
     try:
-        return _name_pending_sessions(store, config_dir, limit=limit, session_name=session_name)
+        return _name_pending_sessions(
+            store, config_dir, limit=limit, session_name=session_name, should_stop=should_stop
+        )
     finally:
         # Only a store this call opened. A caller-supplied store outlives the
         # call by construction (tests reuse theirs to assert on the result), and
@@ -188,6 +197,7 @@ def _name_pending_sessions(
     *,
     limit: int,
     session_name: Callable[[Path], str],
+    should_stop: Callable[[], bool] | None = None,
 ) -> int:
     """The sweep itself, against an already-resolved store.
 
@@ -225,6 +235,12 @@ def _name_pending_sessions(
     # Sorted within a depth so a store too large for one pass makes
     # deterministic progress rather than re-drawing a random subset each launch.
     for session_id in _parents_first(pending, parents):
+        # Checked once per ledger row rather than once per pass: this walk opens a
+        # transcript per row, so a departing runtime must not have to finish it.
+        # Breaking here is safe — every write below is one upsert of one name, and
+        # the next launch re-derives the whole worklist from the ledger.
+        if should_stop is not None and should_stop():
+            break
         if written >= limit:
             break
         directory = sessions / session_id
@@ -351,6 +367,7 @@ def backfill_analytics_session_daily(
     *,
     max_days: int = DEFAULT_SESSION_DAILY_DAYS_PER_PASS,
     store: AnalyticsStore | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> int:
     """Re-derive ``session_daily`` from the ledger; return days committed.
 
@@ -409,6 +426,14 @@ def backfill_analytics_session_daily(
         rebucket = plan.mode == "rebucket"
         derived = 0
         for day in plan.days:
+            # The family's cooperative halt, checked per day for the reason the two
+            # directory sweeps check it per directory. A short pass is SAFE here by
+            # construction: the rebucket publish below requires the whole span and
+            # the watermark is only advanced when the recent window was derived in
+            # full, so a walk that stopped early leaves both untouched and the next
+            # launch resumes from the same frontier.
+            if should_stop is not None and should_stop():
+                break
             written = store.rederive_session_daily_day(day, rebucket=rebucket)
             if written is None:
                 # A failed day STOPS the walk rather than skipping it: the
@@ -448,6 +473,11 @@ def backfill_analytics_session_daily(
         healed = 0
         try:
             for day in store.session_daily_mismatched_days(max_days=max(0, max_days - derived)):
+                # Same halt as the walk above, and for the same reason: a verify
+                # pass that cannot run heals nothing, and healing nothing costs
+                # only the next launch's re-derive.
+                if should_stop is not None and should_stop():
+                    break
                 if store.rederive_session_daily_day(day) is None:
                     break
                 healed += 1

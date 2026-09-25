@@ -512,7 +512,7 @@ async def test_a_hostile_filename_cannot_break_out_of_its_reference(tmp_path):
 async def test_a_path_is_rendered_relative_to_the_workspace(tmp_path):
     """The payload is persisted and re-sent every turn, so an absolute path
     bills its length forever and writes the operator's home into the
-    transcript. ``context_files.py:591-593`` is the precedent."""
+    transcript. ``context_files.py:659-661`` is the precedent."""
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("print('x')\n", encoding="utf-8")
 

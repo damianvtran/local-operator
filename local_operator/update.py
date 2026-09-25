@@ -1265,6 +1265,247 @@ def current_generation() -> Path | None:
     return generation if generation.is_dir() else None
 
 
+#: How long one ``ps`` argv read may take, in seconds.
+#:
+#: BOUNDED because the refresh child that consults it is itself bounded at
+#: ``_DAEMON_REFRESH_TIMEOUT_S``, and a wedged ``ps`` must not spend that whole
+#: budget on one daemon: this probe's contract is "an answer or ``None``", never
+#: "a hang". Five seconds is ~1000x the measured cost of the call on this machine
+#: (``ps -o args=`` answers in single-digit milliseconds); the bound exists so a
+#: pathological host still finishes.
+_PS_PROBE_TIMEOUT_S = 5.0
+
+
+def _process_argv(pid: int) -> str | None:
+    """``ps -o args= -p <pid>``, or ``None`` when it cannot be read.
+
+    THE ONLY PROCESS PROBE THIS MODULE MAKES, and ``ps`` rather than a heavier
+    reader for a measured reason: ``lsof`` walks every file descriptor the process
+    holds (tens of milliseconds, and it needs the fd table) to answer what ``ps``
+    already has, and ``proc_pidinfo`` is a ctypes shim over the same kernel data.
+    ``psutil`` is deliberately not a dependency of this project (see
+    ``tools/group_reaper.py`` for the same choice, and ``cli.py``'s ``etime``
+    probe for the same sentence).
+
+    ``text=True`` with ``errors="replace"``: argv is arbitrary bytes a process
+    chose, and a decode error here must not become an exception out of a repair
+    that is only decorating an upgrade which already succeeded. ``LC_ALL=C`` is
+    deliberately NOT set — the precedent that sets it
+    (``group_reaper._owner_start_token``) does so to pin a locale-FORMATTED date,
+    and there is no format to pin in a process's own bytes.
+
+    ``-ww`` IS NOT DECORATION, and a CI failure is what made it a required
+    argument rather than a style choice (measured 2026-09-24: this PR's own
+    end-to-end test read ``None`` on a Linux runner while passing here, and the
+    same trap had already cost a 3.12 shard in
+    ``tests/unit/secrets/test_broker_sweep.py`` — "Linux ``ps`` falls back to an
+    80-column screen width and CUTS the row" whenever stdout is not a tty, which
+    is every time this module calls it). The generation component lands past the
+    cut — the image path alone is ~150 columns — so the row arrives with the
+    generation id severed, no ancestor can match it, and this module reads that as
+    "no move": silently, and exactly the case this repair exists for.
+    :mod:`local_operator.procname` states the rule this now follows ("a reader that
+    needs the whole line uses ``ps -ww`` or ``/proc/<pid>/cmdline``"), as does the
+    environment reader in ``session/runtime/reclaim``.
+
+    Measured in a Linux container against a live 145-column argv, to pin which
+    spellings are and are not safe:
+
+    ====================  ========================================
+    ``COLUMNS``           ``ps -o args= -p <pid>`` (145-char argv)
+    ====================  ========================================
+    unset                 full line
+    ``132``                 132 columns, generation id CUT
+    ``80``                  80 columns, generation id CUT
+    ``1000``              full line
+    ====================  ========================================
+
+    Add ``-ww`` ("unlimited width") and the line is complete at every one of those
+    widths. macOS/BSD ``ps`` truncates only when it is writing to a TERMINAL
+    (measured: identical output with and without ``COLUMNS=80`` through a pipe), so
+    this repair was never wrong on the platform it runs on — but the flag is what
+    makes the answer independent of the host, and the end-to-end test now pins a
+    narrow ``COLUMNS`` so the hazard cannot come back.
+
+    ``MemoryError`` is caught with the rest (review round 1, Q4, which measured one
+    escaping): a host under memory pressure can fail the FORK itself, and the only
+    caller that matters here is a repair inside an upgrade that has already
+    succeeded — so every way of not getting an answer collapses to ``None`` rather
+    than to a traceback. The blast radius without it was a spurious
+    ``kind="failed"`` warning (the installer's own guard catches it), never a write
+    or a reload.
+
+    The ``subprocess`` import is function-local for this module's usual reason
+    (see ``_refresh_steps``): ``update`` is imported by the TUI, and this runs once
+    per supervised daemon on an upgrade.
+    """
+    import subprocess
+
+    try:
+        completed = subprocess.run(
+            ["ps", "-ww", "-o", "args=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            check=False,
+            timeout=_PS_PROBE_TIMEOUT_S,
+        )
+    except (OSError, ValueError, MemoryError, subprocess.SubprocessError) as exc:
+        # No `ps` at all (a non-POSIX host), a pid `ps` refuses as an argument, a
+        # fork the kernel would not give us, or a call that did not answer inside
+        # the bound. All four are "unreadable".
+        logger.debug("could not read the argv of pid %s: %s", pid, exc)
+        return None
+    if completed.returncode != 0:
+        # Non-zero is "no such process" in every case that matters here: the pid is
+        # gone (the daemon exited between launchd's answer and this probe).
+        return None
+    text = completed.stdout.strip()
+    return text or None
+
+
+def generation_in_argv(argv: str) -> Path | None:
+    """The generation root a process's ``argv`` names, or ``None``.
+
+    PURE: no filesystem, no pointer, no ``ps`` — the string question on its own, so
+    it can be pinned against the literal argv strings a real machine shows and so
+    that an unreadable input has one obvious answer.
+
+    A PREFIX read rather than a search of the whole line, which is the measured
+    shape and not a guess: the generation's own image is executed as ``argv[0]``,
+    so ``ps -o args=`` prints the generation path FIRST and the command line after
+    it. Measured on the operator's machine 2026-09-24 on every supervised daemon
+    (``ps -o pid=,args=``; the home below is elided to ``~`` — ``ps`` prints it
+    absolute — and the module argv is elided for width):
+
+    .. code-block:: text
+
+        59435     1 ~/.local/share/lop/generations/20260924T103058Z-509c7450dbf6/…
+
+    …whose first field is that generation's own
+    ``tools/local-operator/bin/Local Operator``, followed by the module and its
+    arguments (the shim prefers that branded image and falls back to the same
+    directory's ``python3``).
+
+    THE PATH HAS A SPACE IN IT (``…/tools/local-operator/bin/Local Operator``),
+    which is why this walks the path's ANCESTORS instead of splitting the line into
+    fields: ``ps`` joins argv with single spaces and quotes nothing, so the image
+    path is not separable from the argument list by parsing — and it does not have to
+    be, because the generation is an ancestor of the image path, i.e. of everything
+    before the first space.
+
+    LEXICAL THE FILE, RESOLVED THE ANCESTORS, and both halves are load-bearing.
+    The file itself is never resolved: the fallback interpreter in a generation's
+    ``bin`` is a SYMLINK out to the uv-managed Python (``python3 -> python ->
+    ~/.local/share/uv/python/…/python3.14``), so resolving it would jump OUT of the
+    generation for exactly the shape in which no branded image could be planted.
+    The ANCESTORS are resolved on both sides because the shim runs ``pwd -P``: on a
+    machine whose home is reached through a symlink, argv carries the PHYSICAL path
+    while ``generations_dir()`` is spelled from ``~``, and a lexical comparison
+    would answer ``None`` for the very daemon this exists to move. Nothing is
+    invented by the resolve — a PRUNED generation is absent from disk, and
+    ``resolve()`` leaves those components as the path it was given.
+
+    ``None`` for an empty or whitespace-only input, for a field that is not under
+    ``generations_dir()`` at all (a pip venv, a launcher, a relative path), and for
+    ``generations_dir()`` itself.
+    """
+    fields = argv.split(None, 1)
+    if not fields:
+        return None
+    candidate = Path(fields[0])
+    generations = generations_dir().resolve()
+    for parent in candidate.parents:
+        if parent.parent.resolve() == generations:
+            return parent
+    return None
+
+
+def generation_of_process(pid: int) -> Path | None:
+    """The generation the LIVE process ``pid`` was started from, or ``None``.
+
+    THE OBSERVATION, deliberately not an inference: this reads the running
+    process's OWN argv, so what it answers is the build that process actually
+    loaded, which is the only claim the daemon repair is entitled to act on.
+
+    ``None`` for every way this can fail to be established — a pid that is gone or
+    was never there, no ``ps``, a timeout, a non-POSIX host, an argv that names no
+    generation (see :func:`generation_in_argv`). EVERY CALLER MUST READ ``None`` AS
+    "NO MOVE": the direction is chosen, not accidental. A missed reload leaves a
+    daemon on the build it is already serving, while a reload reasoned from a
+    failed probe would interrupt a working one for nothing — and for the tunnel
+    connector that interruption is remote access.
+    """
+    if pid <= 0:
+        return None
+    argv = _process_argv(pid)
+    if argv is None:
+        return None
+    return generation_in_argv(argv)
+
+
+def stale_generation_of_process(pid: int) -> Path | None:
+    """The generation ``pid`` runs, when that is provably NOT ``current``.
+
+    THE SECOND STALENESS QUESTION a supervised daemon's repair has to ask. The
+    first — "does the plist on disk say what this build would render?" — is
+    ``launchd.rewrite_if_stale``'s, and under the generation layout it is answered
+    "current" for a daemon that is generations behind, because the unit names the
+    STABLE SHIM (``~/.local/share/lop/bin/python3``) and a shim does not change when
+    the pointer moves. Measured live on the operator's machine 2026-09-24: four
+    byte-identical plists, two daemons on the current generation and two
+    two-and-three generations behind. Comparing what the RUNNING PROCESS reports is
+    therefore the only question that can see the difference.
+
+    A NONE HERE MEANS TWO DIFFERENT THINGS, and both mean "do not touch it": the
+    process is running the current build, or the comparison could not be made (no
+    generation in its argv, no readable pointer, a pointer that is dangling or
+    being renamed as we read it). Neither is evidence of a move, so neither may
+    produce one.
+
+    NAMES ARE COMPARED RATHER THAN PATHS, because the two sides are spelled
+    differently BY CONSTRUCTION: the shim's ``pwd -P`` puts the PHYSICAL path in the
+    process's argv while ``current`` names whatever ``flip_pointer`` wrote, and the
+    names are what a generation is. ``current`` is RESOLVED first (:func:`current_generation`
+    answers with what the link NAMES, one hop), because a CHAINED pointer —
+    ``current`` -> some link -> ``generations/<id>``, which no writer here produces
+    but a hand-made or wrapped one can — would otherwise compare the LINK's name
+    against a daemon's generation and make every daemon read as stale, four spurious
+    reloads per upgrade (QA round 1, Q3). Resolving it is idempotent for the shipped
+    one-hop shape.
+
+    WHAT THIS ANSWER MEANS, stated narrowly, because the obvious reading is wrong
+    (review round 1, R2): "not the generation ``current`` names" is NOT "the code
+    changed". Two generations can carry the identical build — measured on this
+    machine on 2026-09-24, ``generations/20260923T033831Z-71e3e49a315a`` and
+    ``generations/20260924T102951Z-71e3e49a315a`` both record ``.lop-source``
+    ``71e3e49a315a…`` with ``local_operator-0.62.8`` — so re-installing the same
+    commit into a new generation answers "STALE" for every daemon. That is the
+    repair's deliberate contract and the rejected alternative is recorded where it is
+    acted on (:func:`local_operator.launchd.restart_if_build_moved`): a build-stamp
+    comparison cannot answer at all for a generation that carries no source ref, and
+    that machine would keep the original defect.
+    """
+    running = generation_of_process(pid)
+    if running is None:
+        return None
+    current = current_generation()
+    if current is None:
+        return None
+    try:
+        current_name = current.resolve().name
+    except OSError:
+        # ``resolve`` can raise ``EINVAL`` on this platform while the link is being
+        # replaced underneath the reader — the same hazard ``current_generation``
+        # documents for its own ``readlink``. Measured at 0 failures in 400k reads
+        # against a tight symlink+rename loop (review round 2, NIT-5), so this is
+        # hardening rather than a fix; it is here because the module's rule is that
+        # an unreadable answer means NO MOVE, and a raise here would instead escape
+        # as a warning from the installer's guard.
+        return None
+    return None if running.name == current_name else running
+
+
 def current_install_root() -> Path | None:
     """The install root the POINTER resolves to, or ``None``.
 
@@ -4657,7 +4898,15 @@ def _daemon_refresh_invocation() -> tuple[list[str], str | None] | None:
     """
     from local_operator import procname
 
-    return _post_upgrade_invocation(procname.LABEL_DAEMONS_REFRESH, ["update", "--refresh-daemons"])
+    return _post_upgrade_invocation(
+        procname.LABEL_DAEMONS_REFRESH,
+        # ``--services-only``: this child's caller owns the mobile half. An upgrade
+        # bounces that daemon itself right after this process
+        # (:func:`refresh_daemons_after_upgrade`), so a child that bounced it too
+        # would restart the phone relay twice for one upgrade. See
+        # :func:`_run_daemon_repair`.
+        ["update", "--refresh-daemons", "--services-only"],
+    )
 
 
 def _post_upgrade_invocation(label: str, tail: list[str]) -> tuple[list[str], str | None] | None:
@@ -5120,6 +5369,35 @@ def daemons_refresh_command() -> int:
     return 0
 
 
+def _run_daemon_repair(*, services_only: bool) -> int:
+    """``lop update --refresh-daemons``: the repair, and the mobile half with it.
+
+    TWO CALLERS WITH ONE DIFFERENCE, which is what the flag carries. An UPGRADE
+    spawns the child that runs :func:`daemons_refresh_command` and then bounces the
+    mobile daemon itself (:func:`refresh_daemons_after_upgrade`, and the TUI's own
+    composition), so its child must not bounce it too — that is the double restart
+    review round 1 (R4) removed, and the child is told with ``--services-only``. A
+    HAND RUN has no caller to do it, so it does both halves, which is exactly what an
+    upgrade does; without that, a stale mobile daemon is skipped here while the other
+    three move (review round 2, MINOR-2).
+
+    The mobile half is UNCONDITIONAL, as it is on the upgrade path: the build
+    question is deliberately not asked for that daemon (see
+    ``mobile/install.py``), so this is not "bounce it if it is behind" but "the
+    phone relay is restarted by a repair, as it is by an upgrade".
+
+    A REFUSED REPAIR BOUNCES NOTHING (``_repair_refusal``, evaluated here because the
+    child reports a refusal as a printed warning and exit 0, which the caller cannot
+    tell from "nothing needed repairing"). A repair that is not allowed to rewrite a
+    plist must not restart the operator's daemon as a consolation.
+    """
+    code = daemons_refresh_command()
+    if services_only or _repair_refusal() is not None:
+        return code
+    _print_daemon_refreshes([_mobile_daemon_refresh(refresh_mobile_after_upgrade())])
+    return code
+
+
 def _print_current_generation() -> None:
     """Name the generation ``current`` now points at, or say nothing.
 
@@ -5443,6 +5721,7 @@ def update_command(
     *,
     check: bool = False,
     refresh_daemons: bool = False,
+    services_only: bool = False,
     from_snapshot: str | None = None,
     services: bool = True,
 ) -> int:
@@ -5451,9 +5730,15 @@ def update_command(
     ``--refresh-daemons`` is not an upgrade: it is the repair step that the
     upgrade path runs in a CHILD process from the newly installed wheel, so that
     the plists it renders are this build's and not the previous one's. See
-    :func:`daemons_refresh_command`. It is checked before the PyPI call because
-    it must work on any machine, including one whose network is down, and it
-    never reports a version. See the architect table for the other codes.
+    :func:`daemons_refresh_command` and :func:`_run_daemon_repair`. It is checked
+    before the PyPI call because it must work on any machine, including one whose
+    network is down, and it never reports a version. See the architect table for
+    the other codes.
+
+    ``services_only`` is what that CHILD is told by the upgrade that spawned it
+    (``--services-only``, hidden like the flag above): the caller bounces the mobile
+    daemon itself, immediately after, so the child must not — see
+    :func:`_run_daemon_repair`.
 
     ``--from-snapshot`` is checked before the PyPI call for the same reason: it
     installs a build that is already on this machine, so a host with no route to
@@ -5462,7 +5747,7 @@ def update_command(
     different questions and a caller that asked for both has asked for neither.
     """
     if refresh_daemons:
-        return daemons_refresh_command()
+        return _run_daemon_repair(services_only=services_only)
 
     if from_snapshot is not None:
         if check:

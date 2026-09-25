@@ -100,6 +100,8 @@ _ADAPTER_ID = "osworld-v2"
 # declares its own distribution version.)
 _VERSION = "0.1.3"
 _ENTRY_POINT = "lop_osworld_v2_adapter:create"
+_ACTION_SETTLE_POLICY = "OSWORLD_ACTION_SETTLE_POLICY"
+_SETTLE_POLICIES = frozenset({"throughput", "paper"})
 
 
 class AdapterStateError(RuntimeError):
@@ -310,6 +312,7 @@ class OSWorldV2Adapter:
         self._plan: provisioning.ProvisioningPlan | None = None
         self._refs: cleanup_mod.CleanupRefs | None = None
         self._infra_values: tuple[ScopedInfraValue, ...] = ()
+        self._action_settle_policy = "throughput"
         # Resolved secrets from ResetStartParams / BeginRescueParams. Held
         # in memory only for the provider's construction; never written to
         # the environment (bar the documented judge-key exception), never
@@ -432,6 +435,10 @@ class OSWorldV2Adapter:
         # frame at all: no env var can fix a missing decoder, so asking here
         # (before any allocation) is the difference between a free failure and
         # one that lands on the first observation of a paid VM.
+        # Validate operator-selected pacing before mutating adapter state or
+        # constructing any provider; an unknown policy must never reach paid
+        # allocation under a manifest that claims it was understood.
+        action_settle_policy = self._resolve_action_settle_policy(params.infra_values)
         requirements_mod.require_imaging_decoder()
         provisioning.resolve_proxy_policy(params.infra_values)
         # A SUPPLIED proxy config is validated here, at the earliest point that
@@ -445,6 +452,7 @@ class OSWorldV2Adapter:
         self._refs = cleanup_mod.CleanupRefs.mint(params.episode_id)
         self._infra_values = params.infra_values
         vendor_bridge.inject_infra_environment(params.infra_values)
+        self._action_settle_policy = action_settle_policy
         if self._task is not None:
             self._plan = provisioning.resolve(
                 self._task,
@@ -524,6 +532,32 @@ class OSWorldV2Adapter:
             self._infra_values, task_proxy=bool(self._task.proxy)
         )
         provisioning.validate_proxy_config_file(self._infra_values, enable_proxy=needs_proxy)
+        # THE DECLARATION CONTRACT, enforced at the last free moment. Every
+        # requirement THIS TASK declares as required must have been supplied --
+        # as a secret ref or as an infra value -- or be a name this build cannot
+        # hand over at all, which is refused here just the same: after the
+        # descriptor exists, before the provider is built and therefore before
+        # any guest is allocated.
+        #
+        # It sits AFTER the two refusals above, not instead of them. Those name
+        # a benchmark-specific consequence ("OSWorld would return a silent
+        # 0.0") for the two families they cover; this is the net for every
+        # OTHER requirement the task's own fields introduce, which until now had
+        # no check at all -- OSWORLD_USER_SIM_API_KEY and WEBSITE_HOST_SUFFIX
+        # (declared by 40 of the release's 108 tasks, each of which allocated a
+        # guest and then died in vendor code), plus GITLAB_PRIVATE_TOKEN, which
+        # this build cannot deliver to its controller and so refuses outright
+        # rather than asking for a value that would change nothing. It cannot
+        # live in the runner: ``inspect_requirements`` runs before the task is
+        # named, so the runner's gate sees only the always-on baseline. See
+        # ``requirements.require_supplied`` for the full argument, including
+        # why the always-on baseline is deliberately NOT covered here.
+        requirements_mod.require_supplied(
+            self._task,
+            task_id=params.task_id,
+            secret_refs=params.secrets,
+            infra_values=self._infra_values,
+        )
         if self._provider_factory is None and self._read_provider_config().get("provider") in (
             None,
             "aws",
@@ -714,6 +748,18 @@ class OSWorldV2Adapter:
     # observe / execute
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _resolve_action_settle_policy(infra_values: tuple[ScopedInfraValue, ...]) -> str:
+        supplied = next(
+            (value.value for value in infra_values if value.name == _ACTION_SETTLE_POLICY),
+            "throughput",
+        )
+        if supplied not in _SETTLE_POLICIES:
+            raise AdapterStateError(
+                f"unsupported {_ACTION_SETTLE_POLICY} value; expected 'paper' or 'throughput'"
+            )
+        return supplied
+
     async def observe(self, params: ObserveParams) -> ObservationResult:
         if self._current_observation is None:
             raise AdapterStateError("observe before reset_start")
@@ -740,10 +786,10 @@ class OSWorldV2Adapter:
         # silently disobeyed the model in 425 of 1746 wait-bearing batches
         # (24%) on a benchmark whose tasks are largely about pacing slow UIs.
         #
-        # Each run is a maximal group of consecutive guest statements or a
-        # single wait, so the guest still receives batched statements (one
-        # round trip per run, not per action) while the model's ordering is
-        # honoured exactly.
+        # Throughput mode groups consecutive guest statements; paper mode
+        # retains one compiled guest statement per semantic action so each can
+        # receive its own post-action settle. A ScrollAction compiles to one
+        # compound statement and therefore remains one semantic action.
         runs: list[tuple[str, list[str] | int]] = []
         for statement in statements:
             if statement.startswith("WAIT "):
@@ -753,6 +799,14 @@ class OSWorldV2Adapter:
             else:
                 runs.append(("exec", [statement]))
         guest_lines = [s for s in statements if not s.startswith("WAIT ")]
+        paper_runs = [
+            (
+                ("wait", int(statement.split(" ", 1)[1]))
+                if statement.startswith("WAIT ")
+                else ("exec", [statement])
+            )
+            for statement in statements
+        ]
         # RESUME: the parent is re-reading the state THIS batch already
         # produced, after a previous attempt committed the actions and then
         # failed to read the screen back. Re-running the guest statements here
@@ -760,27 +814,36 @@ class OSWorldV2Adapter:
         # is skipped and only the read-back below runs. The parent sets this
         # flag solely after we declared the commit via ObservationPhaseError.
         if not params.resume_observation and runs:
-            # Only the LAST guest run settles. The provider pauses
-            # ``action_delay_s`` after each execute() so the desktop can
-            # repaint; splitting a batch into ordered runs would otherwise pay
-            # that pause once per run, multiplying it and stacking it on top of
-            # the wait the model asked for (a requested 2 s becoming 5 s). One
-            # settle per batch keeps the pacing identical to what a batch cost
-            # before ordering was honoured.
-            last_exec = max(
-                (index for index, (kind, _) in enumerate(runs) if kind == "exec"),
-                default=-1,
-            )
-            for index, (kind, payload) in enumerate(runs):
-                if kind == "exec":
-                    await self._provider.execute(
-                        cast(list[str], payload), settle=index == last_exec
-                    )
-                else:
-                    await asyncio.sleep(cast(int, payload) / 1000.0)
-            if not guest_lines:
-                # A pure-wait batch still advances the environment's clock.
-                await self._provider.execute([])
+            if self._action_settle_policy == "paper":
+                # Each semantic action settles independently. A WAIT's asked
+                # duration comes first; an empty provider execute then supplies
+                # only its own ``DEFAULT_ACTION_DELAY_S`` settle before the next
+                # action. The
+                # pure-wait path already settles for every wait here, so it must
+                # not receive the throughput empty-batch fallback below.
+                for kind, payload in paper_runs:
+                    if kind == "exec":
+                        await self._provider.execute(cast(list[str], payload), settle=True)
+                    else:
+                        await asyncio.sleep(cast(int, payload) / 1000.0)
+                        await self._provider.execute([], settle=True)
+            else:
+                # Keep the original throughput call sequence unchanged: only
+                # the last guest run settles, and pure waits advance the clock
+                # through one default-settling empty execute.
+                last_exec = max(
+                    (index for index, (kind, _) in enumerate(runs) if kind == "exec"),
+                    default=-1,
+                )
+                for index, (kind, payload) in enumerate(runs):
+                    if kind == "exec":
+                        await self._provider.execute(
+                            cast(list[str], payload), settle=index == last_exec
+                        )
+                    else:
+                        await asyncio.sleep(cast(int, payload) / 1000.0)
+                if not guest_lines:
+                    await self._provider.execute([])
 
         # PAST THE POINT OF NO RETURN. The guest has moved; from here every
         # failure is a failure to READ, and saying so is what lets the parent

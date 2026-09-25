@@ -240,6 +240,7 @@ class FakeAdapter:
         self.failures = failures or {}
         self.fail_after = fail_after or {}
         self.calls: list[str] = []
+        self.timeouts: dict[str, list[float]] = {}
         self.terminated = False
         # The supervisor surface the failure path inspects for the worker's
         # drained stderr (``EpisodeRunner._adapter_stderr``). ``None`` models a
@@ -268,9 +269,25 @@ class FakeAdapter:
         if count >= self.fail_after.get(method, 0):
             raise error
 
-    async def _call_raw(self, method: Any, params: Any, result_type: Any, *, timeout: float) -> Any:
-        del result_type, timeout
+    async def _call_raw(
+        self,
+        method: Any,
+        params: Any,
+        result_type: Any,
+        *,
+        timeout: float,
+        execution_overhead_seconds_per_action: float = 0.0,
+    ) -> Any:
+        from local_operator.evaluation.deadlines import funded_timeout
+
+        del result_type
         self.calls.append(method)
+        effective_timeout = funded_timeout(
+            timeout,
+            params,
+            execution_overhead_seconds_per_action=execution_overhead_seconds_per_action,
+        )
+        self.timeouts.setdefault(method, []).append(effective_timeout)
         self._maybe_fail(method)
         if method == "inspect_requirements":
             return RequirementsResult(requirements=self.declared_requirements)

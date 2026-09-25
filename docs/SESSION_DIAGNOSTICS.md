@@ -1,8 +1,13 @@
 # Current-session diagnostics
 
 `/session` opens a read-only, scrollable snapshot of the current session. It
-accepts no arguments, does not call a model, and does not append a prompt or a
-receipt to conversation history. Escape or `q` closes the view and returns focus
+does not call a model, and does not append a prompt or a receipt to conversation
+history. Its one flag, `/session --copy`, copies the session ID instead of
+opening the view; any other text is refused. The copy is an OSC 52 write, which
+no terminal acknowledges, so the notice says the ID was *sent* to the clipboard
+and prints it — a terminal that ignores OSC 52 still leaves the ID selectable in
+the transcript. The desktop app refuses `--copy` and names the `/session` view,
+which shows the ID. Escape or `q` closes the view and returns focus
 to the composer. A loading screen appears immediately while the ledger is read;
 Escape or `q` cancels that presentation too, so a late disk result cannot open
 over a new draft. Close and reopen to refresh; arrow, page, Home and End keys
