@@ -86,6 +86,14 @@ def _isolated_env(root: Path) -> dict[str, str]:
     env["LOCAL_OPERATOR_CONFIG_DIR"] = str(root / ".local-operator")
     env["TERM"] = env.get("TERM", "xterm-256color")
     env["PYTHONPATH"] = str(REPO)
+    # THE NOTIFICATION GATE, and it is not optional. This script spawns
+    # `local-operator` children with an environment it built itself, which is
+    # exactly the shape `tests/unit/test_notification_isolation.py` scans for: a
+    # mock session driven by a child that has not gated notifications can put its
+    # own reply on the OPERATOR'S LOCK SCREEN. This benchmark only ever drives the
+    # mock provider, but the guard cannot know that — and it is right not to trust
+    # a script to be careful on a machine somebody is working on.
+    env["LOCAL_OPERATOR_NO_NOTIFICATIONS"] = "1"
     return env
 
 

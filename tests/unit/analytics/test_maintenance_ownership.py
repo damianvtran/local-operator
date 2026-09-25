@@ -46,7 +46,17 @@ from local_operator.analytics.store import _WAL_SIZE_LIMIT_BYTES, AnalyticsStore
 #: to publish before calling it wedged. Not an assertion about speed: every
 #: assertion in this file is about what happened, and this only keeps a
 #: regression that blocks forever from hanging the suite instead of failing it.
-_BACKSTOP_S = 20.0
+#:
+#: 20 s was measured generous on a dev box and is NOT generous on a loaded CI
+#: runner, where this file failed with "the writer thread never reached the
+#: sweep". The wait is on the right thing — an event the sweep sets — but what
+#: sets it is a writer thread reaching its IDLE tick, and that tick comes only
+#: after the ``_FLUSH_INTERVAL_S`` flush completes. On a runner sharing cores
+#: with four sibling shards, 20 s stops being the catastrophe margin AGENTS.md
+#: asks a backstop to be and becomes a second, quieter speed assertion. Raised
+#: to 120 s for that reason, and deliberately WITHOUT touching anything these
+#: tests assert: no ceiling on the suite, no retry loop, no sleep.
+_BACKSTOP_S = 120.0
 
 #: Ceiling on a store that parks the writer on purpose, so a broken test cannot
 #: leave a thread blocked inside the sweep forever.
