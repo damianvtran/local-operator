@@ -7,6 +7,18 @@
  * the indicator — no spinner); a session waiting on the user carries the
  * danger dot and a word ("approval" / "question"), because that is the one
  * card that needs a decision (branding §7).
+ *
+ * SECTIONS AND ORDER COME FROM THE DAEMON, and this screen re-derives neither.
+ * The server sorts every row on the shared catalog key
+ * (`session.catalog.CatalogEntry.rank` — the same key the terminal sidebar and
+ * the desktop app sort on) and marks each row `active`/`previous` with the
+ * shared `active` rule, so the list is STABLE across activity refreshes (the
+ * jitter this change removes) and identical to the other two surfaces. This
+ * screen only GROUPS what it is given: ★ Pinned, Active Sessions, Previous
+ * Sessions — the sidebar's own section order, minus the subagent layer the
+ * phone does not carry. A pin is a display lift like the sidebar's, so it never
+ * changes the daemon's ranking and pinning a row never moves it inside its own
+ * section.
  */
 import {
 	useEffect,
@@ -15,11 +27,17 @@ import {
 	useState,
 	type Ref,
 } from "react";
-import { getDirectories } from "../api";
+import { getDirectories, setSessionPin } from "../api";
 import { Sheet } from "../components/ui/sheet";
 import { Spinner } from "../components/spinner";
 import { navigate } from "../router";
-import { retainSessionListStream, useSessions } from "../store";
+import {
+	applySessionPin,
+	clearSessionPinMark,
+	retainSessionListStream,
+	usePinMarks,
+	useSessions,
+} from "../store";
 import { applyTheme, getTheme, THEMES } from "../theme";
 import { shortenHome } from "../lib/format";
 import { MARK_DATA_URI } from "../lib/mark";
@@ -121,14 +139,74 @@ function NewMark({ visible }: { visible: boolean }) {
 function SessionCard({
 	s,
 	home,
+	pinned,
+	onLongPress,
 	ref,
 }: {
 	s: SessionSummary;
 	home: string;
+	/* The pin as RENDERED — the user's unanswered mark over the daemon's
+	   confirmed flag. A separate input from `s.pinned` on purpose: a row may
+	   show its ★ long before the daemon confirms the pin, and the mark must
+	   never be mistaken for the fact that decides which section the row renders
+	   in. */
+	pinned: boolean;
+	/* A long-press opens the pin action sheet for this row. Passed in rather
+	   than handled here so the card stays a pure presentation of one summary and
+	   the gesture's timer lives with the screen that owns the sheet — and so the
+	   card can be rendered in a test with no gesture machinery at all. */
+	onLongPress?: () => void;
 	/* FLIP anchor: the list measures every card before/after a reorder so it
 	   can settle it into its new slot instead of teleporting it. */
 	ref?: Ref<HTMLButtonElement>;
 }) {
+	/* A POINTER, NOT A HOVER: a phone has no hover, so a long-press is the one
+	   gesture that reliably means "more actions for this row" without a visible
+	   control on every card (which would cost width the title needs). A press
+	   that moves — a scroll — CANCELS the timer, or a flick through the list
+	   would open the sheet on whatever row the finger happened to pass over. */
+	const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const pressedAt = useRef<{ x: number; y: number } | null>(null);
+	/* Set by the long-press firing; read and reset by the click that follows it. */
+	const suppressClick = useRef(false);
+	const cancelPress = () => {
+		if (pressTimer.current !== null) {
+			clearTimeout(pressTimer.current);
+			pressTimer.current = null;
+		}
+		pressedAt.current = null;
+	};
+	/* CLEANUP ON UNMOUNT (review round 1, MINOR 2). The list re-renders rows
+	   constantly, and a press in flight when a row unmounts — or when the whole
+	   screen is left by a navigation — would otherwise fire its ``setTimeout``
+	   against a torn-down tree: ``onLongPress`` would open a sheet for a row that
+	   is no longer on screen. */
+	useEffect(() => cancelPress, []);
+	const onPointerDown = (event: React.PointerEvent) => {
+		if (!onLongPress) return;
+		/* A NEW PRESS CLEARS THE SUPPRESSION, so it can never outlive the gesture
+		   that set it (review round 1, NIT 1). Without this a long-press whose
+		   finger lifted off the card (a ``pointerleave`` with no following click)
+		   left the flag set, and the user's NEXT genuine tap was swallowed. */
+		suppressClick.current = false;
+		pressedAt.current = { x: event.clientX, y: event.clientY };
+		pressTimer.current = setTimeout(() => {
+			pressTimer.current = null;
+			/* A long-press must not ALSO fire the card's onClick and navigate:
+			   `cancelPress` clears the timer on pointerup, and this flag is what
+			   tells the click handler to stand down. */
+			suppressClick.current = true;
+			onLongPress();
+		}, 450);
+	};
+	const onPointerMove = (event: React.PointerEvent) => {
+		const start = pressedAt.current;
+		if (start === null) return;
+		/* 10px of travel is a scroll, not a press held still. */
+		if (Math.hypot(event.clientX - start.x, event.clientY - start.y) > 10) {
+			cancelPress();
+		}
+	};
 	const pendingLabel =
 		s.pending_kind === "approval"
 			? "approval"
@@ -175,7 +253,19 @@ function SessionCard({
 		<button
 			ref={ref}
 			type="button"
-			onClick={() => navigate(`/s/${encodeURIComponent(s.session_id)}`)}
+			onPointerDown={onPointerDown}
+			onPointerMove={onPointerMove}
+			onPointerUp={cancelPress}
+			onPointerLeave={cancelPress}
+			onPointerCancel={cancelPress}
+			onContextMenu={(event) => event.preventDefault()}
+			onClick={() => {
+				if (suppressClick.current) {
+					suppressClick.current = false;
+					return;
+				}
+				navigate(`/s/${encodeURIComponent(s.session_id)}`);
+			}}
 			className="flex w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left select-none active:bg-elevated"
 		>
 			<div className="flex items-center gap-2">
@@ -276,6 +366,26 @@ function SessionCard({
 						{pendingLabel}
 					</span>
 				) : null}
+				{/* A PINNED ROW CARRIES ITS ★, and it rides the RIGHT cluster rather than
+				    the state slot. The TUI made exactly this call (`session_sidebar.py`
+				    `_special_mark`): a ★ in the state column made the sessions a user
+				    cares about most the only ones that could not report being blocked,
+				    broken or finished, because the pin is the DURABLE fact and the state
+				    glyph is the volatile one — so the pin moves, not the state. The ★ is
+				    also the shape the ★ Pinned heading uses, so the mark and its section
+				    cannot disagree about what it means.
+
+				    Drawn from the RENDERED pin, not `s.pinned`: the reader's own press
+				    must show its ★ in the commit that handles the tap, while the row
+				    itself waits for the daemon (the mark/section split in `store.ts`). */}
+				{pinned ? (
+					<span
+						className="shrink-0 text-meta text-accent"
+						aria-label="pinned"
+					>
+						★
+					</span>
+				) : null}
 				{/* State word rides BEFORE the count chips in the right cluster
 				    (spec §1): `new` truncates the title only, row height never
 				    changes. */}
@@ -361,25 +471,250 @@ function ThemePicker({
 	);
 }
 
+/* The daemon's own words for a refused pin, or a plain line when it gave none.
+
+    The route's error body IS the reason and the remedy (`no saved messages yet —
+    pin it after you send one`), written for this reader, so it passes through
+    rather than being re-worded here — a second copy of one refusal is how two
+    surfaces end up describing the same rule differently (the same rule
+    `humanizeGateError` follows).
+
+    THE BARE-STATUS CASE IS NOT A REASON. `request` falls back to the status when
+    a failing response's body is not JSON, and `409` under a button the reader
+    just pressed explains nothing, so that spelling gets the plain line instead —
+    as does a failure that carried no message at all. */
+function pinRefusalReason(error: unknown): string {
+	const message = error instanceof Error ? error.message : String(error);
+	if (message === "" || /^\d{3}$/.test(message)) return "the daemon did not say why";
+	return message;
+}
+
+/* A REFUSAL IS THE DAEMON'S SENTENCE AND NOTHING BOUNDS IT. It is an error body,
+   so a stack trace or a multi-line dump under the action would run the sheet out
+   of its column; the clamp keeps the opening, which is the part that names the
+   rule, and marks the cut rather than pretending the message ended there. */
+const PIN_REASON_MAX = 240;
+
+function clampPinReason(reason: string): string {
+	return reason.length > PIN_REASON_MAX
+		? `${reason.slice(0, PIN_REASON_MAX)}…`
+		: reason;
+}
+
 export function SessionListScreen() {
 	const { sessions, connected } = useSessions();
+	const pinMarks = usePinMarks();
 	const [home, setHome] = useState("");
 	const [themeOpen, setThemeOpen] = useState(false);
 	const [query, setQuery] = useState("");
+	/* The row whose pin action sheet is open, or NONE. Held as the id rather than
+	   the summary so a list repaint while the sheet is open cannot leave the
+	   sheet describing a stale object — the row it names is re-read from
+	   `sessions` on every render, so the toggle always acts on current state. */
+	const [pinTarget, setPinTarget] = useState<string | null>(null);
+	/* THE REFUSAL TO RENDER INSIDE THAT SHEET, and the row it answers for.
+
+	   Held as a pair rather than as one sentence because the answer can land
+	   after the reader has moved on: a slow refusal for one row must never paint
+	   inside another row's sheet, so the render gate compares ids as well as
+	   clearing on open. */
+	const [pinRefusal, setPinRefusal] = useState<{
+		sessionId: string;
+		reason: string;
+	} | null>(null);
+	/* THE ROWS WITH A PIN REQUEST STILL IN FLIGHT, ONE ENTRY PER REQUEST. The
+	   sheet STAYS OPEN across that wait (design round 11, D25), so a row's action
+	   has to be dead while ITS OWN request is outstanding. A single screen-wide
+	   slot holding "the row last pressed" answered a different question — "was
+	   this row the last press?" — so a press on one row left another row's
+	   re-opened sheet live, offering a verb and a request that contradicted the
+	   one already on its way (review round 12, MAJOR 1). */
+	const [pinPending, setPinPending] = useState<ReadonlySet<string>>(() => new Set());
+	const markPinPending = (sessionId: string, pending: boolean) =>
+		setPinPending((current) => {
+			const next = new Set(current);
+			if (pending) next.add(sessionId);
+			else next.delete(sessionId);
+			return next;
+		});
+	/* WHAT THE SHEET'S LIVE REGION SAYS, held apart from the text it is derived
+	   from so the region can be mounted EMPTY and filled on the commit after (see
+	   the effect below). Opening the sheet clears it, so what is written is always
+	   this sheet's own answer and never the last one's. */
+	const [pinNotice, setPinNotice] = useState("");
 	/* FLIP settle state: card DOM by session id, plus each card's content
 	   coordinate from the previous commit. */
 	const mainRef = useRef<HTMLElement>(null);
 	const cardRefs = useRef(new Map<string, HTMLButtonElement>());
 	const prevTops = useRef(new Map<string, number>());
+	/* The pin action itself, so a wait that ends with the sheet still open can give
+	   focus back to the control the reader pressed. */
+	const pinActionRef = useRef<HTMLButtonElement>(null);
+	const wasPinBusy = useRef(false);
 	const visible = sessions.filter((session) =>
 		`${session.conversation_name} ${session.session_id} ${session.cwd}`
 			.toLowerCase()
 			.includes(query.toLowerCase()),
 	);
-	const active = visible.filter((session) => session.section === "active");
-	const previous = visible.filter((session) => session.section === "previous");
+	/* THE SIDEBAR'S SECTION ORDER, top to bottom: pinned, then the shared
+	   active/previous partition, filtered through whatever query is typed. A
+	   pinned row appears ONLY in ★ Pinned (not also in Active/Previous), matching
+	   the sidebar, where a pin lifts the row out of the section it ranked into.
+	   The RANKING is untouched — each group keeps the daemon's order, so pinning
+	   never reorders a section and the FLIP settle below has nothing to animate
+	   when a row merely joins the pinned list at the top.
+
+	   THE PARTITION IS THE DAEMON'S, NEVER THE READER'S PRESS. `sessions`
+	   carries confirmed pins only; a press the server has not answered for is a
+	   MARK (`pinMarks`), which draws the ★ and nothing else. Splitting them is
+	   the fix for the rows that moved under the reader: this partition is what
+	   REORDERS the list, and the browser answers a reorder under the reader with
+	   a scroll adjustment of its own — +88.0px on a successful pin, −51.0px at
+	   100% / −101.5px at 200% on a refused one (QA Q13/D18). Rows now move once,
+	   when the daemon confirms; a refusal reorders nothing because nothing ever
+	   moved. */
+	const pinned = visible.filter((session) => session.pinned);
+	const rest = visible.filter((session) => !session.pinned);
+	const active = rest.filter((session) => session.section === "active");
+	const previous = rest.filter((session) => session.section === "previous");
+	const pinRow = pinTarget
+		? sessions.find((session) => session.session_id === pinTarget) ?? null
+		: null;
+	/* Busy is about THIS row's action, not about any request: a press on one row
+	   never disables another row's sheet. */
+	const pinBusy = pinRow !== null && pinPending.has(pinRow.session_id);
+	const refusalFor = pinRefusal && pinRow && pinRefusal.sessionId === pinRow.session_id
+		? pinRefusal.reason
+		: null;
+	/* THE DAEMON'S FLAG, WHICH IS WHAT THE ACTION TALKS ABOUT. Not `renderedPin`:
+	   the ★ records what the reader asked for, and an unanswered request is not a
+	   state — a sheet opened while this row's request is in flight must offer
+	   neither a verb nor an intent derived from it (review round 12, MAJOR 1).
+	   While that request IS in flight the verb claims nothing at all and simply
+	   says what is happening, so no label can precede the daemon's agreement. */
+	const pinConfirmed = Boolean(pinRow?.pinned);
+	const pinActionLabel = pinBusy
+		? "Saving…"
+		: pinConfirmed
+			? "Unpin from the top"
+			: "Pin to the top";
+	const pinRefusalText = refusalFor
+		? `Could not save the pin: ${clampPinReason(refusalFor)}`
+		: null;
+	const pinNoticeText = pinRefusalText ?? (pinBusy ? "Saving…" : "");
+
+	/* The pin to RENDER for a row: the reader's unanswered mark over the daemon's
+	   confirmed flag. This drives the ★ ON THE CARD AND NOTHING ELSE — not the
+	   sheet's verb and not what a press sends. Those read `session.pinned`
+	   (`pinConfirmed` above), because a mark is the evidence of a request and not
+	   an answer: a sheet re-opened mid-flight would otherwise claim the state the
+	   reader is still waiting to hear about, and offer to invert it. */
+	const renderedPin = (session: SessionSummary) =>
+		pinMarks.get(session.session_id) ?? Boolean(session.pinned);
+
+	/* The ★ shows what the reader asked for; only the daemon may move the row.
+	   A failed POST clears the mark, and the ★ falls back with it.
+
+	   THE SHEET STAYS OPEN UNTIL THE ANSWER LANDS (design round 11, D25), and
+	   that is the whole point of this shape. Closing on the press left a refused
+	   pin with no reason anywhere: the ★ appeared at +2.2…5.0ms and cleared at
+	   +5.3…20.5ms — an existence window of ~3ms, a fifth of a 60Hz frame, so the
+	   reader often saw nothing at all, and on a slow answer saw a
+	   confirmation-shaped mark stay up for the whole wait (306ms, 1516ms, 46.9s
+	   measured) and then be withdrawn with no explanation. The refusal reason is
+	   rendered IN FLOW inside this sheet — never as an overlay: the reason the
+	   band was split out of this change is that anything floating above the list
+	   covers the search field. */
+	const togglePin = async (sessionId: string, pinnedNext: boolean) => {
+		applySessionPin(sessionId, pinnedNext);
+		/* A retry in the same sheet starts from no answer, not the last one. */
+		setPinRefusal(null);
+		markPinPending(sessionId, true);
+		try {
+			const saved = await setSessionPin(sessionId, pinnedNext);
+			/* The route answers with the state it READ BACK, which is the daemon's
+			   answer and not ours. A 200 that disagrees means the row was not pinned
+			   (a folder-less session answers 409, but a 200 reporting the old value
+			   is the same fact), and the mark has to go now: `settlePinMarks` only
+			   retires a mark a later frame AGREES with, so this one would never
+			   settle and the ★ would sit on a row the daemon never pinned. */
+			if (saved.pinned !== pinnedNext) clearSessionPinMark(sessionId);
+			/* Only a sheet still showing THIS row closes: the answer can land after
+			   the reader dismissed it and opened another row's, and closing that one
+			   would answer a press nobody made. */
+			setPinTarget((current) => (current === sessionId ? null : current));
+		} catch (error) {
+			/* A refusal takes the MARK back with it: the row never moved, because
+			   only a confirmed list frame reorders this screen. The reason the
+			   daemon gave is kept for the sheet to say, in the sheet's own layout,
+			   so the press that failed is the press that explains itself. */
+			clearSessionPinMark(sessionId);
+			setPinRefusal({
+				sessionId,
+				reason: pinRefusalReason(error),
+			});
+		} finally {
+			markPinPending(sessionId, false);
+		}
+	};
 
 	useEffect(() => retainSessionListStream(), []);
+
+	/* THE LIVE REGION IS FILLED AFTER THE SHEET HAS MOUNTED, never with it: WebKit
+	   AT takes a region's mount as its baseline, so text that arrives inside an
+	   already-populated container is not announced — and a re-opened sheet arrives
+	   exactly that way, its wait already true. The sheet clears the text as it
+	   opens, so the fill is always this sheet's own answer. */
+	useEffect(() => {
+		setPinNotice(pinNoticeText);
+	}, [pinNoticeText]);
+
+	/* FOCUS COMES BACK TO THE ACTION WHEN THE WAIT ENDS. `disabled` blurs a
+	   control in a real browser, which drops the reader out of the sheet's column
+	   mid-wait and leaves the Sheet's trap with nothing to hold but the first and
+	   last element; a refusal is the case the sheet now stays open for, so the
+	   action is where the reader was and takes focus back. Only a busy→idle
+	   transition, so opening a sheet never steals focus from its own controls. */
+	useEffect(() => {
+		if (wasPinBusy.current && !pinBusy) pinActionRef.current?.focus();
+		wasPinBusy.current = pinBusy;
+	}, [pinBusy]);
+
+	/* One predicate for the pin hint, used by BOTH the height class and
+	   ``aria-hidden`` — two spellings of one condition is how a control ends up
+	   painted one way and read out another (review round 3, NIT 1). Gated on what
+	   is VISIBLE (D5) and on the STORE's pins (D6): the caption names a row the
+	   reader can see, and a search that merely hides the pinned rows must not
+	   bring it back. It reads the CONFIRMED pins, so a press the daemon has not
+	   answered for leaves the caption up: the ★ Pinned section it points at does
+	   not exist until the pin is confirmed, and retiring the caption for a mark
+	   alone would take away the only thing explaining the gesture, with nothing
+	   to replace it. */
+	const showPinHint = visible.length > 0 && !sessions.some((session) => session.pinned);
+
+	/* One card factory for all three sections, so a section cannot forget the FLIP
+	   ref or the long-press handler — the bug a fourth copy of this markup would
+	   eventually grow. */
+	const renderCard = (s: SessionSummary) => (
+		<SessionCard
+			key={s.session_id}
+			s={s}
+			home={home}
+			pinned={renderedPin(s)}
+			onLongPress={() => {
+				setPinTarget(s.session_id);
+				/* Opening a sheet clears the last refusal AND its text: they belonged
+				   to the press before, and a stale reason under a fresh action is a
+				   lie — the region starts empty whatever it will say next. */
+				setPinRefusal(null);
+				setPinNotice("");
+			}}
+			ref={(el) => {
+				if (el) cardRefs.current.set(s.session_id, el);
+				else cardRefs.current.delete(s.session_id);
+			}}
+		/>
+	);
 
 	/* FLIP settle for reorders (spec §3): a card never teleports under a
 	   thumb mid-scroll. After each commit, measure every card's position in
@@ -450,60 +785,121 @@ export function SessionListScreen() {
 					local operator
 				</h1>
 			</header>
-			<main
-				ref={mainRef}
-				className="flex flex-1 flex-col overflow-y-auto px-1 pb-2"
-			>
-				<input
-					value={query}
-					onChange={(event) => setQuery(event.target.value)}
-					placeholder="Search conversations…"
-					className="mx-2 mb-2 min-h-10 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
-				/>
-				{sessions.length === 0 ? (
-					<div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
-						<p className="text-body text-ink-muted">
-							{connected
-								? "no sessions running"
-								: "connecting…"}
-						</p>
-						<p className="text-body-sm text-ink-dim">
-							start one below, or from the TUI on your machine
-						</p>
+			{/* BROWSER SCROLL ANCHORING STAYS ON (QA round 4, Q6). An earlier round
+			    opted the list out (`overflow-anchor: none`), and with the opt-out every
+			    unrelated list change moved a scrolled reader's rows: a new live session
+			    +76px, a session resuming +51px, another client's pin below the fold
+			    +45.5px at 100% and +91px at 200%, all 0px with anchoring on.
+
+			    The wrapper carries the column's `min-h-0` and keeps the scroller's
+			    height off the header and footer, so `<main>` inside it stays the thing
+			    that scrolls. It is no longer `relative`: the only absolutely positioned
+			    child it had was the refusal band, which moved to its own PR. */}
+			<div className="flex min-h-0 flex-1 flex-col">
+				<main
+					ref={mainRef}
+					className="flex flex-1 flex-col overflow-y-auto px-1 pb-2"
+				>
+					<input
+						value={query}
+						onChange={(event) => setQuery(event.target.value)}
+						placeholder="Search conversations…"
+						className="mx-2 mb-2 min-h-10 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
+					/>
+					{/* THE GESTURE'S DISCOVERER, on the surface that owns the gesture (design
+					    round 1, D2). The session view's ☆ is one tap away and does the same
+					    thing, but a reader has to already be in a conversation to find it, so
+					    it cannot teach the list's own long-press.
+
+					    GATED ON WHAT IS ON SCREEN, not on the store — the whole point of the
+					    caption is that it names a row the reader can see. Keying on
+					    ``sessions`` (unfiltered) put "touch and hold a row to pin it" directly
+					    above "no matching conversations" for a query that matched nothing, and
+					    brought it back whenever a search hid the pinned rows (design round 2,
+					    D5/D6). ``visible.length > 0`` is the honest condition; the pinned test
+					    reads the STORE so a search that hides a pin does not re-show the hint.
+
+					    IT COLLAPSES RATHER THAN VANISHES, which is D8: removing the node
+					    outright snapped the whole list up ~23px at the exact moment the first
+					    pin landed. The wrapper is always mounted and animates its height to
+					    zero, so the list settles instead of jumping. `prefers-reduced-motion`
+					    caps it to instant for free (the global block), which is the right
+					    fallback — the point is not the motion, it is that nothing snaps.
+
+					    THE COLLAPSE IS CONTENT-AGNOSTIC, and that is not incidental. An
+					    earlier version capped `max-height` at a fixed 2rem — sized for ONE
+					    line of this caption at the default type scale. A caption that WRAPS
+					    to two lines (a longer localized string, a narrower container) is then
+					    taller than the cap, and `overflow-hidden` clips the second line away:
+					    the discoverer silently disappears for exactly the readers who need
+					    the label most. (The cap itself scales with the root font, so a
+					    large-text one-liner still fits — the failure is the WRAP, not the
+					    zoom.) The `0fr`/`1fr` grid trick measures the content itself, so the
+					    caption is fully painted at any string length and collapses to zero
+					    with no magic number to keep in sync with the type scale. */}
+					<div
+						className={cn(
+							"grid transition-[grid-template-rows] duration-200 ease-out",
+							showPinHint ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
+						)}
+						aria-hidden={showPinHint ? undefined : true}
+					>
+						<div className="overflow-hidden">
+							<p className="mx-2 mb-2 text-meta text-ink-dim">
+								touch and hold a row to pin it
+							</p>
+						</div>
 					</div>
-				) : (
-					<div className="flex flex-col gap-3">
-						<section>
-							<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">Active Sessions</h2>
-							{active.map((s) => (
-								<SessionCard
-									key={s.session_id}
-									s={s}
-									home={home}
-									ref={(el) => {
-										if (el) cardRefs.current.set(s.session_id, el);
-										else cardRefs.current.delete(s.session_id);
-									}}
-								/>
-							))}
-						</section>
-						<section>
-							<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">Previous Sessions</h2>
-							{previous.map((s) => (
-								<SessionCard
-									key={s.session_id}
-									s={s}
-									home={home}
-									ref={(el) => {
-										if (el) cardRefs.current.set(s.session_id, el);
-										else cardRefs.current.delete(s.session_id);
-									}}
-								/>
-							))}
-						</section>
-					</div>
-				)}
-			</main>
+					{sessions.length === 0 ? (
+						<div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
+							<p className="text-body text-ink-muted">
+								{connected
+									? "no sessions running"
+									: "connecting…"}
+							</p>
+							<p className="text-body-sm text-ink-dim">
+								start one below, or from the TUI on your machine
+							</p>
+						</div>
+					) : (
+						<div className="flex flex-col gap-3">
+							{/* AN EMPTY SECTION COSTS NO HEADING — the sidebar's own rule
+							    (`_display_rows`: "An empty section contributes no header"), and the
+							    ★ Pinned section above already followed it while these two did not.
+							    Newly reachable because of pinning: a pin LIFTS a row out of its
+							    ranked section, so pinning every row (or a search that matches none)
+							    painted two bare headings with nothing under them (design round 1,
+							    D1). */}
+							{pinned.length > 0 ? (
+								<section>
+									<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">★ Pinned</h2>
+									{pinned.map(renderCard)}
+								</section>
+							) : null}
+							{active.length > 0 ? (
+								<section>
+									<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">Active Sessions</h2>
+									{active.map(renderCard)}
+								</section>
+							) : null}
+							{previous.length > 0 ? (
+								<section>
+									<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">Previous Sessions</h2>
+									{previous.map(renderCard)}
+								</section>
+							) : null}
+							{/* The case where EVERY section is empty: a query that matched none, or
+							    every row pinned away — pinned rows are not empty, so this arm is the
+							    one where the screen would otherwise be a wordless void. */}
+							{pinned.length + active.length + previous.length === 0 ? (
+								<p className="px-2 py-4 text-center text-body-sm text-ink-dim">
+									no matching conversations
+								</p>
+							) : null}
+						</div>
+					)}
+				</main>
+			</div>
 			<footer className="flex items-center gap-2 border-t border-hairline px-3 py-2 pb-[max(env(safe-area-inset-bottom),0.5rem)]">
 				<button
 					type="button"
@@ -522,6 +918,70 @@ export function SessionListScreen() {
 				</button>
 			</footer>
 			<ThemePicker open={themeOpen} onClose={() => setThemeOpen(false)} />
+			{/* THE PIN ACTION SHEET. Long-press opened it, so it is where the gesture's
+			    meaning is spelled out rather than left to be discovered — the row shows
+			    a ★ once pinned, and this sheet is how a reader learns the gesture that
+			    put it there. ONE primary action and nothing else: a menu of one is a
+			    better fit for a phone than an inline control on every row, which would
+			    cost the title the width it truncates against. */}
+			<Sheet
+				open={pinRow !== null}
+				onClose={() => setPinTarget(null)}
+				title={pinRow?.conversation_name || "untitled"}
+			>
+				<div className="flex flex-col p-2">
+					<button
+						ref={pinActionRef}
+						type="button"
+						disabled={pinBusy}
+						/* `disabled` is silent on its own: it says the control is dead and
+						   nothing about the wait that killed it, which no assistive tech can
+						   see either. */
+						aria-busy={pinBusy ? true : undefined}
+						onClick={() =>
+							pinRow && void togglePin(pinRow.session_id, !pinConfirmed)
+						}
+						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-left text-body active:bg-surface disabled:opacity-50"
+					>
+						<span className="w-4 shrink-0 text-accent" aria-hidden>
+							★
+						</span>
+						{/* The verb names the state the press will SET, and it is read from the
+						    DAEMON's flag rather than from the ★ on the row: the ★ records a
+						    request the daemon has not answered for, so a sheet opened while
+						    that request is in flight would otherwise claim the opposite state
+						    and offer to invert it (review round 12, MAJOR 1). While a request
+						    for THIS row is outstanding the verb claims nothing at all. */}
+						{pinActionLabel}
+					</button>
+					{/* THE REFUSAL, IN FLOW INSIDE THE SHEET. A paragraph in the sheet's own
+					    column, not an overlay: it takes layout space, so it cannot cover
+					    another control, and nothing on the list scrolls or reorders to
+					    make room for it. `role="alert"` is what announces it — inside a
+					    dialog that is in flow, which is fine, unlike an alert floating over
+					    the list behind it. The wording is the app's own (`Could not save the
+					    pin: <daemon's reason>`), the same shape the withdrawn band used. */}
+					{/* THE SHEET'S ONE LIVE REGION, MOUNTED EMPTY AND FILLED AFTER. It is a
+					    sibling of the action in the sheet's own column, so it takes layout
+					    space and cannot be drawn over the control above it; anything
+					    floating (an overlay above the list, a positioned box) fails that,
+					    and anything floating above the list covers the search field. The
+					    text lands on the commit AFTER the sheet mounts (the `pinNotice`
+					    effect), because a container that arrives already populated is not
+					    announced — the shape a re-opened sheet has, its wait already true.
+					    `break-words` and the clamp in `clampPinReason` keep a long daemon
+					    message inside the column. */}
+					<p
+						role="alert"
+						className={cn(
+							"px-2 pb-1 text-meta break-words",
+							pinRefusalText ? "text-danger" : "text-ink-muted",
+						)}
+					>
+						{pinNotice}
+					</p>
+				</div>
+			</Sheet>
 		</div>
 	);
 }

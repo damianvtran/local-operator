@@ -161,6 +161,57 @@ Screens, following branding.md §7's agent-output hierarchy:
 - **Session list** — one card per session: name, cwd, model label, streaming
   shimmer, needs-attention badge (approval/ask pending), running-subagent
   chip. New-session button with a cwd picker (home + recents).
+
+  Rows are drawn in the SAME order the terminal sidebar and the desktop app use:
+  the daemon sorts every row on the shared catalogue key
+  (`session.catalog.CatalogEntry.rank` — the tier from `session_category`, the
+  wake band, birth, id) and marks each row active/previous with the shared
+  `active` rule, so the three surfaces agree about a row's tier (within a
+  section) and about which list a conversation is in, and the phone's list is
+  STABLE across activity refreshes (an early version re-derived the key from
+  live state and moved rows as sessions streamed). Two asymmetries, both
+  deliberate: the wake band (the phone's rows carry no wake data, so `wake_rank`
+  is a constant here), and the phone-woken window (a `/wake` accepted but not yet
+  discovered is ranked as a live `idle` row so it lands in Active at once — the
+  sidebar has no equivalent window, so no equivalent tier). The screen only
+  GROUPS what it is sent:
+  **★ Pinned**, **Active Sessions**, **Previous Sessions**.
+
+  A conversation is pinned with a long-press on its row or from the ☆/★ control
+  in the session view's header; either way the row ends up under **★ Pinned**,
+  out of the section it ranked into. Both write the **shared durable pin store**
+  (`sidebar-pins.json` via `local_operator.tui.sidebar_pins`) — the same file
+  the TUI's `F10` and the desktop app's pin action read and write — so a pin
+  made on the phone appears on the other surfaces and vice versa. The route is
+  `POST /api/sessions/{id}/pin` with `{"pinned": bool}` (desired state, not a
+  toggle, so a retried request cannot flip the pin back). A pin made on another
+  surface reaches an open phone list without a reload within one discovery
+  pass (`SCAN_INTERVAL_S`, 2 s): that pass stats `sidebar-pins.json` once per
+  tick and repaints the list only when the pinned set changed.
+
+  The PRESS and the MOVE are two phases, and the split is what keeps the rows
+  still. The press paints the ★ on the row at once — an optimistic mark
+  (`store.pinMarks`), never a rewrite of the row — while the sections (★ Pinned
+  among them) keep partitioning on the daemon's own `pinned` flag, so nothing
+  reorders until a list frame from the daemon confirms the pin. A confirmed pin
+  then moves the rows, by up to one row height (measured in the app at 62.90px
+  ≈ 1.24 row heights including the first `★ Pinned` heading, and 76.50px when
+  the confirming frame arrives from the terminal, with a +88.50px scroll
+  adjustment) — the accepted cost of a lift, paid after the daemon has agreed,
+  and movement at or below one row height is inside the envelope rather than a
+  defect. A pin the daemon does not KEEP clears the mark and reorders nothing —
+  a `409`, or a `200` whose body reports the state it read back instead of the
+  one that was asked for; either way the row never moved, so there is nothing to
+  put back. The session view's header reads the same mark, so the two surfaces
+  agree about a ★ by construction.
+
+  A pin needs the conversation's durable folder, so pinning a session in the
+  moment before its first message lands on disk is refused with a 409 rather
+  than stored as a pin the list cannot show. THIS RELEASE SHOWS NO REFUSAL
+  TEXT — a refused pin is the ★ clearing again, and nothing names the reason;
+  the daemon answers with the reason in the 409 body exactly as before, and the
+  follow-up PR that rebuilds the refusal report is what puts it back on
+  screen.
 - **Session view** — transcript with TUI-parity rendering: user rows,
   assistant markdown, one-line tool calls with state glyphs and green/red
   diff counts, tap to expand/collapse args+output+diff; todos panel;

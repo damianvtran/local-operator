@@ -325,10 +325,29 @@ def test_mobile_uses_same_categories_birth_and_ties():
                 model_label="demo",
                 control_port=1,
                 control_key="test",
+                # THE RECORD'S OWN ``busy``, not only the projection's
+                # ``streaming``. The daemon ranks on the record's flag because
+                # that is what ``decorate_rows`` (and so the catalogue's key)
+                # reads — ``streaming`` is what a fold has SEEN, and the two can
+                # differ for a frame. A real busy runtime publishes
+                # ``busy=True`` (``RuntimeServer``), so a fixture that set only
+                # the projection was under-specifying what the daemon receives.
+                busy=e.row.live_state == "busy",
             )
         )
+        # DELIBERATELY DIVERGENT FOR ONE ROW, so this fixture can FAIL on a wrong
+        # ranking input (review round 3, MINOR 1). With ``streaming`` mirroring
+        # ``busy`` exactly, a daemon that ranked on the projection instead of the
+        # record passed 28/28 — the two inputs could never disagree, so the test
+        # proved nothing about which one is read. ``busy-b`` is the mid-turn-attach
+        # window a real daemon sees: the record already says busy, the fold has not
+        # yet observed a turn start. Ranking on ``streaming`` would file it under
+        # the unseen-error tier instead of busy, and the expected order below fails.
         entry.projection = SessionProjection(
-            session_id=e.id, pid=entry.record.pid, kind="tui", streaming=e.row.live_state == "busy"
+            session_id=e.id,
+            pid=entry.record.pid,
+            kind="tui",
+            streaming=e.row.live_state == "busy" and e.id != "busy-b",
         )
         if e.row.pending:
             from local_operator.mobile.types import PendingRequest

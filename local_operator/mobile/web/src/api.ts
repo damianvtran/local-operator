@@ -155,6 +155,24 @@ export function markSessionSeen(
 	});
 }
 
+/** Pin or unpin a conversation in the SHARED durable store.
+
+    Sends the DESIRED STATE rather than a toggle, matching the desktop route: a
+    dropped response must not flip the pin back when the caller retries, so the
+    body names the state wanted and a retry lands on the same one. The daemon
+    stores it in `sidebar-pins.json`, the same file the terminal's F10 and the
+    desktop app write, so a pin made here appears there and vice versa. */
+export function setSessionPin(
+	sessionId: string,
+	pinned: boolean,
+): Promise<{ ok: boolean; pinned: boolean }> {
+	return request(`/api/sessions/${encodeURIComponent(sessionId)}/pin`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ pinned }),
+	});
+}
+
 export function sendCommand(
 	sessionId: string,
 	op: CommandOp,
