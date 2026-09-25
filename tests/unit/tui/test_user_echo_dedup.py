@@ -44,10 +44,11 @@ from local_operator.tui.app import (
     OperatorApp,
 )
 from local_operator.tui.events import SteeringDelivered, TurnEnded, UserMessageStart
+from local_operator.tui.terminal_title import SPINNER_FRAMES
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
 
-from .test_app_pilot import FakeSession, _factory
+from .test_app_pilot import FakeSession, GoalSession, _band, _factory
 
 
 class _Streaming(FakeSession):
@@ -531,3 +532,58 @@ async def test_a_recalled_steer_takes_only_its_own_entry() -> None:
         await pilot.press("escape")
         await pilot.pause()
         assert _echo_ids(app) == [first_id], "the recall took the wrong steer's entry"
+
+
+@pytest.mark.asyncio
+async def test_the_submitted_prompt_is_on_screen_before_the_session_admits_it() -> None:
+    """The submit window: Enter puts the row on screen, and the app says live.
+
+    The window this pins is the one between the user pressing Enter and the
+    session admitting the prompt, and it exists because `prompt()` returns only
+    when the turn is over (or, on a follower, on the owner's ACK) while the
+    row has to be readable immediately. The reported defect was on the phone,
+    where nothing appeared until the receipt; the TUI half is this pair, and
+    both members are checked here against a session that HOLDS the prompt:
+
+      * the ``UserBlock`` is in the transcript, registered as a pending echo —
+        the row is painted at submit, not at the announcement;
+      * the status band carries the app's live mark (its spinner), written at
+        the same instant as the row. That mark is what makes the window read as
+        "received, starting" rather than as nothing having happened, and it is
+        why no second in-progress signal is added here: D25 makes the
+        transcript's aggregate ``WorkingBlock`` the turn's ONE working line and
+        it mounts on ``agent_start``, where the turn genuinely exists. This cell
+        deliberately does NOT assert the working line's absence — mounting it
+        earlier would be a legitimate change — only the pair that must hold.
+
+    ``GoalSession`` is imported rather than a gate re-derived: it is this
+    suite's one fake whose ``prompt`` can be held open, and a second definition
+    of that stretch is how two files come to disagree about how long "held" is.
+    The gate is released before teardown so the turn settles rather than being
+    left wedged in the worker.
+    """
+    session = GoalSession()
+    session.prompt_gate = asyncio.Event()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "ship it")
+
+        # The prompt is still in the worker's hands: `GoalSession` records it
+        # only after the gate opens, so an empty list means the session has not
+        # admitted anything yet and the assertions below are about the window.
+        assert session.prompts == [], "the session admitted the prompt too early to test"
+        assert len(_user_blocks(app, "ship it")) == 1, "the submitted row is not on screen"
+        assert _echo_texts(app) == ["ship it"], "the painted row is not registered as an echo"
+
+        band = _band(app)
+        assert any(
+            frame in band for frame in SPINNER_FRAMES
+        ), f"the band shows no live mark while the prompt is unadmitted: {band!r}"
+
+        session.prompt_gate.set()
+        for _ in range(20):
+            await pilot.pause()
+            if session.prompts:
+                break
+        assert session.prompts == ["ship it"], "the released gate never ran the turn"

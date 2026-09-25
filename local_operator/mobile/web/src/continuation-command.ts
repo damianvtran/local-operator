@@ -208,12 +208,22 @@ function storedEnvelope(key: string): ContinuationEnvelope | null {
 
 /** Retain the exact producer envelope until acknowledgement. The UUID is the
  * identity of this body, not a mutable composer slot: after uncertain delivery,
- * retries replay these bytes while later edits remain a separate draft. */
+ * retries replay these bytes while later edits remain a separate draft.
+ *
+ * ``onEnvelope`` is called with the resolved envelope BEFORE the round trip,
+ * which is the one moment a caller can paint a row for a command whose
+ * acknowledgement has not arrived yet (see `pending-echo.ts`). It is handed the
+ * envelope rather than minting one itself because the id is this module's to
+ * choose: a caller generating its own would be the second identity rule the
+ * contract above exists to prevent, and a retry must reuse the stored id rather
+ * than a fresh one. It fires on the retry path too, with the stored envelope, so
+ * a replayed send paints its row the same way a first attempt does. */
 export async function submitContinuation(
 	sessionId: string,
 	op: ContinuationOp,
 	text: string,
 	images?: PromptImage[],
+	onEnvelope?: (envelope: ContinuationEnvelope) => void,
 ): Promise<ContinuationReceipt> {
 	const key = commandStorageKey(sessionId);
 	const stored = storedEnvelope(key);
@@ -228,6 +238,10 @@ export async function submitContinuation(
 		throw new Error("This instruction cannot be retained safely for retry.");
 	}
 	if (!stored) saveEnvelope(key, envelope, Date.now());
+	/* Before the round trip, never after: the caller's row has to be on screen for
+	   the whole window this receipt is awaited in, which is the window the user
+	   spends wondering whether their message went. */
+	onEnvelope?.(envelope);
 	try {
 		const reply = await sendCommand(sessionId, envelope);
 		clearPendingContinuation(sessionId);

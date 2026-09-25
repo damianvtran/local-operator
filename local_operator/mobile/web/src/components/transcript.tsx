@@ -14,6 +14,7 @@ import { ToolRow } from "./tool-row"
 import { RowBoundary } from "./row-boundary";
 import { getHistory, getSubagentHistory, imageUrl } from "../api";
 import { cn } from "../lib/cn";
+import type { PendingEcho } from "../pending-echo";
 import type { TranscriptEntry } from "../types";
 
 const PAGE = 120;
@@ -259,11 +260,60 @@ function Entry({ entry, pid }: { entry: TranscriptEntry; pid: string }) {
 	}
 }
 
+/** The row for one command that is in flight — what the user just sent.
+ *
+ * It exists because the receipt is not instant: before it, the user's words were
+ * only ever in the composer's textarea, so a send on a phone link looked like
+ * nothing had happened until the daemon answered and the message appeared out of
+ * nowhere. This row is painted at submit and replaced by the real one under the
+ * same id (`pending-echo.ts`).
+ *
+ * Two deliberate departures from the settled user bubble beside it, and no more:
+ *
+ *   - NO ACCENT LEADING EDGE. The accent edge is this surface's mark for "this is
+ *     what the turn is on" (branding §7) and a message the session has not
+ *     written is not that yet;
+ *   - a stated `sending…` caption, in the meta ink the app already uses for
+ *     receipts, because the honest question at this moment is "did it go?".
+ *
+ * It carries NO spinner and no shimmer. `WorkingLine` is this surface's ONE
+ * in-progress animation (D25), and a second one per row is exactly the
+ * competing-patterns defect that rule exists for — so the pending state is said
+ * in words and ink, not in motion. */
+function PendingEchoRow({ echo }: { echo: PendingEcho }) {
+	return (
+		/* `data-pending-echo` is the row's identity for anything that needs to ask
+		   "is this command's row still pending" from outside React — the same use
+		   `data-completion-anchor` has below, and the only stable hook here that is
+		   not a presentation class. */
+		<div className="flex min-w-0 justify-end" data-pending-echo={echo.commandId}>
+			<div className="flex max-w-[85%] flex-col gap-1 rounded-md border border-hairline bg-surface px-3 py-1.5">
+				{/* Attachments ride as a count, like the TUI's own prompt receipt.
+				   The BYTES are never duplicated here: the composer keeps its previews
+				   and revokes them on acknowledgement, so a second holder of those
+				   object URLs would be a revoke this row cannot see coming. */}
+				{echo.imageCount > 0 ? (
+					<span className="text-meta text-ink-dim">
+						{echo.imageCount === 1 ? "1 image attached" : `${echo.imageCount} images attached`}
+					</span>
+				) : null}
+				{echo.text ? (
+					<div className="text-body leading-normal break-words whitespace-pre-wrap text-ink-muted">
+						{echo.text}
+					</div>
+				) : null}
+				<span className="text-meta text-ink-dim">sending…</span>
+			</div>
+		</div>
+	);
+}
+
 export function Transcript({
 	pid,
 	entries,
 	jobId,
 	scrollKey = `${pid}:${jobId ?? "root"}`,
+	pending = [],
 	tailContent,
 	emptyContent,
 }: {
@@ -271,6 +321,11 @@ export function Transcript({
 	entries: TranscriptEntry[];
 	jobId?: string;
 	scrollKey?: string;
+	/** Commands this device sent that the session has not written a row for yet.
+	 *  Rendered as the LAST rows of the conversation, which is where the real rows
+	 *  will land — the same place, so the reconciliation reads as text losing its
+	 *  "sending…" caption rather than as a row moving. */
+	pending?: PendingEcho[];
 	/** Lifecycle outcomes belong in the conversation's one discoverable scroll
 	 * surface, not in a clipped nested footer beneath it. */
 	tailContent?: ReactNode;
@@ -309,7 +364,12 @@ export function Transcript({
 	   expansion that re-rendered then snapped scrollTop to the very bottom
 	   and the tapped row flew off-screen (read as "the screen went blank"). */
 	const tail = entries[entries.length - 1];
-	const growthSignal = `${entries.length}:${tail?.id ?? ""}:${tail?.text?.length ?? 0}:${tail?.final ?? ""}`;
+	/* The pending row is part of the tail for the SAME reason a new entry is: a
+	   row that appeared below the fold with no scroll is a send the user watches
+	   happen off-screen. Keyed by id, so resolution (which swaps the pending row
+	   for the real one, one entry longer) is a change here too. */
+	const pendingKey = pending.map((echo) => echo.commandId).join(",");
+	const growthSignal = `${entries.length}:${tail?.id ?? ""}:${tail?.text?.length ?? 0}:${tail?.final ?? ""}:${pendingKey}`;
 
 	/* De-dupe: an older page can overlap the live window's head when the fold
 	   re-caps between the fetch and the render. Key on id, older first. */
@@ -459,7 +519,14 @@ export function Transcript({
 					</div>
 				</RowBoundary>
 			))}
-			{visible.length === 0 ? emptyContent : null}
+			{visible.length === 0 && pending.length === 0 ? emptyContent : null}
+			{/* After the last projected row, because that is where the session will
+			    write them. */}
+			{pending.map((echo) => (
+				<RowBoundary key={echo.commandId}>
+					<PendingEchoRow echo={echo} />
+				</RowBoundary>
+			))}
 			{tailContent}
 		</div>
 	);

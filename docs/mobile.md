@@ -170,7 +170,11 @@ Screens, following branding.md §7's agent-output hierarchy:
   model label + effort as tappable chips (opens the model sheet / effort
   rungs), typing `/` opens the slash-command sheet with fuzzy filtering and
   argument hints, send/steer/stop button morphing with turn state, resume
-  affordance after an abort.
+  affordance after an abort. A send paints the message as a PENDING ROW in the
+  conversation immediately — before the daemon has acknowledged it — and the
+  row is reconciled against the session's own row by command id, so it resolves
+  to exactly one row; a failed send takes the row down and hands the text back
+  to the field with the retained-envelope retry beside it.
 
 ## Failure modes and rules
 
