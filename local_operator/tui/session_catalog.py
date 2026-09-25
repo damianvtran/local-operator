@@ -17,7 +17,6 @@ from local_operator.session.catalog import (  # noqa: F401 -- compatibility API
     cached_session_rows,
     decorate_rows,
     load_catalog,
-    load_catalog_with_population,
     rank_entries,
     session_directory_name,
     subagent_population,
