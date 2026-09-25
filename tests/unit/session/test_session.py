@@ -4580,6 +4580,64 @@ def _attention_starts(session) -> list[Any]:
 
 
 @pytest.mark.asyncio
+async def test_a_batch_the_disposal_got_to_first_is_still_made_durable(tmp_path):
+    """MAJOR-1 (review round 1): the disposal must not destroy the batch.
+
+    ``dispose`` reaches an in-flight turn before its flush can run whenever its
+    bounded wait for that turn expires, and the flush then used to clear
+    ``_deferred_job_results`` and return on ``_disposed`` -- no row, no incident,
+    no log. That is the silent loss this change exists to prevent, one ordering
+    over, and it is reachable on the arrival ordering the incident itself was one
+    allocation away from (the incident's own batch was nine children).
+
+    The transcript accepts appends until the very end of ``dispose``, so a row
+    written here lands -- which is what makes routing the batch through the
+    leaving arm the fix rather than a wish. Off the latch the old behaviour
+    stands, and that is asserted here too: the guard is on the LATCH, not on a
+    disposal having happened.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("start a job")
+    session._is_streaming = True
+    await session._on_job_completed("qa-r2", "one", _settled_job("qa-r2"))
+    await session._on_job_completed("rev-r6", "two", _settled_job("rev-r6"))
+    assert session._deferred_job_results, "precondition: the batch is deferred"
+    session.retire_job_deliveries_to_transcript()
+
+    # The disposal gets there first, exactly as it does when the bounded wait for
+    # a turn with a batch behind it expires.
+    session._disposed = True
+    await session._deliver_deferred_job_results()
+
+    assert [row.payload["details"]["job_id"] for row in _job_result_rows(session)] == [
+        "qa-r2",
+        "rev-r6",
+    ], "the disposal must not destroy a batch it did not deliver"
+    assert not session._deferred_job_results
+
+
+@pytest.mark.asyncio
+async def test_a_disposal_off_the_latch_still_delivers_nothing(tmp_path):
+    """The other half of MAJOR-1's guard: it keys on the LATCH, not on disposal.
+
+    A session disposed with no departure armed has no arm that can write, and
+    widening the guard to "any disposed session writes" would change a path
+    nothing asked to change.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("start a job")
+    session._is_streaming = True
+    await session._on_job_completed("qa-r2", "one", _settled_job("qa-r2"))
+    session._disposed = True
+
+    await session._deliver_deferred_job_results()
+
+    assert _job_result_rows(session) == [], "off the latch, a disposal still delivers nothing"
+
+
+@pytest.mark.asyncio
 async def test_a_job_result_opens_no_turn_on_a_leaving_runtime(tmp_path):
     """A delivery that lands after the departure latch is DURABLE, not run.
 
