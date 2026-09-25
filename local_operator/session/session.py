@@ -4644,7 +4644,12 @@ class Session:
         # old fallback after `/model` is the same stale frame this state
         # exists to prevent. Persisted (with the new primary) so a resume does
         # not restore a pin the user already switched away from.
-        if self._active_fallback is not None:
+        #
+        # The withdrawal ANNOUNCES the new primary itself, so the switch below
+        # must not announce it a second time: one ``ModelChangeEvent`` per
+        # switch, whichever edge produced it.
+        announced = self._active_fallback is not None
+        if announced:
             self._drop_fallback_pin(model, "model switched")
         notify = getattr(self._stream_fn, "on_model_changed", None)
         if callable(notify):
@@ -4658,6 +4663,14 @@ class Session:
         # "now running as X (was Y)", so a "Reason: model switched" line would
         # only repeat it. ``reason`` is reserved for failover causes (R3).
         self.refresh_frontend_state()
+        if not announced:
+            # Every host keys its model display off this event, and a genuine
+            # switch used to emit NONE: the runtime's projection (and so the
+            # discovery record `lop sessions` reads) kept the old label until
+            # the next turn's route event, which on an idle session is never.
+            # A switch typed into a TUI by another process (herdr) hit exactly
+            # that. Front ends treat it as a repaint, never a transcript row.
+            self._spawn_model_change(model, "model switched")
         self._spawn_background(
             self.journal_model_switch(
                 f"{model.provider}/{model.model_id}",
@@ -4710,6 +4723,16 @@ class Session:
         self._active_fallback = None
         self._active_route = None
         self._spawn_background(self._persist_active_route(primary))
+        self._spawn_model_change(primary, reason)
+
+    def _spawn_model_change(self, primary: ModelSpec, reason: str) -> None:
+        """Announce ``primary`` as the model now serving, from sync code.
+
+        Background because both callers (``set_model`` and the pin withdrawal)
+        are synchronous and run on the UI loop. One constructor for the two, so
+        a deliberate switch and a withdrawal cannot drift in what they tell a
+        front end.
+        """
         self._spawn_background(
             self._emit(
                 ModelChangeEvent(
