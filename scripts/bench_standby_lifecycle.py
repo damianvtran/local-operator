@@ -260,6 +260,20 @@ class _RuntimeLedger:
             return "exited cleanly before the check (popen rc=0) -- not signalled", True
         return f"SIGNALLED (popen rc={rc})", False
 
+    def reap(self) -> None:
+        """``poll()`` everything held, so a finished child is not left a zombie.
+
+        A held Popen that nobody polls keeps its exited child in ``<defunct>`` —
+        visible in the cleanup child map, and this bench's whole point is that
+        "gone" is measured truthfully. Nobody else may reap these (the ledger is
+        the single owner), so the bench does it here, once, at the end.
+        """
+        for pop in self.popens.values():
+            try:
+                pop.poll()
+            except Exception:  # noqa: BLE001 — a reap is best-effort, never a verdict
+                pass
+
 
 def _warm_p95(warms: list[float]) -> float:
     """p95 of the warm times observed so far, ``max()`` for fewer than 5 samples.
@@ -412,7 +426,7 @@ def _kill_scoped_standbys(console_pid: int) -> None:
         _kill_standby(pid, console_pid)
 
 
-def _cleanup(state: dict[str, Any], root: Path) -> None:
+def _cleanup(state: dict[str, Any], root: Path, ledger: "_RuntimeLedger | None" = None) -> None:
     from local_operator.session.runtime import standby
 
     console_pid = os.getpid()
@@ -439,9 +453,11 @@ def _cleanup(state: dict[str, Any], root: Path) -> None:
     # be SELF-ENFORCING, not a printed map everyone reads past. Wait out the
     # SIGTERMs just sent, then assert emptiness — this console's own children only,
     # since another session's standby is neither this rig's to kill nor to judge.
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline and _standby_pids(console_pid):
+    leftover_wait = time.monotonic() + 10.0
+    while time.monotonic() < leftover_wait and _standby_pids(console_pid):
         time.sleep(0.2)
+    if ledger is not None:
+        ledger.reap()
     leftovers = _standby_pids(console_pid)
     print(f"  ...   cleanup: children now {_children(console_pid)}", flush=True)
     assert not leftovers, f"the bench left standby children alive: {leftovers}"
@@ -786,7 +802,7 @@ def main() -> int:
         except Exception:  # noqa: BLE001 - closing the sampler must not break cleanup
             pass
         try:
-            _cleanup(state, root)
+            _cleanup(state, root, ledger)
         finally:
             shutil.rmtree(base, ignore_errors=True)
 
