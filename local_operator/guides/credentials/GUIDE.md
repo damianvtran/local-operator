@@ -42,6 +42,12 @@ echo "$(lop secret get GITHUB_TOKEN)"          # prints it
 TOKEN=$(lop secret get GITHUB_TOKEN); echo $TOKEN   # same, one step later
 ```
 
+A bash call that does this is **refused before it runs**, with an error naming
+the rule, the offending span and the rewrite — the same is true of a `set -x`
+trace over a command that carries a secret, a `ps` of an argv the value was
+passed in, and a cell that prints one. Re-spell the call as one of the forms
+below; a refusal here is the guard working, not a bug to route around.
+
 `lop secret get` writes the value to stdout with no trailing newline and exits
 non-zero with empty stdout on any failure, which is what makes `$( )` safe: a
 missing secret gives you an empty string and a failed command, never a partial
@@ -51,7 +57,8 @@ A FILE is a different matter. `lop secret get NAME > /tmp/token` puts the value
 on disk unencrypted, which is **not** treated as a compromise — the model never
 sees it — but it is a cleanup debt: delete the copy afterwards **without
 reading it**, because reading it is what would turn a contained value into a
-leaked one. Prefer a form that never leaves a copy at all:
+leaked one (and a read of that copy in the same command is refused outright).
+Prefer a form that never leaves a copy at all:
 
 For a secret that is a FILE (a service-account JSON, a PEM), use the form that
 materialises it for one command and removes it afterwards:
@@ -65,6 +72,100 @@ To hand several secrets to one command as environment variables:
 ```bash
 lop secret run --secret GITHUB_TOKEN --secret NPM_TOKEN=NODE_AUTH_TOKEN -- npm publish
 ```
+
+## Identifying a secret without reading it
+
+Most of what an agent needs from a secret is its IDENTITY, not its bytes: is the
+value I am about to use the one that is stored, and is this the same secret the
+runbook means? `describe` answers that without printing anything:
+
+```bash
+lop secret describe GITHUB_TOKEN --length --fingerprint
+```
+
+```
+name         GITHUB_TOKEN
+kind         string
+...
+length       40 bytes
+fingerprint  hmac-sha256:191abdba80c8f80cbd072522719bf381
+```
+
+`length` is the value's exact size in bytes — compare it with the `stored NAME
+(N bytes)` line from when it went in, and a mismatch says the wrong thing was
+written. `fingerprint` is an HMAC-SHA256 over the value, keyed on the store's
+master key and truncated to 16 bytes: two calls, two names holding the same
+bytes, and two sessions all produce the same digest, while a different value
+produces a different one. Neither flag prints the value, and `describe` has no
+flag that does — the one verb with a flag that prints a value on purpose is
+`get --reveal`, below, and it is audited as such.
+
+**What a fingerprint proves, and what it does not.**
+
+- It proves the two values you compared are the same bytes.
+- It is **not** a hash you can compare against a copy you already hold: a plain
+  `shasum -a 256` of that copy gives a different string, because the fingerprint
+  is keyed.
+- It is **not** stable across a master-key rotation (`lop secret rotate`), and
+  **not** comparable between two stores — the same value fingerprints
+  differently under a different master key, so a changed fingerprint means "the
+  store's key changed" as often as it means "the secret changed".
+- It is **not** proof that a value is secret or unguessable. Whoever holds the
+  master key can confirm a guessed value against it (and can decrypt the store
+  anyway, so gains nothing); whoever does not, cannot.
+
+The round-trip check above — `lop secret get NAME | shasum -a 256` against the
+original — still works and is still the right tool when you have a plaintext
+copy to compare with. The fingerprint is for when you do not: it answers the
+same question with no value-bearing pipeline to get wrong.
+
+## When a human has to see the bytes
+
+The path set aside for that is `--reveal`, at a terminal:
+
+```bash
+lop secret get GITHUB_TOKEN --reveal      # asks at the terminal, then prints it
+```
+
+It is refused — exit 3, **empty stdout**, and the reason on stderr — unless stdin
+AND stdout are both a terminal, so a plain `bash` call, a redirect and a pipeline
+never get the bytes: there is nobody to ask, and nobody to ask is not permission.
+Answering `n` at the prompt reveals nothing and exits non-zero. There is
+deliberately no flag, environment variable or config setting that stands in for
+the prompt, because anything the model can set in the same call it uses is a
+default, not an opt-in.
+
+**What that check is and is not.** It is an accident net, not a control: it asks
+"does this caller have a terminal", and a caller willing to allocate one
+(`script`, a `pty` from a script of its own) satisfies it and answers its own
+prompt. Nothing `lop` can observe tells that apart from a human typing `y`, and
+it would change little if it could — anything running as the user can read the
+master key beside the store and decrypt it directly. So do not treat
+`--reveal` as a wall, and do not read a `reveal` row as proof that a person was
+present. What the announcement does give you is the half that matters: the value
+is fetched through the same seam as `$(lop secret get NAME)`, so where a broker
+and the owning session are reachable the session is told to redact it *before*
+any byte exists, and a session that will not acknowledge that gets no value at
+all.
+
+**The announcement is not unconditional, so do not read its absence as
+impossibility.** Where no broker or session is reachable, and in the default
+keyfile tier where a live broker refuses the caller's ancestry (`unauthorized` /
+`unauthenticated`, which includes this user's own plain terminal, since it has no
+`lop` session among its ancestors) the seam degrades to the **unannounced local
+read**, exactly as `$(lop secret get NAME)` does: same bytes, no notice to any
+session. The fallback is narrower than "any refusal": codes this code path does
+not catch — `unredactable`, `locked`, `version` — propagate instead, so a broker
+that answered and said one of those serves nothing at all. The broker is the
+audit trail and the redaction notice in that tier, not a boundary, because the
+master key sits on disk beside the store and a refused caller can read it
+directly anyway. In the hardened passphrase tier the refusal stands and
+there is no local read to fall back to. "What is recorded" below is how you tell
+the two apart afterwards.
+
+If you are an agent wondering whether you need this: you almost certainly need
+`describe --length --fingerprint` above, or one of the forms in "From bash" that
+hand the value to a consumer without printing it. The reveal is for the user.
 
 ## From eval
 
@@ -81,9 +182,10 @@ usual.
 The value is a real `str`, so f-strings, concatenation and `.encode()` all work.
 Its `repr` shows `[redacted]`, and anything it does reach — stdout, stderr,
 `display`, the cell's result — is scrubbed before the model sees it. **Do not
-rely on that as permission to print it.** It is a safety net for accidents, not
-a channel: a value you deliberately write to a file or post to a service has
-left the harness entirely.
+rely on that as permission to print it**: a cell that prints or logs a retrieved
+value is REFUSED before the kernel sees it, and the scrub is the second layer
+behind that refusal rather than a channel. A value you deliberately write to a
+file or post to a service has left the harness entirely.
 
 ## When to store a secret
 
@@ -175,9 +277,25 @@ it was handled, and there is no exposure.
 
 Every store, retrieval, update, delete and failed authorization is appended to a
 hash-chained audit trail with a timestamp, the secret's id (never its value),
-the session id, and the calling process's pid and executable path.
-`lop secret audit --verify` checks the chain. So "I just read one to check" is
-visible to the user afterwards.
+the session id, and the calling process's pid and executable path. An audited
+reveal leaves two rows and they say different things: the retrieval that fed it
+(`get`, carrying the session id when the broker announced the value) and
+`reveal` — `tty` when bytes went to a terminal, `refused` when nobody could be
+asked, `cancelled` when the human declined. Read together they answer "was a
+value fetched?" and "was one printed?" separately. **To tell an announced
+reveal from an unannounced one, read the pids, not the session id**:
+`LOCAL_OPERATOR_SESSION_ID` is supplied by the caller and nothing verifies it,
+so an unannounced local read carries whatever session id its caller asked for.
+The announced case's retrieval row is written by the **broker**, so its pid is
+the daemon's and differs from the `reveal` row's; the unannounced case's is
+written by the `reveal` process itself — the same pid as its `reveal` row — and,
+when a broker was reachable enough to refuse it, is preceded by that broker's
+`deny:retrieve` and `deny:key` rows, attributed to that same pid. An identity
+check that reads the value (`describe --length`/`--fingerprint`) is recorded as
+`describe` with the fields it was asked for (`length`, `fingerprint`, or both);
+a plain `describe` reads no value and writes no row. `lop secret audit --verify`
+checks the chain. So "I just read one to check" is visible to the user
+afterwards.
 
 ## What this actually protects against — do not overstate it
 

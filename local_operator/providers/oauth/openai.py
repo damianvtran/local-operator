@@ -33,6 +33,7 @@ from local_operator.providers.oauth.callback_server import (
     OAuthCallbackFlow,
     maybe_await,
     raise_for_refresh_failure,
+    report_flow_details,
 )
 from local_operator.providers.oauth.device_code import (
     DevicePollResult,
@@ -308,6 +309,7 @@ async def login_openai_device(
             raise LoginError(f"OpenAI device auth response malformed: {device}")
         interval = max(1.0, float(device.get("interval", 5)))
 
+        await report_flow_details(callbacks, user_code=user_code, expires_in=DEVICE_EXPIRY_SECONDS)
         if callbacks.on_auth_url is not None:
             await maybe_await(
                 callbacks.on_auth_url(DEVICE_PAGE_URL, instructions=f"Enter code: {user_code}")

@@ -20,7 +20,7 @@ import logging
 import random
 import sqlite3
 import time
-from typing import TYPE_CHECKING, Any, Callable, Collection, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Collection, Mapping, Protocol
 
 import httpx
 
@@ -29,6 +29,8 @@ from local_operator.model.configure import (  # noqa: F401  (used by callers)
     build_model_spec,
 )
 from local_operator.model.discovery import (
+    FAILED_LISTING_STATUSES,
+    NO_LISTING_PROVIDERS,
     DiscoveredModel,
     available_models,
     cached_available_models,
@@ -102,6 +104,13 @@ EMPTY_OVER_DATA_ACCEPT_MS = 30 * 60_000
 #: re-list nine providers. Boot and repaint paths keep the default 24h hard TTL
 #: (with an hourly background refresh) because there a request IS visible.
 PICKER_TTL_S = 15 * 60
+
+#: The reason every provider named by :meth:`ProviderController.catalogue_failures`
+#: carries. Deliberately the ONE generic sentence and never the provider's own
+#: error: the surfaces that consume it read only the KEYS, and a provider
+#: exception can carry a response body or a credential URL, so an unvetted reason
+#: string must never reach a wire (or a screenshot) from here.
+CATALOGUE_FAILURE_REASON = "Model listing unavailable"
 
 #: Notes for the QwenCloud console-ticket states the user can ACT ON. All are
 #: painted by ``usage_panel.py``'s body builder, which prefixes a two-cell
@@ -789,6 +798,20 @@ class ProviderController:
         # lazy OAuth thunks name it explicitly, and `create_api_key_login`'s
         # paste-only login swallows it through `**_kwargs`.
         result = await definition.login(callbacks, signal=signal, **options)
+        if signal is not None and signal.aborted:
+            # The login returned AFTER its host abandoned it: a flow that ignores
+            # the signal (the paste-only logins do, by design) or absorbs its
+            # task's cancellation can still come back with a credential. The
+            # user has walked away from this sign-in -- the desktop may already
+            # have started a newer one for another provider -- so storing it now
+            # would silently add an account they cancelled (review round 3,
+            # MINOR 2). Raised as the ordinary cancel outcome every host already
+            # handles.
+            from local_operator.providers.oauth.callback_server import (
+                LoginCancelledError,
+            )
+
+            raise LoginCancelledError(signal.reason or "Login cancelled")
 
         storage = definition.store_credentials_as or provider_id
         if isinstance(result, str):
@@ -1936,61 +1959,93 @@ class ProviderController:
         return entries
 
     def initial_catalogue(self, *, cache_dir: Any = None) -> list[CatalogueEntry]:
-        """First frame catalogue: shipped models and authoritative cached listings.
+        """First frame catalogue: every provider's rows, from its CACHED listing.
 
-        Synchronous, non-blocking, and network-free. While direct providers have
-        stable shipped static models in the registry, aggregator providers
-        (OpenRouter, Radient) have no hardcoded registry models and rely on their
-        dynamic catalogues. When a previous live listing exists on disk, reading it
-        via :func:`cached_available_models` allows hundreds of available models to
-        paint on the very first frame rather than appearing only after a network
-        round trip. DeepSeek's native inventory also owns its selectable set:
-        using the shipped rows here would flash retired ids even when the live
-        catalogue was already cached. Its cache reader supplies the ordinary
-        static fallback when no trustworthy native listing exists.
+        Synchronous, non-blocking and NETWORK-FREE: the reader is
+        :func:`cached_available_models`, which peeks at the document on disk and
+        never takes a fetch lease, spawns a revalidation thread or issues a
+        request. A picker has to paint on the keystroke that opened it.
+
+        NOT I/O-FREE, and the distinction is measured rather than assumed: the
+        frame reads config.yml ONCE (see ``values`` below) and, when a cached
+        listing contributed a row the registry does not have, one keyless price
+        document (:func:`_price_listing_only_rows`). Both are disk reads with no
+        request behind them.
+
+        WHY EVERY PROVIDER AND NOT JUST THE AGGREGATORS. This used to hand a
+        direct provider the shipped static registry alone, so the first frame --
+        and, for the desktop composer's inline ``/model `` argument list, the
+        ONLY frame -- could not offer a model the provider lists and the registry
+        does not carry. Aggregators were read through the cache because they ship
+        no static rows at all; that was never a special rule, it was just the one
+        provider class where the gap was fatal enough to be noticed.
+
+        The policy lives where it already lived, in the reader: on a cold or
+        unusable cache :func:`cached_available_models` falls back to the shipped
+        rows, so the first frame is field-for-field the one this method always
+        painted, and a local provider whose configured endpoint cannot be
+        resolved contributes its shipped rows rather than raising (see that
+        reader).
+
+        WHAT THIS FRAME DOES NOT READ, stated because the earlier wording here
+        claimed otherwise: the reader takes the PLAIN document name
+        (``<credential>.listing``), never a credential-scoped one, so
+        ``openai.oauth.<hash>.listing`` and ``kimi.oauth.listing`` do not reach
+        frame one and the account-scoped prune inside ``_listing_replaces_static``
+        is never entered from here. Deepseek is the only provider whose cached
+        listing OWNS the set on this path. Sweeping the hashed documents instead
+        would be wrong for a frame asked without an account: it could only offer
+        whichever account's catalogue it happened to pick, and a first frame has
+        no credential in hand to pick with.
+
+        ORDER, which pickers rely on: within a provider the cached listing comes
+        first (providers list newest-first) and the registry-only ids it did not
+        mention follow; between providers it is the ``_chat_providers()``
+        registry order. With nothing cached that is the registry's own dict order.
         """
         entries: list[CatalogueEntry] = []
         usable = self.usable_providers()
+        # ONE config read for the whole frame, and only when a local provider is in
+        # the registry at all: the endpoint resolution below reads config.yml per
+        # provider when it is not handed one, and this method runs on the keystroke
+        # that opens a picker -- and, on the desktop, on every keystroke typing a
+        # `/model ` argument. Five reads turned the frame from 0.24 ms into 14.5 ms
+        # (agent review round 2, R2-2).
+        values: Mapping[str, Any] | None = None
+        listed: list[tuple[ProviderDefinition, list[DiscoveredModel]]] = []
         for definition in _chat_providers():
+            if definition.local_setup and values is None:
+                from local_operator.providers.local import config_values
+
+                values = config_values()
+            models, _status = cached_available_models(
+                definition.id, cache_dir=cache_dir, values=values
+            )
+            listed.append((definition, models))
+        priced = _price_listing_only_rows(listed, cache_dir=cache_dir)
+        for definition, models in listed:
             connected = usable is None or definition.id in usable
-            if definition.id in AGGREGATOR_PROVIDERS or definition.id == "deepseek":
-                models, _status = cached_available_models(definition.id, cache_dir=cache_dir)
-                for model in models:
-                    entries.append(
-                        CatalogueEntry(
-                            provider=definition.id,
-                            model_id=model.id,
-                            label=model_label(definition.id, model.id, model.name or "").full,
-                            listing_name=model.name or "",
-                            context_window=max(0, model.context_window),
-                            default_context_window=model.default_context_window,
-                            max_context_window=model.max_context_window,
-                            input_price=_price(model.input_price, definition, free=model.free),
-                            output_price=_price(model.output_price, definition, free=model.free),
-                            connected=connected,
-                            aggregated=definition.id in AGGREGATOR_PROVIDERS,
-                            routed=model.routed,
-                            time_of_use=model.time_of_use,
-                        )
+            for model in models:
+                # The price chain's answer, where it has one, for a row the SHIPPED
+                # registry does not describe (see `_price_listing_only_rows`).
+                model = priced.get((definition.id, model.id), model)
+                entries.append(
+                    CatalogueEntry(
+                        provider=definition.id,
+                        model_id=model.id,
+                        label=model_label(definition.id, model.id, model.name or "").full,
+                        listing_name=model.name or "",
+                        context_window=max(0, model.context_window),
+                        default_context_window=model.default_context_window,
+                        max_context_window=model.max_context_window,
+                        input_price=_price(model.input_price, definition, free=model.free),
+                        output_price=_price(model.output_price, definition, free=model.free),
+                        connected=connected,
+                        aggregated=definition.id in AGGREGATOR_PROVIDERS,
+                        routed=model.routed,
+                        time_of_use=model.time_of_use,
                     )
-            else:
-                for model_id, info in static_models(definition.id).items():
-                    entries.append(
-                        CatalogueEntry(
-                            provider=definition.id,
-                            model_id=model_id,
-                            label=model_label(definition.id, model_id, info.name or "").full,
-                            listing_name=info.name or "",
-                            context_window=max(0, info.context_window or 0),
-                            default_context_window=info.default_context_window,
-                            max_context_window=info.max_context_window,
-                            input_price=_price(info.input_price, definition),
-                            output_price=_price(info.output_price, definition),
-                            connected=connected,
-                            aggregated=False,
-                            time_of_use=info.time_of_use,
-                        )
-                    )
+                )
         return entries
 
     def entry_for(
@@ -2075,6 +2130,153 @@ class ProviderController:
             time_of_use=info.time_of_use if info is not None else None,
         )
 
+    def _engaged_providers(self) -> set[str] | None:
+        """Every provider id the user has ENGAGED — or ``None`` when unknowable.
+
+        ONE fact with TWO readers, and they have to agree: :meth:`live_catalogue`
+        decides from this whether a provider is fetched WITH its credential, and
+        :meth:`catalogue_failures` decides from it whether a failure is the user's
+        to see. Asking the credential question twice, two ways, is how the desktop
+        came to fetch a store-set provider ANONYMOUSLY and then report it as
+        failing — on every live read, indefinitely, with the working key
+        resolvable on disk the whole time (R2-1).
+
+        The union is load-bearing: ``usable_providers`` reads auth rows and the
+        environment, ``persisted_providers`` adds the provider-class rows of the
+        encrypted secret store — what ``PATCH /v1/credentials``, ``lop credential
+        update`` and the desktop Settings / onboarding flows write — which the
+        first cannot see at all.
+
+        ``None`` means UNKNOWABLE, and only ONE STORE can suppress this answer:
+        the AuthStore. ``usable_providers`` answers ``None`` when it cannot be
+        read, and the guard below (``usable is None or persisted is None``) is live
+        on BOTH names rather than one — ``persisted_providers`` reads that same
+        AuthStore through its own call, so a transient failure between the two
+        makes ``persisted`` the reader that answered ``None``. The SECRET-store
+        reader can never suppress the union: a store it cannot read yields an
+        EMPTY SET (it swallows the sqlite family and a malformed row; see
+        ``registry.stored_provider_env_keys``), so an unreadable secret store
+        contributes nothing rather than hiding the answer. Either way an unknown
+        is not an unengaged: the caller narrows on nothing it cannot know.
+
+        COST, and it is on the event-loop thread: exactly one ``open_store()`` per
+        call — measured ~8.6-20.4 ms with a secret store on disk against ~0.018 ms
+        for ``usable_providers()`` alone (~0.09 ms with no store), medians of 25
+        calls on the fleet host in an isolated root — which is
+        bounded and immaterial beside the live fetch fan-out this feeds (up to 2 s
+        per provider of network budget), but it is real synchronous store I/O where
+        the route otherwise documents what it runs there. On a host whose store
+        exists with no broker listening, this can also START a secret-broker
+        daemon as a side effect of a ``GET``.
+
+        Deliberately NOT memoised on the instance: the answer depends on a store
+        other processes can change between the two calls in a single request, and
+        a stale engagement is precisely the bug this method exists to stop. Its
+        callers match that: :meth:`live_catalogue` does not COMPUTE the view when
+        it will not read it (R3-2) — a saving on that call, not on the request,
+        which reaches the same store a line earlier through the caller's own
+        ``persisted_providers()``.
+        """
+        usable = self.usable_providers()
+        persisted = self.persisted_providers()
+        if usable is None or persisted is None:
+            return None
+        return usable | persisted
+
+    def catalogue_failures(
+        self, entries: Collection[CatalogueEntry], statuses: Mapping[str, str]
+    ) -> dict[str, str]:
+        """Provider id -> :data:`CATALOGUE_FAILURE_REASON`, for the listings the
+        user could act on.
+
+        ``statuses`` comes from :meth:`live_catalogue` and answers "how did we get
+        these rows" for EVERY provider considered, so most of its keys are not
+        failures at all: ``cached`` is a deliberate cache serve and
+        ``unauthenticated`` means the provider was never asked. Publishing every
+        key as an error is how the desktop picker told the user that all 23
+        providers had "not answered" (D1).
+
+        The question is narrower than "is it local": **could the app have listed
+        this provider on the user's behalf, and did not**. A provider is named
+        only when ALL of these hold.
+
+        1. It has a listing transport at all. ``NO_LISTING_PROVIDERS`` (the mock
+           ``test`` host) is excluded by the registry's own statement about those
+           ids — they "cannot be listed at all, exposed so a UI can say so
+           without first attempting a request that is guaranteed to fail".
+        2. The user ENGAGED it — the single view :meth:`_engaged_providers`
+           answers: a ``local_setup`` provider counts only when the config carries
+           ``providers.<id>.base_url`` (:func:`local.configured_local_providers`),
+           because the preset port nobody chose is the app's own default with
+           nobody home; every other provider counts when either credential reader
+           knows it — ``usable_providers()`` (auth rows + the environment) or
+           ``persisted_providers()`` (which adds the provider-class rows of the
+           encrypted secret store, where ``PATCH /v1/credentials``, ``lop
+           credential update`` and the desktop Settings / onboarding flows write
+           a key). Consulting only the first made this rule go SILENT for a user
+           whose key came in through Settings, on exactly the ids
+           ``live_catalogue`` fetches ANONYMOUSLY — and consulting only the first
+           in ``live_catalogue`` is what made the same provider's name PERMANENT
+           once it was named here (R2-1); both read this one view now. **A store
+           that could not be read at all does not narrow** — ``usable_providers``
+           answers ``None`` for an unreadable auth store, and that alone makes the
+           whole view ``None``. The secret-store reader cannot answer ``None``: it
+           swallows its own failures and yields an empty set (Q2-1 fixed that
+           reader's one remaining escape, a raising sqlite error), so an
+           unreadable secret store contributes NOTHING to the union rather than
+           suppressing it. The local-endpoint axis is read from config, so it
+           applies in every case.
+        3. The listing actually failed. The existing rule, unchanged: a status in
+           ``FAILED_LISTING_STATUSES`` (``stale``/``empty``), or ``static`` with
+           no rows contributed — ``static`` conflates "no listing endpoint, only
+           bundled rows" with "the fetch died and nothing was cached", and only
+           the second is a failure, which is why the row count is the second
+           argument's job (R1-4/Q1).
+
+        MEASURED, and the reason the engagement axis is not optional. On the
+        operator's machine this named exactly SIX providers — ``ollama``,
+        ``lmstudio``, ``llamacpp``, ``vllm``, ``openai-compatible`` (five preset
+        local ports; ``config.yml`` has no ``providers:`` section at all, so none
+        of them was ever configured) and ``test`` (the app's own mock host). With
+        an ISOLATED config dir, which is what a fresh install looks like, the
+        same three-fact rule named SEVEN: the same six plus ``radient``, a keyless
+        aggregator whose public listing answers 401 and which has no credential,
+        no cache and no bundled rows either. A new install must not open its
+        picker with "Some providers did not answer (7)", and none of the seven was
+        a report about a provider the user had.
+
+        TWO SIBLING RULES ARE LEFT ALONE ON PURPOSE, and neither is drift. The
+        mobile daemon's ``unavailable`` list and the TUI's ``_catalogue_status``
+        both describe a listing the user asked their OWN server for: the TUI's
+        ``stale list: vllm`` is TRUE — those rows really are stale — whereas the
+        desktop banner's claim ("did not answer") is the false one this narrows.
+        Read the three together before changing any one of them.
+        """
+        from local_operator.providers.local import configured_local_providers
+
+        contributed = {entry.provider for entry in entries}
+        configured_local = configured_local_providers()
+        # THE SAME VIEW live_catalogue FETCHES BY — see _engaged_providers, which
+        # owns the why (both credential stores, and unknown narrowing nothing) and
+        # the cost. One fact, two readers, so the listing layer and this rule
+        # cannot disagree about who is engaged.
+        engaged = self._engaged_providers()
+        failures: dict[str, str] = {}
+        for provider, status in statuses.items():
+            if provider in NO_LISTING_PROVIDERS:
+                continue
+            definition = get_provider_definition(provider)
+            if definition is not None and definition.local_setup:
+                if provider not in configured_local:
+                    continue
+            elif engaged is not None and provider not in engaged:
+                continue
+            if status in FAILED_LISTING_STATUSES or (
+                status == "static" and provider not in contributed
+            ):
+                failures[provider] = CATALOGUE_FAILURE_REASON
+        return failures
+
     async def live_catalogue(
         self,
         *,
@@ -2090,10 +2292,15 @@ class ProviderController:
         ``ttl_s`` is the hard TTL passed to discovery; the picker passes
         :data:`PICKER_TTL_S`, and ``None`` keeps discovery's default.
 
-        Only providers with a credential are fetched. An unconnected provider still
-        contributes its STATIC models — the question "what would I get if I logged
-        in here" is precisely what a user cannot otherwise answer, and it was the
-        reason a newly released model was undiscoverable.
+        Only providers with a credential are fetched, and "a credential" is the
+        same engagement view :meth:`catalogue_failures` reads
+        (:meth:`_engaged_providers` — auth rows, the environment, and the
+        provider-class rows of the encrypted secret store), so a key saved through
+        Settings is used for the fetch rather than leaving the provider to be
+        listed anonymously and then reported as failing. An unconnected provider
+        still contributes its STATIC models — the question "what would I get if I
+        logged in here" is precisely what a user cannot otherwise answer, and it
+        was the reason a newly released model was undiscoverable.
 
         Each provider is isolated: discovery never raises by contract, but a
         credential resolution can (an OAuth refresh against a dead network), and
@@ -2116,7 +2323,18 @@ class ProviderController:
         """
         entries: list[CatalogueEntry] = []
         statuses: dict[str, str] = {}
-        usable = self.usable_providers()
+        # THE ENGAGEMENT VIEW, not ``usable_providers`` alone: a store-set key
+        # (Settings, `lop credential update`) has to reach the fetch as a
+        # credential, or the provider is listed ANONYMOUSLY, fails, and is then
+        # named as failing by `catalogue_failures` on every read — with its key on
+        # disk. See `_engaged_providers`. Computed HERE, and only when it is read:
+        # with an explicit ``providers`` set (the mobile daemon's admission path,
+        # itself a GET) the value below is never consulted, so this CALL does not
+        # buy an ``open_store()`` and a possible broker spawn for a discarded
+        # answer (R3-2). The saving is the CALL's, not the request's — that request
+        # opens the same store a line earlier through its own
+        # ``persisted_providers()``.
+        engaged = self._engaged_providers() if providers is None else None
         # ``_chat_providers()`` filters FIRST, so an explicit ``providers`` set
         # naming a decision-only provider is honoured as "this catalogue request
         # mentions it" and still contributes no rows: the caller is asking for a
@@ -2133,16 +2351,16 @@ class ProviderController:
             definition: ProviderDefinition,
         ) -> tuple[ProviderDefinition, bool, list[DiscoveredModel], str]:
             # An explicit ``providers`` set is the CALLER's own credential
-            # determination and outranks ``usable_providers`` for the ids in it.
-            # It has to: ``usable_providers`` has no legacy ``credentials.env``
-            # rung, so a provider configured with ``lop credential update`` came
+            # determination and outranks the engaged view for the ids in it.
+            # It has to: the view has no legacy ``credentials.env`` rung, so a
+            # provider configured with ``lop credential update`` came
             # back unconnected here, listed ANONYMOUSLY, and the phone's picker
             # then showed it empty — with a credential on disk the whole time.
             # Narrowing without this makes the narrowing itself lose rows.
             connected = (
                 definition.id in providers
                 if providers is not None
-                else (usable is None or definition.id in usable)
+                else (engaged is None or definition.id in engaged)
             )
             api_key: str | None = None
             is_oauth = False
@@ -2360,6 +2578,8 @@ def _invalidate_cached_listing(storage_id: str) -> None:
 
 def _enrich_prices(
     listed: list[tuple[ProviderDefinition, list[DiscoveredModel]]],
+    *,
+    cache_dir: Any = None,
 ) -> dict[str, list[DiscoveredModel]]:
     """Each provider's rows with price/limit HOLES filled from the keyless chain.
 
@@ -2389,7 +2609,7 @@ def _enrich_prices(
     """
     from local_operator.model.prices import models_dev_providers, price_row
 
-    models_dev = models_dev_providers()
+    models_dev = models_dev_providers(cache_dir=cache_dir)
     openrouter: list[DiscoveredModel] = next(
         (rows for definition, rows in listed if definition.id == "openrouter"), []
     )
@@ -2442,6 +2662,52 @@ def _enrich_prices(
             )
         result[definition.id] = enriched
     return result
+
+
+def _price_listing_only_rows(
+    listed: list[tuple[ProviderDefinition, list[DiscoveredModel]]],
+    *,
+    cache_dir: Any = None,
+) -> dict[tuple[str, str], DiscoveredModel]:
+    """The keyless price chain, applied ONLY to rows a cached listing contributed.
+
+    WHY ONLY THOSE. A first frame painted from the cache carries whatever money
+    the provider's own listing stated, and for a model the shipped registry has
+    never heard of that is nothing -- so the row paints ``-1.0/-1.0``, the
+    picker's blank cell, where the live path paints the real rate. On the
+    composer's inline ``/model `` list that blank is PERMANENT, because that
+    surface never goes live, so nothing would ever fill it (agent review round 2,
+    R2-3). The chain that fills it is the one ``live_catalogue`` already runs
+    (:func:`_enrich_prices`): disk only, no request, one document read for the
+    whole frame -- 0.9-1.0 ms here for the whole helper against a 138 KiB
+    models.dev projection, 0.9-2.1 ms for the document read inside it (measured
+    2026-09-24 on the fleet host: isolated cache, 25-call median after a
+    warm-up; the range is three runs and the magnitude is rig-dependent). It is
+    not entered at all when nothing needs it, so a cold cache costs this frame
+    exactly what it cost before.
+
+    WHY NOT EVERY ROW, which would be the smaller change: the SHIPPED rows are
+    the frame's contract with the registry. With nothing cached, frame one is
+    ``static_catalogue()`` field for field, and the live pass is what upgrades
+    it; pricing rows the registry already describes here would silently break
+    that equality -- including for shipped rows whose price the registry does not
+    know, which today paint blank on frame one and on the live frame alike.
+    Returns a ``(provider id, model id)`` keyed map, so the caller splices by
+    identity and needs to know nothing about the chain's own ranking.
+    """
+    wanted: list[tuple[ProviderDefinition, list[DiscoveredModel]]] = []
+    for definition, models in listed:
+        shipped = static_models(credential_provider_id(definition.id))
+        only = [row for row in models if row.id not in shipped]
+        if only:
+            wanted.append((definition, only))
+    if not wanted:
+        return {}
+    return {
+        (provider_id, row.id): row
+        for provider_id, rows in _enrich_prices(wanted, cache_dir=cache_dir).items()
+        for row in rows
+    }
 
 
 def _price(value: float | None, definition: ProviderDefinition, *, free: bool = False) -> float:

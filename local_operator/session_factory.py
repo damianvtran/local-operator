@@ -558,8 +558,8 @@ def _no_model_message(hosting: str) -> str:
     return (
         f"Model name is not configured for hosting '{hosting}', and no default "
         "is known for it. Set one with `local-operator config edit model_name "
-        "<model>` or the --model flag (e.g. gpt-4o, claude-3-5-sonnet-latest, "
-        "deepseek-chat)."
+        "<model>` or the --model flag (e.g. gpt-6-astra, claude-opus-5-5, "
+        "deepseek-flash)."
     )
 
 
@@ -2878,6 +2878,12 @@ def _make_system_blocks_provider(
             knowledge_block = ""
         date_str = datetime.now().strftime("%Y-%m-%d")
         goal = goal_state.text if goal_state is not None else ""
+        # The goal block is withheld once the goal is DONE: `mark_done` keeps the
+        # text so the surfaces can strike through what was achieved, and a block
+        # gated on the text alone kept handing the model a finished objective as
+        # the standing one to pursue. Read beside the text so the cache key below
+        # moves with it.
+        goal_status = goal_state.status if goal_state is not None else ""
         team_brief = goal_state.team_brief if goal_state is not None else ""
         agent_brief = goal_state.agent_brief if goal_state is not None else ""
         names = (
@@ -2906,6 +2912,7 @@ def _make_system_blocks_provider(
             knowledge_block,
             date_str,
             goal,
+            goal_status,
             team_brief,
             agent_brief,
             tuple(names),
@@ -2922,6 +2929,7 @@ def _make_system_blocks_provider(
             environment,
             date_str,
             goal=goal,
+            goal_status=goal_status,
             user_instructions=user_instructions,
             repo_guidance=repo_guidance,
             credentials=names,
@@ -3509,9 +3517,20 @@ async def _prepare(
         # promised it (review round 2, F1). ``fresh_directory`` keeps
         # `--resume` honest: adopting the operator's own conversation must not
         # hide their chat.
+        #
+        # ``workstream`` chooses WHICH machine-started value is written: the
+        # operator asked for this one as a long-lived parallel workstream
+        # (`lop exec --workstream`), so it is listed with its opener recorded
+        # rather than hidden. ``getattr`` because this namespace is the narrow
+        # one each entry point builds, and the interactive path has no such
+        # field — an absent field reads as "off", never as an error.
         from local_operator.agent_shell import stamp_agent_shell_session
 
-        stamp_agent_shell_session(transcript_dir, created_here=fresh_directory)
+        stamp_agent_shell_session(
+            transcript_dir,
+            created_here=fresh_directory,
+            delegated_workstream=bool(getattr(args, "workstream", False)),
+        )
 
         # Stamp the store as ours. The cleanup policy refuses to remove
         # anything from an unmarked ``sessions/`` directory, and this is the

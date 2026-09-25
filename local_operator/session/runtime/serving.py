@@ -60,7 +60,13 @@ from local_operator.harness.approval import (
 )
 from local_operator.harness.approval import transition_authority
 from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
-from local_operator.harness.types import AgentEvent, ModelChangeEvent
+from local_operator.harness.types import (
+    AgentEndEvent,
+    AgentEvent,
+    ModelChangeEvent,
+    SubagentEndEvent,
+    SubagentStartEvent,
+)
 from local_operator.harness.wire import bound_agent_end_for_wire
 
 if TYPE_CHECKING:
@@ -214,6 +220,11 @@ GATE_TIMEOUT_CUSTOM_TYPE = _GATE_TIMEOUT_CUSTOM_TYPE
 # but an abandoned automation loop must not grow one owner's memory forever.
 MAX_QUEUED_PROMPTS = 32
 
+#: Coalescing window for the per-event child-roster republish. The same 50 ms
+#: as ``RuntimeServer._push_later`` (the repaint it feeds) and
+#: ``Session._schedule_frontend_jobs``; see ``_schedule_roster_refresh``.
+_ROSTER_REFRESH_COALESCE_S = 0.05
+
 #: THE RUNG-4 RETRY LADDER (review round 1, R7).
 #:
 #: The only attempt used to be the turn-settled task, so a spawn that failed
@@ -244,6 +255,52 @@ _ANNOUNCE_DELIVERED = "delivered"
 _ANNOUNCE_SETTLED = "settled"
 _ANNOUNCE_DEFERRED = "deferred"
 _ANNOUNCE_FAILED = "failed"
+
+
+def _session_may_announce(session: Any) -> bool:
+    """Whether ``session`` is one the operator's OWN listings would show.
+
+    THE RULE, stated once: a session the operator's own listings HIDE must not
+    put anything on his screen. Its supervising session owns it — that is what a
+    delegated or agent-opened run is — and the durable records still make it
+    findable (``lop sessions``, the phone, the supervising session's own
+    transcript), so silence here costs no information.
+
+    Read from the DURABLE MARKER rather than from the environment, and that is
+    the whole design. An earlier candidate was the kill switch
+    ``agent_shell.harness_child_env`` already carries, and it cannot work: no
+    production path calls that helper (only benches, probes and the eval
+    driver), and a variable set at ONE spawn site cannot describe a session that
+    was resumed somewhere else, or adopted by the desktop, or continued by
+    ``lop exec --resume``. ``origin.json`` is the fact every spawn path shares —
+    the same single predicate (:func:`local_operator.resume.is_user_session`)
+    every listing surface already filters on, so this gate and the sidebar
+    cannot disagree about whether a row exists to be looked at.
+
+    ASKED OF THE MIRROR CASE TOO, which matters as much as the gate: a session
+    the listings SHOW (the operator's own conversation, and an
+    ``agent-workstream`` run they asked for) must still announce. A gate that
+    silenced the workstream the operator requested would be the bug this exists
+    to fix, one rung up.
+
+    A session with no transcript directory at all cannot be described by the
+    marker question, so it answers YES: absence of a marker means the user's own
+    in ``resume``'s own contract, and a runtime whose session has no directory
+    yet is not a hidden agent run. The same answer covers a handle whose session
+    is not reachable at all (``None``), which is the shape partial rigs and an
+    early construction stage both have — asking would raise, and a question that
+    cannot be put must not silence a banner that was owed under the old rule.
+    """
+    directory = getattr(getattr(session, "transcript", None), "directory", None)
+    if not directory:
+        return True
+    from local_operator.resume import is_user_session
+
+    try:
+        return is_user_session(Path(directory))
+    except Exception:  # noqa: BLE001 — an unanswered question must not silence a toast
+        logger.debug("could not read the session origin for the announce gate", exc_info=True)
+        return True
 
 
 def _already_bounded(images: Any) -> bool:
@@ -298,6 +355,15 @@ class _PromptCommand:
     images: list["ImageContent"] | None
     admitted: asyncio.Future[None]
     completed: asyncio.Future[bool] | None = None
+    #: Whether this row was minted by the harness rather than typed by a person
+    #: (the goal judge's continuation is the producer). Threaded to
+    #: ``Session.prompt``'s own keyword so the row carries the STRUCTURAL
+    #: provenance stamp from the one place a row is born.
+    harness_injected: bool = False
+    #: Whether the drain waits out a turn it did not open (a wake, a job-result
+    #: delivery, a compaction) before handing this command to ``Session.prompt``.
+    #: See ``ServingSessionHandle.prompt``'s ``wait_for_turn``.
+    wait_for_turn: bool = True
 
     def __iter__(self):  # type: ignore[no-untyped-def]
         # Tuple compatibility for older diagnostics that inspect the queue.
@@ -527,6 +593,14 @@ class ServingSessionHandle(SessionHandle):
         self._session = session
         self._goal_loop: Any = None
         self._loop_command_id: str | None = None
+        #: The edge-triggered goal judge (see ``_goal_judge_driver``), built on
+        #: first use. Typed ``Any`` for the same reason ``_goal_loop`` is: the
+        #: driver's module is imported lazily so this module stays importable
+        #: without the session goal machinery.
+        self._goal_judge: Any = None
+        #: Whether the goal judge may still admit continuation turns. Only a
+        #: headless run closes it (:meth:`close_goal_continuations`).
+        self._goal_continuations_open = True
         self._active_prompt_command_id: str | None = None
         self._desktop_mcp: Any = None
         self._desktop_cwd = cwd
@@ -601,6 +675,7 @@ class ServingSessionHandle(SessionHandle):
         #: type, not a dynamic one every reader has to guess at.
         self._registrant: Any = None
         self._on_projection: Callable[[], None] | None = None
+        self._roster_refresh_scheduled = False
         self._projection = SessionProjection(
             session_id=session.session_id,
             pid=0,  # stamped by the registrant's record
@@ -2521,11 +2596,32 @@ class ServingSessionHandle(SessionHandle):
             # state machine, so folding inline is safe. Only the repaint push
             # crosses threads.
             self._fold.fold_event(event)
-            self._refresh_state()
+            # The ROSTER half of the refresh is coalesced, the scalar half is
+            # not; see ``_schedule_roster_refresh``. A subagent start/end is
+            # the exception: the fold REBUILDS that child's row from the event,
+            # which carries no session id, so the registry's identity fields
+            # must be re-applied before this event's own push goes out.
+            if isinstance(event, (SubagentStartEvent, SubagentEndEvent)):
+                self._refresh_state()
+            else:
+                self._refresh_state(roster=False)
+                self._schedule_roster_refresh()
             self._refresh_todos()
             if isinstance(event, ModelChangeEvent):
                 self._retry_naming_after_route_change()
             self._notify()
+            # LAST, and guarded inside, because it is additive: the goal judge
+            # reacts to the turn's END and nothing on this path may depend on it.
+            #
+            # THIS subscription, and not the prompt drain, is where the turn end
+            # is observed — the drain documents its own gap at the top of
+            # ``_drain_prompt_queue``: it sees the turns ITS queue runs, while a
+            # turn opened by a wake or a resume catch-up runs through the
+            # session's own pipeline and never enters it. The judge must see
+            # every turn end, and this subscription is installed at boot, before
+            # the first heartbeat and with no client attached.
+            if isinstance(event, AgentEndEvent):
+                self._maybe_judge_goal(event)
 
         unsubscribe = self._session.subscribe(handler)
         try:
@@ -2568,7 +2664,35 @@ class ServingSessionHandle(SessionHandle):
         command_id: str | None = None,
         *,
         wait_complete: bool = False,
+        harness_injected: bool = False,
+        wait_for_turn: bool = True,
     ) -> str:
+        """Admit one ordinary prompt; the receipt is its durable append.
+
+        ``wait_for_turn`` makes an accepted prompt WAIT for a turn this queue
+        did not open instead of failing after admission (see
+        ``_await_turn_lock_free``). It is True for every caller of THIS handle —
+        the desktop route (``admit_prompt``), the phone's daemon, a peer
+        ``lop send`` and ``lop exec``'s headless turn all arrive here — and one
+        caller passes False: the boot inbox drain
+        (``process._run_owner_prompt``) runs BEFORE the control socket listens,
+        so waiting there would keep the runtime unreachable for a whole wake
+        turn, and it already answers the refusal by steering the row into the
+        turn in flight — which needs the refusal to arrive rather than the wait.
+
+        THE SEAM IS THIS HANDLE'S, and that is a deliberate boundary rather than
+        an oversight: ``TuiSessionHandle.prompt`` has no equivalent, so a
+        desktop or phone send to a session a TUI owns still fails after
+        admission when a turn it did not open holds the lock. Nothing is lost
+        there (the refusal releases the id, so the retry admits — see
+        ``CommandReservations.reject``), and it reports the failure honestly.
+        Giving that host the wait as well would put a long wait inside a wire
+        ack the client bounds at ``ACK_TIMEOUT_S``: the message would still land
+        while the caller had already rendered a transport error, which is the
+        ambiguous outcome this seam avoids. A TUI-hosted send therefore keeps
+        the fail-then-retry shape, and this docstring states it rather than
+        claiming a uniformity the code does not have.
+        """
         self._check_loop_thread()
         if not command_id:
             # Only old in-process callers omit the v3 field. Minting here keeps
@@ -2576,7 +2700,13 @@ class ServingSessionHandle(SessionHandle):
             command_id = str(uuid.uuid4())
         existing = self._prompt_commands.get(command_id)
         if existing is not None:
-            await existing.admitted
+            # Shielded for the reason the receipt below documents: this is a
+            # DUPLICATE, so the future it awaits belongs to a producer that is
+            # still waiting for its own answer. A retry whose client gives up
+            # would otherwise cancel the first caller's admission — the very
+            # retry path this change exists to make safe, entered from the other
+            # side (agent review round 2, MAJOR-1).
+            await asyncio.shield(existing.admitted)
             return "already admitted"
         # Bounded BEFORE the reservation, deliberately: the bound is a thread
         # hop, and awaiting between reserving a producer identity and queueing
@@ -2743,7 +2873,9 @@ class ServingSessionHandle(SessionHandle):
         self._maybe_name_conversation(text)
         admitted: asyncio.Future[None] = self._loop.create_future()
         completed = self._loop.create_future() if wait_complete else None
-        command = _PromptCommand(command_id, text, blocks, admitted, completed)
+        command = _PromptCommand(
+            command_id, text, blocks, admitted, completed, harness_injected, wait_for_turn
+        )
         position = len(self._prompt_queue) + 1
         legacy_prompt = "message_id" not in inspect.signature(self._session.prompt).parameters
         # Compatibility-only fake/third-party sessions predate durable
@@ -2757,7 +2889,16 @@ class ServingSessionHandle(SessionHandle):
             self._prompt_drain_task = asyncio.ensure_future(self._drain_prompt_queue())
             self._prompt_drain_task.add_done_callback(self._observe_prompt_drain)
         # ACK is the durable transcript append, never insertion into this queue.
-        await admitted
+        #
+        # SHIELDED, like ``completed`` two statements below and for the same
+        # reason: this future is SHARED with the drain (and with any duplicate
+        # sender awaiting it), so a plain ``await`` makes this caller's
+        # cancellation destroy every other holder's admission — the state agent
+        # review round 2 reproduced by cancelling a caller. The cancellation
+        # still reaches THIS caller (``shield`` protects the future, not the
+        # await), which is the honest outcome: this sender gave up, the message
+        # it sent is unaffected.
+        await asyncio.shield(admitted)
         self._command_reservations.accept(command_id)
         if completed is not None and not await asyncio.shield(completed):
             raise RuntimeError("The admitted loop turn did not complete")
@@ -2773,7 +2914,28 @@ class ServingSessionHandle(SessionHandle):
             async def prompt(text: str) -> None:
                 self._loop_command_id = str(uuid.uuid4())
                 try:
-                    await self.prompt(text, command_id=self._loop_command_id, wait_complete=True)
+                    await self.prompt(
+                        text,
+                        command_id=self._loop_command_id,
+                        wait_complete=True,
+                        # A loop's own turn is HARNESS CHROME, on both of its
+                        # modes: the count loop's ``LOOP_PROMPT`` and the
+                        # goal-mode loop's ``LOOP_GOAL_PROMPT``. It is persisted
+                        # as a user row so the transcript records why the
+                        # conversation continued, and the structural stamp is
+                        # what tells a front end it was never typed. Without it
+                        # this route was the hole in that contract: the goal
+                        # loop's text is recognised by NEITHER
+                        # ``harness_chrome_prompts()`` NOR a producer-side
+                        # recogniser, and ``docs/DESKTOP_API.md`` names "the goal
+                        # loop's own prompt" as a row that must carry the marker
+                        # — so it replayed on every surface as the user's own
+                        # words (measured on a real session through this handle:
+                        # the row read ``stamp=no, chrome-recognised=False``).
+                        # The judge's continuation beside it is stamped for the
+                        # same reason; this is the sibling the census found.
+                        harness_injected=True,
+                    )
                 finally:
                     self._loop_command_id = None
 
@@ -2802,6 +2964,234 @@ class ServingSessionHandle(SessionHandle):
             if store is not None and store.state.loop:
                 self._goal_loop.state = dict(store.state.loop)
         return self._goal_loop
+
+    def _goal_judge_driver(self):
+        """The standing goal's judge — the sibling of :meth:`_loop_driver`.
+
+        Built lazily and kept on the handle, because unlike a loop there is no
+        TASK here to own: ``GoalJudge`` holds no long-lived work, so this object
+        is only the policy's collaborator bundle and a restart has nothing to
+        lose (read ``session/goal_judge.py``'s module docstring for why that is
+        the design rather than an implementation detail).
+
+        ``None`` when the session does not implement what this bundle READS —
+        the judged-goal record's judge half, which is narrower than the whole
+        record: the card's four mutators are not all reached from here, and a
+        host that judges does not have to be able to delete anything. Refusing
+        at the one place the bundle is built is what keeps an unguarded read off
+        a duck-typed binding from becoming an exception inside a task nobody
+        awaits: measured on this fleet as
+        ``AttributeError: 'Slow' object has no attribute 'goal_judge_state'``
+        raised out of ``rearm_on_resume``, failing two ``test_exec_mode`` cells
+        (QA round 1, Q3).
+
+        A PROBE on the two members rather than an ``isinstance`` against
+        ``GoalRecordProtocol``: the runtime half of the feature is driven by
+        doubles (``test_desktop_goal_judge``'s own is the example) that implement
+        exactly what the judge reads, and demanding the card's surface of them
+        would make the gate refuse a host that genuinely judges correctly. The
+        names are on the protocol, so neither can be renamed out from under this
+        without the guard in ``tests/unit/session/test_viewer_protocol.py``
+        saying so.
+        """
+        from local_operator.session.goal_judge import GoalJudge, goal_stalled_notice
+
+        if not callable(getattr(self._session, "note_goal_judge", None)):
+            return None
+        if getattr(self._session, "goal_judge_state", None) is None:
+            return None
+
+        if self._goal_judge is None:
+
+            async def judge(text: str) -> str:
+                from local_operator.harness.types import Message
+
+                # ``complete_aside``: the off-the-record fork the TUI's own
+                # ``_judge_goal`` uses. It reads the live conversation, writes
+                # nothing to the transcript, runs no tools, and bills as an
+                # aside — the judged goal must not enter the conversation it is
+                # judging.
+                return await self._session.complete_aside([Message.user(text)])
+
+            async def prompt(text: str) -> None:
+                # The continuation goes through the ORDINARY prompt queue, as a
+                # task, so it is drained exactly like a user prompt, one turn at
+                # a time. Nothing here opens a second concurrency path.
+                #
+                # ``wait_complete`` is what lets the judge await its own turn and
+                # then judge it, and it must NOT be awaited from inside the drain:
+                # the completion future is only resolved by that same drain, so
+                # awaiting it there would deadlock. ``harness_injected`` is the
+                # structural stamp that tells every front end this row is
+                # harness chrome — the row is still persisted, and still
+                # announced, but no surface paints it as the user's words. THAT
+                # stamp, not a remembered id, is what distinguishes the judge's
+                # turn from a user's; the command id is minted per call and
+                # dropped with it (agent review round 2, MINOR-3: the id used to
+                # be held on the handle and read by nothing).
+                command_id = str(uuid.uuid4())
+                try:
+                    await self.prompt(
+                        text,
+                        command_id=command_id,
+                        wait_complete=True,
+                        harness_injected=True,
+                    )
+                except BaseException:
+                    # The judge never retries: it publishes `waiting` and re-arms
+                    # at the next turn end with a NEW id, so nothing may keep this
+                    # one reserved (agent review round 1, MINOR-2). The drain
+                    # already releases a refused id itself; this stays as the
+                    # judge's own guarantee rather than a dependency on that, and
+                    # `reject` is a no-op for an id that already went durable or
+                    # was never reserved.
+                    self._command_reservations.reject(command_id)
+                    raise
+
+            def changed(fields: dict[str, Any]) -> None:
+                # One writer for the judge's fields, so the journal and the frame
+                # cannot disagree: ``note_goal_judge`` persists on TRANSITION and
+                # republishes, and the driver only hands it what moved.
+                self._session.note_goal_judge(**fields)
+                self._notify()
+                # THE STALL'S RECEIPT, and this callback is the seam every
+                # published state already passes through — a goal that has
+                # stopped being auto-continued looks to a user exactly like one
+                # that is quietly waiting, so the transition owes an
+                # announcement naming WHICH bound fired (design round 1, D2).
+                # Emitted AFTER the state is journalled and published, so a
+                # receipt never leads the fact it describes. One per entry, not
+                # per publish: the helper returns a sentence only for the
+                # transition itself (see its docstring), so the streak reset and
+                # every other later frame stay silent.
+                notice = goal_stalled_notice(fields)
+                if notice is not None:
+                    self._emit_notice(notice, "warning")
+
+            def settled(reason: str) -> None:
+                # The SAME call the user's own ``/goal --done`` makes: an ACHIEVED
+                # verdict and a typed mark-done are one settle, and the only
+                # difference is whose words the entry's reason carries.
+                self._session.mark_goal_done(reason)
+                self._notify()
+
+            self._goal_judge = GoalJudge(
+                judge=judge,
+                prompt=prompt,
+                changed=changed,
+                settled=settled,
+                goal=lambda: self._session.goal,
+                status=lambda: self._session.goal_status,
+                token=lambda: self._session.goal_token,
+                serial=lambda: self._session.goal_turn_serial,
+                judge_state=lambda: self._session.goal_judge_state,
+                loop_running=self._loop_owns_the_verdict,
+                continuations=lambda: self._goal_continuations_open,
+            )
+        return self._goal_judge
+
+    def _loop_owns_the_verdict(self) -> bool:
+        """Whether a ``/loop`` driver owns this session's verdicts right now.
+
+        The mutual exclusion the judge must never violate, answered as a PROBE
+        rather than a latch: a loop that ends re-enables the goal judge with no
+        bookkeeping, which a flag set at loop start could not promise.
+
+        TWO signals, because a restart splits them. The live ``GoalLoop`` is
+        authoritative while this process runs it; a session whose checkpoint
+        says ``running``/``judging`` is one whose owner was REPLACED, and the
+        relabel to ``interrupted`` at construction (below) is what makes that
+        state readable as "not running" — a retained snapshot that still said
+        ``running`` would otherwise suppress the judge on a goal nobody is
+        driving.
+        """
+        driver = self._goal_loop
+        if driver is not None and driver.running:
+            return True
+        store = getattr(self._session, "_frontend_state_store", None)
+        state = getattr(store, "state", None)
+        loop = getattr(state, "loop", None)
+        if not isinstance(loop, dict):
+            return False
+        return loop.get("status") in {"running", "judging"}
+
+    def _maybe_judge_goal(self, event: AgentEndEvent) -> None:
+        """Judge the standing goal off a turn's end — triggers 1 and 2.
+
+        SYNCHRONOUS, and every refusal inside it is a silent return: this runs on
+        the event path, the judge is additive to it, and an instrument must never
+        fail the thing it instruments. The whole decision (is there an active
+        goal, is a loop running, is a judge already in flight) lives in the
+        driver, so it cannot be applied here and forgotten on the other host.
+
+        The one check that lives HERE is ownership, because it is about the
+        session rather than about the goal: a handle wrapping a session whose loop
+        runs somewhere else (a follower) must never judge (§3.2). A runtime handle
+        normally owns a real ``Session`` and answers ``"this-process"``, so this
+        is defensive rather than load-bearing on the shipped path — and it is one
+        line rather than a comment precisely so that a host that ever wraps an
+        attached session cannot silently start spending in it.
+
+        ``AgentEndEvent``, not the base ``AgentEvent`` this was annotated with:
+        the three fields read below (``error``/``aborted``/``generation``) exist
+        only on the end event, and the caller already narrows with an
+        ``isinstance`` check before calling here — so the base annotation was
+        three pyright errors on a read the runtime guard had always made safe,
+        not a latent bug. Naming the real type is what lets the type gate agree
+        with the guard instead of having to be told to look away.
+        """
+        from local_operator.session.goal_judge import owns_the_session
+
+        try:
+            if not owns_the_session(self._session):
+                return
+            driver = self._goal_judge_driver()
+            if driver is None:
+                return
+            driver.start_turn_end(
+                error=bool(event.error),
+                aborted=bool(event.aborted),
+                serial=int(event.generation or 0),
+            )
+        except Exception:  # noqa: BLE001 — the event path never fails on the judge
+            logger.debug("goal judge trigger failed", exc_info=True)
+
+    def rearm_goal_judge(self) -> None:
+        """Trigger 3, once per boot: re-engage a goal whose judge was in flight.
+
+        Called through ``server._handle_call_on_session_loop`` immediately after
+        the fold subscription is installed, so this runs once per OWNED session,
+        on that session's loop, after the restored record is readable. The rule
+        of who re-arms lives in the driver (RULINGS R3): a ``waiting``/``stalled``
+        goal is NOT re-armed by a restart, because nothing was in flight and
+        *checkpoint state is not an instruction to spend more tokens*.
+
+        Synchronous by design: the plan that holds it cannot await, so it
+        schedules the probe as a background task on this loop.
+        """
+        # A session outside the record's contract has no judge to re-arm, and
+        # scheduling a task that would fail on that read is how the
+        # `test_exec_mode` cells got an unretrieved exception instead of a
+        # verdict — checked BEFORE the task exists, so nothing outlives this
+        # call (QA round 1, Q3).
+        driver = self._goal_judge_driver()
+        if driver is None:
+            return
+        # ASK THE PROBE'S OWN QUESTION FIRST, because scheduling is not free:
+        # ``_background_tasks`` is the set ``is_busy`` reads as "work a clean exit
+        # would destroy", and a probe that would immediately find nothing in
+        # flight still puts a task in it. That made an idle runtime report busy
+        # for as long as the no-op took — the commonest boot of all is a session
+        # that never used ``/goal`` — and ``is_busy`` is what ``is_pristine`` and
+        # the reaper read, so an empty conversation could not be recognised as
+        # pristine and retired. Refusing HERE keeps the task set meaning what it
+        # says; a goal that IS in flight is unaffected, because this is the same
+        # ``needs_rearm`` predicate the probe itself applies.
+        if not driver.needs_rearm():
+            return
+        task = asyncio.ensure_future(driver.rearm_on_resume())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     @_on_session_loop
     async def run_headless_prompt(self, text: str) -> bool:
@@ -2844,6 +3234,43 @@ class ServingSessionHandle(SessionHandle):
         if driver.state.get("status") == "cancelled":
             raise asyncio.CancelledError
         return driver.state.get("status") in {"completed", "achieved"}
+
+    @_on_session_loop
+    async def close_goal_continuations(self) -> None:
+        """Make this runtime's goal judge verdict-only: it admits no continuation.
+
+        For a HEADLESS run (``lop exec``), called before its first turn. The
+        judge fires at every turn end, including the run's own, so a gate closed
+        only at teardown lost the race whenever the verdict came back first. The
+        judge then admitted a continuation, and a CONTINUE chain could spend up
+        to ``MAX_GOAL_CONTINUATIONS`` turns the command never asked for. exec's
+        explicit continuation mechanism is ``--loop``, and the judge already
+        defers to a running loop, so in exec the judge only RECORDS verdicts.
+        A long-lived runtime never calls this and keeps the full chain.
+        """
+        self._goal_continuations_open = False
+
+    @_on_session_loop
+    async def settle_goal_judge_headless(self) -> None:
+        """A headless run's end: let the judge in flight finish its verdict.
+
+        ``lop exec --goal`` schedules the judge at its last turn end and then
+        tears down. Without this the verdict was usually still in flight at
+        dispose: a paid provider call whose answer was dropped, a record left at
+        `judging`, and the same verdict bought again on the next ``--resume``.
+
+        The exec contract, with :meth:`close_goal_continuations`: the run WAITS
+        for that one verdict (bounded by ``HEADLESS_JUDGE_SETTLE_S``) and admits
+        no continuation. ACHIEVED marks the goal done. CONTINUE is recorded as
+        `waiting` with its reason, and the goal is pursued the next time the
+        session runs a turn. The gate is closed here as well, so a host that
+        skipped the start-of-run call still cannot start a turn behind the
+        teardown.
+        """
+        self._goal_continuations_open = False
+        driver = self._goal_judge
+        if driver is not None:
+            await driver.settle()
 
     @_on_session_loop
     async def cancel_headless_loop(self) -> None:
@@ -2967,6 +3394,56 @@ class ServingSessionHandle(SessionHandle):
         self._refresh_state()
         self._notify()
 
+    async def _await_turn_lock_free(self) -> None:
+        """Wait out a turn this queue did not open before handing it the head.
+
+        ``Session.prompt`` REFUSES outright (``TurnInFlight``) when its turn lock
+        is held, and this queue is not the only thing that takes that lock: a
+        background job's result delivery, a peer wake, a scheduled wake, a resume
+        catch-up (all ``Session._prompt_messages``) and an on-demand compaction
+        do too. A prompt this queue had already ACCEPTED was therefore failed
+        after admission whenever one of those won the race to the lock — a
+        desktop send answered 503, and before the reservation fix its same-id
+        retry was reported admitted without ever landing (QA on PR #1528,
+        Q1-5, and the "prompt failed after admission … TurnInFlight" log line).
+        The accepted prompt has to wait its turn exactly as it waits behind a
+        prompt queued ahead of it here.
+
+        ACQUIRED AND RELEASED, not polled: the lock's own FIFO is the event, so
+        this wakes the moment the holder (and anything queued before this wait)
+        lets go. Holding it for no work is harmless. What makes the hand-off
+        sound is that the caller's ``Session.prompt`` probe then runs with NO
+        await in between — a coroutine's body runs synchronously up to its first
+        suspension — so the probe sees the lock free; a wake that queued behind
+        this wait is then ahead of the prompt's own ``acquire``, which waits
+        rather than refusing.
+
+        WHAT THIS DOES NOT PROMISE: this is not "an admitted prompt cannot fail".
+        ``Session.prompt`` re-checks ``_is_streaming`` once it holds the lock,
+        and its ``@path`` expansion awaits outside it — an approval card parked
+        on a person is enough for a turn to start and finish in that gap — so the
+        refusal is still reachable. What covers it is the release of the id on
+        failure, which is what makes the retry admit; the probe's own verdict is
+        attributed per turn for the same reason (see ``observe_end``).
+
+        THE FAIRNESS RELIED ON: CPython's ``Lock.acquire`` wakes waiters FIFO
+        and its uncontended fast path is guarded by
+        ``all(w.cancelled() for w in self._waiters)``, so a waiter this wait has
+        woken is not jumped by the next caller. A future interpreter that took
+        the fast path with a woken waiter would let the prompt overtake it — a
+        fairness loss, never a refusal, because the probe would still find the
+        lock free.
+
+        A session without the lock (a reduced double, a third-party protocol
+        host) keeps the historical behaviour of refusing at the probe.
+        Cancellation (``dispose``) propagates, and ``asyncio.Lock`` hands the
+        lock on for a cancelled waiter.
+        """
+        lock = getattr(self._session, "_turn_lock", None)
+        if isinstance(lock, asyncio.Lock) and lock.locked():
+            async with lock:
+                pass
+
     async def _drain_prompt_queue(self) -> None:
         """Run admitted ordinary prompts in owner order, one safe turn at a time.
 
@@ -2980,6 +3457,45 @@ class ServingSessionHandle(SessionHandle):
             succeeded = False
             emitted_failure = False
 
+            def own_turn_has_started() -> bool:
+                """Is the turn emitting on this bus THIS command's own turn?
+
+                YES exactly when this command's admission is durable, and that is
+                an invariant rather than a heuristic: ``Session.prompt`` resolves
+                the caller's ``admitted`` future at the append point, which is
+                INSIDE the turn and under its lock, and that turn holds the lock
+                until it ends. So from the moment admission lands, every event on
+                this session's bus belongs to this command's turn — and before it
+                lands, none do: the drain's wait (``_await_turn_lock_free``) is
+                precisely the window in which a turn this queue did NOT open is
+                the one running.
+
+                Read as ``admitted.done()`` rather than through a callback, so
+                there is no scheduling gap between the fact and the reading, and
+                no generation to latch: a stored generation would go stale in
+                the very window it was meant to guard (a future callback that
+                runs only after a foreign turn started would latch THAT turn).
+
+                A host that resolves ``admitted`` at queue time (the legacy
+                branch below, whose sessions predate the durable seam) is
+                attributable from the start and keeps its historical all-events
+                reading, so no reduced or third-party host loses its verdict.
+                """
+                #
+                # A CANCELLED future reads as "not ours" and is checked BEFORE
+                # ``exception()``, which RAISES ``CancelledError`` on a cancelled
+                # future — a ``BaseException``, so ``Session._emit``'s per-handler
+                # ``except Exception`` cannot contain it and it left the fan-out
+                # into whichever turn was emitting: the running turn truncated at
+                # its first event, the prompt drain cancelled, and nothing
+                # reported (agent review round 2, MAJOR-1). The shields below
+                # remove the state from the handle's own waiters; this order is
+                # what keeps the gate safe for any other, and it is the reason the
+                # two are not redundant.
+                if not command.admitted.done() or command.admitted.cancelled():
+                    return False
+                return command.admitted.exception() is None
+
             def observe_end(event: AgentEvent) -> None:
                 nonlocal emitted_failure
                 from local_operator.harness.types import (
@@ -2987,6 +3503,19 @@ class ServingSessionHandle(SessionHandle):
                     ToolExecutionEndEvent,
                 )
 
+                if not own_turn_has_started():
+                    # ONLY THIS COMMAND'S OWN TURN MAY MOVE EITHER VERDICT, and
+                    # the gate is load-bearing rather than tidy: the subscription
+                    # below is installed BEFORE ``_await_turn_lock_free``, so a
+                    # turn this command did not open — a job-result delivery, a
+                    # wake, a catch-up — had its terminal event read as this
+                    # command's failure. A queued ``lop exec`` turn that ran,
+                    # landed and ended clean was reported failed by the delivery
+                    # turn's error (agent review round 1, MAJOR-1, reproduced in
+                    # ``test_a_turn_that_failed_during_the_wait_is_not_this_commands_failure``),
+                    # and the waited-out turn's tool boundary was noted against
+                    # this command's journal note through the same subscription.
+                    return
                 if isinstance(event, AgentEndEvent) and (event.error or event.aborted):
                     emitted_failure = True
                 # The last COMPLETED tool boundary, recorded while the turn is
@@ -3010,6 +3539,8 @@ class ServingSessionHandle(SessionHandle):
             # goal loop submits its next turn after the model already failed.
             unsubscribe_outcome = self._session.subscribe(observe_end)
             try:
+                if command.wait_for_turn:
+                    await self._await_turn_lock_free()
                 parameters = inspect.signature(self._session.prompt).parameters
                 if "message_id" in parameters:
                     fields: dict[str, Any] = {
@@ -3018,6 +3549,13 @@ class ServingSessionHandle(SessionHandle):
                     }
                     if "producer_command_id" in parameters:
                         fields["producer_command_id"] = command.command_id
+                    if "harness_injected" in parameters:
+                        # Probed like the two above rather than passed
+                        # unconditionally: a reduced or third-party session that
+                        # predates the keyword would raise on it, and the
+                        # keyword's whole job is to stamp a marker those hosts
+                        # never read.
+                        fields["harness_injected"] = command.harness_injected
                     await self._session.prompt(command.text, command.images, **fields)
                 else:
                     # Legacy tests/third-party handles have no admission seam;
@@ -3029,6 +3567,13 @@ class ServingSessionHandle(SessionHandle):
                 succeeded = not emitted_failure
             except asyncio.CancelledError:
                 if not command.admitted.done():
+                    # RELEASED for the same reason the failing arm below releases:
+                    # a cancelled admission is not in the transcript, so an id
+                    # left reserved here would answer a retry "already admitted"
+                    # — Q1-5's silent drop, rearranged. Today only ``dispose``
+                    # cancels this drain and clears the map two statements later,
+                    # which is what makes this latent rather than live.
+                    self._command_reservations.reject(command.command_id)
                     command.admitted.set_exception(
                         RuntimeError("session closed before the prompt was admitted")
                     )
@@ -3043,14 +3588,12 @@ class ServingSessionHandle(SessionHandle):
                 raise
             except Exception as exc:  # noqa: BLE001 — admitted turns need terminal handling
                 if not command.admitted.done():
-                    from local_operator.session.errors import TurnInFlight
-
-                    self._command_reservations.reject(
-                        command.command_id,
-                        transfer_to_steer=(
-                            isinstance(exc, TurnInFlight) or "already streaming" in str(exc)
-                        ),
-                    )
+                    # RELEASED, whatever the refusal was. The producer is about
+                    # to be told this command failed, so its retry of the same id
+                    # has to admit it for real — see
+                    # ``CommandReservations.reject`` for the silent drop the old
+                    # ``prompt-transfer`` parking caused on exactly that retry.
+                    self._command_reservations.reject(command.command_id)
                     command.admitted.set_exception(exc)
                 # Provider, transcript, and tool failures are all terminal for
                 # this one admission. Surface the failure asynchronously, then
@@ -3097,11 +3640,7 @@ class ServingSessionHandle(SessionHandle):
             if _already_bounded(images)
             else await _image_blocks_async(cast(list[dict[str, str]] | None, images))
         )
-        if not self._command_reservations.reserve(
-            command_id,
-            kind="steer",
-            prompt_transfer=True,
-        ):
+        if not self._command_reservations.reserve(command_id, kind="steer"):
             return "already admitted"
         # THE UPDATE WINDOW, and a steer is the one admission that cannot simply
         # wait: ``Session.steer`` queues against a TURN, and this runtime is idle
@@ -3643,11 +4182,23 @@ class ServingSessionHandle(SessionHandle):
         # by surface, "reachable" means "some surface is watching OR an OS
         # notification can actually be delivered" — the watching case is
         # handled above, and this is the remaining out-of-band leg.
+        #
+        # AND THE BANNER HAS TO BE ONE THIS SESSION MAY RAISE. A hidden session
+        # (``_session_may_announce`` false: an agent-opened run the operator's
+        # listings do not show) never reaches the OS leg of `_announce_pending`,
+        # so the notify flag alone would promise a person who is never told:
+        # measured before this arm existed, an unattached `agent-shell` gate
+        # parked for 86,400 s with zero toasts, holding the process and stalling
+        # whatever waited on it (PR #1436 agent review round 1, F2). The same
+        # predicate as the announce leg, so the two cannot disagree about who
+        # can learn of the question.
         from local_operator.tui.notify import notifications_enabled
 
         try:
             reachable = notifications_enabled()
         except Exception:  # noqa: BLE001 — an unreadable setting is "not reachable"
+            reachable = False
+        if reachable and not _session_may_announce(getattr(self, "_session", None)):
             reachable = False
         return parked if reachable else PENDING_REQUEST_TIMEOUT_S
 
@@ -3888,6 +4439,16 @@ class ServingSessionHandle(SessionHandle):
             # kill switch turned on mid-run (a session that just switched to the
             # mock hosting) silences a gate that parks afterwards — and
             # `reannounce_pending` on a detach re-reads it the same way.
+            return
+        if not _session_may_announce(getattr(self, "_session", None)):
+            # THE OS LEG ONLY, and the durable half above has already run: a
+            # hidden session's parked gate stays findable in `lop sessions` and
+            # on the phone, because the session that owns it may itself be
+            # waiting on it. What is skipped is the banner — a session the
+            # operator's listings do not show must not put a card on his lock
+            # screen announcing work he cannot see (`_session_may_announce`).
+            # Re-checked on a re-announce, so a run resumed into a visible form
+            # still gets its toast.
             return
         # ROUTE TO WHATEVER IS WATCHING; fall out to the OS only when nothing
         # is. The old test was `attached_clients() > 0`, which counts only
@@ -4188,11 +4749,21 @@ class ServingSessionHandle(SessionHandle):
         either, because the durable unseen mark is untouched, so any surface
         that still delivers — a TUI, a desktop app — reads the same state and
         raises its own banner.
+
+        A HIDDEN SESSION DOES NOT CLIMB IT EITHER, for the same reason and with
+        the same outcome (:func:`_session_may_announce`). A delegated run's
+        completion belongs to the session that owns it and is already visible
+        there; a toast for it is the operator being told about work he neither
+        opened nor can see in any list. Settled rather than deferred, and the
+        same absence of contention as the silenced arm above: no claim, no
+        release, and the durable mark left exactly as another surface needs it.
         """
         try:
             from local_operator.tui.notify import notifications_enabled
 
             if not notifications_enabled():
+                return _ANNOUNCE_SETTLED
+            if not _session_may_announce(getattr(self, "_session", None)):
                 return _ANNOUNCE_SETTLED
             if self._watching_surfaces():
                 # Rung 1. Cheap and first: no store read, no filesystem probe.
@@ -4371,7 +4942,13 @@ class ServingSessionHandle(SessionHandle):
         return result
 
     @_on_session_loop
-    async def complete_aside(self, turns: list[dict[str, Any]]) -> str:
+    async def complete_aside(
+        self,
+        turns: list[dict[str, Any]],
+        *,
+        aside_instruction: bool = True,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> str:
         """Run an off-record provider request against this session.
 
         The aside seam: a viewer asks a question that must NOT enter the
@@ -4380,22 +4957,62 @@ class ServingSessionHandle(SessionHandle):
         needs the real model, credentials and context — which is why it
         cannot be answered viewer-side.
 
+        THIS IS THE REMOTE SEAM'S INSTRUCTION SITE, and that is a placement,
+        not an implementation detail: :func:`wrap_aside_turns` wraps the last
+        user turn here because every remote caller reaches the primitive
+        through a handle like this one. It used to be applied by the TUI alone,
+        so the desktop ``/asides`` route sent the model the user's raw question
+        with no instruction that it was off the record and no instruction not
+        to call a tool — which is why tool calls appeared on that surface.
+        :meth:`Session.complete_aside` deliberately stays bare: its in-process
+        callers supply their own instruction, and the goal-loop judge (which
+        calls it with ``LOOP_JUDGE_PROMPT``) must never receive an aside wrap.
+        The stored/returned aside turns stay RAW — only the provider request
+        carries the wrapper, so the user never sees ``<aside>`` XML.
+
+        ``aside_instruction`` IS THE CALLER'S DECLARATION, not the seam's
+        assumption, and it defaults to True for the reporters this seam exists
+        for: a caller that sends RAW turns (the desktop ``/asides`` route, the
+        phone's quick-ask) gets the instruction applied here whether or not it
+        knows this parameter exists. A caller that supplies its OWN instruction
+        — the TUI's ``/btw`` overlay, and the goal-loop judge, whose question is
+        ``LOOP_JUDGE_PROMPT`` and not an aside at all — passes ``False``.
+        WITHOUT THE FLAG the TUI's pre-wrapped question was wrapped a second
+        time on a session it was only VIEWING (its ``self._session`` is an
+        ``AttachedSession`` there, so this handle runs in the owner), the judge
+        was framed as an aside question, and both failures were silent.
+        :func:`wrap_aside_turns` is idempotent underneath, so a caller that gets
+        the flag wrong is not doubled — the two cannot disagree without the
+        turn list showing it.
+
+        ``on_delta`` forwards each streamed text chunk to the caller that asked
+        for it, as it arrives. OPTIONAL, and probed by signature against the
+        primitive: an older/reduced session without the parameter is answered in
+        one settled piece exactly as before. The ``on_usage`` accrual below is
+        NOT optional and must keep riding every call — it is what stops a hidden
+        way of spending tokens for free (a remote aside, the goal judge) from
+        costing zero.
+
         Found by the post-U9 migration audit rather than by a review: without
         it every aside answered "this owner cannot run off-record requests".
         """
         from local_operator.harness.types import Message
+        from local_operator.session.aside import wrap_aside_turns
 
-        messages = [Message.model_validate(turn) for turn in turns]
+        parsed = [Message.model_validate(turn) for turn in turns]
+        messages = wrap_aside_turns(parsed) if aside_instruction else parsed
         complete = self._session.complete_aside
         store = getattr(self._session, "_frontend_state_store", None)
-        if store is not None and "on_usage" in inspect.signature(complete).parameters:
+        forwards = inspect.signature(complete).parameters
+        fields: dict[str, Any] = {}
+        if on_delta is not None and "on_delta" in forwards:
+            fields["on_delta"] = on_delta
+        if store is not None and "on_usage" in forwards:
             # A remote caller receives text, not a billable usage callback. The
             # authoritative owner must charge the request here; otherwise a
             # hidden goal judge (and other remote asides) silently costs zero.
-            return await complete(
-                messages, on_usage=lambda usage: store.accrue_usage(self._session, usage)
-            )
-        return await complete(messages)
+            fields["on_usage"] = lambda usage: store.accrue_usage(self._session, usage)
+        return await complete(messages, **fields)
 
     @_on_session_loop
     async def adopt_aside(self, messages: list[dict[str, Any]]) -> str:
@@ -4814,16 +5431,18 @@ class ServingSessionHandle(SessionHandle):
         session = self._session
         if command == "desktop_mcp":
             from local_operator.mcp.config import MCPConfigWriteError
-            from local_operator.mcp.desktop import MCPControl, MCPDesktop
+            from local_operator.mcp.desktop import MCPControl, MCPDesktop, refusal_code
 
             if self._desktop_mcp is None:
                 self._desktop_mcp = MCPDesktop(session, self._mcp_grant_tasks, self._desktop_cwd)
             try:
                 data = await self._desktop_mcp.execute(MCPControl.model_validate_json(args))
-            except (ValueError, MCPConfigWriteError):
+            except (ValueError, MCPConfigWriteError) as exc:
                 # Refusals are protocol data, not socket outages. Config errors
-                # can quote credentials, so only a bounded code crosses back.
-                return SlashResult(kind="error", data={"code": "mcp_control_refused"})
+                # can quote credentials, so only a bounded CODE crosses back —
+                # never the text. The code used to be one constant for every
+                # refusal, which left the desktop unable to say why.
+                return SlashResult(kind="error", data={"code": refusal_code(exc)})
             return SlashResult(kind="block", data=data)
         if command == "fork":
             from local_operator.fork import fork_session
@@ -4973,9 +5592,14 @@ class ServingSessionHandle(SessionHandle):
 
     def _goal_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
         from local_operator.session.goal import (
-            GOAL_CLEAR_ARGS,
             MAX_GOAL_CHARS,
             cleared_goal_receipt,
+            goal_dismissed_receipt,
+            goal_done_answer,
+            goal_flag_form,
+            goal_history_items,
+            goal_history_notice,
+            goal_report,
         )
         from local_operator.slash_commands import unknown_flag_refusal
 
@@ -4983,27 +5607,56 @@ class ServingSessionHandle(SessionHandle):
         if not hasattr(session, "set_goal"):
             return SlashResult(kind="notice", text="session is still starting…", style="warning")
         if not arg:
-            current = getattr(session, "goal", "")
-            text = f"goal: {current}" if current else "no goal set — /goal <text> to set one"
-            return SlashResult(kind="notice", text=text, style="info")
-        # The clear forms are matched as the WHOLE argument, so `--clear` can
-        # never be stored as the goal body: nothing below runs for it, and no
-        # turn is started (`goal_set` is what the viewer submits).
-        if arg.lower() in GOAL_CLEAR_ARGS:
+            return SlashResult(
+                kind="notice",
+                text=goal_report(getattr(session, "goal", ""), getattr(session, "goal_status", "")),
+                style="info",
+            )
+        # A FLAG is matched as the WHOLE argument (`goal_flag_form`), so `--clear`
+        # can never be stored as the goal body: nothing below runs for a flag, and
+        # no turn is started (`goal_set` is the one receipt that submits).
+        form = goal_flag_form(arg)
+        if form == "clear":
             # Name what went: the receipt is rendered by a viewer that may have no
             # other way to see the goal (design D4/U3), so the echo is built by
-            # the same shared helper every other host uses.
+            # the same shared helper every other host uses. DELETE records nothing.
             receipt = cleared_goal_receipt(session.goal)
-            session.set_goal("")
+            session.delete_goal()
             self._notify()
             return SlashResult(kind="notice", text=receipt, style="info")
+        if form == "done":
+            entry = session.mark_goal_done()
+            self._notify()
+            return SlashResult(
+                kind="notice",
+                # `None` means there was nothing to settle OR it was already
+                # settled; both must say so rather than print a second "goal done".
+                text=goal_done_answer(session.goal, entry),
+                style="info",
+            )
+        if form == "dismiss":
+            dismissed = session.dismiss_goal()
+            self._notify()
+            return SlashResult(kind="notice", text=goal_dismissed_receipt(dismissed), style="info")
+        if form == "history":
+            rows = goal_history_items(session.history_view())
+            # The `team_list` shape: rows in `data.items`, so both existing hosts
+            # render it without a new renderer, and a one-line notice beside it
+            # because a receipt `data` is not something every surface paints.
+            return SlashResult(
+                kind="block",
+                text=goal_history_notice(len(rows)),
+                data={"type": "goal_history", "items": rows},
+            )
         refusal = unknown_flag_refusal("goal", arg)
         if refusal is not None:
             # One refusal string for every host: a runtime that stored `--stop` as
             # the goal while the TUI refused it is the host-disagreement class the
             # shared vocabularies in this module exist to remove (UX U6).
             return SlashResult(kind="notice", text=refusal, style="warning")
-        stored = session.set_goal(arg)
+        # `arm_goal` rather than `set_goal`: the same text write, plus the record's
+        # supersede/arm ordering, which is what makes `/goal B` non-destructive.
+        stored = session.arm_goal(arg)
         self._notify()
 
         if len(stored) == MAX_GOAL_CHARS and len(arg.strip()) > MAX_GOAL_CHARS:
@@ -6660,7 +7313,61 @@ class ServingSessionHandle(SessionHandle):
             return
         raise RuntimeError("this session cannot accept that op right now")
 
-    def _refresh_state(self) -> None:
+    def _schedule_roster_refresh(self) -> None:
+        """Republish the child roster once per :data:`_ROSTER_REFRESH_COALESCE_S`.
+
+        WHY. ``set_subagent_details`` is one linear pass over a registry capped
+        at ``MAX_RECORDS`` (256), and it ran inline for EVERY root event — which,
+        on a parent with live lanes, is token rate: every lane's progress, every
+        streamed delta of the parent's own turn. Linear is not free at that rate.
+        Sampled on a runtime with 12 stepping lanes and a 240-record roster
+        (``scripts/bench_send_admission.py --condition roster --sample``), 557 of
+        1,846 loop samples (30%) sat in ``set_subagent_details`` after the
+        transcript-probe fix, and a prompt waited 0.8 s p50 behind it to be
+        admitted. The loop that runs this is the loop that admits the user's
+        next message.
+
+        WHY NOTHING IS LOST. The scheduled pass reads the LIVE registry when it
+        fires, so it can never publish a roster older than the one an inline
+        call would have; it only folds a burst of N events into one pass. The
+        repaint it feeds is already coalesced at the same 50 ms by
+        ``RuntimeServer._schedule_push``, so a viewer sees roster movement at
+        most one push tick later than before. Everything else the handler
+        publishes (scalar state, todos, busy, gates) still refreshes inline, and
+        the two events whose fold REPLACES a row refresh inline as well (see the
+        handler).
+
+        Mirrors ``Session._schedule_frontend_jobs``, the coalescer the full-TUI
+        roster has used for the same reason.
+        """
+        if self._roster_refresh_scheduled:
+            return
+        self._roster_refresh_scheduled = True
+        try:
+            self._loop.call_later(_ROSTER_REFRESH_COALESCE_S, self._flush_roster_refresh)
+        except RuntimeError:
+            # No running loop to defer onto (a closing loop, a synchronous test
+            # host): publish now rather than drop the roster.
+            self._roster_refresh_scheduled = False
+            self._refresh_roster()
+
+    def _flush_roster_refresh(self) -> None:
+        self._roster_refresh_scheduled = False
+        if self._disposing:
+            return
+        try:
+            self._refresh_roster()
+        except Exception:  # noqa: BLE001 — a panel refresh never fails the loop
+            logger.debug("deferred roster refresh failed", exc_info=True)
+            return
+        self._notify()
+
+    def _refresh_roster(self) -> None:
+        comms = getattr(self._session, "_subagent_comms", None)
+        if comms is not None:
+            self._fold.set_subagent_details(comms)
+
+    def _refresh_state(self, *, roster: bool = True) -> None:
         self._fold.set_state(
             model_label=_effective_label(self._session),
             model_selector=_selector(self._session),
@@ -6688,10 +7395,10 @@ class ServingSessionHandle(SessionHandle):
         # The cost is the one the TUI already pays per folded event: one linear
         # registry pass, plus a job-row lookup and the outcome/error text caps
         # per node (both listed as unaddressed in the PR). No child transcript
-        # ever leaves with it.
-        comms = getattr(self._session, "_subagent_comms", None)
-        if comms is not None:
-            self._fold.set_subagent_details(comms)
+        # ever leaves with it. ``roster=False`` is the per-event path, which
+        # defers this half to ``_schedule_roster_refresh``.
+        if roster:
+            self._refresh_roster()
 
     def _reconcile_streaming(self) -> None:
         """Seed/align ``streaming`` from the session flag at attach and command

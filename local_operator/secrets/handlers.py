@@ -244,6 +244,15 @@ def _record_dict(record: SecretRecord) -> dict[str, Any]:
 # --- verbs ------------------------------------------------------------------
 
 
+#: Exit code for "this call may not print a value". Deliberately distinct:
+#: argparse uses 2, the store's own failures are mapped to 2 by :func:`dispatch`,
+#: and 1 already means "the audit chain is broken" to ``audit --verify``. A
+#: scripted caller needs to tell "you are using a form this store will not print
+#: for you" apart from "the secret is missing" and from "the store is damaged",
+#: or the refusal becomes one more generic failure worth retrying.
+REVEAL_REFUSED = 3
+
+
 def _get(args: argparse.Namespace) -> int:
     """Write the exact stored bytes to stdout and nothing else.
 
@@ -260,11 +269,151 @@ def _get(args: argparse.Namespace) -> int:
     tells agents to write — so it is the one that most needs the value already
     registered for redaction by the time it can be printed. Nothing about the
     stdout contract changes: same bytes, no trailing newline.
+
+    ``--reveal`` selects a separate path (:func:`_reveal`) that writes the same
+    bytes after asking a human; it is ADDITIVE. The unqualified form above is
+    byte-for-byte and audit-row-for-audit-row what it was before, because
+    changing what ``get`` means by default is a decision about a documented
+    contract (``local_operator/secrets/cli.py``'s module docstring) that belongs
+    to the operator, not to a pipeline this verb is in the middle of.
     """
+    if args.reveal:
+        return _reveal(args)
     value = retrieve_secret(args.name)
     sys.stdout.buffer.write(value)
     sys.stdout.buffer.flush()
     return 0
+
+
+def _reveal(args: argparse.Namespace) -> int:
+    """Print a value to the terminal a human is looking at, and audit it.
+
+    An opt-in for the case where somebody genuinely has to SEE the bytes, and
+    two things make it one rather than a synonym for ``get``:
+
+    * **It asks.** The gate is a prompt on stdin, so a caller with no terminal —
+      an agent's ordinary ``bash`` call, a pipeline, a script's ordinary
+      redirection — is refused with rc=3 and an EMPTY stdout, which is the same
+      fail-closed shape ``access.py`` documents for a live broker's refusal:
+      nobody to ask is not permission. There is deliberately no flag, env var or
+      config key that stands in for the prompt: a setting the model can write in
+      the same call it uses is not an opt-in, it is a default with extra steps.
+    * **It is a distinct audit event.** :meth:`SecretStore.note_reveal` records
+      ``reveal``/``tty`` on top of the retrieval it is fed by, so "a value was
+      printed" is a row of its own and never lost among the routine rows scripts
+      write.
+
+    **The pty test is an accident net, not a control, and the earlier wording of
+    this docstring claimed otherwise.** ``isatty()`` answers "does this caller
+    have a terminal", and a caller that can allocate one (``script(1)``,
+    ``pty.openpty``) satisfies it and then answers its own prompt — a run that is
+    indistinguishable in the trail from a human's. Nothing available to this
+    process can tell those two apart, and the distinction would buy little if it
+    could: anything running as the operator can read the master key beside the
+    store and decrypt it. What the gate removes is the ACCIDENT (the ``$( )``,
+    the redirect, the pipeline, the agent that meant to print and pipe); what
+    covers the deliberate bypass is the announcement below.
+
+    **The value is retrieved through the ANNOUNCEMENT seam, never locally.**
+    :func:`~local_operator.secrets.access.retrieve_secret` is what registers the
+    value with the owning session so its sinks can scrub it, and what applies
+    the retrieval-tier gate — including the ``unredactable`` no-ack refusal,
+    whose whole purpose is "this value cannot be kept out of the transcript".
+    Decrypting here instead, which is what this function first did, leaves the
+    bytes in NO sink: a reveal routed through a caller-allocated pty would then
+    come back through a tool stream with nothing that knows the value to redact
+    it, which is the original incident by a different route. Reading it locally
+    buys nothing (same bytes, same key) and costs exactly the property that
+    matters. Where no broker or session is reachable the seam degrades to the
+    local decrypt, UNNOTIFIED, exactly as ``$(lop secret get NAME)`` does —
+    documented in ``access.py``. **Neither signal is the one an earlier version
+    of this docstring named.** It pointed at "the retrieval row with no session
+    id", which identifies neither case: the `get` row reproduces whatever
+    ``LOCAL_OPERATOR_SESSION_ID`` its caller set (nothing verifies it, so an
+    unannounced read can carry a forged id, and one was measured doing it),
+    while a session registered without an id — how ``tui/__init__.py``
+    registers — makes an ANNOUNCED read write ``session=None`` from the
+    broker. What does discriminate is the PID: the unannounced read's `get` row
+    carries the reveal process's own pid, the announced one carries the
+    broker's, and a broker that was reachable enough to refuse the caller
+    leaves its ``deny:retrieve``/``deny:key`` rows from that same pid first.
+    The operator-facing version of this, which is the one to keep in step with
+    this paragraph, is the credentials guide's "What is recorded".
+
+    Ordering, which is the point of the three steps: retrieve (announce), then
+    record the reveal, then print. A failure in either store step prints nothing
+    at all — an unaudited reveal is worse than a refused one.
+    """
+    if not (sys.stdin and sys.stdin.isatty() and sys.stdout.isatty()):
+        return _refuse_reveal(
+            args.name,
+            outcome="refused",
+            reason="stdin and stdout are not both a terminal, so there is nobody to ask",
+        )
+
+    _err(f"Reveal {args.name} to this terminal, in plain text? [y/N] ")
+    try:
+        answer = input()
+    except EOFError:
+        # A terminal that went away is not consent. `_remove` reads its prompt
+        # unguarded; here the failure would be a traceback on the one path whose
+        # subject is a value, so it fails closed instead.
+        answer = ""
+    if answer.strip().lower() not in ("y", "yes"):
+        _err("cancelled")
+        _note_reveal_refusal(args.name, outcome="cancelled")
+        # REVEAL_REFUSED, not `_remove`'s 1: this file reserves 1 for "the audit
+        # chain is broken", and a script branching on the documented taxonomy
+        # must not read "the human declined" as "tamper detected".
+        return REVEAL_REFUSED
+
+    value = retrieve_secret(args.name)
+    open_store().note_reveal(args.name, session_id=session_id())
+    sys.stdout.buffer.write(value)
+    sys.stdout.buffer.flush()
+    return 0
+
+
+def _refuse_reveal(name: str, *, outcome: str, reason: str) -> int:
+    """Refuse a reveal, say what to write instead, and record the refusal.
+
+    The message goes to stderr in full and stdout stays EMPTY: a refused reveal
+    is consumed by ``$( )`` in exactly the same way a successful one is, and a
+    diagnostic on stdout would be handed to the consumer as the credential.
+    """
+    _err(f"lop secret get --reveal: refusing to reveal {name} — {reason}.")
+    _err("  To USE it without printing it:")
+    _err(f"      lop secret run --secret {name} -- <command…>")
+    _err(f"      lop secret file {name} -- <command…>          (file-shaped secrets)")
+    _err("  To IDENTIFY it without reading it:")
+    _err(f"      lop secret describe {name} --length --fingerprint")
+    _err("  To send the bytes somewhere (unchanged, audited as an ordinary get):")
+    _err(f"      lop secret get {name} | …")
+    _err(f"  At a terminal, a human can: lop secret get {name} --reveal")
+    _note_reveal_refusal(name, outcome=outcome)
+    return REVEAL_REFUSED
+
+
+def _note_reveal_refusal(name: str, *, outcome: str) -> None:
+    """Record a reveal that did NOT happen; never fail the refusal over it.
+
+    The refusal is the safety property here — it must hold whether or not the
+    store is reachable — while the audit row is evidence about it. So a store
+    that cannot be opened (no store yet, a damaged one, a hardened store with no
+    live broker) degrades to a warning instead of turning a refusal into a
+    different error. It is a warning rather than silence because "the refusal,
+    and where it was aimed, was not recorded" is something the operator may need
+    to know; it is not propagated because it is not the failure that matters.
+
+    ``name`` is carried for the message only. The column it could populate is
+    the record ID, and resolving one would be a value read in the path whose
+    point is that no value was read (see
+    :meth:`SecretStore.note_reveal_refusal`).
+    """
+    try:
+        open_store().note_reveal_refusal(outcome=outcome, session_id=session_id())
+    except (SecretStoreError, OSError, UnicodeError, sqlite3.DatabaseError) as exc:
+        _err(f"warning: the refused reveal of {name} was not recorded ({exc})")
 
 
 def _set(args: argparse.Namespace) -> int:
@@ -360,16 +509,47 @@ def _warn_damaged(damaged: list[str]) -> None:
 
 
 def _describe(args: argparse.Namespace) -> int:
-    # Default `role="agent"`: this is the operator's ordinary CLI surface, and a
-    # provider-class row (`LOP_PROVIDER_*`) is refused here exactly as the agent
-    # tool's `describe` refuses it — an agent or a misdirected script must not be
-    # able to enumerate which provider keys a host holds. The provider-side
-    # readers (`registry.provider_secret_value`, the qwencloud ticket) pass
-    # `role="provider"` and are unaffected.
-    record = open_store().describe(args.name)
+    """Metadata for one secret, optionally its identity. Never its value.
+
+    ``--length`` and ``--fingerprint`` answer "which secret is this?" — they let
+    a value be recognised and compared WITHOUT being read, which is the point:
+    the guide's existing round-trip check (``lop secret get NAME | shasum -a
+    256``) hashes the value in a pipeline, and this returns the same answer with
+    no value-bearing pipeline to get wrong. Neither flag, and no future one,
+    prints the bytes; there is no flag anywhere on this verb that does.
+
+    Default ``role="agent"``, and the value-bearing path keeps it: this is the
+    operator's ordinary CLI surface, and a provider-class row
+    (``LOP_PROVIDER_*``) is refused here exactly as the agent tool's `describe`
+    refuses it — an agent or a misdirected script must not be able to enumerate
+    which provider keys a host holds, nor fingerprint one. The provider-side
+    readers (`registry.provider_secret_value`, the qwencloud ticket) pass
+    `role="provider"` and are unaffected.
+    """
+    store = open_store()
+    if args.length or args.fingerprint:
+        # One decrypt, one audit row, and the row is labelled with the fields the
+        # caller actually asked for — `length`, `fingerprint` or both. The digest
+        # is not computed at all when only the length was wanted.
+        record, length, fingerprint = store.describe_identity(
+            args.name,
+            with_length=args.length,
+            with_fingerprint=args.fingerprint,
+            session_id=session_id(),
+        )
+    else:
+        # The metadata-only path, unchanged: no audit row, no value field used.
+        record, length, fingerprint = store.describe(args.name), 0, ""
+
     if args.json:
-        print(json.dumps(_record_dict(record), indent=2))
+        details = _record_dict(record)
+        if args.length:
+            details["length_bytes"] = length
+        if args.fingerprint:
+            details["fingerprint"] = fingerprint
+        print(json.dumps(details, indent=2))
         return 0
+
     print(f"name         {record.name}")
     print(f"id           {record.record_id}")
     print(f"kind         {record.kind}")
@@ -378,6 +558,10 @@ def _describe(args: argparse.Namespace) -> int:
     print(f"updated      {_format_time(record.updated_at)}")
     print(f"last used    {_format_time(record.last_used_at)}")
     print(f"key gen      {record.key_generation}")
+    if args.length:
+        print(f"length       {length} bytes")
+    if args.fingerprint:
+        print(f"fingerprint  {fingerprint}")
     return 0
 
 

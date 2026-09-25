@@ -2647,6 +2647,30 @@ class FrontendSessionState(BaseModel):
     #: (embedded SDK, test double) from failing the whole refresh.
     conversation_title_forked: bool = False
     goal: str = ""
+    #: NEW. "" (none) | "active" | "done". `done` coexists with a non-empty
+    #: `goal` ONLY between the judge's ACHIEVED verdict and the chip's dismissal:
+    #: the pairing is what lets a surface strike the objective it is still
+    #: showing, rather than having to forget it to stop displaying it.
+    goal_status: str = ""
+    #: NEW. The live judge's state (see `GoalJudgeState.to_wire`).
+    #:
+    #: Annotated with a SUBSCRIPTED ``dict[str, Any]`` ON PURPOSE, and the reason
+    #: is the guard rather than the type: the attach-frame guard derives the
+    #: field set it polices from the ANNOTATION STRING (`_collection_fields`),
+    #: so a bare ``dict | None`` would make this field invisible to the check
+    #: that exists to stop exactly this class of field — while its bytes would
+    #: still ride the frame. The subscript is what forces the explicit
+    #: size-policy review `attention`'s own comment asks for.
+    goal_judge: dict[str, Any] | None = None
+    #: NEW. Settled goals, newest first, at most `GOAL_HISTORY_MAX` entries —
+    #: bounded at ENTRY by the record and yielded at the WIRE by
+    #: `_bound_goal_record_in_place` when the frame it would ride is full.
+    goal_history: list[dict[str, Any]] = Field(default_factory=list)
+    #: NEW. The entries were dropped by the WIRE bound, not absent. Mirrors
+    #: `model_catalogue_truncated`, which exists for this exact lie: a pane that
+    #: silently under-reports the history reads as "no completed goals", which
+    #: is the bug the flag exists to prevent.
+    goal_history_truncated: bool = False
     active_agent: str = ""
     active_team: str = ""
     selected_model: FrontendModelSpec | None = None
@@ -3144,6 +3168,28 @@ def job_todos_wire_value(todos: Any) -> list[dict[str, Any]] | None:
     return value
 
 
+def job_trajectory_wire_value(rows: Any) -> list[dict[str, Any]]:
+    """One job's retained rows as ordinary JSON containers, for a wire reply.
+
+    Canonical state holds them FROZEN — a ``_FrozenSequence`` of
+    ``_FrozenMapping``, a ``tuple`` subclass with ``keys``/``items``/``get``
+    that is deliberately not a ``Mapping`` and is not serializable as a JSON
+    object. A caller that put the rows straight onto a response model would
+    either fail validation or ship every row as a list of pairs, and each row
+    carries whole tool results, so the mangling would be expensive to notice.
+    ``_wire_value`` is the ONE converter that knows the frozen shapes; it is
+    named here rather than imported from the desktop adapter so that the
+    snapshot path, the todos wire value beside it and the child reader's seed
+    all reach the wire through the same function.
+
+    The rows are NOT re-stamped, re-ordered or trimmed: ``_lo_seq`` is the
+    reader's identity for a row (see :data:`~local_operator.harness.jobs.
+    TRAJECTORY_SEQ_KEY`), so a seed that altered the stamps or the order would
+    break the one rule that makes the live stream safe to merge with it.
+    """
+    return [_wire_value(row) for row in (rows or ())]
+
+
 def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
     """Serialize one attach snapshot with job trajectories left OUT.
 
@@ -3203,6 +3249,14 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
         if isinstance(components, list) and len(components) > USAGE_COMPONENT_CAP:
             snapshot["usage_components"] = _capped_components(components)
         _bound_live_events_in_place(snapshot)
+        # The goal record is bounded at ENTRY by `GoalState` (a swept history, a
+        # clipped judge reason) and yielded HERE at the wire, because an entry
+        # cap is not a wire bound: the frame this field rides is the one the
+        # socket refuses, so it is the field that gives way when the frame it
+        # would ride is over the line. Before the per-job pass and therefore
+        # before the catalogue's residual search, so the bytes it yields are
+        # available to the fields below rather than spent twice.
+        _bound_goal_record_in_place(payload, snapshot)
         jobs = snapshot.get("jobs")
         if isinstance(jobs, list):
             # Share one text budget across the roster so the frame does not grow
@@ -3317,6 +3371,62 @@ def _frame_line_bytes(payload: dict[str, Any]) -> int:
     bounds any attach that will outlive this reserve.
     """
     return len(json.dumps({"op": "result", "req": 9_999_999_999, "data": payload}).encode()) + 1
+
+
+def _bound_goal_record_in_place(payload: dict[str, Any], snapshot: dict[str, Any]) -> None:
+    """Yield the goal record's PAYLOAD when the frame it would ride is over the line.
+
+    ``goal_history`` is bounded at ENTRY by the record (a swept list of clipped
+    entries), and that is still not a wire bound: the entry cap says how big the
+    list may get, not that the frame carrying it fits. A frame that has none to
+    give would therefore be refused by the socket, which is the failure this
+    field must never be the cause of — so when the frame is over, the record
+    becomes its KEY SKELETON and nothing else:
+
+    * the HISTORY is dropped entirely and ``goal_history_truncated`` is set — the
+      flag is what keeps a reader from reading an empty list as "no completed
+      goals", the lie ``model_catalogue_truncated`` exists to prevent;
+    * the JUDGE is yielded to ``None``.
+
+    The whole payload yields rather than a clipped share of it, and the reason is
+    the measured price of the alternative: keeping the judge's four keys with its
+    reason clipped to 200 characters costs **287 B** of a frame that has none to
+    give, to render one tooltip line — against 20 B for the key alone. The judge
+    is also the one part of this record that is a LIVE projection rather than
+    accumulated data: the next frame rebuilds it from the session, while the
+    fields this frame is over for are the bounded ones whose budgets are already
+    spent. ``None`` is a shape the contract already defines (the field is
+    ``dict[str, Any] | None`` and a reader must tolerate its absence), so this
+    degrades the tooltip rather than lying about anything.
+
+    Neither ``goal``, ``goal_status`` nor any count is touched: the ACTIVE goal
+    and whether it is DONE are the two things on this frame a user is looking at,
+    and they are the whole reason the skeleton is kept.
+
+    Measured the way the neighbouring bounds measure — :func:`_frame_line_bytes`
+    over the frame as it will actually be sent, not arithmetic over parts —
+    because a budget measured any other way is a budget for a frame nobody sends.
+    It runs BEFORE the per-job text pass and therefore before the catalogue's
+    residual search (which must stay LAST, so it can spend what nothing else
+    will): the bytes this yields are then available to those passes rather than
+    being freed after they have already settled. The trade that ordering makes,
+    stated so a later editor does not "fix" it: on a frame that is over the line
+    for reasons this record cannot fix (a roster past every cap), the record
+    yields even though the frame still would not fit. The alternative — yielding
+    it after the catalogue has fitted itself — clips the catalogue to make room
+    for a record that is then thrown away, which loses both.
+    """
+    history = snapshot.get("goal_history")
+    judge = snapshot.get("goal_judge")
+    if not history and not isinstance(judge, dict):
+        return
+    if _frame_line_bytes(payload) <= _MODEL_CATALOGUE_LINE_LIMIT:
+        return
+    if isinstance(history, list) and history:
+        snapshot["goal_history"] = []
+        snapshot["goal_history_truncated"] = True
+    if isinstance(judge, dict):
+        snapshot["goal_judge"] = None
 
 
 def _bound_live_events_in_place(snapshot: dict[str, Any]) -> None:
@@ -3874,7 +3984,25 @@ class SnapshotJobs:
         # Route copies through the public detacher instead of asking Pydantic to
         # deep-copy tuple-backed Mapping/Sequence wrappers: the wrappers must
         # stay immutable while consumers retain their abstract container API.
-        self._values = [_public_job(value) for value in values]
+        #
+        # A row whose CANONICAL object is the one the last replace saw keeps the
+        # detached copy made then: a follower's jobs delta keeps every unchanged
+        # row by identity (``FrontendStateStore._reusable_job``), and re-detaching
+        # all 252 rows of a loaded roster for the handful that moved was ~2 ms per
+        # delta on the viewer's loop. Safe because ``_values`` is private --
+        # ``list``/``get`` still hand every caller a fresh detached copy.
+        previous = getattr(self, "_detached", {})
+        detached: dict[int, tuple[JobState, JobState]] = {}
+        rows: list[JobState] = []
+        for value in values:
+            kept = previous.get(id(value))
+            row = kept[1] if kept is not None and kept[0] is value else _public_job(value)
+            # The source is held beside its copy so ``id(value)`` cannot be
+            # recycled onto a different row while the entry lives.
+            detached[id(value)] = (value, row)
+            rows.append(row)
+        self._detached = detached
+        self._values = rows
         # Roster rendering asks get() once per row. A linear lookup made one
         # paint quadratic in the number of children; retain the first duplicate
         # ID to preserve the old next(...) behaviour for malformed extensions.
@@ -3922,7 +4050,26 @@ class SnapshotSubagentComms:
 
     def replace(self, jobs: Iterable[JobState]) -> None:
         rows = list(jobs)
-        self._nodes = {job.id: self._node_for(job) for job in rows}
+        # A row the last replace saw keeps its node, for the same reason and on
+        # the same identity proof as ``SnapshotJobs.replace``: the node is built
+        # from that (frozen) row, so an identical row builds an equal node.
+        #
+        # EXCEPT where the node also reads the DISK: a row with a ``session_id``
+        # but no wire ``session_dir`` has its directory derived and proven
+        # against an origin marker the child may not have written yet, and a
+        # later frame re-projecting the node is how a still-starting child
+        # becomes openable (``test_a_missing_marker_is_not_memoised_as_a_verdict``).
+        # Those rows are rebuilt every time, exactly as before.
+        previous = getattr(self, "_node_sources", {})
+        sources: dict[str, tuple[JobState, Any]] = {}
+        for job in rows:
+            kept = previous.get(job.id)
+            pure = bool(job.session_dir) or not job.session_id
+            sources[job.id] = (
+                kept if pure and kept is not None and kept[0] is job else (job, self._node_for(job))
+            )
+        self._node_sources = sources
+        self._nodes = {job.id: sources[job.id][1] for job in rows}
         self._aliases = {alias: job.id for job in rows for alias in job.attempt_aliases}
 
     @staticmethod
@@ -4589,6 +4736,50 @@ class _TrajectoryWindows:
         return _FrozenSequence(itertools.chain(entry.rows[dropped:], _freeze_rows(rows[start:])))
 
 
+def _fold_goal_status(session: Any) -> str:
+    """The goal's status, with the migration default for pre-lifecycle sessions.
+
+    THE one place that default lives. A session restored from a build that
+    predates the judged-goal record has a ``goal`` text and no status at all,
+    and the only act that could have put that text there was the user typing
+    ``/goal <text>`` — the one act that expresses "pursue this". Reading it as
+    absent would silently un-set a standing objective the user still expects to
+    be pursued, which is the one direction of this migration that loses work, so
+    it reads as ACTIVE. The consequence is bounded and inspectable: a restored
+    active goal is judged at the next turn end, and the re-arm rule refuses to
+    start one by itself, so a stale restored goal spends nothing until the user
+    does something.
+
+    Reading it in the FOLD rather than in each reader is deliberate: `/goal`, the
+    status band and the desktop chip all read this one projection, so there is no
+    second place for the two to disagree.
+    """
+    status = str(getattr(session, "goal_status", "") or "")
+    if status:
+        return status
+    return "active" if str(getattr(session, "goal", "") or "") else ""
+
+
+class FrontendRevision(NamedTuple):
+    """What :meth:`FrontendStateStore.revision` returns; compare for equality.
+
+    ``lifecycle`` moves only when a child appears, leaves, or changes status or
+    queued-ness -- the subset of a roster change a coalescing reader must apply
+    at once rather than on its next spaced pass.
+    """
+
+    epoch: str
+    jobs: int
+    todos: int
+    wakes: int
+    lifecycle: int
+
+
+def _job_lifecycle(jobs: Sequence[JobState]) -> tuple[tuple[str, str, bool], ...]:
+    """The roster reduced to what makes a child start, settle or leave."""
+    return tuple((job.id, job.status, job.queued) for job in jobs)
+
+
 class FrontendStateStore:
     """Atomic snapshot/update store shared by local and remote sessions.
 
@@ -4671,10 +4862,42 @@ class FrontendStateStore:
         #: because it answers the other half of one question: what a roster tick
         #: must rebuild.
         self._released_rows = _ReleasedRows(self._state.epoch)
+        #: The FOLLOWER's last wire body per job, as received (before the reducer
+        #: rewrites ``trajectory``/``todos`` on it), so a ``jobs`` delta can keep
+        #: the canonical row of every child whose body did not move -- see
+        #: :meth:`_reusable_job`. Owned beside ``_follower_windows`` and reset on
+        #: exactly the same paths, because it describes the same installed rows.
+        self._follower_job_bodies: dict[str, tuple[dict[str, Any], JobState]] = {}
 
     @property
     def state(self) -> FrontendSessionState:
         return self._public_state(self._state)
+
+    def running_task_count(self) -> int:
+        """Running, un-queued ``task`` children, without cloning the state.
+
+        The sibling of :meth:`has_running_job`, for the same measured reason: a
+        viewer's ``running_subagents`` asked this through ``state`` -- a deep copy
+        of every job for one integer -- once per retention check and per stop
+        ladder, and at a 252-row roster that clone is ~2.5 ms of the viewer's
+        loop each time. A read-only scan of the already-frozen rows is safe to
+        share and returns only an ``int``.
+        """
+        return sum(
+            1
+            for job in self._state.jobs
+            if job.type == "task" and job.status == "running" and not job.queued
+        )
+
+    def attention_copy(self) -> dict[str, Any]:
+        """A caller-owned copy of ``attention`` alone, without the whole-state clone.
+
+        ``attention`` is a mutable ``dict`` and so is refused by
+        :meth:`read_field`'s allow-list; this pays the deep copy that protects it
+        for THAT field only, instead of for every job on the roster as ``state``
+        does. Polled about once a second by the TUI's completion-receipt check.
+        """
+        return copy.deepcopy(dict(self._state.attention))
 
     def _public_state(self, state: FrontendSessionState) -> FrontendSessionState:
         """A caller-owned clone of ONE canonical state object.
@@ -4878,9 +5101,65 @@ class FrontendStateStore:
         it from the same section that installed the state and fans out OUTSIDE
         it. No subscriber callback ever runs holding this lock.
         """
+        # Outside the section: one writer per store (see ``_publish_lock``), so
+        # reading the outgoing state here cannot race, and the row walk is
+        # proportional to the roster, which the section must never be.
+        self._bump_revisions(self._state, state)
         with self._publish_lock:
             self._state = state
             return list(self._subscribers)
+
+    #: The collections :meth:`revision` counts, i.e. what the TUI's dock band is
+    #: painted from (the subagent, todo and wake panels).
+    _REVISED_COLLECTIONS: Final = ("jobs", "todos", "wakes")
+
+    def _bump_revisions(self, before: FrontendSessionState, after: FrontendSessionState) -> None:
+        """Advance :meth:`revision` for each collection whose content moved.
+
+        By IDENTITY, which is exact here rather than approximate: canonical
+        collections are replaced, never edited in place, and a ``jobs`` delta
+        keeps the row object of every child whose body did not change (see
+        :meth:`_reusable_job`). So "every row is the same object" means "nothing a
+        reader can see moved", and anything else is a new revision. A scalar
+        delta re-wraps the SAME rows in a fresh sequence, hence the row walk
+        rather than a comparison of the sequence objects.
+
+        ``lifecycle`` is the narrower question a coalescing reader must never
+        wait on: did a child appear, leave, start, settle or get admitted from
+        the queue. Only asked when the roster moved at all.
+        """
+        revisions = self.__dict__.setdefault(
+            "_revisions", dict.fromkeys((*self._REVISED_COLLECTIONS, "lifecycle"), 0)
+        )
+        for name in self._REVISED_COLLECTIONS:
+            old, new = getattr(before, name), getattr(after, name)
+            if old is new:
+                continue
+            if name == "jobs":
+                if len(old) == len(new) and all(a is b for a, b in zip(old, new, strict=True)):
+                    continue
+                if _job_lifecycle(old) != _job_lifecycle(new):
+                    revisions["lifecycle"] += 1
+            revisions[name] += 1
+
+    def revision(self) -> "FrontendRevision":
+        """A token that moves whenever ``jobs``, ``todos`` or ``wakes`` move.
+
+        Lets a reader skip re-deriving a view it already painted from those
+        collections -- the TUI's dock band was re-projecting a 252-row roster on
+        every canonical delta, including the token-cadence scalar ones that
+        cannot change a row. Compare for equality only; the counters carry no
+        other meaning. Carries the epoch, because a re-seated store continues
+        its counters across a lineage change.
+        """
+        revisions = self.__dict__.get("_revisions") or {}
+        return FrontendRevision(
+            epoch=self._state.epoch,
+            jobs=revisions.get("jobs", 0),
+            todos=revisions.get("todos", 0),
+            wakes=revisions.get("wakes", 0),
+            lifecycle=revisions.get("lifecycle", 0),
+        )
 
     def _rebuild_derived(self, state: FrontendSessionState) -> None:
         """Drop every cache a re-seated state invalidates.
@@ -4905,6 +5184,10 @@ class FrontendStateStore:
         self._trajectory_windows.clear()
         self._released_rows.clear()
         self._follower_windows.reset(state.epoch)
+        # Same lineage argument as the window memo: a re-seated state's rows are
+        # freshly parsed objects, so no body recorded against the old ones may
+        # vouch for them.
+        self._follower_job_bodies = {}
 
     def replace(self, state: FrontendSessionState) -> None:
         self._install(self._freeze_for_install(state))
@@ -4969,6 +5252,9 @@ class FrontendStateStore:
             # round trip buys the certainty that no window survives a lineage the
             # follower has just declared untrustworthy.
             self._follower_windows.reset(self._state.epoch)
+            # A shed body means the next full delta may describe rows this store
+            # never saw, so nothing recorded before it may vouch for a row.
+            self._follower_job_bodies = {}
             # Sequence-only install, and SHALLOW on purpose: the body was shed,
             # so what this publish carries is unknown rather than unchanged, and
             # the object it installs is the previous one with a new sequence
@@ -4979,20 +5265,45 @@ class FrontendStateStore:
             for subscriber in subscribers:
                 subscriber(update.model_copy(deep=True))
             return self.state
-        changes = copy.deepcopy(update.changes)
+        # The roster is copied PER ROW below, and only for rows that changed: a
+        # whole-``changes`` deep copy was ~2.5 ms of a 252-row delta on its own,
+        # almost all of it rows the delta merely repeated.
+        changes = copy.deepcopy(
+            {key: value for key, value in update.changes.items() if key != "jobs"}
+        )
         # A malformed field later in a jobs delta must not advance a plan's
         # watermark: validation either installs the entire update or nothing.
         todo_sequences = dict(self._todo_sequences)
-        # The frozen window each rebuilt job will carry, positionally aligned
-        # with ``changes["jobs"]``. Built here, installed AFTER validation.
+        # The frozen window each job will carry, positionally aligned with the
+        # ROSTER (``plan``), reused and rebuilt rows alike. Built here, installed
+        # AFTER validation.
         windows: list[_FrozenSequence] = []
-        if "jobs" in changes:
+        #: Per roster position, either the canonical row kept by identity or the
+        #: index of its body in ``rebuilt`` (the part pydantic validates).
+        plan: list[JobState | int] = []
+        #: The windows of the rows that go through validation, aligned with it.
+        rebuilt_windows: list[_FrozenSequence] = []
+        bodies: dict[str, dict[str, Any]] = {}
+        if "jobs" in update.changes:
             previous = {job.id: job for job in self._state.jobs}
             replacements = set(update.job_trajectory_replacements)
             rebuilt = []
-            for raw in changes["jobs"]:
-                job_id = str(raw.get("id", ""))
+            for received in update.changes["jobs"]:
+                job_id = str(received.get("id", "")) if isinstance(received, Mapping) else ""
                 prior = previous.get(job_id)
+                kept = self._reusable_job(job_id, prior, received, update)
+                if kept is not None:
+                    plan.append(kept)
+                    windows.append(cast(_FrozenSequence, kept.trajectory))
+                    bodies[job_id] = self._follower_job_bodies[job_id][0]
+                    continue
+                # The wire body is KEPT and the reducer works on a copy of it
+                # (one deep copy per rebuilt row, not two): what the next delta
+                # must be compared against is what the runtime sent, before the
+                # window/todo merges below rewrite it.
+                raw = cast(dict[str, Any], copy.deepcopy(received))
+                if isinstance(raw, dict) and job_id:
+                    bodies[job_id], raw = cast(dict[str, Any], received), raw
                 # A runtime that says "this is a replacement" has told us the
                 # window is not a suffix, so the memo is not consulted at all.
                 window = None
@@ -5038,9 +5349,13 @@ class FrontendStateStore:
                     raw["todos"] = update.job_todo_updates[job_id]
                     todo_sequences[job_id] = update.sequence
                 windows.append(window)
+                rebuilt_windows.append(window)
+                plan.append(len(rebuilt))
                 rebuilt.append(raw)
             changes["jobs"] = rebuilt
-            retained = {str(row["id"]) for row in rebuilt}
+            retained = {
+                job.id if isinstance(job, JobState) else str(rebuilt[job]["id"]) for job in plan
+            }
             todo_sequences = {key: seq for key, seq in todo_sequences.items() if key in retained}
             # A job that left the roster takes its window's entry with it, or the
             # memo would pin that job's rows for the life of the store.
@@ -5081,9 +5396,12 @@ class FrontendStateStore:
             # misalignment would install one child's rows on another. Naming that
             # here is cheaper than trusting an ordering invariant to survive the
             # next edit to this method.
-            normalized["jobs"] = _FrozenSequence(
+            validated = [
                 _freeze_job(job.model_copy(update={"trajectory": window}))
-                for job, window in zip(patch.jobs, windows, strict=True)
+                for job, window in zip(patch.jobs, rebuilt_windows, strict=True)
+            ]
+            normalized["jobs"] = _FrozenSequence(
+                step if isinstance(step, JobState) else validated[step] for step in plan
             )
         candidate = self._state.model_copy(update=normalized)
         # ``jobs_are_canonical`` is now true on the jobs path too: the windows
@@ -5102,10 +5420,58 @@ class FrontendStateStore:
         if windows:
             for job, window in zip(self._state.jobs, windows, strict=True):
                 self._follower_windows.remember(job.id, window)
+        if "jobs" in update.changes:
+            # Same place and same reason as the window memo: only a body whose
+            # row canonical state now HOLDS is recorded, paired with that row.
+            self._follower_job_bodies = {
+                job.id: (bodies[job.id], job) for job in self._state.jobs if job.id in bodies
+            }
         self._todo_sequences = todo_sequences
         for subscriber in subscribers:
             subscriber(update.model_copy(deep=True))
         return self.state
+
+    def _reusable_job(
+        self, job_id: str, prior: JobState | None, received: Any, update: FrontendUpdate
+    ) -> JobState | None:
+        """The canonical row to KEEP for ``received``, or ``None`` to rebuild it.
+
+        WHY. A ``jobs`` delta carries the WHOLE roster, and a loaded parent sends
+        one per roster tick: measured at 12 stepping lanes plus 240 settled
+        children, every delta repeated 252 rows (~410 KB) while 1-12 of them had
+        moved, and rebuilding all 252 -- deep copy, pydantic validation, freeze --
+        cost the viewer ~11 ms p50 per delta on its UI loop. It also handed every
+        downstream reader 252 new objects, so nothing further along could tell
+        what had actually changed.
+
+        THE PROOF. A row is kept only when all of these hold, and together they
+        say the rebuild would produce a row equal to the one already installed:
+
+        * the recorded body is paired with ``prior`` BY IDENTITY, so the row is
+          the very one that body built -- not one a ``seed_job_*`` call, a
+          snapshot install or a degraded-delta reset has since replaced (each of
+          those drops or bypasses the record);
+        * the body the runtime sent now EQUALS the body it sent then, so every
+          field pydantic would validate is unchanged;
+        * the delta names no trajectory append or replacement and no todo update
+          for this job -- the three things the reducer merges in from OUTSIDE the
+          body -- so the window and the plan the row carries are still current.
+
+        Anything else rebuilds exactly as before, which is always correct and
+        only slower.
+        """
+        if prior is None or not job_id or not isinstance(received, dict):
+            return None
+        if (
+            job_id in update.job_trajectory_appends
+            or job_id in update.job_trajectory_replacements
+            or job_id in update.job_todo_updates
+        ):
+            return None
+        recorded = self._follower_job_bodies.get(job_id)
+        if recorded is None or recorded[1] is not prior:
+            return None
+        return prior if recorded[0] == received else None
 
     def seed_job_trajectory(self, job_id: str, rows: Sequence[dict[str, Any]]) -> bool:
         """Install rows a FOLLOWER fetched on demand for one child's page.
@@ -5556,6 +5922,13 @@ class FrontendStateStore:
             conversation_title_user_set=bool(getattr(title_state, "user_set", False)),
             conversation_title_forked=bool(getattr(session, "wears_inherited_title", False)),
             goal=str(getattr(session, "goal", "") or ""),
+            # The migration default for a restored pre-lifecycle goal lives in
+            # `_fold_goal_status` (the `getattr(..., default)` shape here is the
+            # same reduced-facade convention `conversation_title_forked`
+            # documents above: an embedded SDK or a test double has no record).
+            goal_status=_fold_goal_status(session),
+            goal_judge=getattr(session, "goal_judge", None),
+            goal_history=getattr(session, "goal_history", []),
             active_agent=str(getattr(session, "active_agent", "") or ""),
             active_team=str(getattr(session, "active_team_name", "") or ""),
             selected_model=(
@@ -6447,11 +6820,40 @@ class FrontendStateStore:
         # Execution stays local to each manager; presentation follows the shared
         # graph. Snapshot its ledgers once, without per-node scans or disk reads.
         comms = getattr(session, "_subagent_comms", None)
+        # A CHILD session shares its root's comms registry, so an unscoped read
+        # below would project the whole fan-out -- every sibling's retained
+        # trajectory re-frozen at each of this child's boundaries, O(N) per
+        # child and O(N^2) across N children on the one shared loop (see
+        # ``SubagentComms.descendant_ids``). A child's roster is its own
+        # subtree; ``None`` means "this is the root, keep the whole graph".
+        scope = _child_scope(session, comms)
+        # ONE registry pass for the whole tick. ``_with_lineage``, the released
+        # memo's fingerprint and ``_released_predicate`` each ask the registry
+        # about one job at a time, and every such ``comms.node``/``nodes`` call
+        # builds a fresh ``RosterPass`` -- a walk of every record plus a
+        # snapshot of every manager. Over an N-job roster that was N passes per
+        # tick, O(N^2) on the parent's 50 ms coalescer (measured: 16 children
+        # spent more time building passes than projecting rows). The view below
+        # answers those reads from a single pass; see ``_TickComms``.
+        if comms is not None and callable(getattr(comms, "roster_pass", None)):
+            comms = _TickComms(comms)
+        # The session's OWN ledger always stays (a child's bash jobs are not
+        # graph records). Keyed by object identity: the graph hands back the
+        # same job objects, and model equality would compare trajectories.
+        own = {id(job) for job in rows} if scope is not None else set()
         graph_jobs = getattr(comms, "job_rows", None)
         if callable(graph_jobs):
             graph_rows = graph_jobs()
             if isinstance(graph_rows, Sequence):
-                rows = graph_rows
+                rows = (
+                    graph_rows
+                    if scope is None
+                    else [
+                        job
+                        for job in graph_rows
+                        if str(getattr(job, "id", "") or "") in scope or id(job) in own
+                    ]
+                )
         # The window and the paused set come from the LIVE manager and the comms
         # record, exactly as ``tui/app.py``'s owner-side filter reads them: one
         # source for the rule, so the dock and the canonical roster cannot drift
@@ -6517,6 +6919,8 @@ class FrontendStateStore:
             graph_nodes = nodes()
             for node in graph_nodes if isinstance(graph_nodes, Sequence) else []:
                 if node.job_id in known:
+                    continue
+                if scope is not None and node.job_id not in scope:
                     continue
                 # After a cold restart nested execution ledgers no longer exist,
                 # but the shared durable graph still does. These are reader rows
@@ -6673,6 +7077,78 @@ def _wire_launch_prompts(value: Any) -> dict[str, str]:
             text = text[:JOB_LAUNCH_PROMPT_WIRE_CHARS] + "\u2026"
         bounded[identity] = text
     return bounded
+
+
+class _TickComms:
+    """A comms registry view that answers node reads from ONE roster pass.
+
+    Built per ``FrontendStateStore._jobs`` call and dropped at its end, so it is
+    exactly as fresh as the tick that made it -- the same guarantee a
+    ``RosterPass`` documents ("a SNAPSHOT, deliberately never retained across
+    calls"). Only the READ methods the projection uses are served from the
+    pass (``node``, ``nodes``); everything else is forwarded to the live
+    registry unchanged, so no write or lifecycle call can see a stale view.
+
+    The pass is built lazily, on the first read, so a tick over a roster with
+    no comms records pays nothing.
+    """
+
+    __slots__ = ("_comms", "_pass", "_nodes", "_by_id")
+
+    def __init__(self, comms: Any) -> None:
+        self._comms = comms
+        self._pass: Any = None
+        self._nodes: list[Any] | None = None
+        self._by_id: dict[str, Any] = {}
+
+    def _roster(self) -> Any:
+        if self._pass is None:
+            self._pass = self._comms.roster_pass()
+        return self._pass
+
+    def nodes(self) -> list[Any]:
+        if self._nodes is None:
+            self._nodes = list(self._roster().nodes())
+        return list(self._nodes)
+
+    def node(self, job_id: str) -> Any:
+        # Resolved through the pass's own ``node_for`` so alias handling (an
+        # attempt id that resolves to its durable record) is the registry's,
+        # not a second implementation of it.
+        if job_id not in self._by_id:
+            self._by_id[job_id] = self._roster().node_for(job_id)
+        return self._by_id[job_id]
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._comms, name)
+
+
+def _child_scope(session: Any, comms: Any) -> set[str] | None:
+    """The job ids a CHILD session's roster may project, or ``None`` for a root.
+
+    A session is a child when it carries a ``_job_id`` its (shared) comms
+    registry knows. Such a session sees exactly its own descendants -- what a
+    viewer of that child can navigate to -- instead of the root's whole graph;
+    see ``SubagentComms.descendant_ids`` for the measured cost of the unscoped
+    read. Total and fail-open to the OLD behaviour: a registry without the
+    method, or one that raises, keeps the full graph (``None``), because an
+    over-wide roster is only slow, while an empty one would hide real rows.
+    """
+    job_id = getattr(session, "_job_id", None)
+    if not job_id or comms is None:
+        return None
+    is_child = getattr(comms, "is_child", None)
+    descendant_ids = getattr(comms, "descendant_ids", None)
+    if not callable(is_child) or not callable(descendant_ids):
+        return None
+    try:
+        if not is_child(job_id):
+            return None
+        ids = descendant_ids(job_id)
+        return {str(item) for item in ids} if isinstance(ids, Iterable) else None
+    except Exception:  # noqa: BLE001 - scoping is an optimisation, never a gate
+        logger.debug("child roster scope unavailable for %s", job_id, exc_info=True)
+        return None
 
 
 def _with_lineage(job: JobState, comms: Any) -> JobState:

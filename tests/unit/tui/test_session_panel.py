@@ -39,7 +39,7 @@ from local_operator.tui.widgets.session_panel import (
 )
 from tests.unit.analytics.test_store import _snap
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
-from tests.unit.tui.test_slash_echo import _submit
+from tests.unit.tui.test_slash_echo import _boot, _submit
 
 
 def flowed(text: str) -> str:
@@ -122,6 +122,11 @@ def test_slash_discovery_and_locality():
 
     command = slash_command_for("/session")
     assert command is not None and not command.echo and not command.consumes_prompt
+    # The description is where `--copy` is taught (no value list offers it, D1),
+    # and it must not fold: the two-column table wraps a description past ~55
+    # cells, the budget `/model`'s row pins in test_app_pilot.
+    assert command.description == "Usage, cost, diagnostics; --copy copies the session ID"
+    assert len(command.description) <= 55, command.description
     capabilities = _slash_capabilities()
     assert (
         next(c for c in capabilities if c.command == "session").scope == CommandScope.FRONTEND_LOCAL
@@ -250,6 +255,75 @@ async def test_invalid_arguments_never_request_model():
         await app.workers.wait_for_complete()
         assert not isinstance(app.screen, SessionScreen)
         assert not session.prompts
+
+
+def _notices(app: OperatorApp) -> list[str]:
+    from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+
+    return [
+        block._text
+        for block in app.query_one(TranscriptView).blocks()
+        if isinstance(block, NoticeBlock)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_copy_flag_puts_the_session_id_on_the_clipboard_without_opening_the_view():
+    """AC1 (decision D2): the flag copies the ID and does nothing else.
+
+    The receipt says "sent to", never "is on your clipboard": the write is OSC 52,
+    which no terminal acknowledges, and the ID is printed so a user whose terminal
+    ignored the write can still select it from the transcript.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._clipboard = ""
+        await _submit(pilot, app, "/session --copy")
+        await app.workers.wait_for_complete()
+        assert app._clipboard == "sess"
+        assert not isinstance(app.screen, SessionScreen)
+        assert "session ID sess sent to the clipboard" in _notices(app)
+        assert not session.prompts
+
+
+@pytest.mark.parametrize("text", ["/session another-id", "/session --cpy", "/session --copy now"])
+@pytest.mark.asyncio
+async def test_other_session_text_is_refused_and_names_the_copy_flag(text):
+    """AC2 (D2): anything but the exact flag is refused, and the refusal teaches it."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._clipboard = ""
+        await _submit(pilot, app, text)
+        await app.workers.wait_for_complete()
+        assert app._clipboard == ""
+        assert not isinstance(app.screen, SessionScreen)
+        assert "/session takes no text except --copy" in _notices(app)
+        assert not session.prompts
+
+
+@pytest.mark.parametrize("missing", ["no-session", "empty-id"])
+@pytest.mark.asyncio
+async def test_copy_flag_before_the_session_exists_copies_nothing(missing):
+    """AC3 (D2): no session, or one with no ID yet, is a warning — never an empty write."""
+
+    class NoIdSession(FakeSession):
+        @property
+        def session_id(self) -> str:
+            return ""
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._session = None if missing == "no-session" else NoIdSession()
+        app._clipboard = ""
+        await _submit(pilot, app, "/session --copy")
+        assert app._clipboard == ""
+        assert not isinstance(app.screen, SessionScreen)
+        assert "no session ID to copy" in _notices(app)
 
 
 @pytest.mark.asyncio

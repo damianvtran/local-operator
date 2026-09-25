@@ -7,6 +7,7 @@ The catalog has no acknowledgement path: listing a conversation is not reading i
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -620,6 +621,226 @@ def rank_entries(entries: Sequence[CatalogEntry]) -> tuple[CatalogEntry, ...]:
     return tuple(sorted(entries, key=lambda entry: entry.rank))
 
 
+# -- scoped, cursor-paged listings -------------------------------------------
+#
+# WHY THIS EXISTS. The chats sidebar used to read the WHOLE catalogue
+# (``limit=500``) on every ``catalogue`` frame, which on the operator's store is
+# a 2.1-4.5 s answer re-fired at the fleet's own churn cadence and held "no chats
+# are showing up" for the duration. A client that paints one group at a time
+# needs three things this module did not expose: a page OF A SCOPE, a position to
+# resume a walk from, and the group counts the collapsed rows badge.
+#
+# WHY A KEY CURSOR AND NOT AN OFFSET. ``load_catalog`` re-derives the ranking on
+# every call, so there is no stable "row 501": with an offset, a session created,
+# hidden, archived or deleted above the offset between two pages skips exactly as
+# many rows -- a certainty on a store this size, not a race. A cursor carrying the
+# ranking KEY of the page's last row says "everything ranked after this
+# position", so a deletion moves nothing.
+#
+# WHAT IT CANNOT PROMISE, stated rather than implied: the cursor is not a
+# snapshot. ``CatalogEntry.rank``'s first two terms (the category and the wake
+# band) move under a poll, so a row whose tier changes between two page reads can
+# be SKIPPED (it moved above the cursor) or SERVED TWICE (it moved below it). A
+# duplicate collapses in the client's id-keyed merge; a skipped tail row is
+# recovered by re-expanding the group, which discards its rows and re-reads the
+# scope from its head. The alternative -- a server-side materialised page set --
+# is per-client server state to invalidate and a second authority for what
+# exists, which is the trade this deliberately declines.
+
+#: The token's shape version. An unknown ``v`` is answered as
+#: ``cursor_missing: true`` (the scope's first page) rather than as an error, so
+#: the key can change shape later without a wire break.
+CURSOR_VERSION = 1
+
+#: The route refuses a longer token by name; stated here too, where it is minted.
+CURSOR_MAX_LENGTH = 256
+
+#: The two bindings a listing can be scoped to -- ``attachment.json``'s two
+#: halves, which is also the pair the renderer groups by.
+SCOPE_KINDS = ("team", "agent")
+
+#: The same bound the profile and team registries use
+#: (``desktop_profiles``' ``max_length=64``). Not a database limit: it is a
+#: refusal against a client that has concatenated something, and every name the
+#: registries will store fits under it.
+SCOPE_NAME_MAX_LENGTH = 64
+
+
+@dataclass(frozen=True)
+class CatalogueScope:
+    """The one binding a page is filtered to.
+
+    ``kind`` is ``"team"`` or ``"agent"``; ``name`` is the display name stored in
+    ``attachment.json``, NEVER validated against the live team/profile registry.
+    That is deliberate: the registries are renamed and pruned while a session's
+    attachment keeps the name it was attached under (``read_session_attachment``'s
+    docstring calls the stored name a historical fact), so a session stays
+    findable under the name it carries rather than under a name the registry
+    would now accept.
+    """
+
+    kind: str
+    name: str
+
+
+@dataclass(frozen=True)
+class CatalogueCursor:
+    """A decoded position: the scope it was minted for, and the rank tuple.
+
+    ``key`` is in the SAME shape as :attr:`CatalogEntry.rank` -- ``(tier,
+    wake_rank, -created_at, id)`` -- because the resume predicate is a plain
+    ``entry.rank > key`` and a restated comparison would be free to drift from
+    the sort. The wire carries ``created_at`` POSITIVE (it is the immutable
+    ordering fact, #800, and a readable token is worth one negation here).
+    """
+
+    scope: CatalogueScope | None
+    key: tuple[int, int, float, str]
+
+
+def encode_cursor(scope: CatalogueScope | None, key: tuple[int, int, float, str]) -> str:
+    """The position of a page's LAST row, opaque to the client.
+
+    ``scope`` is ``None`` for the unscoped head listing, which is a scope of its
+    own: a cursor minted for a team must not resume the head, and vice versa.
+
+    Opaque and NOT signed, deliberately: the token carries no authority -- it is
+    a position in a listing the client is already authenticated to read -- so a
+    forged one can only ask for a page it could ask for anyway. Anything
+    unparseable is answered as a first page, which is the same answer a client
+    gets with no cursor at all.
+    """
+    tier, wake_rank, negative_birth, session_id = key
+    payload = {
+        "v": CURSOR_VERSION,
+        "s": None if scope is None else [scope.kind, scope.name],
+        "k": [tier, wake_rank, -negative_birth, session_id],
+    }
+    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def decode_cursor(token: str) -> CatalogueCursor | None:
+    """Decode a token, or ``None`` when it cannot be used.
+
+    ``None`` IS NOT AN ERROR. The caller answers the scope's FIRST page with
+    ``cursor_missing: true``, exactly as ``HistoryPage.cursor_missing`` /
+    ``_absent_child_page`` do for the transcript tail: the remedy for an
+    unreadable, foreign or absent cursor is the same -- re-read from the top --
+    so every rejection resolves to that one answer rather than to a status code a
+    client would have to special-case. That is also what makes a token minted by
+    a newer build age into a first page instead of into a 500.
+    """
+    if not isinstance(token, str) or not token or len(token) > CURSOR_MAX_LENGTH:
+        return None
+    try:
+        padding = "=" * (-len(token) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(token + padding).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        # ``binascii.Error`` is a ``ValueError``; so is a JSON parse failure.
+        return None
+    if not isinstance(payload, dict) or payload.get("v") != CURSOR_VERSION:
+        return None
+    raw_scope = payload.get("s")
+    if raw_scope is None:
+        scope: CatalogueScope | None = None
+    elif (
+        isinstance(raw_scope, list)
+        and len(raw_scope) == 2
+        and all(isinstance(part, str) for part in raw_scope)
+    ):
+        scope = CatalogueScope(raw_scope[0], raw_scope[1])
+    else:
+        return None
+    raw_key = payload.get("k")
+    if not isinstance(raw_key, list) or len(raw_key) != 4:
+        return None
+    tier, wake_rank, birth, session_id = raw_key
+    # ``bool`` is an ``int`` in Python, so a JSON ``true`` would otherwise pass as
+    # a tier and compare as 0 or 1 against the sort's own integers.
+    if (
+        isinstance(tier, bool)
+        or not isinstance(tier, int)
+        or isinstance(wake_rank, bool)
+        or not isinstance(wake_rank, int)
+        or isinstance(birth, bool)
+        or not isinstance(birth, (int, float))
+        or not isinstance(session_id, str)
+    ):
+        return None
+    return CatalogueCursor(scope, (tier, wake_rank, -float(birth), session_id))
+
+
+def in_scope(binding: tuple[str, str], scope: CatalogueScope) -> bool:
+    """Whether one session's ``(team, agent)`` binding belongs to ``scope``.
+
+    THE RENDERER'S RULE, not a parallel one: ``chat-sidebar.tsx``'s ``children()``
+    groups a row by ``binding.team`` when it has one and by ``binding.agent``
+    otherwise. The ``not team`` half is load-bearing and must not be dropped -- a
+    session attached to a team AND carrying an agent name would otherwise appear
+    under an agent group the sidebar never draws it in.
+    """
+    team, agent = binding
+    if scope.kind == "team":
+        return team == scope.name
+    return not team and agent == scope.name
+
+
+@dataclass(frozen=True)
+class ScopeTally:
+    """One group's counts: what it holds, and how much of that is active."""
+
+    kind: str
+    name: str
+    total: int
+    active: int
+
+
+@dataclass(frozen=True)
+class ScopeCensus:
+    """How many conversations the listing holds, and in which groups.
+
+    Computed from rows the catalogue has ALREADY decorated and ranked (see
+    :func:`_census`), so the only cost it adds is the binding read the filter
+    needs anyway -- there is no second walk of the store and no second answer to
+    "which conversations exist".
+
+    ``unbound`` is the population the renderer has no group for: visible
+    sessions with no attachment at all.
+    """
+
+    total: int
+    active: int
+    unbound: int
+    scopes: tuple[ScopeTally, ...]
+
+
+@dataclass(frozen=True)
+class CatalogPage:
+    """One page of a scope, where to resume it, and the census when asked for.
+
+    ``entries`` is the PAGE followed by any off-page pinned rows, in that order --
+    the same concatenation :func:`load_catalog` returns, and the same shape the
+    desktop route already splits on ``limit``. ``next_cursor`` is minted from the
+    page's LAST row and never from an appended extra: an extra ranks below the
+    page by construction, so a cursor taken from one would re-serve the page.
+    The extras themselves are a FIRST-PAGE promise, appended only on the head
+    answer that carries no usable position -- see :func:`catalogue_page`.
+
+    THERE IS NO SEPARATE TRUNCATION FLAG, deliberately: ``next_cursor`` IS the
+    answer to "did this scope hold more than the page" (non-null exactly when it
+    did), so a boolean beside it would state one fact in two fields and let them
+    be stated two ways. ``truncated`` on the wire is derived from this field, and
+    the invariant ``(next_cursor is not None) == truncated`` is what the route's
+    tests pin.
+    """
+
+    entries: list[CatalogEntry]
+    next_cursor: str | None
+    cursor_missing: bool
+    counts: ScopeCensus | None
+
+
 def session_directory_name(session_id: str) -> bool:
     """Discovery metadata cannot redirect a catalog read outside sessions/."""
     return (
@@ -953,15 +1174,7 @@ _BIRTH_MEMO_ROOTS = 4
 
 def _memo_root(sessions: Path) -> dict[str, tuple[tuple[int, int, int], float]]:
     """This store's birth memo, created (and the oldest root evicted) on first use."""
-    key = str(sessions)
-    memo = _BIRTH_MEMO.get(key)
-    if memo is None:
-        # ``pop(..., None)``: the desktop lists from worker threads, so two
-        # calls can evict the same root; losing a memo only costs a re-read.
-        while len(_BIRTH_MEMO) >= _BIRTH_MEMO_ROOTS:
-            _BIRTH_MEMO.pop(next(iter(_BIRTH_MEMO), ""), None)
-        memo = _BIRTH_MEMO.setdefault(key, {})
-    return memo
+    return _memo_for(_BIRTH_MEMO, sessions)
 
 
 def _memoized_birth(sessions: Path, session_id: str) -> float:
@@ -991,6 +1204,94 @@ def _memoized_birth(sessions: Path, session_id: str) -> float:
         return session_created_at(Path(session_dir))
     memo[session_id] = (key, born)
     return born
+
+
+#: ``sessions root -> {session_id: ((st_ino, st_mtime_ns, st_size), (team, agent))}``
+#: for ``attachment.json``.
+#:
+#: WHY A MEMO AND NOT A PER-REQUEST READ. Every row's GROUP is a column of the
+#: chats sidebar, and the only source of a session's group is its attachment
+#: sidecar. Told to compute the per-group counts, or to answer one group's page,
+#: a listing must know every visible session's binding: the same 757 stats (warm)
+#: that a cold read of 217 sidecars measured at 367 ms, i.e. ~1.3 s on the
+#: operator's store -- unacceptable per request, fine as a first read.
+#:
+#: IDENTICAL IN MECHANISM TO :data:`_BIRTH_MEMO`, deliberately, down to the
+#: stat-before-read race resolution and the blind spot: the key is
+#: ``(st_ino, st_mtime_ns, st_size)`` of the sidecar, and the ONE writer is
+#: ``resume.write_session_attachment``, which is called on CHANGE (attach,
+#: detach, goal set) and never per turn. The publish is atomic (pid-named temp +
+#: ``replace``), so a replaced document lands a NEW inode under the old key and
+#: the next call re-reads rather than serving the previous attachment.
+#:
+#: NOT CACHED: a session with no readable sidecar -- absent, or present but
+#: unparseable. Its binding is ``("", "")``, which is also what
+#: ``read_session_attachment`` answers, so the same value is computed again next
+#: call. Caching it would freeze a session as unbound for the process's life on
+#: the strength of one torn read.
+#:
+#: BOUNDED exactly as the birth memo is: pruned to this call's candidates, at
+#: most :data:`_BIRTH_MEMO_ROOTS` roots.
+#:
+#: THE SHAPE BOTH MEMOS SHARE: ``{session_id: ((ino, mtime_ns, size), value)}``
+#: with ``value`` deliberately UNTYPED here. ``_BIRTH_MEMO``, declared once with
+#: its own docstring above, has the identical shape.
+#:
+#: A type variable was the first spelling and the type gate refused it: the two
+#: memos carry different value types (a birth float, a ``(team, agent)`` pair),
+#: and a variable made this helper's own ``setdefault`` un-inferable. The value
+#: type is annotated at the two CALL SITES (``_memo_root``, ``_memoized_binding``),
+#: which is where it actually matters; the shared part is the bound and the
+#: eviction order, and neither depends on what is stored.
+_BINDING_MEMO: dict[str, dict[str, tuple[tuple[int, int, int], tuple[str, str]]]] = {}
+
+
+def _memo_for(memo: dict[str, dict[str, Any]], sessions: Path) -> dict[str, Any]:
+    """One memo's map for this store, created (and the oldest root evicted) on first use.
+
+    The one implementation of "which map answers for this store, and how many
+    stores may be remembered" -- shared by the birth memo and the binding memo so
+    the two cannot disagree about the bound or about the eviction order.
+    """
+    key = str(sessions)
+    entry = memo.get(key)
+    if entry is None:
+        # ``pop(..., None)``: the desktop lists from worker threads, so two
+        # calls can evict the same root; losing a memo only costs a re-read.
+        while len(memo) >= _BIRTH_MEMO_ROOTS:
+            memo.pop(next(iter(memo), ""), None)
+        entry = memo.setdefault(key, {})
+    return entry
+
+
+def _memoized_binding(sessions: Path, session_id: str) -> tuple[str, str]:
+    """``(team, agent)`` for one candidate, re-read only when its sidecar changed.
+
+    STAT BEFORE READ for the reason :func:`_memoized_birth` states: a sidecar
+    replaced between the two lands its NEW value under the OLD key, so the next
+    call's stat misses and re-reads -- the race resolves toward a re-read, never
+    toward serving a stale attachment.
+    """
+    from local_operator.resume import ATTACHMENT_SIDECAR_NAME, read_session_attachment
+
+    memo = _memo_for(_BINDING_MEMO, sessions)
+    session_dir = os.path.join(sessions, session_id)
+    try:
+        info = os.stat(os.path.join(session_dir, ATTACHMENT_SIDECAR_NAME))
+    except OSError:
+        memo.pop(session_id, None)
+        return ("", "")
+    key = (info.st_ino, info.st_mtime_ns, info.st_size)
+    cached = memo.get(session_id)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    stored = read_session_attachment(Path(session_dir))
+    if stored is None:
+        memo.pop(session_id, None)
+        return ("", "")
+    value = (stored.team, stored.agent)
+    memo[session_id] = (key, value)
+    return value
 
 
 def _row_stat_key(session_dir: Path) -> tuple[float, int] | None:
@@ -1033,10 +1334,12 @@ def cached_session_rows(
     store rather than by every session ever listed.
     """
     from local_operator.resume import (
+        ORIGIN_AGENT_WORKSTREAM,
         ORIGIN_FORK,
         _recent_sessions_with_origin,
         session_name,
         wears_inherited_title,
+        workstream_opened_by,
     )
 
     rows: list[SessionRow] = []
@@ -1088,6 +1391,16 @@ def cached_session_rows(
                 # a page row does not read its birth a second time on a cold call.
                 created_at=_memoized_birth(directory / "sessions", session_id),
                 archived=archived,
+                # Gated on the origin the scan already parsed, like the fork
+                # probe above. The `_replace` on the cache-hit path carries the
+                # field through untouched, which is the right answer rather
+                # than a lucky one: the marker is written once, at creation,
+                # and the cache key is the transcript's stat — the same
+                # immutability argument `_ROW_CACHE` and the marker both rest
+                # on.
+                opened_by=(
+                    workstream_opened_by(session_dir) if origin == ORIGIN_AGENT_WORKSTREAM else None
+                ),
             )
         rows.append(row)
         if key is not None:
@@ -1130,64 +1443,33 @@ def subagent_population(directory: Path) -> int:
     return len(_scan_sessions(directory)[1])
 
 
-def load_catalog(
+def _ranked_candidates(
     directory: Path,
-    limit: int = CATALOG_SCAN_LIMIT,
     *,
     include_subagents: bool = False,
     include_archived: bool = False,
     pinned_hidden_ids: Sequence[str] = (),
-    pinned_off_page: Sequence[str] = (),
-) -> list[CatalogEntry]:
-    """Rank a shared lightweight candidate snapshot before materializing a page.
+) -> tuple[list[CatalogEntry], dict[str, tuple[str, float, str, bool]], set[str]]:
+    """Scan, decorate and rank: the catalogue's MIDDLE, and its only implementation.
 
-    Discovery already stats the whole namespace. Applying a recency cap before
-    attention lost old unread work; reading names for the entire store would
-    undo the sidebar's bounded I/O. Rank cheap rows first, then hydrate only the
-    requested prefix through the existing transcript-stat cache.
+    Extracted from :func:`load_catalog` WITHOUT a behaviour change -- the proof is
+    that every existing ``load_catalog`` test passes unchanged, in particular the
+    syscall model in ``tests/unit/session/test_catalog_scan_cost.py`` and the
+    byte-identical listing it pins -- because the scoped page
+    (:func:`catalogue_page`) needs this work and must not have a second
+    implementation of it. The ranking, the categories and the decoration stay one
+    authority each: another caller may SLICE the result differently and FILTER it,
+    never re-derive it.
 
-    STRICT ABOUT THE STORE, TOLERANT ABOUT THE DECORATION, and the difference is
-    deliberate. This is the listing a UI ADOPTS AS MEMBERSHIP — the desktop
-    sidebar replaces the rows it is showing with this answer, and the TUI's sets
-    its entries from it — so a store that exists but cannot be walked raises
-    (:class:`SessionStoreUnavailable`, which the desktop route answers as a
-    retryable 503) rather than being reported as "you have no conversations".
-    Decorations are the opposite case: they never change WHICH rows are
-    returned, only what is claimed about them, so a read that fails here is
-    named on each row's ``degraded`` and the listing still stands.
+    Returns the ranked entries (the order is TOTAL and UNIQUE -- the id term
+    breaks every tie -- which is what makes a rank-key cursor a position rather
+    than a guess), the ``source`` mapping the caller hydrates its page through,
+    and the scan's own set of hidden (subagent) names.
 
-    ``include_subagents`` adds a capped page of the hidden subagent population
-    as a SEPARATE layer, and ``pinned_hidden_ids`` keeps individually pinned
-    hidden sessions resolvable while that layer is off. Both are keyword-only
-    and default to the behaviour every existing caller already has: with the
-    layer off this function issues exactly the syscalls it did before.
-
-    ``include_archived`` asks the same question of the OTHER visibility axis,
-    and it is off by default because this listing IS a default listing: an
-    archived conversation is hidden everywhere a user browses and is still
-    resumable by explicit id. The filter itself lives in ``_scan_sessions``,
-    which every listing surface reaches through, so the sidebar, the picker,
-    the desktop catalogue and the search cannot disagree about which
-    conversations exist to be offered.
-
-    THE PINS FOLLOW THE SAME RULE, which is the case worth stating because it is
-    the one a reader will look for: an archived session that is PINNED is not
-    offered here, so it cannot appear in a sidebar's pinned section — and it
-    also does not become a PHANTOM there, because ``pinned_off_page`` resolves
-    ids out of the ranked list this function already filtered. The pin store is
-    untouched, so un-archiving restores the row to its section.
-    ``pinned_off_page`` keeps individually pinned sessions resolvable when the
-    PAGE does not carry them — the same promise ``pinned_hidden_ids`` makes on
-    the other axis, and a different one: a hidden id is absent because the
-    catalogue never built it, while an off-page id IS built here and is dropped
-    by the ``limit`` slice below. A caller that renders a pinned section must
-    have both, because a pin is a durable statement by the user and a recency
-    window is a property of the listing. The extras come back APPENDED, after
-    the page and in the ranking's own order (every extra ranks below every page
-    row by construction, so the concatenation IS rank order).
+    STRICT ABOUT THE STORE, TOLERANT ABOUT THE DECORATION, exactly as
+    :func:`load_catalog` documents: a store that exists but cannot be walked
+    raises, while a decoration that could not be read is named on each row.
     """
-    from dataclasses import replace
-
     from local_operator.resume import (
         _scan_sessions,
         _scanned_entries,
@@ -1458,27 +1740,78 @@ def load_catalog(
             + subagent_entries
         )
     )
-    # THE PAGE, THEN THE PINS THAT FELL OUTSIDE IT. The slice is a RECENCY
-    # window, and a pin is the one thing in this listing that is not recency: it
-    # is a durable statement the user made about a conversation. On a store
-    # larger than the client's page a pinned session is therefore UNRENDERABLE
-    # without this — the row the client needs to draw in its pinned section is
-    # exactly the row the window removes — so the caller that renders pins names
-    # them and gets them back here.
-    #
-    # WHAT THIS COSTS: nothing measurable, and that is the reason it lives here
-    # rather than in a caller. Every candidate's row, decoration and attention
-    # lookup has ALREADY happened by this point — the slice is the only thing
-    # that discarded these entries — so an extra costs one membership test, not
-    # a scan, a hydration or a second `cached_session_rows` call. A caller-side
-    # union would have to re-scan the store or re-hydrate by id, and the id
-    # lookup it would need is the one thing this function does not return.
-    #
-    # SILENTLY ABSENT WHEN IT CANNOT BE RESOLVED, deliberately: an id that is
-    # not in ``ranked`` at all — a hidden (delegated) run, which never reaches
-    # ``candidates``, or a directory that has since been deleted — is simply not
-    # appended, rather than raising. The caller asked for a row it would like to
-    # render, not for a promise this store cannot keep.
+    return ranked, source, hidden
+
+
+def load_catalog(
+    directory: Path,
+    limit: int = CATALOG_SCAN_LIMIT,
+    *,
+    include_subagents: bool = False,
+    include_archived: bool = False,
+    pinned_hidden_ids: Sequence[str] = (),
+    pinned_off_page: Sequence[str] = (),
+) -> list[CatalogEntry]:
+    """Rank a shared lightweight candidate snapshot before materializing a page.
+
+    Discovery already stats the whole namespace. Applying a recency cap before
+    attention lost old unread work; reading names for the entire store would
+    undo the sidebar's bounded I/O. Rank cheap rows first, then hydrate only the
+    requested prefix through the existing transcript-stat cache.
+
+    STRICT ABOUT THE STORE, TOLERANT ABOUT THE DECORATION, and the difference is
+    deliberate. This is the listing a UI ADOPTS AS MEMBERSHIP — the desktop
+    sidebar replaces the rows it is showing with this answer, and the TUI's sets
+    its entries from it — so a store that exists but cannot be walked raises
+    (:class:`SessionStoreUnavailable`, which the desktop route answers as a
+    retryable 503) rather than being reported as "you have no conversations".
+    Decorations are the opposite case: they never change WHICH rows are
+    returned, only what is claimed about them, so a read that fails here is
+    named on each row's ``degraded`` and the listing still stands.
+
+    ``include_subagents`` adds a capped page of the hidden subagent population
+    as a SEPARATE layer, and ``pinned_hidden_ids`` keeps individually pinned
+    hidden sessions resolvable while that layer is off. Both are keyword-only
+    and default to the behaviour every existing caller already has: with the
+    layer off this function issues exactly the syscalls it did before.
+
+    ``include_archived`` asks the same question of the OTHER visibility axis,
+    and it is off by default because this listing IS a default listing: an
+    archived conversation is hidden everywhere a user browses and is still
+    resumable by explicit id. The filter itself lives in ``_scan_sessions``,
+    which every listing surface reaches through, so the sidebar, the picker,
+    the desktop catalogue and the search cannot disagree about which
+    conversations exist to be offered.
+
+    THE PINS FOLLOW THE SAME RULE, which is the case worth stating because it is
+    the one a reader will look for: an archived session that is PINNED is not
+    offered here, so it cannot appear in a sidebar's pinned section — and it
+    also does not become a PHANTOM there, because ``pinned_off_page`` resolves
+    ids out of the ranked list this function already filtered. The pin store is
+    untouched, so un-archiving restores the row to its section.
+    ``pinned_off_page`` keeps individually pinned sessions resolvable when the
+    PAGE does not carry them — the same promise ``pinned_hidden_ids`` makes on
+    the other axis, and a different one: a hidden id is absent because the
+    catalogue never built it, while an off-page id IS built here and is dropped
+    by the ``limit`` slice below. A caller that renders a pinned section must
+    have both, because a pin is a durable statement by the user and a recency
+    window is a property of the listing. The extras come back APPENDED, after
+    the page and in the ranking's own order (every extra ranks below every page
+    row by construction, so the concatenation IS rank order).
+    """
+    # A THIN SHELL OVER THE SHARED MIDDLE, and a refactor rather than a change of
+    # promise: the scan-to-ranking half is ``_ranked_candidates`` and the
+    # page-to-row half is ``_hydrate``, so the scoped listing reuses both without a
+    # second spelling of either. Signature, return type and behaviour are
+    # unchanged, so every caller that does not want a scope keeps getting exactly
+    # the listing it got before.
+
+    ranked, source, _hidden = _ranked_candidates(
+        directory,
+        include_subagents=include_subagents,
+        include_archived=include_archived,
+        pinned_hidden_ids=pinned_hidden_ids,
+    )
     entries = ranked[:limit]
     if pinned_off_page:
         # The window is the caller's own page bound, so a pinned row sitting
@@ -1503,6 +1836,23 @@ def load_catalog(
     # the page, and it comes back appended, which is cheaper than raising the
     # limit for everyone to serve the few rows a user pinned.
     # Pinned by `test_the_layer_competes_for_the_page_on_a_full_store`.
+    return _hydrate(directory, source, entries)
+
+
+def _hydrate(
+    directory: Path,
+    source: dict[str, tuple[str, float, str, bool]],
+    entries: list[CatalogEntry],
+) -> list[CatalogEntry]:
+    """Give the chosen page its real name, fork mark, archive flag and opener.
+
+    The LAST step and the only per-row cost that scales with the page rather than
+    with the store: ``cached_session_rows`` is stat-validated by the transcript,
+    and a row it declines to hydrate (no readable transcript) keeps the scan's own
+    name rather than disappearing.
+    """
+    from dataclasses import replace
+
     named = {
         row.id: row
         for row in cached_session_rows(
@@ -1520,6 +1870,13 @@ def load_catalog(
                     # rather than from the row cache; see
                     # ``cached_session_rows``.
                     archived=named[entry.id].archived,
+                    # WHO opened this row, for a workstream only (``None``
+                    # otherwise). Hydration is an allow-list of fields, so
+                    # leaving it out here would drop the attribution on the one
+                    # path every desktop sidebar row travels — the rows would
+                    # be listed and read as the operator's own, which is
+                    # exactly the confusion the field exists to remove.
+                    opened_by=named[entry.id].opened_by,
                 ),
             )
             if entry.id in named
@@ -1527,3 +1884,183 @@ def load_catalog(
         )
         for entry in entries
     ]
+
+
+def _census(ranked: Sequence[CatalogEntry], bindings: Mapping[str, tuple[str, str]]) -> ScopeCensus:
+    """Per-group totals from rows already ranked, and bindings already read.
+
+    NO EXTRA PER-ROW WORK, which is the fact that makes the counts affordable at
+    all: ``load_catalog`` decorates, ranks and reads attention for EVERY candidate
+    and then discards all but a page (``CatalogEntry.active`` is already computed
+    on every one of them), so ``total`` is a count over the bindings and
+    ``active`` a sum over ``entry.active`` -- the counts' own cost is zero.
+
+    THE POPULATION IS THE ONE THE PANEL CAN DRAW: visible sessions that are NOT
+    ARCHIVED. Every default list in the app hides archived conversations, and the
+    bug this whole change answers was a number that disagreed with the rows -- a
+    badge inflated by rows no default list can show is a badge that invites a
+    person into an empty group. The archive flag is stamped by the SCAN, so this
+    is a predicate over rows that are already here rather than a second walk; the
+    listing's own ``include_archived`` still governs which ROWS come back, which
+    is why a request may carry archived rows while the census does not count them.
+
+    Subagent rows are excluded. They are not conversations offered in the
+    listing; they are the opt-in hidden layer, they carry no attachment of their
+    own, and counting them would put the hidden population's size into a badge
+    drawn beside the user's own work.
+    """
+    totals: dict[tuple[str, str], int] = {}
+    actives: dict[tuple[str, str], int] = {}
+    total = active = unbound = 0
+    for entry in ranked:
+        if entry.subagent or entry.row.archived:
+            continue
+        total += 1
+        if entry.active:
+            active += 1
+        team, agent = bindings[entry.id]
+        if not team and not agent:
+            unbound += 1
+            continue
+        # A session attached to a team AND carrying an agent name belongs to the
+        # TEAM group -- the same rule ``in_scope`` applies, spelled once here
+        # because the census is what the badge is drawn from.
+        key = ("team", team) if team else ("agent", agent)
+        totals[key] = totals.get(key, 0) + 1
+        if entry.active:
+            actives[key] = actives.get(key, 0) + 1
+    scopes = tuple(
+        ScopeTally(kind, name, count, actives.get((kind, name), 0))
+        # ``-total`` then kind then name: the descending-size order a badge list
+        # is read in, with the sort's own tie-break so two reads of one store
+        # cannot disagree.
+        for (kind, name), count in sorted(
+            totals.items(), key=lambda item: (-item[1], item[0][0], item[0][1])
+        )
+    )
+    return ScopeCensus(total=total, active=active, unbound=unbound, scopes=scopes)
+
+
+def catalogue_page(
+    directory: Path,
+    *,
+    scope: CatalogueScope | None = None,
+    cursor: str | None = None,
+    limit: int = CATALOG_SCAN_LIMIT,
+    include_archived: bool = False,
+    with_counts: bool = False,
+    pinned_off_page: Sequence[str] = (),
+    pinned_hidden_ids: Sequence[str] = (),
+) -> CatalogPage:
+    """One scope's page, its resume position, and (opt-in) the group census.
+
+    ``limit`` bounds the PAGE WITHIN THE SCOPE, so a client can ask for 25 of one
+    team's 434 conversations and get that team's top 25 -- not the head page
+    filtered to whatever happened to survive it, which is the defect this exists
+    to remove on a store where 151 of ``team:lopdev``'s rows are past a 500-row
+    page. ``limit`` must be at least 1, which the route bounds with FastAPI's own
+    ``ge=1, le=500`` on a parameter this change did NOT introduce -- an out-of-range
+    ``limit`` is answered by the framework's generic validation detail, exactly as
+    it is on ``main`` -- because a zero-length page has no last row to mint a
+    resume position from.
+
+    THE FILTER SITS AFTER RANKING AND BEFORE THE SLICE, and that is the only
+    correct place for it: filtering the LISTING first would re-derive the ordering
+    (the rank is computed over all candidates, and a scope's top row is not the
+    head page's top row), and filtering the page would answer "this team's chats"
+    with whatever of them the global page carried.
+
+    A CURSOR IS A POSITION, NOT AN IDENTITY: the resume is ``entry.rank >
+    cursor.key``, so the row the cursor was minted from may be deleted between
+    pages without breaking the walk. See this section's header for the
+    duplicate/skip exposure that comes with a key that moves under a poll.
+
+    AN UNUSABLE OR FOREIGN CURSOR IS NOT AN ERROR: the answer is the scope's first
+    page with ``cursor_missing: true``. An empty scope is not an error either --
+    it is a 200 with an empty page and a census entry of 0 -- because a team with
+    no conversations yet is a legitimate state and the name is deliberately not
+    validated against the registry.
+
+    ``next_cursor`` is non-null exactly when ``truncated`` is true, which is the
+    invariant the route's model documents and its tests pin.
+    """
+    ranked, source, _hidden = _ranked_candidates(
+        directory,
+        include_archived=include_archived,
+        pinned_hidden_ids=pinned_hidden_ids,
+    )
+    # THE BINDING READ, once, and only when the answer needs it: a scoped page
+    # cannot be filtered without every candidate's binding and the census is a
+    # counter over the same rows, so one read serves both. That is what makes a
+    # scoped page cost what the head answer the client already asks for costs
+    # (`with_counts=true`) rather than a new term on top of it.
+    bindings: dict[str, tuple[str, str]] = {}
+    counts: ScopeCensus | None = None
+    if scope is not None or with_counts:
+        sessions_root = directory / "sessions"
+        bindings = {entry.id: _memoized_binding(sessions_root, entry.id) for entry in ranked}
+        # Pruned to THIS call's candidates, exactly as the birth memo is: a bound
+        # on the map rather than a cache that grows with the store's history.
+        memo = _memo_for(_BINDING_MEMO, sessions_root)
+        for stale in memo.keys() - set(bindings):
+            memo.pop(stale, None)
+        if with_counts:
+            # BEFORE the scope and cursor filters: the census describes the whole
+            # listing, which is what a collapsed group's badge is drawn from.
+            counts = _census(ranked, bindings)
+    if scope is not None:
+        ranked = [entry for entry in ranked if in_scope(bindings[entry.id], scope)]
+    position = decode_cursor(cursor) if cursor else None
+    # A FOREIGN cursor is refused the same way an unreadable one is: the scope is
+    # part of the token, so a page resumed with another scope's position would
+    # otherwise silently answer a filtered list from an unfiltered position.
+    cursor_missing = bool(cursor) and (position is None or position.scope != scope)
+    if position is not None and not cursor_missing:
+        ranked = [entry for entry in ranked if entry.rank > position.key]
+    # ``limit + 1`` is the truncation probe and nothing else -- one row beyond the
+    # page answers "did the scope hold more", and nothing in the scan is bounded
+    # by the number (it is limit-independent), so the extra row costs one rank
+    # position.
+    window = ranked[: limit + 1]
+    entries = window[:limit]
+    truncated = len(window) > limit
+    # Minted EXACTLY when ``truncated`` on every answer the route can produce
+    # (the invariant its model documents), and always from the page's last row.
+    # ``entries`` is therefore non-empty whenever ``truncated`` is -- ``limit`` is
+    # at least 1 on the route, which is why it refuses ``limit=0`` by name -- and
+    # the emptiness check is here so a direct caller that ignored that
+    # precondition gets no cursor rather than an ``IndexError``.
+    next_cursor = encode_cursor(scope, entries[-1].rank) if entries and truncated else None
+    if pinned_off_page and scope is None and (position is None or cursor_missing):
+        # FIRST PAGE OF THE HEAD ONLY, and the position clause is the half QA's
+        # walk found missing: the extras are appended from ``ranked[limit:]``,
+        # and a later page's ``ranked`` is already filtered past its cursor -- so
+        # EVERY such page appended every pin still below it, and a walk served
+        # the same pinned row twice (once as an extra, once as a page row). The
+        # promise this list exists for is the one the pin store makes: the whole
+        # pinned set rides the page the client paints first, and each later page
+        # is only the scope's continuation.
+        #
+        # GATED ON ``cursor_missing``, which is exactly the sentence "this answer
+        # IS the scope's first page" -- and that predicate has TWO halves: no
+        # usable position at all, and a position that decoded but is not usable
+        # HERE (unreadable, minted for another scope, or minted for the other
+        # request shape). ``position is None`` alone covers only the first half:
+        # a FOREIGN token decodes, so the resume filter is skipped and the page
+        # really is the first page, while the extras were omitted from it -- and
+        # because that same answer is what settles the client's pin facts, the
+        # Pinned section could lose the rows this list exists to keep. Reading
+        # the flag rather than re-deriving the disjunction is also why the two
+        # can never drift apart again.
+        #
+        # HEAD SCOPE ONLY. A scoped answer cannot speak for the pinned set -- the
+        # client gates its pin facts on the head answer for exactly this reason --
+        # and an extra here would be a row outside the scope it asked for.
+        wanted = set(pinned_off_page)
+        entries += [entry for entry in ranked[limit:] if entry.id in wanted]
+    return CatalogPage(
+        entries=_hydrate(directory, source, entries),
+        next_cursor=next_cursor,
+        cursor_missing=cursor_missing,
+        counts=counts,
+    )

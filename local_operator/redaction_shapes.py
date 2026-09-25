@@ -104,8 +104,11 @@ coverage, where under-masking is still a leak and over-masking is still a defect
 
 from __future__ import annotations
 
+import base64
 import codecs
+import json
 import re
+import urllib.parse
 from dataclasses import dataclass, replace
 from typing import (
     Callable,
@@ -806,6 +809,137 @@ _URL_LIKE = re.compile(r"(?i)^[a-z][a-z0-9+.\-]*://")
 #: A dotted attribute path (``current.session_key``, ``models-dev.listing``).
 _DOTTED_PATH = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)+")
 
+#: The characters a type ANNOTATION may be spelled with, used as a whole-value
+#: confinement check — NECESSARY, not sufficient.
+#:
+#: A value outside it is decidable as a credential by alphabet alone: a quote, ``/``,
+#: ``@``, ``=``, ``$``, ``%`` or a backtick is in no type annotation, so membership
+#: REJECTS a credential spelling that carries one of those. It does NOT accept a
+#: value as a type, and that distinction is what agent review R1-1 measured the cost
+#: of believing: a human-chosen password is usually spelled with no symbol at all,
+#: and ``&Secret1`` and ``Camel::Word9`` are both confined to this alphabet while
+#: being credential material. The alphabet narrows the class; the parser and the
+#: conditions in :func:`_is_type_expression` are what decide.
+#:
+#: ``[``/``]``/``(``/``)`` are deliberately absent: a value carrying one of them is
+#: released by :data:`_EXPRESSION_CHARS` before this test runs — a PRE-EXISTING
+#: release, identical at base and head, and not one this clause introduces.
+_TYPE_ALPHABET = frozenset(
+    "abcdefghijklmnopqrstuvwxyz" "ABCDEFGHIJKLMNOPQRSTUVWXYZ" "0123456789" "_<>,:&'."
+)
+
+#: Primitive type names, in every language whose source this pass reads.
+#:
+#: A primitive is what lets a generic's ARGUMENT prove itself a type without being
+#: CamelCase: ``Vec<u8>``, ``Map<string, string>``, ``Optional[str]``. Without it
+#: the argument rule would have to accept any lowercase word, and a value spelled
+#: ``SomePassword<secret>`` would be read as a type.
+#:
+#: **A primitive proves a type only as an ARGUMENT of a parsed generic application**
+#: (agent review R1-2). Several of these words are ordinary English in the languages
+#: that use them — ``any``, ``void``, ``object``, ``null``, ``type`` — so an ungated
+#: allowance released ``Pass<int>`` and ``Pass<any>``, a passphrase whose
+#: argument happens to be one. The gate is enforced where the argument is read, in
+#: :func:`_parse_type_expression`; a value with no argument list never reaches the
+#: allowance at all, which is also what keeps a bare ``&Password1`` out.
+_TYPE_PRIMITIVES = frozenset(
+    {
+        # Rust
+        "bool",
+        "char",
+        "str",
+        "u8",
+        "u16",
+        "u32",
+        "u64",
+        "u128",
+        "usize",
+        "i8",
+        "i16",
+        "i32",
+        "i64",
+        "i128",
+        "isize",
+        "f32",
+        "f64",
+        # TypeScript / JavaScript
+        "string",
+        "number",
+        "boolean",
+        "any",
+        "unknown",
+        "never",
+        "void",
+        "object",
+        "symbol",
+        "bigint",
+        "undefined",
+        "null",
+        # Python
+        "int",
+        "float",
+        "complex",
+        "bytes",
+        "bytearray",
+        "list",
+        "dict",
+        "set",
+        "tuple",
+        "frozenset",
+        "type",
+        "None",
+    }
+)
+
+#: How deep a nested type application may go before the value stops being read as
+#: a type. ``Arc<Mutex<String>>`` is 2, ``Option<Vec<HashMap<K, V>>>`` is 3. This
+#: is a bound on RECURSION — a pathological value must not drive the parser — and
+#: not a claim about how deeply real annotations nest.
+_TYPE_NESTING_LIMIT = 8
+
+#: The spelling of a TYPE NAME: CamelCase, or a single capital with anything after
+#: it. This is the same judgement the bare-name clause in
+#: :func:`_value_is_not_a_credential` makes inline, named here because the type
+#: parser needs it too and two spellings of one rule drift.
+#:
+#: A digit is ALLOWED here, unlike in that clause: a type name legitimately carries
+#: one (``Base64``, ``Sha256``, ``Utf8``), and the digit test there exists to keep a
+#: real AWS session token — a bare CamelCase run of digits and letters — out. A
+#: value reaching this test has already had to parse as a type application, which
+#: no session token does. **Where a digit is allowed is decided by
+#: :func:`_carries_a_non_primitive_digit`, not by this pattern**: the release is
+#: confined to the digit-free residual, so a digit-carrying name is read as a type
+#: only when it is a primitive.
+_TYPE_NAME = re.compile(r"[A-Z][A-Za-z0-9]*|[a-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*")
+
+#: One IDENTIFIER in a value, for the digit confinement below: a name may carry
+#: digits, and ``1`` alone (a const-generic argument) is deliberately not a match.
+_TYPE_NAME_TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+#: The stems a CREDENTIAL WORD begins with, matched against a type application's
+#: BASE (agent review R1-2). A primitive argument is ordinary English in the
+#: languages that use primitives — ``any``, ``void``, ``object``, ``null``, ``int``
+#: — so an application whose base is spelled like a credential and whose argument is
+#: a bare primitive (``Pass<int>``, ``Secret<str>``, ``Token<void>``) is a
+#: passphrase, not an annotation. ``Pass`` is not a whole credential word, which is
+#: why the match is a STEM and not :func:`is_credential_name`.
+_CREDENTIAL_STEMS = (
+    "pass",
+    "passwd",
+    "pwd",
+    "secret",
+    "token",
+    "credential",
+    "auth",
+    "login",
+    "apikey",
+)
+
+#: A qualified path with NO argument list: ``Sv::Secret``, ``collections::HashMap``.
+#: Used only to refuse a value that is a path and nothing else — the spelling a person
+#: reaches for when a credential carries ``::`` (agent review R1-1).
+_TYPE_PATH_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+")
+
 
 #: Qualifier words that make an otherwise ambiguous ``*_KEY``/``*_KEYS`` name a
 #: CREDENTIAL name rather than a code one. ``PRIVATE_KEY`` is a secret;
@@ -966,6 +1100,394 @@ def _repeats_its_own_name(value: str, name: str) -> bool:
     return value_norm in name_norm or name_norm in value_norm
 
 
+def _carries_a_non_primitive_digit(value: str) -> bool:
+    """Whether any NAME in ``value`` carries a digit without being a primitive.
+
+    The release is confined to the DIGIT-FREE residual, and this is the
+    enforcement of that half of the condition: a digit is read as a type's only
+    where it belongs to a primitive type name (``u8``, ``i32``, ``f64``), because
+    ``Option<Vec<u8>>`` is a real annotation and no human password is spelled
+    ``u8``. Everywhere else a digit is exactly what separates a chosen password
+    from a type spelling: ``Ident<Ident7>`` and ``Ident7<Ident>`` are released
+    WHOLE by an arm that ignores this, with no hit at all — the dangerous
+    direction, and one the corpus had no row for (agent review R1-1).
+
+    The cost is the false positive this re-admits, deliberately: ``Option<Sha256>``
+    is a real type name and is now masked. That is the safe direction — the same
+    class the clause exists to *reduce* rather than to eliminate — and masking a
+    type is strictly better than releasing a credential.
+    """
+    for token in _TYPE_NAME_TOKEN.findall(value):
+        if any(char.isdigit() for char in token) and token not in _TYPE_PRIMITIVES:
+            return True
+    return False
+
+
+def _is_type_leaf_name(segment: str) -> bool:
+    """Whether a path segment is spelled as a TYPE name rather than a word.
+
+    This is the existing CamelCase judgement, reused: a type's own name begins
+    with a capital (``String``, ``HashMap``, ``Foo``) or is a single capital
+    (``T``, ``K``), and a language primitive is in :data:`_TYPE_PRIMITIVES`. A
+    lowercase word is neither, which is what keeps ``Foo<word>`` out.
+    """
+    if not segment:
+        return False
+    if segment in _TYPE_PRIMITIVES or segment == "_":
+        return True
+    return bool(_TYPE_NAME.fullmatch(segment))
+
+
+def _parse_generic_argument(text: str, index: int, end: int, depth: int) -> tuple[bool, int, bool]:
+    """Parse one generic argument: a lifetime, a const integer, or a type.
+
+    The third value says whether the argument is evidence that the enclosing
+    value is a TYPE. A lifetime and a const-generic integer are both legal
+    arguments (``Cow<'a, str>``, ``GenericArray<u8, N>``) but neither is proof on
+    its own, which is why the caller requires at least one argument that is.
+    """
+    if index < end and text[index] == "'":
+        index += 1
+        start = index
+        while index < end and (text[index].isalnum() or text[index] == "_"):
+            index += 1
+        return (index > start), index, True
+    if index < end and text[index].isdigit():
+        while index < end and text[index].isdigit():
+            index += 1
+        return True, index, False
+    return _parse_type_expression(text, index, end, depth)
+
+
+def _parse_type_expression(text: str, index: int, end: int, depth: int) -> tuple[bool, int, bool]:
+    """Parse ONE type expression from ``text[index:end]``.
+
+    The grammar is the one real annotations are written in, and it is checked on
+    the WHOLE value rather than searched inside it. That is the load-bearing
+    part: a credential that merely contains an angle bracket does not parse as a
+    type, and the parser has to run out of characters at the same place the value
+    does.
+
+    Returns ``(parsed, next_index, is_a_type_name)``, where the last element says
+    whether what was parsed is spelled as a type NAME — the distinction the
+    caller uses to reject ``abc::def`` and ``Foo<word>``.
+
+    **An unterminated argument list is accepted**, and that is the common case
+    rather than an edge: the assigned-value group cannot cross whitespace, so
+    ``HashMap<String, String>`` reaches this rule as ``HashMap<String`` and
+    ``Option<Vec<u8>>`` as ``Option<Vec<u8``. The value is therefore allowed to
+    run out of characters inside a generic, provided the arguments it did carry
+    are types — which is what an annotation looks like when it is cut at a
+    delimiter, and what no credential-shaped value looks like.
+    """
+    if depth > _TYPE_NESTING_LIMIT:
+        return False, index, False
+    # An optional reference marker, with its optional lifetime: ``&``, ``&'a``.
+    while index < end and text[index] == "&":
+        index += 1
+        if index < end and text[index] == "'":
+            index += 1
+            while index < end and (text[index].isalnum() or text[index] == "_"):
+                index += 1
+    start = index
+    while index < end and (text[index].isalnum() or text[index] == "_"):
+        index += 1
+    if index == start:
+        return False, index, False
+    segments = [text[start:index]]
+    while text.startswith("::", index):
+        index += 2
+        segment_start = index
+        while index < end and (text[index].isalnum() or text[index] == "_"):
+            index += 1
+        if index == segment_start:
+            return False, index, False
+        segments.append(text[segment_start:index])
+    # Only the LEAF has to be a type name: ``std::collections::HashMap`` is
+    # spelled with lowercase module segments, and demanding case from them would
+    # miss every qualified path in real code.
+    is_a_type_name = _is_type_leaf_name(segments[-1])
+    if index < end and text[index] == "<":
+        index += 1
+        argument_is_a_type = False
+        argued = False
+        argument_names_are_types = True
+        while index < end:
+            argument_start = index
+            parsed, index, argument_is_a_type_here = _parse_generic_argument(
+                text, index, end, depth + 1
+            )
+            if not parsed:
+                return False, index, is_a_type_name
+            argued = True
+            if argument_is_a_type_here:
+                argument_is_a_type = True
+            elif not _is_type_leaf_name(text[argument_start:index]):
+                # A lowercase word that is NOT a type name: ``Foo<word>``. A
+                # PRIMITIVE is a type name here, which is how ``Vec<u8>`` passes —
+                # and the allowance is spent only where an argument list was
+                # actually parsed.
+                #
+                # The WHOLE slice is read here, and that is deliberate (the family
+                # hunt's site 6). This line is reached only when the argument parsed as
+                # a NON-type, so it can only ever MASK — a whole-string read in the
+                # safe direction. A previous round claimed that token-splitting it
+                # would RELEASE qualified arguments; that claim has NO witness and is
+                # withdrawn. Patching this line to split the slice on ``::`` and accept
+                # any token moved the final verdict for 0 of 400 candidate values (and
+                # 0 in the reviewer's own 4752- and 1080-candidate sweeps): a
+                # ``::``-qualified slice that IS a type name is consumed as a type
+                # upstream and never arrives here. Leaving the whole-slice read is
+                # still the right call; the reason is that it is harmless, not that
+                # splitting it would leak (agent review R4-2).
+                argument_names_are_types = False
+            if index < end and text[index] == ",":
+                index += 1
+                continue
+            if index < end and text[index] == ">":
+                index += 1
+            break
+        if not argued or not argument_names_are_types:
+            # ``Foo<>`` (nothing to prove) or ``Foo<word>`` (a word is not a type):
+            # neither is an application, so neither is released.
+            return False, index, is_a_type_name
+        if not argument_is_a_type:
+            # ``Foo<word>`` — a generic application whose arguments are not
+            # types. That spelling is exactly how a person writes a passphrase
+            # with angle brackets in it, so it is NOT released.
+            return False, index, is_a_type_name
+        # The BASE's own verdict is NOT overwritten here, and that is the second
+        # half of R1-1: forcing it True released a lowercase base (``foo<Bar>``,
+        # ``abc::def<Bar>``, ``Correcthorse<Battery7>``) under a strong credential
+        # name. Only the argument is new evidence; a generic spelling does not
+        # make a word-shaped base into a type.
+    return True, index, is_a_type_name
+
+
+def _type_token_segments(token: str) -> tuple[str, ...]:
+    """EVERY name a type token is spelled with, markers and qualification stripped.
+
+    A token in this grammar carries things beside its own name: a ``::``
+    qualification (``foo::bar::Baz``) and a reference marker (``&``, ``&&``). Both are
+    SPELLING, and every guard here that decides a release on what a token is CALLED has
+    to read the same part of it.
+
+    **A POSITION, not a SITE, is what this returns — and that is the lesson of the
+    fifth round on this clause.** R1-1 was a digit position; R1-2 and R2-1 read the
+    ARGUMENT where the fact was the base; R3-1 read the WHOLE BASE where the fact is the
+    leaf; R4-1 read the FIRST and LAST segments where the fact is ANY segment. The three
+    earlier fixes each widened a read at a call SITE and then enumerated SITES — and
+    R4-1 hid INSIDE site 1, one the enumeration marked FIXED, because a site can be
+    named correctly while the window it reads is still narrower than the vocabulary it
+    refuses. So this returns the whole segment set rather than one leaf: a consumer that
+    tests every entry cannot read a narrower window than the vocabulary it refuses, and
+    a positional omission is then structurally impossible rather than enumerated away.
+
+    One helper rather than a ``split`` per call site, because the two release-side tests
+    in :func:`_is_type_expression` are the SAME extraction
+    (:func:`_base_is_a_credential_stem` and :func:`is_credential_name`), and a fix
+    applied to one of them and not the other is exactly the miss R3-1 was.
+
+    The token's OWN spelling leads the tuple, so a consumer keeps the whole-string read
+    the first-segment test used to provide (``startswith`` on the whole token can only
+    see segment 0) while gaining the interior ones.
+
+    Only ``::`` and ``&`` are stripped, and that is the whole REACHABLE set: the
+    assigned value's own grammar excludes whitespace, so a lifetime reference can only
+    arrive FUSED to the name it qualifies, and a fused lifetime is not separable from
+    that name by any split — there is no marker left to cut on. A reference to a
+    primitive therefore still reads as that primitive, which is what keeps ``&str``
+    released.
+    """
+    stripped = token.lstrip("&")
+    # ``dict.fromkeys`` de-duplicates while keeping the order, so a single-segment token
+    # (``Pass``, ``&str``) yields one entry rather than the same name twice.
+    return tuple(dict.fromkeys((stripped, *stripped.split("::"))))
+
+
+def _base_is_a_credential_stem(base: str) -> bool:
+    """Whether a type application's BASE is spelled like a credential word.
+
+    It decides the release on the BASE alone, whatever the argument is (agent
+    review R1-2, R2-1). ``Vec<u8>``, ``Map<string, string>`` and ``Arc<Mutex<str>>``
+    keep their release because a type's own base is a type name; a base a person
+    reaches for when they choose a password — ``Pass``, ``Passphrase``, ``Passkey``,
+    ``Passwd``, ``Secret``, ``Token``, ``Auth``, ``Login``, ``ApiKey`` — does not,
+    because a passphrase over such a base is a chosen value far more often than it
+    is an annotation, and a credential released is worse than a type masked.
+
+    **The test is on the BASE and not the argument, and that is the lesson of two
+    review rounds.** R1-2 gated this on a bare primitive argument and so released
+    ``Pass<int>``; R2-1 then shipped the same inversion one spelling over and
+    released ``Pass<Phrase>``, ``Auth<Token>`` and ``Pass<Vec<u8>>`` whole, with no
+    hit. Any later widening of the ARGUMENT grammar must not be able to re-open this
+    class, which is what putting the refusal on the base buys.
+
+    **The base is read as EVERY one of its ``::`` segments** (agent reviews R3-1 and
+    R4-1), because the discriminating fact is the NAME the token denotes and a
+    qualification hides that name behind a path: a qualified spelling whose ANY segment
+    is in :data:`_CREDENTIAL_STEMS` is that credential word with a namespace attached,
+    and each narrower window released a whole class with NO hit — so the value was not
+    even registered for the exact-value pass.
+
+    The windows, and what each one cost, because the series is the point:
+
+    * the WHOLE BASE alone released the qualified class — 360 of 360 combinations of 5
+      module prefixes, 12 stem leaves and 6 argument shapes (R3-1), and the
+      no-argument spelling (a bare qualified path) released through the
+      path-convention branch too;
+    * the whole base PLUS its LEAF fixed that and still released a stem in an INTERIOR
+      segment — ``foo::Pass::Word``, ``std::Secret::String<Vec<u8>>``, ``&Pass::Word``,
+      504 of 504 in the round-4 grid (R4-1) — because ``startswith`` on the whole base
+      can only ever match segment 0 and the leaf read takes ``rsplit("::", 1)[-1]``, so
+      every segment between the two was invisible to BOTH. That is the whole reason this
+      reads an extraction of the full segment set instead: the miss was a POSITION
+      inside a call site the R3-1 enumeration had marked fixed, not another site.
+
+    Either test can only ever refuse a release, so widening the window cannot trade
+    containment back — which is why every segment is read rather than the two the last
+    finding happened to name.
+
+    A stem match is deliberately blunt: it only ever REFUSES a release, so the cost
+    of a false hit is a masked type, which is the direction this clause trades in.
+    """
+    return any(
+        part.lower().startswith(stem)
+        for part in _type_token_segments(base)
+        for stem in _CREDENTIAL_STEMS
+    )
+
+
+def _is_type_expression(value: str) -> bool:
+    """Whether a matched value is a TYPE ANNOTATION rather than a credential.
+
+    **Why this exists.** ``api_key: Option<String>`` is a Rust struct field, and
+    the assignment rule read the generic type as the value of a credential-shaped
+    name: ``api_key`` is a credential name, the type is 14 characters of opaque
+    text to the value test, and the name is STRONG, so the value proof returned
+    ``False`` and the type was masked. Two of those in one file escalated to a
+    rotation demand that stopped a release, which is the cost this exists to
+    prevent — a guard that asks an operator to rotate a credential on a type
+    annotation is not one anybody can safely learn to ignore.
+
+    **Why the test is a parse and not a shape.** The cheap discriminators — "the
+    value contains an angle bracket", "the value does not contain a digit" — are
+    both wrong in the dangerous direction: a passphrase is free to contain either,
+    and each cheap test releases a whole class of real values with it. So the
+    value is read with the grammar real annotations are written in, on the whole
+    value, and it is released only when every character of it belongs to that
+    grammar: a reference, a path, and balanced generic arguments that are
+    themselves types.
+
+    **The named residual, and it is accepted deliberately.** A value spelled
+    exactly as ``Ident<Ident>`` — capitals on both sides, no other symbols — is
+    read as a type. ``DB_PASSWORD=Pass<Word>`` is therefore released. That is the
+    same residual class the neighbouring clauses already carry, and it is bounded
+    by construction: no issuer's alphabet contains ``<`` or ``>`` (base64url, hex,
+    JWT and UUID all exclude them), every vendor prefix is lowercase, and a
+    human-chosen password must additionally be spelled with capitals on BOTH the
+    base and the argument and carry **no digit, no symbol and no word break**.
+    A credential that meets all of that is not distinguishable from a type by
+    spelling at all, so it is recorded here rather than guessed at.
+
+    **The confinement is ENFORCED, not just documented** (agent review R1-1, R1-2).
+    Every condition the release is stated to have is a check this function runs,
+    because the first implementation documented four and enforced one: a digit on
+    either side of the angle brackets, a lowercase base, and a bare ``::`` path each
+    released the value WHOLE with NO hit at all. The conditions, in the order they
+    are checked:
+
+    * **no symbol** — the ``_TYPE_ALPHABET`` membership test below, and it is
+      necessary rather than sufficient: a symbol-less password is confined to the
+      alphabet too;
+    * **no digit** — :func:`_carries_a_non_primitive_digit`, which allows a digit
+      only inside a primitive name, so ``Option<Vec<u8>>`` still parses and
+      ``Ident<Ident7>`` does not;
+    * **no word break** — the base and every argument must each be a single
+      :data:`_TYPE_NAME` token, and the base's own verdict is no longer overwritten
+      by the generic that follows it (``foo<Bar>`` is a word, not a type);
+    * **no bare path** — a value that is a ``::`` path and NOTHING else is refused,
+      so ``Sv::Secret`` is not released; only an attached argument list
+      (``collections::HashMap``) is evidence enough.
+
+    A separate release sits underneath this clause and is NOT its doing: a value
+    carrying ``[``, ``]``, ``(`` or ``)`` is released earlier by the pre-existing
+    expressions clause — ``DB_PASSWORD=x(y)``, ``a[b]`` and ``P@ss(w)0rd`` are
+    released identically at base and head — which is the same
+    "the type alphabet is not a credential's alphabet" gap and is recorded here
+    rather than claimed away.
+
+    What remains released is therefore the digit-free, symbol-free, single-token,
+    application-or-bare-name spelling — and nothing wider. The price is taken in the
+    safe direction: a digit-carrying type name (``Option<Sha256>``) is now masked,
+    which is the false positive this clause *reduces* rather than one it eliminates.
+    """
+    if not value:
+        return False
+    if not any(char in value for char in "<:&"):
+        # No type-ONLY character. A bare word or path here is indistinguishable
+        # from a credential by spelling, and the CamelCase clause above already
+        # releases the bare TYPE NAME spelling, so nothing is owed to this case.
+        return False
+    if not set(value) <= _TYPE_ALPHABET:
+        return False
+    if _carries_a_non_primitive_digit(value):
+        return False
+    base = value.split("<", 1)[0]
+    if _base_is_a_credential_stem(base):
+        # A credential-stem base refuses the release WHATEVER the argument is
+        # (agent review R2-1). Qualifying this with a bare-primitive-argument test
+        # read the discriminating fact in the wrong place, and it is the same
+        # mistake R1-2 made one spelling over: the BASE is what says a person chose
+        # this value, and an argument that is a CamelCase name (``Pass<Phrase>``) or
+        # a nested application (``Pass<Vec<u8>>``) is no more proof of a type than
+        # ``int`` was — yet every such spelling was released whole, with no hit,
+        # while the qualifier stood. NO primitive-carrying base in the paired tables is
+        # a stem, and that is the property this refusal has: the claim is about EVERY
+        # ``::`` SEGMENT of the base (agent review R3-3 corrected this sentence once, and
+        # R4-1 is the reason the correction is now about segments rather than a single
+        # one — it read as a property of types, and R3-1 lived underneath exactly that
+        # reading, while R4-1 lived underneath the narrower "LAST segment" one). A type's
+        # own base is not spelled as a credential word in any of its segments, so
+        # ``Vec<u8>``, ``Option<Vec<u8>>`` and ``Arc<Mutex<String>>`` keep their release:
+        # the refusal sits on the BASE and is silent about the argument,
+        # which is the direction that cannot trade containment back.
+        return False
+    if any(is_credential_name(part) for part in _type_token_segments(base)):
+        # The BASE is a credential WORD, whatever the arguments are (agent review
+        # R1-2): ``Pass<int>``, ``Pass<any>``, ``Token<void>``, ``Secret<str>``. A
+        # type's base is not spelled as a credential word in the paired tables —
+        # ``Vec``, ``Option``, ``HashMap``, ``String`` and every custom type name are not
+        # (the R3-3 correction applies to this sentence too, and R4-1 widens it: the
+        # property is about every ``::`` SEGMENT of the base, not its leaf) — so this rejects
+        # the class the argument grammar alone cannot, and it does it on the base
+        # rather than on the argument, which is what keeps a real annotation over a
+        # primitive (``Vec<u8>``, ``Option<Vec<u8>>``) released.
+        # EVERY segment is read through the same helper as the stem test above (agent
+        # reviews R3-1 and R4-1): these are the two release-side extractions of the SAME
+        # slice, and passing a NARROWER window to one of them is what left the qualified
+        # class, and then the interior-segment one, released. ``base`` is deliberately
+        # reused rather than re-split so the two cannot drift apart again, and the helper
+        # returns the full segment set so a positional gap cannot be introduced at
+        # either site.
+        return False
+    path = _TYPE_PATH_RE.fullmatch(value)
+    if path:
+        # A qualified path and NOTHING else: ``Sv::Secret``, ``collections::HashMap``.
+        # The conditions above do not reach this spelling (no digit, one token per
+        # segment, a type-shaped leaf), and a person writing a credential with a path
+        # separator reaches for exactly it, so the path must obey the MODULE-PATH
+        # CONVENTION to be a type: every segment but the leaf is lowercase (
+        # ``std::collections::HashMap``), because a namespace segment is never
+        # CamelCase. ``Sv::Secret`` and ``Camel::Word9`` violate it and mask
+        # (agent review R1-1); ``std::collections::HashMap`` keeps its corpus row.
+        segments = value.split("::")
+        if any(seg != seg.lower() for seg in segments[:-1]):
+            return False
+    parsed, index, is_a_type_name = _parse_type_expression(value, 0, len(value), 0)
+    return parsed and index == len(value) and is_a_type_name
+
+
 def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
     """Whether a matched value must NOT be masked, and why.
 
@@ -1034,6 +1556,24 @@ def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
         # ...and no digit: ``FwoGZXIvYXdzEBYaDExampleTokenValue1234567890`` is a
         # real AWS session token and is in the original corpus, while every type
         # name in this tree is digit-free.
+        return True
+    # A TYPE APPLICATION is a reference too, and this is the clause that covers
+    # the annotations the clause above cannot: ``api_key: Option<String>``,
+    # ``Vec<String>``, ``HashMap<String, String>``, ``Result<String, Error>``,
+    # ``Arc<Mutex<String>>``, ``Box<dyn Trait>``, ``std::string::String``,
+    # ``&SomeVeryLongEnumName``. The bare-name clause above is a single-identifier
+    # test, so a GENERIC gone through it is not a type at all — it is 14 characters
+    # of opaque text beside a credential-shaped name, on a STRONG name, which is
+    # why the value proof returned ``False`` and the type was masked.
+    #
+    # Measured: reading three real source files put two of these in a transcript
+    # (``api_key: Option<String>`` twice, in one file), both of them masked, one
+    # family of them ESCALATED, and the escalation stopped a release pending a
+    # rotation verdict for a type annotation. That is the cost this clause exists
+    # to prevent, and it is the reason the release is a PARSE of the whole value
+    # rather than a shape test — see :func:`_is_type_expression` for the grammar,
+    # the confinement check, and the residual this deliberately accepts.
+    if _is_type_expression(value):
         return True
     # A bare ``_``-led identifier with no digit is a reference, even under a strong
     # name: ``get_api_key=_oauth_api_key``. Restored unchanged from ``origin/main``
@@ -3727,6 +4267,93 @@ def _is_truncated_pem(hit: ShapeHit) -> bool:
     return re.search(r"END [A-Z0-9 ]*PRIVATE KEY", upper) is None
 
 
+#: The shortest matched value whose own characters may be CLAIMED as readable
+#: credential material — the floor under the exposure judgement.
+#:
+#: **Why a floor at all.** ``exposed`` is the whole severity classification: it is
+#: what raises the rotation notice, and it was computed for a match of ANY length.
+#: Below this width the claim is not supportable, because a fragment that short is
+#: not credential material and its characters are all but certain to reappear in
+#: the same text for innocent reasons. Measured on the module's own source: two
+#: two-character and one four-character ``dsn-password-plain`` match read their own
+#: characters back out of ordinary prose — the Python keyword ``pass`` among them —
+#: and the session escalated with ``labels=()``, announcing "a credential the shape
+#: table could not name". A match that short WAS masked in the text (the rule
+#: matched it and replaced it), so whatever is left is text the mask did not write,
+#: not a readable credential.
+#:
+#: **The number, and what it costs in each direction.** Both bounds land on five,
+#: which is why it is five rather than a tuning knob:
+#:
+#: * DOWNWARD it is bounded by the module's own shortest real credential. The
+#:   corpus's one escalating case (``amqp DSN``) carries a FIVE-character password
+#:   that survives deliberately in the userinfo, and :func:`_run_shapes` records a
+#:   seven-character ``-pass`` value as real in the same breath; both must keep
+#:   escalating, so the floor cannot sit above five. The flag refusal's own boundary
+#:   (:data:`_FLAG_PROSE_MAX_CHARS`, with its test pinning five, six and seven
+#:   characters as escalating again) is the same edge approached from the other side.
+#: * UPWARD it is the width below which a match cannot be told from ordinary text
+#:   ANYWHERE in the text — the judgement :data:`_FLAG_PROSE_MAX_CHARS` already makes
+#:   for this class — so one past that width is the first at which the survival
+#:   question has any discriminating power.
+#:
+#: The cost, stated the way the module states its other floors: a credential-shaped
+#: value of ONE to FOUR characters really printed twice in the clear is graded
+#: CONTAINED and files no rotation demand. At that width it cannot be distinguished
+#: from the prose around it, which is the whole of the reason — and the MASK is
+#: untouched by this floor, so the text is rewritten exactly as it was; only the
+#: severity claim is withheld, and ``complete`` still says what that mask may claim.
+_EXPOSURE_MIN_VALUE_LEN = _FLAG_PROSE_MAX_CHARS + 1
+
+
+def _value_may_be_claimed_exposed(value: str) -> bool:
+    """Whether a matched value's own characters may be CLAIMED as readable material.
+
+    Two refusals, and they answer different questions, so both are needed:
+
+    * WIDTH (:data:`_EXPOSURE_MIN_VALUE_LEN`) — below it a match cannot be told
+      from ordinary text anywhere in the text, so the survival question has no
+      discriminating power and the claim is refused rather than answered.
+    * SUBSTANCE (:func:`_value_is_not_a_credential`) — the judgement the MASKING
+      floor (:func:`_assignment_value_guard`) already makes, reused rather than
+      restated so a second reading of ``is this a credential`` cannot drift from
+      it. The REGISTRATION floor (:func:`is_registerable_component`) is NOT a
+      second caller of the whole predicate: it consults only its placeholder half
+      (:func:`is_placeholder_component`) plus its own length floor, exactly as it
+      did before this change, and it is byte-identical across it. It subsumes the
+      placeholder consult this site used to make on its own, and it reaches the
+      cases no word list can: a value that is an expression, a reference, a type
+      name or a path is not credential material in either direction.
+
+    ``name=""`` because the exposure judgement is anchored on the VALUE's own
+    characters, not on a name: the name-driven clauses of that predicate excuse a
+    value that is a REFERENCE to a name (:func:`_repeats_its_own_name`,
+    ``name.startswith("_")``), and a value that reached a mask was already judged
+    under its real name at the masking floor. An empty name makes exactly those
+    clauses inert and leaves the value's own shape doing the work.
+
+    ``strong=True`` is the CONSERVATIVE arm for a hit whose name is unknown here:
+    it refuses the claim only for values that are code, references, placeholders or
+    paths whatever a name says, and leaves ambiguous values their exposure. The
+    other arm relaxes in the wrong direction — under it the corpus's own
+    five-character ``amqp`` password stops escalating, which is a silent missed
+    leak, and a missed leak is not recoverable where a spurious rotation is.
+    """
+    if len(value) < _EXPOSURE_MIN_VALUE_LEN:
+        return False
+    if REDACTION_MARKER in value:
+        # A value carrying the harness's OWN marker is not ordinary text and cannot be
+        # read as code: the marker is text a mask wrote, so the expression/reference
+        # clauses of the predicate (which is where ``[`` and ``]`` land) would refuse a
+        # claim for a reason that has nothing to do with the value's own spelling. The
+        # survival question decides it instead, which is the documented limit
+        # :func:`_credential_fragments_survive` records: a value containing the marker
+        # that survives WHOLLY still escalates, and a partial survivor is ungradeable
+        # and stays refused — its surviving fragment is spelled exactly like a mask.
+        return True
+    return not _value_is_not_a_credential(value, name="", strong=True)
+
+
 def _only_fully_masked(hits: list[ShapeHit], text: str) -> list[ShapeHit]:
     """Grade every hit: contained, contained-but-unclaimable, or EXPOSED.
 
@@ -3773,25 +4400,45 @@ def _only_fully_masked(hits: list[ShapeHit], text: str) -> list[ShapeHit]:
         # cannot swallow an exposure: a block that was masked is contained, and
         # one that left a fragment readable is not.
         #
-        # A PLACEHOLDER/REFERENCE value is never graded EXPOSED, and this consult is
-        # the whole of the false-positive fix rather than a wording change. The DSN
-        # rule masks the copy INSIDE the URL and deliberately leaves a bare second
-        # mention READABLE — the value is a ``$VAR`` reference, and
-        # ``is_placeholder_component`` is exactly what keeps it unmasked (it is the
-        # predicate ``_value_is_not_a_credential`` consults at the masking floor).
-        # The fragment test then found that deliberately-readable survivor under the
-        # hit's own value and read it as a partial mask, so a duplicated reference
-        # filed a rotation demand for a value that was never credential material:
-        # ``postgres://u:$VAR@host`` plus a later ``$VAR`` escalated, and the same
-        # line without the second mention did not. The exposed path was the ONE site
-        # that did not consult the predicate — the masking floor and the registration
-        # floor (:func:`is_registerable_component`) both do — and no word-list change
-        # can reach it, because the value is correctly on the list already.
+        # The survival question is asked LAST, because it is the expensive half and
+        # it is the half with no discriminating power for a value that is not
+        # credential material to begin with. Two refusals run in front of it, and
+        # they are the whole of the false-positive fix rather than a wording change:
         #
-        # The conservative direction is unchanged for every real value: only a
-        # placeholder is excused, and a genuinely half-masked SECRET (or a duplicate
-        # of one) still escalates, because its own characters are genuinely readable.
-        exposed = not is_placeholder_component(hit.value) and _credential_fragments_survive(
+        # * WIDTH — :data:`_EXPOSURE_MIN_VALUE_LEN`. This is the floor the exposed
+        #   path was missing, and it is what stops a two-to-four character ordinary
+        #   word being claimed as readable credential material: at that width the
+        #   characters reappear in the same text for innocent reasons, so the
+        #   fragment test returns True for prose (the Python keyword ``pass``, read
+        #   out of this module's own source, was one such escalation).
+        # * SUBSTANCE — :func:`_value_is_not_a_credential`, the predicate the
+        #   MASKING floor (:func:`_assignment_value_guard`) already consults and
+        #   this site did not. (The REGISTRATION floor
+        #   (:func:`is_registerable_component`) does not consult the whole
+        #   predicate — only its placeholder half, plus its own length floor — so
+        #   this site is that predicate's SECOND caller, not its third.) It
+        #   subsumes the placeholder consult that used to sit here: the DSN rule
+        #   masks the copy INSIDE a URL and deliberately leaves a bare second mention
+        #   READABLE, because the value
+        #   is a ``$VAR`` reference — and the fragment test then found that
+        #   deliberately-readable survivor under the hit's own value and read it as a
+        #   partial mask, so ``postgres://u:$VAR@host`` plus a later ``$VAR`` filed a
+        #   rotation demand for a value that was never credential material, while the
+        #   same line without the second mention did not. No word-list change could
+        #   reach that, because the value is correctly on the list already.
+        #
+        # The conservative direction is unchanged for every real value: a genuinely
+        # half-masked SECRET (or a duplicate of one) still escalates, because its own
+        # characters are genuinely readable. The floor sits below the module's own
+        # shortest real credential for that reason, and what
+        # ``test_a_short_but_real_credential_keeps_its_escalation`` pins is the two
+        # routes by which a short value still survives it: the ``amqp`` DSN — whose
+        # userinfo username, equal to the password, stays readable by the DSN rule's
+        # own design rather than by this floor — and a seven-character ``-pass`` value
+        # printed twice in the clear. A FULLY-MASKED five-character value is not one
+        # of them: it files nothing at either revision, so no masked case can pin this
+        # floor's lower edge.
+        exposed = _value_may_be_claimed_exposed(hit.value) and _credential_fragments_survive(
             hit, index
         )
         if _is_truncated_pem(hit) or exposed:
@@ -4090,22 +4737,447 @@ def scrub_secrets_with_hits(
     them for containment) both read this, so neither can observe a mask without
     the same rule having produced it.
     """
-    return scrub_shapes_with_hits(_scrub_values(text, values))
+    return scrub_shapes_with_hits(scrub_values(text, values))
 
 
-def _scrub_values(text: str, values: Iterable[Optional[str]]) -> str:
-    """The exact-value half on its own: longest first, empties skipped.
+# --- the exact-VALUE pass: WHICH SPELLINGS of a known value are masked ---------
+#
+# A known value used to be masked by its own bytes, and the incident this
+# section was written for is why that is not enough: an agent that could not
+# read a hostname the mask kept replacing printed it REVERSED
+# (``moc.avrenimog.aq.ppa-aq``) and the reversal walked straight past the mask.
+# The control here is an output FILTER, so transforming the value before
+# printing it defeats the filter for exactly as long as the filter knows one
+# spelling of it.
+#
+# The fix is a CLOSED SET OF SPELLINGS per value — the cheap transforms, each
+# one deterministic and reversible by inspection — and deliberately not an
+# entropy or "looks random" heuristic. See the note on :data:`CREDENTIAL_SHAPES`:
+# such a rule cannot tell a credential from a build id, and a mask that eats
+# build ids is one the operator learns to distrust.
+#
+# WHAT THIS DOES NOT COVER, stated rather than implied. This is a spelling list,
+# not a decoder. A value put through a transform the list does not enumerate
+# (rot13, a double base64, a byte-wise Caesar shift, an escape form nobody
+# prints) still passes, and a value SHORTER than the floor below gets its
+# permutations skipped entirely. Both residuals have the same shape as the shape
+# table's own (see the module docstring): the pass narrows the gap, it does not
+# close it.
 
-    ``str`` rather than the declared ``Optional[str]``: the list is built from a
-    store, and a non-string entry there is a bug this pass should survive rather
-    than raise on — a redaction failure that raises turns a tool result into a
-    tool crash.
+#: The shortest value whose TRANSFORMED spellings are masked at all.
+#:
+#: A floor, not a tuning knob, and it comes from the other direction of this
+#: same policy: over-masking is a defect. Every family below is a permutation of
+#: the value, so the shorter the value, the likelier its permutation is a string
+#: ordinary output already contains — the reversal of an eight-character value
+#: is a real English word often enough (``atled``/``delta``), and a two-byte hex
+#: spelling is a plausible run in any hex dump. Masking those by accident blinds
+#: the agent to ordinary tool output, which is the failure this module's
+#: negative corpus exists to prevent.
+#:
+#: 12 is chosen against what a credential LOOKS like rather than against a
+#: computed probability: the shortest real API key, session token or password
+#: worth registering is far longer. What the floor costs is bounded and
+#: understood — a six-character registered value still has its verbatim spelling
+#: masked by the pre-existing rule, unchanged; only its permutations are
+#: skipped, so a value under the floor keeps exactly the coverage it has today.
+_TRANSFORM_MIN_VALUE_LEN = 12
+
+#: The separators a "characters spread out" spelling may be built from.
+#:
+#: ``sed 's/./& /g'``-style evasion inserts ONE uniform separator between every
+#: character of the value, which is deterministically decidable — one spelling
+#: per separator, and the set is closed and short. A MIXED run (a space after
+#: one character, a dot after the next) is deliberately NOT in the set:
+#: enumerating separator combinations is exponential in the value's length,
+#: which is the shape a bounded policy has to refuse.
+_SEPARATOR_RUN_SEPARATORS = (" ", "-", ".", ":", "\n")
+
+#: A percent-escape and a ``\\uXXXX`` escape, for the case-swapped spellings.
+#: Anchored on the escape's own introducer so the substitution can only ever
+#: touch digits INSIDE an escape — an ordinary character of the value is left
+#: exactly as the encoder wrote it (see :func:`_lowered_escape_digits`).
+_PERCENT_ESCAPE_RE = re.compile(r"%[0-9A-Fa-f]{2}")
+_UNICODE_ESCAPE_RE = re.compile(r"\\u[0-9A-Fa-f]{4}")
+
+
+def _lowered_escape_digits(text: str) -> str:
+    """``text`` with every escape's HEX DIGITS lowercased, and nothing else.
+
+    Only the digits: a percent-encoded spelling carries ordinary characters of
+    the value beside its escapes (``quote`` leaves unreserved bytes alone), and
+    lowercasing those would produce a string that is not a spelling of the value
+    at all — over-masking a different string, which is a defect in this module.
+    """
+    return _PERCENT_ESCAPE_RE.sub(lambda match: match.group(0).lower(), text)
+
+
+def _uppered_unicode_digits(text: str) -> str:
+    """``text`` with every ``\\uXXXX`` escape's hex digits uppercased.
+
+    The same discipline as :func:`_lowered_escape_digits` and for the same
+    reason: ``json.dumps`` writes ``\\n``, ``\\"`` and ``\\\\`` with lowercase
+    letters that are part of the escape's SPELLING, and uppercasing those would
+    yield a string no encoder emits.
+    """
+    return _UNICODE_ESCAPE_RE.sub(lambda match: match.group(0).upper(), text)
+
+
+def credential_forms(value: str) -> tuple[str, ...]:
+    """Every spelling of ``value`` the exact-VALUE pass masks, longest first.
+
+    The list is CLOSED and bounded, and both properties are load-bearing: this
+    runs over every settled tool result, so a policy whose cost grows with the
+    text it is handed is one review rejects (see :func:`scrub_values` for the
+    measurement and the bound).
+
+    **Longest spelling first**, which is the same rule the value list itself
+    carries one level up: a shorter spelling that happens to be a prefix of a
+    longer one must not run first and leave the longer one's tail on screen.
+
+    The families, and why each is a SPELLING rather than a guess:
+
+    * the verbatim value and its REVERSAL — the evasion measured in production;
+    * base64 in all four spellings a command may produce: standard and URL-safe,
+      each padded and unpadded;
+    * hex, lower and upper case;
+    * the three SPACED hex spellings the dump tools actually print — single-space
+      byte pairs (``hexdump -C``, ``' '.join(f'{b:02x}' …)``), double-space byte
+      pairs (``od -An -tx1``'s column layout) and ``xxd``'s DEFAULT 2-byte
+      grouping. ``xxd -p`` is the contiguous form above; plain ``xxd`` is not,
+      and a dump is a real accident path (``lop secret get X | xxd``);
+    * hex behind a backslash escape (``\\x71``, ``\\x7A``), which is what
+      ``repr``, ``xxd -p | sed`` and a shell ``printf`` leave behind;
+    * percent-encoding, both the path form (``%20``) and the form-value form
+      (``+``), each also with its escape digits lowercased (``%2f`` — the two
+      cases are the same encoding, and which one a command emits is a librarian
+      choice: ``urllib`` uses upper, hand-rolled encoders use lower);
+    * JSON string escaping, both the ASCII-escaped form (``\\u00e9``) and the
+      raw-Unicode form, the first also with its digits uppercased;
+    * the characters of the value spread by one uniform separator.
+
+    A value shorter than :data:`_TRANSFORM_MIN_VALUE_LEN` gets the verbatim
+    spelling only — see that constant for why.
+
+    **What the families still do not reach, stated rather than implied.** A hex
+    dump of a value longer than one ``xxd`` line (16 bytes) is broken by the
+    tool's own line wrap — a newline plus an 8-digit offset prefix every 16
+    bytes — so no contiguous needle spans it; and MIXED-case hex digits inside
+    one escape (``\\x71Ab``) are not enumerated, because enumerating them is
+    2**k forms, which is the exponential shape this policy refuses. The pure
+    lower and upper spellings, which is what encoders emit, are covered.
+    """
+    if not value:
+        # The empty value has no spelling; returning ``("",)`` here would let a
+        # direct caller put the marker between every character of every text.
+        return ()
+    if len(value) < _TRANSFORM_MIN_VALUE_LEN:
+        return (value,)
+    raw = value.encode("utf-8")
+    forms = [value, value[::-1]]
+    standard = base64.b64encode(raw).decode("ascii")
+    urlsafe = base64.urlsafe_b64encode(raw).decode("ascii")
+    forms += [standard, standard.rstrip("="), urlsafe, urlsafe.rstrip("=")]
+    hex_lower = raw.hex()
+    forms += [hex_lower, hex_lower.upper()]
+    pairs = [f"{byte:02x}" for byte in raw]
+    forms += [
+        " ".join(pairs),
+        "  ".join(pairs),
+        " ".join("".join(pairs[index : index + 2]) for index in range(0, len(pairs), 2)),
+    ]
+    forms += [
+        "".join(f"\\x{byte:02x}" for byte in raw),
+        "".join(f"\\x{byte:02X}" for byte in raw),
+    ]
+    quoted = urllib.parse.quote(value, safe="")
+    quoted_plus = urllib.parse.quote_plus(value, safe="")
+    forms += [quoted, quoted_plus, _lowered_escape_digits(quoted)]
+    forms += [quoted_plus, _lowered_escape_digits(quoted_plus)]
+    escaped_json = json.dumps(value)[1:-1]
+    forms += [
+        escaped_json,
+        _uppered_unicode_digits(escaped_json),
+        json.dumps(value, ensure_ascii=False)[1:-1],
+    ]
+    forms += [separator.join(value) for separator in _SEPARATOR_RUN_SEPARATORS]
+    # De-duplicated first: an alphanumeric value's URL-safe spelling IS its
+    # standard one and its percent-encoded spelling IS itself, so without the
+    # dedupe a plain value pays several whole-text searches for spellings it has
+    # already tried. ``dict.fromkeys`` keeps insertion order, so the sort below
+    # is deterministic for ties.
+    unique = dict.fromkeys(form for form in forms if form)
+    return tuple(sorted(unique, key=len, reverse=True))
+
+
+def longest_redaction_form(values: Iterable[Optional[str]]) -> int:
+    """The longest spelling any of ``values`` can be published as, in characters.
+
+    For a caller that PUBLISHES a stream in chunks, this is the size of the tail
+    it has to keep in hand: a spelling that straddles a cut begins no further
+    back than this from the cut, so a chunker that retains this much can always
+    find the straddling spelling and move the cut off it (:class:`StreamMasker`).
+    It is a property of the VALUE SET, not of the text, which is what makes the
+    window bounded by what the session knows rather than by what a command
+    prints.
+
+    It is NOT a whole-buffer bound and must not be described as one: the retained
+    tail is this much PLUS the spelling it is holding off (window plus needle), so
+    a value of N characters whose escaped spelling is 4N holds up to 4N plus the
+    window. See :func:`stream_hold_window` for the window itself and
+    :data:`_STREAM_HOLD_LIMIT` for the cap on the first term only.
+    """
+    longest = 0
+    for value in values:
+        if isinstance(value, str) and value:
+            longest = max(longest, max(len(form) for form in credential_forms(value)))
+    return longest
+
+
+#: The cap on the WINDOW a chunker holds back (not on its buffer — see
+#: :func:`stream_hold_window`).
+#:
+#: A bound on the first term of ``window + needle``, deliberately NOT a
+#: value-length bound. A registered value is otherwise unbounded (a session can
+#: register a pasted blob), and a chunker whose window grew with it would be one
+#: a caller can wedge by registering a large one. 64 KiB is far above the longest
+#: spelling a real credential has — a 32-character secret's backslash-escaped
+#: form is 128 characters — and far below the retention caps the rest of the
+#: pipeline uses.
+_STREAM_HOLD_LIMIT = 65536
+
+
+def stream_hold_window(values: Iterable[Optional[str]]) -> int:
+    """How many characters a chunker must hold back for ``values``.
+
+    ``min(longest_redaction_form(values), _STREAM_HOLD_LIMIT)`` — one function
+    rather than the expression twice, because BOTH chunked surfaces must agree on
+    the number: :class:`StreamMasker` for the eval worker's frames and
+    ``tools/builtin._PipeRedactor`` for the bash live stream and the peekable job
+    tail. A surface that holds a different amount publishes a spelling the other
+    one would have held, which is how the bash pipe came to publish a multi-line
+    registered value one line at a time (the round-1 blocker: 0 held windows on
+    that side against a spelling that contains its own line terminator).
+
+    The number this returns is the WINDOW, not the whole buffer: the buffer a
+    caller needs is the window plus the spelling it is holding off.
+    """
+    return min(longest_redaction_form(values), _STREAM_HOLD_LIMIT)
+
+
+def straddling_form_start(text: str, cut: int, forms: Sequence[str]) -> int:
+    """The start offset of a spelling that straddles ``cut``, or ``-1``.
+
+    A spelling that straddles a cut STARTS in ``[cut - len(form) + 1, cut)`` —
+    it begins before the cut and ends after it — so the search is confined to
+    that window plus the spelling's own length instead of scanning the buffer to
+    its end. That confinement is what makes the rule affordable on an oversized
+    registered value, where the unbounded scan dominated the per-read cost
+    (round-1 review, F5).
+
+    Returns the EARLIEST straddling start found, and the caller moves its cut
+    there and re-checks: moving a cut back can put it inside a spelling that was
+    previously clear, so both callers (``StreamMasker._safe_cut`` and
+    ``tools/builtin._PipeRedactor._release_point``) run this to a fixed point.
+
+    A one-character spelling is skipped: it cannot straddle a position. Neither
+    can an empty one, which :func:`credential_forms` no longer produces.
+    """
+    for form in forms:
+        length = len(form)
+        if length <= 1:
+            continue
+        window_start = max(cut - length + 1, 0)
+        # `end` is the last offset a whole match may END at, so it is
+        # `cut - 1 + length`: a match starting one character before the cut needs
+        # exactly that much room. `str.find` needs the whole needle inside
+        # `[start, end)`, so passing anything less would hide the very match the
+        # rule exists to find.
+        window_end = cut + length - 1
+        start = text.find(form, window_start, window_end)
+        while start != -1 and start < cut:
+            if start + length > cut:
+                return start
+            start = text.find(form, start + 1, window_end)
+    return -1
+
+
+class StreamMasker:
+    """Mask known VALUES across a stream of chunks, without ever splitting one.
+
+    **Why a window and not a per-chunk pass.** :func:`scrub_values` is a
+    WHOLE-TEXT pass, and a stream is not one text. Mask each write independently
+    and a value split across two writes is present in NEITHER half — no
+    ``replace`` fires in either — so both halves are published and whatever reads
+    them as one document has the value back. That is not hypothetical: the eval
+    worker emits one frame per ``write``, the parent appends each frame to a
+    background job's tail, and ``jobs(op='peek')`` JOINS them back into the one
+    string the model reads.
+
+    **The hold is a window and the cut is moved off a spelling.** Only the first
+    ``len(pending) - hold`` characters are candidates for publication, where
+    ``hold`` is :func:`longest_redaction_form` of the values currently
+    registered, and the cut is then moved back to the start of any spelling that
+    would straddle it — so a spelling is published whole and masked, or held
+    whole, and never in two halves.
+
+    ``hold`` alone is NOT sufficient, and this class does not pretend otherwise:
+    a cut is a POSITION, so a spelling that begins before it and ends after it is
+    split however much text is held back. The window is what bounds the search
+    that moves the cut, and what bounds the buffer: ``pending`` never exceeds
+    ``hold`` plus the longest spelling, and both terms come from what the SESSION
+    knows rather than from what a caller writes. The bound is
+    :data:`_STREAM_HOLD_LIMIT` characters at most, and the residual is the other
+    side of it — a value whose longest spelling exceeds the limit is held by the
+    limit and no further, so a spelling longer than that can still be split. The
+    limit is a bound on the BUFFER, deliberately not a value-length bound, so a
+    caller that needs an exact guarantee for one enormous value has to bound its
+    own input instead.
+
+    With no values registered the hold is zero and NOTHING is delayed: a stream
+    that has touched no secret behaves exactly as it did before this class
+    existed, which is the property that keeps it off the latency of ordinary
+    output.
+
+    Publication is DELAYED, never lost: ``push(..., final=True)`` releases the
+    held tail, and a caller that drops it loses only streamed liveliness, because
+    the settled text is scrubbed whole by :func:`scrub_values`.
+
+    Deliberately values-only. The shapes pass is line-anchored and is not
+    reachable from every process that streams a value (the eval worker has no
+    session store), so a caller that HAS shapes should use the pipe filter in
+    ``tools/builtin`` instead — this class is for the surfaces whose whole
+    vocabulary is the values they registered.
+    """
+
+    def __init__(self, values: Iterable[Optional[str]] = ()) -> None:
+        #: The registered values, longest first. Re-read per chunk by the caller
+        #: (``refresh``), because a value can be registered DURING the stream.
+        self.values: list[str] = []
+        #: Every spelling of every registered value, longest first — the needles
+        #: the cut rule is checked against. Derived here rather than per push so
+        #: a stream pays for the spelling list once per registration change.
+        self._forms: tuple[str, ...] = ()
+        self._hold = 0
+        self._pending = ""
+        self.refresh(values)
+
+    def refresh(self, values: Iterable[Optional[str]]) -> None:
+        """Adopt a widened value set mid-stream.
+
+        The hold can only GROW here, never shrink below what is already held
+        back, for the same reason the bash pipe filter's can: ``pending`` is
+        untouched, and a value that arrives at the same moment as the bytes it
+        has to mask is resolved on the next ``push`` rather than released
+        unmasked now.
+        """
+        current = sorted(
+            {value for value in values if isinstance(value, str) and value},
+            key=len,
+            reverse=True,
+        )
+        if current == self.values:
+            return
+        self.values = current
+        self._forms = tuple(
+            sorted(
+                {form for value in current for form in credential_forms(value)},
+                key=len,
+                reverse=True,
+            )
+        )
+        # The SAME window the bash pipe filter sizes its hold from, through the
+        # one function that computes it: two surfaces that disagree here publish
+        # what the other one holds.
+        self._hold = stream_hold_window(current)
+
+    def push(self, text: str, *, final: bool = False) -> str:
+        """Mask what may be published now; hold the rest until it is decidable."""
+        self._pending += text
+        if final:
+            ready, self._pending = self._pending, ""
+            return scrub_values(ready, self.values)
+        cut = self._safe_cut()
+        if cut <= 0:
+            return ""
+        ready, self._pending = self._pending[:cut], self._pending[cut:]
+        return scrub_values(ready, self.values)
+
+    def _safe_cut(self) -> int:
+        """The largest prefix that cannot contain part of a spelling.
+
+        The window is where the cut STARTS, not what makes it safe — see the
+        class docstring — so the candidate is moved back to the start of any
+        spelling that would straddle it. The same rule the bash pipe filter
+        applies to a released chunk (``_PipeRedactor._release_point``), with the
+        same fixed-point loop: moving the cut can put it inside a spelling that
+        was previously clear, so the check is repeated until the cut stops
+        moving.
+
+        Nothing is cut when the hold already covers the whole buffer, and nothing
+        is cut at all when no value is registered — the empty case is the one
+        that must cost no latency.
+        """
+        if self._hold <= 0:
+            return len(self._pending)
+        cut = len(self._pending) - self._hold
+        if cut <= 0:
+            return 0
+        while True:
+            start = straddling_form_start(self._pending, cut, self._forms)
+            if start < 0:
+                return cut
+            cut = start
+
+    @property
+    def withheld(self) -> int:
+        """Characters held back right now — the live card's 'pending' reading."""
+        return len(self._pending)
+
+
+def scrub_values(text: str, values: Iterable[Optional[str]]) -> str:
+    """Mask every known value in ``text``, in every spelling it may be printed in.
+
+    The exact-value half of :func:`scrub_secrets`, published so the surfaces that
+    mask VALUES ALONE (the eval worker's frames, a bare ledger with no session
+    store behind it, an MCP diagnostic line) read one policy instead of keeping
+    their own copy of the loop.
+
+    Values LONGEST FIRST, so a value that is a prefix of another cannot leave the
+    longer one's tail behind; and inside one value, its longest spelling first,
+    for the same reason one level down. Empties are skipped — replacing the empty
+    string would insert the marker between every character — and a non-``str``
+    entry (a bug in whatever built the list) is skipped rather than raised on,
+    because a redaction failure that raises turns a tool result into a tool
+    crash.
+
+    **Bounded, and measured rather than assumed.** The pass costs one C-level
+    ``str.find``/``str.replace`` per spelling, the spelling count per value is
+    closed (:func:`credential_forms` — 13 for a 26-character value) and the value
+    set is bounded by the session's registration cap. Measured on this host (M3
+    Max, CPython 3.12, best of seven, a 1 MB ordinary-log text): ~7.4 ms with five
+    registered values, ~1.0 ms of which the verbatim-only loop cost before this
+    change, and ~0.0 ms with no values at all — against ~83 ms for the SHAPE pass
+    that runs over the same text immediately afterwards, i.e. the mask is an order
+    of magnitude cheaper than the table it sits beside. The dominant new term is
+    the spelling count, not the value count, which is why the count is what the
+    policy bounds and what a test pins.
     """
     result = text
-    ordered = sorted((value for value in values if value), key=len, reverse=True)
+    # The `str` filter is in the GENERATOR, not a guard inside the loop: `key=len`
+    # is applied by `sorted` while it builds the list, so a truthy non-`str` entry
+    # (a bug in whatever built the list) would raise `TypeError` from `len()`
+    # before any guard could skip it — turning a tool result into a tool crash,
+    # which is the one failure a redaction pass must never have.
+    ordered = sorted(
+        (value for value in values if isinstance(value, str) and value),
+        key=len,
+        reverse=True,
+    )
     for value in ordered:
-        if isinstance(value, str) and value in result:
-            result = result.replace(value, REDACTION_MARKER)
+        for form in credential_forms(value):
+            if form in result:
+                result = result.replace(form, REDACTION_MARKER)
     return result
 
 

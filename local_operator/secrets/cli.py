@@ -26,6 +26,13 @@ other verb writes its human output to stdout only in non-value form, and every
 diagnostic goes to stderr. ``tests/unit/secrets/test_cli.py`` asserts the
 exact bytes.
 
+The same holds for ``get --reveal``, which is a separate, additive path: it
+writes the same exact bytes, with the same absence of a trailing newline,
+after asking a human at a terminal — and refuses with a distinct exit code and
+an empty stdout when there is no terminal to ask at. ``describe --length
+--fingerprint`` is the value-free inspection surface: it identifies a secret
+and prints neither its bytes nor anything reversible from them.
+
 ``set`` reads the value from STDIN and there is deliberately no ``--value``
 flag: argv is readable by any same-uid process through ``ps`` and
 ``KERN_PROCARGS2`` (design §2.2, spike 2), so a value on the command line is a
@@ -67,6 +74,18 @@ def add_parser(subparsers: Any) -> None:
         "get", help="Write a secret's value to stdout with no trailing newline"
     )
     get_parser.add_argument("name")
+    # Additive and off by default. The unqualified `get` keeps its documented
+    # contract (exact bytes, no newline, exit 2 with empty stdout on failure);
+    # `--reveal` is the audited, prompt-gated path to the same bytes for a human
+    # at a terminal, and refuses with `REVEAL_REFUSED` when nobody can be asked.
+    get_parser.add_argument(
+        "--reveal",
+        action="store_true",
+        help=(
+            "Ask at the terminal, then print the value; audited as a reveal. Refused "
+            "unless stdin and stdout are both a terminal"
+        ),
+    )
 
     set_parser = actions.add_parser("set", help="Store a NEW secret; the value is read from stdin")
     set_parser.add_argument("name")
@@ -105,6 +124,22 @@ def add_parser(subparsers: Any) -> None:
     describe_parser = actions.add_parser("describe", help="Metadata for one secret; never a value")
     describe_parser.add_argument("name")
     describe_parser.add_argument("--json", action="store_true")
+    # The value-free identity flags. Neither prints the value, and there is no
+    # flag on this verb that does: what they add is a byte length and a keyed
+    # digest, both derived from the value and neither reversible into it.
+    describe_parser.add_argument(
+        "--length",
+        action="store_true",
+        help="Include the value's length in bytes (never the value)",
+    )
+    describe_parser.add_argument(
+        "--fingerprint",
+        action="store_true",
+        help=(
+            "Include a stable, non-reversible fingerprint of the value for comparison "
+            "(never the value)"
+        ),
+    )
 
     for name in ("rm", "delete"):
         remove_parser = actions.add_parser(name, help="Remove a secret permanently")

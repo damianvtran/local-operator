@@ -211,6 +211,13 @@ def extract_parent_message(text: str) -> ParentMessage | None:
 #: cannot grow without bound; eviction is oldest-settled-first.
 MAX_RECORDS = 256
 
+#: How long a roster may reuse one child's "transcript is on disk" probe. The
+#: probe feeds only the roster's ``resumable`` hint (``resume`` re-probes before
+#: acting), so this bounds how stale a HINT may be, not a decision. Five seconds
+#: turns one ``stat`` per settled child per root event into one per child per
+#: five seconds; see ``SubagentComms._transcript_on_disk`` for the measurement.
+TRANSCRIPT_PROBE_TTL_S = 5.0
+
 DeliveryOutcome = Literal["injected", "queued", "cancelled", "paused", "failed"]
 
 #: Default number of transcript steps ``peek`` returns when the caller does not
@@ -346,6 +353,16 @@ class ChildInfo:
     #: an hour ago had no in-product path to its transcript at all — exactly
     #: the case this class's docstring says it exists to cover.
     session_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ChildLifecycle:
+    """The per-event slice of a :class:`ChildInfo`: see ``RosterPass.lifecycles``."""
+
+    status: str
+    result_text: str | None = None
+    error_text: str | None = None
+    age_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -512,6 +529,23 @@ class _ChildRecord:
     #: attempt into this record so the viewer can render every historical
     #: launch row as its concise prompt, not just the current one.
     prior_launch_prompts: dict[str, str] = field(default_factory=dict)
+
+
+def _age_of(record: _ChildRecord, job: Any | None, status: str, now: float) -> float | None:
+    """Seconds since launch for a live child, since settle for a finished one.
+
+    Shared by ``RosterPass.describe`` and ``RosterPass.lifecycles`` so the
+    roster row and the projection's elapsed clock read one derivation. A
+    ``pausing`` child has no age (its ``describe`` row says so explicitly).
+    """
+    if status == "pausing":
+        return None
+    if status in ("running", "queued", "starting"):
+        started = getattr(job, "start_time", None) if job is not None else None
+        return (now - started) if started else None
+    if record.settled_at is not None:
+        return now - record.settled_at
+    return None
 
 
 def _lifecycle(
@@ -724,7 +758,7 @@ class RosterPass:
             return False
         cached = self._transcripts.get(session_dir)
         if cached is None:
-            cached = (session_dir / TRANSCRIPT_FILENAME).exists()
+            cached = self._comms._transcript_on_disk(session_dir)
             self._transcripts[session_dir] = cached
         return cached
 
@@ -774,7 +808,6 @@ class RosterPass:
         running = self.is_running(record)
         now = self.now
         status, result_text, error_text = _lifecycle(record, job, running)
-        age: float | None = None
         detail: str | None = None
 
         if status == "pausing":
@@ -787,11 +820,7 @@ class RosterPass:
                 detail="pause is still landing; it becomes resumable in a moment",
             )
 
-        if status in ("running", "queued", "starting"):
-            started = getattr(job, "start_time", None) if job is not None else None
-            age = (now - started) if started else None
-        elif record.settled_at is not None:
-            age = now - record.settled_at
+        age = _age_of(record, job, status, now)
 
         # Enumerated rather than defaulted to True: a status that reaches here
         # without being listed is one nobody has reasoned about, and the safe
@@ -876,6 +905,35 @@ class RosterPass:
         """Every record's row, newest-launch-last (insertion order)."""
         return [self.describe(record) for record in self.records]
 
+    def lifecycles(self) -> dict[str, "ChildLifecycle"]:
+        """Status, terminal text and age per record: ``roster()`` minus the verdict.
+
+        WHY A SECOND READ. The mobile/desktop projection calls this pass on
+        EVERY root event of a runtime-hosted session -- every streamed token of
+        the parent and every relayed child progress edge -- and it needs only
+        the four facts below. ``roster()`` also computes ``resumable``, which is
+        a transcript ``stat()`` per record plus the twin lookup; over a parent
+        carrying its ``MAX_RECORDS`` history that was 256 syscalls per event on
+        the loop every child lane shares (measured 5.7 ms p50 / 23 ms p95 per
+        event at 256 records, ``scripts/bench_subagent_fanout.py --history``).
+
+        NOT A SECOND DERIVATION: status and text come from ``_lifecycle`` and
+        the age from the same clock and branch ``describe`` uses, so the two
+        reads cannot disagree
+        (``test_lifecycles_agree_with_the_roster_on_every_field_they_share``).
+        """
+        rows: dict[str, ChildLifecycle] = {}
+        for record in self.records:
+            job = self.job_row(record)
+            status, result_text, error_text = _lifecycle(record, job, self.is_running(record))
+            rows[record.job_id] = ChildLifecycle(
+                status=status,
+                result_text=result_text,
+                error_text=error_text,
+                age_s=_age_of(record, job, status, self.now),
+            )
+        return rows
+
     def node(self, record: _ChildRecord) -> SubagentNode:
         """One presentation node, deriving its status the same way the roster does."""
         session_id = record.session_dir.name if record.session_dir is not None else None
@@ -920,7 +978,18 @@ class RosterPass:
             # job row) is exactly the precedence this field wants, and having
             # one derivation means the roster and the node can no longer
             # disagree about the same child.
-            status=self.describe(record).status,
+            #
+            # ``_lifecycle`` DIRECTLY, not ``self.describe(record).status``:
+            # ``describe`` returns ``_lifecycle``'s status unchanged on every
+            # arm (``test_node_status_is_describes_status_for_every_arm`` pins
+            # that), and everything else it computes -- the resumable verdict,
+            # with its transcript ``stat()`` and twin lookup -- is thrown away
+            # here. ``nodes()`` runs per root event on the runtime host and per
+            # roster tick, so over a 128-record registry that discarded verdict
+            # was 128 filesystem probes per event on the loop every child
+            # shares (measured: ``scripts/bench_subagent_fanout.py --history``).
+            # ``status_counts`` already reads the status this way.
+            status=_lifecycle(record, self.job_row(record), self.is_running(record))[0],
             result_text=record.result_text or "",
             error_text=record.error_text or "",
         )
@@ -978,6 +1047,47 @@ class SubagentComms:
         self._detail_listeners: set[Callable[[str], None]] = set()
         self._change_listeners: set[Callable[[], None]] = set()
         self._aliases: dict[str, str] = {}
+        #: ``session_dir -> (transcript exists, monotonic probe time)``; see
+        #: :meth:`_transcript_on_disk` for why it outlives one roster pass.
+        self._transcript_probes: dict[Path, tuple[bool, float]] = {}
+
+    def _transcript_on_disk(self, session_dir: Path) -> bool:
+        """Whether ``session_dir`` holds a transcript, re-probed at most every
+        :data:`TRANSCRIPT_PROBE_TTL_S`.
+
+        WHY ACROSS PASSES. A roster pass runs on the session loop once per root
+        event (``serving._refresh_state`` -> ``set_subagent_details``), and a
+        parent with live lanes emits root events at token rate. The per-pass memo
+        in :class:`RosterPass` made the probe one ``stat`` per settled child per
+        EVENT, which is still O(roster) syscalls at token rate: sampled on a
+        runtime holding 12 stepping lanes and a 240-record roster
+        (``scripts/bench_send_admission.py --condition roster --sample``), 2,125
+        of 4,119 loop samples (52%) sat in ``pathlib.stat`` under
+        ``transcript_present``, the loop lagged 108 ms p50 / 674 ms p95, and a
+        prompt took 1.9 s p50 to be admitted. The stat is slow because the host
+        is: ~20 runtimes share one APFS volume at load 100.
+
+        THE INVALIDATION STORY, since a cached verdict can go stale:
+
+        * the answer only ever feeds the roster's ``resumable`` HINT. The
+          authority is :meth:`resume`, which probes the file itself
+          (``if not (record.session_dir / TRANSCRIPT_FILENAME).exists()``) at
+          the moment it acts, so a stale ``True`` can at worst advertise a
+          resume that is then refused with the accurate reason, and a stale
+          ``False`` withholds the hint for at most the TTL;
+        * the one transition this process causes itself — a child attaching to
+          a directory — drops that directory's entry (:meth:`attach`), so a
+          freshly attached child is probed afresh on the next pass;
+        * a deletion by another process (retention cleanup, a user ``rm``) is
+          seen within :data:`TRANSCRIPT_PROBE_TTL_S`.
+        """
+        now = time.monotonic()
+        cached = self._transcript_probes.get(session_dir)
+        if cached is not None and now - cached[1] < TRANSCRIPT_PROBE_TTL_S:
+            return cached[0]
+        present = (session_dir / TRANSCRIPT_FILENAME).exists()
+        self._transcript_probes[session_dir] = (present, now)
+        return present
 
     def subscribe_changes(self, listener: Callable[[], None]) -> Callable[[], None]:
         """Observe graph/state changes without triggering durable history reads."""
@@ -1131,6 +1241,10 @@ class SubagentComms:
             self._aliases[alias] = job_id
         record.child = child
         record.session_dir = session_dir
+        # A child attaching is the one transcript-existence change this process
+        # causes itself; forget the directory's cached probe so the roster sees
+        # it on the next pass rather than after the TTL.
+        self._transcript_probes.pop(session_dir, None)
         record.job_ref = self.job(job_id)
         if record.unsubscribe_jobs is not None:
             record.unsubscribe_jobs()
@@ -1264,6 +1378,67 @@ class SubagentComms:
             record.child for record in self._records.values() if record.child is not None
         )
         return sessions
+
+    def descendant_ids(self, job_id: str) -> set[str]:
+        """Every record strictly BELOW ``job_id`` in the launch graph.
+
+        WHY THIS EXISTS. This registry is ONE instance shared by the root and
+        every child it (transitively) launches, so a reader that asks it for
+        "the roster" gets the WHOLE fan-out. That is right for the root, and it
+        was quietly wrong for a child: each child ``Session`` owns a frontend
+        store whose ``_jobs`` projection read ``job_rows()`` and ``nodes()``
+        unscoped, so every child re-froze every SIBLING's retained trajectory
+        (up to ``TRAJECTORY_CAP`` rows each) at each of its own message, tool
+        and turn boundaries. N children therefore paid O(N) per boundary — O(N²)
+        across the fan-out, all on the one event loop they share with the
+        parent. Measured with ``scripts/bench_subagent_fanout.py``: at 16
+        children those refreshes were the majority of process CPU and drove
+        loop lag past two seconds, which is what an operator sees as slow
+        children and a parent that stops answering while it waits on them.
+
+        A child's own roster is its own subtree, exactly what a viewer of that
+        child can navigate to, so the child projects that and nothing else.
+
+        Both ends are resolved through the attempt aliases, so a resumed
+        attempt (new job id, same durable record) keeps its descendants and a
+        grandchild launched under a superseded attempt id still counts. Linear
+        in the registry, with a per-call memo, and cycle-safe for the malformed
+        legacy snapshots ``ancestors`` already defends against.
+        """
+        root = self._aliases.get(job_id, job_id)
+        parent_of = {
+            key: (
+                self._aliases.get(record.parent_job_id, record.parent_job_id)
+                if record.parent_job_id
+                else None
+            )
+            for key, record in self._records.items()
+        }
+        verdict: dict[str, bool] = {}
+
+        def below(key: str) -> bool:
+            path: list[str] = []
+            seen: set[str] = set()
+            current: str | None = key
+            answer = False
+            while current is not None:
+                if current in verdict:
+                    answer = verdict[current]
+                    break
+                if current in seen:
+                    break
+                seen.add(current)
+                path.append(current)
+                parent = parent_of.get(current)
+                if parent == root:
+                    answer = True
+                    break
+                current = parent
+            for item in path:
+                verdict[item] = answer
+            return answer
+
+        return {key for key in self._records if key != root and below(key)}
 
     def job_rows(self) -> list[Any]:
         """Snapshot the shared graph's ledgers once, without moving execution."""
@@ -2693,6 +2868,9 @@ class SubagentComms:
         evictable.sort(key=lambda record: (record.settled_at is not None, record.settled_at or 0.0))
         for record in evictable[:overflow]:
             del self._records[record.job_id]
+            # Keeps the probe cache bounded by the same cap as the records.
+            if record.session_dir is not None:
+                self._transcript_probes.pop(record.session_dir, None)
 
 
 # ---------------------------------------------------------------------------

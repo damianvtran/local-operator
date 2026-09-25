@@ -515,6 +515,7 @@ class RpcClient:
         params: ProtocolModel,
         *,
         timeout: float,
+        execution_overhead_seconds_per_action: float = 0.0,
     ) -> dict[str, Any]:
         """One call, governed by the greater of ``timeout`` and what it declared.
 
@@ -558,7 +559,11 @@ class RpcClient:
             # false for exactly the two declaring methods, and invisible to
             # every test whose request declares nothing, where the two values
             # are equal. See :mod:`local_operator.evaluation.deadlines`.
-            effective_budget = funded_timeout(timeout, params)
+            effective_budget = funded_timeout(
+                timeout,
+                params,
+                execution_overhead_seconds_per_action=execution_overhead_seconds_per_action,
+            )
             # Started BEFORE the request is written, deliberately: ``elapsed``
             # is the caller's wall time for the whole call -- the frame going
             # out included -- not ``wait_for``'s deadline overshoot, which

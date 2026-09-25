@@ -1163,10 +1163,12 @@ class Notifier:
         returns as soon as a child is registered, so a parent that delegates
         reaches ``agent_end`` with its children still working: the model has
         stopped talking, but the WORK the user asked for is not done, and a
-        toast then is a false finish. Staying quiet costs nothing, because each
-        settled job re-enters the conversation as a fresh turn
-        (``Session._on_job_completed``) whose own completion is notifiable —
-        so the user is told once, when the last child has landed.
+        toast then is a false finish. Staying quiet costs nothing, because
+        settled jobs re-enter the conversation as a fresh turn whose own
+        completion is notifiable (``Session._on_job_completed``; jobs that
+        settle while a turn is streaming are held and arrive TOGETHER as one
+        turn once it ends, ``Session._deliver_deferred_job_results``) — so the
+        user is told once, when the last child has landed.
 
         Deliberately counts children rather than asking whether any single
         child finished: a child's own completion is never notifiable on its

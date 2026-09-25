@@ -321,17 +321,30 @@ def collect_sessions(
     live_pids = [rec.pid for rec, state in scanned if state == "live"]
     measured = usage_fn(live_pids)
     # Read ONCE for the whole listing, beside the usage measurement and for the same
-    # reason: the set answers a per-row question and a per-row file scan would be the
-    # cost ``session_rows`` already pays once (``fired_pids``/``held_pids`` each read
-    # every dump's text). The row builder below derives the same bit from the same
-    # reader, and the two must agree — ``session_rows`` is ``stall_held``'s published
-    # form and this field is what the panel paints from.
+    # reason: these scans answer a per-row question and a per-row file scan would be
+    # the cost ``session_rows`` already pays once. THE MAPS RATHER THAN THE PID SETS,
+    # because ``stall_dump`` publishes the FILE the search found: the path is a fact
+    # only the scan holds, and a caller composing one from its own log directory
+    # names a file that does not exist for a fire in another store (review round 1,
+    # MAJOR-1 / QA round 1, Q-1). Both rows below build their two fields from this
+    # one pair, so the panel and the JSON cannot disagree about a dead pid.
     from local_operator.session.runtime import stall_watchdog
 
-    held_pids = stall_watchdog.held_pids()
+    held_dumps = stall_watchdog.held_dumps()
+    fired_dumps = stall_watchdog.fired_dumps()
 
     lines: list[SessionLine] = []
     for rec, state in scanned:
+        # THIS LIFE'S OWN ARTIFACTS, resolved once per row: a dump written for a pid an
+        # EARLIER life drew is not this row's evidence, and the test is the artifact's
+        # mtime against the record's own start (``dump_is_current``). Unfenced, the
+        # widened search marked a live, healthy session ``bound held; lop stop`` off a
+        # recycled pid's leftover dump (QA round 1, Q-2) and published a ``stall_dump``
+        # path that does not exist (review round 1, MAJOR-1 / Q-1).
+        dump = fired_dumps.get(rec.pid)
+        if not stall_watchdog.dump_is_current(dump, rec.started_at):
+            dump = None
+        held = stall_watchdog.dump_is_current(held_dumps.get(rec.pid), rec.started_at)
         use = measured.get(rec.pid)
         lines.append(
             SessionLine(
@@ -379,14 +392,22 @@ def collect_sessions(
                 # it (design review round 1, D1): the row dict has had it since this
                 # branch, and until the panel read it the only place it existed was the
                 # JSON.
-                # FENCED ON LIVENESS (design review round 2, D8): ``held_pids`` is a
-                # scan of the dump files and says nothing about whether the process is
-                # still there, so a held runtime that a person later stopped kept the
-                # phrase "still running, needs you" on a row whose pid is gone — the
-                # panel rendered ``bound held`` beside ``stale``. A held dump is a
-                # live-state fact, so it is published only for a pid the registry does
-                # not call stale.
-                stall_held=rec.pid in held_pids and state != "stale",
+                # FENCED ON LIVENESS (design review round 2, D8): the scan says nothing
+                # about whether the process is still there, so a held runtime that a
+                # person later stopped kept the phrase "still running, needs you" on a
+                # row whose pid is gone — the panel rendered ``bound held`` beside
+                # ``stale``. A held dump is a live-state fact, so it is published only
+                # for a pid the registry does not call stale.
+                # ...AND FENCED ON THE RECORD'S OWN LIFE (QA round 1, Q-2): with the
+                # search widened to every store a writer can have used, a leftover held
+                # dump on a RECYCLED pid turned a live, healthy session (6 s uptime, 1 s
+                # heartbeat) into ``bound held; lop stop`` on the real CLI table. The
+                # artifact's mtime against this record's own start is what separates the
+                # two.
+                stall_held=held and state != "stale",
+                # THE FILE, NOT A COMPOSED PATH — see the maps above (MAJOR-1 / Q-1).
+                stall_dump=str(dump) if dump is not None else None,
+                started_at=rec.started_at,
                 # Which build each runtime is running, for diagnosing skew
                 # across a host that replaces its install several times a day.
                 # Same getattr defaulting as the live-state fields above.
@@ -614,14 +635,14 @@ def session_rows(
     this order, so the expectation is updated in the same change.
     """
     info = collect_sessions(root, include_stored=include_stored, stored_limit=stored_limit)
-    # THE FLEET'S OWN STALL BOUND, and what it left behind. ONE scan of the log
-    # directory for the whole listing rather than one per row: the marker has to
-    # be read out of each candidate file, so a per-row call would re-glob and
-    # re-read the same directory once per session.
-    from local_operator.session.runtime import stall_watchdog
-
-    fired = stall_watchdog.fired_pids()
-    held = stall_watchdog.held_pids()
+    # THE FLEET'S OWN STALL BOUND, and what it left behind — READ OFF THE LINES rather
+    # than scanned again here. ``collect_sessions`` does the one scan a listing needs
+    # (the marker has to be read out of each candidate file, so a per-row call would
+    # re-glob and re-read every store once per session) and fences each row's artifacts
+    # against that runtime's own life. That fence is also why the published
+    # ``stall_dump`` is the path the SCAN found: composed here from this process's own
+    # log directory it named a file that does not exist for a fire in another store
+    # (review round 1, MAJOR-1 / QA round 1, Q-1).
     return [
         {
             "state": line.state,
@@ -712,7 +733,7 @@ def session_rows(
             # needs after a freeze and the runtime that wrote it is gone by
             # definition — a listing is where they arrive (``stall_watchdog``
             # owns the naming, so the path is never composed twice).
-            "stall_dump": str(stall_watchdog.dump_path(line.pid)) if line.pid in fired else None,
+            "stall_dump": line.stall_dump,
             # THE THIRD STATE, on the surface a person looks at first. A row whose
             # bound fired is two different situations now, and this is what tells
             # them apart: WITHOUT it the runtime is gone and the dump is a
@@ -725,7 +746,7 @@ def session_rows(
             # is a question with a yes/no answer on every row.
             # ...and fenced the same way here, so the two surfaces cannot disagree
             # about a dead pid's leftover dump (design review round 2, D8).
-            "stall_held": line.pid in held and line.state != "stale",
+            "stall_held": line.stall_held,
         }
         for line in info.lines
     ]

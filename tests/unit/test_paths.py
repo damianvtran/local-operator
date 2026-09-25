@@ -173,3 +173,47 @@ def test_ensure_agent_home_dir_creates(monkeypatch: pytest.MonkeyPatch, tmp_path
     monkeypatch.setenv(AGENT_HOME_ENV, str(target))
     result = ensure_agent_home_dir()
     assert result == target and target.is_dir()
+
+
+def test_platform_log_dir_ignores_the_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The property the store search rests on: the platform root does NOT move.
+
+    ``log_dirs()`` lists this process's own ``log_dir()`` AND the platform default,
+    and it is only a search at all because those two are different directories for
+    two processes of the same machine: the session runtimes are started with
+    ``LOCAL_OPERATOR_CONFIG_DIR`` set while the daemon that classifies their deaths is
+    not. A ``platform_log_dir`` that honoured the override would collapse the two
+    candidates into one and put the reader back where it found nothing (the 31 cards
+    of the stall-dump attribution PR).
+
+    Also pins the deduplication, which is what keeps a process WITHOUT the override
+    from opening the same path twice.
+    """
+    from local_operator.paths import (
+        CONFIG_DIR_ENV,
+        DEFAULT_CONFIG_DIRNAME,
+        LOG_DIRNAME,
+        log_dir,
+        log_dirs,
+        platform_log_dir,
+    )
+
+    monkeypatch.delenv(CONFIG_DIR_ENV, raising=False)
+    without = platform_log_dir()
+    assert without == log_dir(), "with no override the two must agree"
+    # TWO candidates, and they are DIFFERENT directories rather than one path twice: the
+    # default config directory's logs is where a runtime started with the override set
+    # to the default writes, which is the measured case this search exists for.
+    default_config_store = Path.home() / DEFAULT_CONFIG_DIRNAME / LOG_DIRNAME
+    assert log_dirs() == (without, default_config_store), log_dirs()
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path / "cfg"))
+    assert log_dir() == tmp_path / "cfg" / "logs"
+    assert platform_log_dir() == without, "the platform root followed the override"
+    assert log_dirs() == (
+        tmp_path / "cfg" / "logs",
+        default_config_store,
+        without,
+    ), f"every store a writer can have used stays a candidate, this process's first: {log_dirs()}"

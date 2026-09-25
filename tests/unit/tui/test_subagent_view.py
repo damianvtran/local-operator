@@ -989,10 +989,19 @@ def test_relay_says_thinking_not_responding_until_the_child_streams_text() -> No
         "responding",
         "thinking",
     ]
-    # Every child event still lands in the trajectory, deltas included: the
-    # throttle is on the parent stream, not on the page's ledger.
+    # The page's ledger keeps every word, but a message's text deltas are
+    # COALESCED into one row before the next boundary event (see
+    # ``_make_relay.flush_text``): per-token rows filled the 500-row window and
+    # drove the parent's roster refresh at token rate. The single row carries
+    # the concatenation, and it lands BEFORE the ``message_end`` that flushed
+    # it, so the page's per-message fold renders the same text in the same
+    # order.
     assert job.trajectory is not None
-    assert [e["type"] for e in job.trajectory].count("message_update") == 3
+    kinds = [e["type"] for e in job.trajectory]
+    assert kinds.count("message_update") == 1
+    update = next(e for e in job.trajectory if e["type"] == "message_update")
+    assert update["delta"] == "Here is the answer."
+    assert kinds.index("message_update") < len(kinds) - 1 - kinds[::-1].index("message_end")
 
 
 def test_relay_reports_responding_once_per_message_and_never_over_a_running_tool() -> None:

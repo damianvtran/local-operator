@@ -11,7 +11,6 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel, Field
 
-from local_operator.model.discovery import FAILED_LISTING_STATUSES
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.auth import get_desktop_auth
@@ -69,6 +68,18 @@ class Catalogue(BaseModel):
     #: Whether the credential store could be read. When False, every row's
     #: `connected` is a listing default rather than a statement about auth, and
     #: a caller must not group or badge on it.
+    #:
+    #: It answers for the AUTH store only (``ProviderController.usable_providers``),
+    #: and the asymmetry is deliberate rather than an oversight: those are the rows
+    #: the picker groups on, and the secret store's provider rows are a second
+    #: source that this flag does not speak for. In the state a round-2 fix made
+    #: answerable — a secret store that cannot be read — this field is therefore
+    #: still True while no store credential was visible, and the honest reading is
+    #: "auth is known; nothing here claims the secret store was". Naming the secret
+    #: half in this flag was considered and rejected: with no store credential
+    #: visible the rows of a provider whose key lives there read `connected: false`,
+    #: and a flag that also said "credentials unknown" would invite a caller to
+    #: badge rows that are not in doubt (Q3-2).
     credentials_known: bool = True
 
 
@@ -114,56 +125,71 @@ async def models(live: bool = False, auth: DesktopAuth = Depends(get_desktop_aut
     try:
         failures: dict[str, str] = {}
         if live:
-            entries, statuses = await controller.live_catalogue()
-            # ``live_catalogue`` returns a STATUS for EVERY provider it
-            # considered (``ok``/``cached``/``stale``/``static``/
-            # ``unauthenticated``/``empty``), not a failure map. Naming every key
-            # as an error is how this endpoint told the desktop that all 23
-            # providers had "not answered" while two aggregators' 452 rows were
-            # on screen (D1). A status answers "how did we get these rows", and
-            # two of its values are not failures: ``cached`` served a stored
-            # document on purpose, and ``unauthenticated`` providers were never
-            # asked because they need a credential the caller did not supply.
+            # THE PICKER'S OWN CADENCE, never discovery's 24 h default. This read
+            # is the user pressing "Refresh from providers": they are asking NOW,
+            # and a document inside the hard TTL is otherwise served from disk
+            # without a request -- which is how a model the provider published
+            # since the last fetch fails to appear on the very click meant to find
+            # it. `PICKER_TTL_S` is the same constant the TUI's
+            # `_refresh_catalogue` and the mobile daemon pass, for the same
+            # reason; a document YOUNGER than the cadence is still served as-is,
+            # because the cadence bounds the refetch rather than removing it.
+            from local_operator.providers.controller import PICKER_TTL_S
+
+            # The engagement view this route's live read fetches by is one extra
+            # synchronous cost on the loop thread, and it belongs in this list for
+            # the same reason the others do: `_engaged_providers` is one
+            # `open_store()` over the encrypted secret store (measured ~8.6-20.4 ms
+            # with a store on disk, ~0.09 ms without, against ~0.018 ms for
+            # `usable_providers()` alone — medians of 25 calls each, isolated root,
+            # fleet host), and on a host whose store exists with no
+            # broker listening it can start a secret-broker daemon. Bounded and small
+            # beside the live fetch fan-out it feeds, and deliberately not memoised on
+            # the controller -- the store can change between the two calls a request
+            # makes.
+            entries, statuses = await controller.live_catalogue(ttl_s=PICKER_TTL_S)
+            # WHICH providers count as failing is ``catalogue_failures``'s
+            # question now, and it lives on the controller so every desktop
+            # surface asks it once from the same facts (config for the local
+            # endpoints, ``usable_providers()`` for the rest, and the row count
+            # that separates a row-less ``static`` from a provider whose bundled
+            # rows are exactly what the user asked to see). The deliberate
+            # silences are unchanged from before the rule moved: a row-ful
+            # ``static``/``unauthenticated`` provider has answered the user's
+            # question, and the TUI footer names the missing credential (D1,
+            # R1-4/Q1). This route only publishes the answer, in the same shape
+            # the mobile daemon's model route uses.
             #
-            # ``static`` is the one status that is BOTH shapes. It means "the
-            # registry is all there is", which for a provider that bundles rows
-            # is a fine answer — but a provider with NO bundled rows whose fetch
-            # failed with nothing cached also reports ``static``, and that is
-            # exactly the operator's original "refresh failed" state (R1-4/Q1:
-            # ``available_models('openrouter', base_url=dead)`` → ``static``, 0
-            # rows; a real 401 against api.openai.com likewise). ``FAILED_LISTING_STATUSES``
-            # alone would go SILENT there, where the old code named it.
-            #
-            # So a provider is reported when it has no listing AND contributed no
-            # rows at all: the intersection of the no-listing statuses with
-            # "contributed zero entries". Same shape the mobile daemon's model
-            # route uses (``status != "empty" and provider not in
-            # listed_providers``). The deliberate silence is kept for the
-            # row-ful ``static``/``unauthenticated`` cases — a 401 provider whose
-            # catalogue still shows its bundled rows has answered the user's
-            # question, and the TUI footer already names the missing credential.
-            #
-            # The VALUE stays the generic sentence on purpose: the surface that
-            # consumes this reads only the keys, and provider exceptions can
-            # carry response bodies or credential URLs, so an unvetted reason
-            # string must never reach the wire here.
-            contributed = {entry.provider for entry in entries}
-            failures = {
-                key: "Model listing unavailable"
-                for key, status in statuses.items()
-                if status in FAILED_LISTING_STATUSES
-                or (status == "static" and key not in contributed)
-            }
+            # The VALUE is the controller's one generic sentence on purpose: the
+            # surface that consumes this reads only the keys, and provider
+            # exceptions can carry response bodies or credential URLs, so an
+            # unvetted reason string must never reach the wire here.
+            failures = controller.catalogue_failures(entries, statuses)
         else:
-            # NOT `asyncio.to_thread`. `initial_catalogue` is synchronous and
-            # I/O-free by contract (it exists to paint on the keystroke that
-            # opens the picker; measured 0.21 ms median, 0.77 ms max), so the
-            # hop bought nothing -- and it cost correctness: the AuthStore's
-            # sqlite connection is created on the event-loop thread, so reading
-            # it from a worker raised `ProgrammingError`, which
+            # NOT `asyncio.to_thread`, and the reason is CORRECTNESS rather than
+            # cost: the AuthStore's sqlite connection is created on the event-loop
+            # thread, so reading it from a worker raised `ProgrammingError`, which
             # `usable_providers()` reported as "store unreadable" and the
             # catalogue turned into "everything is connected" on a machine with
             # no credentials (D18). Keep this call on the loop thread.
+            #
+            # The cost claim that used to stand here -- "`initial_catalogue` is
+            # synchronous and I/O-free by contract (measured 0.21 ms median,
+            # 0.77 ms max)" -- is FALSE since the first frame began reading every
+            # provider's cached listing, so it is replaced rather than left to
+            # mislead (agent review round 2, R2-2). What the call really does now,
+            # all of it disk and none of it a request: the cache document per
+            # provider, config.yml ONCE (only when a local provider is in the
+            # registry), and -- only when a cached listing contributed a model the
+            # shipped registry does not carry -- one keyless price document.
+            #
+            # Sized on 2026-09-24 on the fleet host, isolated HOME/config, 25-call
+            # median after a warm-up, three runs: 1.3-2.0 ms empty-cached, 1.3-1.6
+            # ms with a listing-only row and no price document on disk, 2.5-4.4 ms
+            # with a 138 KiB models.dev projection to read. Ranges, not a
+            # constant: the magnitude is this rig's and moves with the fleet.
+            # It stays on the loop thread: single-digit milliseconds, and the hop
+            # is what broke the credential store.
             entries = controller.initial_catalogue()
         # `CatalogueEntry.connected` is True both when a provider IS usable and
         # when the credential store could not be read at all -- the deliberate

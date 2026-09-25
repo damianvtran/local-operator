@@ -623,6 +623,32 @@ class TranscriptBlock(Static):
         """
         return self._content
 
+    def update_node_styles(self, animate: bool = True) -> None:
+        """Restyle only a block that is in the DOM; a detached one waits for mount.
+
+        Textual answers every class change (``add_class``/``set_class``) with
+        ``App.update_styles`` -> ``stylesheet.update_nodes`` over the node, and
+        it does so whether or not the node has a parent yet. A resumed
+        conversation builds every block DETACHED — constructed, classed
+        (``tool-card``, ``tool-success``, the adaptive ``gap-above``), filled
+        and only then mounted in one batch — so each of those class writes paid
+        a full selector match for a widget that was about to be matched again:
+        ``App._register`` runs ``stylesheet.apply`` on every widget it mounts,
+        from the classes it holds AT that moment. Measured on the real
+        ``OperatorApp`` opening a 285-row session: 235 ``update_nodes`` calls,
+        0.30-0.47 s of a 0.45-1.26 s open, all of them for nodes with no parent.
+
+        Skipping them is exact rather than approximate, because the mount-time
+        apply is the one that decides what the block is painted with and it
+        reads the final class set; nothing can paint a node that is not in the
+        tree. ``is_attached`` is the walk to the DOM root, so a block inside a
+        mounted-but-hidden (parked) transcript is attached and keeps restyling
+        exactly as before — only the genuinely orphaned case is skipped.
+        """
+        if not self.is_attached:
+            return
+        super().update_node_styles(animate=animate)
+
     def finalize(self) -> None:
         """Freeze the block; the container never re-renders it afterwards."""
         self._finalized = True
@@ -3948,6 +3974,9 @@ class TranscriptView(ScrollableContainer):
         # is read once per card per repaint and only changes when the set of tool
         # names on screen does.
         self._name_col_cache: int | None = None
+        #: A floor on the derived column for rows about to mount (see
+        #: :meth:`reserve_name_col`); 0 means none.
+        self._name_col_reserve = 0
         # The width the ledger's ROWS were last published with — what their
         # summaries were actually laid out against. Deliberately separate from
         # the cache: a path that invalidates the column drops the cache, so the
@@ -4004,6 +4033,9 @@ class TranscriptView(ScrollableContainer):
         #: :meth:`insert_blocks` for why a single late restore is not enough.
         #: ``None`` when no insert is settling.
         self._insert_anchor: tuple[TranscriptBlock, float] | None = None
+        #: Set by :meth:`hold_tail_through_layout` while a caller is landing a
+        #: follower on the tail across several layout passes.
+        self._hold_tail_placement = False
 
     def on_mount(self) -> None:
         """Give the system vertical scrollbar an open-hand hover cursor.
@@ -4899,7 +4931,9 @@ class TranscriptView(ScrollableContainer):
                 name = getattr(block, "tool_name", "")
                 if isinstance(name, str) and name:
                     longest = max(longest, cell_len(display_name(name)))
-            self._name_col_cache = max(TOOL_NAME_COL, min(longest, TOOL_NAME_COL_MAX))
+            self._name_col_cache = max(
+                TOOL_NAME_COL, min(longest, TOOL_NAME_COL_MAX), self._name_col_reserve
+            )
             # Deriving IS publishing: this is the width every row paints with
             # from here on, so it is also what a later resync has to compare
             # against. Recorded at the derivation rather than only at a repaint
@@ -4908,6 +4942,49 @@ class TranscriptView(ScrollableContainer):
             # a reveal that changes nothing must not walk every row.
             self._name_col_applied = self._name_col_cache
         return self._name_col_cache
+
+    def hold_tail_through_layout(self, hold: bool) -> None:
+        """Land a following reader on the tail BEFORE placement, while ``hold``.
+
+        For the viewport-first resume (``OperatorApp._render_resumed_history``):
+        from the first projection to the settle of the page that completes the
+        window, every layout pass keeps a follower on the newest row in the same
+        frame the extent moves, so neither the first paint nor the backfill
+        paints a frame off the tail. See :meth:`arrange`.
+        """
+        self._hold_tail_placement = hold
+
+    def reserve_name_col(self, names: Iterable[str]) -> None:
+        """Hold the name column at least as wide as ``names`` need, before they mount.
+
+        For a caller that paints part of a window now and mounts the rest a
+        frame later — the viewport-first resume (``OperatorApp.
+        _backfill_resume_window``). The column is derived from the rows ON
+        SCREEN, so without this a longer tool name in the later page widens it
+        after the first paint and every ledger row in the viewport shifts
+        sideways: a reflow the reader sees as motion, on a frame that was
+        otherwise final. Reserving the width the finished window will have
+        makes the first paint already carry it.
+
+        The same clamp as the derivation, and a FLOOR rather than an override,
+        so rows that genuinely need more still widen it.
+        :meth:`release_name_col_reserve` drops it once the rows it stood in for
+        are mounted, when the derivation reaches the same number on its own.
+        """
+        from local_operator.tui.glyphs import display_name
+
+        longest = max(
+            (cell_len(display_name(name)) for name in names if isinstance(name, str) and name),
+            default=0,
+        )
+        self._name_col_reserve = max(TOOL_NAME_COL, min(longest, TOOL_NAME_COL_MAX))
+        self._resync_name_col()
+
+    def release_name_col_reserve(self) -> None:
+        """Drop :meth:`reserve_name_col`'s floor; the rows now speak for themselves."""
+        if self._name_col_reserve:
+            self._name_col_reserve = 0
+            self._resync_name_col()
 
     def invalidate_name_col(self) -> None:
         """Public entry point: a card's NAME changed, so the column may have.
@@ -5101,6 +5178,8 @@ class TranscriptView(ScrollableContainer):
         for block in self._blocks:
             block.remove()
         self._blocks.clear()
+        self._name_col_reserve = 0
+        self._hold_tail_placement = False
         # Every derived measurement goes with them. The name column is computed
         # FROM the blocks, so a stale one made the next ledger inherit the width
         # of a transcript the user just cleared — re-deriving here publishes the
@@ -5119,7 +5198,17 @@ class TranscriptView(ScrollableContainer):
         # next turn streams into a reader who is, by construction, at the
         # bottom of an empty column.
         self._tail_anchor.acquire()
-        self.scroll_home(animate=False)
+        # IMMEDIATE and inside the programmatic guard. A bare
+        # `scroll_home(animate=False)` is DEFERRED to after the next refresh, so
+        # it lands outside any guard, and `watch_scroll_y` read it as the READER
+        # leaving the bottom — releasing the anchor this method just acquired.
+        # On an in-app `/resume` that is the frame the incoming conversation's
+        # first rows arrive in: two frames painted at scroll 0 with the head
+        # notice on screen, a whole screenful off the tail, until the backfill's
+        # anchored insert re-acquired it (design round 1, D1: 22 ms on this
+        # branch, the same class main paints for 26 ms).
+        with self._tail_anchor.programmatic_scroll():
+            self.scroll_to(y=0, animate=False, immediate=True, force=True)
         if self._on_clear is not None:
             self._on_clear()
 
@@ -5304,6 +5393,34 @@ class TranscriptView(ScrollableContainer):
         estimate is needed.
         """
         result = super().arrange(size, optimal)
+        if (
+            self._hold_tail_placement
+            and self._tail_anchor.following
+            and not self.app.animator.is_being_animated(self, "scroll_y")
+        ):
+            # THE FOLLOWER'S HALF of the same pre-placement, while a caller has
+            # asked for it (:meth:`hold_tail_through_layout`). `_size_updated`'s
+            # tail scroll runs after this reflow has placed the rows, so an
+            # extent change under a follower paints ONE frame at the old offset
+            # first: a resume's first paint showed the TOP of the frame it had
+            # just mounted (scroll 0 against a 149-row extent) before jumping to
+            # the tail, and the backfill page inserted above the viewport slid
+            # the content for a frame before snapping back. Landing the tail
+            # HERE is the destination `_size_updated` reaches, one frame earlier.
+            #
+            # Opt-in rather than for every follower: a sidebar switch restores a
+            # saved anchor while `following` is still armed, and a rule that
+            # re-landed the tail on every arrange undid that restore
+            # (`test_sidebar_anchor_reassert`).
+            #
+            # Same bound as the anchored branch below: the fresh content extent,
+            # because `max_scroll_y` is stale until `_size_updated`.
+            target = max(0, result.total_region.bottom - size.height)
+            if abs(target - self.scroll_y) >= 0.5:
+                self.set_reactive(Widget.scroll_y, target)
+                self.set_reactive(cast(Reactive[float], Widget.scroll_target_y), target)
+                self.vertical_scrollbar.set_reactive(ScrollBar.position, target)
+            return result
         held = self._insert_anchor
         if held is not None and not self._tail_anchor.following:
             block, gap = held

@@ -2074,3 +2074,69 @@ async def test_a_plain_request_keeps_the_banners_established_sentence(
         await _settle(app, pilot)
         assert len(spawned) == 1, spawned
         assert spawned[0][1] == BODY_INTERRUPTED, spawned[0]
+
+
+@pytest.mark.asyncio
+async def test_a_machine_started_run_is_never_announced_and_a_workstream_is(
+    store_root: Path, spawned: list[list[str]]
+) -> None:
+    """This surface already filtered by ORIGIN — pinned, and pinned in BOTH directions.
+
+    ``_notify_background_completions`` builds its candidate set from
+    ``load_catalog``, which scans through ``resume._scan_sessions`` and keeps only
+    the user's own origins, so an ``agent-shell`` run has never reached this rung
+    and must not start now. What the workstream origin changes is the OTHER row:
+    it is a user origin, so the operator's own TUI announces it exactly as it
+    announces a conversation he opened — which is what makes a fan-out the
+    operator asked for visible on the surface he is actually looking at.
+
+    BOTH ARMS IN ONE CELL, so the control is the same run and the same scan: the
+    two sessions differ only by their marker. The hidden arm's watermark is
+    asserted too, because "no banner" for the wrong reason (a claim someone else
+    spent) is not the property under test.
+    """
+    from local_operator.resume import (
+        ORIGIN_AGENT_SHELL,
+        ORIGIN_AGENT_WORKSTREAM,
+        mark_session_origin,
+    )
+
+    _make_session(store_root, "current", "Current conversation")
+    delegated = _make_session(store_root, "d00000000001", "Delegated review run")
+    mark_session_origin(delegated, ORIGIN_AGENT_SHELL)
+    workstream = _make_session(store_root, "w00000000001", "Fan-out audit")
+    mark_session_origin(workstream, ORIGIN_AGENT_WORKSTREAM, opened_by={"session": "manager00001"})
+
+    store = AttentionStore(store_root / "attention.db")
+    delegated_identity = conversation_identity(delegated)
+    workstream_identity = conversation_identity(workstream)
+    # An ESTABLISHED store: both carry a prior, already-read completion, so the
+    # baseline is installed and the next publish is news on both identities.
+    for identity in (delegated_identity, workstream_identity):
+        seed = str(uuid.uuid4())
+        store.publish(identity, seed, "old", "complete")
+        store.acknowledge(identity, seed)
+
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app, pilot)
+        await _settle(app, pilot)
+        spawned.clear()
+
+        delegated_token = str(uuid.uuid4())
+        store.publish(delegated_identity, delegated_token, "delegated-completion", "complete")
+        store.publish(workstream_identity, str(uuid.uuid4()), "workstream-completion", "complete")
+        await _settle(app, pilot, rounds=10)
+
+        assert len(spawned) == 1, spawned
+        argv = " ".join(spawned[0])
+        assert "w00000000001" in argv
+        assert "Fan-out audit" in argv
+        assert "Delegated review run" not in argv
+
+    # The skip is a FILTER ABOVE THE CLAIM, exactly as it is for a test-hosted
+    # row above: the hidden completion is still claimable, so a surface that may
+    # legitimately announce it — the desktop app on a host where notifications
+    # are on — still can. A spent watermark here would read as "somebody was
+    # told" about a banner nobody ever received.
+    assert store.claim_delivery(delegated_identity, delegated_token, "probe") is True

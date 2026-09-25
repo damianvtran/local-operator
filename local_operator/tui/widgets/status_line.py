@@ -1182,6 +1182,14 @@ class StatusLine:
         #: instead of the segment ladder. Animated for the same reason
         #: ``_starting`` is: see :meth:`set_connecting`.
         self._connecting: bool = False
+        #: Whether the connection segment's sentence is an INSTRUCTION rather than
+        #: a verdict, and therefore takes `muted` instead of `danger`. The third
+        #: register the segment needs: `danger` says "something is wrong with the
+        #: connection", and a red sentence telling the operator to answer the
+        #: question above the band reads as "something is wrong with this
+        #: question" — beside a card whose own highlight is the accent green
+        #: (design round 2, D7). Set with the same string it qualifies.
+        self._connection_muted: bool = False
         self._spinner_timer = None
         #: Interval the live timer was created with; a focus change compares
         #: against it to decide whether the timer must be replaced.
@@ -1442,6 +1450,7 @@ class StatusLine:
         self,
         *,
         connection: str | None = None,
+        connection_muted: bool | None = None,
         model_label: str | None = None,
         model_name: str | None = None,
         effort: str | None = None,
@@ -1468,6 +1477,8 @@ class StatusLine:
         """Update any subset of segments and repaint the band."""
         if connection is not None:
             self._connection = connection
+        if connection_muted is not None:
+            self._connection_muted = connection_muted
         if model_label is not None:
             self._model_label = model_label
         if model_name is not None:
@@ -1789,6 +1800,14 @@ class StatusLine:
             # glyph below, so the eye has a non-textual cue either way and the
             # accent budget is untouched (no green for a session that is not
             # live).
+            #
+            # A THIRD REGISTER, and the same rule one step over: not every
+            # non-working sentence is a FAILURE. `Saved · Answer the question
+            # above` instructs, and painting an instruction in the alarm ink
+            # under a card whose own highlight is the accent green reads as
+            # "something is wrong with this question" (design round 2, D7). The
+            # caller names the register with `connection_muted`, and the two
+            # verdict sentences keep `danger`.
             connecting = getattr(self, "_connecting", False)
             left = Text()
             if connecting:
@@ -1802,7 +1821,11 @@ class StatusLine:
                     left.append(" ", style=dim)
             left.append(
                 connection,
-                style=muted if connecting else Style(color=theme_mod.semantic_color("danger")),
+                style=(
+                    muted
+                    if connecting or self._connection_muted
+                    else Style(color=theme_mod.semantic_color("danger"))
+                ),
             )
             left.truncate(width, overflow="ellipsis")
             # The gap this row reserves for the name must be the one ``_compose``
@@ -2212,15 +2235,28 @@ class StatusLine:
         # new attribute directly turned three of those into AttributeErrors —
         # a widget's renderer must tolerate the reduced hosts its own suite
         # builds, the same way the fork/subagent fields here already do.
-        if getattr(self, "_starting", False) and not self._streaming:
+        if getattr(self, "_starting", False):
             # Before the runtime exists there is nothing to report but the
             # wait itself, and the caption carries the whole meaning — so it is
             # always spelled out, unlike the working indicator whose word is
             # suppressed when the shimmer is already saying it.
+            #
+            # IT OUTRANKS `working`. A prompt accepted while the viewer is not
+            # yet attached marks the band streaming at once, but nothing has
+            # reached the owner until the bind lands, and the app keeps this
+            # flag up for exactly that wait (`OperatorApp._push_starting_band`).
+            # Letting `working` win hid the one not-attached cue the moment the
+            # user acted on it (UX round 1, U4). A normal turn never has both:
+            # the flag is only ever up while the viewer is cold.
+            #
+            # `muted`, not `dim`: this caption is the only on-screen statement
+            # that the attach is still pending, and `dim` on the band's ground
+            # measured 4.18:1, under AA's 4.5:1 (design round 1, D3); `muted`
+            # is 7.93:1, the band's own secondary-text step.
             if parts:
                 left.append(f" {_SEP_LEFT} ", style=seam)
             left.append(_SPINNER_FRAMES[self._spinner_index], style=accent)
-            left.append(" starting…", style=dim)
+            left.append(" starting…", style=muted)
         elif self._streaming:
             # The aggregate working LINE (WorkingBlock) carries the shimmer; the
             # band keeps a quiet activity glyph so a still frame still reads
