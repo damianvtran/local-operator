@@ -770,7 +770,15 @@ process:
   (the answer `browser_bridge/install.py::_default_config_root()` derives for the
   same purpose, and for the same reason — `Path.home()` would compare a
   redirected home against itself and conclude it is the real one), and refuses
-  when `$HOME` is not it;
+  when `$HOME` is not it. **On Windows the gate is inert by construction**: there
+  is no passwd database, so both readings come from `USERPROFILE` and always
+  agree — the same weakness
+  `supervisors.unit_is_addressable`'s docstring records for its Windows arm, and
+  moot for the toast legs because this product posts no OS notification there at
+  all (no `notify-send`, no bundle). It is not moot for the desktop-frame sites,
+  where the app that would raise the banner DOES run on Windows, so a Windows
+  rig's frame offer is governed only by the kill switch and the test-hosting
+  rule; the honest statement of that is the point of this sentence;
 - the legs that ask it are the identity bundle and the `osascript` fallback in
   `detached_notify`, `Notifier.send`'s D-Bus fallback, the three `cmux notify`
   spawn sites (`Notifier.send` and the TUI's two observer branches — `cmux
@@ -1636,12 +1644,11 @@ driving the real front end, never for opening a peer to hand work to.
 
 **Do not lean on the isolation to cover this.** Since 2026-09-24 a redirected
 `HOME` also makes every surface that LEAVES the process refuse on its own (see
-"Isolating a run" — a
-notification is the one side effect a path redirect cannot isolate), but a rig
-that runs a session with the operator's real `HOME` still reaches his desktop,
-and `env -i` is what strips the value the suite armed. Set the gate in the
-CHILD's environment at the launcher, so a rig that forgets is quiet rather than
-plausible: a launcher that drives the real CLI carries
+"Isolating a run" — a notification is the one side effect a path redirect cannot
+isolate), but a rig that runs a session with the operator's real `HOME` still
+reaches his desktop, and `env -i` is what strips the value the suite armed. Set
+the gate in the CHILD's environment at the launcher, so a rig that forgets is
+quiet rather than plausible: a launcher that drives the real CLI carries
 `LOCAL_OPERATOR_NO_NOTIFICATIONS=1` in its `env -i` block, and a launcher that
 runs a session in its own process calls
 `tui.notify.suppress_notifications_for_process()` before the first one starts.

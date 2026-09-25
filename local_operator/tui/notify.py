@@ -546,8 +546,17 @@ def desktop_belongs_to_this_process() -> bool:
 
     Fails OPEN when the real home cannot be determined (no passwd database, no
     ``getuid``): every platform that can post a toast is one that has a passwd
-    entry, so refusing there would buy nothing and take the feature away. The
-    refusal is NOT silent for the user it can genuinely cost a feature — a
+    entry, so refusing there would buy nothing and take the feature away. ON
+    WINDOWS THE GATE IS THEREFORE INERT: there is no passwd database, so
+    ``real_home()`` reads ``USERPROFILE`` and ``Path.home()`` reads the same
+    variable — the two always agree, and a redirected profile is not detected.
+    That is the same weakness ``supervisors.unit_is_addressable`` records for its
+    Windows arm, and it matters here only for the desktop-frame sites (Windows
+    has no toast leg at all), where the kill switch and the test-hosting rule are
+    then the whole guard. Stated rather than implied, because a reader of the
+    gate's name would otherwise take it for a platform-independent guarantee.
+
+    The refusal is NOT silent for the user it can genuinely cost a feature — a
     container (``docker run -e HOME=/root``, a devcontainer), a sandboxed shell
     (``bwrap``, ``firejail``, ``nix-shell``), ``sudo -E lop`` or a dotfile that
     rewrites ``HOME`` all land here, and the first refusal in a process says so
@@ -561,15 +570,19 @@ def desktop_belongs_to_this_process() -> bool:
         if home is None:
             return True
         allowed = Path.home().resolve() == home
-    except (ImportError, AttributeError, KeyError, OSError, RuntimeError, ValueError) as exc:
-        # The shapes this machine cannot answer IN: no `pwd` (ImportError), no
-        # uid (AttributeError), no passwd entry (KeyError), an unreadable or
-        # unresolvable home (OSError/RuntimeError/ValueError — `Path.home()`
-        # raises RuntimeError when it cannot resolve one at all). Anything
-        # OUTSIDE this tuple is a defect in the predicate rather than a platform
-        # without an answer, and it propagates to the caller deliberately: a
-        # `NameError` here must NOT be laundered into "cannot tell", which fails
-        # open in the direction that re-opens the leak this exists to close.
+    except (ImportError, OSError, RuntimeError, ValueError) as exc:
+        # EXACTLY the shapes that are reachable here, and no more, because the
+        # tuple is a claim about the platform rather than a net. `real_home()`
+        # answers None for its own platform shapes (it catches ImportError,
+        # KeyError, OSError and AttributeError inside), so what is left is: a
+        # `local_operator.supervisors` that will not import (ImportError), an
+        # unreadable or unresolvable home from `Path.home()`/`resolve()`
+        # (RuntimeError — which is what `Path.home()` raises when it cannot
+        # resolve one at all — plus OSError and ValueError). Anything OUTSIDE
+        # this tuple is a defect in the predicate rather than a platform without
+        # an answer, and it propagates deliberately: a `NameError` or a
+        # `TypeError` here must NOT be laundered into "cannot tell", which fails
+        # OPEN in the very direction that re-opens the leak this exists to close.
         # `supervisors.unit_is_addressable` catches a comparable pair for the
         # same reason.
         logger.debug("could not tell whose desktop this is: %s", exc)

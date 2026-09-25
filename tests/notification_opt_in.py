@@ -29,6 +29,20 @@ the same shape as the other two, applied in-process because the predicate reads
 no environment variable (which is the point of it: a redirected rig cannot
 opt itself out).
 
+A TEST THAT NEEDS THE OTHER ANSWER MUST SCOPE ITS OWN PATCH INSIDE THIS ONE —
+a ``with mock.patch(_IDENTITY_GATE, …):`` block in the test BODY — and must not
+install one with ``monkeypatch.setattr`` on the same attribute. Two patches of
+one attribute restore in teardown order, and ``monkeypatch`` saves the value it
+found: this module's lambda. When ``monkeypatch`` unwinds — which happens beside
+this fixture, not inside it — its restore reinstates the waiver for the rest of
+the worker process. That is not hypothetical: it made the identity suite's
+refusal cells fail only when they ran AFTER a feed suite in the same worker,
+which is an order a ``-n 4`` shard produces. A patch scoped in the test body
+stops first and restores this waiver, so the outer teardown still restores the
+real predicate. Patching the predicate's INPUT (``supervisors.real_home``)
+cannot work here instead: the waiver IS this attribute, so the input is never
+read.
+
 HOW TO USE IT, and the reason it is a context manager rather than a fixture.
 Each module keeps its OWN opt-in fixture — that is this repository's established
 style (see ``tests/unit/session/test_runtime_completion_announce.py`` and

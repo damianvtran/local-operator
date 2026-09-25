@@ -2074,3 +2074,132 @@ async def test_a_plain_request_keeps_the_banners_established_sentence(
         await _settle(app, pilot)
         assert len(spawned) == 1, spawned
         assert spawned[0][1] == BODY_INTERRUPTED, spawned[0]
+
+
+# ---------------------------------------------------------------------------
+# The identity gate, at the TUI's OWN two cmux spawn sites
+# ---------------------------------------------------------------------------
+#
+# `store_root` scrubs every `CMUX_*` variable from the environment, deliberately:
+# this suite runs inside cmux on the maintainer's machine, and the bare-terminal
+# path is the configuration the reported bug lived in. These two cells put the
+# marker BACK, because the shape under test is a rig that redirects `HOME`
+# WITHOUT `env -i` — it keeps every inherited `CMUX_*`, so the cmux backend is
+# reachable to it and has to be refused. Tests/conftest.py redirects `HOME` for
+# every test in this suite, which makes the predicate answer here for real.
+#
+# Both cells carry a control arm, so neither can pass on the cmux branch having
+# been broken outright — a claim no assertion in this file could make before,
+# which is why deleting either clause in `app.py` used to fail nothing.
+
+_CMUX_SURFACE = "773d5e5e-1111-4222-8333-444455556666"
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_is_not_the_users_own_never_uses_the_cmux_backend(
+    store_root: Path, spawned: list[list[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_deliver_background_completion`: the row-banner spawn site.
+
+    ``spawned`` records BOTH backends in one list, so "which one was used" is
+    what the assertion reads: the detached backend appends
+    ``[title, body, session_id, subtitle]`` and the cmux one appends its argv,
+    whose first element is ``cmux``. The control arm then patches the predicate
+    open and requires the cmux argv, which is what proves the leg is live.
+    """
+    _make_session(store_root, "current", "Current conversation")
+    background = _make_session(store_root, "bg0000000001", "Article-search-svc schema review")
+    control = _make_session(store_root, "bg0000000002", "Second review")
+    store = AttentionStore(store_root / "attention.db")
+    # An ESTABLISHED store for both rows: each has a prior, already-read
+    # completion, so the next publish is news rather than the baseline.
+    for directory, anchor in ((background, "old"), (control, "old")):
+        token = str(uuid.uuid4())
+        store.publish(conversation_identity(directory), token, anchor, "complete")
+        store.acknowledge(conversation_identity(directory), token)
+
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app, pilot)
+        await _settle(app, pilot)
+        spawned.clear()
+
+        monkeypatch.setenv("CMUX_SURFACE_ID", _CMUX_SURFACE)
+        store.publish(conversation_identity(background), str(uuid.uuid4()), "fresh", "complete")
+        await _settle(app, pilot)
+
+        assert len(spawned) == 1, spawned
+        assert (
+            spawned[0][0] != "cmux"
+        ), "a run that is not the user's own raised a toast in THEIR cmux: " + str(spawned)
+        assert "bg0000000001" in " ".join(spawned[0])
+
+        # CONTROL ARM: the same cell with the predicate answered for a real run.
+        monkeypatch.setattr(
+            "local_operator.tui.notify.desktop_belongs_to_this_process", lambda: True
+        )
+        spawned.clear()
+        store.publish(conversation_identity(control), str(uuid.uuid4()), "fresh", "complete")
+        await _settle(app, pilot)
+
+        assert spawned and spawned[0][0] == "cmux", spawned
+
+
+@pytest.mark.asyncio
+async def test_the_digest_never_uses_the_cmux_backend_for_a_run_that_is_not_yours(
+    store_root: Path, spawned: list[list[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The background-digest spawn site, which is a different code path.
+
+    The digest is the last thing the scan does and the one delivery that carries
+    no ``session_id``, so it is partitioned structurally (slot 2) rather than by
+    matching its prose. Under the refusal every delivery — rows AND digest — must
+    arrive through the detached backend, which is what the 4-slot shape proves;
+    with the predicate answered for a real run, the same flood must arrive as
+    cmux argvs.
+    """
+    from local_operator.tui.app import _BACKGROUND_NOTIFY_MAX_PER_TICK
+
+    _make_session(store_root, "current", "Current conversation")
+    seed = _make_session(store_root, "bg0000000000", "Seed")
+    store = AttentionStore(store_root / "attention.db")
+    seed_token = str(uuid.uuid4())
+    store.publish(conversation_identity(seed), seed_token, "old", "complete")
+    store.acknowledge(conversation_identity(seed), seed_token)
+
+    refused = [
+        _make_session(store_root, f"bg00000001{index:02d}", f"Overnight {index}")
+        for index in range(12)
+    ]
+    control = [
+        _make_session(store_root, f"bg00000002{index:02d}", f"Later {index}")
+        for index in range(_BACKGROUND_NOTIFY_MAX_PER_TICK + 1)
+    ]
+
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app, pilot)
+        await _settle(app, pilot, rounds=8)
+        spawned.clear()
+
+        monkeypatch.setenv("CMUX_SURFACE_ID", _CMUX_SURFACE)
+        for directory in refused:
+            store.publish(conversation_identity(directory), str(uuid.uuid4()), "fresh", "complete")
+        await _settle(app, pilot, rounds=8)
+
+        assert all(
+            len(call) == 4 for call in spawned
+        ), "a cmux argv reached a run that is not the user's own: " + str(spawned)
+        assert [call for call in spawned if not call[2]], "the digest never arrived"
+
+        # CONTROL ARM: the same flood, with the predicate answered for a real run.
+        monkeypatch.setattr(
+            "local_operator.tui.notify.desktop_belongs_to_this_process", lambda: True
+        )
+        spawned.clear()
+        for directory in control:
+            store.publish(conversation_identity(directory), str(uuid.uuid4()), "fresh", "complete")
+        await _settle(app, pilot, rounds=8)
+
+        assert spawned and all(call[0] == "cmux" for call in spawned), spawned
+        assert any(call[1:2] == ["notify"] for call in spawned), spawned

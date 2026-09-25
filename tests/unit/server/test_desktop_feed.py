@@ -46,6 +46,7 @@ import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import pytest
 
@@ -2991,16 +2992,18 @@ def test_a_run_that_is_not_the_users_own_offers_no_banner(tmp_path, monkeypatch)
     _publish(root, sid)
     assert [frame["session_id"] for frame in _bannered(feed, subscription)] == [sid]
 
+    # SCOPED INSIDE the module opt-in's patch, in the test body — the only
+    # nesting order that restores cleanly (see ``tests/notification_opt_in``).
     # Recorded as well as answered: the clause has to be ON this path, and a
-    # cell that only asserts the absence of a frame would pass if the filter
-    # stopped running at all.
+    # cell that only asserts the absence of a frame would pass on the filter
+    # having stopped running.
     asked: list[int] = []
-    monkeypatch.setattr(
+    with mock.patch(
         "local_operator.tui.notify.desktop_belongs_to_this_process",
         lambda: (asked.append(1), False)[1],
-    )
-    _publish(root, sid)
-    frames = _bannered(feed, subscription)
+    ):
+        _publish(root, sid)
+        frames = _bannered(feed, subscription)
     assert asked, f"the offer was never withheld by this gate; frames={frames}"
     assert frames == []
 

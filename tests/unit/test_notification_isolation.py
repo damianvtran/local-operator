@@ -1097,11 +1097,16 @@ def _files_that_spawn_a_cmux_toast() -> list[Path]:
 def test_every_cmux_toast_site_asks_the_gate() -> None:
     """A cmux spawn whose gate was forgotten is a rig on the operator's screen.
 
-    TEXTUAL, and the PR must not read it as proof of behaviour — the behavioural
-    half is ``test_a_redirected_home_refuses_the_cmux_toast``, which drives the
-    leg the TUI uses. This is the drift tripwire for the NEXT spawn site: the
-    marker it keys on (``CMUX_SURFACE_ID``) is inherited, so the site that
-    forgets the gate is a site that posts into somebody else's cmux.
+    THIS SWEEP IS PER FILE, NOT PER SITE, and the distinction is load-bearing:
+    a file that names the predicate anywhere passes it, so it cannot see the
+    second spawn site inside a file that already answers the question (`app.py`
+    has two). It is a drift tripwire against a NEW module reaching for
+    `cmux_command` without asking whose desktop it is — which is the shape the
+    first cut of this change had. What pins each SITE is behaviour:
+    ``test_a_redirected_home_refuses_the_cmux_toast`` for `Notifier.send`, and
+    the two cells in ``tests/unit/tui/test_background_completion_notify.py`` for
+    `app.py`'s two, each with a control arm and each proven to fail when its
+    clause is deleted.
     """
     population = _files_that_spawn_a_cmux_toast()
     assert population, "the sweep found no cmux sites; the predicate has rotted"
