@@ -1119,9 +1119,9 @@ def test_a_spinning_runtime_gets_its_dump_and_its_fire(tmp_path: Path) -> None:
             f"(rc={child.poll()}): {lines[-8:]!r}"
         )
         pid = armed_pid()
-        assert pid is not None, (
-            f"the child exited before it armed its bound (rc={child.poll()}): {lines[-8:]!r}"
-        )
+        assert (
+            pid is not None
+        ), f"the child exited before it armed its bound (rc={child.poll()}): {lines[-8:]!r}"
         dump = stall_watchdog.dump_path(pid, root / "logs")
 
         # THE SPIN: bounded, and the bound is the cell's, not the module's. Waiting on
