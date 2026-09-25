@@ -836,6 +836,54 @@ def test_a_failed_spawn_gives_the_slot_back(
     assert (str(root), standby.SLOT_TUI) in standby._SLOTS
 
 
+def test_a_failed_second_spawn_keeps_the_slot_while_a_spare_lives(
+    supervisor_harness: Any,
+) -> None:
+    """M2 (agent review round 1): release the slot only when the pool is EMPTY.
+
+    The m3-2 rationale — "a slot held by a console with no spare is a win nobody
+    gets" — is exactly the empty case. At depth 2 with a live spare in hand the
+    slot is doing its job; releasing it lets another console win the cap and warm
+    beside a holder that already has a spare.
+    """
+    from local_operator.session.runtime import standby
+
+    def explode(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("no fork for you")
+
+    # (a) empty pool: the m3-2 release still happens.
+    empty = supervisor_harness(role=standby.SLOT_DAEMON)
+    assert standby._take_slot(empty.root, standby.SLOT_DAEMON) is True
+    empty.monkeypatch.setattr(standby, "_spawn_standby", explode)
+    standby._spawn_one(empty.root, standby.SLOT_DAEMON)
+    assert (
+        str(empty.root),
+        standby.SLOT_DAEMON,
+    ) not in standby._SLOTS, "a claim that produced no spare must go back"
+
+    # (b) a live spare in the pool: the second spawn fails, the slot STAYS, and
+    #     the failure is still scheduled as a retry.
+    held = supervisor_harness(role=standby.SLOT_DAEMON)
+    assert standby._take_slot(held.root, standby.SLOT_DAEMON) is True
+    calls: list[int] = []
+
+    def flaky(*args: Any, **kwargs: Any) -> Any:
+        calls.append(1)
+        if len(calls) > 1:
+            raise OSError("no fork for you")
+        return held.stub_spawn(*args, **kwargs)
+
+    held.monkeypatch.setattr(standby, "_spawn_standby", flaky)
+    standby._spawn_one(held.root, standby.SLOT_DAEMON)
+    assert len(standby._POOL) == 1, "the first spawn did not land"
+    standby._spawn_one(held.root, standby.SLOT_DAEMON)
+    assert (
+        str(held.root),
+        standby.SLOT_DAEMON,
+    ) in standby._SLOTS, "a failed second spawn released a slot that still has a live spare"
+    assert standby._NEXT_AT[0] > held.clock, "the failed spawn did not schedule a retry"
+
+
 def test_one_spare_per_root_per_slot_however_many_consoles(
     root: Path, tmp_path: Path, started: dict[str, Any], clean_slots: None
 ) -> None:
