@@ -177,9 +177,9 @@ Screens, following branding.md §7's agent-output hierarchy:
   GROUPS what it is sent:
   **★ Pinned**, **Active Sessions**, **Previous Sessions**.
 
-  A conversation is pinned with a long-press on its row (★ Pinned is where it
-  then appears, lifted out of its old section) or from the ☆/★ control in the
-  session view's header. Both write the **shared durable pin store**
+  A conversation is pinned with a long-press on its row or from the ☆/★ control
+  in the session view's header; either way the row ends up under **★ Pinned**,
+  out of the section it ranked into. Both write the **shared durable pin store**
   (`sidebar-pins.json` via `local_operator.tui.sidebar_pins`) — the same file
   the TUI's `F10` and the desktop app's pin action read and write — so a pin
   made on the phone appears on the other surfaces and vice versa. The route is
@@ -187,10 +187,29 @@ Screens, following branding.md §7's agent-output hierarchy:
   toggle, so a retried request cannot flip the pin back). A pin made on another
   surface reaches an open phone list without a reload within one discovery
   pass (`SCAN_INTERVAL_S`, 2 s): that pass stats `sidebar-pins.json` once per
-  tick and repaints the list only when the pinned set changed. A pin needs the
-  conversation's durable folder, so pinning a session in the moment before its
-  first message lands on disk is refused with a 409 rather than stored as a pin
-  the list cannot show.
+  tick and repaints the list only when the pinned set changed.
+
+  The PRESS and the MOVE are two phases, and the split is what keeps the rows
+  still. The press paints the ★ on the row at once — an optimistic mark
+  (`store.pinMarks`), never a rewrite of the row — while the sections (★ Pinned
+  among them) keep partitioning on the daemon's own `pinned` flag, so nothing
+  reorders until a list frame from the daemon confirms the pin. A confirmed pin
+  then moves the rows, by up to one row height (measured in the app at 62.90px
+  ≈ 1.24 row heights including the first `★ Pinned` heading, and 76.50px when
+  the confirming frame arrives from the terminal, with a +88.50px scroll
+  adjustment) — the accepted cost of a lift, paid after the daemon has agreed,
+  and movement at or below one row height is inside the envelope rather than a
+  defect. A refused pin clears the mark and reorders nothing: since the row
+  never moved there is nothing to put back. The session view's header reads the
+  same mark, so the two surfaces agree about a ★ by construction.
+
+  A pin needs the conversation's durable folder, so pinning a session in the
+  moment before its first message lands on disk is refused with a 409 rather
+  than stored as a pin the list cannot show. THIS RELEASE SHOWS NO REFUSAL
+  TEXT — a refused pin is the ★ clearing again, and nothing names the reason;
+  the daemon answers with the reason in the 409 body exactly as before, and the
+  follow-up PR that rebuilds the refusal report is what puts it back on
+  screen.
 - **Session view** — transcript with TUI-parity rendering: user rows,
   assistant markdown, one-line tool calls with state glyphs and green/red
   diff counts, tap to expand/collapse args+output+diff; todos panel;
