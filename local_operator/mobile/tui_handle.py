@@ -283,6 +283,13 @@ class TuiSessionHandle(SessionHandle):
             self._unsubscribe_detail_changes()
             self._unsubscribe_detail_changes = None
         self._projection.session_id = session.session_id
+        # The whole identity follows the swap, not just the id. ``_refresh_state``
+        # skips an EMPTY title (``or None``), so a ``/new`` after a named
+        # conversation kept the old name forever and the record paired it with
+        # the new id; the model is reset for the same reason, in case a host
+        # rebinds without the projection subscription that would refresh it.
+        self._projection.conversation_name = getattr(session, "conversation_name", "") or ""
+        self._projection.model_label = _effective_label(session)
         self._projection.transcript.clear()
         self._projection.todos.clear()
         self._projection.subagents.clear()
@@ -320,6 +327,12 @@ class TuiSessionHandle(SessionHandle):
                 reseed(has_durable_history(session))
             except Exception:  # noqa: BLE001 — a stale bit must never break /new
                 logger.debug("could not re-seed the started bit on rebind", exc_info=True)
+        # LAST, once the identity above is in place: an idle ``/new`` or
+        # ``/resume`` emits no session event, so without this nudge the
+        # registrant's push tick (and with it the record `lop sessions` reads)
+        # waited for the 15 s heartbeat. ``_schedule_push`` is thread-safe.
+        if self._on_projection is not None:
+            self._on_projection()
 
     def _publish_session_started(self) -> None:
         """Flip the record's ``started`` bit once this session runs a real turn.
@@ -527,14 +540,12 @@ class TuiSessionHandle(SessionHandle):
                     await session.prompt(text, image_blocks, **fields)
                 except BaseException as exc:
                     if not admitted.done():
-                        from local_operator.session.errors import TurnInFlight
-
-                        self._command_reservations.reject(
-                            command_id,
-                            transfer_to_steer=(
-                                isinstance(exc, TurnInFlight) or "already streaming" in str(exc)
-                            ),
-                        )
+                        # Released, never parked: the caller is told this prompt
+                        # failed, so the same id must admit on its retry — as a
+                        # prompt or, from ``AttachClient.send_command``'s
+                        # busy fallback, as a steer. See
+                        # ``CommandReservations.reject``.
+                        self._command_reservations.reject(command_id)
                         admitted.set_exception(exc)
                     raise
 
@@ -566,11 +577,7 @@ class TuiSessionHandle(SessionHandle):
 
         def do_steer() -> bool:
             session = self._session()
-            if not self._command_reservations.reserve(
-                command_id,
-                kind="steer",
-                prompt_transfer=True,
-            ):
+            if not self._command_reservations.reserve(command_id, kind="steer"):
                 return False
             try:
                 fields: dict[str, Any] = {"message_id": command_id}

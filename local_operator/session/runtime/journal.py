@@ -869,18 +869,70 @@ HELD_BOUND_LEAD = (
     "end this runtime"
 )
 
+#: The clause for a fire the ARTIFACT DOES NOT ACCOUNT FOR: it fired and dumped every
+#: thread, and nothing in the file says whether the runtime survived it.
+#:
+#: WHY THIS EXISTS RATHER THAN SILENCE (finding A, cell "absence of a post-fire marker is
+#: not proof"). The old code turned that silence into the loudest available claim — "the
+#: bound ended it". The opposite silence is no better: a reader looking at a successor's
+#: row that was in fact preceded by a bound expiry would never learn to open the dump.
+#: So the fire is named and the missing fact is named with it, which is what makes the
+#: row honest on an artifact written between the dump-only change and the policy marker.
+STALL_BOUND_LEAD = (
+    "its own stall bound fired earlier and dumped every thread beside its log; the "
+    "artifact does not say whether that fire ended this runtime"
+)
 
-def _stall_bound_evidence(row: TurnJournalRow) -> tuple[str | None, tuple[str, ...], bool]:
-    """``(which leg fired, which tickers died, whether the runtime SURVIVED it)``.
+#: The clause for a fire the artifact places INSIDE the asyncio runner's OWN teardown
+#: (:func:`stall_watchdog.fired_in_runner_teardown` returned ``True``), i.e. the fire the
+#: annotation exists for: the phase where task cancellation, async-generator shutdown and
+#: the default executor's join run, and where the loop can sit for the whole
+#: ``THREAD_JOIN_TIMEOUT`` while nothing about it is a turn that stopped reporting.
+#:
+#: A LEAD FOR THE SAME REASON AS ITS SIBLINGS: it says what the runtime was DOING at the
+#: fire — the fact that sends a reader to the right part of the dump — and never what
+#: ended it. It is written in the subjunctive about the join because that is all the
+#: annotation's ordering proves (see :data:`stall_watchdog.TEARDOWN_MARKER`).
+TEARDOWN_LEAD = (
+    "its asyncio runner had begun its own teardown when its own stall bound fired "
+    "(the executor join may follow)"
+)
 
-    ``(None, (), False)`` when this turn left no dump of its own.
+#: What :func:`_stall_bound_evidence` answers when the artifact cannot be read at all.
+#:
+#: THE EMPTY TOKEN, so it is never equal to one of
+#: :mod:`stall_watchdog`'s outcomes: the unreadable path must not borrow the vocabulary
+#: of an answer it did not make, and every reader below compares by equality.
+_STALL_EVIDENCE_UNREADABLE = ""
 
-    THE TWO FACTS COME OUT OF ONE READ OF ONE FILE, deliberately: the narration
-    consumes them together (agent review round 1, MINOR 3), because a bare
+
+def _stall_bound_evidence(
+    row: TurnJournalRow,
+) -> tuple[str | None, tuple[str, ...], str, bool]:
+    """``(which leg fired, which tickers died, how the fire ended, teardown-ordered)``.
+
+    ``(None, (), _STALL_EVIDENCE_UNREADABLE, False)`` when this turn left no dump of its
+    own — the empty token, so that the unreadable path cannot borrow the vocabulary of
+    an answer it did not make (see the constant).
+
+    FOUR FACTS, ONE READ OF ONE FILE, deliberately: the narration consumes them
+    together (agent review round 1, MINOR 3), because a bare
     SILENCE leg must not be reported as "the loop went silent" while the same
     artifact says the plane's own reporter was gone. Two separate readers would be
     two chances for the pair to disagree about which file they came from, which is
     the same class of error the fence below guards in the time direction.
+
+    THE THIRD FACT REPLACED A BOOL, and the substitution is finding A of the
+    2026-09-23 convergence round: ``held_fire``'s old answer was "the runtime survived
+    it", which meant "the artifact carries a marker only a live Python thread could
+    append" — and reading its ABSENCE as "so the bound ended this runtime" is false on
+    every dump-only build. :func:`stall_watchdog.fire_outcome` answers from what the
+    header STATES instead, and its third answer (:data:`stall_watchdog.FIRE_UNKNOWN`)
+    is what keeps an artifact that proves nothing from becoming a death claim.
+
+    THE FOURTH IS ORDERING-ONLY too, for the class of fires taken inside
+    ``asyncio``'s own shutdown (:func:`stall_watchdog.fired_in_runner_teardown`, which
+    returns ``None`` unless the teardown annotation stands above the fire).
 
     THE FILE IS SEARCHED FOR, NOT COMPUTED, and the reason is measured rather than
     defensive. ``dump_path`` resolves its directory from ``paths.log_dir()``, which
@@ -940,21 +992,31 @@ def _stall_bound_evidence(row: TurnJournalRow) -> tuple[str | None, tuple[str, .
 
         evidence = stall_watchdog.dump_evidence(row.pid)
         if evidence is None:
-            return None, (), False
+            return None, (), _STALL_EVIDENCE_UNREADABLE, False
         path, text = evidence
         if not stall_watchdog.dump_is_current(path, row.started_at):
-            return None, (), False
+            return None, (), _STALL_EVIDENCE_UNREADABLE, False
         armed = stall_watchdog.armed_at(text)
         if armed is None or armed > row.started_at:
-            return None, (), False
+            return None, (), _STALL_EVIDENCE_UNREADABLE, False
+        # THE FOUR FACT-READERS ARE PINNED TO THE ARTIFACT THE FENCE PLACED. Handed no
+        # directory they search the stores themselves, and a second search is a second
+        # choice: the narration would then be describing one file while the fence above
+        # described another, which is the disagreement the one-read paragraph above
+        # exists to prevent — and it is reachable, because the two searches see a
+        # different world once a write lands between them. The chosen store is the
+        # whole answer to the alignment question, so it is passed rather than left
+        # implicit.
+        store = path.parent
         return (
-            stall_watchdog.fired_leg(row.pid),
-            stall_watchdog.tick_deaths(row.pid),
-            stall_watchdog.held_fire(row.pid),
+            stall_watchdog.fired_leg(row.pid, store),
+            stall_watchdog.tick_deaths(row.pid, store),
+            stall_watchdog.fire_outcome(row.pid, store),
+            stall_watchdog.fired_in_runner_teardown(row.pid, store) is True,
         )
     except Exception:  # noqa: BLE001 — an unreadable dump is not a dead session
         logger.debug("stall dump unreadable for pid %s", row.pid, exc_info=True)
-        return None, (), False
+        return None, (), _STALL_EVIDENCE_UNREADABLE, False
 
 
 def _stall_bound_detail(leg: str, tick_deaths: tuple[str, ...] = ()) -> str:
@@ -1002,18 +1064,24 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
 
     THE PREFERENCE ORDER IS THE FIX, and every rung is a NAMED cause:
 
-    0. **the runtime's own stall bound ended it** → ``runtime-stall-bound``. The
-       bound's dump is keyed to this row's pid and is written AT THE INSTANT OF
-       DEATH — ``faulthandler`` reaches it from a C thread that runs no Python —
-       so it is strictly later evidence about this process than anything the row
-       itself carries, which is why it sits above every rung below. It is also
-       the ONLY rung that can answer for this death: the bound's exit runs no
-       exit hook, writes no journal row and reaches no reaper, so without this
-       the loudest possible ending — a runtime that dumped every thread and
-       killed itself — was narrated as ``unattributed``. See
-       :func:`_stall_bound_evidence` for how a fired dump is told from a file a
-       SIGKILL left, and :data:`incidents.STALL_BOUND_CAUSE` for what its absence
-       cost.
+    0. **the runtime's own stall bound ended it** → ``runtime-stall-bound``. ONLY A
+       LEGACY ARTIFACT MAY REACH THIS RUNG (finding A of the 2026-09-23 convergence
+       round). The bound's timer has been dump-only since the build that made it so,
+       and the header states which convention the file was written under: a
+       :data:`stall_watchdog.DUMP_POLICY_MARKER` header proves the fire could not have
+       ended anything, a LEGACY fatal-policy sentence proves it could, and an artifact
+       that proves neither gets no such claim. Before this the rung read "fired with
+       no post-fire held marker => the bound ended it", which was TRUE of the legacy
+       builds — an idle fire there took the native exit, so nothing was left to write
+       a marker — and FALSE of everything since: a fire held by the GIL cannot append
+       a Python marker at all, and any later stop or crash is a separate cause with
+       its own rung. The dump is still keyed to this row's pid and still written AT
+       THE INSTANT OF THE FIRE — ``faulthandler`` reaches it from a C thread that runs
+       no Python — which is why the rung sits above every rung below; what changed is
+       that the CONVENTION has to be stated by the artifact rather than inferred from
+       what it does not contain. See :func:`_stall_bound_evidence` for how a fired
+       dump is told from a file a SIGKILL left and
+       :data:`incidents.STALL_BOUND_CAUSE` for what its absence cost.
 
     1. **the row's own recorded exit cause, when it names a signal** →
        ``runtime-shutdown``. This is a stop sweep that reached its target: the
@@ -1077,24 +1145,40 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
         STALL_BOUND_CAUSE,
         render_cut_off_reason,
     )
+    from local_operator.session.runtime.stall_watchdog import (
+        FIRE_LEGACY_FATAL,
+        FIRE_SURVIVED,
+        FIRE_UNKNOWN,
+    )
 
-    leg, tick_deaths, held = _stall_bound_evidence(row)
-    # THE THIRD STATE, and the reason it is tested FIRST among the two. A fired dump
-    # now has two readings, and they want opposite answers: without ``HELD_MARKER``
-    # the bound ENDED this runtime (this rung), with it the bound dumped, found work
-    # in flight, and LEFT THE RUNTIME ALIVE — so a death that happened afterwards is
-    # some OTHER death, and narrating it as this one would be the exact class of lie
-    # this whole rung exists to end (the instrument knowing and saying the wrong
-    # thing is worse than it not saying anything). So the held case falls THROUGH to
-    # the rungs below, carrying :data:`HELD_BOUND_LEAD` so the reader still learns a
-    # bound fired and was survived.
-    if leg is not None and not held:
+    leg, tick_deaths, outcome, teardown = _stall_bound_evidence(row)
+    # ONLY A LEGACY ARTIFACT THAT STATES ITS OWN CONVENTION MAY REACH THIS RUNG, and the
+    # predicate is an equality against the artifact's answer rather than the absence of a
+    # marker (finding A of the 2026-09-23 convergence round). The old test — fired and
+    # not held — read "no post-fire marker" as "the bound ended it", which is false on
+    # every dump-only build and is how a still-live runtime came to be narrated as a
+    # watchdog death.
+    if leg is not None and outcome == FIRE_LEGACY_FATAL:
         return (
             "error",
             STALL_BOUND_CAUSE,
             render_cut_off_reason(STALL_BOUND_CAUSE, detail=_stall_bound_detail(leg, tick_deaths)),
         )
-    held_lead = HELD_BOUND_LEAD if held else ""
+    # THE FIRE IS STILL ON THE RECORD — as a CLAUSE, never as the cause, and WHICH clause
+    # is what the artifact proved: SURVIVED (a dump-only build, or a legacy held fire),
+    # or nothing proved, in which case the fire is named AND the missing fact is named
+    # with it (see :data:`STALL_BOUND_LEAD` — the reading that replaces the old
+    # inference). The teardown clause is independent of the outcome: ordering is what it
+    # proves, and it is added whatever the file says the build's policy was.
+    clauses: list[str] = []
+    if leg is not None:
+        if outcome == FIRE_SURVIVED:
+            clauses.append(HELD_BOUND_LEAD)
+        elif outcome == FIRE_UNKNOWN:
+            clauses.append(STALL_BOUND_LEAD)
+        if teardown:
+            clauses.append(TEARDOWN_LEAD)
+    fire_clause = "; ".join(clauses)
     signal = signal_exit_token(row.exit_cause)
     if signal:
         return (
@@ -1103,7 +1187,7 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
             render_cut_off_reason(
                 "runtime-shutdown",
                 detail=row_detail(row, lead=f"{signal} received"),
-                clause=held_lead,
+                clause=fire_clause,
             ),
         )
     recorded = str(row.exit_cause or "")
@@ -1119,7 +1203,7 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
         return (
             "error",
             recorded,
-            render_cut_off_reason(recorded, detail=row_detail(row), clause=held_lead),
+            render_cut_off_reason(recorded, detail=row_detail(row), clause=fire_clause),
         )
     if install_moved(row):
         # The lead rides here too: the install-window arm has the narrowest detail of
@@ -1130,7 +1214,7 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
         return (
             "error",
             "install-mid-update",
-            render_cut_off_reason("install-mid-update", detail=detail, clause=held_lead),
+            render_cut_off_reason("install-mid-update", detail=detail, clause=fire_clause),
         )
     return (
         "error",
@@ -1138,16 +1222,17 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
         render_cut_off_reason(
             KILL_CAUSE,
             detail=row_detail(row, lead=KILL_UNATTRIBUTED),
-            # ...AND THE HELD LEAD IS A CLAUSE HERE TOO (agent review round 2, MAJOR-2;
+            # ...AND THE FIRE CLAUSE IS A CLAUSE HERE TOO (agent review round 2, MAJOR-2;
             # design review round 2, D3). This is the arm round 1 measured first — the
             # "died of nothing recorded" row of that table — and it kept the lead inside
             # the parenthetical, so a held-then-killed death and a no-dump death still
             # rendered byte-identically in the listing cell: exactly the collapse of
-            # three states into two that the lead's placement exists to prevent. The
-            # UNATTRIBUTED half stays in the DETAIL, where it belongs: it qualifies the
-            # death, while "the bound fired and did NOT end it" changes what the row
-            # MEANS.
-            clause=held_lead,
+            # three states into two that the lead's placement exists to prevent. Since
+            # finding A the clause is whichever one the artifact earned — survived,
+            # unknown, teardown — and the argument is unchanged for all three: the
+            # UNATTRIBUTED half stays in the DETAIL, where it belongs, because it
+            # qualifies the death, while "the bound fired" changes what the row MEANS.
+            clause=fire_clause,
         ),
     )
 

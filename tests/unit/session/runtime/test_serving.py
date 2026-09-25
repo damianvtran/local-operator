@@ -457,6 +457,43 @@ async def test_prompt_streaming_rejection_transfers_identity_to_steer() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_refused_prompt_retried_as_a_prompt_is_really_admitted() -> None:
+    """QA on PR #1528, Q1-5: the retry of a refused id is RUN, never swallowed.
+
+    A prompt refused with ``TurnInFlight`` after the drain took it used to park
+    its id as ``prompt-transfer``. The desktop's receipt journal and the phone
+    retry a failed send with the SAME id as a PROMPT, and that retry answered
+    "already admitted" without queueing anything: the message reached no
+    transcript while the client was told it had. Here the retry must reach the
+    session a second time and its receipt must be the real admission.
+    """
+    from local_operator.session.errors import TURN_IN_FLIGHT, TurnInFlight
+
+    handle, session = make_handle()
+    delivered: list[str] = []
+
+    async def refuse_then_admit(  # noqa: ANN202
+        text, images=None, *, message_id=None, admitted=None  # noqa: ANN001
+    ):
+        if not delivered:
+            delivered.append("refused")
+            raise TurnInFlight(TURN_IN_FLIGHT)
+        delivered.append(text)
+        assert message_id is not None and admitted is not None
+        session.admit(message_id)
+        admitted.set_result(None)
+
+    session.prompt = refuse_then_admit  # type: ignore[method-assign]
+    with pytest.raises(TurnInFlight):
+        await handle.prompt("raced", command_id="retried-id")
+    assert await handle.prompt("raced", command_id="retried-id") == "prompt admitted"
+    assert delivered == ["refused", "raced"], "the retry never reached the session"
+    # And from then on the durable index answers, so a THIRD send is the dedupe.
+    assert await handle.prompt("raced", command_id="retried-id") == "already admitted"
+    assert delivered == ["refused", "raced"]
+
+
+@pytest.mark.asyncio
 async def test_distinct_concurrent_steers_keep_fifo_order() -> None:
     handle, session = make_handle()
 
@@ -2664,3 +2701,75 @@ async def test_complete_aside_tolerates_a_primitive_without_on_delta() -> None:
 
     assert answer == "answer."
     assert len(session.turns) == 1
+
+
+# -- the child-roster republish is coalesced off the per-event path -----------
+#
+# WHY. ``set_subagent_details`` is one linear pass over a registry capped at 256
+# records, and it ran inline for EVERY root event -- token rate on a parent with
+# live lanes, on the loop that admits the user's next message. Measured with
+# ``scripts/bench_send_admission.py --condition roster``: 30% of loop samples,
+# and a prompt waited 0.8 s p50 behind it. Structural pins: calls counted, never
+# a clock.
+
+
+class _CountingComms:
+    """A registry double that counts roster passes and reports none of them."""
+
+    def __init__(self) -> None:
+        self.passes = 0
+
+    def roster_pass(self, now: Any = None) -> Any:
+        self.passes += 1
+        return SimpleNamespace(
+            roster=lambda: [], lifecycles=lambda: {}, nodes=lambda: [], job=lambda _job_id: None
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_burst_of_root_events_costs_one_roster_pass() -> None:
+    """Fifty streamed events inside one coalescing window -> one registry pass."""
+    session = FakeSession()
+    comms = _CountingComms()
+    session._subagent_comms = comms  # type: ignore[attr-defined]
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp")
+    projections: list[int] = []
+    handle.subscribe(lambda: projections.append(comms.passes))
+    comms.passes = 0  # the attach seed is a deliberate, separate pass
+
+    for _ in range(50):
+        session.emit(NoticeEvent(text="tick", kind="info"))
+    assert comms.passes == 0, "the per-event path must not walk the registry inline"
+    projections.clear()
+
+    # Wait on the coalescer's own flag rather than a sleep sized to the window.
+    for _ in range(200):
+        if not handle._roster_refresh_scheduled:
+            break
+        await asyncio.sleep(serving_mod._ROSTER_REFRESH_COALESCE_S / 5)
+    assert comms.passes == 1, f"a burst must fold into ONE pass, saw {comms.passes}"
+    # The deferred pass must also be PUBLISHED: it is what carries a quiet
+    # session's final roster to the phone and desktop. Review round 1 (F2)
+    # turned the flush's ``_notify()`` into ``pass`` and 727 tests stayed
+    # green; a projection callback that observed the pass is what was missing.
+    assert (
+        projections and projections[-1] == 1
+    ), "the deferred roster pass was folded but never published to the viewer"
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_start_still_republishes_the_roster_inline() -> None:
+    """The fold REBUILDS a started child's row without its session id; the
+    registry's identity must be re-applied before this event's push goes out."""
+    from local_operator.harness.types import SubagentStartEvent
+
+    session = FakeSession()
+    comms = _CountingComms()
+    session._subagent_comms = comms  # type: ignore[attr-defined]
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp")
+    handle.subscribe(lambda: None)
+    comms.passes = 0
+
+    session.emit(SubagentStartEvent(job_id="child", label="child"))
+
+    assert comms.passes == 1

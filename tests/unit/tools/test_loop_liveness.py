@@ -358,11 +358,13 @@ async def test_concurrent_grep_walks_keep_the_loop_live(
 async def test_ripgrep_skipped_count_walk_stays_off_loop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The rg engine's oversized-file recount re-walks the tree — off-loop.
+    """The rg engine's oversized-file count walks the tree — off-loop.
 
     The ripgrep subprocess never blocked the loop, but the footer's
-    skipped-file count is recovered by a second Python walk+stat pass, and
-    that pass carried the same inline-walk regression as the Python engine.
+    skipped-file count is recovered by a Python walk, and that walk carried the
+    same inline-walk regression as the Python engine. (It is ONE walk+stat pass
+    now, not the walk-then-stat-second-walk this test was originally written
+    for; the spy below is about where it runs, which did not change.)
     Skipped (not failed) when rg is not installed: the path under test does
     not exist without it.
     """

@@ -32,6 +32,7 @@ from local_operator.providers.oauth.callback_server import (
     LoginCancelledError,
     LoginError,
     maybe_await,
+    report_flow_details,
 )
 from local_operator.providers.oauth.device_code import (
     DevicePollResult,
@@ -145,6 +146,9 @@ async def login_qwencloud_token_plan(
         if not device_token or not verification_url:
             raise LoginError(f"QwenCloud device authorization response malformed: {init}")
 
+        await report_flow_details(
+            callbacks, expires_in=float(init.get("ExpiresIn", DEFAULT_TTL_SECONDS))
+        )
         if callbacks.on_auth_url is not None:
             await maybe_await(
                 callbacks.on_auth_url(

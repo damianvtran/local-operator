@@ -432,10 +432,19 @@ class AdapterSupervisor:
         result_type: type[AdapterResult],
         *,
         timeout: float,
+        execution_overhead_seconds_per_action: float = 0.0,
     ) -> AdapterResult:
         if self.rpc is None:
             raise SupervisionError("adapter RPC is unavailable")
-        payload = await self.rpc.call(method, params, timeout=timeout)
+        if execution_overhead_seconds_per_action:
+            payload = await self.rpc.call(
+                method,
+                params,
+                timeout=timeout,
+                execution_overhead_seconds_per_action=execution_overhead_seconds_per_action,
+            )
+        else:
+            payload = await self.rpc.call(method, params, timeout=timeout)
         return result_type.model_validate(payload, strict=True)
 
     async def handshake(self, *, timeout: float = 10.0) -> Handshake:
@@ -687,11 +696,13 @@ class VerifiedAdapterSession:
         *,
         rescue_required: Callable[[], None] | None = None,
         answer_owner: str = "host",
+        execution_overhead_seconds_per_action: float = 0.0,
     ) -> None:
         if answer_owner not in ("host", "adapter"):
             raise SupervisionError("invalid ask-user answer ownership")
         self._answer_owner = answer_owner
         self._supervisor = supervisor
+        self._execution_overhead_seconds_per_action = execution_overhead_seconds_per_action
         self.verifier = verifier
         self._rescue_required = rescue_required or (lambda: None)
         self._rescue_descriptor_id: Digest | None = None
@@ -720,10 +731,22 @@ class VerifiedAdapterSession:
         *,
         timeout: float,
         validate: Callable[[AdapterResult], None],
+        execution_overhead_seconds_per_action: float = 0.0,
     ) -> AdapterResult:
         self._ensure_usable()
         try:
-            result = await self._supervisor._call_raw(method, params, result_type, timeout=timeout)
+            if execution_overhead_seconds_per_action:
+                result = await self._supervisor._call_raw(
+                    method,
+                    params,
+                    result_type,
+                    timeout=timeout,
+                    execution_overhead_seconds_per_action=execution_overhead_seconds_per_action,
+                )
+            else:
+                result = await self._supervisor._call_raw(
+                    method, params, result_type, timeout=timeout
+                )
             validate(result)
             return result
         except BaseException as error:
@@ -836,7 +859,13 @@ class VerifiedAdapterSession:
             raise
         return result
 
-    async def execute(self, params: ExecuteParams, *, timeout: float) -> ExecuteResult:
+    async def execute(
+        self,
+        params: ExecuteParams,
+        *,
+        timeout: float,
+        execution_overhead_seconds_per_action: float | None = None,
+    ) -> ExecuteResult:
         current = self.verifier.current_observation
         if current is None:
             raise SupervisionError("execute has no current observation")
@@ -856,6 +885,11 @@ class VerifiedAdapterSession:
                 self.verifier.validate_execution_result(params, value)
                 if isinstance(value, ExecuteResult)
                 else (_ for _ in ()).throw(SupervisionError("execute returned the wrong result"))
+            ),
+            execution_overhead_seconds_per_action=(
+                self._execution_overhead_seconds_per_action
+                if execution_overhead_seconds_per_action is None
+                else execution_overhead_seconds_per_action
             ),
         )
         assert isinstance(result, ExecuteResult)

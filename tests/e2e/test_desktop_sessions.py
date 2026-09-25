@@ -32,12 +32,26 @@ from tests.e2e.harness import (
     E2E_ORACLE_MODEL,
     ScriptedStream,
     build_session,
+    provider_call_kinds,
     text_turn,
     tool_call_turn,
+    user_turns,
 )
 from tests.notification_opt_in import notification_path_opt_in
 
 pytestmark = pytest.mark.e2e
+
+
+def _census(stream: ScriptedStream) -> list[str]:
+    """The kinds of provider call this session has made, in call order.
+
+    One place for the goal text the running censuses below count against, so one
+    of them cannot drift from the command that sets it — and one place for the
+    label list, so a failure prints what the calls WERE rather than a bare
+    number. ``provider_call_kinds`` is the shared instrument; its own docstring
+    carries why a total can no longer answer the question these cells ask.
+    """
+    return provider_call_kinds(stream.requests, goal="Preserve one identity")
 
 
 @pytest.fixture
@@ -156,6 +170,14 @@ async def test_canonical_desktop_over_http(headless_tui_env: Path, workspace: Pa
             stream = ScriptedStream(
                 [
                     text_turn("The goal request arrived once."),
+                    # The judged goal's forked judge, immediately after the goal
+                    # command's own turn. It answers ACHIEVED, so the chain ends
+                    # there: the tape is POSITIONAL, and every answer below is
+                    # attached to the call it was written for. A plain-text answer
+                    # here would be an unreadable verdict — a failure strike and a
+                    # continuation turn — which would shift every later answer
+                    # onto the wrong call.
+                    text_turn("VERDICT: ACHIEVED\nIdentity preserved."),
                     text_turn("The canonical runtime answered."),
                     text_turn("The team request arrived once."),
                     text_turn("The image arrived without invented text."),
@@ -240,7 +262,31 @@ async def test_canonical_desktop_over_http(headless_tui_env: Path, workspace: Pa
                     == 1
                 )
                 assert "Preserve one identity" in json.dumps(goal_entries)
-                assert len(stream.requests) == 1, "the goal command must consume exactly one turn"
+                # THE PROPERTY: one Enter is exactly ONE user-authored turn, and
+                # every other provider call is the goal machinery working BESIDE
+                # that turn rather than a second submission of it.
+                #
+                # It used to read `len(stream.requests) == 1`, which was true when
+                # `/goal` cost one call. `/goal` now also drives the judged goal:
+                # the owner's turn end forks the judge, and a CONTINUE verdict
+                # admits a continuation turn — the same chain QA measured on the
+                # runtime path and `tests/e2e/test_goal_submission.py` pins with a
+                # 5-call script. A total cannot tell that chain from the failure
+                # this cell exists to catch (the argument submitted twice, or a
+                # command that re-asks), so the assertion names the KINDS instead:
+                # relaxing it to `== 3` would pin today's arithmetic and lose the
+                # invariant, and deleting it would lose the cell.
+                kinds = _census(stream)
+                assert kinds.count("goal") == 1, (
+                    "the goal command starts exactly ONE user-authored turn:" f" {kinds}"
+                )
+                assert (
+                    kinds.count("user") == 0
+                ), f"and no other user turn has been started yet: {kinds}"
+                assert kinds.count("judge") >= 1, (
+                    "the stored goal is judged on its owning host, beside the turn"
+                    f" rather than inside it: {kinds}"
+                )
                 duplicate = await client.post(
                     target + "/commands",
                     json={
@@ -250,7 +296,9 @@ async def test_canonical_desktop_over_http(headless_tui_env: Path, workspace: Pa
                     },
                 )
                 assert duplicate.json()["result"]["replayed"]
-                assert len(stream.requests) == 1, "a replayed goal command must not submit a turn"
+                assert _census(stream).count("goal") == 1, (
+                    "a replayed goal command must not submit a second turn:" f" {_census(stream)}"
+                )
                 print(
                     "HTTP /goal200 stores the goal AND admits the same argument as an "
                     "ordinary user turn: one durable row under the goal, one scripted "
@@ -307,7 +355,11 @@ async def test_canonical_desktop_over_http(headless_tui_env: Path, workspace: Pa
                 rows = history.json()["result"]["entries"]
                 assert sum("A canonical turn" in json.dumps(row) for row in rows) == 1
                 assert "The canonical runtime answered." in json.dumps(rows)
-                assert len(stream.requests) == 2
+                assert user_turns(_census(stream)) == 2, (
+                    "ONE provider turn per user message — the judge's forked calls"
+                    " ride BESIDE them rather than as an extra turn of the user's:"
+                    f" {_census(stream)}"
+                )
                 print(
                     "Prompt admission200; canonical agent_end received; one durable "
                     "user row and one real scripted provider call; retry did not "
@@ -356,7 +408,11 @@ async def test_canonical_desktop_over_http(headless_tui_env: Path, workspace: Pa
                     )
                     == 1
                 )
-                assert len(stream.requests) == 3
+                assert user_turns(_census(stream)) == 3, (
+                    "ONE provider turn per user message — the judge's forked calls"
+                    " ride BESIDE them rather than as an extra turn of the user's:"
+                    f" {_census(stream)}"
+                )
                 print(
                     "Owner /team attaches real registry team and admits consumed "
                     "request once; retry replayed without second turn"
@@ -391,7 +447,11 @@ async def test_canonical_desktop_over_http(headless_tui_env: Path, workspace: Pa
                     )
                     == 1
                 )
-                assert len(stream.requests) == 4
+                assert user_turns(_census(stream)) == 4, (
+                    "ONE provider turn per user message — the judge's forked calls"
+                    " ride BESIDE them rather than as an extra turn of the user's:"
+                    f" {_census(stream)}"
+                )
                 print(
                     "Image-only prompt admitted200 without synthetic text; "
                     "one durable user row; retry did not duplicate image"
@@ -464,7 +524,11 @@ async def test_canonical_desktop_over_http(headless_tui_env: Path, workspace: Pa
                 assert served.status_code == 200, served.text
                 assert served.content == raw
                 assert served.headers["content-type"].startswith("image/")
-                assert len(stream.requests) == 5
+                assert user_turns(_census(stream)) == 5, (
+                    "ONE provider turn per user message — the judge's forked calls"
+                    " ride BESIDE them rather than as an extra turn of the user's:"
+                    f" {_census(stream)}"
+                )
                 print(
                     f"Image {len(raw)}B persisted to the attachment store and "
                     "referenced from the transcript; served back over HTTP"

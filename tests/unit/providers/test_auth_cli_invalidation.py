@@ -77,7 +77,7 @@ def _swap_login(monkeypatch, provider_id: str, answer):
 
 
 def test_an_api_key_login_drops_the_planted_listing(cache, monkeypatch, capsys) -> None:
-    monkeypatch.setattr(auth_cli, "_apply_login_defaults", lambda provider_id: None)
+    monkeypatch.setattr(auth_cli, "_apply_login_defaults", lambda provider_id, **_kwargs: None)
     document = _plant(cache, "anthropic.listing.json")
     untouched = _plant(cache, "openrouter.listing.json")
     _swap_login(monkeypatch, "anthropic", "sk-ant-pasted")
@@ -91,7 +91,7 @@ def test_an_api_key_login_drops_the_planted_listing(cache, monkeypatch, capsys) 
 
 def test_an_oauth_login_drops_every_document_of_the_storage_id(cache, monkeypatch) -> None:
     """``xai-oauth`` stores as ``xai``; the documents are named the same way."""
-    monkeypatch.setattr(auth_cli, "_apply_login_defaults", lambda provider_id: None)
+    monkeypatch.setattr(auth_cli, "_apply_login_defaults", lambda provider_id, **_kwargs: None)
     plain = _plant(cache, "xai.listing.json")
     scoped = _plant(cache, "xai.oauth.listing.json")
     prefix_sibling = _plant(cache, "xai-other.listing.json")
@@ -131,7 +131,7 @@ def test_login_and_logout_drop_the_in_process_model_info_memo(cache, monkeypatch
     bucket until the memo is cleared too. Same pairing as the controller and
     the server's credential route."""
     cleared: list[str] = []
-    monkeypatch.setattr(auth_cli, "_apply_login_defaults", lambda provider_id: None)
+    monkeypatch.setattr(auth_cli, "_apply_login_defaults", lambda provider_id, **_kwargs: None)
     monkeypatch.setattr(
         "local_operator.model.configure.invalidate_model_info_cache",
         lambda: cleared.append("memo"),
@@ -201,7 +201,7 @@ def test_login_drops_the_providers_cached_usage_row(cache, monkeypatch, tmp_path
         UsageCacheStore,
     )
 
-    monkeypatch.setattr(auth_cli, "_apply_login_defaults", lambda provider_id: None)
+    monkeypatch.setattr(auth_cli, "_apply_login_defaults", lambda provider_id, **_kwargs: None)
     # Redirect the shared cache: the CLI has no cache handle to inject, so it
     # resolves `default_cache_path()`, which follows the config dir.
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))

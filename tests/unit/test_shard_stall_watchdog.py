@@ -12,6 +12,7 @@ xdist report-phase rule is mutation-tested: flipping ``when == "teardown"`` to
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 
@@ -24,12 +25,16 @@ from tests import shard_stall_watchdog as watchdog
 def _isolate_module_state(monkeypatch, tmp_path: Path):
     """Every test owns the module's process-wide state and its dump directory.
 
-    The dump path is a module-level constant computed from ``TMPDIR`` at import,
-    so a test that let the real one through would write into the shared temp dir
-    that a concurrent suite is also using -- and the CI workflow's own reporting
-    step reads that same directory.
+    The dump ROOT is a module-level constant computed from ``TMPDIR`` at import,
+    so a test that let the real one through would write into the tree of
+    directories a concurrent suite is also using -- and the CI workflow's own
+    reporting step reads that same root. Each run gets a directory of its own
+    beneath it (:func:`watchdog.run_dir`), which these tests must not inherit
+    either, so the cached run directory and the exported variable are reset too.
     """
-    monkeypatch.setattr(watchdog, "DUMP_DIR", tmp_path / "lo-shard-stall")
+    monkeypatch.setattr(watchdog, "DUMP_ROOT", tmp_path / "lo-shard-stall")
+    monkeypatch.setattr(watchdog, "_RUN_DIR", None)
+    monkeypatch.delenv(watchdog.ENV_RUN_DIR, raising=False)
     monkeypatch.setattr(watchdog, "_CONTROLLER", None)
     monkeypatch.setattr(watchdog, "_WORKER", None)
     yield
@@ -59,17 +64,171 @@ class _FakeConfig:
             self.workerinput = {"workerid": "gw0"}
 
 
-def test_inert_without_the_env_var(monkeypatch) -> None:
-    """Unset means inert, so a developer run and the ``-n0`` e2e stage are untouched.
+def test_inert_on_ci_without_the_env_var(monkeypatch) -> None:
+    """A CI job that did not ask for the shard bound stays exactly as inert as before.
 
-    Inert has to mean *no thread and no directory*, not merely a disabled
-    report: this hook runs in every pytest process in the repo, including the
-    e2e stage that carries its own tighter bound.
+    That is what keeps the ``-n0`` e2e stage (one process, its own tighter bound)
+    out of this module's worker branch: only CI's explicit value can enable it
+    there. Inert means *no thread and no directory*, not merely a disabled report
+    -- this hook runs in every pytest process in the repo.
     """
     monkeypatch.delenv(watchdog.ENV_SECONDS, raising=False)
+    monkeypatch.delenv(watchdog.LOCAL_ENV_SECONDS, raising=False)
     assert watchdog.enabled_seconds() is None
-    watchdog.install(_FakeConfig(worker=False))
-    assert watchdog._CONTROLLER is None
+    assert watchdog.local_seconds(on_ci=True) is None
+
+
+def test_an_explicit_local_bound_is_honoured_on_ci_too(monkeypatch) -> None:
+    """The off-switch arm must not swallow a value the operator typed in.
+
+    ``local_seconds`` refuses to INVENT a bound on CI; it does not refuse one it was
+    handed. Worth a guard because the two arms live next to each other and a
+    later edit that returns early on ``on_ci`` -- a plausible reading of "CI keeps
+    the shard bound only" -- would silently drop the bound on the one machine where
+    a stall costs a cancelled job.
+    """
+    monkeypatch.delenv(watchdog.ENV_SECONDS, raising=False)
+    monkeypatch.setenv(watchdog.LOCAL_ENV_SECONDS, "120")
+    assert watchdog.local_seconds(on_ci=True) == 120.0
+    assert watchdog.local_seconds(on_ci=False) == 120.0
+
+
+def test_the_local_default_reports_without_any_env_var(monkeypatch, capsys) -> None:
+    """The point of the local default: silence is what cost a local run its evening.
+
+        Measured 2026-09-24: a whole-tree local run under load average 80-200 reached
+        69% and then its log stopped -- because a wall-clock ``timeout`` killed the
+    group, not because a test hung, and the log tail (a ``PluggyTeardownRaisedWarning``
+        and ``OSError: cannot send (already closed?)`` from orphaned workers) could not
+        say which. Nothing in the run could have told the reader, so the reader watched
+        it by hand for four hours. This guard is the fix: absent an explicit value, a
+        local run instruments itself.
+    """
+    monkeypatch.delenv(watchdog.ENV_SECONDS, raising=False)
+    monkeypatch.delenv(watchdog.LOCAL_ENV_SECONDS, raising=False)
+
+    assert watchdog.local_seconds(on_ci=False) == watchdog.LOCAL_DEFAULT_SECONDS
+    watchdog.install(_FakeConfig(worker=False), on_ci=False)
+    assert watchdog._CONTROLLER is not None
+    assert watchdog._CONTROLLER.seconds == watchdog.LOCAL_DEFAULT_SECONDS
+    # One line, naming the switch that turns it off: an instrument that reports on
+    # a healthy run has to be silenceable by the person reading it.
+    notice = capsys.readouterr().err
+    assert watchdog.LOCAL_ENV_SECONDS in notice and "=0" in notice
+
+
+def test_the_local_default_is_silenceable_and_overridable(monkeypatch) -> None:
+    """A debugger session needs it OFF, and a bound someone typed in must win.
+
+    ``0``/``false``/``no``/``off`` is the off switch (any case, the repo's usual
+    flag reading, and the same set the root conftest's worker-cap flag uses).
+    An explicit value wins over the default in both directions, because the only
+    reason to set it is that the default is wrong for this host or this session.
+    """
+    monkeypatch.delenv(watchdog.ENV_SECONDS, raising=False)
+    for off in ("0", "false", "NO", "off"):
+        monkeypatch.setenv(watchdog.LOCAL_ENV_SECONDS, off)
+        assert watchdog.local_seconds(on_ci=False) is None, off
+    monkeypatch.setenv(watchdog.LOCAL_ENV_SECONDS, "45")
+    assert watchdog.local_seconds(on_ci=False) == 45.0
+
+
+def test_a_malformed_local_bound_falls_back_to_the_default(monkeypatch) -> None:
+    """A typo must not be read as "no reporting" -- that is the failure mode here.
+
+    Falling back to the default is safe in a way a shorter bound would not be:
+    the default only prints, and it is already sized above any legitimate item, so
+    the worst a typo can do is report at the bound nobody chose. Disabling instead
+    would turn a five-character mistake into the silence this module exists to
+    remove -- and that silence is indistinguishable from a healthy run.
+    """
+    monkeypatch.delenv(watchdog.ENV_SECONDS, raising=False)
+    for typo in ("4m", "-5", "inf", "nan"):
+        monkeypatch.setenv(watchdog.LOCAL_ENV_SECONDS, typo)
+        assert watchdog.local_seconds(on_ci=False) == watchdog.LOCAL_DEFAULT_SECONDS, typo
+
+
+def test_the_off_switch_spellings_match_the_worker_cap_flag() -> None:
+    """One reading of ``0``/``false``/``no``/``off`` per module, and they must agree.
+
+    Two modules now decide whether an env flag is off (this one and the root
+    conftest's worker cap), and they are read by the same person in the same
+    session: `PYTEST_QUIET_WORKER_CAP=0` silences one and
+    `LOCAL_OPERATOR_LOCAL_STALL_SECONDS=0` silences the other. A second reading
+    that treated `off` as ON would be a defect nobody notices until the value they
+    typed failed to take effect -- so the sets are pinned equal here rather than
+    kept equal by a comment.
+    """
+    import importlib.util
+
+    # The root conftest under a private name: pytest has already imported the real
+    # one as a plugin, and it must not be monkeypatched (see
+    # `tests/unit/test_xdist_worker_budget.py::_load_hook_module`).
+    spec = importlib.util.spec_from_file_location(
+        "_conftest_flags_under_test", Path(__file__).resolve().parents[2] / "conftest.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert module._FALSY_ENV_VALUES == watchdog.FALSY_ENV_VALUES
+
+
+def test_the_hard_bound_is_off_unless_asked_for(monkeypatch) -> None:
+    """Report-only is the default everywhere, including CI.
+
+    A fired hard bound kills the process that hits it -- a worker carrying
+    unrelated tests -- so it cannot be the default; ``exit=True`` only ever comes
+    from an explicit request (see the module docstring).
+    """
+    monkeypatch.delenv(watchdog.TEST_TIMEOUT_ENV, raising=False)
+    assert watchdog.per_test_bound() is None
+    for off in ("0", "false", "no", "off"):
+        monkeypatch.setenv(watchdog.TEST_TIMEOUT_ENV, off)
+        assert watchdog.per_test_bound() is None, off
+    monkeypatch.setenv(watchdog.TEST_TIMEOUT_ENV, "4m")
+    assert watchdog.per_test_bound() is None, "a typo must not start killing workers"
+
+
+def test_the_hard_bound_is_sized_from_the_manifest_and_floored(monkeypatch) -> None:
+    """The bound comes from ``tests/durations.json``, never from taste or a clock.
+
+    Two directions, because both are the sizing claim: a heavy file gets slack over
+    its own measured total (so a legitimately slow test under fleet load cannot
+    trip it), and a file the manifest does not mention gets the floor rather than
+    an exemption -- an unbounded new file is exactly where a hang would hide.
+    """
+    monkeypatch.setenv(watchdog.TEST_TIMEOUT_ENV, "1")
+    assert watchdog.per_test_bound() == (None, True)
+
+    heavy = "tests/unit/tui/test_settings_view.py::test_one"
+    measured = watchdog._manifest_seconds(heavy)
+    assert measured is not None and measured > watchdog.BOUND_FLOOR_S
+    assert watchdog.sized_bound_seconds(heavy) == pytest.approx(measured * watchdog.BOUND_SLACK)
+    assert watchdog.sized_bound_seconds(heavy) > SLOWEST_LEGITIMATE_ITEM_S
+
+    unknown = "tests/unit/tui/test_a_file_the_manifest_does_not_mention.py::test_one"
+    assert watchdog._manifest_seconds(unknown) is None
+    assert watchdog.sized_bound_seconds(unknown) == watchdog.BOUND_FLOOR_S
+
+
+#: The worst legitimate single item for a local run, in seconds, as the number the
+#: sizing claim above has to clear. 81.0 is what `.github/workflows/ci.yml` carries
+#: (the comment above `LOCAL_OPERATOR_SHARD_STALL_SECONDS: "240"`, which sizes this
+#: module's CI shard bound and attributes the figure to AGENTS.md) -- and AGENTS.md
+#: carries no 81 s measurement at either this head or the previous one, so treat
+#: 81.0 as the CI comment's number rather than as a sourced measurement. It is here
+#: because the assertion needs a floor: a bound under the slowest honest item would
+#: fail healthy runs. The measured slowest item on this host is the C1 picker sweep
+#: (412.75 s before its boot reuse, 133-177 s after), which the 900 s local default
+#: clears comfortably.
+SLOWEST_LEGITIMATE_ITEM_S = 81.0
+
+
+def test_a_typed_bound_wins_over_the_sized_one(monkeypatch) -> None:
+    """The escape hatch, for someone who has already seen the sized bound misfire."""
+    monkeypatch.setenv(watchdog.TEST_TIMEOUT_ENV, "12.5")
+    assert watchdog.per_test_bound() == (12.5, True)
 
 
 def test_a_malformed_bound_disables_rather_than_shrinks(monkeypatch) -> None:
@@ -333,6 +492,57 @@ def test_the_worker_keeps_the_bound_it_was_installed_with(monkeypatch) -> None:
     assert fake.armed and fake.armed[0][0] == 4.0
 
 
+def test_the_worker_re_arms_per_item_and_sizes_the_sized_bound(monkeypatch) -> None:
+    """One item is the instrument's unit, so a new test gets a new countdown.
+
+    Arming ONCE per process (what this did before the hard bound existed) means the
+    countdown an item inherits started while some earlier test was running: the
+    first fast test to follow a slow one would be reported as a stall, and a test
+    that parks early in its file would be waited out only after the previous test's
+    bound had already elapsed. Two items, two arms, and the stale timer cancelled
+    -- the assertion that both happen is what stops a later edit from making
+    ``arm`` a first-call-only no-op again.
+
+    The sized bound comes from ``tests/durations.json`` (see
+    :func:`sized_bound_seconds`), so the two arms are asserted at each file's own
+    value rather than at one number the test would have to hardcode twice.
+    """
+    monkeypatch.setenv(watchdog.TEST_TIMEOUT_ENV, "1")
+    fake = _install_worker(monkeypatch, bound="4")
+    heavy = "tests/unit/tui/test_settings_view.py::test_one"
+    light = "tests/unit/analytics/test_model.py::test_one"
+
+    watchdog.note_start(heavy)
+    watchdog.note_start(light)
+
+    worker = watchdog._WORKER
+    assert worker is not None
+    assert [armed for armed, _ in fake.armed] == [
+        watchdog.sized_bound_seconds(heavy),
+        watchdog.sized_bound_seconds(light),
+    ]
+    assert fake.cancels == 1, "the previous item's timer must not be left running"
+
+
+def test_the_hard_bound_kills_the_process_instead_of_repeating(monkeypatch) -> None:
+    """``exit=True, repeat=False`` is the opt-in; the default repeats and never exits.
+
+    A repeating timer that exits would kill the worker at the first snapshot with
+    its stacks half-written, and an exiting timer that repeated would be reported
+    twice for one park. The two modes are therefore mutually exclusive by
+    construction, and this guard is what says so -- the whole difference between
+    "a report" and "a failure" lives in these two keywords.
+    """
+    monkeypatch.setenv(watchdog.TEST_TIMEOUT_ENV, "600")
+    fake = _install_worker(monkeypatch, bound="4")
+
+    watchdog.note_start("tests/unit/a.py::test_one")
+
+    worker = watchdog._WORKER
+    assert worker is not None
+    assert fake.armed == [(600.0, {"file": worker._handle, "repeat": False, "exit": True})]
+
+
 def test_an_unusable_dump_directory_disables_the_worker(monkeypatch, tmp_path) -> None:
     """An unusable ``TMPDIR`` must disable the instrument, not fail the shard.
 
@@ -344,7 +554,7 @@ def test_an_unusable_dump_directory_disables_the_worker(monkeypatch, tmp_path) -
     """
     occupied = tmp_path / "occupied"
     occupied.write_text("not a directory\n", encoding="utf-8")
-    monkeypatch.setattr(watchdog, "DUMP_DIR", occupied / "lo-shard-stall")
+    monkeypatch.setattr(watchdog, "DUMP_ROOT", occupied / "lo-shard-stall")
     fake = _install_worker(monkeypatch)
 
     worker = watchdog._WORKER
@@ -520,3 +730,255 @@ def test_no_ci_job_runs_both_watchdogs_in_one_process() -> None:
         assert not (job.get("env") or {}).get(
             watchdog.ENV_SECONDS
         ), f"{name} arms the shard watchdog; it must not also run the e2e C timer"
+
+
+def test_the_report_says_how_fast_the_run_is_progressing() -> None:
+    """A silence needs a rate beside it, or the reader cannot tell slow from parked.
+
+    Measured 2026-09-24: a run whose log stood still for 29 minutes (69% and no
+    further bytes) was neither stalled nor dead -- it had been killed by the
+    wall-clock ``timeout`` its operator passed, having progressed steadily until
+    that second. The count and the rate are the two numbers that separate that
+    case from a park, and they are cheap: the controller already sees every
+    teardown report.
+    """
+    sink = _Sink()
+    controller = watchdog._install_controller_for_test(2.0, sink)
+    for index in range(4):
+        nodeid = f"tests/unit/a.py::test_{index}"
+        controller.started(nodeid)
+        controller.note(nodeid, "setup")
+        controller.note(nodeid, "teardown")
+
+    controller._last_progress -= 10.0
+    assert controller.report_if_stalled() is True
+
+    text = sink.texts[-1]
+    assert "4 tests completed in" in text
+    assert "/s)" in text, text
+
+
+# ---------------------------------------------------------------------------
+# Round-1 review MAJOR-1: the two knobs are independent, in both orders.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("silenced", [True, False])
+def test_the_hard_bound_survives_the_reporter_being_silenced(monkeypatch, silenced) -> None:
+    """``LOCAL...=0`` silences the REPORT, and must not drop the BOUND with it.
+
+    This is the combination the module's own announcement invites -- the ON line
+    names ``LOCAL_OPERATOR_LOCAL_STALL_SECONDS=0`` as the way to switch the report
+    off -- and it was the one that did nothing at all: ``install()`` returned on a
+    silenced reporter before it resolved the hard bound, so ``TEST_TIMEOUT_SECONDS=3``
+    against a 40 s park ran to completion, exit 0, with no dump directory created
+    (measured twice, round-1 review MAJOR-1). Resolving the bound after the return
+    fails the ``silenced`` cell.
+    """
+    monkeypatch.delenv(watchdog.ENV_SECONDS, raising=False)
+    monkeypatch.setenv(watchdog.TEST_TIMEOUT_ENV, "3")
+    if silenced:
+        monkeypatch.setenv(watchdog.LOCAL_ENV_SECONDS, "0")
+    else:
+        monkeypatch.delenv(watchdog.LOCAL_ENV_SECONDS, raising=False)
+    fake = _FakeFaulthandler()
+    monkeypatch.setattr(watchdog, "faulthandler", fake)
+
+    watchdog.install(_FakeConfig(worker=True))
+
+    worker = watchdog._WORKER
+    assert worker is not None
+    assert (worker.seconds is None) if silenced else (worker.seconds is not None)
+    watchdog.note_start("tests/unit/a.py::test_parks")
+    assert fake.armed == [(3.0, {"file": worker._handle, "repeat": False, "exit": True})]
+
+
+def test_both_orders_of_the_pair_arm_the_bound(monkeypatch) -> None:
+    """The pair set in either order -- a shell types one export before the other.
+
+    ``install()`` reads the environment rather than a sequence, so both orders
+    must resolve to one armed bound. Written as two installs in one test because
+    the failure this guards is an early return that depends on which of the two
+    values was resolved first, and a single-order test cannot see it.
+    """
+    armed: list[list[tuple[float, dict[str, object]]]] = []
+    for order in ("bound-first", "silence-first"):
+        monkeypatch.delenv(watchdog.ENV_SECONDS, raising=False)
+        monkeypatch.delenv(watchdog.TEST_TIMEOUT_ENV, raising=False)
+        monkeypatch.delenv(watchdog.LOCAL_ENV_SECONDS, raising=False)
+        pair = (
+            ((watchdog.TEST_TIMEOUT_ENV, "3"), (watchdog.LOCAL_ENV_SECONDS, "0"))
+            if order == "bound-first"
+            else ((watchdog.LOCAL_ENV_SECONDS, "0"), (watchdog.TEST_TIMEOUT_ENV, "3"))
+        )
+        for key, value in pair:
+            monkeypatch.setenv(key, value)
+        monkeypatch.setattr(watchdog, "_WORKER", None)
+        monkeypatch.setattr(watchdog, "_RUN_DIR", None)
+        fake = _FakeFaulthandler()
+        monkeypatch.setattr(watchdog, "faulthandler", fake)
+
+        watchdog.install(_FakeConfig(worker=True))
+        watchdog.note_start("tests/unit/a.py::test_parks")
+        armed.append(fake.armed)
+
+    bounds = [[seconds for seconds, _kwargs in one] for one in armed]
+    assert bounds[0] == bounds[1] == [3.0]
+    assert [kwargs["exit"] for _seconds, kwargs in armed[0]] == [True]
+    assert [kwargs["repeat"] for _seconds, kwargs in armed[0]] == [False]
+
+
+def test_a_silenced_report_still_says_the_bound_is_live(monkeypatch, capsys) -> None:
+    """Reporting off is not the same as nothing being armed, and it says so.
+
+    Without this line the combination is silent in both directions: the report is
+    off because it was asked to be, and the first thing anyone learns about the
+    bound is a worker dying. The controller still exists -- its cleanup is what
+    keeps a run's directory from accumulating one armed file per test -- but it
+    reports nothing and must never compare against a bound that is not there.
+    """
+    monkeypatch.delenv(watchdog.ENV_SECONDS, raising=False)
+    monkeypatch.setenv(watchdog.LOCAL_ENV_SECONDS, "0")
+    monkeypatch.setenv(watchdog.TEST_TIMEOUT_ENV, "5")
+
+    watchdog.install(_FakeConfig(worker=False))
+
+    controller = watchdog._CONTROLLER
+    assert controller is not None
+    assert controller.seconds is None
+    assert controller._thread is None
+    assert controller.report_if_stalled() is False
+    err = capsys.readouterr().err
+    assert watchdog._bound_detail((5.0, True)) in err
+    assert "OFF" in err and "kills its worker" in err
+
+
+def test_the_announcement_lines_agree_about_the_bound(monkeypatch, capsys) -> None:
+    """The ON line and the OFF line must describe the same bound the same way.
+
+    They are read in opposite situations -- one while the report is on, one just
+    after the operator silenced it -- so a reader comparing the two is the point,
+    and a drift between the texts is how a live bound gets believed to be off.
+    The ON line also has to say what its own silence knob does NOT switch off.
+    """
+    monkeypatch.delenv(watchdog.ENV_SECONDS, raising=False)
+    monkeypatch.delenv(watchdog.LOCAL_ENV_SECONDS, raising=False)
+    monkeypatch.setenv(watchdog.TEST_TIMEOUT_ENV, "5")
+
+    watchdog.install(_FakeConfig(worker=False))
+
+    on = capsys.readouterr().err
+    assert watchdog._bound_detail((5.0, True)) in on
+    assert "survives that" in on
+
+
+# ---------------------------------------------------------------------------
+# Round-1 review MAJOR-2 / QA Q3: one dump directory per RUN, not per user.
+# ---------------------------------------------------------------------------
+
+
+def _fired_dump(path: Path, frame: str) -> None:
+    """One worker file with an arm-time header and a real snapshot in it."""
+    path.write_text(
+        f"{watchdog.ARM_MARKER}tests/unit/a.py::test_parked exceeded 240s; every thread follows.\n"
+        f"{watchdog.FIRED_MARKER}0:04:00)!\n"
+        "Thread 0x1 (most recent call first):\n"
+        f'  File "{frame}", line 12 in test_parked\n',
+        encoding="utf-8",
+    )
+
+
+def test_an_empty_run_directory_reports_the_same_as_no_directory(tmp_path) -> None:
+    """Every run makes its directory at install, so "nothing to report" has two shapes.
+
+    One is a root that does not exist; the other is a root holding a run
+    directory with no dumps in it -- a run still in its collection phase, or one
+    whose worker never started. Both are the same answer to a reader, and the
+    second must not print an empty-looking report, which is indistinguishable
+    from a stall whose evidence went missing.
+    """
+    root = tmp_path / "lo-shard-stall"
+    (root / "run-111").mkdir(parents=True)
+    assert watchdog.report_dumps(root) == watchdog.report_dumps(tmp_path / "absent")
+    assert "no shard stall report" in watchdog.report_dumps(root)
+
+
+def test_the_run_directory_is_made_and_handed_to_the_workers(monkeypatch) -> None:
+    """The controller makes this run's directory and exports its path.
+
+    Workers inherit the controller's environment, which is what lets every
+    process of one run write into one directory without a lock file. The second
+    half checks that a worker resolves that exported path rather than inventing
+    one, and the third that a process which never installed cannot collide.
+    """
+    monkeypatch.delenv(watchdog.ENV_SECONDS, raising=False)
+    monkeypatch.delenv(watchdog.LOCAL_ENV_SECONDS, raising=False)
+    monkeypatch.delenv(watchdog.ENV_RUN_DIR, raising=False)
+
+    watchdog.install(_FakeConfig(worker=False), on_ci=False)
+
+    run = watchdog.run_dir()
+    assert run.parent == watchdog.DUMP_ROOT
+    assert os.environ[watchdog.ENV_RUN_DIR] == str(run)
+    assert run.is_dir()
+
+    monkeypatch.setattr(watchdog, "_RUN_DIR", None)
+    monkeypatch.setattr(watchdog, "_WORKER", None)
+    watchdog.install(_FakeConfig(worker=True), on_ci=False)
+    assert watchdog.run_dir() == run
+    assert watchdog._WORKER is not None
+    assert watchdog._WORKER._path.parent == run
+
+    monkeypatch.delenv(watchdog.ENV_RUN_DIR, raising=False)
+    monkeypatch.setattr(watchdog, "_RUN_DIR", None)
+    fallback = watchdog.run_dir()
+    assert fallback.parent == watchdog.DUMP_ROOT
+    assert str(os.getpid()) in fallback.name
+
+
+def test_two_concurrent_runs_never_read_or_delete_each_others_dumps(monkeypatch, tmp_path) -> None:
+    """This run's directory only: the two failures one shared directory caused.
+
+    A report could print a concurrent run's stack excerpt as its own evidence,
+    and a run that finished deleted a concurrent run's armed dump -- whose worker
+    still holds the descriptor, so that run's fired dump landed on an unlinked
+    inode and its report lost the one thing that decides bound-versus-deadlock.
+    Both halves are asserted, plus the reader's other need: the workflow's report
+    over the ROOT still finds every run's evidence, attributed by run.
+    """
+    root = tmp_path / "lo-shard-stall"
+    mine = root / "run-111"
+    other = root / "run-222"
+    for directory in (mine, other):
+        directory.mkdir(parents=True)
+
+    _fired_dump(mine / "worker-111.log", "/repo/tests/unit/tui/test_mine.py")
+    _fired_dump(other / "worker-222.log", "/repo/tests/unit/tui/test_theirs.py")
+    (mine / "worker-333.log").write_text(
+        f"{watchdog.ARM_MARKER}tests/unit/a.py::test_armed exceeded 900s; every thread follows.\n",
+        encoding="utf-8",
+    )
+    (other / "worker-444.log").write_text(
+        f"{watchdog.ARM_MARKER}tests/unit/b.py::test_other_armed exceeded 900s; "
+        "every thread follows.\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(watchdog, "_RUN_DIR", mine)
+    controller = watchdog._install_controller_for_test(900.0, _Sink())
+
+    excerpts = "\n".join(controller._stack_excerpts())
+    assert "test_mine.py" in excerpts
+    assert "test_theirs.py" not in excerpts
+
+    controller.cleanup()
+
+    assert not (mine / "worker-333.log").exists()
+    assert (mine / "worker-111.log").exists()
+    assert (other / "worker-444.log").exists()
+    assert (other / "worker-222.log").exists()
+
+    report = watchdog.report_dumps(root)
+    assert "run-111" in report and "run-222" in report
+    assert "test_mine.py" in report and "test_theirs.py" in report
+    assert "exceeded 900s" not in report

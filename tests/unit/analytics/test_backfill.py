@@ -77,6 +77,40 @@ def test_backfill_names_a_session_from_its_transcript(tmp_path):
     store.close()
 
 
+def test_the_name_sweep_stands_down_between_ledger_rows(tmp_path):
+    """A runtime that is LEAVING stops this walk at the row it is on.
+
+    This pass was the deepest frame in 40 of the 46 teardown dumps a design pass
+    classified, so it is the one a departing runtime is most likely to be
+    joined on. Pass granularity is worth minutes on a real store; the check
+    below is worth one ledger row.
+    """
+    store = AnalyticsStore(tmp_path / "analytics.db")
+    store.record_batch([_snap("aaa"), _snap("bbb"), _snap("ccc")])
+    for session_id, opener in (("aaa", "first"), ("bbb", "second"), ("ccc", "third")):
+        _session(tmp_path, session_id, opener)
+
+    checks: list[None] = []
+
+    def should_stop() -> bool:
+        checks.append(None)
+        return len(checks) > 1
+
+    assert backfill_analytics_session_names(tmp_path, store=store, should_stop=should_stop) == 1
+    # ``session_names_map`` is the ledger's own name rows; ``aggregate()``
+    # reports every session the ledger has ever seen, named or not.
+    assert store.session_names_map() == {
+        "aaa": "first"
+    }, "the stop did not leave the walk between rows"
+    assert len(checks) == 2, "the predicate is not consulted once per ledger row"
+
+    # Without a predicate — the shape every other caller uses — the ledger is
+    # finished, including the rows the stopped walk never reached.
+    assert backfill_analytics_session_names(tmp_path, store=store) == 2
+    assert store.session_names_map() == {"aaa": "first", "bbb": "second", "ccc": "third"}
+    store.close()
+
+
 def test_backfill_never_overwrites_a_real_title(tmp_path):
     store = AnalyticsStore(tmp_path / "analytics.db")
     store.record_batch([_snap("aaa")])

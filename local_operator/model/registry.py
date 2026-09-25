@@ -30,6 +30,16 @@ class ProviderDetail(BaseModel):
         default=False,
         description="Whether the provider is recommended for use in Local Operator",
     )
+    # Filled per request by `GET /v1/models/providers` from `model.defaults`, never
+    # authored here: the suggestion table is the one source, and a second copy on
+    # these rows would drift from it. camelCase to match `requiredCredentials`.
+    suggestedModel: Optional[Dict[str, str]] = Field(
+        default=None,
+        description=(
+            "The model a first sign-in to this provider sets as the default, as "
+            "{id, name}; null when the provider has no suggestion"
+        ),
+    )
 
 
 SupportedHostingProviders = [
@@ -551,6 +561,33 @@ anthropic_models: Dict[str, ModelInfo] = {
     # `supports_prompt_cache=True` is a family property (every Claude from 3 on
     # accepts `cache_control`) rather than a listing field; `supports_images` IS a
     # listing field (`capabilities.image_input.supported`) and is True for all ten.
+    #
+    # Claude Opus 5.5 -- the suggested default for Anthropic (`model.defaults`).
+    # Id, 1M window and 128k output from the models overview table at
+    # https://platform.claude.com/docs/en/about-claude/models/overview (read
+    # 2026-09-24; also served by the live `/v1/models` listing under a Claude
+    # Pro/Max OAuth grant the same day). Prices from the pricing page above, read
+    # the same day: $4 in / $5 5m write / $0.20 cache hit / $20 out. The cache hit
+    # is 0.05x base input, NOT the family's usual 0.1x (the page's footnote 2),
+    # so it is transcribed rather than derived.
+    "claude-opus-5-5": ModelInfo(
+        id="claude-opus-5-5",
+        name="Claude Opus 5.5",
+        max_tokens=128_000,
+        context_window=1_000_000,
+        supports_images=True,
+        supports_prompt_cache=True,
+        limits_from_listing=True,
+        input_price=4.0,  # $4 / MTok
+        output_price=20.0,  # $20 / MTok
+        cache_writes_price=5.0,  # $5 / MTok (5m write)
+        cache_reads_price=0.20,  # $0.20 / MTok (0.05x input)
+        description=(
+            "Anthropic's Claude Opus 5.5: the recommended starting model, with a "
+            "1M-token context window and 128k of output."
+        ),
+        recommended=True,
+    ),
     "claude-opus-5": ModelInfo(
         id="claude-opus-5",
         name="Claude Opus 5",
@@ -1165,6 +1202,29 @@ def anthropic_family_model_info(model_id: str) -> Optional[ModelInfo]:
 
 
 openai_models: Dict[str, ModelInfo] = {
+    # GPT-6 Astra -- the suggested default for OpenAI (`model.defaults`), on
+    # both the API-key and the ChatGPT-subscription routes (the Codex catalogue
+    # serves it; `scripts/bench_openai_oauth_cache.py` drives it over OAuth).
+    # https://developers.openai.com/api/docs/models/gpt-6-astra (read
+    # 2026-09-24): $10 / $1 cached / $12.50 cache write / $50 per million,
+    # 1,050,000 context, 128k max output. Prompts over 272k input are billed at
+    # 2x input / 1.5x output; as for gpt-5.6-sol below, the <272k rate is
+    # carried rather than an invented blend.
+    "gpt-6-astra": ModelInfo(
+        id="gpt-6-astra",
+        name="GPT-6 Astra",
+        input_price=10.0,
+        output_price=50.0,
+        cache_writes_price=12.5,  # 1.25x uncached input, per the same page
+        cache_reads_price=1.0,
+        max_tokens=128_000,
+        context_window=1_050_000,
+        supports_images=True,
+        supports_prompt_cache=True,
+        supports_responses_api=True,
+        description="OpenAI GPT-6 Astra: OpenAI's most capable model for end-to-end work.",
+        recommended=True,
+    ),
     # GPT-5.6 Sol. Official list from
     # https://developers.openai.com/api/docs/models/gpt-5.6-sol (read
     # 2026-08-23): $4 / $0.40 cached / $20 per million, 1,050,000 context,
@@ -1336,6 +1396,27 @@ openai_models: Dict[str, ModelInfo] = {
 
 
 google_models: Dict[str, ModelInfo] = {
+    # Gemini 3.8 Flash -- the suggested default for Google (`model.defaults`).
+    # Prices from https://ai.google.dev/gemini-api/docs/pricing (read 2026-09-24):
+    # $0.75 in / $3.75 out / $0.075 context-cache read per million, PROMOTIONAL
+    # through 2026-12-31 and doubling to $1.50 / $7.50 / $0.15 on 2027-01-01.
+    # The current rate is carried because it is what a call costs today; update
+    # this row when the promotion ends rather than pre-empting it. Window and
+    # output cap (1,048,576 / 65,536) from the models.dev catalogue this app
+    # already reads for price fallback, matching Google's Flash family.
+    "gemini-3.8-flash": ModelInfo(
+        id="gemini-3.8-flash",
+        name="Gemini 3.8 Flash",
+        max_tokens=65_536,
+        context_window=1_048_576,
+        supports_images=True,
+        supports_prompt_cache=True,
+        input_price=0.75,
+        output_price=3.75,
+        cache_reads_price=0.075,
+        description="Google's most capable Flash model, built for agents and long-horizon coding.",
+        recommended=True,
+    ),
     "gemini-2.5-flash-preview-05-20": ModelInfo(
         id="gemini-2.5-flash-preview-05-20",
         name="Gemini 2.5 Flash Preview",
@@ -1600,6 +1681,30 @@ for _deepseek_alias, _deepseek_label in (
     )
 
 qwen_models: Dict[str, ModelInfo] = {
+    # Qwen3.8 Max on Model Studio (pay-as-you-go) -- the suggested default for
+    # the `alibaba` provider (`model.defaults`). The Token Plan row of the same id
+    # further down is a SUBSCRIPTION and is priced in credits; this is the
+    # metered route. https://www.alibabacloud.com/help/en/model-studio/qwen3-8-max
+    # (International scope, read 2026-09-24): $2 in / $6 out / $0.25 implicit-
+    # cache read per million, 1,000,000 context. Output cap as the Token Plan row
+    # (131,072), which models.dev reports for this id too.
+    #
+    # Named with a route suffix for the reason `GLM-5.2 (Token Plan)` is: the Token
+    # Plan row already answers to the bare "Qwen3.8 Max", and shipped names must
+    # be globally unique (test_no_two_shipped_rows_share_a_curated_name).
+    "qwen3.8-max": ModelInfo(
+        id="qwen3.8-max",
+        name="Qwen3.8 Max (Model Studio)",
+        max_tokens=131_072,
+        context_window=1_000_000,
+        supports_images=True,
+        supports_prompt_cache=True,
+        input_price=2.0,
+        output_price=6.0,
+        cache_reads_price=0.25,
+        description="Alibaba's flagship Qwen3.8 model on Model Studio",
+        recommended=True,
+    ),
     # No row here carries a cache price, and their absence is a correction rather
     # than an omission. All 14 priced rows used to set
     # `cache_writes_price = input_price` and `cache_reads_price = output_price` —
@@ -2064,6 +2169,27 @@ qwencloud_token_plan_models: Dict[str, ModelInfo] = {
 }
 
 mistral_models: Dict[str, ModelInfo] = {
+    # Mistral Medium 3.5 (`mistral-medium-2604`), addressed by its floating alias
+    # -- the suggested default for Mistral (`model.defaults`). Mistral's models
+    # overview calls it "our frontier-class multimodal model optimized for agentic
+    # and coding use cases", and it is the named successor of Magistral Medium and
+    # Mistral Medium 3 in the deprecation table, so it -- not Large 3, an
+    # open-weight general model -- is the frontier pick. Page
+    # https://docs.mistral.ai/models/mistral-medium-3-5-26-04 (read 2026-09-24):
+    # $1.50 in / $7.50 out per million, 256k context. No cache rate is published,
+    # so none is claimed.
+    "mistral-medium-latest": ModelInfo(
+        id="mistral-medium-latest",
+        name="Mistral Medium 3.5",
+        max_tokens=262_144,
+        context_window=262_144,
+        supports_images=True,
+        supports_prompt_cache=False,
+        input_price=1.5,
+        output_price=7.5,
+        description="Mistral's frontier-class multimodal model for agentic and coding work.",
+        recommended=True,
+    ),
     "mistral-large-latest": ModelInfo(
         id="mistral-large-latest",
         name="Mistral Large Latest",
@@ -2296,6 +2422,16 @@ kimi_models: Dict[str, ModelInfo] = {
         recommended=True,
     ),
 }
+# ``kimi-k3`` is the SAME model under the API-key host's spelling (see the
+# comment on ``k3``), and it is the suggested default for an API-key Kimi login
+# (`model.defaults`): the coding-plan id ``k3`` does not exist on
+# ``api.moonshot.cn``. Copied rather than restated so the two spellings cannot
+# drift apart on price or window. Named for its host, as `GLM-5.2 (Token Plan)` is,
+# because shipped names must be unique (test_no_two_shipped_rows_share_a_curated_name)
+# and the two rows are one model on two platforms.
+kimi_models["kimi-k3"] = kimi_models["k3"].model_copy(
+    update={"id": "kimi-k3", "name": "Kimi K3 (Moonshot API)"}
+)
 
 # X.AI Grok models and pricing
 xai_models: Dict[str, ModelInfo] = {
@@ -2306,6 +2442,25 @@ xai_models: Dict[str, ModelInfo] = {
     # the list price of a typical agent turn; a 200k+ prompt is still billed
     # (and still appears in By provider) but the estimate understates it
     # rather than inventing a blended rate the table cannot express.
+    # Grok 4.7 -- the suggested default for xAI (`model.defaults`), and the model
+    # the page below says to use "for everything else, including code". Same
+    # tiers as grok-4.6 on https://docs.x.ai/developers/models (read 2026-09-24):
+    # $2 in / $0.50 cached / $6 out below a 200k prompt, 2x at or above it; 500k
+    # context. Output cap carried from grok-4.6, the page quoting none.
+    "grok-4.7": ModelInfo(
+        id="grok-4.7",
+        name="Grok 4.7",
+        max_tokens=131_072,
+        context_window=500_000,
+        supports_images=True,
+        supports_prompt_cache=True,
+        input_price=2.00,  # $2 / MTok (<200k prompt); $4 ≥200k
+        output_price=6.00,  # $6 / MTok (<200k prompt); $12 ≥200k
+        cache_writes_price=2.00,
+        cache_reads_price=0.50,  # $0.50 / MTok (<200k); $1.00 ≥200k
+        description="xAI Grok 4.7: xAI's most capable model, 500k context.",
+        recommended=True,
+    ),
     "grok-4.6": ModelInfo(
         id="grok-4.6",
         name="Grok 4.6",

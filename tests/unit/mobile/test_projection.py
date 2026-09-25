@@ -419,6 +419,9 @@ def test_subagent_compaction_reuses_only_identical_sources_and_prunes_removed_jo
         def roster(self) -> list[Any]:
             return []
 
+        def lifecycles(self) -> dict[str, Any]:
+            return {}
+
         def nodes(self) -> list[Any]:
             return current_pass.nodes()
 
@@ -3121,6 +3124,10 @@ def test_a_roster_row_with_no_age_publishes_no_age() -> None:
 
         def roster(self) -> list[Any]:
             return [lifecycle(self._age)]
+
+        def lifecycles(self) -> dict[str, Any]:
+            # The read the fold actually makes (``RosterPass.lifecycles``).
+            return {"c1": lifecycle(self._age)}
 
         def nodes(self) -> list[Any]:
             return [node]

@@ -1048,3 +1048,85 @@ def test_the_router_ladder_does_not_leak_onto_a_non_aggregator_auto() -> None:
     assert spec.reasoning_efforts == ()
     assert spec.reasoning_effort is None
     assert spec.reasoning_default_effort is None
+
+
+def _is_scalar_annotation(annotation: Any) -> bool:
+    """Whether a field annotation can only ever hold an immutable scalar.
+
+    Only a UNION is unpacked (``Optional[int]``, ``str | None``). Any other
+    parameterised type is a container whatever its arguments -- ``list[str]``
+    must fail even though ``typing.get_args`` would hand back ``(str,)``, which
+    is exactly the hole an ``get_args(...) or (ann,)`` check leaves open.
+    """
+    import types
+    import typing
+
+    scalars = (int, float, str, bool, type(None))
+    if typing.get_origin(annotation) in (typing.Union, types.UnionType):
+        return all(_is_scalar_annotation(member) for member in typing.get_args(annotation))
+    return typing.get_origin(annotation) is None and annotation in scalars
+
+
+def test_the_scalar_pin_rejects_a_generic_container() -> None:
+    """The pin above must catch the containers it exists for, not just bare lists."""
+    from typing import Optional
+
+    for rejected in (list[str], dict[str, float], tuple[str, ...], Optional[list[str]], set[int]):
+        assert not _is_scalar_annotation(rejected), rejected
+    for accepted in (int, float, str, bool, Optional[int], str | None, Optional[float]):
+        assert _is_scalar_annotation(accepted), accepted
+
+
+def test_paint_resolution_isolates_the_memo_with_a_shallow_copy(monkeypatch) -> None:
+    """The paint path hands out SHALLOW copies, and they are still isolated.
+
+    ``resolve_model_info_paint`` runs once per usage component on the parent's
+    roster tick, so it stopped paying pydantic's deep-copy walk (measured as the
+    single largest cost of a 16-child tick). A shallow copy is only equivalent
+    while every ``ModelInfo`` field is a scalar -- a nested container would then
+    be SHARED between the caller's copy and the process-wide memo, and a caller
+    mutating it would corrupt every later price. This pins both halves: the
+    field inventory that makes the shallow copy safe, and the isolation itself
+    on the memo arm and the registry-fallback arm.
+    """
+    for name, field in ModelInfo.model_fields.items():
+        assert _is_scalar_annotation(field.annotation), (
+            f"ModelInfo.{name} is {field.annotation!r}: a non-scalar field makes "
+            "resolve_model_info_paint's shallow copy share state with its memo"
+        )
+
+    bucket = int(configure.time.time() // configure.DEFAULT_TTL_S)
+    memo_row = ModelInfo(id="paint-model", name="paint-model", description="memo", input_price=3.0)
+    monkeypatch.setitem(configure._paint_memo, ("anthropic", "paint-model", bucket), memo_row)
+    handed, hit = configure.resolve_model_info_paint("anthropic", "paint-model")
+    assert hit is True and handed is not memo_row
+    handed.input_price = 99.0
+    assert memo_row.input_price == 3.0, "a caller's write reached the process-wide memo"
+
+    fallback, hit = configure.resolve_model_info_paint("anthropic", "claude-unheard-of-6")
+    assert hit is False
+    fallback.context_window = 1
+    again, _ = configure.resolve_model_info_paint("anthropic", "claude-unheard-of-6")
+    assert again.context_window == 200_000, "a caller's write reached the registry fallback"
+
+
+def test_paint_resolution_never_deep_copies(monkeypatch) -> None:
+    """Structural pin for the roster-tick cost: the paint path makes no deep copy.
+
+    Asserted on the call rather than on a timing, per AGENTS.md "Prefer a
+    structural invariant": a ``deep=True`` here is the regression, whatever the
+    host's speed.
+    """
+    seen: list[bool] = []
+    original = ModelInfo.model_copy
+
+    def spy(self, *, update=None, deep=False):  # type: ignore[no-untyped-def]
+        seen.append(deep)
+        return original(self, update=update, deep=deep)
+
+    monkeypatch.setattr(ModelInfo, "model_copy", spy)
+    bucket = int(configure.time.time() // configure.DEFAULT_TTL_S)
+    row = ModelInfo(id="paint-model", name="paint-model", description="memo")
+    monkeypatch.setitem(configure._paint_memo, ("anthropic", "paint-model", bucket), row)
+    configure.resolve_model_info_paint("anthropic", "paint-model")
+    assert seen == [False]

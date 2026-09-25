@@ -2586,6 +2586,23 @@ class RuntimeServer:
             self._unsubscribe = await self._handle_call_on_session_loop(
                 self._handle.subscribe, self._schedule_push
             )
+            # ONE RE-ARM PROBE PER BOOT, immediately after the fold subscription
+            # is live and inside the same guarded prologue. The judged goal's
+            # active-ness is durable state and its judge is edge-triggered, so a
+            # restart has to ask the restored record ONCE whether a continuation
+            # was actually in flight (a `waiting`/`stalled` goal is deliberately
+            # left alone — see RULINGS R3). Hopped rather than called directly
+            # for the reason the two registrations above are: the record is read
+            # and the probe scheduled on the loop that owns the session.
+            #
+            # Probed, not required — a handle without the capability (a third-
+            # party or reduced host) simply has no goal judge to re-arm.
+            rearm_goal_judge = getattr(self._handle, "rearm_goal_judge", None)
+            if callable(rearm_goal_judge):
+                try:
+                    await self._handle_call_on_session_loop(rearm_goal_judge)
+                except Exception:  # noqa: BLE001 — additive, never a boot gate
+                    logger.debug("goal judge re-arm probe failed", exc_info=True)
             # v4: hosts that can serialize their event stream feed the relay.
             # Probed, not required — a handle without the capability leaves
             # attach clients on v3 projection-only behaviour, never broken.
@@ -4222,6 +4239,36 @@ class RuntimeServer:
             )
         except Exception:  # noqa: BLE001 — a stale marker is not worth an exception
             logger.debug("could not republish the session record", exc_info=True)
+
+    def _republish_identity(self) -> None:
+        """Carry a changed model or title from the projection into the record.
+
+        `lop sessions` reads the RECORD, and only the 15 s heartbeat used to
+        copy these two fields into it, so a `/model` switch showed the old model
+        for up to a heartbeat — and ``_republish`` above does not carry them at
+        all. Called from every coalesced push, so the comparison is the steady
+        cost and a record write happens only on an actual change.
+
+        ``session_id`` moves WITH the title: after ``/resume`` or ``/new`` on a
+        TUI host the projection carries both, and writing the title alone paired
+        the new conversation's name with the old id until the heartbeat — an id
+        someone copies from `lop sessions` to resume the wrong conversation.
+        """
+        publisher = getattr(self, "_publisher", None)
+        if publisher is None:
+            return
+        try:
+            seed = self._handle.session_projection_seed
+            identity = {
+                "session_id": seed.session_id,
+                "model_label": seed.model_label,
+                "conversation_name": seed.conversation_name,
+            }
+            if all(getattr(self._record, key) == value for key, value in identity.items()):
+                return
+            publisher.heartbeat(**identity)
+        except Exception:  # noqa: BLE001 — the heartbeat still corrects it within 15 s
+            logger.debug("could not republish the session identity", exc_info=True)
 
     def attach_clients(self) -> int:
         """Live terminal viewers or leased desktop delivery surfaces.
@@ -6774,6 +6821,9 @@ class RuntimeServer:
         Full-TUI attach clients are skipped (see ``_projection_recipients``).
         Phone daemon frames stay byte-identical.
         """
+        # FIRST, ahead of the no-recipients return: a detached owner has nobody
+        # to repaint, but `lop sessions` still reads its record.
+        self._republish_identity()
         recipients = self._projection_recipients()
         if not recipients:
             # Detached owners and full-TUI-only viewers have nobody consuming
