@@ -14,6 +14,8 @@ child source was meant to change.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -734,5 +736,114 @@ async def test_a_nested_child_with_no_model_anywhere_runs_on_this_sessions_model
             "was recorded; using this session's model)"
         ) in text
         assert "this session's model (" not in text
+    finally:
+        await revived.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Review round 3 follow-ups
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_does_not_search_every_session_per_record(monkeypatch):
+    """M1: ``snapshot`` runs on the shared loop on every roster persist, so it must
+    stay linear. Reading ownership through ``job()`` rebuilt ``_sessions()`` (a scan
+    of every record) once per record. Asserted structurally, as a call count, not
+    as a wall-clock ceiling."""
+    from local_operator.harness.comms import SubagentComms
+
+    class _Row:
+        def __init__(self, owns: bool) -> None:
+            self.owns_model = owns
+            self.model_label = FLASH
+
+    class _Jobs:
+        def get(self, job_id, **_kwargs):
+            return None
+
+    host = SimpleNamespace(jobs=_Jobs())
+    comms = SubagentComms(host)  # type: ignore[arg-type]
+    for index in range(50):
+        job_id = f"job-{index}"
+        comms.record_launch(job_id, f"child-{index}", effort="lo" if index % 2 else "")
+        record = comms._record(job_id)
+        assert record is not None
+        record.session_dir = Path(f"/nonexistent/{job_id}")
+        record.job_ref = _Row(owns=bool(index % 2))
+
+    calls = 0
+    original = SubagentComms._sessions
+
+    def counting(self):
+        nonlocal calls
+        calls += 1
+        return original(self)
+
+    monkeypatch.setattr(SubagentComms, "_sessions", counting)
+    rows = comms.snapshot()
+
+    assert len(rows) == 50
+    # The value still comes through: ownership read off the retained row.
+    assert [row["owns_model"] for row in rows[:4]] == [False, True, False, True]
+    assert calls <= 1, f"snapshot rebuilt the session list {calls} times for 50 records"
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_role_pinned_manager_still_decides_its_workers_model(tmp_path, monkeypatch):
+    """M2: a manager pinned by its ROLE profile (``record.effort`` empty),
+    restored from a sidecar written before ``owns_model`` existed. The role's pin
+    is ownership (D9.4), so the worker takes that tier, not the D9.2 fallback."""
+    from local_operator.agents import AgentRegistry
+    from local_operator.tools.agent_tool import AgentParams, write_profile
+
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    _write_tiers(config_dir, lo=FLASH)
+    registry = AgentRegistry(tmp_path / "agents")
+    write_profile(
+        registry,
+        AgentParams(
+            op="create",
+            name="lead",
+            description="Leads a slice",
+            instructions="Lead it.",
+            effort="lo",
+            delegate=True,
+        ),
+        creating=True,
+    )
+
+    stream = HangingThenDoneStream(hold="MANAGE-HOLD")
+    root = _parent(tmp_path, stream)
+    root.agent_registry = registry
+    comms = root.subagent_comms
+    mgr_id = root._launch_subagent(label="mgr", prompt="MANAGE-HOLD", agent="lead")
+    await wait_for(lambda: (r := comms._record(mgr_id)) is not None and r.child)
+    manager = comms._record(mgr_id).child
+    assert manager.model_label == FLASH
+    assert comms._record(mgr_id).effort == "", "precondition: pinned by the role, not a tier"
+    worker_id = manager._launch_subagent(label="worker", prompt="do the work")
+    await wait_for(lambda: _completed(manager, worker_id))
+    stream.release.set()
+    await wait_for(lambda: _completed(root, mgr_id))
+    await root._persist_subagent_roster()
+    await root.dispose()
+
+    def legacy(details):
+        for row in details["records"]:
+            row.pop("owns_model", None)
+
+    _rewrite_sidecar(tmp_path, legacy)
+    _write_tiers(config_dir, lo="openrouter/qwen/qwen3.8-max")
+    after = RecordingStream()
+    revived = _parent(tmp_path, after)
+    revived.agent_registry = registry
+    try:
+        text = await _hub_resume(revived, worker_id)
+        new_id = _resumed_id(revived, text)
+        await wait_for(lambda: _completed(revived, new_id))
+        assert after.selectors_for(RESUME_PROMPT) == ["openrouter/qwen/qwen3.8-max"]
+        assert "could not be found" not in text
+        assert "on its parent's model (openrouter/qwen/qwen3.8-max)" in text
     finally:
         await revived.dispose()

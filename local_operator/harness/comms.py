@@ -2060,10 +2060,35 @@ class SubagentComms:
         label = getattr(record.job_ref, "model_label", None)
         return str(label) if label else record.model_label
 
-    def _record_owns_model(self, record: _ChildRecord) -> bool | None:
-        """Whether a pin chose ``record``'s model: the live row, then the saved flag."""
-        owns = getattr(self.job(record.job_id) or record.job_ref, "owns_model", None)
+    @staticmethod
+    def _record_owns_model(record: _ChildRecord) -> bool | None:
+        """Whether a pin chose ``record``'s model: the retained row, then the saved flag.
+
+        Reads ``record.job_ref`` rather than calling :meth:`job`, the same way
+        :meth:`_record_model_label` does. :meth:`snapshot` calls this once per
+        record, and :meth:`job` rebuilds :meth:`_sessions` (a scan of every
+        record) on each call, which made the roster persist O(N^2) on the
+        shared loop (review round 3, M1). ``owns_model`` is stamped on the job
+        row object at registration, and ``job_ref`` holds that same object, so
+        nothing is lost by not searching again.
+        """
+        owns = getattr(record.job_ref, "owns_model", None)
         return owns if isinstance(owns, bool) else record.owns_model
+
+    def _role_pinned(self, record: _ChildRecord) -> bool:
+        """Whether ``record``'s role profile carries a tier pin.
+
+        Resolved leniently, like :meth:`_owned_model`: a broken pin here only
+        means the walk cannot use it, never that a descendant's resume fails.
+        """
+        role = record.agent_role
+        resolve = getattr(self._session, "_resolve_subagent_model", None)
+        if not role or role == "task" or not callable(resolve):
+            return False
+        try:
+            return isinstance(resolve(role, None), ModelSpec)
+        except Exception:  # noqa: BLE001 — an unreadable profile is "no pin"
+            return False
 
     def _owned_model(self, record: _ChildRecord) -> ModelSpec | None:
         """A settled ancestor's own pinned model: its tier re-resolved from current
@@ -2123,9 +2148,11 @@ class SubagentComms:
             if isinstance(live, ModelSpec):
                 return live, ""
             owns = self._record_owns_model(ancestor)
-            # A stored tier is a pin whatever the flag says; only a record with
-            # no flag AND no tier is genuinely unknown.
-            if owns is None and ancestor.effort:
+            # A stored tier, or a role whose profile pins one, is a pin whatever
+            # the flag says. Only a record with no flag and no pin of either kind
+            # is genuinely unknown (review round 3, M2: a legacy role-pinned
+            # manager broke the chain).
+            if owns is None and (ancestor.effort or self._role_pinned(ancestor)):
                 owns = True
             if owns is None:
                 break
