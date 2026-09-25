@@ -86,15 +86,21 @@ def effect_copy(*, purpose: str, session_id: str, request_id: str = "") -> str:
     return f"Authorise the operator key to LOOSEN the approval gate of {target}"
 
 
-def sign_message(signer: Signer, message: bytes) -> Signature:
+def sign_message(signer: Signer, message: bytes, *, timeout: float | None = None) -> Signature:
     """Sign one message and return the wire form.
 
     Split from :func:`sign_challenge` so the message construction is not
     duplicated by a caller that already has the bytes — and so a test can sign a
     message the runtime did not mint, which is how the replay tests build their
     forged frames.
+
+    ``timeout`` bounds the wait for the human gesture on a presence-gated key. It is
+    the CALLER's bound and not the backend's: the key agent blocks in the OS call for as
+    long as the sheet is up, so the only thing that can end the wait is the process that
+    started it (``--timeout`` on ``lop operator sign``; the default lives in
+    ``keyagent.SIGN_TIMEOUT_SECONDS``).
     """
-    signature = signer.sign(message)
+    signature = signer.sign(message, timeout=timeout)
     return Signature(sig=signature.hex(), key_id=signer.handle.key_id)
 
 
@@ -141,6 +147,7 @@ def sign_challenge(
     session_id: str = "",
     request_id: str = "",
     backend_name: str | None = None,
+    timeout: float | None = None,
 ) -> Signature:
     """Sign the runtime's challenge for one action. This call prompts.
 
@@ -148,6 +155,10 @@ def sign_challenge(
     refuses the gesture — never a silent ``None``, because the surfaces that call
     it must be able to tell "the operator said no" from "there is no key here",
     and only the second one has a remedy the copy can name.
+
+    ``timeout`` is how long the human gesture may take; on expiry the key agent is killed
+    and the failure says nothing was signed, which is a different outcome from a
+    dismissed sheet and is reported as such.
     """
     if purpose not in ACTIONS:
         raise KeyBackendError(f"unknown signing purpose {purpose!r}")
@@ -166,7 +177,7 @@ def sign_challenge(
         challenge=challenge,
     )
     try:
-        return sign_message(signer, message)
+        return sign_message(signer, message, timeout=timeout)
     finally:
         signer.close()
 

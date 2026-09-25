@@ -40,7 +40,7 @@ from local_operator.operator import (
     sign_challenge,
     staging_path,
 )
-from local_operator.operator.keychain import KeyBackendError
+from local_operator.operator.keychain import SECURE_ENCLAVE, KeyBackendError
 from local_operator.operator.sign import anchor_for_handle, describe_level
 from local_operator.paths import config_dir
 
@@ -259,6 +259,23 @@ def _trust() -> int:
     return 0 if loaded.usable else 1
 
 
+def _keyagent_state(backend: str) -> tuple[bool, str] | None:
+    """The macOS key agent's state, or ``None`` when it is not this host's private half.
+
+    Asked ONLY where it can matter — on macOS, and only when the recorded backend is the
+    presence store or nothing is recorded at all — so a Linux or Windows report and a
+    ``file-only`` macOS report are unchanged. This is the one place the runtime asks the
+    key agent about ITSELF rather than about a key, and it is a diagnostic verb rather
+    than a frame: two short subprocesses (a pre-flight and a ``doctor``) on the command an
+    operator runs when something is already wrong.
+    """
+    if sys.platform != "darwin" or backend not in ("", SECURE_ENCLAVE):
+        return None
+    from local_operator.operator.keychain import SecureEnclaveBackend
+
+    return SecureEnclaveBackend().health()
+
+
 def _status() -> int:
     report = operator_authority_report()
     staged = staging_path(config_dir())
@@ -269,7 +286,26 @@ def _status() -> int:
     print(f"private-half backend   : {report['backend'] or '(none)'}")
     print(f"presence per signature : {report['presence_enforced_by_os']}")
     print(f"spawn-capable guarantee: {report['capability_guarantee']}")
-    print(f"reason                 : {report['reason']}")
+    reason = report["reason"]
+    agent = _keyagent_state(report["backend"])
+    if agent is not None:
+        ok, note = agent
+        if not report["backend"] and not ok:
+            # NOTHING RECORDED AND THE KEY AGENT IS BROKEN: the reason line is the key
+            # agent's state, because on a macOS the key agent is part of the INSTALL and
+            # its absence is not "this host has no presence store" — it is a broken
+            # install, and it is the thing the operator must act on. The anchor's own
+            # reason (no file at the root-owned path) is still visible in the level and
+            # the ``anchor installed`` lines above, so nothing is lost by leading with
+            # the cause.
+            reason = note
+        elif report["backend"] and not ok:
+            # AN ANCHOR NAMES THE PRESENCE BACKEND AND IT DOES NOT WORK: said out loud,
+            # because the two lines above would otherwise promise a presence gate on a
+            # host where no signature can be produced at all. A WORKING install prints
+            # no extra line — this is a report of a fault, not a new field.
+            print(f"key agent              : {note}")
+    print(f"reason                 : {reason}")
     # THE ONE STEP THAT IS STILL PENDING, named rather than left for the reader to
     # infer from a level that looks lower than what `init` just printed. The two
     # lines are about different things on purpose: `init` reports the KEY it
@@ -348,7 +384,7 @@ def _sign(args: argparse.Namespace) -> int:
     # actually lands for a CLI caller: the OS sheet raised by the presence backend
     # carries the OS's own wording, because `SecKeyCreateSignature` takes no
     # parameters dictionary and `kSecUseOperationPrompt` was deprecated in macOS 11
-    # (see `operator/keychain.SecureEnclaveBackend.sign`). Printing the sentence
+    # (see `operator/keychain._KeyagentSigner`). Printing the sentence
     # before the gesture is what makes the human's decision an informed one.
     from local_operator.operator.sign import effect_copy
 
@@ -367,6 +403,7 @@ def _sign(args: argparse.Namespace) -> int:
             config_root=root,
             session_id=args.session,
             request_id=args.request_id,
+            timeout=getattr(args, "timeout", None),
         )
     except KeyBackendError as exc:
         print(f"could not sign: {exc}", file=sys.stderr)
