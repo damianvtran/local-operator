@@ -37730,7 +37730,6 @@ class OperatorApp(App[None]):
         1.95 M-row ledger, unbounded is 2 358.7 ms against 2 241.8 ms for 30 days.
         """
         from local_operator.analytics.store import AnalyticsStore
-
         from local_operator.tui.widgets.analytics_panel import MODEL_RATES_LIMIT
 
         def _read() -> list[Any]:
