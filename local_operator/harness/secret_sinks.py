@@ -2265,7 +2265,11 @@ class _ShellAnalyzer:
         `_legacy_word_destination` names, since that spelling is where round 7's
         leaks came from. A CLOSED descriptor is not a discarded one (R7-1), and a
         word the guard cannot read is refused rather than written down as a file
-        (R7-2).
+        (R7-2). `&>>` is lexed as one operator with `&>` even though it is bash
+        ≥4 syntax and this host's `/bin/bash` is 3.2: there it is a syntax error,
+        the line aborts and nothing is written (ran=False, measured), so the
+        lexing costs nothing locally and is right wherever the tool resolves a
+        newer shell.
         """
         fds: dict[str, tuple[str, str]] = {"1": ("result", ""), "2": ("stderr", "")}
 
