@@ -271,11 +271,13 @@ fi
 #   security find-identity -p codesigning "$KEYCHAIN"   # is the identity THERE
 #   security find-identity -p codesigning               # can the SEARCH LIST reach it
 #
-# `-v` is deliberately NOT used in either form: it lists only identities whose
-# certificate chain validates, and that evaluation consults the search list even when
-# a keychain is named — so the validating scoped count collapses to zero in exactly
-# the state this text is about. Measured, not assumed, and the single most useful
-# correction to come out of reviewing this:
+# `-v` is deliberately NOT used in either form. It lists only identities whose
+# certificate chain VALIDATES, so it is a validity report and not a presence check —
+# and validity here depends on what else the search list can see, so neither reading
+# of it generalises: on the host measured below it reports 0 in the failing state,
+# while the v0.62.39 release's own log reports 1 in that same state (the throwaway
+# keychain absent from the list). The non-`-v` form is the presence check, and it is
+# what the two commands above ask for.
 #
 # MEASURED 2026-09-25 on macOS 27, trusted Developer ID identity present only in the
 # throwaway keychain (the CI runner's condition — on this host the login keychain
@@ -284,7 +286,7 @@ fi
 #
 #   keychain NOT in the user search list:
 #     find-identity -p codesigning "$KC"  -> 1   (the identity IS in the keychain)
-#     find-identity -v -p codesigning "$KC" -> 0 (chain evaluation consults the list)
+#     find-identity -v -p codesigning "$KC" -> 0 here; 1 in the release's own log
 #     find-identity -p codesigning        -> 0   (the search list cannot reach it)
 #     codesign ... --keychain "$KC"       -> errSecInternalComponent
 #     codesign ... (no --keychain)        -> "<sha>: no identity found"
@@ -311,14 +313,21 @@ could not be used, while `errSecItemNotFound` ("The specified item could not be
 found in the keychain") or "no identity found" means a LOOKUP returned nothing —
 which is also what the IDENTITY lookup says when the certificate chain cannot be
 evaluated. Measure rather than guess. In the shell that created the keychain, and
-WITHOUT `-v` (which lists only identities whose chain validates, and so hides
-exactly the case below):
+WITHOUT `-v` — it reports only chain-validating identities, a validity report rather
+than a presence check (the v0.62.39 log shows it returning a VALID identity in this
+very state, so it cannot be relied on in either direction):
 
   security find-identity -p codesigning "$KEYCHAIN"   # is the identity THERE?
   security find-identity -p codesigning               # can the SEARCH LIST reach it?
 
-* An identity in the first and NONE in the second: the keychain is not in the user
-  keychain SEARCH LIST. That is what broke the v0.62.39 release — `codesign
+The second count says what it says only on a host where NOTHING ELSE holds this
+identity. On a machine whose login keychain already has it — the operator's Mac, or
+anywhere the bundle has been signed before — that copy is what the second count
+reports, so it cannot see the misconfiguration at all. That masking is what hid this
+bug locally for as long as it lasted.
+
+* An entry for that identity in the first and none in the second: the keychain is not
+  in the user keychain SEARCH LIST. That is what broke the v0.62.39 release — `codesign
   --keychain FILE` narrows only the IDENTITY lookup, while the signing KEY resolved
   through the SEARCH LIST. Add it, and restore the list afterwards:
 
