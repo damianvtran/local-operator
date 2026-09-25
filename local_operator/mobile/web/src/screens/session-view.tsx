@@ -121,21 +121,21 @@ function Header({
 	const pinMarks = usePinMarks();
 	const row = sessions.find((r) => r.session_id === sessionId);
 	const pinned = pinMarks.get(sessionId) ?? Boolean(row?.pinned);
-	const [pinError, setPinError] = useState("");
 	const togglePin = async () => {
-		setPinError("");
 		const next = !pinned;
 		/* Optimistic mark, then confirmed: the ★ flips at once and the daemon's
 		   next repaint is the authority for the list. */
 		applySessionPin(sessionId, next);
 		try {
 			await setSessionPin(sessionId, next);
-		} catch (e) {
-			/* A refusal takes the mark back with it. The list would otherwise keep
-			   showing a ★ the daemon never accepted until its next repaint, which
-			   is the one thing this screen cannot promise. */
+		} catch {
+			/* A refusal takes the mark back with it, and that is the whole of the
+			   response this screen shows: the reason the daemon gave is not rendered
+			   here (the refusal band was removed from this change and is being rebuilt
+			   on its own PR). The list would otherwise keep showing a ★ the daemon
+			   never accepted until its next repaint, which is the one thing this
+			   screen cannot promise. */
 			clearSessionPinMark(sessionId);
-			setPinError(String((e as Error).message ?? e));
 		}
 	};
 	return (
@@ -201,15 +201,6 @@ function Header({
 				className="border-b border-hairline bg-elevated px-2 py-1 text-meta text-ink-muted"
 			>
 				{gateReceipt}
-			</p>
-		) : null}
-		{pinError ? (
-			/* A failed pin POST is SAID, not swallowed: a button whose press changed
-			   nothing must not read as success. The optimistic list write is corrected
-			   by the daemon's next repaint, so this is the only place the failure is
-			   visible at all. */
-			<p role="alert" className="border-b border-hairline px-2 py-1 text-meta text-danger">
-				Could not save the pin: {pinError}
 			</p>
 		) : null}
 		</>
