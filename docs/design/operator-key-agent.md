@@ -126,13 +126,26 @@ The verbs, and what each answers:
 | `public` | no | `{"ok":true,"protocol":1,"spki":"…"}` |
 | `exists` | no | `{"ok":true,"protocol":1,"present":true}` |
 | `sign` | **yes, every call** | `{"ok":true,"protocol":1,"signature":"<b64url DER>"}` |
-| `doctor` | no | `{"ok":true,…,"rung":"…","keychain":"ok","keychain_status":0,"profile":"ok"}` |
+| `doctor` | no (it creates ONE item under `<tag>.<pid>` and deletes it again) | `{"ok":true,…,"rung":"…","keychain":"ok","keychain_status":0,"profile":"ok","generation":"ok","generation_status":0}` |
 | `selftest` | no | `{"ok":true,…,"checks":[{"name":…,"expected":…,"actual":…}]}` |
 | `purge` | no | `{"ok":true,"protocol":1,"deleted":<OSStatus>}` |
 
 * **`create` is idempotent** (`reused`), which is what makes a second
   `lop operator init` a report rather than a second key — and a second key would
-  invalidate every device certificate signed under the first anchor.
+  invalidate every device certificate signed under the first anchor. The **tag is
+  consulted BEFORE the key is generated**, because `SecKeyCreateRandomKey` SUCCEEDS
+  against a tag that already holds an item (measured, QA round 1): attempting the create
+  first meant the duplicate branch was never reached, three calls returned three
+  different points with `reused:false`, and `public` kept resolving the tag to the first
+  one — so an anchor staged from `create()`'s handle pinned a public half the agent would
+  never sign with. `emit_key_reply` is the single place the reply is built, so `create`
+  and `public` cannot describe two different keys.
+* **`doctor` MEASURES the entitlement instead of inspecting it.** The keychain query is
+  answered `errSecItemNotFound` to an unentitled process as well as to an entitled one
+  (§3's trap), so it cannot distinguish a working install from one whose entitlement the
+  OS will not honour — a bundle of the latter shape reported `keychain":"ok"` and looked
+  healthy (QA round 1). Generation is the operation the entitlement gates, so `doctor`
+  performs it once under a throwaway tag and deletes it immediately; `ok` requires it.
 * **`exists` exists because of §3**: the Python side may not answer "is there a key?"
   itself. A query is a question, so "there is none" is its *success* reply
   (`present:false`); `public` is where -25300 becomes exit 3.
@@ -160,11 +173,20 @@ different sites and the Python diagnosis table
 
 | State | `init` | `status` |
 |---|---|---|
-| helper absent | not installed: an sdist install, or a wheel for another platform — reinstall, or `--backend file-only` and here is what that costs | `(none)`, reason `the macOS key agent is not installed (broken install)` |
-| verification failed | its signature does not verify as ours, or it carries no profile | `(none)`, reason `the key agent failed verification` |
-| killed by signal | the kernel refused its entitlement: the profile is missing, stale or does not authorize its application identifier | `(none)`, reason `the key agent was killed: bad or missing embedded profile` |
-| no key stored | no operator key on this host: run `lop operator init` | `(none)`, reason `no key on this host` |
-| key stored | the level it achieved | `private-half backend : operator-secure-enclave`, `presence per signature : True` |
+| helper absent | not installed: an sdist install, or a wheel for another platform — reinstall, or `--backend file-only` and here is what that costs | `key agent : the macOS key agent is not installed (broken install)`, plus `fix :` naming the reinstall; the `reason` line keeps the ANCHOR's own sentence |
+| verification failed | its signature does not verify as ours, or it carries no profile | `key agent : the key agent failed verification` + `fix :` |
+| killed by signal | the kernel refused its entitlement: the profile is missing, stale or does not authorize its application identifier | `key agent : the key agent was killed: bad or missing embedded profile` + `fix :` |
+| entitlement refused | the OS refused the keychain call: the profile's entitlement is not in effect | `key agent : the key agent's keychain call was refused: its entitlement is not in effect` + `fix :` |
+| no key stored | no operator key on this host: run `lop operator init` | `reason : no key on this host` |
+| key stored | the level it achieved, with the protection class `[kSecAttrAccessible…]` | `private-half backend : operator-secure-enclave`, `presence per signature : True` |
+
+**The key agent's fault STANDS BESIDE the authority reason, never in place of it**
+(design round 1). The level is `spawn-capability-only` because no anchor is installed, and
+the key agent's state does not move the level at all; collapsing the two into one field
+read as "my key vanished and my installation is broken" one command after a successful
+`init`, and routed the reader to a reinstall that neither installs the anchor nor changes
+the level. `status` names a remedy that can work, which is why the `loosening:` block
+keeps its `lop operator init` sentence only in the state where that verb is the next step.
 
 **Nothing silently downgrades.** On macOS the key agent is part of the *install*, not
 a host capability, so a missing or unverifiable helper makes `auto` and
@@ -235,14 +257,19 @@ toolchain must not move under the artefact the entitlement depends on.
    still cannot use the key;
 3. the **Developer ID G2 intermediate** fetched from Apple and pinned by sha256
    (`f16cd3c5…df3a`): a runner without it imports an identity that is not valid;
-4. compile universal2 (`-arch arm64 -arch x86_64`), assemble the bundle, assert the
-   profile authorizes exactly what the entitlements claim, sign with the identity
-   addressed **by hash** (so the workflow carries nobody's name), and
+4. compile universal2 (`-arch arm64 -arch x86_64`), **assert with `lipo -archs` that the
+   assembled binary really carries both slices** (the tag is not a binary, and `--binary`
+   skips the compile), assemble the bundle, assert the profile authorizes exactly what the
+   entitlements claim AND that it is still current and names the signing certificate, sign
+   with the identity addressed **by hash** (so the workflow carries nobody's name), and
    `codesign --verify --strict`;
 5. run the helper's `selftest`;
 6. retag the pure wheel into `local_operator-<v>-py3-none-macosx_11_0_universal2.whl`
    with the signed bundle injected at the path the runtime resolves, its execute bit
-   preserved, and `RECORD` rebuilt from the bytes written;
+   preserved, and `RECORD` rebuilt from the bytes written — then re-assert `lipo -archs`
+   on the helper EXTRACTED FROM THE WHEEL, because the wheel is what an Intel Mac
+   downloads and a single-arch helper under a universal2 tag installs cleanly and cannot
+   execute;
 7. upload that wheel as `release-dists-macos`; `pypi-publish` needs **both** jobs, so a
    release that cannot build the key agent fails rather than shipping the pure wheel
    alone;
