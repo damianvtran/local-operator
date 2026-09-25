@@ -527,9 +527,9 @@ def test_an_unanswered_confirmation_times_out_and_admits_nobody(
         if refreshed.invites[0].state != "redeemed":
             break
         time.sleep(0.1)
-    assert refreshed.invites[0].state == "minted", (
-        f"an abandoned pairing left the token {refreshed.invites[0].state!r}"
-    )
+    assert (
+        refreshed.invites[0].state == "minted"
+    ), f"an abandoned pairing left the token {refreshed.invites[0].state!r}"
     assert refreshed.invites[0].attempts == 1, refreshed.invites[0]
     assert refreshed.invites[0].outcome == "timeout", refreshed.invites[0]
     assert "pairing_refused" in _events(server_a)
