@@ -38,6 +38,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.network import audit as audit_mod
 from local_operator.network import dial as session_dial
 from local_operator.network import projection, relay, store
 from local_operator.session.cleanup import mark_store
@@ -1604,6 +1605,398 @@ def test_the_stream_is_a_pass_through_and_quitting_it_leaves_the_peer_running(
         assert client2.recv() is not None, "the session was no longer reachable"
         assert len(served[SESSION].handle.calls) == calls_after_quit
         client2.close()
+    finally:
+        _stop_all(served)
+
+
+#: The four ways a viewer goes away, spelled as the OWNER's relay experiences
+#: them. A clean close, a TUI quit, a desktop client disconnect and a viewer
+#: process dying are four front-end stories with one wire consequence between
+#: them: the viewer's control connection ends. Two of the four below are driven
+#: through a REAL child process, so the "crashed viewer" cell is not the test
+#: politely closing a socket it owns.
+_VIEWER_LEAVES: tuple[str, ...] = ("clean-close", "abrupt-reset", "close-op", "killed-viewer")
+
+
+#: A viewer that opens a stream and then never closes it: it prints ``OPENED`` and
+#: waits to be killed. Written to a file rather than passed as ``-c`` so the child's
+#: own traceback (if it fails) is readable, and run on THIS interpreter so it is the
+#: same build under test. RAW, and it has to be: the child's source needs the
+#: two-character escape ``\n`` to survive into the file it is written to, and a plain
+#: literal would turn it into a newline inside a string the child then cannot parse.
+_KILLABLE_VIEWER = r"""
+import json
+import socket
+import sys
+import time
+from pathlib import Path
+
+from local_operator.network import store
+
+root, peer, session = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+record = store.find_own_relay(root)
+sock = socket.create_connection(("127.0.0.1", record.control_port), timeout=10)
+sock.sendall((json.dumps({"key": record.control_key, "client": "cli"}) + "\n").encode())
+sock.sendall(
+    (
+        json.dumps(
+            {
+                "op": "stream_open",
+                "req": 1,
+                "peer": peer,
+                "session_id": session,
+                "auth": {"frontend_state": True, "events": True, "surface": "terminal"},
+            }
+        )
+        + "\n"
+    ).encode()
+)
+buffer = b""
+while b"\n" not in buffer:
+    chunk = sock.recv(65536)
+    if not chunk:
+        raise SystemExit("the relay closed before the stream opened")
+    buffer += chunk
+print("OPENED", flush=True)
+time.sleep(600)
+"""
+
+
+def _owner_stream(server: relay.RelayServer, session_id: str) -> Any:
+    """The OWNER's half of the stream for ``session_id``, or ``None``."""
+    for stream in server._streams.values():  # noqa: SLF001 — the table the leak lived in
+        if stream.session_id == session_id:
+            return stream
+    return None
+
+
+def _owner_stream_table(server: relay.RelayServer, session_id: str) -> list[Any]:  # noqa: SLF001
+    return [  # noqa: SLF001 — one read of the table, so the assertion is about the table
+        stream
+        for stream in server._streams.values()  # noqa: SLF001
+        if stream.session_id == session_id
+    ]
+
+
+@pytest.mark.parametrize("how", _VIEWER_LEAVES)
+def test_a_viewer_leaving_releases_the_owner_s_stream(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, how: str
+) -> None:
+    """Q-XH-2: the OWNER's relay→runtime dial is released when its viewer goes.
+
+    Before the fix this test fails on every parameter for one reason: the viewer
+    relay sent the peer NOTHING on close (``_close_stream`` required
+    ``stream.dial is not None``, and a viewer-side ``_Stream`` never has a dial),
+    so the owner kept one more ESTABLISHED socket to its runtime per open — 5
+    ``session_stream_opened`` and 0 closes across a real host boundary, one per
+    viewer, with the runtime pinned resident for 47 minutes and the idle-exit final
+    flush unable to fire. The leak was on the OWNER's hop, which is why the
+    assertions below are made on the owner's table, its dial's socket and its audit
+    counts — the viewer side looked clean throughout and said nothing.
+    """
+    import os
+    import struct
+    import subprocess
+    import sys
+
+    server_a, server_b, host_a, port_a = peer_pair
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    # The SESSION lives on A (the owner); the VIEWER is B, whose relay dials A.
+    _seed(server_a.root, SESSION)
+    served = _serve(monkeypatch, server_a.root)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
+    # DECLARED BEFORE THE TRY, so the `finally` below can reap it even when the cell
+    # fails before the spawn (pyright reads the inner binding as possibly unbound, and
+    # a leaked killable viewer is exactly what this cell must not leave behind).
+    child: Any = None
+    try:
+        _warm(server_a.root, SESSION)
+        _viewer(server_b)
+        assert _dial_to(server_b, record, host_a, port_a) is not None
+
+        if how == "killed-viewer":
+            script = tmp_path / "killed_viewer.py"
+            script.write_text(_KILLABLE_VIEWER, encoding="utf-8")
+            child = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+                [
+                    sys.executable,
+                    str(script),
+                    str(server_b.root),
+                    server_a.identity.device_id,
+                    SESSION,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env={**os.environ, "LOCAL_OPERATOR_CONFIG_DIR": str(server_b.root)},
+                text=True,
+            )
+            assert child.stdout is not None
+            opened_line = child.stdout.readline().strip()
+            assert opened_line == "OPENED", (
+                opened_line,
+                child.stderr.read() if child.stderr is not None else "",
+            )
+            viewer: Any = None
+        else:
+            viewer = _StreamClient(server_b.root)
+            opened = viewer.open_stream(
+                server_a.identity.device_id,
+                SESSION,
+                events=True,
+                frontend_state=True,
+                surface="terminal",
+            )
+            assert opened["op"] == "ack", opened
+            assert viewer.recv() is not None, "no welcome through the stream"
+
+        # THE OWNER'S HALF IS UP: one stream for this session, with a live socket to
+        # the runtime. This is the state that used to outlive the viewer.
+        assert _wait_for(lambda: _owner_stream(server_a, SESSION) is not None)
+        owner_stream = _owner_stream(server_a, SESSION)
+        assert owner_stream is not None
+        assert owner_stream.dial is not None, "the owner did not dial its own runtime"
+        assert owner_stream.dial.sock.fileno() != -1
+        stream_id = owner_stream.stream_id
+
+        # …now the viewer goes away, four ways.
+        if how == "clean-close":
+            viewer.close()
+        elif how == "abrupt-reset":
+            # SO_LINGER 0 makes close() send RST instead of FIN: a viewer whose
+            # process died mid-write, as the relay's reader sees it.
+            viewer.sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            viewer.sock.close()
+        elif how == "close-op":
+            # The multiplexed local close (§2.5) — a front end asking its own relay,
+            # with no socket death involved at all.
+            viewer.send({"op": "stream_close", "req": 77, "stream": stream_id})
+            # NOT ASSERTED, deliberately: this shape ends the connection inside the
+            # relay's own close, so whether the ack is still readable depends on the
+            # kernel's timing — the test client writes with no read-back loop of its
+            # own (production's transport has one). What this parameter is FOR is the
+            # machine cause the close is recorded with, asserted further down.
+            viewer.recv(timeout=2.0)
+            viewer.close()
+        else:
+            child.kill()
+            child.wait(timeout=20)
+
+        # THE OWNER RELEASES: its table loses the stream and its runtime socket is
+        # closed, with no manual command on either side.
+        assert _wait_for(
+            lambda: not _owner_stream_table(server_a, SESSION), timeout_s=15
+        ), f"the owner still holds a stream after a {how} viewer left"
+        assert _wait_for(
+            lambda: owner_stream.dial.sock.fileno() == -1, timeout_s=5
+        ), f"the owner's relay→runtime socket is still open after a {how} viewer left"
+
+        # COUNTS THAT BALANCE, which is how the leak was found in the first place.
+        # A's OWN log is the instrument, flushed first: the server writes through the
+        # instance the fixture built, and a second reader would see only what that one
+        # had already spilt to disk.
+        server_a.audit.flush()
+        events = server_a.audit.tail(limit=500)
+        owner_opens = [
+            row
+            for row in events
+            if row.get("event") == "session_stream_opened"
+            and (row.get("detail") or {}).get("role") == "owner"
+        ]
+        owner_closes = [
+            row
+            for row in events
+            if row.get("event") == "session_stream_closed"
+            and (row.get("detail") or {}).get("role") == "owner"
+        ]
+        assert len(owner_opens) == 1, owner_opens
+        assert len(owner_closes) == 1, owner_closes
+        # THE MACHINE FIELD, NOT ONLY THE DETAIL (agent review round 1, MAJOR 1). The
+        # detail word is the story an incident reader wants, but `cause` is the field
+        # they FILTER on, and the writer substitutes `internal` for any value outside
+        # `audit.CAUSES` — so asserting the detail alone let nine unmapped close words
+        # ship with every record reading as an internal fault. This is the live path
+        # (a real viewer left a real stream), so the row here is written by the writer
+        # that does the substitution.
+        machine = owner_closes[0].get("cause")
+        assert machine in audit_mod.CAUSES, owner_closes[0]
+        assert machine not in ("", "internal"), owner_closes[0]
+        assert (owner_closes[0].get("detail") or {}).get("cause") in (
+            relay.STREAM_CLOSE_MACHINE_CAUSES
+        ), owner_closes[0]
+
+        if how == "close-op":
+            # THE VIEWER'S OWN WORDS (agent review round 2, MINOR 2). A front end asking
+            # ITS OWN relay to end the pipe sends the §2.5 `stream_close`, and that used
+            # to be forwarded to the owner as though it were a session frame: the owner
+            # could not answer it, so the viewer relay closed through
+            # `peer-stopped-answering` and the incident record said `peer_unreachable` —
+            # a machine cause naming the peer for a close the peer had nothing to do
+            # with, while `_ctl_stream_close` (whose word is `viewer-requested`) never
+            # ran. Both relays' rows are asserted, because the fault was in which word
+            # the VIEWER's relay chose.
+            server_b.audit.flush()
+            viewer_closes = [
+                row
+                for row in server_b.audit.tail(limit=500)
+                if row.get("event") == "session_stream_closed"
+                and (row.get("detail") or {}).get("role") == "viewer"
+            ]
+            assert viewer_closes, "the viewer's relay recorded no close for its own close op"
+            assert (viewer_closes[-1].get("detail") or {}).get(
+                "cause"
+            ) == "viewer-requested", viewer_closes[-1]
+            assert viewer_closes[-1].get("cause") == "viewer_left", viewer_closes[-1]
+            # …and the owner is told by the PEER, which is what the close op does.
+            assert (owner_closes[0].get("detail") or {}).get(
+                "cause"
+            ) == "peer-requested", owner_closes[0]
+            assert machine == "peer_closed", owner_closes[0]
+
+        # …and quit safety is untouched by any of this: the runtime is alive.
+        calls_after = len(served[SESSION].handle.calls)
+        assert isinstance(calls_after, int)
+    finally:
+        if child is not None and child.poll() is None:
+            child.kill()
+            child.wait(timeout=20)
+        _stop_all(served)
+
+
+def test_a_refused_stream_open_writes_no_close_row(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MAJOR 1 (round 2): a pipe that never opened leaves no close to pair with.
+
+    ``_open_viewer_stream`` registers the stream, THEN asks the owner. On the refusal
+    branch it used to call ``_drop_stream``, which reports — so every remote attach to a
+    session the peer does not hold left a ``session_stream_closed`` with no
+    ``session_stream_opened``, an EMPTY machine cause (the one close row outside §4.3's
+    four members, so uncountable by every filter an incident reader uses) and
+    ``outcome="ok"`` on a refusal. Reproduced on a real pair before the fix; the row is
+    gone now, and the attempt is still in the trail where the knowledge is: the refusing
+    device's durable ``authorisation_refused``.
+    """
+    server_a, server_b, host_a, port_a = peer_pair
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    # A SESSION THE OWNER DOES NOT HOLD: the ordinary refusal, named by the authorizer
+    # (`session … does not live on this device`).
+    absent = "ffffffffffff"
+    assert absent != SESSION
+    served = _serve(monkeypatch, server_a.root)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
+    try:
+        _warm(server_a.root, SESSION)
+        _viewer(server_b)
+        assert _dial_to(server_b, record, host_a, port_a) is not None
+
+        viewer = _StreamClient(server_b.root)
+        opened = viewer.open_stream(server_a.identity.device_id, absent)
+        assert opened["op"] == "error", opened
+        assert "does not live on this device" in str(opened.get("message") or ""), opened
+        viewer.close()
+
+        # THE REFUSAL IS STILL RECORDED, on the device that refused and for the reason
+        # it refused (durable, so it is not waiting on a heartbeat).
+        server_a.audit.flush()
+        refusals = [
+            row
+            for row in server_a.audit.tail(limit=500)
+            if row.get("event") == "authorisation_refused"
+        ]
+        assert refusals, "the owner refused the open without recording that it did"
+        assert str(refusals[-1].get("cause") or "") in audit_mod.CAUSES, refusals[-1]
+
+        # AND NO HALF-PAIR ON EITHER RELAY: no open, so no close. Read off the writers,
+        # which is the surface the counts below are taken from.
+        server_a.audit.flush()
+        server_b.audit.flush()
+        for label, server in (("owner", server_a), ("opener", server_b)):
+            rows = [
+                row
+                for row in server.audit.tail(limit=500)
+                if str(row.get("event") or "").startswith("session_stream_")
+            ]
+            assert (
+                rows == []
+            ), f"the {label} recorded a stream row for an open that never opened: {rows}"
+
+        # The PAIRING ITSELF is asserted by the departure cells, which count one open
+        # against one close on both relays; this cell's job is the absence.
+    finally:
+        _stop_all(served)
+
+
+def test_the_owner_s_close_row_reaches_the_file_it_writes(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q-XH-9: the close is in ``audit.jsonl`` itself, not only in this process's view.
+
+    AN INDEPENDENT VERIFIER READS THE AUDIT THE WAY AN OPERATOR DOES — `jq` over
+    ``network/audit.jsonl``, in another process, which cannot flush a buffer it does not
+    own. Every stream row is appended to the writer's buffer and is NOT in the file at
+    the instant it is recorded (measured with an instrument that reads the path after
+    each ``record``: ``raw_stream_rows 0 -> 0`` for both roles in every departure shape),
+    so what such a reader can see depends on the relay publishing its own tail. It does:
+    the heartbeat flushes unconditionally, so the row lands within one ``HEARTBEAT_S``.
+    This cell reads the file with no flush and no ``tail()`` — the reader QA used — and
+    fails if the owner's release is invisible there for longer than two of them (the wait
+    below is 20 s, against a 15 s heartbeat: the bound it names with slack for the tick
+    that was already in flight when the close landed — a 3x bound would pass a cell whose
+    real latency had doubled, agent review round 2, NIT 2).
+    """
+    server_a, server_b, host_a, port_a = peer_pair
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    _seed(server_a.root, SESSION)
+    served = _serve(monkeypatch, server_a.root)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
+    try:
+        _warm(server_a.root, SESSION)
+        _viewer(server_b)
+        assert _dial_to(server_b, record, host_a, port_a) is not None
+
+        viewer = _StreamClient(server_b.root)
+        opened = viewer.open_stream(
+            server_a.identity.device_id,
+            SESSION,
+            events=True,
+            frontend_state=True,
+            surface="terminal",
+        )
+        assert opened["op"] == "ack", opened
+        assert viewer.recv() is not None, "no welcome through the stream"
+        assert _wait_for(lambda: _owner_stream(server_a, SESSION) is not None)
+        viewer.close()
+
+        path = store.audit_path(server_a.root)
+
+        def _owner_close_row() -> dict[str, Any] | None:
+            """The owner's close row AS THE FILE HOLDS IT — no flush, no `tail()`."""
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                return None
+            for line in reversed(lines):
+                if not line:
+                    continue
+                row = json.loads(line)
+                if row.get("event") != "session_stream_closed":
+                    continue
+                if (row.get("detail") or {}).get("role") == "owner":
+                    return row
+            return None
+
+        assert _wait_for(lambda: _owner_close_row() is not None, timeout_s=20), (
+            "the owner's close row never reached the file it writes: an operator "
+            "reading audit.jsonl cannot see that the release happened or why"
+        )
+        row = _owner_close_row()
+        assert row is not None
+        # THE MACHINE FIELD SURVIVES THE FILE, which is the surface an incident reader
+        # filters on (agent review round 1, MAJOR 1): a mapped cause, not `internal`.
+        assert row["cause"] not in ("", "internal"), row
+        assert row["cause"] in {"viewer_left", "peer_closed", "owner_gone", "peer_unreachable"}, row
+        assert (row.get("detail") or {}).get("cause"), row
+        assert (row.get("detail") or {}).get("stream"), row
     finally:
         _stop_all(served)
 

@@ -323,6 +323,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``network``, ``replicas`` and ``staging`` under the config root, plus "
         "``attachments`` (see above): the sync plane's own directories",
     ),
+    "local_operator/network/credentials/placement.py": (
+        3,
+        "``placement.json``, ``placement.state.json`` and ``.placement.lock`` under "
+        "``network/credentials/<network_id>/``: the broker's per-network record of who owns "
+        "a credential and who may borrow it — a store file beside ``sessions/``, never an "
+        "entry a session directory holds",
+    ),
     "local_operator/session/placement.py": (
         2,
         "``network`` again and the handoff journal inside it: both outside ``sessions/``",

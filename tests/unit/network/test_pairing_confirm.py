@@ -136,9 +136,11 @@ def test_a_decline_through_the_relay_never_admits(
     politely: the decision file is self-describing, and `matched` is the truth of it."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
     _pending(root)
-    server = relay.RelayServer(
-        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
-    )
+    # Serve-shaped: the decision file this cell reads is resolved from the relay's OWN
+    # root, so building it the way ``lop network serve`` does is what proves the two
+    # agree (see ``test_relay_e2e.serve_shaped_relay``).
+    server = relay.RelayServer(settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1"))
+    assert server.root == root, f"the serve-shaped relay resolved {server.root}"
     try:
         answered = server._ctl_pair_confirm(  # noqa: SLF001
             {"invite_id": "i_abc123", "decision": "admit", "matched": False}
