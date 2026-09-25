@@ -27,6 +27,7 @@ from typing import Any
 import pytest
 
 from local_operator.buildwatch import UpdateLock
+from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE, AsyncJob
 from local_operator.harness.types import ImageContent
 from local_operator.harness.wake import WakeSchedule
 from local_operator.mobile.command_reservation import CommandReservations
@@ -41,6 +42,7 @@ from local_operator.session.runtime.inbox import (
 from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.runtime.types import LEAVING_FOR_BUILD, SIGNAL_DRAIN_CAUSE
 from local_operator.session.session import Session
+from tests.e2e.harness import ScriptedStream, build_session, text_turn
 
 
 class FakeSession:
@@ -1269,3 +1271,116 @@ async def test_a_spooled_turn_raises_the_process_that_can_run_it(
     await host.receive_peer_message("no rush", mode="steer", wake=False)
     assert calls == [], "a quiet note raises nobody"
     assert spooled_store.read_spooled(config_dir) != {}, "…and the wake record is still there"
+
+
+# -- settled deliveries during the drain ------------------------------------------
+#
+# Unlike the cells above, these drive the REAL ``Session`` behind the REAL handle:
+# the divert is a method ON THE SESSION, so a stub that grew one would pin the stub
+# rather than the latch-to-session handover. ``tests.e2e.harness.build_session`` is
+# the same real session the admission-race cells use, and the assertions land on the
+# delivery path's own evidence — provider calls, durable rows, run rows.
+
+
+def _settled(job_id: str) -> AsyncJob:
+    return AsyncJob(
+        id=job_id,
+        type="task",
+        status="completed",
+        label=job_id,
+        start_time=1.0,
+        result_text=f"{job_id} done",
+    )
+
+
+def _job_rows(session: Session) -> list[Any]:
+    return [
+        entry
+        for entry in session._transcript.entries()
+        if entry.type == "message" and entry.payload.get("custom_type") == JOB_RESULT_MESSAGE_TYPE
+    ]
+
+
+def _run_rows(session: Session) -> list[Any]:
+    return [
+        entry
+        for entry in session._transcript.entries()
+        if entry.type == "custom" and entry.payload.get("custom_type") == "attention_started"
+    ]
+
+
+def _delivery_host(
+    tmp_path: Path, turns: int = 4
+) -> tuple[ServingSessionHandle, Session, ScriptedStream]:
+    stream = ScriptedStream([text_turn(f"reply {i}") for i in range(turns)])
+    session = build_session(tmp_path / "sess", stream)
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    return handle, session, stream
+
+
+@pytest.mark.asyncio
+async def test_the_drain_latch_diverts_a_settled_childs_result(tmp_path: Path) -> None:
+    """invariant (i) is about EVERY arrival, not only the admissions.
+
+    The latch refuses ``prompt`` and ``receive_peer_message``, and that pair is
+    what the invariant's statement names — but a settled child's result is
+    harness-initiated and entered ``Session._deliver_job_results`` directly, so
+    it opened a turn the exit could only abort (session a81ceec0982b). Diverted,
+    the batch is durable and costs nothing.
+    """
+    handle, session, stream = _delivery_host(tmp_path)
+    assert handle.begin_drain("runtime-retired", "declined 3x") is True
+    assert session._leaving_deliveries is True, "the latch has to reach the session"
+
+    await session._deliver_job_results(
+        [("j1", "one", _settled("j1")), ("j2", "two", _settled("j2"))]
+    )
+
+    assert stream.requests == [], "a leaving runtime must buy no provider call"
+    assert [row.payload["details"]["job_id"] for row in _job_rows(session)] == ["j1", "j2"]
+    assert _run_rows(session) == [], "no run may open after the commit"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_retire_latch_diverts_a_settled_childs_result(tmp_path: Path) -> None:
+    """The other latch, same door: ``begin_retire`` commits the exit IN THIS STEP.
+
+    The idle exit and the viewer's rotate both come through here, and both leave
+    the same window between the latch and the disposal — which is where the
+    incident's delivery turn opened.
+    """
+    handle, session, stream = _delivery_host(tmp_path)
+    assert handle.begin_retire("runtime-retired") is True
+    assert session._leaving_deliveries is True
+
+    await session._deliver_job_results([("j1", "one", _settled("j1"))])
+
+    assert stream.requests == []
+    assert [row.payload["details"]["job_id"] for row in _job_rows(session)] == ["j1"]
+    assert _run_rows(session) == []
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_drain_gives_deliveries_back(tmp_path: Path) -> None:
+    """``process._abandon_move``: a kept runtime is SERVING again, so it must deliver again.
+
+    The divert is the one latch state ``end_drain`` has to undo, because the
+    alternative is a runtime that holds every child's report for the rest of its
+    life — silent under-delivery, the bug the deferral path exists to fix.
+    """
+    handle, session, stream = _delivery_host(tmp_path)
+    assert handle.begin_drain("runtime-retired") is True
+    assert session._leaving_deliveries is True, "precondition: the drain armed the divert"
+    assert handle.end_drain() is True
+    assert session._leaving_deliveries is False, "an abandoned move restores the deliveries"
+
+    await session._deliver_job_results([("j1", "one", _settled("j1"))])
+    deadline = asyncio.get_running_loop().time() + 10.0
+    while not stream.requests:
+        assert asyncio.get_running_loop().time() < deadline, "the delivery turn never ran"
+        await asyncio.sleep(0.01)
+
+    assert len(stream.requests) == 1, "exactly one batched turn, as before the latch"
+    await session.dispose()

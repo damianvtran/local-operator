@@ -326,7 +326,7 @@ def _capture_deliveries(parent: Session) -> list[list[str]]:
     """Each delivery TURN, as the list of job ids it carried."""
     turns: list[list[str]] = []
 
-    def record(results: list[tuple[str, str, Any]]) -> None:
+    async def record(results: list[tuple[str, str, Any]]) -> None:
         if results:
             turns.append([job_id for job_id, _text, _job in results])
 
@@ -359,7 +359,7 @@ async def test_a_result_the_turn_collected_with_wait_is_not_delivered_again(
     assert turns == []
     job.consumed = True  # the turn's own ``wait`` took it
     parent._is_streaming = False
-    parent._deliver_deferred_job_results()
+    await parent._deliver_deferred_job_results()
     assert turns == []
     await parent.dispose()
 
@@ -385,7 +385,7 @@ async def test_a_deferred_result_survives_its_row_being_swept_mid_turn(
     del parent.jobs._jobs["swept"]  # the retention sweep, mid-turn
     assert parent.jobs.get("swept") is None
     parent._is_streaming = False
-    parent._deliver_deferred_job_results()
+    await parent._deliver_deferred_job_results()
     assert turns == [["swept"]]
     await parent.dispose()
 
@@ -402,7 +402,7 @@ async def test_results_deferred_in_one_turn_arrive_as_one_turn(tmp_path: Path, m
         parent.jobs._jobs[job_id] = job
         await parent._on_job_completed(job_id, f"{job_id} done", job)
     parent._is_streaming = False
-    parent._deliver_deferred_job_results()
+    await parent._deliver_deferred_job_results()
     assert turns == [["c1", "c2", "c3"]]  # one turn, settle order
     await parent.dispose()
 
@@ -418,7 +418,9 @@ async def test_one_delivery_turn_carries_every_result_row(tmp_path: Path, monkey
         prompted.append(messages)
 
     parent._prompt_messages = fake_prompt  # type: ignore[method-assign]
-    parent._deliver_job_results([("c1", "one", _settled("c1")), ("c2", "two", _settled("c2"))])
+    await parent._deliver_job_results(
+        [("c1", "one", _settled("c1")), ("c2", "two", _settled("c2"))]
+    )
     await _wait_until(lambda: bool(prompted))
     assert len(prompted) == 1
     texts = [message.details["text"] for message in prompted[0]]

@@ -42,6 +42,7 @@ not re-import them; the values and their per-record notes live in that module.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 #: Provider wordings that mean "this request does not fit", in every phrasing
@@ -343,10 +344,21 @@ _HINTS: dict[str, str] = {
     # half-happened, so the model must re-establish state before redoing work.
     # The sentence is deliberately general because the CAUSE varies (retire,
     # signal, owner death); the cause itself rides ``Incident.raw``.
+    #
+    # AND SO IS WHOSE RUN IT WAS (UX round 1, U5). "do not assume the request
+    # completed" named a request the reader does not always have: the run this
+    # row describes may be a DELIVERY turn, a wake run or a resume catch-up —
+    # harness-initiated, opened with no human waiting on a receipt — and in that
+    # case the operator's own request HAD completed, which is precisely the
+    # falsehood that cost a turn re-verifying finished work in the report this
+    # change answers. The subject is the WORK the run was doing, spelled out
+    # rather than left as a pronoun with two candidate antecedents ("it" could
+    # read as the turn or as the thing the turn was mid-way through — UX round 2,
+    # U11), and it is true whichever owner the run had.
     "cut-off": "The runtime was cut off before this turn produced a result. The transcript "
     "holds whatever was written before it stopped and nothing after. Check the "
     "state of anything it was mid-way through before repeating the work; do not "
-    "assume the request completed.",
+    "assume that work finished.",
 }
 
 #: Why a turn was cut off. Harness-authored, so unlike :data:`_RULES` these are
@@ -1270,6 +1282,102 @@ def format_mcp_unavailable_message(server: str, reason: str) -> str:
     lines.append(
         "Its tools are not callable until the user restores it, and the agent "
         "should not retry them in a loop."
+    )
+    return "\n".join(lines)
+
+
+def format_held_delivery_message(jobs: Sequence[tuple[str, str]], *, reason: str = "") -> str:
+    """Render the row for job results the harness FAILED to hold for the next turn.
+
+    ``jobs`` is ``(job_id, label)`` per result. The ID is carried as well as the
+    label because the row's own remedy is addressed by id, and a reader shown only
+    a label has nothing to substitute into it (UX round 2, U9 — the rendered head
+    used to name labels while the suggested action said ``<job id>``).
+
+    A dedicated formatter, authored HERE rather than as a paragraph at the call
+    site, for the reason :func:`format_mcp_unavailable_message` gives: every
+    operator- and model-facing incident sentence in this codebase is built in
+    one place, and a hand-written one at a call site carries no head, no
+    ``suggested action:`` slot, and none of the structure a reader's eye uses to
+    tell a system record from the agent's own prose (design review round 1, D2 —
+    measured in a rendered frame, where this row sat directly under the MCP
+    warning's labelled shape and read as the agent narrating).
+
+    IT LEADS WITH WHAT FAILED, because this row has exactly one caller — the
+    failure arm of ``Session._hold_job_results_for_next_turn`` — and an earlier
+    revision spent its first clause on the hold it did NOT achieve ("so they were
+    held for the next turn"), contradicting its own parenthetical in the one path
+    where acting is time-boxed: a reader told the reports were held has no reason
+    to go and read them (design review round 2, D7; UX round 2, U10).
+
+    The incident HEAD, because this is a session-level fact the next turn has to
+    know before it trusts the conversation; but NOT ``Incident.render``'s
+    closing tail ("This is why the previous turn ended"), which is FALSE here —
+    the same reason the MCP row does not go through the classifier. Nothing
+    failed and no turn ended: the runtime left while results were still arriving,
+    and the operator's own turn completed.
+
+    ONE PARAGRAPH FOR THE BATCH, however many results it names (design review
+    round 1, D4). The incident's own batch was nine children, and a per-result
+    notice painted nine near-identical warning paragraphs — the shape this file's
+    own delivery contract argues against ("N children that settle during one
+    parent turn are one piece of news"). The count and the ids carry the
+    multiplicity; the per-job detail belongs in the log.
+
+    THE ROUTES IT NAMES ARE THE ONES THAT ACTUALLY WORK, and it says what does
+    not (design round 1 D1/D3; UX round 2, U9). The first draft sent the reader to
+    the job ledger, refuted twice over: ``retention_expired`` drops a settled row
+    on any read after ``DEFAULT_RETENTION_MS`` — five minutes, while this row's
+    reader is a turn that may be hours away — and a successor's row is
+    ``restored``, exempt from that window but carrying NO result text (the roster
+    sidecar persists none), so ``wait`` answers with a bare header there.
+    ``hub op='peek'`` reads the child's own transcript, which the sweep never
+    touches — but only a SUBAGENT child has one: ``_on_job_completed`` also
+    accepts background ``bash``, whose output lives in the job ledger and nowhere
+    else. So the row names the transcript route for the children that have one,
+    names the ledger route with its bound for the ones that do not, and does not
+    pretend the same instruction covers both. The bound is rendered from the
+    constant that enforces it rather than typed, like every other bound in this
+    file (design review round 1, D3).
+    """
+    from local_operator.harness.jobs import DEFAULT_RETENTION_MS
+    from local_operator.session.runtime.types import bound_text
+
+    named = [
+        f"{label} ({job_id})" if label and label != job_id else job_id for job_id, label in jobs
+    ]
+    count = len(named) or 1
+    noun = "result" if count == 1 else "results"
+    subject = "it" if count == 1 else "they"
+    them = "it" if count == 1 else "them"
+    head = (
+        f"[session incident] held delivery: {count} background job {noun} could not be held "
+        f"for the next turn — {subject} arrived after this session's runtime had committed "
+        f"to leaving, and the harness could not write {them} into this conversation"
+    )
+    if reason.strip():
+        head += f" ({reason.strip()[:200]})"
+    lines = [head + "."]
+    # EVERY id, with no "+N more" (design round 3, D16 = UX U13 = review MINOR-4):
+    # the route below is addressed by id, so a truncated list made it followable
+    # for five of nine — the incident's own shape. The list is reference material
+    # on its own line, not part of the sentence a reader skims.
+    if named:
+        lines.append(f"Jobs: {', '.join(named)}")
+    lines.append(
+        # No present-tense claim about who has read these (review round 3,
+        # MINOR-3): the row is durable and re-rendered forever, so "nothing has
+        # read it" would become false the moment a later turn did read it — the
+        # same class D10/U7 fixed for the held notice. "never reached this
+        # conversation" is a fact about the write that stays true.
+        f"suggested action: {subject} never reached this conversation — a subagent child "
+        "keeps its own transcript, readable by id with hub op='peek' <job id> (paging with "
+        "range='a-b'), and a background bash command has no transcript at all: its output "
+        "lives only in its job row, which the ledger drops once "
+        f"{bound_text(DEFAULT_RETENTION_MS / 1000.0)} have passed since it settled — and it "
+        "is dropped on the next read after that, or sooner when the sweep runs on a "
+        "settle, a cancel or a delivery sink's exit, so by the time this row is read that "
+        "row is usually gone."
     )
     return "\n".join(lines)
 

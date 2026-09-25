@@ -574,6 +574,59 @@ dispose only on `True`; `"kept: <reason>"` otherwise (the existing answer shape
 at `session/runtime/server.py:2296-2309`). The quiet idle exit uses the same
 latch with `cause="idle-exit"`. Roughly 40 lines plus tests.
 
+**Correction, 2026-09-25 — the claim above was too broad, and an incident
+proved it.** "From that instant the admission paths refuse ... so no turn can
+open between here and the dispose" holds for the paths that existed when it was
+written and were the only ones in view: `prompt` and `receive_peer_message`. It
+is FALSE for a third, HARNESS-INITIATED arrival — a settled background job's
+result, which enters through `Session._deliver_job_results` with no client
+waiting on a receipt, so no admission gate ever sees it. Session
+`a81ceec0982b` (2026-09-24): a runtime latched a departure, the finishing turn's
+`finally` flushed nine results it had deferred during that turn into ONE delivery
+turn, the boundary re-read saw an idle runtime, the exit disposed, and the
+delivery turn was aborted before its first provider call.
+
+**The idle read is narrower than "`is_busy()` cannot see the session", which is
+what this note first claimed.** `is_busy()` DOES read the session's own state —
+`is_streaming`, `_turn_lock.locked()`, `running_subagents()`, the job manager —
+and it did so at this design's own base. What it cannot see is the gap between
+`Session._spawn_background` scheduling a turn and that turn acquiring
+`_turn_lock`: the lock is not yet held and `_is_streaming` is not yet set, so a
+delivery that has been *decided* is invisible for as long as the loop takes to
+start it (204 ms of loop occupancy in the measured incident). That gap is what
+the fix removes for a latched delivery, because it no longer spawns at all
+(review round 1, MINOR-1: correct the earlier wording wherever it appears). The conversation got a
+`kind=error cause=disposed` row 650 ms after the operator's own honest
+`complete`, rendered as a cut-off card for work that had already been merged.
+
+**Which fix, and why not the other one (UX round 1, U1 — the decision this note
+now records).** This ships **(a-light)**: the batch is made durable and no turn is
+opened. The alternative, **(a-full)**, would spool the results to the successor's
+inbox (a new `source`, a `details` field that survives the round trip, a delivery
+branch in `process._drain_inbox_into`, and a drain-back-in arm for the abandon
+path) so the successor RUNS one turn with them. It was not taken here, and the
+reason is scope rather than disagreement: delivery is identical to the base in
+every state (the base aborted the delivery turn, so nothing that used to be
+processed became unprocessed), the failure of the old behaviour was noise — a red
+card for finished work — not lost work, and (a-full) needs machinery this change
+would then have to test twice. The cost of (a-light) is that a held report has no
+arrival signal until someone turns the session, so this PR pays for it in the
+cheapest place: the row is marked held and the TUI paints it on the warning tier
+(`harness/rows.py::held_delivery_notice`, covered by
+`tests/unit/tui/test_harness_injection_replay.py::test_a_held_child_report_replays_as_a_warning_and_a_delivered_one_does_not`),
+and the build drain notice says a child reporting after the latch arrives on the
+next turn. Revisit (a-full) if the product decides a delegated report must be
+ANSWERED without a human re-engaging the session.
+
+**The invariant, restated so it is true of every arrival:** *from the instant the
+departure latch is taken, no turn opens on this runtime for ANY arrival — that is
+the set that `prompt`, `receive_peer_message`, a fired wake, and a settled job's
+result all belong to.* An arrival that is not an admission is made DURABLE
+instead of run (the shape `Session._drop_pre_aborted_turn` already gives the
+pre-aborted case, "this drops the model call, never the message"), which is why
+the fix carries no new message shape: `harness/render.py`'s allow-list already
+renders a durable `job_result` row as an injected user message on the next turn.
+
 ### 5.2 A mismatched import must be a loud, named failure
 
 Verified shape (§1.6): a lazy `from local_operator… import x` inside a running
@@ -740,7 +793,7 @@ Rendered by `_default_convert_to_llm` (`session/session.py:675-697`) from the
 > suggested action: The runtime was cut off before this turn produced a result.
 > The transcript holds whatever was written before it stopped and nothing after.
 > Check the state of anything it was mid-way through before repeating the work;
-> do not assume the request completed.
+> do not assume that work finished.
 > This is why the previous turn ended. Take it into account before repeating the
 > same request.
 

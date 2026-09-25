@@ -828,6 +828,11 @@ def project_settled_rows(
         COMPACTION_REFUSED_TYPE,
     )
     from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
+
+    # ``job_result`` is declared beside the job manager that writes it, not with
+    # the harness markers above — imported from its own home so this fold cannot
+    # drift from the type the writer stamps on the row.
+    from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE
     from local_operator.harness.message_types import (
         PEER_MESSAGE_MESSAGE_TYPE,
         SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
@@ -844,6 +849,7 @@ def project_settled_rows(
         assistant_stop_notice,
         compaction_refused_notice,
         gate_timeout_notice,
+        held_delivery_notice,
         is_harness_chrome,
         is_harness_notice_row,
         turn_cut_tool_call,
@@ -1139,6 +1145,36 @@ def project_settled_rows(
                     )
                 )
                 appended = True
+                continue
+            # A child's report that arrived after this session's runtime had
+            # committed to leaving, so it was HELD for the next turn instead of
+            # being delivered (``Session._hold_job_results_for_next_turn``).
+            #
+            # THIS BRANCH IS THE ROW'S ONLY ARRIVAL SIGNAL, and it is why it
+            # exists at all (UX round 1, U1). A held row opens no turn, publishes
+            # no outcome and paints nothing else, so before this branch the
+            # operator returned to a session that read "idle, turn complete" while
+            # a report they had delegated was owed to a turn that had not happened
+            # — indistinguishable from the children having reported nothing. The
+            # phone already showed it, through its generic custom-message
+            # fallback; the TUI had no branch for the type, so the row fell past
+            # every arm above and then past the role-based handling below, which
+            # drops a custom message with no role (the same trap the incident and
+            # MCP branches were added for).
+            #
+            # ONLY THE HELD ROW IS PAINTED, deliberately, and the difference is
+            # real rather than a shortcut: a DELIVERED row was acknowledged by the
+            # turn it opened, and that turn's own answer is already in this frame
+            # — so painting it too would add a duplicate of the assistant's reply
+            # on every ordinary child delivery, which is not what this change is
+            # for. A held row has no such answer, and the notice line distinguishes
+            # it from one that has (U6).
+            if getattr(message, "custom_type", None) == JOB_RESULT_MESSAGE_TYPE:
+                held = held_delivery_notice(getattr(message, "details", None) or {})
+                if held is not None:
+                    text, severity = held
+                    self._append_block(NoticeBlock(text, kind=severity, fold_width=fold_width))
+                    appended = True
                 continue
             role = getattr(message, "role", None)
             if role == "tool":
