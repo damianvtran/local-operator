@@ -14,6 +14,11 @@ import {
 	getPendingContinuation,
 	submitContinuation,
 } from "../continuation-command";
+import {
+	projectionCarriesCommand,
+	registerPendingEcho,
+	withdrawPendingEcho,
+} from "../pending-echo";
 import { Sheet } from "./ui/sheet";
 import { cn } from "../lib/cn";
 import { useDraft } from "../store";
@@ -359,6 +364,13 @@ export function Composer({
 		setSending(true);
 		setError("");
 		setNotice("");
+		/* The echo the prompt branch paints, held so the failure branch can take it
+		   back down and hand the text over again. A HOLDER rather than a plain
+		   local because the callback that fills it runs in a closure TS's
+		   control-flow analysis cannot follow — a `let x: T | null = null` reads as
+		   permanently `null` at the catch. `null` on every other route: a slash
+		   command paints no row. */
+		const submitted: { echo: { commandId: string; text: string } | null } = { echo: null };
 		try {
 			/* Slash input routes to the slash op rather than prompt — and only
 			   when there is no attachment, since a "/…" caption with an image
@@ -388,6 +400,34 @@ export function Composer({
 					submittedEnvelope.op,
 					trimmed,
 					payloadImages,
+					/* The user's message leaves the composer HERE, into a row of its own,
+					   before the daemon has answered — the whole point of the optimistic
+					   path. It is painted under the ENVELOPE's id rather than a fresh one,
+					   because that id is also the id the session will write the real row
+					   under, which is what reconciles the two. */
+					(envelope) => {
+						/* A retry of an envelope the session already wrote paints nothing:
+						   the projection owns that row and a second one under the same id is
+						   the duplicate this reconciliation exists to prevent. */
+						if (projectionCarriesCommand(projection.transcript, envelope.command_id)) return;
+						registerPendingEcho(pid, {
+							commandId: envelope.command_id,
+							text: envelope.text,
+							imageCount: envelope.images?.length ?? 0,
+						});
+						submitted.echo = { commandId: envelope.command_id, text: envelope.text };
+						/* The draft leaves the composer only when the envelope IS the body it
+						   holds. A retry replays the RETAINED envelope, whose body can differ
+						   from a draft typed since — the exact case `RETRY_ACK_NOTICE` exists
+						   for — and clearing the composer there would discard that draft, the
+						   loss `action_stop` forbids. */
+						if (
+							envelope.text === trimmed &&
+							JSON.stringify(envelope.images) === JSON.stringify(payloadImages)
+						) {
+							setText("");
+						}
+					},
 				);
 				setRetryEnvelope(null);
 				const currentPayloadImages = imagesRef.current.length
@@ -395,18 +435,26 @@ export function Composer({
 					: undefined;
 				const acknowledgedCurrentDraft =
 					receipt.envelope.op === submittedEnvelope.op &&
-					receipt.envelope.text === textRef.current.trim() &&
+					/* An EMPTY composer is covered by any acknowledgement — there is nothing
+					   left in it for the ACK to be behind. That is the ordinary path now, the
+					   send having moved the draft into its own row; the comparison is what is
+					   left of the original predicate and it still catches the case it was
+					   written for, a message typed while this one was in flight. */
+					(textRef.current.trim() === "" ||
+						receipt.envelope.text === textRef.current.trim()) &&
 					JSON.stringify(receipt.envelope.images) === JSON.stringify(currentPayloadImages);
 				if (acknowledgedCurrentDraft) {
 					imagesRef.current.forEach((i) => URL.revokeObjectURL(i.preview));
 					setImages([]);
 					setText("");
 				} else {
-					/* The acknowledged envelope predates the visible edit. Keep the edit
-					   as the next command rather than presenting an old idempotent ACK as
-					   delivery of content the owner never received. This is a positive
-					   outcome, so it renders in the success notice, not the danger alert
-					   (D11). */
+					/* The acknowledged envelope covers the submission, but NOT everything
+					   the user is looking at: they started another message while this one was
+					   in flight, or attached something to it. Keep that as the next command
+					   rather than presenting an idempotent ACK as delivery of content the
+					   owner never received. This is a positive outcome, so it renders in the
+					   success notice, not the danger alert (D11). The pending row stays up
+					   either way — it is a row the session genuinely owes. */
 					setNotice(RETRY_ACK_NOTICE);
 				}
 				return;
@@ -420,7 +468,20 @@ export function Composer({
 			   The raw fetch string ("Load failed") must never surface — that was
 			   the developer-worded first impression of U3. Every non-streaming
 			   send, tui-originated or daemon, reads as "couldn't send/continue";
-			   only a live steer uses the steer copy. */
+			   only a live steer uses the steer copy.
+
+			   The pending row comes DOWN with it. A row left standing would be a
+			   message the user believes went — the phantom this path exists to
+			   refuse — and the composer's alert below is the honest state from here:
+			   it names the failure and offers the retry under the SAME envelope id,
+			   which is also what keeps an ambiguous 408/502/504 from being reported as
+			   a refusal. The text goes back with it, because the submit moved it out
+			   of the composer and this is the only copy the user has left. */
+			if (submitted.echo) withdrawPendingEcho(pid, submitted.echo.commandId);
+			/* Only into an empty composer, on the same reading the acknowledgement
+			   uses: text the user has typed since is theirs, and the retained envelope
+			   behind the retry button still carries the body this submit sent. */
+			if (submitted.echo && textRef.current.trim() === "") setText(submitted.echo.text);
 			setRetryEnvelope(getPendingContinuation(pid));
 			setError(projection.streaming ? STEER_ERROR : CONTINUATION_ERROR);
 		} finally {

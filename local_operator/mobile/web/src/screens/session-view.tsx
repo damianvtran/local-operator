@@ -34,6 +34,7 @@ import { WorkingLine } from "../components/working-line";
 import { COLUMN_HEIGHT_VAR } from "../lib/column";
 import { navigate } from "../router";
 import { useCompletionView } from "../use-completion-view";
+import { usePendingEchoes } from "../pending-echo";
 import { AgentScreen } from "./agent-view";
 import {
 	retainProjectionStream,
@@ -130,6 +131,10 @@ export function SessionScreen({
 	jobId?: string;
 }) {
 	const { projection, connected } = useProjection(sessionId);
+	/* Commands this device has sent that the session has not written a row for
+	 * yet. Read above the `!projection` return because hooks cannot be called
+	 * after it, and resolved against the transcript by id — see `pending-echo.ts`. */
+	const pendingEchoes = usePendingEchoes(sessionId, projection?.transcript);
 	const [modelsOpen, setModelsOpen] = useState(false);
 	const [effortOpen, setEffortOpen] = useState(false);
 	const rootRef = useRef<HTMLDivElement>(null);
@@ -200,6 +205,13 @@ export function SessionScreen({
 		);
 	}
 
+	/* An empty session shows the placeholder only while it is genuinely empty. A
+	   prompt this device just sent makes the column non-empty the instant it
+	   leaves the composer, and hiding its row behind "no messages yet" would put
+	   the placeholder in front of the very message that proves the send worked. */
+	const showEmptyState =
+		projection.transcript.length === 0 && !projection.streaming && pendingEchoes.length === 0;
+
 	return (
 		<div
 			ref={rootRef}
@@ -215,7 +227,7 @@ export function SessionScreen({
 			) : <>
 			<Header projection={projection} sessionId={sessionId} />
 
-			{projection.transcript.length === 0 && !projection.streaming ? (
+			{showEmptyState ? (
 				/* A just-started session has no messages yet. An empty scroll
 				   area reads as "did it break?"; this placeholder says the
 				   session is ready and what to do next. Hidden the moment a
@@ -228,7 +240,11 @@ export function SessionScreen({
 					</p>
 				</div>
 			) : (
-				<Transcript pid={sessionId} entries={projection.transcript} />
+				<Transcript
+					pid={sessionId}
+					entries={projection.transcript}
+					pending={pendingEchoes}
+				/>
 			)}
 
 			{/* The aggregate working line — pinned at the foot of the transcript
