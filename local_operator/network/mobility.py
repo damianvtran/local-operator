@@ -1324,11 +1324,19 @@ def _source_prepare(
     # local runtime retired. Stopping first made a 1.9 GB scratchpad hold the session shut
     # for the whole digest, and then for the copy as well; now the stop covers the copy
     # plus a stat-level re-check, which is the only part that has to be quiescent.
+    # THE MOVE'S TAIL RULE, ASKED FOR RATHER THAN ASSERTED. Three ``whole_transcript=True``
+    # literals used to sit in this file, and NONE of them changed what the destination
+    # receives — that is decided by the wire purpose in ``sync._plan`` (review round 3,
+    # MINOR 2: reverting all three here passes every torn-tail cell; reverting the
+    # predicate below fails them). All four sites now derive the answer from
+    # ``sync.whole_transcript_for``, so "fixing the wrong one" is no longer possible: the
+    # source's own prepare-vs-commit comparison and the plan a destination reads are keyed
+    # on the same predicate.
     stamps = sync_mod.member_stamps(
         server.root,
         session_id,
         attachments_dir=Path(server.root) / "attachments",
-        whole_transcript=True,
+        whole_transcript=sync_mod.whole_transcript_for(sync_mod.COPY_PURPOSE_MOVE),
     )
     outcome = _retire_local_runtime(server.root, session_id)
     if outcome["result"] != "retired" and outcome["result"] != "cold":
@@ -1363,7 +1371,7 @@ def _source_prepare(
         session_id,
         have=frame.get("have") or {},
         attachments_dir=Path(server.root) / "attachments",
-        whole_transcript=True,
+        whole_transcript=sync_mod.whole_transcript_for(sync_mod.COPY_PURPOSE_MOVE),
         stamps=stamps,
     )
     write_handoff_entry(
@@ -1459,11 +1467,13 @@ def _source_commit(
             "message": "that handoff belongs to another device, so nothing was changed",
             "session_id": session_id,
         }
+    # The SAME predicate the plan used, so a commit cannot disagree with the plan it is
+    # completing about whether the transcript travelled whole.
     current = sync_mod.plan_id(
         server.root,
         session_id,
         attachments_dir=Path(server.root) / "attachments",
-        whole_transcript=True,
+        whole_transcript=sync_mod.whole_transcript_for(sync_mod.COPY_PURPOSE_MOVE),
     )
     directory = Path(server.root) / "sessions" / session_id
     # WHAT THE DESTINATION SAYS IT HOLDS, and what this device's own bytes hash to

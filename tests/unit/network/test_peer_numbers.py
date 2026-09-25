@@ -120,6 +120,25 @@ def test_a_fractional_age_and_start_are_ordinary_values() -> None:
     assert _row(started=1.5).to_record().started_at == 1.5
 
 
+def test_a_peer_claiming_a_zero_age_is_read_as_unknown() -> None:
+    """``age_s: 0`` PARSES, and it is the one reading that makes a stale peer look fresh.
+
+    MEASURED (review round 3, NIT 3): every unreadable spelling lands on ``AGE_UNKNOWN_S``
+    ("last seen a very long time ago") — but a peer that CLAIMS ``0`` came back as ``0``,
+    which renders as "just now". ``0`` is exactly what the pre-validator spelling
+    ``float(value or 0.0)`` wrote for an age it did not know, so a mixed fleet still sends it,
+    and a device cannot truthfully send it: the value is the age of the peer's own process,
+    and 0.0 s means it started within this microsecond. The ambiguous value falls to the stale
+    side, like every other unreadable one.
+    """
+    assert _row(age_s=0).age_s == projection.AGE_UNKNOWN_S
+
+    # The same rule for the per-device block, which is peer input too.
+    assert projection._peer_age(0) == projection.AGE_UNKNOWN_S
+    assert projection._peer_age(1.5) == 1.5, "a real fractional age is still a reading"
+    assert projection._peer_age("junk") == projection.AGE_UNKNOWN_S
+
+
 def test_the_peer_facts_age_is_the_same_rule() -> None:
     """The listing's per-device block is peer input too (``peers()``)."""
     for value in BAD_VALUES:

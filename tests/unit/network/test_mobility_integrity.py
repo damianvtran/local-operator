@@ -30,6 +30,7 @@ the slice's tests.
 from __future__ import annotations
 
 import json
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -866,6 +867,36 @@ def test_a_promote_that_landed_and_then_failed_can_still_be_opened(
     assert read_tombstones(server_a.root)
 
 
+def test_a_move_of_a_session_whose_scratchpad_is_a_link_is_refused(
+    pair: Devices, tmp_path: Path, monkeypatch: pytest.MonkeyPatch  # noqa: F811 — fixture
+) -> None:
+    """THE MAJOR, through the real two-relay mesh: the source SURVIVES with the link intact.
+
+    The plan-level cell beside this one asserts the sentence and the plan; this one drives
+    the thing that DELETES — ``_move`` retires the source runtime, verifies the copy and
+    removes the directory. Before the fix it answered ``ok: true`` with ``trees: []`` and
+    ``trees_skipped: []`` and removed the session directory with the link inside it (the
+    reviewer's own ``test_r3_11`` reproduced exactly that).
+    """
+    server_a, server_b, _host, _port = pair
+    _pair(pair, monkeypatch, role="admin")
+    directory = _owned_session(server_a)
+    elsewhere = tmp_path / "other-volume"
+    (elsewhere / "scratchpad").mkdir(parents=True)
+    (elsewhere / "scratchpad" / "notes.md").write_text("the operator's notes\n", encoding="utf-8")
+    shutil.rmtree(directory / "scratchpad", ignore_errors=True)
+    (directory / "scratchpad").symlink_to(elsewhere / "scratchpad")
+
+    result = _move(server_b, SESSION, monkeypatch=monkeypatch)
+
+    assert result.get("ok") is not True, result
+    assert result.get("code") == "unlisted_content", result
+    assert "scratchpad" in str(result.get("message")), result
+    assert directory.is_dir(), "the source survived the refusal"
+    assert (directory / "scratchpad").is_symlink(), "and so did its link"
+    assert (elsewhere / "scratchpad" / "notes.md").is_file()
+
+
 def test_a_replica_with_a_corrupted_sidecar_is_not_promoted(tmp_path: Path) -> None:
     """A recovery verifies the WHOLE copy set, not only the transcript.
 
@@ -900,6 +931,46 @@ def test_a_replica_with_a_corrupted_sidecar_is_not_promoted(tmp_path: Path) -> N
     # NOTHING WAS PROMOTED: the fixture's own session is the only directory in the store.
     assert [p.name for p in sorted((root / "sessions").iterdir())] == ["abc123"]
     assert (replica / "transcript.jsonl").read_bytes() == before, "the replica's bytes were kept"
+
+
+def test_a_replica_missing_an_attested_member_is_refused_and_named(tmp_path: Path) -> None:
+    """A member the cursor attested and that is GONE is named, not only digested.
+
+    MEASURED BEFORE THE FIX (review round 3, MINOR 3): deleting ``turn-journal.json`` from a
+    verified replica refused the recovery with ``incomplete_replica`` — the right answer,
+    reached through the whole-set digest, and an ANONYMOUS one, while a REWRITTEN
+    ``title.json`` named its file. The missing case is also the one the old comment reasoned
+    about ("its absence is the honest state of this replica"): a member the cursor RECORDS
+    was on disk when the cursor was written (the attested set is built from this device's own
+    report), so its absence now is a loss, not a state.
+    """
+    from tests.unit.network.test_sync import _ask, seed
+
+    root = tmp_path / "owner"
+    root.mkdir()
+    seed(root, "abc123", rows=50)
+    sync.sync_from(
+        root,
+        "abc123",
+        ask=_ask(root),
+        owner_device="d_owner",
+        into=sync.replica_dir(root, "abc123"),
+    )
+    replica = sync.replica_dir(root, "abc123")
+    assert (replica / "turn-journal.json").is_file()
+    (replica / "turn-journal.json").unlink()
+    before = (replica / "transcript.jsonl").read_bytes()
+
+    with pytest.raises(sync.SyncRefused) as refusal:
+        sync.promote_replica(root, "abc123")
+
+    assert refusal.value.code == "incomplete_replica", refusal.value
+    assert (
+        "turn-journal.json" in refusal.value.message
+    ), "a member the sync verified and recovery refuses to promote must be NAMED"
+    # NOTHING WAS PROMOTED, and the replica kept what it still has.
+    assert [p.name for p in sorted((root / "sessions").iterdir())] == ["abc123"]
+    assert (replica / "transcript.jsonl").read_bytes() == before
 
 
 def test_the_source_is_hashed_before_its_runtime_is_retired(
