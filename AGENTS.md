@@ -532,15 +532,16 @@ resolver or a lost edge fails a test rather than a CI job.
 
 **CI's five shards are the whole-tree gate. A local whole-tree run is not one, and
 no session should block on it.** Measured 2026-09-24 at load average 140-200, the
-whole tree is **>85 minutes at the four workers this host's hook resolved** — the
-run's own line is `pytest worker cap: 4 (bound by memory, cpu arm 7, memory arm 4,
+whole tree is **~84 minutes projected at the four workers this host's hook resolved**
+— the run's own line is `pytest worker cap: 4 (bound by memory, cpu arm 7, memory arm 4,
 …)`, and it reached 0% to 12% in 13 min, 43% at 38 min, then **69% at ~58 min,
-where its own `timeout: 3600` killed it**: the total is a LOWER BOUND projected from
-a run that never finished, not a measurement of one — and **20 minutes for two TUI
-files alone at `-n 6`**; `tests/durations.json` carries 12,663 call-phase seconds of
-it, **77.2% of that total under `tests/unit/tui`** (9,775 s). (The 82.3% in the
-Environment section above is a share of a different total — 108 test-minutes — and
-quoting one total with the other's percentage is how a number stops being
+where its own `timeout: 3600` killed it**: the projection is 58 min over 69% (and 26
+points in the last 20 min gives ~82 min), so read it as "~84 min projected, and at
+least the 60 min it actually ran" rather than a measured total — and **20 minutes for
+two TUI files alone at `-n 6`**; `tests/durations.json` carries 12,663 call-phase
+seconds of it, **77.2% of that total under `tests/unit/tui`** (9,775 s). (The 82.3% in
+the Environment section above is a share of a different total — 108 test-minutes —
+and quoting one total with the other's percentage is how a number stops being
 evidence.) Prefer the scoped inner loop above, and remember that the scoped `test`
 job narrows for nothing on this tree today.
 
@@ -636,12 +637,13 @@ at 0.5 s cadence saw a **two-sample 735 MB transient settling to 377-490 MB**, w
 `-n 3` reproduced at 612 MB. So a 1,500 MB cap was not the binding constraint on
 THAT slice, and no run in that incident ever printed a memory kill. It is not a
 bound for a TUI-heavy run: the Environment section above records **~1,090 MB as the
-worst single worker ever observed**, and three of those plus the controller is
-~1.6 GB — over a `memory_mb=1500` call, which is exactly the arithmetic the charge's
-`600 MB x N` ENVELOPE exists to describe (an envelope over the median worker, not a
-ceiling on the worst). Nothing exports the cap to the child, so a hook could not
-size down from it if it wanted to; a warning for it would be an alarm one slice's
-measurement does not support, which is why there is none.
+worst single worker ever observed**, and one of those plus two ordinary ones
+(~1,090 + 2 x ~255 = ~1,600 MB) is already over a `memory_mb=1500` call — three
+worst-case workers would be ~3.2 GB. That is the arithmetic the charge's `600 MB x N`
+ENVELOPE exists to describe (an envelope over the median worker, not a ceiling on the
+worst). Nothing exports the cap to the child, so a hook could not size down from it
+if it wanted to; a warning for it would be an alarm one slice's measurement does not
+support, which is why there is none.
 
 **What a boot costs, and why the heavy files are heavy.** A `run_test` of the
 assembled app is ~1.2 s of real Textual work on this host (mount, stylesheet

@@ -212,11 +212,16 @@ def test_the_hard_bound_is_sized_from_the_manifest_and_floored(monkeypatch) -> N
     assert watchdog.sized_bound_seconds(unknown) == watchdog.BOUND_FLOOR_S
 
 
-#: The worst legitimate single item recorded for a local run, in seconds. It is
-#: NOT from AGENTS.md -- it is the C-timer comment in ``.github/workflows/ci.yml``
-#: ("the worst legitimate test measured in a full local run is 81s"), which sizes
-#: the e2e bound from the same figure. It is here as a number because the sizing
-#: claim above needs one: a bound under this would fail healthy runs.
+#: The worst legitimate single item for a local run, in seconds, as the number the
+#: sizing claim above has to clear. 81.0 is what `.github/workflows/ci.yml` carries
+#: (the comment above `LOCAL_OPERATOR_SHARD_STALL_SECONDS: "240"`, which sizes this
+#: module's CI shard bound and attributes the figure to AGENTS.md) -- and AGENTS.md
+#: carries no 81 s measurement at either this head or the previous one, so treat
+#: 81.0 as the CI comment's number rather than as a sourced measurement. It is here
+#: because the assertion needs a floor: a bound under the slowest honest item would
+#: fail healthy runs. The measured slowest item on this host is the C1 picker sweep
+#: (412.75 s before its boot reuse, 133-177 s after), which the 900 s local default
+#: clears comfortably.
 SLOWEST_LEGITIMATE_ITEM_S = 81.0
 
 

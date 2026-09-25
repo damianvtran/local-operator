@@ -7174,10 +7174,18 @@ async def _c1_cell(size: tuple[int, int], depth: int, reveal: bool) -> C1Observa
     reads rather than a call into the sweep: an oracle that shared the sweep's
     own reads could agree with it while both were wrong about the app.
 
-    Its arrangement is the sweep's for one cell -- seeded the same way, shown
-    through the same app path, with a previous card answered out of the dock
-    first -- because the question is whether REUSE changes what a cell observes,
-    so everything except the reuse has to be identical.
+    Its ARRANGEMENT is the sweep's, seeded the same way and shown through the same
+    app path, with a previous card answered out of the dock first -- because the
+    question is whether REUSE changes what a cell observes, so everything except the
+    amount of reuse has to match: the oracle always has exactly ONE prior
+    unmount-and-remount behind it. That is the sweep's arrangement for a MIDDLE cell
+    only, and the asymmetry is deliberate rather than hidden. The sweep's FIRST cell
+    has zero prior unmounts, so this oracle is STRICTER than the cell it checks (it
+    would report a defect the sweep's own first cell could not show); the sweep's
+    LAST cell has nine cycles behind it, and the dock-level readings are what catch
+    the difference there -- which the mutant table above demonstrates, since the
+    never-unmount mutant is RED on exactly that last cell. State it, because "the
+    arrangements are identical" would be an overclaim in both directions.
     """
     question = _paragraph_options_question(12)
     app, card = await _real_app_card(size, [question])

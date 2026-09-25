@@ -187,15 +187,24 @@ LOCAL_ENV_SECONDS = "LOCAL_OPERATOR_LOCAL_STALL_SECONDS"
 #: The bound a LOCAL run reports at when nothing overrides it: 900s (15 min) of
 #: no completed test.
 #:
-#: Sized ABOVE every legitimate item rather than tightly, because the cost of
-#: being too tight is a false alarm on a healthy run -- which is how a diagnostic
-#: gets switched off and then is not there when it matters. The reference point is
-#: The worst legitimate test in a full local run, from the C-timer comment in
-#: ``.github/workflows/ci.yml`` (which sizes the e2e bound from the same figure),
-#: is 81s; this host runs the suite at load average 80-200, so even a 5x
-#: load-slowed item is ~400s. CI's 240s is NOT the local number and is not a
-#: candidate for one: it is priced against a 20-minute job cap that a local run
-#: does not have.
+#: Sized ABOVE every legitimate item rather than tightly, because the cost of being
+#: too tight is a false alarm on a healthy run -- which is how a diagnostic gets
+#: switched off and then is not there when it matters. Sized from what this tree
+#: MEASURES: the slowest single item a whole-tree local run has produced here is
+#: the C1 picker sweep, at 412.75 s before its boot reuse and 133-177 s after it, so
+#: 900 s is ~2x the worst this host has ever drawn.
+#:
+#: There is a "81 s" version of that number in `.github/workflows/ci.yml` (the
+#: comment above `LOCAL_OPERATOR_SHARD_STALL_SECONDS: "240"`), and it is worth being
+#: plain that it is not evidence: it attributes itself to AGENTS.md ("as AGENTS.md
+#: requires"), and AGENTS.md carries no such measurement at this head or the one
+#: before it -- so following the citation terminates. That comment sizes THIS
+#: module's CI shard bound, not the e2e stage's (which comes from
+#: `tests/e2e/watchdog.py` and cites no such figure), and this docstring quotes it
+#: only to say it is not what the local default is calibrated against.
+#:
+#: CI's 240s is NOT the local number and is not a candidate for one: it is priced
+#: against a 20-minute job cap that a local run does not have.
 LOCAL_DEFAULT_SECONDS = 900.0
 
 #: Opt-in per-test HARD bound (kills the process, naming the item through xdist's
