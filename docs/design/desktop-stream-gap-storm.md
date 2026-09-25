@@ -11,6 +11,17 @@ where `git diff v0.62.35 HEAD` over
 `origin/main` and this branch execute the same code on this path, and there is no
 upstream fix to point at.
 
+> **Baseline re-checked 2026-09-25 18:20 (task-8).** The app's daemon has since
+> moved to **0.62.38** (`Registered this app's own daemon … pid 74822, v0.62.38`,
+> log 17:49:43) and `origin/main` is now **`ae0667aa5` = 0.62.41**. The premise
+> holds: across `v0.62.35 → v0.62.38`, and again across `0133fe4e5 → origin/main`,
+> the only change touching any of these five files is an unrelated refactor of
+> `_draft_model_spec` in the routes module (model-selection validation); the
+> `/events` handler, `DesktopSessionBridge` and the feed are byte-identical. The
+> daemon also restarts often — **10 registrations across the two log files**, each
+> an app or `uv-tool` update — and each one resets the bridge pool, every epoch,
+> every runtime and every socket at once (§11.1, §11.6).
+
 Evidence base: the analyst's measured report (`~/lo-osc/findings/oscillation-backend.md`)
 plus the code below, re-read here. Where the report and this document disagree, this
 document's line numbers are this tree's.
@@ -1036,3 +1047,256 @@ two watch-items in §8.1 and §8.5.
 | Dwell on every `release()`, not only a stream's | silently extends residency across the whole read surface, and changes every test (and every claim) about a read detaching |
 | Dwell a subscription the bridge itself revoked (`overflow`) | inverts the relief valve — the bridge has just told that reader to resync — and makes a *closing* bridge dwell; it also keeps `test_slow_subscriber_overflow_is_explicit_and_bounded` (`tests/unit/server/test_desktop_sessions.py:138-156`) meaningful |
 | Do nothing (D1 alone) | the stream stops ending, but every genuine break — sleep/wake, daemon re-exec, a slow reader — still costs a runtime teardown and a full repaint |
+
+---
+
+## 11. What accumulates with uptime? (task-8)
+
+The operator's report — *"after restarting the UI it seems to go away for a bit,
+but I think it probably happens after some long amount of time of use"* — says the
+trigger is state that accumulates, not a steady-state property. Five candidates
+were tested against the live daemon and its two logs (read-only: `ps`, the log
+files, the store's `stat`s; no request was made to the daemon, nothing was
+written, nothing was restarted).
+
+**Headline: none of the five is the uptime switch, and the one that is real needs
+a change the design did not have.** The rest of this section is the evidence and
+the ranked disposition.
+
+### 11.1 The bridge pool (`BRIDGE_COUNT = 64`) — latent, and D2 makes it reachable
+
+**Mechanism, as claimed.** `DesktopSessions.session` evicts at the cap with
+`del self.bridges[oldest.session_id]` (`:4958-4963`) and never `close()`s what it
+drops, so the dropped bridge keeps its facade, its runtime, its subscriptions and
+its presence until something else reaps them — and a later open of that session
+builds a *second* bridge with its own epoch.
+
+**Measured.** Distinct sessions opened per daemon lifetime, counted from every
+session-scoped route in both logs and segmented at each
+`Registered this app's own daemon` line:
+
+| log | lifetime | distinct sessions opened |
+|---|---|---|
+| old | 00:43 → 08:42 · 08:42 → 10:47 · 10:47 → 17:59 · 17:59 → 23:05 | 17 · 17 · 12 · 25 |
+| current | 08:13 → 12:13 · 12:13 → 13:36 · 13:36 → 15:14 · 15:14 → 17:49 · 17:49 → now | 24 · 14 · 25 · 17 · **10** |
+
+The maximum over ten lifetimes is **25 against a cap of 64**, and
+`Too many active desktop sessions` appears **0 times** in both logs. The pool is
+not full today, has never been full across the ten daemon lifetimes these two logs
+cover, and cannot fill while the daemon restarts every few hours on `uv-tool`
+updates — each restart resets `self.bridges` outright.
+
+**So: not realized, and not the cause of this report.** The defect is real but
+latent, and it is *bounded* rather than permanent: the dropped bridge stays alive
+through its own `attention_task` and its facade's callbacks, so it keeps its
+runtime attached until its watch lease lapses and the `DEFAULT_GRACE_S = 3 s`
+drain reaps it (~48 s), after which nothing references it. What that window buys
+is a session that can have **two bridges with two epochs** (and its runtime held
+by the orphan), and it stops being merely latent under D2, which is why it becomes
+item 3 of §12: a **dwelling** bridge is deliberately not evictable (§4.3.5), so the
+set of evictable bridges shrinks and the
+`ValueError("Too many active desktop sessions")` arm of `:4961` becomes reachable
+in a state that previously always had an idle bridge to take. The shape of the
+change is in §12.
+
+### 11.2 Per-bridge subscribers (`SUBSCRIBER_COUNT = 32`) — not realized
+
+The stream's own teardown pops its subscriber as the generator finishes (`:3145`),
+so an ordinary disconnect reaps promptly; `_expire_watches` (`:3057-3076`) is a
+*presence* refresh, not a subscriber reaper, and has nothing to do with the table.
+Measured: `Too many event subscribers` appears **0 times** in both logs.
+
+One latent leak exists and is worth naming because it is in the handshake:
+the route subscribes at `:3277`, and if the response body is never iterated —
+the client disconnects between headers and body — the generator's `finally` never
+runs, so that subscription is never popped (`release_once` releases the *bridge*,
+not the subscription). Reaching the cap needs **32 of those on one bridge**, on a
+bridge that stays reachable; nothing in either log suggests it. D2 does not make
+it worse: a dwelling subscription is popped by its own dwell task after
+`RECONNECT_DWELL_S` at the latest, so the dwell bounds the slot rather than
+holding it forever.
+
+**No change needed for this report.** If a reviewer wants it closed anyway, the
+shape is a `sub`-aware `release_once` that pops only when `not sub.dwelling` —
+not worth spending task-4's budget on.
+
+### 11.3 Per-session runtime residency — bounded; one unreaped child
+
+`_detach()` unsubscribes the bridge (`:1496-1497`) and calls `remote.dispose()`
+(`:1499-1501`), which closes the viewer's socket
+(`session/attached.py:8903-8908`); the runtime's term 3 then falls and it exits
+after `DEFAULT_GRACE_S = 3.0` (`session/runtime/process.py:102`, `:1138`).
+
+Measured: the app's daemon (`pid 74822`) has exactly **three children** — one live
+session runtime (`id=0c1358c8`, 34 MB RSS, 18 min), one **unreaped zombie**
+(`<defunct>`, ppid 74822), and a runtime that started 11 minutes ago. It is not
+proportional to the 44 sessions the log shows being opened, and the 28
+`session.runtime.process` processes alive on this host belong to the ~25 agent
+sessions this machine runs concurrently, not to the app.
+
+Ten `ppid=1` runtimes *do* carry session ids the app has opened
+(`112979d4`, `790d870e`, `a81ceec0`, `6011712f`, …), but they cannot be attributed
+to the app: the agent fleet shares the same session store and the same ids, and
+`lop exec` runtimes are orphaned to pid 1 in exactly the same way. What can be
+said is the bound that matters: **the daemon's own child count is 1-2**, so
+residency does not grow with the number of conversations viewed.
+
+The zombie child is a small hygiene finding of its own (the daemon does not always
+reap), unrelated to this defect and out of scope.
+
+### 11.4 Store growth and the length of the un-drained window — refuted, and covered anyway
+
+The concern is that a 678 MB `analytics.db` (it was 659 MB earlier today) and
+growing journals stretch `await self.snapshot()` (`:3113`), the window D1 is about.
+
+Measured proxy for that window, from the log's own two routes: the delay between a
+stream's `GET …/events` (logged at response *start*) and the client's next
+`POST …/watch` (sent only after it has the `open` frame), per hour:
+
+| hour | 08 | 09 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| p50 (s) | 0.34 | 0.61 | 2.79 | 1.08 | 0.34 | 0.13 | 0.14 | 0.74 | 0.61 | 0.61 | 0.41 |
+| p90 (s) | 6.48 | 3.47 | 6.60 | 6.17 | 2.26 | 0.16 | 0.46 | 2.07 | 1.24 | 2.70 | 1.95 |
+
+Over 332 pairs: p50 **0.64 s**, p90 **3.95 s**, max **17.3 s**. It does **not**
+grow with uptime — the worst hours are the morning's, the best are the afternoon's
+— which fits what the code says the window is made of: a cold attach, not the
+store. The store's own terms are bounded or independent of size: the attention
+read is capped at `ATTENTION_SNAPSHOT_WAIT_S = 0.05` (`:235`) and serves the last
+known state; `history()` is a *backward* tail page whose cost the reader's own
+docstring measures at 1.5-6 ms at the tail, and it is served through a
+process-wide LRU with explicit bounds (`PAGE_CACHE_ENTRIES = 16`,
+`PAGE_CACHE_BYTES = 24 MiB`, `local_operator/session/page_cache.py:113-114`) — no
+unbounded cache accumulates across sessions.
+
+**And D1 removes the window's duration from the equation entirely**: before the
+handshake completes, a full queue evicts a superseded frame instead of
+disconnecting, so a snapshot that takes 20 s can no longer end a stream. A longer
+window costs a longer cold attach and more dropped-and-superseded frames, never a
+gap storm. **Fully covered.**
+
+### 11.5 Renderer-side accumulation — not measurable from here, and probably not uptime
+
+Read (not run): the main relay keeps one `AbortController` per stream in a `Map`
+and deletes it on end, on abort and on close
+(`local-operator-ui` `src/main/desktop-stream.ts:89,158,189,315-321`); the hook's
+buffer is drained every flush (`pending.current = []`), its label-gap set is
+bounded (`LABEL_GAP_MAX_TRACKED = 512`), and the other per-flush sets are locals.
+The one structure that grows without a constant is the transcript and its index
+(`paintedIds`, `use-canonical-session.ts:729,1358`), which grows with the
+**conversation's** length, not with app uptime, and resets when the operator
+navigates to another conversation. That is a plausible "one very long conversation
+gets slower" effect; it is not a per-hour accumulator and it cannot be measured
+from this position.
+
+**What would settle it:** the renderer-driver DOM capture task-2 already built,
+run against one long-lived conversation at two points an hour apart, comparing
+flush duration and the painted row count. No backend item either way.
+
+### 11.6 What the operator's own observation most likely is
+
+"Restarting the UI fixes it for a bit" is exactly what a **daemon restart** does
+here, and the app performs one when it is relaunched: the current daemon
+registered at **17:49:43** (`pid 74822, v0.62.38`), the previous one at 15:14:05,
+before that 13:36:42, 12:13:03 and 08:13:52 — five in one working day. Each
+restart drops every bridge (so every epoch rotates), every stream socket and every
+runtime at once, and the storm needs all three of its ingredients to recur: a
+long *cold* engage that publishes a burst (measured: the window's p90 is ~4 s,
+max 17 s), a subscriber with no reader for that burst, and a reconnect after the
+epoch rotated. D1 removes the second ingredient and D2 removes the third's cost;
+neither is a function of uptime, which is consistent with the report — the
+*building blocks* are always present, and what "some long amount of time of use"
+supplies is simply more chances to hit them.
+
+### 11.7 Ranked disposition
+
+| # | mechanism | realized here today? | covered by D1/D2? | needs a change? |
+|---|---|---|---|---|
+| 1 | **Bridge-pool eviction drops a bridge without closing it** (`:4958-4963`), and D2 makes dwelling bridges unevictable | **no** — max occupancy 25 of 64 across ten daemon lifetimes; the refusal string never appears | **no** — D2 *adds* a state where the pool can have no evictable bridge | **yes — item 3, §12** |
+| 2 | Subscriber table filling to `SUBSCRIBER_COUNT` | no — the refusal string appears 0 times; a leak path exists but needs 32 hits on one bridge | yes in effect (the dwell bounds a slot rather than holding it) | no |
+| 3 | Runtime residency growing with sessions viewed | no — the daemon's child count is 1-2 regardless of the 44 sessions opened | n/a | no (a separate unreaped-zombie hygiene note) |
+| 4 | Store growth lengthening the snapshot window | **refuted** — the window is 0.64 s p50 / 3.95 s p90 and does not trend with uptime; its terms are bounded or size-independent | **yes, fully** — D1 makes window *length* irrelevant | no |
+| 5 | Renderer-side accumulation | unknown from here; the only unbounded structure grows with conversation length, not uptime | n/a | no (task-2's DOM capture settles it) |
+
+---
+
+## 12. Item 3 for task-4: eviction closes what it drops, and the dwelling bridge is the last resort
+
+Recommended addition to the implementing PR, in the same function task-4 already
+edits (`_evictable` `:4598-4608`, and its one caller `session()` `:4930-4984`).
+
+```python
+    def _evict_one(self) -> DesktopSessionBridge | None:
+        """The bridge to drop for pool room, or ``None``. Caller holds the pool lock.
+
+        TWO TIERS, and the order is the point. An ordinary idle bridge
+        (``users == 0``, no handout, not dwelling) has nothing to lose. A
+        DWELLING bridge is the last resort — it is holding a runtime for a viewer
+        that may be reconnecting this second — so it is taken only when nothing
+        else is available, and taking it ends its dwell: its viewer gets an
+        honest gap on reconnect instead of being refused the open outright.
+        """
+        idle = [b for b in self.bridges.values() if self._evictable(b)]
+        if not idle:
+            idle = [b for b in self.bridges.values() if b.dwelling and not b.users]
+        if not idle:
+            return None
+        victim = min(idle, key=lambda b: b.touched)
+        del self.bridges[victim.session_id]
+        return victim
+```
+
+and in `session()`, the victim is closed **after the pool lock is released** —
+and not one line earlier:
+
+```python
+        finally:
+            if taken:
+                self._end_handout(session_id)
+        if evicted is not None:
+            # AFTER the lock, deliberately: ``close()`` awaits the bridge's own
+            # lock and the owner connection's teardown, and holding the pool lock
+            # across either is the 7.9 s open the docstring at :4796-4812 exists
+            # to prevent. Closing is also what the bare ``del`` never did: without
+            # it the dropped bridge keeps its facade, its runtime, its subscribers
+            # and its presence, and a later open of that session builds a SECOND
+            # bridge with its own epoch while the first is still attached.
+            with contextlib.suppress(ConnectionError, RuntimeError):
+                await evicted.close()
+        try:
+            yield bridge
+```
+
+**Why the second tier is not optional once D2 lands.** Before D2, `users == 0`
+implied evictable, so a pool at the cap always had a victim unless 64 sessions
+were streaming at once. After D2 a bridge can be unevictable *and* idle for 20 s,
+so the `ValueError("Too many active desktop sessions")` arm (`:4961`) becomes
+reachable in a state that used to be impossible — the buyer of a 20 s reconnect
+window would be a new refusal to open. The fallback trades that refusal for one
+honest gap on a viewer that had already lost its transport.
+
+**Why it is still not the fix for this report.** Measured occupancy is 25 of 64 at
+its worst, and every daemon restart resets the pool (§11.1, §11.6). This item
+protects the change from introducing a new refusal and closes a pre-existing leak;
+it must not be allowed to complicate or delay D1/D2 verification.
+
+**Tests** (both in `tests/unit/server/test_desktop_stream_dwell.py`, beside T2-4):
+
+* `test_eviction_closes_what_it_drops` — fill the pool to `BRIDGE_COUNT`, open one
+  more session: the evicted bridge has `remote is None`, no subscribers, no live
+  dwell task, and the new session has a working bridge.
+* `test_the_dwelling_bridge_is_the_last_resort` — with one ordinary idle bridge
+  and one dwelling bridge present, eviction takes the idle one; with only dwelling
+  bridges, it takes the oldest and that bridge's dwell ends (its viewer's next
+  open is a plain `gap=true`).
+* `test_eviction_never_awaits_inside_the_pool_lock` — the regression guard for the
+  ordering: hold the pool lock (or assert via a spy that `close()` is not entered
+  while `pool.lock.locked()`), because this is the one way the item can be
+  implemented and still be wrong.
+
+**Regression risk, stated.** The eviction path is reached only at the cap, which
+this machine never reaches, so the change cannot alter any measured behaviour
+here — and the `_evict_one` extraction must leave the non-full path byte-identical
+(`_evictable`'s meaning, `touched`'s role and the handout reservation untouched).
+The one new await lands on the cap path only, where the pool is already paying a
+bridge lookup and a handout anyway.
