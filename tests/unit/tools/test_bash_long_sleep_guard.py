@@ -59,6 +59,39 @@ def test_the_measured_commands_from_the_live_child_are_refused(command: str) -> 
     assert "`wait`" in message
     assert "jobs op='peek'" in message
     assert sleep_guard.ALLOW_ENV in message
+    # The diagnosis must be TRUE about the operator's own reach: a steer DOES
+    # interrupt a foreground bash and detaches it to a background job; only a
+    # note is deaf. The old sentence claimed neither could reach it, in the
+    # direction that costs the operator the lever they lacked in the incident
+    # (design review D4).
+    assert "deaf to a hub note" in message
+    assert "a steer does reach it" in message
+    assert "cannot be interrupted by a hub message" not in message
+    # The promise about a message is the true one: a note queued BEFORE the wait
+    # parks is delivered at the next boundary rather than shortening that park,
+    # so the clause has to say WHILE (review round 2, A4).
+    assert "while it is parked" in message
+    assert "a message arrives, or " not in message
+    # The hatch is PER SEGMENT, which the copy has to say: `VAR=1 sleep 900;
+    # sleep 900` is still refused, and an exported value is not read at all
+    # (design review D3).
+    assert "prefixed on each long sleep" in message
+    assert "per segment" in message
+    assert "an exported value is not read" in message
+    # ...and the reader's own vocabulary, not a third one for the same event
+    # (design review D5): `wait` answers in "the wait was cancelled" and takes
+    # `wait_ms` in ms.
+    assert "the wait is cancelled" in message
+    assert "`wait_ms` in ms" in message
+    # D1: every bullet LEADS with its actionable token, because the operator's
+    # failed-call card paints each advice line as ONE cropped row whose measure
+    # is 94 cells at a 100-column frame and 74 at 80 — the unhedged copy put
+    # `wait` at cells 86-92 and the hatch variable at 57-90, so both were cut
+    # exactly on the frames operators run.
+    for bullet in (line for line in message.splitlines() if line.startswith("  - ")):
+        first_token = bullet.index("`")
+        assert first_token <= 8, bullet
+        assert bullet.index("`", first_token + 1) <= _ADVICE_TOKEN_LEAD_CELLS, bullet
 
 
 #: The same child's SHORT sleeps, which must keep working.
@@ -93,7 +126,10 @@ BLOCKED = [
     "sleep 121  # poll the suite",
     "sleep 1500  # wait",
     "cd x && sleep 900  # watch",
-    "sleep 900;# poll",
+    # (`sleep 900;# poll` is NOT listed: the `;` splits the segment before the
+    # comment is reached, so it refuses with or without the fix and reading it
+    # as coverage would be misleading — the two cells above are the ones that
+    # discriminate, and the round-2 differential confirms it.)
 ]
 
 
@@ -219,10 +255,24 @@ def _call(name: str, args: dict[str, object]):
     return ToolCall(id="c", name=name, arguments=dict(args))
 
 
-def _loop_context(tools: dict[str, object], context: ToolContext):
-    from local_operator.harness.loop import LoopContext
+async def _plan(tools: list[AgentTool], context: ToolContext, args: dict[str, object]):
+    """Plan one ``bash`` call through the real seam, with ``tools`` as the
+    session's live inventory (that list is what the refusal copy is built from)."""
+    from local_operator.harness.loop import AgentLoop, LoopContext
+    from local_operator.harness.types import LoopConfig, Message
 
-    return LoopContext(tool_context=context, tools=list(tools.values()))  # type: ignore[arg-type]
+    loop_context = LoopContext(system_blocks=[], tools=tools, tool_context=context)
+    return await AgentLoop()._plan_call(  # noqa: SLF001 — the planning seam is the unit
+        _call("bash", args),
+        loop_context,
+        # A stream function is required by the config but never reached: these
+        # calls are refused during planning, before any model request.
+        LoopConfig(
+            model=_MODEL,
+            convert_to_llm=lambda messages: [m for m in messages if isinstance(m, Message)],
+            stream_fn=lambda request, signal: None,
+        ),
+    )
 
 
 async def _bash(args: dict[str, object], context: ToolContext):
@@ -241,6 +291,78 @@ async def test_the_bash_tool_refuses_before_spawning(tmp_path) -> None:
     assert result.is_error is True
     assert "sleeps 1500 s (25 min) in the foreground" in result.text
     assert not marker.exists()
+
+
+#: (offered inventory, must-name, must-not-name) for every reader class the
+#: design round measured. ``must_not_name`` is the whole point of D2: a refusal
+#: that names a replacement the reader does not hold routes it into
+#: ``Tool not found``.
+READER_CLASSES = [
+    # an interactive root: all three
+    (
+        frozenset({"bash", "read", "wait", "jobs", "wake", "hub"}),
+        ["`wait`", "`jobs op='peek'`", "`wake`"],
+        [],
+    ),
+    # a coder child: non-delegating, can background, keeps jobs and wait, has no
+    # wake (its one-prompt session could not keep one anyway)
+    (
+        frozenset({"bash", "read", "wait", "jobs", "hub"}),
+        ["`wait`", "`jobs op='peek'`"],
+        ["`wake`"],
+    ),
+    # a declared-inventory session (`lop exec --tools bash,read`): none of them,
+    # and it must be told so rather than handed options that error
+    (frozenset({"bash", "read"}), [], ["`wait`", "`jobs op='peek'`", "`wake`"]),
+]
+
+
+@pytest.mark.parametrize(("offered", "named", "absent"), READER_CLASSES)
+def test_the_advice_names_only_tools_the_reader_holds(
+    offered: frozenset[str], named: list[str], absent: list[str]
+) -> None:
+    message = sleep_guard.check_long_sleep("sleep 1500; tail log", offered=offered)
+    assert message is not None
+    for token in named:
+        assert token in message, (token, message)
+    # ``absent`` is checked against the ADVICE (the bullet lines), not the whole
+    # message: the no-tool reader is told in prose that the session offers none
+    # of the three, which necessarily names them.
+    bullets = "\n".join(line for line in message.splitlines() if line.startswith("  - "))
+    for token in absent:
+        assert token not in bullets, (token, message)
+
+
+def test_a_reader_with_none_of_the_three_is_told_so_and_led_to_the_hatch() -> None:
+    """The class that made the hedged middle unacceptable: with no `wait`,
+    no `jobs` and no `wake`, the escape hatch is the only bullet that works, so
+    it leads and the reader is told plainly (design review D2)."""
+    message = sleep_guard.check_long_sleep("sleep 1500; tail log", offered=frozenset({"bash"}))
+    assert message is not None
+    lines = message.splitlines()
+    assert "offers no `wait`, `jobs` or `wake`" in message
+    first_bullet = next(line for line in lines if line.startswith("  - "))
+    assert sleep_guard.ALLOW_ENV in first_bullet
+
+
+@pytest.mark.asyncio
+async def test_the_loop_hands_the_hook_the_readers_own_inventory(tmp_path) -> None:
+    """The inventory must reach the refusal through the REAL planning seam, not
+    just the constructor: a session whose inventory is narrowed refuses with
+    copy that names nothing it cannot run (design review D2)."""
+    from local_operator.tools.registry import create_tools
+
+    manager = AsyncJobManager()
+    context = ToolContext(cwd=str(tmp_path), session_id="sg-inv", jobs=manager)
+    try:
+        tools = [tool for tool in create_tools(context) if tool.name in ("bash", "read")]
+        planned = await _plan(tools, context, {"command": "sleep 1500; tail log"})
+        assert planned.failure is not None
+        text = planned.failure.text
+        assert "offers no `wait`, `jobs` or `wake`" in text
+        assert "`wait` on its job id" not in text
+    finally:
+        await manager.dispose()
 
 
 @pytest.mark.asyncio
@@ -280,6 +402,90 @@ async def test_the_loop_never_prompts_approval_for_a_refused_long_sleep(tmp_path
         await manager.dispose()
 
 
+#: The tools an interactive root session holds, i.e. every replacement the copy
+#: may name. Passed explicitly so a test that is not ABOUT the inventory still
+#: exercises the fully-offered copy rather than the speculative ``None`` path.
+_ALL_TOOLS = frozenset({"bash", "read", "grep", "wait", "jobs", "wake", "hub"})
+
+#: How far into a bullet its actionable token may run. The operator's failed-call
+#: card crops each advice line at 74 cells in the canonical 80-column frame (54 at
+#: 60, 44 at 50), so a token starting past ~40 cells is a token the operator
+#: cannot read (design review D1).
+_ADVICE_TOKEN_LEAD_CELLS = 40
+
+#: Every spelling pydantic coerces to a BOOL, split by what it means. The first
+#: seven passed ``validate_tool_arguments`` looking like a background call to the
+#: raw-argument hook — which read the string and found it truthy — so the call
+#: reached the approval gate and was refused only by the body (review A1).
+FALSY_BACKGROUND_SPELLINGS = ["false", "no", "0", "off", "n", "f", "FALSE", "False"]
+TRUTHY_BACKGROUND_SPELLINGS = ["true", "yes", "1", "on", "y", "t", "TRUE", "True"]
+
+
+@pytest.mark.parametrize("spelling", FALSY_BACKGROUND_SPELLINGS)
+def test_the_hook_refuses_when_background_is_a_falsy_spelling(spelling: str) -> None:
+    """``background: "false"`` IS a foreground call: the hook must refuse it, so
+    the refusal happens before the operator is asked to approve anything."""
+    refusal = builtin._long_foreground_sleep_refusal(
+        {"command": "sleep 1500; tail -c 250 log", "background": spelling}, _ALL_TOOLS
+    )
+    assert refusal is not None, spelling
+    assert "sleeps 1500 s (25 min) in the foreground" in refusal
+
+
+@pytest.mark.parametrize("spelling", TRUTHY_BACKGROUND_SPELLINGS)
+def test_the_hook_allows_when_background_is_a_truthy_spelling(spelling: str) -> None:
+    """...and the other half: a real background call is never refused, whichever
+    spelling the model used."""
+    assert (
+        builtin._long_foreground_sleep_refusal(
+            {"command": "sleep 1500; tail -c 250 log", "background": spelling}, _ALL_TOOLS
+        )
+        is None
+    ), spelling
+
+
+@pytest.mark.parametrize("spelling", FALSY_BACKGROUND_SPELLINGS)
+@pytest.mark.asyncio
+async def test_a_falsy_background_spelling_never_reaches_the_approval_gate(
+    tmp_path, spelling: str
+) -> None:
+    """The finding, through the REAL loop: the gate's callback is not invoked.
+
+    This is the arm that discriminated in review — with the raw-argument hook the
+    gate was asked (`approvals: [('bash', 'run: sleep 1500')]`) and only the body
+    refused the call.
+    """
+    from local_operator.tools.registry import create_tools
+
+    approvals: list[str] = []
+
+    async def request_approval(tool_name: str, summary: str, **kwargs: object) -> bool:
+        approvals.append(summary)
+        return True
+
+    manager = AsyncJobManager()
+    context = ToolContext(cwd=str(tmp_path), session_id="sg-spell", jobs=manager)
+    context.request_approval = request_approval  # type: ignore[assignment]
+    tools = list(create_tools(context))
+    stream = _ToolsThenText({"command": "sleep 1500; tail -c 250 log", "background": spelling})
+    try:
+        events = await _run_loop(tools, context, stream)
+        assert approvals == [], f"{spelling!r} reached the gate: {approvals}"
+        assert "in the foreground" in json.dumps([str(event) for event in events])
+    finally:
+        await manager.dispose()
+
+
+def test_the_hook_leaves_a_shape_it_cannot_coerce_to_the_body(tmp_path) -> None:
+    """A hook that raises is SILENTLY SKIPPED by the loop, which would let the
+    call reach the gate — so an uncoercible shape returns None here and is the
+    body's ``ValidationError`` to report."""
+    refusal = builtin._long_foreground_sleep_refusal(
+        {"command": "sleep 1500", "timeout": "soon"}, _ALL_TOOLS
+    )
+    assert refusal is None
+
+
 @pytest.mark.asyncio
 async def test_a_background_call_is_never_refused(tmp_path) -> None:
     """The replacement the refusal names must itself be allowed."""
@@ -291,6 +497,32 @@ async def test_a_background_call_is_never_refused(tmp_path) -> None:
         assert result.details is not None and result.details.get("backgrounded") is True
     finally:
         await manager.cancel(result.details["job_id"]) if result.details else None
+        await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_both_paths_of_the_guard_report_the_same_fault_class(tmp_path) -> None:
+    """One predicate, one bucket. The plan-time refusal is a MODEL fault
+    (``invalid_arguments``); the execute-time path used to be an unmarked
+    ``execution`` one, so an identical call was counted differently depending on
+    which layer caught it (review A2)."""
+    from local_operator.harness.loop import FAULT_KEY
+    from local_operator.tools.registry import create_tools
+
+    manager = AsyncJobManager()
+    context = ToolContext(cwd=str(tmp_path), session_id="sg-fault", jobs=manager)
+    try:
+        tools = list(create_tools(context))
+        planned = await _plan(tools, context, {"command": "sleep 1500; tail log"})
+        direct = await _bash({"command": "sleep 1500; tail log"}, context)
+        failure = planned.failure
+        assert failure is not None and failure.details is not None
+        assert direct.details is not None
+        assert failure.details[FAULT_KEY] == direct.details[FAULT_KEY] == "invalid_arguments", (
+            failure.details,
+            direct.details,
+        )
+    finally:
         await manager.dispose()
 
 

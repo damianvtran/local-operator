@@ -3003,10 +3003,16 @@ class AgentLoop:
         # the model what to do instead, and a prefix added here would only
         # lengthen every refusal. Guarded like the other host hooks — a hook
         # that raises never refuses the call it was asked about.
+        #
+        # The inventory rides along because a refusal that names a replacement
+        # the reader does not hold is worse than one that names none: this is
+        # the only place in the harness that holds BOTH the call and the live
+        # tool list at the moment a refusal is composed (design review D2).
         refusal = None
         if tool.refuse_args is not None:
+            offered = frozenset(candidate.name for candidate in context.tools)
             try:
-                refusal = tool.refuse_args(args)
+                refusal = tool.refuse_args(args, offered)
             except Exception:
                 logger.warning("plan-time refusal check failed for %s", call.name, exc_info=True)
             else:

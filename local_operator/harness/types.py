@@ -1295,8 +1295,9 @@ class AgentTool(BaseModel):
     call_approval_tier: Callable[[dict[str, Any]], Literal["read", "write", "exec"]] | None = Field(
         default=None, exclude=True
     )
-    #: PLAN-TIME refusal: ``(validated args) -> message | None``. Runs during
-    #: planning, before the batch, so a call this tool will not run is refused
+    #: PLAN-TIME refusal: ``(validated args, offered tool names) -> message |
+    #: None``. Runs during planning, before the batch, so a call this tool will
+    #: not run is refused
     #: without a card being announced and — the reason this exists — WITHOUT an
     #: approval prompt. Without it the operator is asked to approve a call the
     #: tool then refuses itself, which reads as the harness wasting their
@@ -1309,7 +1310,16 @@ class AgentTool(BaseModel):
     #: as a rejected line range. A tool with a hook keeps its execute-time check
     #: too: this path covers the loop, and ``execute`` is also reachable
     #: directly (tests, the dispatch bridge), from where no hook runs.
-    refuse_args: Callable[[dict[str, Any]], str | None] | None = Field(default=None, exclude=True)
+    #:
+    #: The SECOND argument is the names of the tools the calling session
+    #: actually holds (``_plan_call`` reads them off ``context.tools``), and it
+    #: is there because a refusal that names a replacement the reader does not
+    #: have routes it straight into ``Tool not found`` — the failure the first
+    #: refusal in this family exists to remove. A hook that cannot tell must not
+    #: guess; the loop always can.
+    refuse_args: Callable[[dict[str, Any], frozenset[str]], str | None] | None = Field(
+        default=None, exclude=True
+    )
 
 
 # ---------------------------------------------------------------------------
