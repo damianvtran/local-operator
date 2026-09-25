@@ -2748,6 +2748,60 @@ async def test_a_withdrawal_clears_the_memory_and_a_drop_does_not() -> None:
 
 
 @pytest.mark.asyncio
+async def test_only_a_live_desktop_connection_can_withdraw_the_attachment() -> None:
+    """THE SHAPE GATE (N1): a non-desktop caller's withdrawal is refused.
+
+    ``desktop_withdraw`` is the ONE frame that clears the session-scoped attach
+    memory, so the refusal must be by SHAPE and free of side effects: a
+    terminal attach and the daemon both get the error frame, and the memory a
+    live desktop pane planted stands through both attempts. Delete the gate
+    and either caller silently drops the model-facing answer.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    runtime.start()
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    terminal = AttachClient(lambda _projection: None, lambda _reason: None)
+    daemon_writer = None
+    try:
+        record = await _wait_record()
+        await desktop.connect(record, "s1")
+        await desktop.desktop_watch(visible=True, can_notify=True)
+        memory = runtime._desktop_attach_seen
+        assert memory > 0.0
+        assert runtime.attached_surfaces() == frozenset({"desktop"})
+
+        # A TERMINAL ATTACH: the error frame is the reply, and the client's
+        # shared reader raises the frame's own sentence for it.
+        await terminal.connect(record, "s1")
+        with pytest.raises(
+            RuntimeError, match="desktop withdrawal requires a live desktop attach connection"
+        ):
+            await terminal.desktop_withdraw()
+
+        # THE DAEMON: the same gate read on the wire, so what is asserted is
+        # the frame itself — this is the ``conn.kind != "attach"`` branch.
+        daemon_reader, daemon_writer = await _dial(record)
+        daemon_writer.write(json.dumps({"op": "desktop_withdraw", "req": 91}).encode() + b"\n")
+        await daemon_writer.drain()
+        err = await _until(daemon_reader, "error", 91)
+        assert "desktop withdrawal requires a live desktop attach connection" in err["message"]
+
+        # NEITHER REFUSAL MOVED THE MEMORY, so the next answer still sees the
+        # pane (the live terminal is its own surface and stays counted): a
+        # refusal that cleared the memory would re-open the incident silently.
+        assert runtime._desktop_attach_seen == memory
+        assert runtime.attached_surfaces() == frozenset({"attach", "desktop"})
+    finally:
+        if daemon_writer is not None:
+            daemon_writer.close()
+        terminal.close()
+        desktop.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_a_real_drop_does_not_flip_the_interactivity_block() -> None:
     """PROMPT-LEVEL: the churn never reaches the rendered bytes (round 3).
 
