@@ -38,7 +38,7 @@ from local_operator.ansi import sanitize_prompt_line
 from local_operator.harness.approval import ask_approval
 from local_operator.harness.guard_area import (
     exempt_from_escalation,
-    reads_exempt_source,
+    resolves_to_exempt_source,
 )
 from local_operator.harness.intent import (
     INTENT_FIELD,
@@ -687,20 +687,20 @@ class LoopContext:
     # retain every cancelled call's arguments (a ``write`` carries whole file
     # contents), and a later call reusing the id would consume a stale record.
     original_call_args: dict[str, dict[str, Any]] = field(default_factory=dict)
-    # R3-2: the guard-area exemption verdict of every call the loop actually
-    # dispatched, keyed by ``tool_call_id`` -- the SAME key and the same
-    # dispatch/consume shape as ``original_call_args`` above. Re-deriving the
-    # verdict at redaction time is a defect, not merely redundant work: a tool
-    # BATCH gathers its results before any are appended, so a same-batch
-    # mutation (``read <path>`` plus ``bash ln -sfn`` in one batch) always lands
-    # FIRST and the guard re-resolving at redaction sees a filesystem the reader
-    # never saw -- the agent's bytes get read and masked. Recording the verdict
-    # at dispatch, where ``item.args`` is in hand and the reader inside
-    # ``tool.execute`` resolves the same value, makes the two agree by
-    # construction. Consumed (popped) by BOTH redaction sites -- the native
-    # ``_append_results`` path and the eval bridge, which hands the popped value
-    # to ``_redact_content`` -- and popped on cancellation, so it does not
-    # outlive the result it belongs to.
+    # R3-2 / R4-1 / R5: the guard-area exemption verdict of every call, keyed by
+    # ``tool_call_id`` -- the SAME key and the same record/consume shape as
+    # ``original_call_args`` above, but NOT written at this end: the READER writes
+    # it, through ``ToolContext.record_resolved_path``, at the resolution it is
+    # about to open (``_exempt_verdict_recorder`` files it here). Every other
+    # resolution is a second MOMENT as well as a second input, and that is the
+    # defect three rounds in a row narrowed: re-derived at redaction, a tool
+    # BATCH's mutation (``read <path>`` plus ``bash ln -sfn``) always landed
+    # first; computed at dispatch, the reader's own resolution still came later,
+    # and a link moved in that gap cleared the escalation for bytes taken from a
+    # file the exemption does not cover. Consumed (popped) by BOTH redaction
+    # sites -- the native ``_append_results`` path and the eval bridge, which hands
+    # the popped value to ``_redact_content`` -- and popped on cancellation, so it
+    # does not outlive the result it belongs to.
     exempt_source_verdicts: dict[str, bool] = field(default_factory=dict)
 
 
@@ -1049,19 +1049,45 @@ def _call_arguments(context: "LoopContext", tool_call_id: str) -> dict[str, Any]
     return {}
 
 
-def _exempt_source_verdict(context: "LoopContext", tool_call_id: str) -> bool | None:
-    """The guard-area verdict recorded at DISPATCH for the result being redacted.
+def _exempt_verdict_recorder(context: "LoopContext") -> Callable[[str, str, bool], None]:
+    """The callback a READER uses to publish the path it just resolved.
 
-    Recorded by ``_runner_result`` and CONSUMED here (popped), the same
+    Installed on ``ToolContext.record_resolved_path`` for the duration of a call
+    whose result will be redacted, and called by ``execute_read``/``execute_grep``
+    at the resolution they are about to open. The membership test is
+    :func:`guard_area.resolves_to_exempt_source`, so the exemption's one definition
+    stays with the exemption; this only files the answer under the call's id, where
+    :func:`_exempt_source_verdict` pops it one step later.
+
+    A reader that never resolves (a scheme handle, a validation failure) records
+    nothing, and the redaction then falls back to resolving for itself -- the
+    escalating direction, unchanged.
+    """
+
+    def record(tool_call_id: str, resolved: str, resolvable: bool) -> None:
+        context.exempt_source_verdicts[tool_call_id] = resolves_to_exempt_source(
+            resolved, resolvable
+        )
+
+    return record
+
+
+def _exempt_source_verdict(context: "LoopContext", tool_call_id: str) -> bool | None:
+    """The guard-area verdict the READER recorded for the result being redacted.
+
+    Recorded by the reader itself, at the resolution it is about to open
+    (:func:`_exempt_verdict_recorder`), and CONSUMED here (popped), the same
     dispatch/consume shape as :func:`_call_arguments` beside it. ``None`` means
-    this call never dispatched -- a planning failure, a synthetic result the loop
-    invented -- so ``exempt_from_escalation`` must fall back to resolving the
-    verdict itself. Returning the recorded value rather than re-deriving it is
-    the whole point (R3-2 against PR #1502): a tool batch gathers its results
-    before any are appended, so a same-batch mutation (``read <path>`` plus
-    ``bash ln -sfn`` in one batch) lands first, and a verdict re-derived at
-    redaction would resolve a filesystem the reader never saw and clear an
-    escalated read of the guard's own area.
+    this call never resolved -- a planning failure, a synthetic result, a scheme
+    handle -- so ``exempt_from_escalation`` falls back to resolving the verdict
+    itself, which escalates.
+
+    Consuming the reader's own answer rather than re-deriving it is the whole
+    point (R3-2, R4-1 and R5 against PR #1502): every other resolution is a
+    second MOMENT as well as a second input, and a symlink moved in that gap --
+    by a same-batch sibling, by a background process, by anything -- decided the
+    verdict for bytes the reader had already taken from a file the exemption does
+    not cover.
     """
     return context.exempt_source_verdicts.pop(tool_call_id, None)
 
@@ -3376,20 +3402,24 @@ class AgentLoop:
                 execution_context = execution_context.model_copy(
                     update={"dispatch_tool": dispatch_tool}
                 )
-            # R3-1/R3-2: the guard's view of this call is recorded HERE, where
-            # ``item.args`` -- the ORIGINAL the tool is about to run with -- is
-            # in hand, and the reader inside ``tool.execute`` resolves the same
-            # value. Two records share this point because they share the reason:
-            # ``_call_arguments`` would otherwise find only the stored, scrubbed
-            # copy in ``context.messages`` (R3-1), and a redaction-time
-            # re-resolution of the exemption would see a filesystem a same-batch
-            # mutation has already changed (R3-2). Guarded by the same config as
-            # the redaction that consumes them, so an unconfigured hook pays no
-            # copy and no resolution at all.
+            # R3-1 / R3-2 / R4-1 / R5: the guard's view of this call is RECORDED
+            # here and DECIDED by the reader. The arguments come from
+            # ``item.args`` -- the ORIGINAL the tool is about to run with --
+            # because the stored turn is the scrubbed copy (R3-1). The exemption
+            # verdict is not computed here at all: the reader reports the path IT
+            # resolved through ``ToolContext.record_resolved_path`` and this
+            # recorder stores that answer under the call's id. A verdict computed
+            # here would still be a second resolution at a second moment -- the
+            # reader resolves again inside ``tool.execute``, and a symlink moved
+            # in that gap handed the redaction an exemption for bytes the reader
+            # had already taken from a NON-exempt file (measured across rounds
+            # 3-5, most recently 2 of 20 raced attempts). Guarded by the same
+            # config as the redaction that consumes it, so an unconfigured hook
+            # pays nothing.
             if config.redact_tool_result is not None:
                 context.original_call_args[call.id] = item.args
-                context.exempt_source_verdicts[call.id] = reads_exempt_source(
-                    tool.name, item.args, _session_cwd(context)
+                execution_context = execution_context.model_copy(
+                    update={"record_resolved_path": _exempt_verdict_recorder(context)}
                 )
             return await tool.execute(call.id, item.args, signal, on_update, execution_context)
         except asyncio.CancelledError:

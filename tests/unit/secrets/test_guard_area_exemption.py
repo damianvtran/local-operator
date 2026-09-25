@@ -947,6 +947,31 @@ def _bash_tool() -> AgentTool:
     )
 
 
+def _eval_tool(path_arg: str, captured: list[str]) -> AgentTool:
+    """An ``eval`` tool whose body makes ONE nested ``read`` through the bridge.
+
+    ``AgentTool(name="eval")`` is what makes the loop build the nested
+    ``dispatch_tool`` bridge, so this is the real bridge, not a stand-in; the
+    nested result's text is appended to ``captured`` so an arm can assert which
+    file the nested reader actually opened.
+    """
+
+    async def execute(
+        tool_call_id: str, args: dict[str, Any], signal: Any, on_update: Any, context: Any
+    ) -> ToolResult:
+        nested = await context.dispatch_tool("read", {"path": path_arg, "raw": True})
+        captured.append("".join(part.get("text", "") for part in nested.get("content", [])))
+        # A fixed, shape-free row: an arm using this is about the NESTED call, so
+        # the outer row must contribute no escalation of its own.
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="eval",
+            content=[TextContent(text="nested dispatch done")],
+        )
+
+    return AgentTool(name="eval", parameters={"type": "object", "properties": {}}, execute=execute)
+
+
 def _shaped_layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, str]:
     """The R3-1 layout, and the spelling that makes one argument name two files.
 
@@ -1172,7 +1197,6 @@ def test_a_handed_in_verdict_is_consumed_and_never_re_resolved(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """THE SEAM both fixes rest on: an answer in hand means no resolution at all.
-
     The arms above assert OUTCOMES; this one asserts the property those outcomes
     depend on, and it reds if ``exempt_from_escalation`` starts resolving when it
     was handed a verdict -- the shape a later "optimisation" would take. The
@@ -1194,3 +1218,72 @@ def test_a_handed_in_verdict_is_consumed_and_never_re_resolved(
     with guard_area.exempt_from_escalation("read", {"path": "a/b.py"}, "."):
         assert source_is_exempt() is False
     assert calls == ["a/b.py"], "the no-verdict fallback stopped resolving"
+
+
+@pytest.mark.parametrize("via", ("native", "bridge"))
+@pytest.mark.asyncio
+async def test_a_retarget_between_dispatch_and_the_read_still_escalates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, via: str
+) -> None:
+    """R5 REGRESSION ARM. The gap is between the RECORD and the READER.
+
+    Rounds 3 and 4 moved the exemption's resolution earlier twice -- off the
+    redaction, then off the arguments -- and round 5 measured what was left: the
+    reader resolves the argument a SECOND time inside its own body, so a link moved
+    in *that* gap still handed the redaction an exemption for bytes taken from a
+    file the exemption does not cover (2 of 20 raced attempts in a real session,
+    and deterministically on both the native path and the eval bridge).
+
+    The mutation is injected exactly where the gap is: the link starts at the
+    exempt tree, the wrapper (the real ``read`` tool, entered unchanged otherwise)
+    retargets it to the decoy, and the real reader then resolves and opens the
+    decoy. The verdict must be the READER's own answer -- False, so the escalation
+    fires -- never one recorded before the reader ran.
+
+    Reds on the dispatch-time version of the fix, where the record answered True
+    for the exempt tree while the reader opened the decoy: the decoy's escalation
+    was cleared. Both routes are covered because the bridge dispatched its own
+    nested call and recorded the same thing at the same moment.
+    """
+    root, exempt_dir, relative = _link_layout(tmp_path, monkeypatch)
+    link = root / "lnk"
+    link.unlink()
+    link.symlink_to(exempt_dir)  # the link STARTS at the exempt tree
+    session = _session(tmp_path)
+    original_execute = builtin.execute_read
+
+    async def retarget_then_read(
+        tool_call_id: str,
+        args: dict[str, Any],
+        signal: Any = None,
+        on_update: Any = None,
+        context: Any = None,
+    ) -> ToolResult:
+        link.unlink()
+        link.symlink_to(root / "decoydir")
+        return await original_execute(tool_call_id, args, signal, on_update, context)
+
+    read_tool = AgentTool(
+        name="read",
+        parameters={
+            "type": "object",
+            "properties": {"path": {"type": "string"}, "raw": {"type": "boolean"}},
+        },
+        execute=retarget_then_read,
+    )
+    tools = [read_tool]
+    calls = [("c1", "read", json.dumps({"path": relative, "raw": True}))]
+    captured: list[str] = []
+    if via == "bridge":
+        tools = [_eval_tool(relative, captured), read_tool]
+        calls = [("c1", "eval", json.dumps({}))]
+
+    rows = await _drive_tools(session, tools, _BatchStream(calls), str(root))
+
+    # The bridge's OUTER row is the fixed shape-free one, so "the reader opened
+    # the decoy" is read from the nested text the fake eval captured there.
+    opened = captured[0] if via == "bridge" else (rows[0] if rows else "")
+    assert ATTACKER_BODY in opened, "the reader did not open the agent's file"
+    assert _escalation_flags(session) == [
+        True
+    ], f"{via}: a retarget between the record and the reader cleared the escalation"

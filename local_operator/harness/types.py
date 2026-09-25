@@ -1000,6 +1000,17 @@ class ToolContext(BaseModel):
     dispatch_tool: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None = Field(
         default=None, exclude=True, repr=False
     )
+    # The path a READER resolved, reported by the reader itself the instant it
+    # resolved it: ``(tool_call_id, resolved_path, resolvable)``. Installed by the
+    # loop for the duration of a call whose result will be redacted, and consumed
+    # by the guard-area exemption, which must not resolve the argument a second
+    # time at a second moment -- a symlink moved in between decided the verdict for
+    # bytes the reader had already taken from a file the exemption does not cover
+    # (PR #1502 rounds 3-5). ``None`` is the escalating direction: the guard then
+    # falls back to resolving for itself, and an unresolvable path is not exempt.
+    record_resolved_path: Callable[[str, str, bool], None] | None = Field(
+        default=None, exclude=True, repr=False
+    )
     session_id: str = ""
     # Human-readable title is display metadata only. Security-sensitive tools
     # must continue using ``session_id`` for identity and authorization.
