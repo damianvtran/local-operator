@@ -14,8 +14,15 @@ many consoles run, and a console that cannot take its slot spawns cold.
 WHAT IT REPORTS
 
 * ``consoles`` — how many warming consoles were started on the one root.
-* ``spares`` — live ``[standby]`` interpreters after all of them warmed.
-* ``spare_rss_mb`` — their total resident size.
+* ``spares`` — live spares that are CHILDREN of this run's consoles. The host-wide
+  count and the foreign remainder are reported beside it and are never the number
+  to quote: a sibling session's spare was counted as ours before agent review round
+  3 (M3-2), which turned an uncontaminated "2 spares" into "4 spares / 424 MB".
+* ``spare_footprint_mb_range`` — per-spare ``footprint(1)`` sampled before and
+  after the engages, reported as a range. NOT a sum of ``ps rss``: RSS is neither
+  additive across processes (they share mapped modules) nor stable within a run
+  (one spare measured 178.1 MB, then 65.9 MB two minutes later on a 161.5 MB
+  footprint).
 * per console — whether it held a slot, whether it got a ready spare, and then its
   own REAL engage (``AttachedSession.cold`` → ``bind_runtime``), so "the losers go
   cold" is a measurement rather than an inference from ``adopted: false``.
@@ -38,6 +45,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import statistics
 import subprocess
 import sys
@@ -69,10 +77,12 @@ _CONSOLE = textwrap.dedent("""
         won = True
     else:
         standby.enable_warming(root, daemon=(slot == standby.SLOT_DAEMON))
-        deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline and slot not in standby._SLOTS:
-            time.sleep(0.05)
-        won = slot in standby._SLOTS
+        # ASK, do not poll: the claim is idempotent for a slot this process already
+        # holds, so this answers "did I get the slot?" synchronously whatever the
+        # warming thread is doing — and it cannot be broken by the registry's key
+        # shape, which a ``slot in _SLOTS`` poll silently was when the key became
+        # ``(root, slot)`` (every console then reported slot_held=False).
+        won = bool(standby._take_slot(root, slot))
 
     warmed = False
     if won:
@@ -84,13 +94,21 @@ _CONSOLE = textwrap.dedent("""
                 break
             time.sleep(0.2)
     spare = standby._WARM[0]
-    out.write_text(json.dumps({
+
+    def _publish(path, payload):
+        # ATOMIC (QA round 3, Q4-4): a plain write lets a reader observe a
+        # half-written file, which crashed this bench in one of three N=5 runs.
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload))
+        os.replace(tmp, path)
+
+    _publish(out, {
         "pid": os.getpid(),
         "slot": slot,
         "slot_held": bool(won),
         "warmed": bool(warmed),
         "spare_pid": spare.proc.pid if spare is not None else None,
-    }))
+    })
 
     # Phase 2: the bench has counted the spares and says go.
     go = out.with_suffix(".go")
@@ -102,13 +120,58 @@ _CONSOLE = textwrap.dedent("""
     # ``adopted`` by the harness convention ``bench_standby_engage`` already uses:
     # the runtime that answered is THIS console's spare, not a fresh cold child.
     result["adopted"] = bool(spare is not None and result.get("runtime_pid") == spare.proc.pid)
-    (out.parent / (out.stem + ".engage.json")).write_text(json.dumps(result))
+    _publish(out.parent / (out.stem + ".engage.json"), result)
 """)
 
 
 #: The module a spare is exec'd as, so ``ps`` can be read without a rendezvous path
 #: (there is none — that is the R1-1 property).
 STANDBY_MODULE = "local_operator.session.runtime.standby"
+
+#: The module a runtime runs as (cold or adopted). Only the cleanup needs it: it is
+#: what keeps the root from being written while this script removes it.
+RUNTIME_MODULE = "local_operator.session.runtime.process"
+
+
+def _read_report(path: Path, wait_s: float = 120.0) -> dict[str, Any] | None:
+    """A report JSON, or ``None`` if it never became readable.
+
+    Tolerant on purpose (QA round 3, Q4-4): the writers publish atomically now, and
+    this side still does not assume it — a ``JSONDecodeError`` here used to abort a
+    whole run on a file that was one ``os.replace`` from being complete.
+    """
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        if path.exists():
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                time.sleep(0.2)
+                continue
+            if isinstance(loaded, dict):
+                return loaded
+        time.sleep(0.25)
+    return None
+
+
+def _runtime_processes() -> list[tuple[int, int, float, str]]:
+    """Live RUNTIME children (``-m ...runtime.process``), for the cleanup only.
+
+    An engage spawns one, and a runtime still writing into the root is what made
+    ``rmtree`` fail (QA round 3, Q4-3).
+    """
+    out = subprocess.run(
+        ["ps", "-eo", "pid=,ppid=,rss=,command="], capture_output=True, text=True
+    ).stdout
+    found: list[tuple[int, int, float, str]] = []
+    for line in out.splitlines():
+        fields = line.split(None, 3)
+        if len(fields) < 4:
+            continue
+        pid, ppid, rss, command = fields
+        if f"-m {RUNTIME_MODULE}" in command:
+            found.append((int(pid), int(ppid), round(int(rss) / 1024, 1), _tail(command)))
+    return found
 
 
 def _spare_processes() -> list[tuple[int, int, float, str]]:
@@ -133,6 +196,46 @@ def _spare_processes() -> list[tuple[int, int, float, str]]:
         if f"-m {STANDBY_MODULE}" in command:
             found.append((int(pid), int(ppid), round(int(rss) / 1024, 1), _tail(command)))
     return found
+
+
+def _footprint_mb(pid: int) -> float | None:
+    """macOS ``footprint(1)`` for one pid, in MB — the honest per-process figure.
+
+    WHY NOT THE SUM OF ``ps rss``: RSS is not additive across processes (they share
+    the runtime's mapped modules) and it is not even stable within one run — the
+    round-3 review measured one spare at 178.1 MB and then 65.9 MB two minutes
+    later on a 161.5 MB footprint. So the per-spare footprint is sampled and
+    reported as a RANGE, and no total is presented as the cost.
+    """
+    try:
+        out = subprocess.run(["footprint", str(pid)], capture_output=True, text=True, timeout=25)
+    except subprocess.TimeoutExpired:
+        # LOUD, not silent (QA round 3, Q4-2): ``footprint`` walks a process's
+        # mappings and can exceed its bound on a loaded host, which returned None in
+        # three of four runs and read as "no data" with no reason given.
+        print(f"    (footprint for {pid} timed out after 25 s; no footprint reported)", flush=True)
+        return None
+    except (OSError, subprocess.SubprocessError) as error:
+        print(f"    (footprint for {pid} failed: {error})", flush=True)
+        return None
+    if out.returncode != 0:
+        detail = (out.stderr or "").strip().splitlines()
+        print(
+            f"    (footprint for {pid} exited {out.returncode}: "
+            f"{detail[0] if detail else 'no stderr'})",
+            flush=True,
+        )
+        return None
+    for line in out.stdout.splitlines():
+        at = line.find("Footprint:")
+        if at >= 0:
+            parts = line[at:].split()
+            for index, word in enumerate(parts):
+                if word.endswith("KB") and index and parts[index - 1].replace(",", "").isdigit():
+                    return round(int(parts[index - 1].replace(",", "")) / 1024, 1)
+                if word.endswith("MB") and index and parts[index - 1].replace(",", "").isdigit():
+                    return round(float(parts[index - 1].replace(",", "")), 1)
+    return None
 
 
 def _tail(command: str) -> str:
@@ -167,6 +270,7 @@ def _one_run(consoles: int, mode: str, warm_wait: float) -> dict[str, Any]:
     else:
         slots = (["daemon"] + ["tui"] * consoles)[:consoles]
     procs: list[subprocess.Popen[bytes]] = []
+    row: dict[str, Any] | None = None
     try:
         for index, slot in enumerate(slots):
             report = out_dir / f"console-{index}.json"
@@ -193,38 +297,40 @@ def _one_run(consoles: int, mode: str, warm_wait: float) -> dict[str, Any]:
                 )
             )
         reports = []
-        deadline = time.monotonic() + warm_wait + 120.0
         for index in range(len(slots)):
-            path = out_dir / f"console-{index}.json"
-            while not path.exists() and time.monotonic() < deadline:
-                time.sleep(0.25)
-            assert path.exists(), f"console {index} never reported"
-            reports.append(json.loads(path.read_text()))
+            report = _read_report(out_dir / f"console-{index}.json", warm_wait + 120.0)
+            assert report is not None, f"console {index} never reported a readable report"
+            reports.append(report)
         spares = _spare_processes()
         console_pids = {proc.pid for proc in procs}
+        # ATTRIBUTED before anything is reported (agent review round 3, M3-2): the
+        # headline used to be every ``-m ...standby`` process on the machine, so one
+        # sibling session's spare turned an uncontaminated "2 spares" into "4
+        # spares / 424 MB". Only this run's consoles' children are ours.
+        mine = [item for item in spares if item[1] in console_pids]
+        foreign = [item for item in spares if item[1] not in console_pids]
         # Phase 2: everyone engages now that the count is known.
         for index in range(len(slots)):
             (out_dir / f"console-{index}.go").write_text("go")
-        engages = []
-        deadline = time.monotonic() + 600.0
-        for index in range(len(slots)):
-            path = out_dir / f"console-{index}.engage.json"
-            while not path.exists() and time.monotonic() < deadline:
-                time.sleep(0.25)
-            engages.append(json.loads(path.read_text()) if path.exists() else None)
+        engages = [
+            _read_report(out_dir / f"console-{index}.engage.json", 600.0)
+            for index in range(len(slots))
+        ]
+        before = [
+            {"pid": pid, "rss_mb": rss, "footprint_mb": _footprint_mb(pid)}
+            for pid, _ppid, rss, _tail in mine
+        ]
         row = {
             "consoles": len(slots),
             "mode": mode,
-            "spares": len(spares),
-            # Attributed, not just counted: a spare is this root's if it is a child
-            # of a console this run started (a replacement after an engage is the
-            # same slot's spare, which is why the count can exceed the slot count
-            # without the cap being broken).
-            "spares_of_this_run": sum(1 for item in spares if item[1] in console_pids),
-            "spare_rss_mb": round(sum(item[2] for item in spares), 1),
-            "spare_details": [
-                {"pid": pid, "ppid": ppid, "rss_mb": rss, "mine": ppid in console_pids}
-                for pid, ppid, rss, _tail in spares
+            # THE HEADLINE IS THIS RUN'S. ``host_wide_spares`` is kept for the
+            # contamination check and is never the number to quote.
+            "spares": len(mine),
+            "host_wide_spares": len(spares),
+            "foreign_spares": len(foreign),
+            "spares_of_this_run": len(mine),
+            "spare_footprint_mb": [
+                {"pid": sample["pid"], "footprint_mb": sample["footprint_mb"]} for sample in before
             ],
             "load1": round(os.getloadavg()[0], 1),
             "per_console": [
@@ -238,6 +344,21 @@ def _one_run(consoles: int, mode: str, warm_wait: float) -> dict[str, Any]:
                 for report, engage in zip(reports, engages)
             ],
         }
+        # Sampled AGAIN after the engages: a spare's footprint shrinks once its
+        # imports settle, which is why the range is reported and not one reading.
+        after = [
+            {"pid": pid, "rss_mb": rss, "footprint_mb": _footprint_mb(pid)}
+            for pid, _ppid, rss, _tail in _spare_processes()
+            if _ppid in console_pids
+        ]
+        row["spare_samples"] = {"before": before, "after": after}
+        footprints = [
+            sample["footprint_mb"]
+            for sample in before + after
+            if sample.get("footprint_mb") is not None
+        ]
+        if footprints:
+            row["spare_footprint_mb_range"] = [min(footprints), max(footprints)]
         adopted = [c["bind_ms"] for c in row["per_console"] if c["adopted"]]
         cold = [c["bind_ms"] for c in row["per_console"] if c["adopted"] is False]
         if adopted:
@@ -246,17 +367,48 @@ def _one_run(consoles: int, mode: str, warm_wait: float) -> dict[str, Any]:
             row["cold_bind_ms_median"] = round(statistics.median(cold), 1)
         return row
     finally:
-        for proc in procs:
-            if proc.poll() is None:
-                proc.kill()
-                proc.wait(timeout=30)
-        for pid, _ppid, _rss, _tail in _spare_processes():
-            # Only the spares whose parent we started; never by name.
-            if any(proc.pid == _ppid for proc in procs):
+        # CHILDREN FIRST, WHILE THEIR PARENTS ARE STILL ALIVE (QA round 3, Q4-3).
+        # Phase 2's engages spawn real runtimes (``-m ...runtime.process``) as
+        # children of the consoles, and killing the consoles first orphans them: a
+        # runtime still writing into the root made ``rmtree`` fail ENOTEMPTY, and
+        # ``ignore_errors=True`` hid it — measured as 6 of 8 runs leaving the root
+        # behind even after the first attempt at this fix. So: collect the children
+        # (runtimes and spares) attributable to THIS run's consoles, kill those, then
+        # the consoles, sweep once more for a kill that raced a fork, remove the root,
+        # and CHECK that it is gone.
+        console_pids = {proc.pid for proc in procs}
+        for _pass in range(2):
+            ours = [
+                item
+                for item in _runtime_processes() + _spare_processes()
+                if item[1] in console_pids
+            ]
+            if not ours:
+                break
+            for pid, _ppid, _rss, _tail in ours:
                 try:
                     os.kill(pid, 9)
                 except OSError:
                     pass
+            if _pass == 0:
+                for proc in procs:
+                    if proc.poll() is None:
+                        proc.kill()
+                        proc.wait(timeout=30)
+        shutil.rmtree(base, ignore_errors=True)
+        # NOT silence: the removal is part of what this script claims to do, so a
+        # survivor is printed and recorded rather than swallowed by ``ignore_errors``.
+        root_removed = not base.exists()
+        if row is not None:
+            # In the artefact as well as the log: "this script removes its root" is a
+            # claim, and a claim that only prints when it fails is not checkable.
+            row["root_removed"] = root_removed
+        if not root_removed:
+            print(
+                f"  WARNING: {base} was not removed; still present: "
+                f"{[str(item) for item in sorted(base.rglob('*'))[:5]]}",
+                flush=True,
+            )
 
 
 def main() -> int:
@@ -274,7 +426,8 @@ def main() -> int:
     row.update(label=args.label, tree=tree)
     print(
         f"  consoles={row['consoles']} mode={row['mode']} spares={row['spares']} "
-        f"spare_rss_mb={row['spare_rss_mb']} load1={row['load1']}"
+        f"(host-wide {row['host_wide_spares']}, foreign {row['foreign_spares']}) "
+        f"footprint_mb={row.get('spare_footprint_mb_range')} load1={row['load1']}"
     )
     for console in row["per_console"]:
         print(

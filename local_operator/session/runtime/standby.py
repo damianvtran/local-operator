@@ -139,21 +139,26 @@ WHAT IT IS NOT — THE OPERATOR'S CONSTRAINTS, AND HOW EACH IS HELD
     private descriptor to a child of exactly one console (that is the R1-1 fix),
     so serving another console's engage would need a rendezvous between two
     same-uid processes — and any path one of them can bind is a path an impostor
-    can bind first, which is the escalation R1-1 proved. Same-uid peers cannot
-    authenticate each other at all (pid, ``argv``, environment and any token in
-    the root are equally readable), so the honest answer is a cap: an ``flock``
+    can bind first: the impostor then receives a real console's operator
+    capability, which is the escalation R1-1 proved. The narrow reason is worth
+    stating exactly, because the broad version of it is FALSE and this codebase
+    contradicts it: same-uid peers CAN be authenticated — ``secrets/peer.py`` does
+    it with the kernel's own attestation — but that names the peer to a SERVER. It
+    gives a CLIENT nothing to compare a candidate server against, and the console
+    is the client here, so it cannot tell a real warmer from an impostor. There is
+    no code-identity check available either (both are the same interpreter), and
+    privilege separation would be a redesign. So the count is capped: an ``flock``
     slot per root, kernel-released on death, holding TWO slots at most for the
     whole machine — the daemon's (a singleton, and the desktop surface must not
     lose its spare to whichever TUI started first) and one shared by every other
     console. A console that cannot take its slot spawns cold every time; that is
-    the trade, and it is what turns ~20 spares at ~145 MB each into two.
+    the trade, and it is what turns ~20 spares at ~136 MB each into two.
 
     A CONSEQUENCE FOR THE CONSTRAINTS ABOVE: the desktop app's ``lop serve``
-    daemon keeps its own spare; every TUI on the root shares the other, so only
-    the first one to warm gets the win and the rest spawn cold while it is held.
-    conversations warms its own, which is a real per-console memory charge
-    (~145 MB each, measured with three consoles on one root) — the price of the
-    capability never reaching a process this console did not start.
+    daemon keeps its own spare, and every TUI on the root shares the other, so
+    only the first TUI to warm gets the win and the rest spawn cold while it is
+    held. That is a per-console cost too — a time cost rather than a memory one —
+    and the body's cap section measures it rather than implying it.
 
 RIG NOTE (agent review round 1, R1-6, and it is now structural rather than a
 policy): a rig never leaves a standby behind, because a standby's life is tied
@@ -360,8 +365,18 @@ SLOT_DAEMON = "daemon"
 #: The slot every OTHER console on the root shares.
 SLOT_TUI = "tui"
 
-#: slotted -> the lock descriptor this process holds, for its lifetime.
-_SLOTS: dict[str, int] = {}
+#: ``(root, slot)`` -> the lock descriptor this process holds, for its lifetime.
+#: Keyed by ROOT as well as slot because the invariant is per root (agent review
+#: round 3, m3-1): an isolated-root session must never hold or miss the operator's
+#: slot, and the key carrying only the slot was right by accident — one process
+#: never held two roots' slots at once solely because ``ensure_warm`` refuses a
+#: root that is not ``config_dir()``.
+_SLOTS: dict[tuple[str, str], int] = {}
+
+#: Serialises the check-then-set on ``_SLOTS`` (round 3, n3-2). Its own lock, not
+#: ``_LOCK``: ``_take_slot`` does file I/O while holding it, and ``_LOCK`` is the
+#: engage path's critical section.
+_SLOT_LOCK = threading.Lock()
 
 #: This process's slot, set once by :func:`enable_warming`.
 _ROLE: list[str] = [SLOT_TUI]
@@ -553,14 +568,20 @@ def ensure_warm(root: Path, interpreter: str, slot: str | None = None) -> None:
         # which is the price this PR trades for a bounded memory ceiling.
         if not _take_slot(Path(root), slot):
             return
-        with _LOCK:
-            current = _WARM[0]
-            if current is not None and current.alive():
-                return
-            if current is not None:
-                current.close()
-            _WARM[0] = _spawn_standby(Path(root), interpreter, slot)
-            fresh = _WARM[0]
+        try:
+            with _LOCK:
+                current = _WARM[0]
+                if current is not None and current.alive():
+                    return
+                if current is not None:
+                    current.close()
+                _WARM[0] = _spawn_standby(Path(root), interpreter, slot)
+                fresh = _WARM[0]
+        except BaseException:
+            # The claim came first, so it goes back: a slot held by a console with
+            # no spare is a win nobody gets, and nothing else releases it (m3-2).
+            _release_slot(Path(root), slot)
+            raise
         # OUTSIDE the lock: the monitor immediately blocks in ``proc.wait()`` and
         # only takes the lock if the child leaves without being adopted.
         _start_monitor(fresh)
@@ -573,16 +594,21 @@ def _take_slot(root: Path, slot: str) -> bool:
 
     ONE ADOPTABLE SPARE IS NOT POSSIBLE, WHICH IS WHY THIS IS A CAP INSTEAD
     (agent review round 3, after `d2 <https://github.com/damianvtran/local-operator/pull/1538>`_
-    measured three consoles on one root warming three spares at ~145 MB each).
+    measured three consoles on one root warming three spares at ~136 MB each).
     A spare is a private descriptor to a child of exactly one console — that is
     the R1-1 fix, and the capability reaches no process that console did not fork.
     Making one spare adoptable by the OTHER consoles on the root therefore needs a
     rendezvous between two same-uid processes, and a path any same-uid process can
-    bind is a path an impostor can bind first: it would receive a real console's
-    operator capability, which is exactly the escalation R1-1 proved. Same-uid
-    peers cannot authenticate each other by pid, ``argv``, environment or a token
-    in the root (all of them are as readable as the root is), so the honest answer
-    is to BOUND the count rather than share one.
+    bind is a path an impostor can bind first: the impostor then receives a real
+    console's operator capability, which is the escalation R1-1 proved. The narrow
+    reason is worth stating exactly, because the broad version of it is FALSE and
+    this codebase contradicts it: same-uid peers CAN be authenticated —
+    ``secrets/peer.py`` does it with the kernel's own attestation — but that names
+    the peer to a SERVER. It gives a CLIENT nothing to compare a candidate server
+    against, and the console is the client here, so it cannot tell a real warmer
+    from an impostor. There is no code-identity check available either (both are
+    the same interpreter), and privilege separation would be a redesign. So the
+    count is capped instead.
 
     ``flock`` and not a pid file: the kernel releases the lock when the holding
     process dies, so a crash or a ``kill -9`` cannot leave a root permanently
@@ -590,47 +616,83 @@ def _take_slot(root: Path, slot: str) -> bool:
     ``O_CLOEXEC`` so the spare's own child cannot hold the slot its parent's death
     should free. Never raises: a console that cannot take a slot simply spawns
     cold, which is the behaviour this whole module already degrades to.
+
+    IT FAILS CLOSED (round 3, M3-1). The first version returned ``True`` on any
+    ``OSError``, and the reviewer reproduced what that means: with
+    ``chmod 0o500 root/run`` two consoles on one root both warmed, neither held a
+    lock, and the cap silently stopped applying on exactly the roots that are
+    under pressure (a read-only home, ``ENOSPC`` — this host hit 100% twice in a
+    day — ``EMFILE``). A cap that disappears when the disk is full is not a cap.
     """
-    if slot in _SLOTS:
+    key = (str(root), slot)
+    with _SLOT_LOCK:
+        if key in _SLOTS:
+            return True
+        try:
+            import fcntl
+
+            directory = root / "run"
+            directory.mkdir(parents=True, exist_ok=True)
+            descriptor = os.open(
+                str(directory / f"standby-{slot}.lock"),
+                os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+            )
+        except (ImportError, OSError):
+            # Cold, not uncapped. "Cannot express the cap here" and "do not warm
+            # here" are the same answer; the ImportError arm is unreachable anyway
+            # (no fcntl implies a non-POSIX platform, where ``disabled`` has
+            # already stopped warming), so both are answered the same way.
+            logger.warning(
+                "no standby slot available for %s on %s; this console will spawn cold",
+                slot,
+                root,
+                exc_info=True,
+            )
+            return False
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(descriptor)
+            logger.info(
+                "this root's %s standby slot is held by another console; "
+                "engages here will spawn cold (%s)",
+                slot,
+                root,
+            )
+            return False
+        _SLOTS[key] = descriptor
         return True
-    try:
-        import fcntl
-
-        directory = root / "run"
-        directory.mkdir(parents=True, exist_ok=True)
-        descriptor = os.open(
-            str(directory / f"standby-{slot}.lock"),
-            os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0),
-            0o600,
-        )
-    except (ImportError, OSError):
-        # No fcntl is a platform where ``pass_fds`` does not exist either (see
-        # ``disabled``), so warming is already off and there is nothing to cap.
-        logger.debug("could not open a standby slot for %s", root, exc_info=True)
-        return True
-    try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        os.close(descriptor)
-        logger.info(
-            "this root's %s standby slot is held by another console; "
-            "engages here will spawn cold (%s)",
-            slot,
-            root,
-        )
-        return False
-    _SLOTS[slot] = descriptor
-    return True
 
 
-def _release_slots() -> None:
-    """Give up every slot this process holds. Tests only; exit releases them anyway."""
-    for descriptor in _SLOTS.values():
+def _release_slot(root: Path, slot: str) -> None:
+    """Give up this root's slot — a claim that produced no spare is a wasted slot.
+
+    Called when the spawn itself fails (round 3, m3-2). The claim is taken BEFORE
+    the fork, so a console that claims and then cannot warm would hold the root's
+    only slot with nothing to offer, for the life of the process: ``_SLOTS`` is per
+    process and nothing else ever releases it. With this, the count is "at most one
+    spare per slot, and exactly one holder" — which is what the prose says.
+    """
+    with _SLOT_LOCK:
+        descriptor = _SLOTS.pop((str(root), slot), None)
+    if descriptor is not None:
         try:
             os.close(descriptor)
         except OSError:
             pass
-    _SLOTS.clear()
+
+
+def _release_slots() -> None:
+    """Give up every slot this process holds. Tests only; exit releases them anyway."""
+    with _SLOT_LOCK:
+        descriptors = list(_SLOTS.values())
+        _SLOTS.clear()
+    for descriptor in descriptors:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
 
 
 def _spawn_standby(root: Path, interpreter: str, slot: str = SLOT_TUI) -> "_Standby":
