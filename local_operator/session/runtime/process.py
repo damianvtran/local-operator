@@ -57,6 +57,7 @@ is the one an unnamed outside sweep can actually reach.
 from __future__ import annotations
 
 import asyncio
+import faulthandler
 import inspect
 import logging
 import os
@@ -2841,6 +2842,34 @@ def _drain_loaded_label(runtime: object) -> str:
     return boot.label() if boot is not None else "<unknown>"
 
 
+def _ask_store_maintenance_to_stop() -> None:
+    """Ask this process's store-maintenance walk to leave at its next directory.
+
+    THE PRODUCTION SETTER for the walk's stop event, called from
+    :func:`_commit_to_leaving` — the one place a departure is committed to — so
+    the request is the departure's own act rather than a re-badged test seam.
+    The walk is a daemon thread no production path joins, so this can neither
+    block nor fail a departure; what it changes is that a pass which would
+    otherwise run to completion (3-7 minutes over a large store) leaves within
+    one directory of its own work, which is what stops a runtime that has
+    decided to leave from holding the disk — and, if it is unlucky enough to sit
+    in the shared executor, the exit — while it does.
+
+    Imported HERE rather than at module scope because ``session_factory`` is the
+    session-construction module and this one is the runtime's entry point: the
+    entry path pays for it only on an actual departure, and never on boot. A
+    failure is swallowed: a departure is not the place to discover that
+    housekeeping is unreachable, and the cost of losing this is only that the
+    walk finishes the pass it was already running.
+    """
+    try:
+        from local_operator.session_factory import request_store_maintenance_stop
+
+        request_store_maintenance_stop()
+    except Exception:  # noqa: BLE001 — a departure must not be failed by housekeeping
+        logger.debug("could not ask store maintenance to stop", exc_info=True)
+
+
 async def _commit_to_leaving(
     handle: object,
     runtime: object,
@@ -2988,6 +3017,14 @@ async def _commit_to_leaving(
         return None
     if not latched:
         return None
+    # THE WALK IS ASKED TO STOP HERE, on the same commit that stopped admitting
+    # work, and for the same reason: from this instant nothing new is served, so
+    # every directory a store pass still walks is work done for a runtime that is
+    # already gone. It is asked AFTER the latch because the latch is the commit —
+    # a request sent before it could stop a walk that a runtime which then failed
+    # to latch would still need. Fire and forget: the walk answers between
+    # directories, and this path never waits for it.
+    _ask_store_maintenance_to_stop()
     return _Drain(
         detail=detail,
         to=to,
@@ -4723,15 +4760,138 @@ async def amain(operator_cap: bytes | None = None) -> int:
     return 0
 
 
+#: The fraction of the configured stall bound this teardown gives the SHARED
+#: default executor's join, before it stops waiting and names the workers it is
+#: waiting on.
+#:
+#: THE TWO NUMBERS ARE THE SAME NUMBER TODAY, which is the whole reason this is
+#: spelled out rather than left alone: ``asyncio.Runner.close`` joins the
+#: executor with CPython's own ``THREAD_JOIN_TIMEOUT`` (300 s) and
+#: :data:`stall_watchdog.DEFAULT_STALL_S` is also 300 s, so a runtime that
+#: decided to leave while an executor worker was still inside a store walk hung
+#: in that join and was described by the ONE diagnostic that can name neither
+#: the join nor the worker — the stall bound's dump, on a process that had
+#: finished its turn (43 of the 182 retained dumps on this host, 24%, had the
+#: main thread inside ``Runner.close``). Half is the ratio because it has to hold
+#: for every bound an operator can set, not just the default: at 300 s the
+#: occupants are named at 150 s, and at the 45 s floor at 22.5 s — still well
+#: above any legitimate off-loop call left in flight once a runtime has finished
+#: its own work.
+_TEARDOWN_EXECUTOR_JOIN_FRACTION = 0.5
+
+
+def _teardown_executor_join_bound_s() -> float:
+    """Seconds this teardown gives the shared executor to join before reporting.
+
+    Derived from the bound the STALL TIMER will actually use
+    (:func:`stall_watchdog.bound_seconds`) rather than from a constant of its
+    own, so the report is strictly earlier than the fire on every host: an
+    operator who tightens the watchdog tightens the number this has to beat, and
+    one who switches it off (``0``/``off``) leaves no timer to beat at all — the
+    fallback is then :data:`stall_watchdog.DEFAULT_STALL_S`, because the report
+    should still have a deadline of its own.
+    """
+    bound = stall_watchdog.bound_seconds()
+    if bound is None:
+        bound = stall_watchdog.DEFAULT_STALL_S
+    return max(1.0, bound * _TEARDOWN_EXECUTOR_JOIN_FRACTION)
+
+
+def _report_stuck_executor_workers(bound_s: float) -> None:
+    """Name the workers that outlived the bounded join, and dump every thread.
+
+    WHAT THIS IS FOR. A worker stopped in the kernel cannot be reclaimed by
+    anything, and the interpreter's own exit joins non-daemon threads whatever
+    this code does — so the reading here is not "the process will now leave". It
+    is WHO is holding it, taken while the runtime can still say so, so that the
+    next launch of the same pool — or the operator reading the log — has a name
+    instead of a silent 300 seconds.
+
+    The dump goes to STDERR, which for a spawned runtime is the capture file its
+    parent opened (``launch._spawn_runtime`` folds the child's stderr into it),
+    i.e. the log an operator already reads. Deliberately NOT the stall
+    watchdog's own dump file: that reader keys on a ``FIRED_MARKER`` header and
+    has no settledness claim, so a block written by another producer could be
+    read as one of its own hangs.
+    """
+    logger.warning(
+        "runtime teardown: the shared default executor did not join within %.0fs of this "
+        "runtime finishing its work; every thread is dumped below so the worker holding "
+        "this process is named here rather than by the stall bound (pid %d)",
+        bound_s,
+        os.getpid(),
+    )
+    faulthandler.dump_traceback(all_threads=True)
+
+
+async def _join_default_executor(loop: asyncio.AbstractEventLoop, bound_s: float) -> None:
+    """Await the shared executor's join, reporting instead of hanging past ``bound_s``.
+
+    The standard library's ``shutdown_default_executor`` accepts its own timeout
+    and SWALLOWS the expiry — it warns and abandons the wait — which is the
+    recovery needed but not the observation: the wait is bounded here instead,
+    so an expiry is ours to see and name rather than a warning nobody reads.
+    """
+    try:
+        async with asyncio.timeout(bound_s):
+            await loop.shutdown_default_executor()
+    except TimeoutError:
+        _report_stuck_executor_workers(bound_s)
+
+
+def _teardown_loop(runner: asyncio.Runner) -> None:
+    """Close a runner's loop, bounding the join on the shared default executor.
+
+    WHY THIS IS WRITTEN OUT rather than left to ``runner.close()``: the standard
+    library closes a loop in four steps — cancel the tasks still pending, close
+    the async generators, JOIN THE DEFAULT EXECUTOR, close the loop — and the
+    join is the only one that can lose minutes, because it is
+    ``ThreadPoolExecutor.shutdown(wait=True)`` reached through ``asyncio``'s own
+    ``_do_shutdown`` thread (confirmed from a fault-handler traceback of the
+    real hang). ``Runner.close`` passes CPython's constant and takes no argument
+    for it, and that constant is the same 300 s the stall bound uses; the bound
+    has to be one this process chooses, so the step is performed here. The other
+    three steps are the standard library's, restated against the public API
+    (``all_tasks``/``gather``/``shutdown_asyncgens``/``close``), so nothing here
+    depends on a private name.
+
+    NO WORK IS DROPPED, AND THE BOUND IS NOT A BOUND ON THE PROCESS. Expiry
+    abandons the WAIT, never the work: the pool is told to stop with
+    ``wait=False``, which cancels nothing already queued or running, the queued
+    callables still execute, and the interpreter's own exit still joins the
+    non-daemon worker. Measured on this failure shape (a worker parked in a FIFO
+    read with no writer): the join expired at its bound, the loop closed, and the
+    process was still alive afterwards, exiting only when the worker returned.
+    What changes is that the operator gets the early NAMED reading in
+    :func:`_report_stuck_executor_workers` instead of the anonymous wedge the
+    stall bound reports, which is why this is a diagnostic and not a fix.
+    """
+    loop = runner.get_loop()
+    try:
+        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.run_until_complete(_join_default_executor(loop, _teardown_executor_join_bound_s()))
+    finally:
+        # The last step of the standard library's own teardown, and it is what
+        # makes an abandoned join land where an expired one does: ``close``
+        # shuts the default executor down with ``wait=False`` itself, so no
+        # private access is needed to leave the pool stopped-and-not-joined.
+        loop.close()
+
+
 async def _run_amain(operator_cap: bytes | None) -> int:
     """Run ``amain`` and annotate the dump when the asyncio runner starts tearing down.
 
     THE WHOLE OF FINDING D (2026-09-23 convergence round) IS THE ``finally`` BELOW, and
-    its position is the mechanism rather than a style choice. ``asyncio.run`` constructs
+    its position is the mechanism rather than a style choice. ``main`` constructs
     a ``Runner``, runs this coroutine, and only THEN tears the runner down: it cancels
     the remaining tasks, runs async-generator shutdown and joins the default executor
-    (``shutdown_default_executor`` -> ``_do_shutdown`` -> ``Thread.join``, bounded by
-    ``asyncio.constants.THREAD_JOIN_TIMEOUT``). Those phases run OUTSIDE this coroutine,
+    (``shutdown_default_executor`` -> ``_do_shutdown`` -> ``Thread.join``, under this
+    branch's own bound, not CPython's). Those phases run OUTSIDE this coroutine,
     so the ``finally`` is the last moment a Python thread of ours is alive to say which
     phase the process has entered — and it is exactly the phase the operator's store
     kept losing: 17-27 dumps whose loop sits in asyncio shutdown with the death
@@ -4821,16 +4981,31 @@ def main() -> int:
     # runtime child, so a reader has to be able to attribute a line to the
     # process that wrote it.
     logger.info("session runtime started: pid %d", os.getpid())
+    # THE TEARDOWN IS EXPLICIT so that its executor join can be bounded and, when
+    # the bound expires, DIAGNOSED (:func:`_teardown_loop`, reached from the
+    # ``finally`` below). ``asyncio.run`` is the implicit form of the same four
+    # steps, with CPython's 300-second constant on the join — the same number as
+    # :data:`stall_watchdog.DEFAULT_STALL_S`, which is exactly how a departing
+    # runtime came to be reported by the stall bound instead of by its own
+    # teardown.
+    runner = asyncio.Runner()
     try:
         # THROUGH THE WRAPPER, NEVER ``amain`` DIRECTLY: the wrapper's ``finally`` is what
         # annotates the dump with the runner's own teardown phase, and it has to run
-        # BEFORE ``asyncio.run`` starts that teardown. Calling ``amain`` here would put
+        # BEFORE ``_teardown_loop`` starts that teardown. Calling ``amain`` here would put
         # the note after the join it exists to explain — or, on the path where the join
         # never returns, never write it at all. See :func:`_run_amain`.
-        return asyncio.run(_run_amain(operator_cap=operator_cap))
+        return runner.run(_run_amain(operator_cap=operator_cap))
     except KeyboardInterrupt:
         return 0
     finally:
+        # THE LOOP IS CLOSED WHILE THE BOUND IS STILL ARMED, which is the order
+        # ``asyncio.run`` left behind and is kept deliberately: the teardown's own
+        # join bound is strictly below this one (see
+        # :func:`_teardown_executor_join_bound_s`), so the join now reports and
+        # gives up well BEFORE the timer would, and a wedge anywhere else in the
+        # teardown still gets the dump-only fire it gets today.
+        _teardown_loop(runner)
         # A clean exit cancels the bound and writes its own outcome over the
         # header — the file STAYS, because the evidence is its content (the
         # fired marker), never its existence: a SIGKILL leaves the same file an
