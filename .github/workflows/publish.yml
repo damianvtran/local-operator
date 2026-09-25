@@ -265,10 +265,11 @@ jobs:
           # why it must be appended.
           KEYCHAIN="$RUNNER_TEMP/keyagent.keychain-db"
           KPW="$(uuidgen)"   # random, throwaway, and never a stored secret
-          {
-            echo "KEYCHAIN=$KEYCHAIN"
-            echo "KEYCHAIN_PW=$KPW"
-          } >> "$GITHUB_ENV"
+          # Only KEYCHAIN is exported, for the later steps that use it. The keychain
+          # password stays a shell variable: nothing outside this step reads it, and
+          # $GITHUB_ENV values are echoed verbatim into the job's public log, so
+          # exporting it printed a live (if throwaway) credential for no purpose.
+          echo "KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
           security create-keychain -p "$KPW" "$KEYCHAIN"
           security set-keychain-settings -lut 3600 "$KEYCHAIN"
           security unlock-keychain -p "$KPW" "$KEYCHAIN"
