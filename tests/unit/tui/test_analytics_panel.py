@@ -29,6 +29,7 @@ from local_operator.tui.widgets.analytics_panel import (
     METRIC_COST,
     METRIC_TOKENS,
     AnalyticsScreen,
+    ReportLayout,
     _forest_labels,
     _forest_rows,
     _row_overhead,
@@ -43,7 +44,6 @@ from local_operator.tui.widgets.analytics_panel import (
     proportion_bar,
     rate_legend,
     scope_needs_rate_legend,
-    ReportLayout,
 )
 from local_operator.tui.widgets.tool_card import truncate_cells
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
