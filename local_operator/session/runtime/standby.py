@@ -632,8 +632,12 @@ SUPERVISOR_TICK_S = 0.25
 #: Spares each console keeps in hand, per slot. The daemon keeps TWO: its spare is
 #: the desktop first-send budget, and a second new chat must not land in the
 #: replacement's warm window (measured: a send racing the replacement warm paid
-#: 2688-3119 ms). It is this module's one memory trade, +~130 MB (median spare
-#: RSS) while the second spare lives. Every other console keeps one.
+#: 2688-3119 ms). What depth 2 covers is exactly THE SECOND chat: four
+#: back-to-back new chats measured 3 adopted / 1 cold at depth 2 against 2/4 at
+#: depth 1, so a third send in rapid succession can still race both refills —
+#: that residue belongs to the desktop draft pre-engage, not to more spares
+#: (agent review round 1, Q3). It is this module's one memory trade, +~130 MB
+#: (median spare RSS) while the second spare lives. Every other console keeps one.
 DAEMON_SPARE_DEPTH = 2
 TUI_SPARE_DEPTH = 1
 
