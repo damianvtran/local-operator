@@ -98,7 +98,7 @@ RULES: tuple[Rule, ...] = (
         why=(
             "The incident's Case A. `echo`, `printf`, `cat`, `tee`, `sed`, "
             "`base64`, `rev` and their class write their operands to stdout, and "
-            "stdout of this command IS the tool result, so the value lands in "
+            "stdout of this command is the tool result, so the value lands in "
             "the transcript, which is the model's context, and the only cure is "
             "a rotation. The rule keys on the flow (a source or a variable "
             "holding one, as an operand), not on the value, so re-spelling the "
@@ -211,7 +211,7 @@ RULES: tuple[Rule, ...] = (
             "pipe later, and the filtered spelling is the shape the incident's "
             "second half used. A pipeline's last stage writes to this result, so "
             "the value is refused whether it reached that stage verbatim or "
-            "transformed; the transform only decides whether the OUTPUT filter "
+            "transformed; the transform only decides whether the output filter "
             "would have recognised it, and the output filter is not the control."
         ),
         rewrite=(
@@ -256,7 +256,7 @@ RULES: tuple[Rule, ...] = (
         question="Does the value stop at a length or digest sink?",
         why=(
             "A length reveals nothing — `handlers._set` prints `len(value)` "
-            "deliberately — and a digest is one-way, so a pipeline that ENDS in "
+            "deliberately — and a digest is one-way, so a pipeline that ends in "
             "`wc` or the shasum family is a use, not a print. The list is kept "
             "tight on purpose: a hash is fine, but `cmp -l` and `diff` are not, "
             "because their output contains bytes of the subject."
@@ -290,7 +290,7 @@ RULES: tuple[Rule, ...] = (
             "for as long as nothing reads it: the read is what turns the file "
             "into a transcript entry. Both halves are refused here: reading a "
             "file this command wrote from a value, and reading the path "
-            "`lop secret file NAME` returns. The cross-CALL half (a later tool "
+            "`lop secret file NAME` returns. The cross-call half (a later tool "
             "call reading it) is not detectable from one command's text and "
             "belongs to the session-scoped ledger in the design doc."
         ),
@@ -590,10 +590,10 @@ RULES: tuple[Rule, ...] = (
             "the emitter rule cannot see them. What the dumper reaches is what "
             "decides, and it is keyed on what the shell did with the name, not on "
             "which prefix bound it: `printenv` and a command-less `env` (any "
-            "flags: `-0`, `-u OTHER`) show the EXPORTED namespace (`export`, "
+            "flags: `-0`, `-u OTHER`) show the exported namespace (`export`, "
             "`-x`, `set -a`, a `V=… cmd` prefix); bare `set`, bare "
             "`declare`/`typeset` and `-p` show every shell variable; `readonly` "
-            "and `local` bind WITHOUT exporting. An `env` that runs a command "
+            "and `local` bind without exporting. An `env` that runs a command "
             "(`env V=… client`) is a consumer handing the value to a child."
         ),
         rewrite=(
@@ -653,7 +653,7 @@ RULES: tuple[Rule, ...] = (
             "justification: a false refusal costs one re-spelling (the rewrite "
             "in the message carries the same information in a form the scanner "
             "accepts), while a false allow is a credential in the transcript, "
-            "and nothing undoes that. A command with NO source is never refused "
+            "and nothing undoes that. A command with no source is never refused "
             "for a lexing failure, so a build, a test suite or a train loop is "
             "untouched by this rule."
         ),
@@ -697,7 +697,7 @@ RULES: tuple[Rule, ...] = (
             "scrub is a safety net for accidents and not a channel, so the "
             "deliberate print is refused rather than relied on to be masked. "
             "The allowed derived observations are a length (`len`/`hash`/`id`) "
-            "and anything read off a RESPONSE the value was used to build "
+            "and anything read off a response the value was used to build "
             "(`resp.status_code`, `done.returncode`); a membership or comparison "
             "(`print('x' in token)`) is refused, because a bool the model can "
             "ask for again is an oracle that reads the value one character at "
@@ -2278,12 +2278,20 @@ class _ShellAnalyzer:
         for fd, op, target in cls._fd_redirections(stage):
             text = cls._word_text(target).strip().strip("'\"")
             if op in ("&>", "&>>"):
-                # `&>WORD` sends BOTH streams to the word. A word the guard
-                # cannot read on its own keeps the pre-round-6 verdict: fd 1 is
-                # left on this result, so the stage is refused. That is where
-                # `&> $LOG` (`LOG=/dev/stderr`) put the raw value in the
-                # `--- stderr ---` section once it was absorbed as a path (R7-2).
-                if not cls._word_is_unreadable(text):
+                # `&>WORD` sends BOTH streams to the word, so a word the guard
+                # cannot read is refused by rebinding both descriptors rather
+                # than by leaving fd 1 where an earlier redirect put it.
+                # `lop secret get X > /tmp/f &> $LOG` was the hole: the leading
+                # redirect alone read as contained, the unreadable `$LOG`
+                # (`/dev/stderr`) was never resolved, and the raw value landed
+                # in this result's `--- stderr ---` section while the verdict
+                # said contained (R8-1). The legacy `>&WORD` spelling already
+                # refuses exactly this hazard, for this reason
+                # (`_legacy_word_destination`), so the two arms now agree; for a
+                # word the guard CAN read, the destination it names still wins.
+                if cls._word_is_unreadable(text):
+                    fds["1"] = fds["2"] = ("result", "")
+                else:
                     fds["1"] = fds["2"] = cls._resolve_destination(text, fds)
             elif op in (">", ">>", ">|"):
                 if fd in fds:

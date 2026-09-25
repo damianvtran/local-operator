@@ -193,7 +193,7 @@ def derive_value_fingerprint_key(master_key: bytes) -> bytes:
 
 
 def value_fingerprint(master_key: bytes, value: bytes) -> str:
-    """A stable, non-reversible identity for one secret VALUE.
+    """A non-reversible identity for one secret VALUE, stable within one store only.
 
     Answers "is this the same secret I compared a moment ago / in another
     session?" without handing anyone the bytes, which is the whole point: the

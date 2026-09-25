@@ -390,6 +390,39 @@ def test_reveal_prints_the_value_at_a_terminal(cli) -> None:
     assert cli("audit", "--verify").returncode == 0
 
 
+def test_the_tty_legend_appears_only_when_a_row_uses_the_word(cli) -> None:
+    """The legend explains a word, so it follows the word and not "there are rows".
+
+    A store whose audit holds no reveal still renders rows, and a legend printed
+    under ``if records:`` told the reader what a ``tty`` row means on a store
+    that had none — explaining a word absent from the output it closes. Scoped
+    to the spelled-out label, which the renderer already knows; the ``--json``
+    enum is untouched, as the D4 split promises.
+    """
+    cli("set", "SYN_ALPHA", stdin=b"alpha-synthetic-token-0001\n")
+
+    without_reveal = cli("audit")
+    assert without_reveal.returncode == 0, without_reveal.stderr
+    assert b"set" in without_reveal.stdout, "the rows themselves must still render"
+    assert b"tty" not in without_reveal.stdout, without_reveal.stdout
+
+    code, captured = _typed_cli(
+        cli.config, ["get", "SYN_ALPHA", "--reveal"], ["y"], answer_when=b"Reveal"
+    )
+    assert code == 0, captured
+
+    with_reveal = cli("audit")
+    assert b"reveal  at a terminal" in with_reveal.stdout, with_reveal.stdout
+    # The legend keys on the phrase the rows render, not on the enum, so the
+    # caveat cannot end up explaining a word the reader never sees. A blank line
+    # separates it from the rows, which is what makes it read as a footer.
+    assert b"\n\n  at a terminal: not proof a person agreed.\n" in with_reveal.stdout
+    assert (
+        b"tty" not in with_reveal.stdout
+    ), "the human view spells the state out; the enum is a machine contract"
+    assert _secret_events(cli)[-1]["outcome"] == "tty", "the enum stays in --json"
+
+
 def test_a_declined_prompt_reveals_nothing(cli) -> None:
     """The prompt is a gate, not a formality: answering ``n`` shows no bytes.
 
