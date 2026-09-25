@@ -18,6 +18,7 @@ from __future__ import annotations
 from local_operator.analytics.model import ModelRateRow, UsageAggregate
 from local_operator.tui.widgets.analytics_panel import (
     MODEL_RATES_FAILED,
+    MODEL_RATES_LIMIT,
     MODEL_RATES_PENDING,
     AnalyticsScreen,
     build_report,
@@ -189,3 +190,36 @@ def test_the_rates_worker_writes_to_a_screen_that_is_not_mounted_yet():
             assert "claude" in text
 
     asyncio.run(run())
+
+
+def test_a_capped_table_says_it_is_capped() -> None:
+    """The read is bounded at ``MODEL_RATES_LIMIT`` and the table discloses it.
+
+    A silently truncated list reads as "these are all your models", which is the
+    defect the model picker's ``model_catalogue_truncated`` exists to prevent
+    (QA round 1, O-2; the cap was invisible at 43 groups on the operator's
+    ledger). One constant feeds both the read and this sentence, so the notice
+    cannot drift from the bound that produced it.
+    """
+    rows = [
+        ModelRateRow(
+            provider="p",
+            model_id=f"m{i}",
+            calls=1,
+            output_tokens=1,
+            decode_us=1_000_000,
+            decode_tokens=1,
+            decode_calls=1,
+            wall_us=1_000_000,
+            wall_tokens=1,
+            wall_calls=1,
+        )
+        for i in range(MODEL_RATES_LIMIT)
+    ]
+    text = _report_text(UsageAggregate(calls=1), model_rates=rows)
+    assert f"showing the top {MODEL_RATES_LIMIT} models by output tokens" in text
+
+    # And NOT on a table that is not capped: the sentence is a disclosure, not a
+    # decoration on every frame.
+    short = _report_text(UsageAggregate(calls=1), model_rates=rows[:5])
+    assert "showing the top" not in short

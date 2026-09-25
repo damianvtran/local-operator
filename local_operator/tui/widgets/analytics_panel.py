@@ -1474,7 +1474,14 @@ def build_report(
         _row_overhead(provider_pairs, width, keep_cache=show_cache),
         _row_overhead(session_pairs, width, keep_cache=show_cache),
     )
-    name_cap = max(_MIN_NAME_COL, min(_MAX_NAME_COL, width - overhead))
+    # The floor is a COMFORT floor, not a hard one: at the band's narrow edge
+    # (measured 72-77 cells) holding the name column at 30 composed rows 1-6 cells
+    # wider than the frame, which is the same silent-clipping class D2 names — the
+    # rightmost column is cut while the budget believes it fits (QA round 2, Q-2).
+    # So the name column shrinks to fit, down to ``_NAME_COL_HARD_FLOOR`` cells,
+    # and only below THAT is an overrun accepted (a name under a dozen cells
+    # identifies nothing, so the columns to its right are the ones worth keeping).
+    name_cap = max(_NAME_COL_HARD_FLOOR, min(_MAX_NAME_COL, width - overhead))
 
     # The disclosure gutter exists only when SOMETHING can be expanded, and that
     # test is stable across expansion: roots are always visible, so "a visible
@@ -1665,6 +1672,11 @@ _WIDE_TABLE_MIN = 72
 #: space (a 12-cell label is still a recognisable prefix); the ceiling is the
 #: point past which more name stops buying legibility and just spreads the row.
 _MIN_NAME_COL = 30
+
+#: The name column's HARD floor: below this the table stops being readable at all,
+#: so a frame narrower than ``_NAME_COL_HARD_FLOOR + overhead`` is allowed to
+#: overrun rather than shrink the name into uselessness. See ``build_report``.
+_NAME_COL_HARD_FLOOR = 12
 _MAX_NAME_COL = 48
 
 #: Cells the body widget reserves for its own vertical scrollbar. The
@@ -2445,9 +2457,7 @@ MODEL_RATES_LIMIT = 200
 #: What the two rate columns are, and why one of them can be a dash. Printed
 #: under the table whenever anything in it is unknown, because ``—`` and a
 #: number are only distinguishable if the screen says what the dash means.
-MODEL_RATE_LEGEND = (
-    "decode = measured generation · wall = whole call incl. first token · " "— = no window"
-)
+MODEL_RATE_LEGEND = "decode = measured · wall = whole call · — = no window"
 
 
 def _model_rate_section(
@@ -2535,7 +2545,11 @@ def _model_rate_section(
         wall = format_tps(row.wall_tps)
         any_unknown = any_unknown or row.decode_tps is None or row.wall_tps is None
         block.append("   ")
-        block.append(f"{decode:>{decode_col}} tok/s", style=dim)
+        # ``fg`` like the rate cells one table above (design round 2, D7: the same
+        # number was 11.30:1 there and 3.43:1 here, in the table that exists to
+        # compare it ACROSS models). The wall rate beside it stays ``dim``: it is
+        # the secondary measurement.
+        block.append(f"{decode:>{decode_col}} tok/s", style=fg)
         block.append("   ")
         block.append(f"{wall:>{wall_col}} tok/s", style=dim)
         # Coverage as a fraction of CALLS rather than a percentage: the reader's
