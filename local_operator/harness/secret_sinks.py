@@ -98,7 +98,7 @@ RULES: tuple[Rule, ...] = (
         why=(
             "The incident's Case A. `echo`, `printf`, `cat`, `tee`, `sed`, "
             "`base64`, `rev` and their class write their operands to stdout, and "
-            "stdout of this command IS the tool result — so the value lands in "
+            "stdout of this command IS the tool result, so the value lands in "
             "the transcript, which is the model's context, and the only cure is "
             "a rotation. The rule keys on the flow (a source or a variable "
             "holding one, as an operand), not on the value, so re-spelling the "
@@ -158,9 +158,9 @@ RULES: tuple[Rule, ...] = (
         question="Is `lop secret get NAME` run on its own, with nothing to consume it?",
         why=(
             "`lop secret get` writes the exact stored bytes to stdout and exits "
-            "non-zero with EMPTY stdout on failure — which is what makes `$( )` "
+            "non-zero with empty stdout on failure, which is what makes `$( )` "
             "safe and what makes the bare form the leak: with nothing consuming "
-            "its stdout, the value IS the tool result. This is the incident's "
+            "its stdout, the value is the tool result. This is the incident's "
             "shape with no `echo` to blame, and it is the reason the guide's "
             "prohibition is about the value reaching the transcript rather than "
             "about any particular command."
@@ -168,8 +168,8 @@ RULES: tuple[Rule, ...] = (
         rewrite=(
             "Interpolate it into the command that needs it "
             '(`curl -H "Authorization: Bearer $(lop secret get NAME)" …`), hand '
-            "it over without stdout (`lop secret run --secret NAME -- …`), or — "
-            "if you only need to know it exists — `lop secret describe NAME`."
+            "it over without stdout (`lop secret run --secret NAME -- …`), or, "
+            "if you only need to know it exists, `lop secret describe NAME`."
         ),
         examples=(
             "lop secret get GITHUB_TOKEN",
@@ -288,7 +288,7 @@ RULES: tuple[Rule, ...] = (
             "The guide sanctions materialising a value to disk (`lop secret get "
             "NAME > /tmp/token`) as contained-but-debt, and it is contained only "
             "for as long as nothing reads it: the read is what turns the file "
-            "into a transcript entry. Both halves are refused here — reading a "
+            "into a transcript entry. Both halves are refused here: reading a "
             "file this command wrote from a value, and reading the path "
             "`lop secret file NAME` returns. The cross-CALL half (a later tool "
             "call reading it) is not detectable from one command's text and "
@@ -296,9 +296,10 @@ RULES: tuple[Rule, ...] = (
         ),
         rewrite=(
             "Give the command the path instead of reading it: "
+            "`lop secret file NAME -- CMD`, or, for the guide's worked example, "
             "`lop secret file GCP_SA_JSON -- gcloud auth activate-service-account "
-            '--key-file "$GOOGLE_APPLICATION_CREDENTIALS"` — '
-            "or delete the copy without reading it (`rm -f`)."
+            '--key-file "$GOOGLE_APPLICATION_CREDENTIALS"`. Delete the copy without '
+            "reading it (`rm -f`)."
         ),
         examples=(
             "lop secret get GITHUB_TOKEN > /tmp/token; cat /tmp/token",
@@ -324,14 +325,15 @@ RULES: tuple[Rule, ...] = (
         question="Does the consumer handed to the secret verb print the value?",
         why=(
             "`lop secret file NAME -- CMD` materialises the value for CMD and "
-            "removes it afterwards — which is exactly right when CMD reads it, "
+            "removes it afterwards, which is exactly right when CMD reads it, "
             "and exactly the leak when CMD is `cat`/`echo`: the verb's stdout is "
             "this result, so the value is printed by a command the harness ran "
             "on the model's behalf."
         ),
         rewrite=(
             "Hand the path to the program that needs it "
-            'lop secret file GCP_SA_JSON -- gcloud … --key-file "$GOOGLE_APPLICATION_CREDENTIALS"` '
+            "`lop secret file GCP_SA_JSON -- gcloud … --key-file "
+            '"$GOOGLE_APPLICATION_CREDENTIALS"` '
             "or use `lop secret run --secret NAME -- …` for an environment "
             "variable. Do not make the consumer a printer."
         ),
@@ -422,7 +424,7 @@ RULES: tuple[Rule, ...] = (
         why=(
             "Under `set -x` (equivalently `bash -x`, `sh -x`, `set -o xtrace`, a "
             "`PS4` assignment) the shell writes every expansion to stderr, and "
-            "stderr is captured into this result — so the sink is the shell "
+            "stderr is captured into this result, so the sink is the shell "
             "itself, and the value is printed whether or not any command in the "
             "text prints anything. Debug traces are a routine thing to add to a "
             "command that fetches a credential, which is why this is a rule "
@@ -431,7 +433,7 @@ RULES: tuple[Rule, ...] = (
         rewrite=(
             "Drop the trace (`set -x`/`-x`), or run the traced part where its "
             "stderr is not this command's stderr, and never trace a command that "
-            "carries a secret — the trace prints the value."
+            "carries a secret: the trace prints the value."
         ),
         examples=(
             "set -x; TOKEN=$(lop secret get GITHUB_TOKEN); " 'curl -H "Bearer $TOKEN" https://x',
@@ -456,7 +458,7 @@ RULES: tuple[Rule, ...] = (
         lang="shell",
         question="Can another process read this argv while the secret is in it?",
         why=(
-            "A value passed in argv is readable by any same-uid process — the "
+            "A value passed in argv is readable by any same-uid process; the "
             "secret store's own design rejects argv as a value channel for "
             "exactly that reason. So a command that both puts a secret in argv "
             "and shows the process table (or reads `/proc/*/cmdline`) is refused: "
@@ -494,7 +496,7 @@ RULES: tuple[Rule, ...] = (
         question="Is a printing stage's stdout redirected into the captured stderr?",
         why=(
             "`execute_bash` reads stderr into the same tool result as stdout, so "
-            '`echo "$v" 1>&2` is not a way out of the refusal — the `2>&1` '
+            '`echo "$v" 1>&2` is not a way out of the refusal; the `2>&1` '
             "split is an output-channel detail, not a containment boundary. "
             "Refused for the same flow as `shell.print-of-source`."
         ),
@@ -529,7 +531,7 @@ RULES: tuple[Rule, ...] = (
         rewrite=(
             "Keep the inline program on the consuming side "
             "(`sh -c 'curl -H \"Authorization: Bearer $TOKEN\" …'` with `TOKEN` "
-            "supplied by `lop secret run --secret GITHUB_TOKEN=TOKEN -- sh -c …`), "
+            "supplied by `lop secret run --secret NAME=TOKEN -- sh -c …`), "
             "or use `lop secret run --secret NAME -- …` directly."
         ),
         examples=(
@@ -584,8 +586,8 @@ RULES: tuple[Rule, ...] = (
             "A value does not have to be named as an operand to be printed. "
             "`export V=$(lop secret get NAME); printenv V`, `V=$(…); export V; "
             "env | grep V=` and `V=$(…); set | grep V=` all hand the raw value "
-            "back, and none of them puts it in a printer's argv — which is why "
-            "the emitter rule cannot see them. The dumper's REACH is what "
+            "back, and none of them puts it in a printer's argv, which is why "
+            "the emitter rule cannot see them. What the dumper reaches is what "
             "decides, and it is keyed on what the shell did with the name, not on "
             "which prefix bound it: `printenv` and a command-less `env` (any "
             "flags: `-0`, `-u OTHER`) show the EXPORTED namespace (`export`, "
@@ -596,7 +598,7 @@ RULES: tuple[Rule, ...] = (
         ),
         rewrite=(
             "Let the consumer print its own result: "
-            "`lop secret run --secret [redacted] -- client`, or `v=$(lop secret get "
+            "`lop secret run --secret NAME -- client`, or `v=$(lop secret get "
             'NAME); curl -H "Authorization: Bearer $v" …`. Do not export a value '
             "and then dump the environment."
         ),
@@ -648,7 +650,7 @@ RULES: tuple[Rule, ...] = (
             "Fail closed, and only here: an unterminated quote, an unbalanced "
             "`$(`, an unterminated heredoc leaves the region unknown, so whether "
             "the value is printed is unknown too. The asymmetry is the whole "
-            "justification — a false refusal costs one re-spelling (the rewrite "
+            "justification: a false refusal costs one re-spelling (the rewrite "
             "in the message carries the same information in a form the scanner "
             "accepts), while a false allow is a credential in the transcript, "
             "and nothing undoes that. A command with NO source is never refused "
@@ -691,7 +693,7 @@ RULES: tuple[Rule, ...] = (
             "`logging.*` (and any `logger.info`-shaped call) all reach stdout, "
             "stderr or the log, and the eval tool returns those to the model. "
             "The store's own `SecretValue.__repr__` shows `[redacted]`, and the "
-            "cell's output is scrubbed — but the guide says plainly that the "
+            "cell's output is scrubbed, but the guide says plainly that the "
             "scrub is a safety net for accidents and not a channel, so the "
             "deliberate print is refused rather than relied on to be masked. "
             "The allowed derived observations are a length (`len`/`hash`/`id`) "
@@ -705,7 +707,7 @@ RULES: tuple[Rule, ...] = (
             "Use the value in the call that needs it "
             "(`requests.get(url, headers={'Authorization': f'Bearer {token}'})`). "
             "To identify a secret without its value, "
-            '`secret` tool with `op="describe"`.'
+            'use the `secret` tool with `op="describe"`.'
         ),
         examples=(
             'token = secrets["GITHUB_TOKEN"]\nprint(token)',
@@ -824,7 +826,7 @@ RULES: tuple[Rule, ...] = (
         rewrite=(
             "Pass arguments as a list rather than through a shell "
             '(`subprocess.run(["gcloud", "--key-file", path])`) or give the '
-            "value to the child's environment — "
+            "value to the child's environment, with "
             "`lop secret run --secret NAME -- …` in bash."
         ),
         examples=(
@@ -845,7 +847,7 @@ RULES: tuple[Rule, ...] = (
         lang="python",
         question="Does the cell raise an exception whose message IS the value?",
         why=(
-            "An exception's text is not a side channel — it is the output: the "
+            "An exception's text is not a side channel. It is the output: the "
             "eval tool returns the traceback, so `raise ValueError(token)` and "
             "`assert False, token` both put the value in this result with no "
             "print anywhere in the cell (R3-4). Refused at the same "
@@ -903,7 +905,7 @@ RULES: tuple[Rule, ...] = (
         why=(
             "The cell cannot be parsed, so nothing about where the value goes is "
             "knowable: the same fail-closed asymmetry as the shell half, and "
-            "subject to the same condition — a cell that never mentions the "
+            "subject to the same condition: a cell that never mentions the "
             "store is not refused, and a syntax error there is the kernel's "
             "ordinary error message, not ours."
         ),
@@ -4529,9 +4531,21 @@ def refusal_text(result: ScanResult, *, text: str, tool_name: str = "") -> str:
     else:
         head = (
             "refusing to run this call: a stored secret would be printed into "
-            "this session's transcript, which IS the model's context. Nothing "
+            "this session's transcript, which is the model's context. Nothing "
             "can undo that afterwards, so it is refused before the command runs."
         )
+    # `bash` and `eval` are different surfaces for the same finding, and the two
+    # lines below the findings name forms the reader can actually TYPE: every
+    # form in the shell footer is a bash form that cannot be entered into an eval
+    # cell, and the eval footer's allowances cannot be entered into a command.
+    # The surface comes from the finding's language when one fired, and from the
+    # tool that refused otherwise (an unresolved result carries no finding to
+    # ask), defaulting to the shell list (D4).
+    shell_surface = True
+    if result.findings:
+        shell_surface = rule(result.findings[0].rule).lang == "shell"
+    elif tool_name:
+        shell_surface = tool_name != "eval"
     lines = [f"[secret sink] {head}"]
     if result.findings:
         finding = result.findings[0]
@@ -4560,12 +4574,30 @@ def refusal_text(result: ScanResult, *, text: str, tool_name: str = "") -> str:
         # `len(findings)` guard printed an empty "also refused by:" (NIT-1).
         if len(result.labels) > 1:
             lines.append(f"  also refused by: {', '.join(result.labels[1:])}")
+    if result.verdict == "unresolved" and not result.findings:
+        # `scan_command`'s `except RecursionError` branch returns an unresolved
+        # result with NO findings (it is marked unreachable because `_MAX_DEPTH`
+        # is the real guard), and every line above is emitted per finding, so
+        # without this the one refusal shape that must always hand the reader a
+        # rewrite would render its head and its footer and nothing actionable.
+        unresolved = (
+            "shell.unresolved-source-region" if shell_surface else "python.unresolved-source-region"
+        )
+        lines.append(f"  do:     {rule(unresolved).rewrite}")
     lines.append(
-        "  still allowed: `lop secret list`, `lop secret get --help`, "
-        "`lop secret describe NAME`, `lop secret get NAME | wc -c`, and the "
-        'sanctioned `curl -H "Authorization: Bearer $(lop secret get NAME)" …`.'
+        (
+            "  still allowed: `lop secret list`, `lop secret get --help`, "
+            "`lop secret describe NAME`, `lop secret get NAME | wc -c`, and the "
+            'sanctioned `curl -H "Authorization: Bearer $(lop secret get NAME)" …`.'
+        )
+        if shell_surface
+        else (
+            "  still allowed: `print(len(token))`, `print(hash(token))`, and a "
+            "field read off a response the value was used to build "
+            "(`print(resp.status_code)`), plus the `secret` tool's `describe` op."
+        )
     )
     if tool_name:
         lines.append(f"  tool: {tool_name}; nothing was executed.")
-    lines.append("  guide: guide://credentials — read it before re-spelling this call.")
+    lines.append("  guide: guide://credentials. Read it before re-spelling this call.")
     return "\n".join(lines)
