@@ -122,22 +122,35 @@ WHAT IT IS NOT — THE OPERATOR'S CONSTRAINTS, AND HOW EACH IS HELD
 
     So the band is gone. The warm runs at the host's NORMAL priority, which makes
     its duration the host's own scheduling latency and nothing invented here:
-    measured on this host, ~24-32 s at load 150 and below (median of 23
-    acquisitions), and up to ~125 s at load 150-160 under contention. That is the
-    price of a warm whose cost is 1.7 s of CPU, and it is paid on a daemon thread
-    AFTER an engage, so no engage ever waits on it. What the design gives up with
-    the band is the claim that a speculative spare never competes with live work;
-    what it keeps is that the spare is opt-in, lazy, one per host, and reaped on
-    idle. A slow warm is strictly better than a starved one: a late standby still
-    serves the NEXT engage, while an abandoned one serves nothing.
+    measured on this host, **p50 2.7 s / max 3.7 s over 7 runs at load 153-166**,
+    on 1.7 s of CPU. It is paid on a daemon thread AFTER an engage, so no engage
+    ever waits on it. What the design gives up with the band is the claim that a
+    speculative spare never competes with live work; what it keeps is that the
+    spare is opt-in, lazy, capped per root, and reaped on idle. A slow warm is
+    strictly better than a starved one: a late standby still serves the NEXT
+    engage, while an abandoned one serves nothing.
 
     The user-visible consequence, stated rather than implied: a host's FIRST new
     conversation after a boot can be cold, and so can the next one if it comes
     before the warm finishes (see the PR body's per-surface table for both).
 
-    A CONSEQUENCE FOR THE CONSTRAINTS ABOVE: this buys the win per CONSOLE, not
-    per machine. The desktop app's ``lop serve`` daemon is a singleton, so the
-    desktop surface keeps one spare; each interactive TUI that opens new
+    THE COUNT IS CAPPED PER ROOT, FOR THE WHOLE MACHINE (agent review round 3).
+    Sharing ONE adoptable spare across consoles is not achievable: a spare is a
+    private descriptor to a child of exactly one console (that is the R1-1 fix),
+    so serving another console's engage would need a rendezvous between two
+    same-uid processes — and any path one of them can bind is a path an impostor
+    can bind first, which is the escalation R1-1 proved. Same-uid peers cannot
+    authenticate each other at all (pid, ``argv``, environment and any token in
+    the root are equally readable), so the honest answer is a cap: an ``flock``
+    slot per root, kernel-released on death, holding TWO slots at most for the
+    whole machine — the daemon's (a singleton, and the desktop surface must not
+    lose its spare to whichever TUI started first) and one shared by every other
+    console. A console that cannot take its slot spawns cold every time; that is
+    the trade, and it is what turns ~20 spares at ~145 MB each into two.
+
+    A CONSEQUENCE FOR THE CONSTRAINTS ABOVE: the desktop app's ``lop serve``
+    daemon keeps its own spare; every TUI on the root shares the other, so only
+    the first one to warm gets the win and the rest spawn cold while it is held.
     conversations warms its own, which is a real per-console memory charge
     (~145 MB each, measured with three consoles on one root) — the price of the
     capability never reaching a process this console did not start.
@@ -339,6 +352,20 @@ _WARM: list["_Standby | None"] = [None]
 #: engage path.
 _LOCK = threading.Lock()
 
+#: The desktop daemon's slot. It is a singleton per root (``lop serve``), and it
+#: serves the surface the operator opens conversations from, so it never competes
+#: with the TUIs.
+SLOT_DAEMON = "daemon"
+
+#: The slot every OTHER console on the root shares.
+SLOT_TUI = "tui"
+
+#: slotted -> the lock descriptor this process holds, for its lifetime.
+_SLOTS: dict[str, int] = {}
+
+#: This process's slot, set once by :func:`enable_warming`.
+_ROLE: list[str] = [SLOT_TUI]
+
 
 class _Standby:
     """A forked, warming interpreter and the private descriptor to it.
@@ -349,10 +376,19 @@ class _Standby:
     docstring): the capability is handed over this descriptor and nowhere else.
     """
 
-    def __init__(self, proc: "subprocess.Popen[bytes]", sock: socket.socket, root: Path) -> None:
+    def __init__(
+        self,
+        proc: "subprocess.Popen[bytes]",
+        sock: socket.socket,
+        root: Path,
+        slot: str = SLOT_TUI,
+    ) -> None:
         self.proc = proc
         self.sock = sock
         self.root = root
+        #: The root slot this spare occupies, so its replacement asks for the same
+        #: one rather than quietly taking the other.
+        self.slot = slot
         #: Set once the child says it is warm. Kept as a cached answer so the
         #: engage path never blocks on a read that has not arrived yet.
         self.ready = False
@@ -372,12 +408,18 @@ class _Standby:
             pass
 
 
-def enable_warming(root: "Path | None" = None) -> None:
+def enable_warming(root: "Path | None" = None, *, daemon: bool = False) -> None:
     """Make this process a warmer, and warm one standby now, off the caller's thread.
 
     Called by the TUI and the ``serve`` daemon at their launch points, so the
     FIRST new conversation or cold switch already finds a standby. Never raises:
     a console that cannot warm simply spawns cold.
+
+    ``daemon`` picks the slot (see :func:`_take_slot`): the daemon is a singleton
+    and keeps its own, every other console shares ``SLOT_TUI``. It is declared
+    HERE, once per process, rather than passed to each warm: the engage path warms
+    too (``launch.engage_runtime``), from both kinds of console, and a per-call
+    parameter would need every caller to remember which one it is.
     """
     if disabled() or os.environ.get("LOP_MOBILE_CHILD_RESUME"):
         return
@@ -402,6 +444,7 @@ def enable_warming(root: "Path | None" = None) -> None:
         logger.debug("could not resolve a standby target", exc_info=True)
         return
     _WARMING[0] = True
+    _ROLE[0] = SLOT_DAEMON if daemon else SLOT_TUI
     warm_in_background(Path(target), interpreter)
 
 
@@ -479,7 +522,7 @@ def _monitor(warm: _Standby) -> None:
     try:
         from local_operator.session.runtime.launch import _spawn_interpreter
 
-        ensure_warm(warm.root, _spawn_interpreter())
+        ensure_warm(warm.root, _spawn_interpreter(), warm.slot)
     except Exception:  # noqa: BLE001 - a missing replacement is a slower engage
         logger.debug("could not replace the standby for %s", warm.root, exc_info=True)
 
@@ -488,7 +531,7 @@ def _start_monitor(warm: _Standby) -> None:
     threading.Thread(target=_monitor, args=(warm,), name="lop-standby-monitor", daemon=True).start()
 
 
-def ensure_warm(root: Path, interpreter: str) -> None:
+def ensure_warm(root: Path, interpreter: str, slot: str | None = None) -> None:
     """Start a standby for ``root`` unless one is already alive. Never raises.
 
     Called from ``launch.engage_runtime`` after each spawn decision, so the NEXT
@@ -503,13 +546,20 @@ def ensure_warm(root: Path, interpreter: str) -> None:
 
         if Path(root) != config_dir():
             return
+        slot = _ROLE[0] if slot is None else slot
+        # THE CAP, and it is a hard one: exactly one spare per slot per root for
+        # the whole machine, however many consoles are running. A console that
+        # cannot take its slot goes cold (2.15 s p50 at load 153-166, measured),
+        # which is the price this PR trades for a bounded memory ceiling.
+        if not _take_slot(Path(root), slot):
+            return
         with _LOCK:
             current = _WARM[0]
             if current is not None and current.alive():
                 return
             if current is not None:
                 current.close()
-            _WARM[0] = _spawn_standby(Path(root), interpreter)
+            _WARM[0] = _spawn_standby(Path(root), interpreter, slot)
             fresh = _WARM[0]
         # OUTSIDE the lock: the monitor immediately blocks in ``proc.wait()`` and
         # only takes the lock if the child leaves without being adopted.
@@ -518,7 +568,72 @@ def ensure_warm(root: Path, interpreter: str) -> None:
         logger.debug("could not warm a standby for %s", root, exc_info=True)
 
 
-def _spawn_standby(root: Path, interpreter: str) -> "_Standby":
+def _take_slot(root: Path, slot: str) -> bool:
+    """Claim this root's ``slot`` for this process, or report that it is taken.
+
+    ONE ADOPTABLE SPARE IS NOT POSSIBLE, WHICH IS WHY THIS IS A CAP INSTEAD
+    (agent review round 3, after `d2 <https://github.com/damianvtran/local-operator/pull/1538>`_
+    measured three consoles on one root warming three spares at ~145 MB each).
+    A spare is a private descriptor to a child of exactly one console — that is
+    the R1-1 fix, and the capability reaches no process that console did not fork.
+    Making one spare adoptable by the OTHER consoles on the root therefore needs a
+    rendezvous between two same-uid processes, and a path any same-uid process can
+    bind is a path an impostor can bind first: it would receive a real console's
+    operator capability, which is exactly the escalation R1-1 proved. Same-uid
+    peers cannot authenticate each other by pid, ``argv``, environment or a token
+    in the root (all of them are as readable as the root is), so the honest answer
+    is to BOUND the count rather than share one.
+
+    ``flock`` and not a pid file: the kernel releases the lock when the holding
+    process dies, so a crash or a ``kill -9`` cannot leave a root permanently
+    without a spare, and there is no stale pid to misread as a live owner.
+    ``O_CLOEXEC`` so the spare's own child cannot hold the slot its parent's death
+    should free. Never raises: a console that cannot take a slot simply spawns
+    cold, which is the behaviour this whole module already degrades to.
+    """
+    if slot in _SLOTS:
+        return True
+    try:
+        import fcntl
+
+        directory = root / "run"
+        directory.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(
+            str(directory / f"standby-{slot}.lock"),
+            os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+    except (ImportError, OSError):
+        # No fcntl is a platform where ``pass_fds`` does not exist either (see
+        # ``disabled``), so warming is already off and there is nothing to cap.
+        logger.debug("could not open a standby slot for %s", root, exc_info=True)
+        return True
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(descriptor)
+        logger.info(
+            "this root's %s standby slot is held by another console; "
+            "engages here will spawn cold (%s)",
+            slot,
+            root,
+        )
+        return False
+    _SLOTS[slot] = descriptor
+    return True
+
+
+def _release_slots() -> None:
+    """Give up every slot this process holds. Tests only; exit releases them anyway."""
+    for descriptor in _SLOTS.values():
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+    _SLOTS.clear()
+
+
+def _spawn_standby(root: Path, interpreter: str, slot: str = SLOT_TUI) -> "_Standby":
     """Fork the warming interpreter, handing it ONE end of a private socketpair.
 
     ``pass_fds`` is what makes the other end unreachable by anything else: it is
@@ -574,7 +689,7 @@ def _spawn_standby(root: Path, interpreter: str) -> "_Standby":
         console_end.close()
         raise
     child_end.close()
-    return _Standby(proc, console_end, root)
+    return _Standby(proc, console_end, root, slot)
 
 
 #: What a standby may say before it is asked anything, as ONE byte (the console
@@ -816,6 +931,10 @@ def reset_for_tests() -> None:
         warm.consumed = True
         warm.close()
         _retire(warm)
+    # The slots go with it, or a suite that disables warming and re-enables it
+    # would keep a lock it never released (and, in-process, would then be its own
+    # "another console").
+    _release_slots()
 
 
 # ---------------------------------------------------------------------------
