@@ -1030,9 +1030,7 @@ async def test_a_silenced_process_offers_no_banner(
 
 
 @pytest.mark.asyncio
-async def test_a_run_that_is_not_the_users_own_offers_no_banner(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_a_run_that_is_not_the_users_own_offers_no_banner(tmp_path: Path) -> None:
     """The IDENTITY gate is asked here too, and for a different reason.
 
     The process switch above silences a backend a rig started. This gate covers

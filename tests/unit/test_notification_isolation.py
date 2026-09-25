@@ -1133,3 +1133,56 @@ def test_the_frame_sites_withhold_the_offer_from_a_run_that_is_not_yours() -> No
     for module in ("desktop_feed.py", "desktop_sessions.py"):
         source = (root / module).read_text(encoding="utf-8")
         assert "desktop_belongs_to_this_process" in source, module
+
+
+#: The unsafe form: a fixture-scoped patch of the identity predicate, which
+#: `monkeypatch` saves and restores around a test. Matched loosely (the target
+#: may be wrapped onto its own line and the target string spelled either way).
+_NESTED_GATE_PATCH = re.compile(
+    r"monkeypatch\.setattr\(\s*[\"']local_operator\.tui\.notify\.desktop_belongs_to_this_process"
+)
+
+
+def _modules_that_nest_a_gate_patch() -> list[Path]:
+    """Test modules that both take the shared opt-in AND patch the predicate.
+
+    Both halves are required to be an offender, which is what keeps this from
+    flagging the tests that legitimately install the predicate themselves in a
+    module with no waiver to nest over (`tests/unit/tui/test_notify.py`,
+    `tests/unit/tui/test_background_completion_notify.py`).
+    """
+    root = Path(__file__).resolve().parents[1]
+    return [
+        path
+        for path in sorted(root.rglob("test_*.py"))
+        if "notification_path_opt_in" in path.read_text(encoding="utf-8")
+        and _NESTED_GATE_PATCH.search(path.read_text(encoding="utf-8"))
+    ]
+
+
+def test_no_test_nests_a_fixture_scoped_patch_under_the_opt_in() -> None:
+    """The seam's waiver and a test's own patch must not nest.
+
+    WHY THIS IS A TRIPWIRE AND NOT A STYLE RULE. Two patches of one attribute
+    restore in teardown order, and ``monkeypatch`` saves the value it FOUND —
+    the waiver's lambda. When the fixture-scoped patch unwinds beside the
+    opt-in rather than inside it, its restore reinstates the waiver for the rest
+    of the worker process: the identity suite's refusal cells then fail only
+    when they run after a feed suite in the same shard, which is an order a
+    ``-n 4`` run produces. That happened (round 2), it is invisible in any
+    file-scoped run, and the guarded form is a ``mock.patch`` scoped in the test
+    BODY, which stops before the opt-in does.
+
+    Textual, so the PR must not read it as proof: the behavioural half is the
+    two frame cells, and the seam documents the rule with the incident.
+    """
+    offenders = [
+        path.relative_to(Path(__file__).resolve().parents[2])
+        for path in _modules_that_nest_a_gate_patch()
+    ]
+    assert not offenders, (
+        "these modules take the notification opt-in AND install a fixture-scoped "
+        "patch of the identity gate, so the waiver can leak for the rest of the "
+        "worker process — scope a `mock.patch` inside the test body instead:\n"
+        + "\n".join(f"  {path}" for path in offenders)
+    )

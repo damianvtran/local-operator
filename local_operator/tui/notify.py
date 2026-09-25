@@ -570,15 +570,18 @@ def desktop_belongs_to_this_process() -> bool:
         if home is None:
             return True
         allowed = Path.home().resolve() == home
-    except (ImportError, OSError, RuntimeError, ValueError) as exc:
+    except (ImportError, OSError, RuntimeError) as exc:
         # EXACTLY the shapes that are reachable here, and no more, because the
         # tuple is a claim about the platform rather than a net. `real_home()`
         # answers None for its own platform shapes (it catches ImportError,
         # KeyError, OSError and AttributeError inside), so what is left is: a
-        # `local_operator.supervisors` that will not import (ImportError), an
-        # unreadable or unresolvable home from `Path.home()`/`resolve()`
-        # (RuntimeError — which is what `Path.home()` raises when it cannot
-        # resolve one at all — plus OSError and ValueError). Anything OUTSIDE
+        # `local_operator.supervisors` that will not import (ImportError), and
+        # an unreadable or unresolvable home from `Path.home()`/`resolve()` —
+        # `RuntimeError` is what `Path.home()` raises when it cannot resolve one
+        # at all, `resolve()` adds `OSError`. Measured on 3.12.13 and 3.14.7
+        # (round 3, R3-1), which is why `ValueError` is not in the tuple either:
+        # it cannot be raised from a `$HOME` an environment variable can even
+        # hold. Anything OUTSIDE
         # this tuple is a defect in the predicate rather than a platform without
         # an answer, and it propagates deliberately: a `NameError` or a
         # `TypeError` here must NOT be laundered into "cannot tell", which fails

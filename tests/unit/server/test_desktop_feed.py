@@ -2967,7 +2967,7 @@ def test_a_silenced_process_composes_no_banner(tmp_path, monkeypatch) -> None:
     assert _bannered(feed, subscription) == []
 
 
-def test_a_run_that_is_not_the_users_own_offers_no_banner(tmp_path, monkeypatch) -> None:
+def test_a_run_that_is_not_the_users_own_offers_no_banner(tmp_path) -> None:
     """The IDENTITY gate reaches the machine-wide channel as well.
 
     The kill-switch cell above covers a backend a rig silenced; this one covers
