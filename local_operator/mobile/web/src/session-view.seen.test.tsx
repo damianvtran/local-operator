@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 //
 // Only an uncovered final result in the focused selected conversation is read.
-import { act, cleanup, render } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionScreen } from "./screens/session-view";
 import { retainSessionListStream } from "./store";
@@ -17,6 +17,10 @@ vi.mock("./api", () => ({
 	getCommands: vi.fn(async () => ({ commands: [] })),
 	getModels: vi.fn(async () => ({ models: [] })),
 	sendCommand: vi.fn(async () => ({ ok: true, detail: "" })),
+	/* Settled by default, and HONEST about it: `pinned` is the state the route read
+	   back, so the truthful default echoes the request. The test for a 200 whose
+	   read-back disagrees stages its own answer. */
+	setSessionPin: vi.fn(async (_id: string, pinned: boolean) => ({ ok: true, pinned })),
 	/* Settled by default: the answer the handshake is defined by. Tests that need
 	   the UNREAD answer (a superseded token, or an older daemon) stage their own. */
 	markSessionSeen: vi.fn(async () => ({
@@ -79,7 +83,7 @@ function projection(): SessionProjection {
 	} satisfies SessionProjection;
 }
 
-const { markSessionSeen } = await import("./api");
+const { markSessionSeen, setSessionPin } = await import("./api");
 const { clearSessionUnseen } = await import("./store");
 
 afterEach(() => {
@@ -120,6 +124,30 @@ describe("SessionScreen seen handshake", () => {
 		focusedResult();
 		render(<SessionScreen sessionId="s1" />);
 		expect(retainSessionListStream).toHaveBeenCalled();
+	});
+
+	it("clears the header ★ when the 200's read-back disagrees (round 10, MINOR 1)", async () => {
+		// The pin route answers with the state it READ BACK, so a body reporting the
+		// old value is the daemon saying the row is not pinned — and the store's
+		// confirmation sweep retires a mark only when a later frame AGREES with it.
+		// Without the guard in the header's toggle, this mark would never settle and
+		// the ★ would stay on a row the daemon never pinned.
+		slot = { projection: projection(), connected: true };
+		vi.mocked(setSessionPin).mockResolvedValueOnce({ ok: true, pinned: false });		render(<SessionScreen sessionId="s1" />);
+
+		fireEvent.click(screen.getByRole("button", { name: "pin this session" }));
+		// The optimistic half: the ★ is on the control in the commit that handled
+		// the press, which is the whole reason the handshake is split.
+		expect(
+			screen.getByRole("button", { name: "unpin this session" }).getAttribute("aria-pressed"),
+		).toBe("true");
+
+		// And the POST's own read-back takes it back, with no frame needed.
+		await waitFor(() =>
+			expect(
+				screen.getByRole("button", { name: "pin this session" }).getAttribute("aria-pressed"),
+			).toBe("false"),
+		);
 	});
 
 	it("acknowledges the rendered token once without optimistic clearing", async () => {

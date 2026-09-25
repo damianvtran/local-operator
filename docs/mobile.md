@@ -199,9 +199,11 @@ Screens, following branding.md §7's agent-output hierarchy:
   the confirming frame arrives from the terminal, with a +88.50px scroll
   adjustment) — the accepted cost of a lift, paid after the daemon has agreed,
   and movement at or below one row height is inside the envelope rather than a
-  defect. A refused pin clears the mark and reorders nothing: since the row
-  never moved there is nothing to put back. The session view's header reads the
-  same mark, so the two surfaces agree about a ★ by construction.
+  defect. A pin the daemon does not KEEP clears the mark and reorders nothing —
+  a `409`, or a `200` whose body reports the state it read back instead of the
+  one that was asked for; either way the row never moved, so there is nothing to
+  put back. The session view's header reads the same mark, so the two surfaces
+  agree about a ★ by construction.
 
   A pin needs the conversation's durable folder, so pinning a session in the
   moment before its first message lands on disk is refused with a 409 rather

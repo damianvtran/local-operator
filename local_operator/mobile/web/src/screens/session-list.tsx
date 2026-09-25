@@ -530,7 +530,14 @@ export function SessionListScreen() {
 		applySessionPin(sessionId, pinnedNext);
 		setPinTarget(null);
 		try {
-			await setSessionPin(sessionId, pinnedNext);
+			const saved = await setSessionPin(sessionId, pinnedNext);
+			/* The route answers with the state it READ BACK, which is the daemon's
+			   answer and not ours. A 200 that disagrees means the row was not pinned
+			   (a folder-less session answers 409, but a 200 reporting the old value
+			   is the same fact), and the mark has to go now: `settlePinMarks` only
+			   retires a mark a later frame AGREES with, so this one would never
+			   settle and the ★ would sit on a row the daemon never pinned. */
+			if (saved.pinned !== pinnedNext) clearSessionPinMark(sessionId);
 		} catch {
 			/* A refusal takes the MARK back with it, and that is the whole of what
 			   the press changed: the row never moved, because only a confirmed list
