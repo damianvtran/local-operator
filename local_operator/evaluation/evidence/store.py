@@ -48,6 +48,7 @@ from local_operator.evaluation.evidence.models import (
     OutcomeDraft,
     OutcomeSeal,
     ReconciliationPayload,
+    ReplyTolerancePayload,
     ScoringResultPayload,
     ScoringStartPayload,
     StateMarker,
@@ -812,6 +813,12 @@ class EvidenceWriter:
         execution_types = (
             ModelRequestPayload,
             ModelResponsePayload,
+            # The tolerance record accompanies the ``model_response`` it counts
+            # for, so it belongs to the same phase: execution evidence, written
+            # after the budget commitment and before finalization. Gated here
+            # rather than left to fall through the chain below, which would let
+            # a kind with no phase rule be appended after the journal closed.
+            ReplyTolerancePayload,
             UsageCostPayload,
             ContextCompactionPayload,
             ObservationPayload,
@@ -897,6 +904,7 @@ class EvidenceWriter:
             (
                 ModelRequestPayload,
                 ModelResponsePayload,
+                ReplyTolerancePayload,
                 UsageCostPayload,
                 ContextCompactionPayload,
                 ObservationPayload,

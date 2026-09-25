@@ -384,8 +384,7 @@ def classify_rejection(reason: str) -> str:
         # failures that used to share one key and one hint (see
         # ``_LEADING_DELIMITER_RULE``). The offset is the discriminator: a
         # decode that cannot start is a reply whose FIRST byte is not a JSON
-        # value -- a preamble, a code fence, or a provider reasoning boundary
-        # token -- while a decode that starts and then breaks is a reply whose
+        # value, while a decode that starts and then breaks is a reply whose
         # object was cut off or double-escaped. Keyed on the parser's own
         # reported position and not on the reply text, because this classifier
         # must run over sealed artifacts too, 271 of whose 311 reply sections
@@ -395,6 +394,17 @@ def classify_rejection(reason: str) -> str:
         # also how trailing text and duplicate keys fail -- so it lands in the
         # residual, which is why that half's hint names text outside the object
         # as one of its causes.
+        #
+        # What the leading key MEANS moved when the decoder learned to read a
+        # decision behind leading junk (``_locate_leading_object``): the shapes
+        # this comment used to name as its causes -- a preamble, a code fence, a
+        # provider reasoning boundary token, a native call-syntax wrapper -- are
+        # now absorbed when the reply carries exactly one decision. What is still
+        # recorded under this key is a reply whose offset 0 could not start a
+        # value AND whose body holds no single readable decision: prose only, a
+        # fragment of a call's own markup, two objects that could each be the
+        # decision. The key and its trigger are unchanged, so the class table
+        # stays comparable across the change; only the population shrank.
         if _LEADING_DELIMITER_RULE.search(reason):
             return "leading-delimiter"
         return "incomplete-json"
@@ -756,22 +766,25 @@ def rejection_hint(
         )
     if class_key == "leading-delimiter":
         # The half of the old ``malformed-json`` class whose reply could not be
-        # READ AT ALL: the first byte is not the start of a JSON value, so the
-        # decoder had nothing to start from. The named causes are the shapes
-        # that put something else in front of the object -- a preamble, a code
-        # fence, a native tool-call syntax wrapper -- because those three are
-        # what the old hint named and none of them is absorbed. The fourth,
-        # a provider reasoning delimiter, IS absorbed before this point when the
-        # model declares one (``strip_reasoning_boundary_markers``), and naming
-        # a defect the harness has already absorbed would spend the model's one
-        # correction on a rule it is not breaking. The accepted-shape example is
-        # what actually corrects all four.
+        # READ AT ALL: nothing at the head of the reply started a JSON value, so
+        # the offset-0 decode had nothing to read. The class is NOT a statement
+        # that something sat in front of the object: a preamble, a code fence and
+        # a native tool-call syntax wrapper are all absorbed now, when the reply
+        # still carries exactly one decision (``_locate_leading_object``), and a
+        # provider reasoning delimiter is removed before this point when the
+        # model declares one (``strip_reasoning_boundary_markers``). What is left
+        # under this key is a reply with no readable decision in it at all, or
+        # with more than one: so the hint must not send the model after a
+        # preamble it may not have written -- that would spend its one correction
+        # on a rule it is not breaking. It states the accepted shape and the
+        # uniqueness rule, which is the one instruction that repairs every
+        # remaining cause.
         return (
-            "the reply did not begin with the JSON object -- its first character "
-            "was not '{', so no decision could be read from it. A preamble, a "
-            "code fence or a native tool-call syntax wrapper before the object "
-            "is not skipped. Reply with exactly one JSON object, beginning with "
-            "'{', and nothing else: "
+            "the reply did not begin with the JSON object, and no single complete "
+            "decision could be read from it: either nothing in the reply is a "
+            "readable action batch, or more than one object in it could have been "
+            "the decision and which one you meant has to be unambiguous. Reply "
+            "with exactly one JSON object, beginning with '{', and nothing else: "
             f"{_example_json(surface, observation, shape)}"
         )
     if class_key == "incomplete-json":
@@ -1061,13 +1074,20 @@ def _extra_action_key_hint(
     observation: Observation,
     shape: HintShape = HintShape(),
 ) -> str:
-    """Name the field that is not accepted, and where it IS accepted.
+    """Name the field that is not accepted, and the fields the kind does take.
 
     The useful half is not "extra inputs are not permitted" -- the model knows
-    something was refused -- but WHICH key, and which action kind the field it
-    sent actually belongs to. The common real case is a field borrowed from a
-    neighbouring kind (``frame_id`` on a ``wait``), so naming the kinds that
-    take it turns an opaque refusal into a one-line correction.
+    something was refused -- but WHICH key, followed by the shape the kind it
+    named actually accepts.
+
+    It used to have a second half: naming the kinds that DO take a borrowed
+    field, because the common real case was a field from a neighbouring kind
+    (``frame_id`` on a ``wait``). That case is no longer refused at all -- it is
+    dropped and reported by ``public_reply.drop_sibling_action_fields``, which
+    reads the model's required ``kind`` tag as the statement of what it chose --
+    so the clause could never print again and is gone rather than kept as a
+    paragraph no payload can reach. What reaches this hint is a name NO kind
+    declares, and for that there are no owners to name.
 
     The path is taken from the ``extra_forbidden`` ENTRY rather than from the
     first location in the rendering, because one payload can break two rules at
@@ -1083,19 +1103,10 @@ def _extra_action_key_hint(
     if len(path) < 4 or path[0] != "actions":
         return _example_json_hint(surface, observation, "an extra field in an action", shape)
     kind, name = path[2], path[3]
-    owners = sorted(
-        _action_kind_of(model)
-        for model in surface.models
-        if name in model.model_fields and _action_kind_of(model) != kind
+    return (
+        f'"{name}" is not a field of a "{kind}" action'
+        f'. a "{kind}" action takes exactly {_action_line(surface, kind, shape)}'
     )
-    parts = [f'"{name}" is not a field of a "{kind}" action']
-    if owners:
-        parts.append(
-            f"it belongs to the {', '.join(json.dumps(owner) for owner in owners)} "
-            f'action kind(s) -- check that "{kind}" is the kind you meant'
-        )
-    parts.append(f'a "{kind}" action takes exactly {_action_line(surface, kind, shape)}')
-    return ". ".join(parts)
 
 
 def _action_line(surface: ActionSurface, kind: str, shape: HintShape = HintShape()) -> str:
@@ -1465,11 +1476,17 @@ def strip_reasoning_boundary_markers(
     own text: a provider template emits the closing half of its reasoning
     boundary token at the joint between the reasoning channel and the content
     channel, so the assembled reply starts with ``</mm:think>`` welded to a
-    byte-perfect action batch. The strict decoder refuses a reply that does not
-    START with a JSON value -- by design, because hunting forward for the first
-    ``{`` can silently execute a batch the model never sent -- so the whole
-    billed turn was discarded as ``malformed-json``. The token is DECLARED per
-    model (``ModelSpec.reasoning_boundary_markers``), never recognised here.
+    byte-perfect action batch. When this strip was added the decoder refused a
+    reply that did not START with a JSON value, so the whole billed turn was
+    discarded as ``malformed-json``. The decoder now reads a decision behind
+    leading junk too, whenever it is the reply's ONLY decision
+    (``public_reply._locate_leading_object``), which covers these replies without
+    the declaration -- so the strip's remaining licence is the byte-precise half
+    of the job rather than the readability half: it removes DECLARED template
+    bytes, so the ``public_reply`` text the next turn carries is the model's own
+    reply instead of that reply with a provider token welded to its head. The
+    token is DECLARED per model (``ModelSpec.reasoning_boundary_markers``), never
+    recognised here.
 
     Returns the text to judge and the markers actually removed, in order. Two
     properties the caller depends on:
@@ -1479,9 +1496,9 @@ def strip_reasoning_boundary_markers(
       leading whitespace, which the decoder lstrips anyway, so the whitespace is
       not part of the decision either way). A token inside a string value, or
       behind a character of prose, is not touched and the reply is judged on its
-      original bytes. No ``find``, no substring surgery, and no balanced-object
-      extraction from prose -- the last is the salvage operation this module's
-      strictness exists to refuse.
+      original bytes. No ``find``, no substring surgery: which bytes in front of
+      the object are framing is the DECODER's question, and this function answers
+      only the narrower one about a declared head.
     * **An undeclared marker is not a marker.** ``markers`` empty -- every
       model the table does not list -- returns the input unchanged and nothing
       removed, so this is a declaration-driven tolerance and not a global
@@ -1553,10 +1570,12 @@ def parse_decision(
     meant.
     """
 
-    decoded, trailing = _decode_leading_json(payload)
+    decoded, trailing, leading_framing_bytes = _decode_leading_json(payload)
     if not isinstance(decoded, Mapping):
         raise DecisionParseError("decision must be a JSON object")
-    actions, note = normalise_public_reply(decoded, action_binding=action_binding)
+    actions, note, tolerated_action_fields = normalise_public_reply(
+        decoded, action_binding=action_binding
+    )
     if action_binding == COMPACT_ACTION_BINDING:
         try:
             actions = bind_compact_actions(decoded, actions, observation.observation_id)
@@ -1654,6 +1673,13 @@ def parse_decision(
         prompt_cache_key=prompt_cache_key,
         context_tokens=context_tokens,
         compaction=compaction,
+        # The decoder's own counts, set here rather than attached afterwards:
+        # they are facts about the REPLY's bytes -- how much framing preceded
+        # the decision, how many action fields the kind mismatch cost -- while
+        # the provenance ``decide`` attaches (``stripped_reply_markers``) is
+        # about how the reply was assembled before this function saw it.
+        tolerated_action_fields=tolerated_action_fields,
+        leading_framing_bytes=leading_framing_bytes,
     )
 
 

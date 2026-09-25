@@ -2410,10 +2410,13 @@ class ModelSpec(BaseModel):
     # kept as narrow as the evidence: a declared token at the very start of the
     # assembled reply, removed whole. Nothing is searched for, nothing is
     # removed from the middle, and a token inside a string value or behind a
-    # character of prose is left alone and judged as the bytes it is. Extracting
-    # the first balanced JSON object from prose -- the other way to rescue these
-    # replies -- remains refused for the reason ``_decode_leading_json`` gives:
-    # it can execute a batch the model never sent.
+    # character of prose is left alone and judged as the bytes it is. A reply
+    # behind an UNdeclared token is no longer lost either, and that is the
+    # decoder's doing rather than this table's: ``_decode_leading_json`` reads a
+    # decision behind leading junk when it is the reply's only decision
+    # (``public_reply._locate_leading_object``), so what the declaration still
+    # decides is whether the token is REMOVED from the reply the context carries
+    # -- the byte-precise half of the job -- not whether the turn survives.
     reasoning_boundary_markers: tuple[str, ...] = ()
     # Whether this ROUTE can serve this model at the provider's fast tier, and
     # whether the user has asked it to. Same division of labour as the effort

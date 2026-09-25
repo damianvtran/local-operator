@@ -40,6 +40,7 @@ from local_operator.evaluation.evidence.models import (
     OutcomeSeal,
     PreflightPayload,
     ReconciliationPayload,
+    ReplyTolerancePayload,
     ScoringResultPayload,
     ScoringStartPayload,
     StateMarker,
@@ -448,6 +449,11 @@ def _verify_semantics(
     execution_payload_types = (
         ModelRequestPayload,
         ModelResponsePayload,
+        # The tolerance record accompanies the ``model_response`` it counts for,
+        # so it is execution evidence here for the same reason the writer gates
+        # it there: it must not be readable as something a closed journal can
+        # acquire after finalization.
+        ReplyTolerancePayload,
         UsageCostPayload,
         ContextCompactionPayload,
         ObservationPayload,

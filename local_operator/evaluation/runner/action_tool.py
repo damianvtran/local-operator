@@ -63,7 +63,10 @@ from local_operator.evaluation.runner.provider_client import (
     rejection_hint,
     validation_diagnostic,
 )
-from local_operator.evaluation.runner.public_reply import _inlined_action_schema
+from local_operator.evaluation.runner.public_reply import (
+    _inlined_action_schema,
+    drop_sibling_action_fields,
+)
 from local_operator.harness.types import (
     FAULT_INVALID_ARGUMENTS,
     FAULT_KEY,
@@ -452,6 +455,34 @@ def _build_batch(arguments: Mapping[str, Any], observation: Observation) -> Acti
     the same property the absence of those keys from the schema buys, stated a
     second time at the one boundary where a non-compliant client could ignore
     the schema and send them anyway.
+
+    The one thing read OUT of an action is the field the reply tolerance drops
+    (``drop_sibling_action_fields``): a field belonging to a SIBLING action kind
+    states nothing the required ``kind`` tag did not already state, and the prose
+    path drops it for the same reason and with the same report. Applied here too
+    because the two channels converge on this one validated structure, and a
+    drop that ran on only one of them would refuse a decision the other accepts.
+
+    Scoped to the drop: this function reads an action ARRAY, because that is
+    what the offered call's parameters declare (``public_reply_schema``). The
+    prose channel additionally accepts an ``actions`` value that is a
+    JSON-encoded STRING (``_actions_from_json_string``), and that tolerance is
+    deliberately NOT mirrored here -- a call whose argument contradicts the type
+    the channel offered it is refused, while the same bytes arriving as prose
+    are read. Widening this channel's accepted spellings is a contract decision
+    of its own rather than part of reading a batch's actions.
+
+    Known gap, recorded rather than papered over: the drop count returned by
+    ``drop_sibling_action_fields`` is DISCARDED here. This channel builds no
+    ``ModelDecision`` and writes no sealed record of its own, so there is no
+    place to put a count -- an accepted batch from this path is counted only in
+    the log line the shared renderer emits. That is not a defect today, because
+    ``build_action_tool`` has no caller outside this module: no episode reaches
+    this path, so no bundle can read 0 for a reply that used the tolerance. It
+    becomes one the moment this channel is wired, and the fix is not to invent a
+    field here but to hand the count to the ``reply_tolerance`` event the runner
+    already seals (``ReplyTolerancePayload``), which is the one carrier that
+    does not re-baseline sealed bytes.
     """
     raw_actions = arguments.get("actions")
     actions: Any = raw_actions
@@ -464,6 +495,11 @@ def _build_batch(arguments: Mapping[str, Any], observation: Observation) -> Acti
             )
             for action in raw_actions
         ]
+        # ``_tolerated_fields`` is intentionally not carried out of this frame:
+        # this path has no ``ModelDecision`` and no sealed record to put it in,
+        # and the docstring above states where it must go when the channel is
+        # wired (the runner's ``reply_tolerance`` event).
+        actions, _tolerated_fields = drop_sibling_action_fields(actions)
     return ActionBatch.model_validate(
         {
             "protocol_version": PROTOCOL_VERSION,
