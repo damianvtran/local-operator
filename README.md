@@ -430,11 +430,15 @@ a peer owns up to date without opening it, and `lop sessions move <id> --to
 local --from-replica` recovers that copy as a new session for when the device
 that held it is gone.
 
-**A note on what is not here yet.** The credential half is not finished: a
-session created on a peer needs a model *that peer* can reach, and this build
-does not broker one. The desktop app has no mesh view yet — the networks and
-devices screen would live in `local-operator-ui`, next to the sessions it lists.
-Nothing above documents a command that does not run today.
+**A note on what is not here yet.** Credentials are brokered rather than copied:
+`lop network credential share <provider> --with <device>` lets a peer borrow a
+login *this* device holds, for a bounded grant
+(`network.credentials.grant_ttl_s`, fifteen minutes by default), and
+`lop network credentials` shows who owns what and what this device borrows.
+`kimi` is the one provider that can never be lent — its grants are signed with the
+fingerprint of the device that made them. The desktop app has no mesh view yet —
+the networks and devices screen would live in `local-operator-ui`, next to the
+sessions it lists. Nothing above documents a command that does not run today.
 
 The design set behind all of it is in
 [`docs/design/mesh-network.md`](./docs/design/mesh-network.md) — the spine, with
