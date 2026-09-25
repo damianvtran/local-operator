@@ -457,6 +457,43 @@ async def test_prompt_streaming_rejection_transfers_identity_to_steer() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_refused_prompt_retried_as_a_prompt_is_really_admitted() -> None:
+    """QA on PR #1528, Q1-5: the retry of a refused id is RUN, never swallowed.
+
+    A prompt refused with ``TurnInFlight`` after the drain took it used to park
+    its id as ``prompt-transfer``. The desktop's receipt journal and the phone
+    retry a failed send with the SAME id as a PROMPT, and that retry answered
+    "already admitted" without queueing anything: the message reached no
+    transcript while the client was told it had. Here the retry must reach the
+    session a second time and its receipt must be the real admission.
+    """
+    from local_operator.session.errors import TURN_IN_FLIGHT, TurnInFlight
+
+    handle, session = make_handle()
+    delivered: list[str] = []
+
+    async def refuse_then_admit(  # noqa: ANN202
+        text, images=None, *, message_id=None, admitted=None  # noqa: ANN001
+    ):
+        if not delivered:
+            delivered.append("refused")
+            raise TurnInFlight(TURN_IN_FLIGHT)
+        delivered.append(text)
+        assert message_id is not None and admitted is not None
+        session.admit(message_id)
+        admitted.set_result(None)
+
+    session.prompt = refuse_then_admit  # type: ignore[method-assign]
+    with pytest.raises(TurnInFlight):
+        await handle.prompt("raced", command_id="retried-id")
+    assert await handle.prompt("raced", command_id="retried-id") == "prompt admitted"
+    assert delivered == ["refused", "raced"], "the retry never reached the session"
+    # And from then on the durable index answers, so a THIRD send is the dedupe.
+    assert await handle.prompt("raced", command_id="retried-id") == "already admitted"
+    assert delivered == ["refused", "raced"]
+
+
+@pytest.mark.asyncio
 async def test_distinct_concurrent_steers_keep_fifo_order() -> None:
     handle, session = make_handle()
 
