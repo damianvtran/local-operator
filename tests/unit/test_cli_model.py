@@ -10,6 +10,7 @@ user would read.
 from __future__ import annotations
 
 import os
+import signal
 from typing import Any
 from unittest.mock import patch
 
@@ -325,13 +326,18 @@ def test_ctrl_c_while_waiting_is_one_honest_line_not_a_traceback(
         raise KeyboardInterrupt
 
     monkeypatch.setattr("asyncio.run", interrupted)
+    # The real re-delivery would kill the test runner; what it must be called
+    # with is asserted below, and a real bash loop proves the effect (MINOR-4).
+    delivered: list[tuple[int, int]] = []
+    monkeypatch.setattr("local_operator.cli.os.kill", lambda pid, sig: delivered.append((pid, sig)))
+    monkeypatch.setattr("signal.signal", lambda *_a: None)
     if command == "model":
         monkeypatch.setattr(
             "local_operator.mobile.peer_send.resolve_switch_target",
             lambda **_k: (record, [], ""),
         )
         argv = ["model", "experiment", "deepseek/deepseek-flash"]
-        needle = "interrupted — the switch may or may not have landed"
+        needle = "interrupted — the switch is unconfirmed and may still apply"
     else:
         monkeypatch.setattr(
             "local_operator.cli._resolve_peer_target", lambda *_a, **_k: (record, [], "")
@@ -347,3 +353,20 @@ def test_ctrl_c_while_waiting_is_one_honest_line_not_a_traceback(
     err = capsys.readouterr().err
     assert rc == 130
     assert needle in err and "Traceback" not in err, err
+    # MINOR-4: exiting 130 is not enough for bash to stop a loop around the
+    # command; the process must die OF SIGINT, after the notice is printed.
+    assert delivered == [(os.getpid(), signal.SIGINT)]
+
+
+def test_the_unconfirmed_switch_lines_fit_60_columns_and_look_forward() -> None:
+    """U3: the op can still sit unread in a stalled target, so both receipts say
+    the switch may still apply — never "may or may not have landed", which a
+    `lop sessions` run straight away seemed to answer. Each row fits 60 columns."""
+    from local_operator.mobile.peer_send import (
+        interrupted_switch_detail,
+        unconfirmed_switch_detail,
+    )
+
+    for detail in (interrupted_switch_detail(), unconfirmed_switch_detail()):
+        assert "may still apply" in detail and "may or may not" not in detail, detail
+        assert max(len(line) for line in detail.splitlines()) <= 60, detail
