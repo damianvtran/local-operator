@@ -29,14 +29,17 @@
 # options:
 #   --binary FILE      prebuilt universal binary (default: compile from source)
 #   --source FILE      the C source (default: lop-keyagent/se-keyagent.c)
-#   --keychain FILE    a throwaway keychain holding the identity (CI). WHAT IT
-#                      DOES AND DOES NOT DO, because assuming it is sufficient is
+#   --keychain FILE    a throwaway keychain holding the identity, for a caller that
+#                      has one (the local probe rigs under tools/lop-signing). WHAT
+#                      IT DOES AND DOES NOT DO, because assuming it is sufficient is
 #                      what broke the v0.62.39 release: it narrows the IDENTITY
 #                      (certificate) lookup to FILE. The signing KEY is resolved
 #                      through the user keychain SEARCH LIST, so FILE must ALSO be
 #                      listed there (`security list-keychains -d user -s FILE …`).
-#                      Passing --keychain alone fails at the codesign step below
-#                      with errSecInternalComponent — see the failure help there.
+#                      Passing --keychain alone fails at the codesign step below with
+#                      errSecInternalComponent — see the failure help there. The
+#                      release job does not pass it at all: it pins the identity with
+#                      --identity and reaches the key through the search list.
 #   --timestamp MODE   ``secure`` (default) or ``none``. ``none`` is NOT for a
 #                      release: it is for a local build on a host whose timestamp
 #                      authority cannot be reached. It REFUSES unless the caller
