@@ -165,8 +165,13 @@ def reply_channel_tools(
     return [build_reply_channel_tool(schema, description=description, name=name)]
 
 
-def envelope_from_tool_call(calls: Iterable["ToolCall"], *, name: str) -> str | None:
-    """The raw argument JSON of the first reply-channel call, or ``None``.
+def envelope_from_tool_call(
+    calls: Iterable["ToolCall"],
+    *,
+    name: str,
+    offered_names: Iterable[str] | None = None,
+) -> str | None:
+    """The raw argument JSON of the reply-channel call, or ``None``.
 
     Returns TEXT, not a parsed object, so the caller feeds it to the very
     decoder that validates a prose reply. That is the whole point: one
@@ -184,14 +189,53 @@ def envelope_from_tool_call(calls: Iterable["ToolCall"], *, name: str) -> str | 
     rather than ``None`` — a distinction the caller needs, because "the model
     used the channel and sent garbage" is a rejection to report, while "the
     model did not use the channel" means read the prose instead.
+
+    ``offered_names`` is the tool names the REQUEST put on the wire, and
+    passing it is what makes the channel survive the model naming the call
+    something else. When the reply channel is the SOLE name offered, every call
+    the stream carried is the channel's, whatever it was named: the request
+    advertised no capability, so there is nothing else a call could be, and the
+    name is a label the model invented for the one function it was given.
+
+    That distinction is measured, not theoretical, and it is why the default is
+    the strict name test rather than the tolerant one. Over the arm's 27 sealed
+    OSWorld bundles (deepseek-v4.1-flash), 174 of the 199 ``leading-delimiter``
+    refusals published NO reply text at all: ``content_deltas=0`` with a
+    streamed call (``tool_call_deltas`` 3-1124), i.e. the decision arrived as a
+    tool call and the harness read only the empty prose, then refused the turn
+    for not beginning with ``{``. At the SAME shape (``content_deltas=0``,
+    ``tool_call_deltas>0``, ``stop=toolUse``) 176 other replies were read and
+    published, which is what rules out "the bytes were empty" as the cause and
+    leaves the call's NAME as the only difference — and the name was recorded
+    nowhere, so the class could not be diagnosed from a sealed bundle at all.
+
+    Omitted (or naming any other set): only a call named ``name`` is the
+    channel, which is the correct reading for a request that ALSO offered real
+    tools — there a foreign name is a real capability being invoked, not a
+    reply, and reading its arguments as one would execute a label the harness
+    never advertised.
+
+    The widening is bounded by everything downstream of this function, which is
+    unchanged: the bytes go to the same decoder, so a foreign-named call
+    carrying two batches, a duplicate key, a non-object, or an object that
+    fails validation is refused by exactly the rules a prose reply is refused
+    by. No shape that was refused on the channel before is accepted now.
     """
-    matched = [call for call in calls if call.name == name]
+    calls = list(calls)
+    if offered_names is not None and list(offered_names) == [name]:
+        matched = calls
+    else:
+        matched = [call for call in calls if call.name == name]
     if not matched:
         return None
 
     # Two calls naming the channel is the SAME ambiguity the prose decoder
     # refuses -- "which one did the model mean?" -- and taking the first would
-    # execute a decision the model may have superseded.
+    # execute a decision the model may have superseded. That holds for two
+    # FOREIGN-named calls too, which is the case the sole-offer rule above now
+    # admits: two calls carrying two batches are refused here rather than
+    # resolved by order, so widening WHICH calls are read cannot widen how many
+    # of them may be executed.
     #
     # Rather than inventing a second rejection, hand the decoder every envelope
     # the model sent, concatenated, and let its own rules judge them. The
