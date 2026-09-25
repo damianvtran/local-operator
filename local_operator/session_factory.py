@@ -3618,9 +3618,16 @@ async def _prepare(
     )
     spec = model_configuration.spec
 
-    from local_operator.providers.auth_store import AuthStore
+    # ONE CONSTRUCTION SITE, and ``build_auth_store`` returns the very same
+    # ``AuthStore`` on a device that borrows nothing — no network, no placement, or
+    # nothing shared with this device (build plan §5, design §5.1). It swaps in
+    # ``network.credentials.store.MeshAwareAuthStore`` only when another device owns
+    # a credential this one is a holder for, which is the only state in which the
+    # broker rung can fire. ``AuthStore`` is still imported here because the rest of
+    # this module's annotations name it.
+    from local_operator.network.credentials import build_auth_store
 
-    auth_store = AuthStore(config_dir=config_manager.config_dir)
+    auth_store = build_auth_store(config_manager.config_dir)
     # A fork inherits its PARENT's provider cache key. The fork's transcript is
     # a byte-identical copy, so its first request reproduces the parent's cached
     # prefix exactly and should be routed to it rather than opening a fresh one.

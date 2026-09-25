@@ -207,9 +207,17 @@ not for work that follows the machine.
 Credentials are brokered, never mirrored (decision A5). Operationally: never
 copy a token or a key from one device to another, never run a login on a peer,
 and never "fix" an expiry by re-authenticating for someone else. A refresh is
-requested from the device that owns the credential. Nothing in this build
-brokers credentials yet — the `broker_credential` capability is in the member
-vocabulary, and the op that would use it is not.
+requested from the device that owns the credential, which lends a short-lived
+access token and never its refresh token (`lop network credential share|revoke`,
+`lop network credentials`).
+
+Revocation is not instant, and an incident response must not assume it is.
+`credential revoke` refuses new borrows at once; a grant already lent is dropped
+by the borrower within `network.credentials.grant_ttl_s` (900 s by default); and
+an OAuth bearer copied out of the borrower stays valid at the provider until the
+token itself expires — to end it now, sign the account out at the provider. A
+shared static API key never expires, so a copy of one lives until the key is
+rotated at the provider; rotating it is the only way to end it.
 
 ## When something looks wrong
 
