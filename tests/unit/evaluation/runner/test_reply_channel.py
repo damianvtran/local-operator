@@ -487,9 +487,9 @@ async def test_duplicate_keys_in_a_foreign_named_call_still_refuse() -> None:
             model_spec=_spec(supports_tools=True),
         ).decide(current, _turns(current))
     with pytest.raises(DecisionRejected) as in_prose:
-        await _client(
-            ScriptedStream(duplicated), model_spec=_spec(supports_tools=True)
-        ).decide(current, _turns(current))
+        await _client(ScriptedStream(duplicated), model_spec=_spec(supports_tools=True)).decide(
+            current, _turns(current)
+        )
 
     # PARITY is the property, not any particular message: the raw bytes reach the
     # decoder UNREPAIRED on both channels, so the same text fails identically
