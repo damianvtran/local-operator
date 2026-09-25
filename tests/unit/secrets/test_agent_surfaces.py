@@ -1198,14 +1198,27 @@ def test_streamed_frames_fail_closed_when_the_ledger_is_unreadable(
     # The copy is pinned, because both halves of it are load-bearing rather than
     # decorative. A reader here is a model polling the job tail, and one that
     # reads this as a lost result cancels a job whose result was never in
-    # question; the notice therefore says the result still arrives. And it ends
-    # on a newline, because frames are appended to ONE shared tail as raw text
-    # (`JobManager.append_output`), so a faulted stdout and a faulted stderr
-    # would otherwise run together into a single unreadable line.
-    assert joined == eval_worker._WITHHELD_FRAME_TEXT * 2
+    # question; the notice therefore says the result still arrives. The withhold
+    # is sticky, so the second write adds no second notice from THIS sink.
+    assert joined == eval_worker._WITHHELD_FRAME_TEXT
     assert "arrives when the run finishes" in joined
-    assert eval_worker._WITHHELD_FRAME_TEXT.endswith("\n")
-    assert len(eval_worker._WITHHELD_FRAME_TEXT.rstrip("\n")) <= 200, "outside the peek cut"
+    assert joined.endswith("\n"), "the notice ends on its own line"
+    assert len(joined.rstrip("\n")) <= 200, "outside the peek progress-line cut"
+
+    # And the newline's own reason, which one sink cannot show: the worker builds
+    # TWO of these (stdout and stderr) and both append to ONE shared job tail as
+    # raw text (`JobManager.append_output`), so without the trailing newline the
+    # two notices would run together into a single unreadable line.
+    frames = []
+    channels = [
+        eval_worker._StreamingTextIO(eval_worker.STREAM_CHAR_LIMIT, frames.append),
+        eval_worker._StreamingTextIO(eval_worker.STREAM_CHAR_LIMIT, frames.append),
+    ]
+    channels[0].write("out")
+    channels[1].write("err")
+    tail = "".join(frames)
+    assert tail == eval_worker._WITHHELD_FRAME_TEXT * 2, tail
+    assert tail.splitlines() == [eval_worker._WITHHELD_FRAME_TEXT.rstrip("\n")] * 2
 
 
 def test_worker_response_scrubs_every_model_visible_channel(isolated: Path) -> None:

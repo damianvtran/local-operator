@@ -1996,20 +1996,23 @@ def test_r7_3_a_non_canonical_device_spelling_is_the_device_it_names(
 
 
 @pytest.mark.parametrize(
-    "command",
+    ("command", "rule"),
     [
         # R8-1: a LEADING redirect must not decide the verdict. The `&>`/`&>>`
         # arm left fd 1 alone when the word was unreadable, so the first
         # redirect on the line was the last word on whether the value reached
         # the result.
-        "lop secret get NAME > /tmp/pre-amp &> $LOG",
-        "lop secret get NAME > /tmp/pre-amp &>> $LOG",
-        "lop secret get NAME >/dev/null &> $LOG",
-        'v=$(lop secret get NAME); echo "$v" > /tmp/pre-amp &> $LOG',
+        ("lop secret get NAME > /tmp/pre-amp &> $LOG", "shell.bare-source-in-command-position"),
+        ("lop secret get NAME > /tmp/pre-amp &>> $LOG", "shell.bare-source-in-command-position"),
+        ("lop secret get NAME >/dev/null &> $LOG", "shell.bare-source-in-command-position"),
+        (
+            'v=$(lop secret get NAME); echo "$v" > /tmp/pre-amp &> $LOG',
+            "shell.print-of-source",
+        ),
     ],
 )
 def test_r8_1_a_leading_redirect_does_not_decide_an_unreadable_both_streams_word(
-    command: str,
+    command: str, rule: str
 ) -> None:
     """R8-1: `&>WORD` rebinds fd 1 instead of inheriting whatever bound it.
 
@@ -2022,6 +2025,7 @@ def test_r8_1_a_leading_redirect_does_not_decide_an_unreadable_both_streams_word
     """
     result = scan_command(command)
     assert result.refused, (command, result)
+    assert rule in result.labels, (command, result.labels)
 
 
 @pytest.mark.asyncio
