@@ -187,10 +187,12 @@ def _one(arm: str, index: int, warm_timeout_s: float) -> dict[str, Any]:
             os.environ.pop(standby.DISABLE_ENV, None)
             ok, secs, spare_pid, rss = _warm_standby(root, warm_timeout_s)
             row.update(standby_ready=ok, standby_warm_s=round(secs, 1), standby_rss_mb=rss)
-            # Nothing re-warms INSIDE the timed span; the replacement is its own
-            # measurement (standby_warm_s), not weather on this one.
-            standby.reset_for_tests()
-            os.environ.pop(standby.DISABLE_ENV, None)
+            # Nothing RE-WARMS inside the timed span: the replacement is its own
+            # measurement (standby_warm_s), not weather on this one. ``_WARMING``
+            # off rather than ``reset_for_tests`` -- the latter would retire the
+            # standby this arm exists to measure (and did, until this was fixed:
+            # two passes measured 2.2 s of cold spawn with ``adopted: 0``).
+            standby._WARMING[0] = False
         row["load1"] = round(os.getloadavg()[0], 1)
         row.update(asyncio.run(_engage(root, uuid.uuid4().hex[:12])))
         row["adopted"] = bool(spare_pid and row.get("runtime_pid") == spare_pid)
