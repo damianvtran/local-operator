@@ -19049,21 +19049,25 @@ def _resumed_line(
     model, owns = _row_model(comms, new_job_id) if new_job_id else ("", None)
     if not model:
         return line
+    # A fallback (D9.2, D9.3) is said out loud, never silent: an unannounced
+    # model is how the cost incident behind this receipt went unnoticed.
+    note_of = getattr(comms, "resume_model_note", None)
+    note = note_of(new_job_id) if callable(note_of) and new_job_id else ""
     on_parent = getattr(comms, "resumed_on_parent_model", None)
+    if note:
+        # The note names the model's source, so the clause must not name a
+        # second one: "on this session's model (X) (its parent's model could not
+        # be found; ...)" would state two sources for one model (review R7).
+        line += f" on {model} ({note})"
+        return line
     if callable(on_parent) and new_job_id and on_parent(new_job_id):
-        # Inherited from a manager rather than from this session (D9.1): "on
+        # Inherited from an ancestor rather than from this session (D9.4): "on
         # this session's model" would be false, and a bare "on <model>" reads
         # as a pin.
         line += f" on its parent's model ({model})"
     else:
         line += f" {_model_clause(model, owns, session_model)}"
-    # A fallback (D9.2) is said out loud, never silent: an unannounced model is
-    # how the cost incident behind this receipt went unnoticed.
-    note_of = getattr(comms, "resume_model_note", None)
-    note = note_of(new_job_id) if callable(note_of) and new_job_id else ""
-    if note:
-        line += f" ({note})"
-    elif previous_model and previous_model != model:
+    if previous_model and previous_model != model:
         line += f" (its previous run was on {previous_model})"
     return line
 
