@@ -7,9 +7,9 @@ secret is this?" and one it can use to ask "show me the bytes":
   digest of a VALUE. The crypto assertions live here because the property they
   defend is about the primitive (keyed, not a bare hash; truncated; stable), not
   about the CLI that prints it.
-* :meth:`SecretStore.describe_fingerprint` — metadata, a byte length and that
+* :meth:`SecretStore.describe_identity` — metadata, a byte length and that
   digest, never the value, with its own audit event.
-* :meth:`SecretStore.reveal` / :meth:`SecretStore.note_reveal_refusal` — the
+* :meth:`SecretStore.note_reveal` / :meth:`SecretStore.note_reveal_refusal` — the
   audited, human-consent path to the bytes, recorded as ``reveal`` so it is not
   lost among the ``get`` rows scripts write.
 
