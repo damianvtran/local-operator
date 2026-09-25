@@ -16,7 +16,8 @@ What it shows, top to bottom:
   tool schemas, environment, knowledge, conversation, and tool results. Marked
   as an estimate because the provider bills one input total and the split is
   apportioned by character length.
-- **By provider** — the same totals grouped per provider/model source.
+- **By provider** — the same totals grouped per provider/model source, plus the
+  measured decode rate (``tok/s``) where those calls carried a window.
 - **By session** — per-session context spend, named where a title is known.
 
 The renderer here is a set of pure functions returning ``rich.text.Text`` so
@@ -45,6 +46,7 @@ see :func:`_session_row_line` for why that is load-bearing rather than tidy.
 
 from __future__ import annotations
 
+import math
 import textwrap
 from dataclasses import dataclass, field
 from typing import Collection, Mapping, NamedTuple, Protocol, Sequence
@@ -139,6 +141,77 @@ def format_percent(fraction: float | None) -> str:
     if 99 < pct < 100:
         return "99%"
     return f"{round(pct)}%"
+
+
+def format_tps(value: float | None) -> str:
+    """A generation rate: ``315`` / ``9.9`` / ``<0.1`` / ``—`` when unknown.
+
+    Two of those spellings are honesty rules rather than formatting taste, and
+    they are the whole reason this is not one ``f"{value:.1f}"``:
+
+    - ``None`` renders ``—``, never ``0``. The rate is unknown whenever no call
+      in scope contributed a measured window, which is the state of every
+      ledger recorded before this metric shipped, and ``0 tok/s`` would claim
+      every one of those calls decoded instantly. :meth:`UsageAggregate.decode_tps`
+      returns ``None`` rather than ``0.0`` for exactly this reason; this
+      formatter is where that distinction reaches the screen.
+    - Below 10 the tenth is KEPT. A genuinely slow decode (``0.4 tok/s``) is a
+      MEASUREMENT, not a rounding error, and an integer form would print it as
+      a confident ``0`` — the same glyph family as the ``—`` that means
+      "unknown", with two different facts collapsed into one spelling. A
+      nonzero rate that still rounds to ``0.0`` keeps a bound instead
+      (``<0.1``), the rule ``format_cost`` already follows for a figure below
+      its ladder's resolution. At 10 and above the tenth stops discriminating,
+      so the integer part takes :func:`format_tokens`' scaling vocabulary
+      (``315`` / ``1.2k``) exactly as ``format_tokens`` does for counts.
+    """
+    if value is None:
+        return "—"
+    # A non-finite rate is not a measurement either. ``decode_tps`` divides two
+    # summed integers with a positive window, so it cannot produce one; this is
+    # the same never-raise-mid-render guard ``format_cost`` carries for a
+    # hand-built aggregate, rather than a claim that data reaches it.
+    if not math.isfinite(value):
+        return "—"
+    if value < 10:
+        tenths = f"{value:.1f}"
+        # Tied to the RENDERED string rather than a literal cutoff, so the
+        # guard cannot drift from what the reader actually sees.
+        return "<0.1" if value > 0 and tenths == "0.0" else tenths
+    return format_tokens(round(value))
+
+
+def scope_needs_rate_legend(scope: "UsageAggregate") -> bool:
+    """Whether ONE scope's rate cells need the coverage footnote.
+
+    ``decode_calls < calls`` is "this rate does not speak for every call",
+    which includes the pre-release ledger's ``0 of N``: the footnote is what
+    explains a column of bare ``—`` cells rather than leaving the reader to
+    guess whether the model is slow, broken, or simply never measured.
+
+    The predicate, not the loop, for the reason ``scope_needs_cost_legend``
+    gives: ``/session`` asks the same question over its own scopes, and two
+    copies of "when is the footnote owed" would eventually disagree.
+    """
+    return scope.decode_calls < scope.calls
+
+
+def rate_legend(aggregate: "UsageAggregate") -> str:
+    """The tables' one-line coverage footnote, or ``""`` when coverage is full.
+
+    ONE line for the whole report rather than a cell per row: the rate column
+    is already three cells wide on every row, and the counts behind it are the
+    scope's, so a per-row coverage figure would cost every table a column for
+    a number the footnote carries once (design §7). It is drawn from the
+    AGGREGATE while the tables show per-provider and per-session scopes, and
+    that is sound rather than convenient: every row's ``decode_calls`` and
+    ``calls`` sum into the aggregate's, and ``decode_calls <= calls`` holds
+    row-wise, so coverage cannot be full in the whole and partial in a part.
+    One check on the aggregate therefore covers every rate cell on the screen.
+    """
+    if not scope_needs_rate_legend(aggregate):
+        return ""
+    return f"decode rate over {aggregate.decode_calls:,} of {aggregate.calls:,} calls"
 
 
 def format_cost(aggregate: "_CostLike") -> str:
@@ -1179,6 +1252,19 @@ def build_report(
             "of context served from cache",
         )
     )
+    # The measured decode rate rides the headline figures because it is one: how
+    # fast this machine's models actually generate. It is the one figure here
+    # that can be UNKNOWN rather than zero (``—`` when no call carried a
+    # measured window), so its note names what it measures and the coverage
+    # footnote below the tables says how much of the ledger it speaks for —
+    # never ``0 tok/s``, which would claim every call decoded instantly.
+    lines.append(
+        kv(
+            "Decode rate",
+            f"{format_tps(aggregate.decode_tps)} tok/s",
+            "measured decode speed",
+        )
+    )
     # Cost rides the TOTALS block because it is a headline figure, but it is an
     # ESTIMATE (published list price × billed tokens; it cannot see a plan,
     # discount, or free tier), so its note says so — the same measured-vs-modelled
@@ -1484,6 +1570,21 @@ def build_report(
             )
         )
 
+    # Footnote for the decode rate, drawn only when the rate does not speak for
+    # every call (``decode_calls < calls``) — which includes the pre-release
+    # ledger's zero, where it is the ONE line that explains the ``—`` in every
+    # ``tok/s`` cell above it. ``dim`` so it reads as a footnote, not a row, and
+    # drawn here rather than per section because both tables' rate cells are
+    # ``tok/s`` and one line covers them: the counts it names are the aggregate
+    # the rows sum into (see ``rate_legend``). A fully-measured run draws
+    # nothing, so a reader who knows the column never sees the string.
+    legend_text = rate_legend(aggregate)
+    if legend_text:
+        lines.append(Text())
+        legend = Text()
+        legend.append("  " + legend_text, style=dim)
+        lines.append(legend)
+
     # Legend for the cost markers, drawn only when a ``+`` or ``$—`` is on
     # screen (review D1). ``dim`` so it reads as a footnote, not a row.
     #
@@ -1585,6 +1686,12 @@ def _row_overhead(groups: "Sequence[tuple[str, UsageAggregate]]", width: int) ->
         return 0
     # ``  {name}`` indent, then ``{tokens:>NN} tokens``.
     overhead = 2 + _tokens_col(groups) + len(" tokens")
+    # ``   {tps:>NN} tok/s`` — the decode-rate column, immediately after the
+    # tokens it is a rate OF, and sized to the widest rate in this table for the
+    # same D11 reason as the calls column: ``format_tps`` returns 1 cell for an
+    # unmeasured ledger and 3-4 for a fast one, so a pad sized by hand would be
+    # right for one and overrun the box for the other.
+    overhead += 3 + _tps_col(groups) + len(" tok/s")
     # ``   `` gap + the right-aligned cost cell, sized to the widest figure in
     # this table exactly as ``_group_section`` sizes it.
     overhead += 3 + max(len(format_cost(agg)) for _, agg in groups)
@@ -1629,6 +1736,22 @@ def _tokens_col(groups: "Sequence[tuple[str, UsageAggregate]]") -> int:
     outgrow silently.
     """
     return max(8, max((len(format_tokens(agg.total_tokens)) for _, agg in groups), default=0))
+
+
+def _tps_col(groups: "Sequence[tuple[str, UsageAggregate]]") -> int:
+    """Cells the ``tok/s`` column needs, floored at 3.
+
+    Sized from the data through :func:`format_tps` exactly as ``_tokens_col``
+    and ``_calls_col`` are, because the D11 rule applies here most of all: that
+    formatter is total and returns ``—`` (1 cell) for a ledger with no measured
+    windows and a scaled form for a fast one, so a literal pad sized against the
+    fixture would push every column to its right off the box on the ledger.
+
+    The floor is not an allowance: 3 is the width of the widest sub-10 form
+    (``9.9``), so a fresh ledger's column is the same 3 cells an ordinary slow
+    reading needs and the numeric columns do not twitch as rates cross 10.
+    """
+    return max(3, max((len(format_tps(agg.decode_tps)) for _, agg in groups), default=0))
 
 
 #: One indent step per level of session nesting. Two cells: enough that a
@@ -1736,6 +1859,11 @@ class ReportLayout:
     #: the row sideways (see :func:`_session_row_line`).
     name_col: int = 0
     tokens_col: int = 0
+    #: The decode-rate column. Published for the same reason the others are: it
+    #: is a maximum over the whole table, so a single-row repaint that measured
+    #: it from that row's own rate would narrow the column and shift the row's
+    #: numbers sideways (see :func:`_session_row_line`).
+    tps_col: int = 0
     cost_col: int = 0
     calls_col: int = 0
     #: Whether the ``% cache`` column is present — the width switch, not a width.
@@ -1954,8 +2082,8 @@ def _session_section(
     tables sit one above the other and must read as the same table.
 
     "Identical" is load-bearing rather than aspirational: the columns here are
-    sized through the SAME ``_tokens_col``/``_calls_col``/``truncate_cells``
-    helpers ``_group_section`` and ``_row_overhead`` use. This function forked
+    sized through the SAME ``_tokens_col``/``_tps_col``/``_calls_col`` and
+    ``truncate_cells`` helpers ``_group_section`` and ``_row_overhead`` use. This function forked
     from ``_group_section`` before those existed, and a fork that keeps the
     literal ``:>8``/``:>4`` pads is the D8/D11 defect preserved in a second
     place — the budget would be measured through the helpers while the paint
@@ -1998,7 +2126,7 @@ def _session_section(
     simply not found at the tail and the row paints in one style, as before.
 
     ``layout`` publishes everything a LATER single-row repaint needs — the row
-    triples, the label budget, the four column widths and their switch. The
+    triples, the label budget, the five column widths and their switch. The
     screen owns a long-lived layout and asks for one row to be recomposed on
     every pointer crossing; without these figures the patch path would have to
     walk the forest and re-measure the columns a second time, which is both the
@@ -2021,6 +2149,7 @@ def _session_section(
     target.session_triples = rows
     target.name_col = name_col
     target.tokens_col = _tokens_col(pairs)
+    target.tps_col = _tps_col(pairs)
     target.cost_col = max(len(format_cost(agg)) for _, agg in pairs)
     target.calls_col = _calls_col(pairs)
     target.show_cache = width >= _WIDE_TABLE_MIN
@@ -2047,8 +2176,8 @@ def _session_row_line(
     second definition of what a row looks like, and the two would drift.
 
     **The argument it takes is the layout, not a row list, and that is the
-    point.** ``tokens_col``/``cost_col``/``calls_col`` are maxima over every row
-    in the table, so composing a row against its OWN figures silently changes
+    point.** ``tokens_col``/``tps_col``/``cost_col``/``calls_col`` are maxima
+    over every row in the table, so composing a row against its OWN figures silently changes
     the numeric columns: measured on the operator's ledger, a patch that
     re-entered the table composer with a one-row list produced rows shifted
     sideways in 24 of the 26 crossings, and 26 of 26 were byte-identical to a
@@ -2096,6 +2225,12 @@ def _session_row_line(
         line.append(clipped + pad, style=accent if on_cursor else style)
     line.append(f"{format_tokens(agg.total_tokens):>{layout.tokens_col}} tokens", style=style)
     line.append("   ")
+    # Immediately after the tokens it is a rate OF, and ``dim`` like ``calls``
+    # and ``% cache``: it is derived from a measured window rather than billed
+    # by the provider, so it must not read with the authority of ``tokens`` or
+    # the dollars beside it. ``—`` when this row's calls produced no window.
+    line.append(f"{format_tps(agg.decode_tps):>{layout.tps_col}} tok/s", style=dim)
+    line.append("   ")
     append_cost(line, agg, layout.cost_col, style, dim)
     line.append(f"   {agg.calls:>{layout.calls_col}} calls", style=dim)
     if layout.show_cache:
@@ -2141,9 +2276,9 @@ def _group_section(
     where nothing is priced this is exactly the old token order.
 
     ``name_col`` is shared across both tables (review D2) so their columns line
-    up. ``width`` decides the rest: a wide frame shows tokens · cost · calls ·
-    cache; a narrow one drops the cache column (see ``_WIDE_TABLE_MIN``) so the
-    cost column this feature adds always survives.
+    up. ``width`` decides the rest: a wide frame shows tokens · tok/s · cost ·
+    calls · cache; a narrow one drops the cache column (see
+    ``_WIDE_TABLE_MIN``) so the cost column this feature adds always survives.
     """
     fg = semantic_style("fg")
     dim = semantic_style("dim")
@@ -2173,6 +2308,7 @@ def _group_section(
     # ``16 calls`` put the two ``calls`` labels at different offsets), which
     # defeats scanning the column straight down exactly as D3 described.
     tokens_col = _tokens_col(ordered)
+    tps_col = _tps_col(ordered)
     calls_col = _calls_col(ordered)
     for name, agg in ordered:
         block.append("\n")
@@ -2186,6 +2322,14 @@ def _group_section(
         # latter; ``truncate_cells`` measures in CELLS, matching the pad.
         block.append(f"  {truncate_cells(name, name_col):<{name_col}}", style=fg)
         block.append(f"{format_tokens(agg.total_tokens):>{tokens_col}} tokens", style=fg)
+        # The decode rate sits immediately after the tokens it is a rate OF, and
+        # ``dim`` like ``calls``/``% cache``: it is derived from a measured
+        # window, not billed by the provider, so it must not carry the weight of
+        # the two authority figures beside it. ``—`` when this scope produced no
+        # measured window — the coverage footnote below the tables says how many
+        # calls the rate does speak for whenever that happens.
+        block.append("   ")
+        block.append(f"{format_tps(agg.decode_tps):>{tps_col}} tok/s", style=dim)
         # Cost sits next to tokens as the other headline number, in full-strength
         # ``fg`` — it is the answer this feature exists to give, not a footnote.
         # The lower-bound ``+`` is dimmed by ``append_cost`` (review D1).

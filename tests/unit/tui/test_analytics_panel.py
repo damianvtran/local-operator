@@ -33,11 +33,15 @@ from local_operator.tui.widgets.analytics_panel import (
     _forest_rows,
     _row_overhead,
     _row_prefix,
+    _tps_col,
     build_report,
     format_cost,
     format_percent,
     format_tokens,
+    format_tps,
     proportion_bar,
+    rate_legend,
+    scope_needs_rate_legend,
 )
 from local_operator.tui.widgets.tool_card import truncate_cells
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
@@ -91,6 +95,37 @@ def test_format_tokens_scales():
 def test_format_percent():
     assert format_percent(0.734) == "73%"
     assert format_percent(None) == "—"
+
+
+def test_format_tps_is_total_and_never_spells_a_measurement_as_unknown_or_zero():
+    """The two honesty rules, which are the same rule read in both directions.
+
+    ``None`` is "nothing was measured": it renders ``—`` and never ``0``, which
+    would claim every call on a pre-release ledger decoded instantly. A slow but
+    REAL rate is a measurement and must never render as the ``0`` that means
+    unknown — hence the kept tenth below 10. Above 10 the tenth stops
+    discriminating and the integer part takes the count vocabulary the rest of
+    the screen already scales with.
+    """
+    assert format_tps(None) == "—"
+    # A sub-10 rate keeps its tenth: 0.4 is a reading, not a rounding error, and
+    # an integer form would print it as the same ``0`` that means "unknown".
+    assert format_tps(0.4) == "0.4"
+    assert format_tps(9.9) == "9.9"
+    # A nonzero rate below the tenth's resolution keeps a BOUND rather than a
+    # confident ``0.0`` — the rule ``format_cost`` follows with ``<$0.0001``.
+    assert format_tps(0.04) == "<0.1"
+    # A measured zero IS zero (a window was timed and produced no output); the
+    # distinction from ``—`` is the whole point of the ``None`` branch.
+    assert format_tps(0.0) == "0.0"
+    # At 10 and above the integer part scales like every other count here.
+    assert format_tps(10.0) == "10"
+    assert format_tps(315.4) == "315"
+    assert format_tps(1_234.0) == "1.2k"
+    # Total over its domain, including values ``decode_tps`` cannot return:
+    # nothing raises mid-render (``format_cost``'s never-raise rule).
+    for not_a_rate in (float("nan"), float("inf"), float("-inf")):
+        assert format_tps(not_a_rate) == "—", not_a_rate
 
 
 def test_the_composed_figure_keeps_its_marks_and_never_reads_as_free():
@@ -871,6 +906,274 @@ def test_a_wide_frame_spends_its_width_on_the_name():
     assert title not in narrow
     narrow_row = next(li for li in narrow.splitlines() if "coder · Fix" in li)
     assert "…" in narrow_row, "a cut name must say it was cut"
+
+
+#: A 100-second decode window, so the rate a fixture writes is the rate a test
+#: reads (``decode_tokens / 100``) while ``decode_tokens`` stays an integer, as
+#: the recorder's own columns are.
+_DECODE_US = 100_000_000
+
+
+def _decode(
+    tps: float | None, *, calls: int = 100, decode_calls: int | None = None
+) -> UsageAggregate:
+    """One aggregate carrying a measured decode window at ``tps``.
+
+    ``tps=None`` is the pre-release ledger: no call contributed a window, so
+    ``decode_calls`` stays 0 and the rate is UNKNOWN rather than zero. Otherwise
+    the window is built from the rate the test wants to read, on a 100-second
+    span so a sub-10 rate survives the integer rounding the real recorder does.
+    """
+    if tps is None:
+        return UsageAggregate(calls=calls)
+    return UsageAggregate(
+        calls=calls,
+        decode_us=_DECODE_US,
+        decode_tokens=round(tps * (_DECODE_US / 1_000_000)),
+        decode_calls=calls if decode_calls is None else decode_calls,
+    )
+
+
+def _rate_report(
+    tps: float | None, *, calls: int = 100, decode_calls: int | None = None
+) -> UsageAggregate:
+    """A whole report's worth: totals plus one provider row and one session row."""
+    scope = _decode(tps, calls=calls, decode_calls=decode_calls)
+    agg = copy.copy(scope)
+    agg.by_provider = {"anthropic": scope}
+    agg.by_session = {"abc123": scope}
+    setattr(agg, "session_names", {"abc123": "my session"})
+    return agg
+
+
+def test_the_rate_column_is_in_both_tables_immediately_after_tokens():
+    """One column, in BOTH tables, in the same position.
+
+    ``_group_section`` and ``_session_section`` are two composers of one table
+    shape, and the module documents the defect class this pins: a column added to
+    one and not the other takes the rightmost column off the table that did not
+    budget for it. Asserted as a POSITION — ``" tokens"``, then the ordinary
+    three-cell gap, then the rate — rather than as a substring, because a
+    ``315 tok/s`` somewhere else on the row would not say which column it is in.
+    """
+    text = _text(_rate_report(315.0))
+    provider = next(li for li in text.split("By provider", 1)[-1].splitlines() if " tokens" in li)
+    session = next(li for li in text.split("By session", 1)[-1].splitlines() if " tokens" in li)
+    for row in (provider, session):
+        assert re.search(r" tokens {3}315 tok/s", row), row
+    # The headline carries the same reading, so the totals and the tables cannot
+    # disagree about what the rate is.
+    assert re.search(r"Decode rate\s+315 tok/s", text), text
+
+
+def test_the_rate_cell_reads_unknown_never_zero_when_no_window_was_measured():
+    """A pre-release ledger: every rate cell says ``—``, and NO cell says ``0``.
+
+    The column still has to be THERE — a table whose shape changed between an
+    old ledger and a new one would not be one table — so this asserts the pad
+    and the glyph, not merely the absence of a number.
+    """
+    text = _text(_rate_report(None))
+    # Everything below the provider header is the two tables (plus footnotes), so
+    # the row filter does not catch the Totals lines that also say "tokens".
+    rows = [li for li in text.split("By provider", 1)[-1].splitlines() if " tokens" in li]
+    assert len(rows) == 2, rows
+    for row in rows:
+        # ``—`` is right-aligned inside the 3-cell column, so the gap is the
+        # three-cell gutter plus the pad (exactly what ``_tps_col``'s floor is
+        # for: the column does not collapse to the glyph's own width).
+        assert re.search(r" tokens +— tok/s", row), row
+    assert "0 tok/s" not in text
+    assert re.search(r"Decode rate\s+— tok/s", text), "the headline says unknown too"
+
+
+def test_the_coverage_footnote_appears_only_when_the_rate_is_partial():
+    """Partial coverage is named, in the idiom the money footnote already uses.
+
+    ``decode_calls < calls`` is the whole condition. At full coverage the column
+    needs no explaining; at ZERO coverage the footnote is the one line that says
+    why every cell above it is ``—``. Drawn once for the report rather than once
+    per table, because it explains a ``tok/s`` column that both tables share —
+    and because a second copy is the "same footnote twice" defect D12 records.
+    """
+    partial = _text(_rate_report(315.0, calls=1530, decode_calls=1240))
+    assert "decode rate over 1,240 of 1,530 calls" in partial
+    assert partial.count("decode rate over") == 1, "one line, not one per table"
+
+    complete = _text(_rate_report(315.0, calls=1530, decode_calls=1530))
+    assert "decode rate over" not in complete
+
+    untouched = _text(_rate_report(None, calls=1530))
+    assert "decode rate over 0 of 1,530 calls" in untouched
+
+    # The predicate and the text are separate names so a caller can decide
+    # whether to leave a gap for the footnote; both are asserted directly.
+    assert scope_needs_rate_legend(_decode(None)) is True
+    assert scope_needs_rate_legend(_decode(315.0)) is False
+    assert rate_legend(_decode(None)) == "decode rate over 0 of 100 calls"
+    assert rate_legend(_decode(315.0)) == ""
+
+
+#: Every width ``format_tps`` can return, one row each: unknown (``—``), a slow
+#: tenth (``0.4``), a plain integer (``315``) and a scaled one (``1.2k``). All
+#: four are present because the column is sized from the DATA, so a fixture with
+#: one width would pin one column width and be blind to the pad overrun.
+_RATE_WIDTH_PROFILES = (
+    ("ollama", "sessunknown", None),
+    ("deepseek", "sessslow", 0.4),
+    ("anthropic", "sessfast", 315.0),
+    ("kimi", "sessscaled", 1_234.0),
+)
+
+
+def _rate_width_agg() -> UsageAggregate:
+    """Both tables carrying every rate width, under names that hold the cap.
+
+    Long names on purpose. The name column is ``min(cap, longest + 1)``, so a
+    fixture of short names is DATA-bound and fits any frame however badly the
+    row's overhead is understated — the overrun only becomes visible once a row
+    holds the column at the width the frame's own budget gave it. The existing
+    width sweep records the same lesson.
+    """
+    agg = _agg()
+    agg.by_provider = {}
+    agg.by_session = {}
+    names = {}
+    for provider, sid, tps in _RATE_WIDTH_PROFILES:
+        scope = _decode(tps, calls=100, decode_calls=100)
+        agg.by_provider[provider] = scope
+        agg.by_session[sid] = scope
+        names[sid] = f"{provider} · Toggleable Sidebar for Session Switching in the TUI"
+    # The totals' own window, so the report is internally coherent — and partial,
+    # so the coverage footnote is on the frame the sweep measures too.
+    total = _decode(315.0, calls=400, decode_calls=200)
+    agg.decode_us = total.decode_us
+    agg.decode_tokens = total.decode_tokens
+    agg.decode_calls = total.decode_calls
+    setattr(agg, "session_names", names)
+    return agg
+
+
+def test_both_tables_budget_the_rate_column_so_no_width_can_clip_the_row():
+    """The D8/D11 clipping class, at the widths ``_WIDE_TABLE_MIN`` straddles.
+
+    This is the repeat-offender defect the module documents: ``_row_overhead``
+    budgets the name column from the columns the tables paint, and a column
+    painted in one table and not budgeted (or budgeted and not painted) takes
+    the RIGHTMOST column off the box, silently, because a row ending in ``cach``
+    still looks like a row. ``tok/s`` is the third column added under that rule,
+    and it lands mid-row, so a missing term moves everything to its right.
+
+    Asserted as WIDTH against the content box, never as the presence of a
+    string: every row of BOTH tables is measured in cells. Three properties:
+
+    * above the name column's floor the widest painted row of each table fits
+      the box, and the rate column survives being painted into it;
+    * what each table spends on everything that is NOT a name is identical,
+      because they share one name column — the cross-table half of "changed
+      together", which fails if one table paints a column the other does not;
+    * the cache column that APPEARS at ``_WIDE_TABLE_MIN`` costs exactly its
+      budgeted cells across the boundary, rather than growing the row by the
+      column plus a name column the switch forgot to shrink.
+    """
+    agg = _rate_width_agg()
+    items = {
+        "By provider": list(agg.by_provider.items()),
+        "By session": list(agg.by_session.items()),
+    }
+    # From here the frame, not the 30-cell label floor, decides the name column.
+    # Below it the floor wins by design and the row may overrun (the
+    # pre-existing narrow-width behaviour the module records as out of scope).
+    floor = _MIN_NAME_COL + max(
+        _row_overhead(items["By provider"], _WIDE_TABLE_MIN),
+        _row_overhead(items["By session"], _WIDE_TABLE_MIN),
+    )
+    assert floor > _WIDE_TABLE_MIN, (
+        "the fixture must reach the wide band, or the cache/budget straddle below "
+        f"is never exercised: floor={floor}"
+    )
+
+    def painted(width: int) -> dict[str, list[str]]:
+        lines = "\n".join(line.plain for line in build_report(agg, width))
+        provider = lines.split("By provider", 1)[-1].split("By session", 1)[0]
+        session = lines.split("By session", 1)[-1]
+        return {
+            "By provider": [li.rstrip() for li in provider.splitlines() if " tokens" in li],
+            "By session": [li.rstrip() for li in session.splitlines() if " tokens" in li],
+        }
+
+    for width in range(_WIDE_TABLE_MIN - 12, 161):
+        tables = painted(width)
+        spends: dict[str, int] = {}
+        for label, rows in tables.items():
+            assert len(rows) == len(_RATE_WIDTH_PROFILES), (label, width, rows)
+            widths = {cell_len(row) for row in rows}
+            assert len(widths) == 1, (
+                f"{label} at content width {width}: the rows are ragged "
+                f"({sorted(widths)}) — the rate pad must equalize ``—`` with a "
+                "scaled rate"
+            )
+            assert len({row.index(" tok/s") for row in rows}) == 1, (
+                f"{label} at content width {width}: the ``tok/s`` labels do not line "
+                "up, so the column cannot be read straight down"
+            )
+            spends[label] = widths.pop() - _row_overhead(items[label], width)
+            if width >= floor:
+                widest = max(cell_len(row) for row in rows)
+                assert widest <= width, (
+                    f"{label} at content width {width}: the widest painted row is "
+                    f"{widest} cells, so {widest - width} fall off the box and the "
+                    f"rightmost column is clipped — {rows[0]!r}"
+                )
+                box = truncate_cells(rows[0], width)
+                assert " tok/s" in box, (
+                    f"{label} at content width {width}: the rate column is what falls "
+                    f"off when the row is painted into the box — {box!r}"
+                )
+                if width >= _WIDE_TABLE_MIN:
+                    assert box.endswith(" cache"), (
+                        f"{label} at content width {width}: the rightmost column is cut "
+                        f"when the row is painted into the box — {box!r}"
+                    )
+        assert spends["By provider"] == spends["By session"], (
+            "both tables share ONE name column, so what each spends on everything "
+            f"that is not a name must be equal; at content width {width} the provider "
+            f"table spends {spends['By provider']} and the session table "
+            f"{spends['By session']} — a column painted in one table and budgeted in "
+            "neither, or budgeted for both and painted in one"
+        )
+
+    # ``_WIDE_TABLE_MIN`` is a cliff, not a slope: ``% cache`` switches on there,
+    # so the row gains cells in one step. The budget has to absorb them in both
+    # tables, which is exactly what the step being the cache term (and nothing
+    # else) proves.
+    narrow = painted(_WIDE_TABLE_MIN - 1)
+    wide = painted(_WIDE_TABLE_MIN)
+    for label in narrow:
+        assert cell_len(wide[label][0]) - cell_len(narrow[label][0]) == 3 + 4 + len(" cache"), (
+            f"{label}: the cache column that appears at {_WIDE_TABLE_MIN} must cost its "
+            "budgeted cells and nothing more"
+        )
+
+
+def test_the_rate_column_is_sized_by_the_data_not_by_a_constant():
+    """``_tps_col`` floors at the widest sub-10 form, then follows the data.
+
+    The floor is not an allowance: 3 is ``9.9``, the widest output below 10, so
+    an unmeasured ledger's column is the same width an ordinary slow reading
+    needs. Above it the column grows — a scaled rate is 4 cells, and a pad sized
+    for ``—`` would push every column to its right off the box (the D11 rule,
+    which this column is the third instance of).
+    """
+    assert _tps_col([("a", _decode(None))]) == 3
+    assert _tps_col([("a", _decode(0.4))]) == 3
+    assert _tps_col([("a", _decode(315.0))]) == 3
+    assert _tps_col([("a", _decode(1_234.0))]) == 4
+    # Mixed widths in ONE table: the column is the widest row's, so every row
+    # pads to it rather than each row sizing its own.
+    mixed = [("a", _decode(None)), ("b", _decode(1_234.0))]
+    assert _tps_col(mixed) == 4
+    assert _row_overhead(mixed, 120) - _row_overhead([("a", _decode(None))], 120) == 1
 
 
 def test_no_content_width_overruns_its_box_and_clips_a_column():
@@ -1906,12 +2209,24 @@ def test_the_hint_advertises_the_expand_keys_only_when_a_row_can_expand():
 def test_the_cursor_is_scrolled_into_view_when_it_moves():
     """The cursor may be left off screen by the wheel, so a key that ACTS on it
     has to reveal it first — otherwise it writes to a row the reader cannot see
-    and the frame appears not to change."""
+    and the frame appears not to change.
+
+    The height is 16 rather than 12 because the premise of the sequence below is
+    "the table is on screen", and at 12 the body's viewport is exactly ONE line:
+    ``end`` parks it on the report's last line, so the table — with a line of
+    footnote above that last line — falls outside and ``down`` takes the
+    ``not self._table_on_screen()`` branch (a line-scroll, which at the bottom
+    is a no-op) instead of acting on a row. That was already true of a 1-line
+    viewport at other report heights; the decode-rate headline and its coverage
+    footnote moved the foot down the three lines that tipped this one over. The
+    assertion is unchanged and now runs at a height where the viewport can hold
+    a row, so the test pins the cursor contract rather than the report's height.
+    """
     import asyncio
 
     async def run():
         app = OperatorApp(lambda: _factory(FakeSession()))
-        async with app.run_test(size=(110, 12)) as pilot:
+        async with app.run_test(size=(110, 16)) as pilot:
             screen = await _push(pilot, app, _nested_screen_agg())
             # Bring the table into view first. Above it the arrows line-scroll
             # (there is no row to address up there — R1/D1/U1), so the cursor
