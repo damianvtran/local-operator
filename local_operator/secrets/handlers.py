@@ -1006,12 +1006,19 @@ def _audit(args: argparse.Namespace) -> int:
             f"{labels.get(entry.outcome, entry.outcome):<{width}} "
             f"pid={entry.pid or '-':<7} {entry.secret_id or ''}"
         )
-    # Scoped to a row that actually spells `tty` out, not to "there are rows":
-    # a store whose audit holds no reveal still renders `ok`/`refused` rows, and
-    # a legend for a word that appears nowhere in the output explains nothing
-    # while looking like it does.
-    if any(row.outcome in labels for row in records):
-        print("  tty: a terminal was attached, not proof a person agreed.")
+    # Scoped to a row that actually renders the state this legend explains, not
+    # to "there are rows": a store whose audit holds no reveal still renders
+    # `ok`/`refused` rows, and a legend for a state absent from the output it
+    # closes explains nothing while looking like it does. The gate compares the
+    # RENDERED label rather than the enum, so it cannot drift from the phrase the
+    # legend keys on; `--json` is what keeps the enum alive.
+    #
+    # The blank line is what makes the caveat read as a footer. Flush against the
+    # last data row it reads as that row's tail, which is how a caveat gets
+    # skipped by the reader it exists for.
+    if any(labels.get(row.outcome, row.outcome) == labels["tty"] for row in records):
+        print()
+        print("  at a terminal: not proof a person agreed.")
     return 0
 
 

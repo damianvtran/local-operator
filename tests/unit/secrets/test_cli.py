@@ -413,7 +413,13 @@ def test_the_tty_legend_appears_only_when_a_row_uses_the_word(cli) -> None:
 
     with_reveal = cli("audit")
     assert b"reveal  at a terminal" in with_reveal.stdout, with_reveal.stdout
-    assert b"  tty: a terminal was attached, not proof a person agreed." in with_reveal.stdout
+    # The legend keys on the phrase the rows render, not on the enum, so the
+    # caveat cannot end up explaining a word the reader never sees. A blank line
+    # separates it from the rows, which is what makes it read as a footer.
+    assert b"\n\n  at a terminal: not proof a person agreed.\n" in with_reveal.stdout
+    assert (
+        b"tty" not in with_reveal.stdout
+    ), "the human view spells the state out; the enum is a machine contract"
     assert _secret_events(cli)[-1]["outcome"] == "tty", "the enum stays in --json"
 
 

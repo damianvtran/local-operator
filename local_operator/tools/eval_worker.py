@@ -724,11 +724,12 @@ def _ledger_values() -> tuple[str, ...]:
 #: The trailing newline is load-bearing. Frames are appended to a job's shared
 #: tail as raw text (``JobManager.append_output``), so a stdout notice and a
 #: stderr notice would otherwise run together into one unreadable line. The
-#: notice is 150 characters before that newline, inside the 200-character
+#: notice is 159 characters before that newline, inside the 200-character
 #: progress-line cut in :mod:`local_operator.tools.eval`.
 _WITHHELD_FRAME_TEXT = (
     "[live output withheld: the secret redaction filter failed. The result is "
-    "filtered separately at the end, and withheld too if that filter fails there.]\n"
+    "filtered by a second pass when the run finishes, and withheld if that "
+    "pass fails too.]\n"
 )
 
 

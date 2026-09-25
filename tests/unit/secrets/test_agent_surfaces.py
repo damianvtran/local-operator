@@ -1206,8 +1206,8 @@ def test_streamed_frames_fail_closed_when_the_ledger_is_unreadable(
     # reason. The withhold is sticky, so the second write adds no second notice
     # from THIS sink.
     assert joined == eval_worker._WITHHELD_FRAME_TEXT
-    assert "filtered separately at the end" in joined
-    assert "withheld too if that filter fails there" in joined
+    assert "filtered by a second pass when the run finishes" in joined
+    assert "withheld if that pass fails too" in joined
     assert "arrives when the run finishes" not in joined, (
         "re-measured: the ledger fault that raises this notice also withholds the "
         "settled text, so an unconditional arrival claim is false where it is read"
