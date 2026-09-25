@@ -1181,6 +1181,25 @@ def unreachable_switch_detail(error: BaseException) -> str:
 #: the same figure as the attach client's ``ACK_TIMEOUT_S``.
 PEER_MODEL_ACK_TIMEOUT_S = 15.0
 
+#: How long ``lop model`` stays silent before saying it is still waiting (UX
+#: round 3, U11). A healthy target answers in well under a second, but a stopped
+#: or wedged one holds the command for the whole :data:`PEER_MODEL_ACK_TIMEOUT_S`,
+#: and 15 s of nothing reads as a hang.
+PEER_MODEL_WAIT_NOTICE_S = 2.0
+
+
+def waiting_for_switch_detail(record: "Any") -> str:
+    """The one line ``lop model`` prints while the target has not answered yet.
+
+    Names the target in the receipt's own ``name (pid N)`` grammar, and the
+    bound, so the reader knows the wait ends on its own.
+    """
+    name = record.conversation_name or record.session_id
+    return (
+        f"waiting for {name} (pid {record.pid}) to answer… "
+        f"(up to {PEER_MODEL_ACK_TIMEOUT_S:.0f}s)"
+    )
+
 
 def not_running_detail(session: str) -> str:
     """A stored/closed session: a cold switch has no owner to apply it (D1, D4)."""

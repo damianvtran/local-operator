@@ -146,9 +146,24 @@ def provider_call_in_flight(session: Any) -> bool:
         return True
 
 
-def refusal_detail(reason: str, current: str) -> str:
-    """``refused: <reason>; still on <current>`` — the error frame's message."""
-    return f"refused: {reason.rstrip('.')}; still on {current}"
+def refusal_detail(reason: str, current: str, *, displaced: str = "") -> str:
+    """``refused: <reason>; still on <current>`` — the error frame's message.
+
+    ``displaced`` is the selection a pinned fallback is serving in place of
+    (:func:`displaced_selection`). Without it, a switch refused while the
+    fallback already serves the requested model read ``the switch to X did not
+    take effect; still on X`` — true, and self-contradictory to a reader
+    (review round 3, NIT-5). Naming whose fallback ``current`` is resolves it.
+    """
+    still_on = f"{current} (fallback for {displaced})" if displaced else current
+    return f"refused: {reason.rstrip('.')}; still on {still_on}"
+
+
+def displaced_selection(session: Any) -> str:
+    """The SELECTED ``provider/model`` a pinned fallback serves instead of, else ``""``."""
+    fallback = pinned_fallback_label(session)
+    selected = selected_label(session)
+    return selected if fallback and selected and selected != fallback else ""
 
 
 # THE RESULT STRINGS ARE SHORT LINES, OUTCOME FIRST (design round 1, D1/D6).
@@ -179,17 +194,22 @@ def pinned_fallback_label(session: Any) -> str:
     return str(getattr(session, "effective_model_label", "") or "")
 
 
-def _outcome_line(old: str, new: str, dropped_fallback: str) -> str:
-    """The receipt's first line: what the session is on now, and what it left.
+def _outcome_lines(old: str, new: str, dropped_fallback: str) -> list[str]:
+    """The receipt's leading lines: what the session is on now, and what it left.
 
     ``dropped_fallback`` is set when the request re-selected the model a pinned
     fallback had displaced (review round 2, N5): the selection did not move, so
     ``switched to X (was X)`` would be false. What changed is that the fallback
-    was withdrawn, and the line says that.
+    was withdrawn, and the lines say that.
+
+    TWO lines for that case (design round 3, D11): as one line it carries two
+    full ids plus ``(was on fallback …)``, and at 80 columns a long fallback id
+    was clipped out of the ~72-cell body. Split, each line holds one id, which
+    is the budget every other receipt line already keeps.
     """
     if dropped_fallback:
-        return f"back on {new} (was on fallback {dropped_fallback})"
-    return f"switched to {new} (was {old})"
+        return [f"back on {new}", f"was on fallback {dropped_fallback}"]
+    return [f"switched to {new} (was {old})"]
 
 
 def switched_detail(
@@ -209,7 +229,7 @@ def switched_detail(
     no call is in flight, so the line speaks of the current STEP instead, which
     is true in both states (UX round 1, U7).
     """
-    lines = [_outcome_line(old, new, dropped_fallback)]
+    lines = _outcome_lines(old, new, dropped_fallback)
     if busy:
         in_flight = "the call in flight" if calling else "the current step"
         # Short enough for an expanded card at 80 columns (design round 2, D8);
@@ -243,9 +263,11 @@ def partial_switch_detail(
     in force. Reporting that as a refusal would tell the sender nothing
     changed; reporting it as a clean switch would hide the fault.
     """
-    return (
-        f"{_outcome_line(old, in_force, dropped_fallback)}\n"
-        f"{PARTIAL_SWITCH_LEAD} {type(error).__name__}: {error}"
+    return "\n".join(
+        [
+            *_outcome_lines(old, in_force, dropped_fallback),
+            f"{PARTIAL_SWITCH_LEAD} {type(error).__name__}: {error}",
+        ]
     )
 
 
@@ -276,17 +298,33 @@ def audit_body(
     return body + _terminal_tail(sender or {})
 
 
-def pending_audit_body(old: str, new: str, sender: dict[str, Any] | None = None) -> str:
+def pending_audit_body(
+    old: str,
+    new: str,
+    sender: dict[str, Any] | None = None,
+    *,
+    dropped_fallback: str = "",
+) -> str:
     """The card for an ACCEPTED switch whose outcome is still being decided.
 
     A TUI local-setup provider activates after a capacity probe, so at the
     moment the card is written the switch may still fail. "requested" says
     exactly that; the switch notice that follows (or a refusal notice) says
     how it ended.
+
+    ``dropped_fallback`` is N5's case on this path (review round 3, N6): the
+    request re-selects the model a pinned fallback displaced, so ``old`` IS
+    ``new`` and ``on <old> until it applies`` named a model the session was
+    not on. It is on the fallback until the switch applies, and the card says so.
     """
-    return f"{AUDIT_PREFIX} switch to {new} requested (on {old} until it applies)" + _terminal_tail(
-        sender or {}
-    )
+    if dropped_fallback:
+        body = (
+            f"{AUDIT_PREFIX} switch back to {new} requested "
+            f"(on fallback {dropped_fallback} until it applies)"
+        )
+    else:
+        body = f"{AUDIT_PREFIX} switch to {new} requested (on {old} until it applies)"
+    return body + _terminal_tail(sender or {})
 
 
 #: The ``sender["via"]`` value ``lop model`` sets when no lop session ran it.

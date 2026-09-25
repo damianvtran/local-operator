@@ -230,3 +230,56 @@ def test_a_terminal_switch_is_attributed_to_the_terminal(monkeypatch, tmp_path) 
         lambda: {"pid": 7, "session_id": "s1", "conversation_name": "fleet boss"},
     )
     assert _cli_switch_sender()["conversation_name"] == "fleet boss"
+
+
+class _SilentHandle(_ModelHandle):
+    """A target that answers only once the CLI has said it is waiting (U11)."""
+
+    def __init__(self, noticed: "Any") -> None:
+        super().__init__()
+        self._noticed = noticed
+
+    async def receive_peer_model(self, provider, model_id, *, sender=None):  # noqa: ANN001, ANN201
+        import asyncio
+
+        # Event-driven, not a sleep: the answer is held until the notice fired.
+        assert await asyncio.to_thread(self._noticed.wait, 30), "the waiting notice never printed"
+        return await super().receive_peer_model(provider, model_id, sender=sender)
+
+
+@pytest.mark.asyncio
+async def test_a_slow_target_is_announced_on_stderr_while_it_is_waited_for(
+    no_self, monkeypatch, capsys
+) -> None:
+    """U11: a stopped target held `lop model` silent for the whole 15 s ack
+    deadline. After a short grace the CLI says who it is waiting for, on stderr
+    so stdout stays the receipt alone, and the receipt still follows."""
+    import asyncio
+    import threading
+
+    from local_operator.mobile import peer_send
+
+    noticed = threading.Event()
+    real = peer_send.waiting_for_switch_detail
+
+    def notice(record: Any) -> str:
+        noticed.set()
+        return real(record)
+
+    monkeypatch.setattr(peer_send, "PEER_MODEL_WAIT_NOTICE_S", 0.01)
+    monkeypatch.setattr(peer_send, "waiting_for_switch_detail", notice)
+    runtime = RuntimeServer(_SilentHandle(noticed), kind="tui")
+    runtime.start()
+    runtime.set_record_started(True)
+    try:
+        alias = _alias(await _wait_record())
+        rc = await asyncio.to_thread(_run, ["--pid", str(alias.pid), "deepseek/deepseek-flash"])
+        out = capsys.readouterr()
+        assert rc == 0, out.err
+        assert out.err.strip().splitlines() == [
+            f"waiting for experiment one (pid {alias.pid}) to answer… (up to 15s)"
+        ]
+        assert "waiting" not in out.out
+        assert out.out.startswith("switched to deepseek/deepseek-flash")
+    finally:
+        runtime.close()

@@ -63,6 +63,7 @@ from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
 from local_operator.harness.intent import ACTIVITY_THINKING
+from local_operator.mobile.peer_model import TERMINAL_SENDER
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.composer_focus import (
     composer_may_take_focus,
@@ -2682,10 +2683,15 @@ class PeerMessageBlock(ExpandableActionBlock):
         rendering them identically told the reader nothing about which they
         were looking at — two sessions in sibling checkouts would both read as
         "user-dashboard".
+
+        A ``lop model`` run from a plain terminal is labelled ``terminal`` by the
+        app, not named by a peer, so it takes the unquoted form too (design
+        round 3, D12): quoted, it read exactly like a session a user had named
+        "terminal", and without a cwd tail in the body nothing told them apart.
         """
         name = _sanitize_sender_field(self._sender.get("conversation_name"))
         if name:
-            return name, True
+            return name, self._sender.get("via") != TERMINAL_SENDER
         cwd = _sanitize_sender_field(self._sender.get("cwd")).rstrip("/")
         if cwd:
             return os.path.basename(cwd) + "/", False  # trailing slash: a directory

@@ -275,7 +275,11 @@ async def test_a_tui_pinned_on_the_request_whose_model_command_never_ran_is_a_re
             monkeypatch.setattr(app, "_run_slash_command", lambda *_a, **_k: None)
             with pytest.raises(ValueError) as caught:
                 await handle.receive_peer_model("deepseek", "deepseek-flash", sender={})
-            assert "did not take effect" in str(caught.value)
+            # NIT-5: names whose fallback it is still on, not "X ... still on X".
+            assert str(caught.value) == (
+                "refused: the switch to deepseek/deepseek-flash did not take effect; "
+                "still on deepseek/deepseek-flash (fallback for anthropic/claude-opus-5)"
+            )
             assert session.applied == [] and session.peer_cards == []
             assert session.model_label == "anthropic/claude-opus-5"
     finally:
@@ -310,6 +314,31 @@ async def test_a_tui_pending_local_switch_onto_the_pinned_fallback_stays_pending
 
 
 @pytest.mark.asyncio
+async def test_a_tui_pending_reclaim_card_says_it_is_on_the_fallback(tmp_path, monkeypatch) -> None:
+    """N6: a local-setup reclaim of the displaced selection is pending; until it
+    applies the session is on the FALLBACK, and the card must not claim otherwise."""
+    session = _FallbackSession()
+    app, store = await _app(session, tmp_path, monkeypatch)
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            handle = await _handle(app, pilot)
+
+            def pending_only(*_a, **_k):  # noqa: ANN002, ANN003
+                app._model_activation_pending = 1
+
+            monkeypatch.setattr(app, "_run_slash_command", pending_only)
+            detail = await handle.receive_peer_model("anthropic", "claude-opus-5", sender={})
+            assert detail.startswith("pending: "), detail
+            assert [text for text, _ in session.peer_cards] == [
+                "[remote model switch] switch back to anthropic/claude-opus-5 requested "
+                "(on fallback deepseek/deepseek-flash until it applies)"
+            ]
+    finally:
+        app._model_activation_pending = None
+        store.close()
+
+
+@pytest.mark.asyncio
 async def test_a_tui_reclaiming_the_displaced_selection_says_back_on(tmp_path, monkeypatch) -> None:
     """N5 on the TUI host: asking for the selection a fallback displaced."""
     session = _FallbackSession()
@@ -318,9 +347,10 @@ async def test_a_tui_reclaiming_the_displaced_selection_says_back_on(tmp_path, m
         async with app.run_test(size=(100, 30)) as pilot:
             handle = await _handle(app, pilot)
             detail = await handle.receive_peer_model("anthropic", "claude-opus-5", sender={})
-            assert detail.splitlines()[0] == (
-                "back on anthropic/claude-opus-5 (was on fallback deepseek/deepseek-flash)"
-            )
+            assert detail.splitlines()[:2] == [
+                "back on anthropic/claude-opus-5",
+                "was on fallback deepseek/deepseek-flash",
+            ]
             assert session.active_fallback is None
             assert [text for text, _ in session.peer_cards] == [
                 "[remote model switch] back on anthropic/claude-opus-5 "

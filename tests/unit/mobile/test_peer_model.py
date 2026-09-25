@@ -172,10 +172,53 @@ def test_reclaiming_the_displaced_selection_reads_back_on_it() -> None:
     detail = peer_model.switched_detail(
         "a/x", "a/x", busy=False, running_subagents=0, dropped_fallback="b/y"
     )
-    assert detail.splitlines()[0] == "back on a/x (was on fallback b/y)"
+    assert detail.splitlines()[:2] == ["back on a/x", "was on fallback b/y"]
     assert peer_model.audit_body("a/x", "a/x", dropped_fallback="b/y") == (
         "[remote model switch] back on a/x (was on fallback b/y)"
     )
+
+
+def test_the_back_on_receipt_fits_an_expanded_card_at_80_columns() -> None:
+    """D11: as one line the back-on receipt carried two full ids and clipped a
+    long fallback id out of the ~72-cell body at 80 columns. Every line,
+    INCLUDING the first, now fits — the busy and partial forms too."""
+    new, fallback = "anthropic/claude-opus-5", "openrouter/qwen3-coder-plus"
+    for detail in (
+        peer_model.switched_detail(
+            new, new, busy=False, running_subagents=0, dropped_fallback=fallback
+        ),
+        peer_model.switched_detail(
+            new,
+            new,
+            busy=True,
+            calling=True,
+            running_subagents=12,
+            dropped_fallback=fallback,
+        ),
+        peer_model.partial_switch_detail(new, new, OSError("disk full"), dropped_fallback=fallback),
+    ):
+        assert max(len(line) for line in detail.splitlines()) <= 72, detail
+        assert detail.splitlines()[1] == f"was on fallback {fallback}"
+
+
+def test_a_pending_reclaim_card_names_the_fallback_it_is_on() -> None:
+    """N6: a pending re-selection of the displaced model is on the FALLBACK until
+    it applies, not on the model it asked for."""
+    assert peer_model.pending_audit_body("a/x", "a/x", {}, dropped_fallback="b/y") == (
+        "[remote model switch] switch back to a/x requested (on fallback b/y until it applies)"
+    )
+    assert peer_model.pending_audit_body("a/x", "c/z", {}) == (
+        "[remote model switch] switch to c/z requested (on a/x until it applies)"
+    )
+
+
+def test_a_refusal_names_whose_fallback_it_is_still_on() -> None:
+    """NIT-5: `did not take effect; still on X` for a switch TO X read as a
+    contradiction while X was a fallback. The displaced selection is named."""
+    assert peer_model.refusal_detail(
+        "the switch to b/y did not take effect", "b/y", displaced="a/x"
+    ) == ("refused: the switch to b/y did not take effect; still on b/y (fallback for a/x)")
+    assert peer_model.refusal_detail("no.", "a/x") == "refused: no; still on a/x"
 
 
 def test_every_line_fits_an_expanded_card_at_80_columns() -> None:
@@ -399,7 +442,7 @@ async def test_serving_pinned_on_the_request_but_the_apply_never_ran_is_a_refusa
         await handle.receive_peer_model("deepseek", "deepseek-flash", sender={})
     assert str(caught.value) == (
         "refused: the switch to deepseek/deepseek-flash did not take effect; "
-        "still on deepseek/deepseek-flash"
+        "still on deepseek/deepseek-flash (fallback for anthropic/claude-opus-5)"
     )
     assert cards == [], "a switch that did not happen must not write a card"
     assert session.model_label == "anthropic/claude-opus-5"
@@ -419,9 +462,10 @@ async def test_serving_reclaiming_the_displaced_selection_says_back_on(monkeypat
 
     monkeypatch.setattr(session, "set_model", set_model, raising=False)
     detail = await handle.receive_peer_model("anthropic", "claude-opus-5", sender={})
-    assert detail.splitlines()[0] == (
-        "back on anthropic/claude-opus-5 (was on fallback deepseek/deepseek-flash)"
-    )
+    assert detail.splitlines()[:2] == [
+        "back on anthropic/claude-opus-5",
+        "was on fallback deepseek/deepseek-flash",
+    ]
     assert [text for text, _ in cards] == [
         "[remote model switch] back on anthropic/claude-opus-5 "
         "(was on fallback deepseek/deepseek-flash)"
