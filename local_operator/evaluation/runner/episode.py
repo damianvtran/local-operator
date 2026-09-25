@@ -1153,6 +1153,8 @@ class EpisodeRunner:
                 # scripted client -- which has no reply assembly to speak of --
                 # must record 0 rather than claim a strip that never ran.
                 stripped_reply_markers=getattr(decision, "stripped_reply_markers", 0),
+                tolerated_action_fields=getattr(decision, "tolerated_action_fields", 0),
+                leading_framing_bytes=getattr(decision, "leading_framing_bytes", 0),
                 redacted_response=response_artifact,
             ),
         )

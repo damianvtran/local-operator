@@ -575,7 +575,7 @@ def _replay_verdict(reply: str) -> str:
 
     payload = reply.strip()
     try:
-        decoded, _trailing = _decode_leading_json(payload)
+        decoded, _trailing, _framing = _decode_leading_json(payload)
         if not isinstance(decoded, dict):
             return "batch-shape"
         normalise_public_reply(decoded)
@@ -684,7 +684,7 @@ def _actions_value(reply: str) -> Any:
     """
 
     try:
-        value, _trailing = _decode_leading_json(reply.strip())
+        value, _trailing, _framing = _decode_leading_json(reply.strip())
     except (DecisionParseError, ValueError):
         return None
     return value.get("actions") if isinstance(value, dict) else None
