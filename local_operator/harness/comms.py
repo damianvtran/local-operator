@@ -2356,6 +2356,13 @@ class SubagentComms:
         # ``effort`` alone would return a child launched at ``hi`` on the
         # parent's model while the panel still displayed ``hi``.
         #
+        # This resolution is what the resumed child actually runs on, and
+        # ``None`` means the root's model as it is NOW. The child's own
+        # journalled model is deliberately not restored
+        # (``Session._restore_selected_model`` skips ``model_source="child"``).
+        # A resume therefore follows a parent ``/model`` switch or a tier edit
+        # made since the child last ran, and the ``hub`` receipt names the model.
+        #
         # Guarded rather than called outright: ``_session`` is a full
         # ``Session`` in production, but this class is also driven by the
         # reduced hosts and test doubles that supply only the queue/steer/
