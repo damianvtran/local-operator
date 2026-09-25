@@ -281,7 +281,11 @@ jobs:
           #
           # raised by the `codesign` call in assemble_keyagent_bundle.sh AFTER
           # `security find-identity -v -p codesigning "$KEYCHAIN"` had reported the
-          # identity VALID and the step above had exited 0. `--keychain FILE`
+          # identity VALID **in that run's own log** and the step above had exited 0.
+          # That scoped `-v` form is not a reliable signal in general — it reports 0
+          # in the same failing state on another host (last row group of the
+          # measurement below) — which is why the help text in the assembly script
+          # names a check that does discriminate instead. `--keychain FILE`
           # narrows only the IDENTITY (certificate) lookup to that file; the
           # PRIVATE KEY is resolved through the user keychain SEARCH LIST, so a
           # throwaway keychain that holds the key but is not listed there cannot be
@@ -291,24 +295,48 @@ jobs:
           # anywhere but looked fine locally.
           #
           # MEASURED, 2026-09-25, on a host where the identity exists ONLY in the
-          # throwaway keychain (the runner's condition), same keychain, same
-          # identity SHA, all with the p12 imported and `find-identity -v` valid:
+          # throwaway keychain (the runner's condition), same keychain, same identity
+          # SHA, all with the p12 imported, the partition list set and the G2
+          # intermediate imported:
           #
-          #   not in the search list, --keychain passed   -> errSecInternalComponent
-          #   not in the search list, set as DEFAULT      -> errSecInternalComponent
-          #   not in the search list, Apple ROOT imported -> errSecInternalComponent
-          #   APPENDED to the search list, --keychain     -> signed, verified
-          #   APPENDED to the search list, no --keychain  -> signed, verified
+          #   keychain NOT in the user search list:
+          #     find-identity -p codesigning "$KC"     -> 1 (it IS in the keychain)
+          #     find-identity -v -p codesigning "$KC"  -> 0 (chain eval uses the list)
+          #     find-identity -p codesigning           -> 0 (the list can't reach it)
+          #     codesign --keychain "$KC"              -> errSecInternalComponent
+          #     codesign (no --keychain)               -> "<sha>: no identity found"
+          #   keychain APPENDED to the user search list:
+          #     all four forms report the identity; both argvs sign and verify
+          #   keychain NOT in the list, set as the DEFAULT one  -> still fails
+          #   keychain NOT in the list, Apple ROOT CA imported -> still fails
           #
-          # So the default-keychain route is NOT a substitute and neither is the
-          # missing self-signed root (both ruled out above rather than assumed),
-          # and it is membership of the search list that is load-bearing.
+          # THE STRINGS ARE NOT THE RELEASE'S and this comment does not claim they
+          # are: the rig produces errSecInternalComponent, v0.62.39 produced
+          # errSecItemNotFound ("The specified item could not be found in the
+          # keychain"). One condition, two spellings across two macOS versions. What
+          # establishes the cause is the RUNNER ladder, not that string — 36178040698
+          # (this append, with `--keychain` still passed) flipped the failing job green
+          # on macOS 15, and 36179085672 showed the later removal of `--keychain`
+          # changed nothing there. The two ruled-out rows above are measured on this
+          # host, not assumed, and they are the two a reader reaches for first.
           #
           # The previous list is saved and restored by the always() cleanup: the
           # keychain is deleted there, and a search-list entry naming a deleted
           # keychain breaks every later `security` invocation in the job.
           PREV_SEARCH="$(security list-keychains -d user | tr -d '"' | tr '\n' ' ')"
           echo "KEYCHAIN_SEARCH_PREV=$PREV_SEARCH" >> "$GITHUB_ENV"
+          # THE EXPANSION IS DELIBERATELY UNQUOTED: the saved value is a LIST of
+          # keychain paths, and quoting it would pass the whole list as one path. The
+          # round trip is faithful for paths without whitespace or double quotes, which
+          # is the shape a GitHub macOS runner has (a single `login.keychain-db` under
+          # `/Users/runner`); stated rather than left implicit.
+          #
+          # THE `shellcheck disable` BELOW IS NOT INERT, which is why it is kept: the
+          # repo wires no shellcheck or actionlint gate, but actionlint (brew, run by
+          # hand) does honour the directive — MEASURED 2026-09-25, with both directives
+          # in place it reports the one pre-existing SC2086 in `Get release tag`, and
+          # without them it reports three, two of which are these deliberate splits
+          # (reviewer round 1, R1-6; disposition on the PR).
           # shellcheck disable=SC2086  # deliberate: the saved list is a list of paths
           security list-keychains -d user -s "$KEYCHAIN" $PREV_SEARCH
           echo "keychain search list now:"
@@ -496,13 +524,26 @@ jobs:
           # p12 or the decoded profile.
           #
           # THE SEARCH LIST IS RESTORED FIRST, while the keychain still exists: the
-          # runner's `security list-keychains` preference outlives the keychain
-          # file, so deleting first would leave the list naming a keychain that is
-          # gone. The variable is empty when the import step died before it wrote
-          # it, so the restore is skipped rather than run with no argument.
+          # runner's `security list-keychains` preference outlives the keychain file,
+          # so deleting first would leave the list naming a keychain that is gone. The
+          # guard tests that the variable is NOT SET — the import step died before
+          # exporting it — and not that it is empty: an empty list is a real state a
+          # runner could have, and treating it as "nothing to restore" would leave the
+          # list naming the keychain deleted on the next line (reviewer round 1, R1-5).
+          #
+          # THE EFFECT IS ECHOED, because it is the one new side effect no other part
+          # of the log shows: `$GITHUB_ENV`'s echo reports the SAVED value, which says
+          # nothing about whether the restore ran or worked, so before this a wrong or
+          # skipped restore was indistinguishable from a correct one on the runner
+          # (reviewer round 1, R1-4). `|| true` stays: failing a release job during
+          # cleanup, after a successful sign, would be worse than the noise.
           if [ -n "${KEYCHAIN_SEARCH_PREV:-}" ]; then
-            # shellcheck disable=SC2086  # deliberate: the saved list is a list of paths
+            # shellcheck disable=SC2086  # deliberate: a list of paths, as at the append
             security list-keychains -d user -s $KEYCHAIN_SEARCH_PREV || true
+            echo "keychain search list after the restore:"
+            security list-keychains -d user || true
+          else
+            echo "no saved search list to restore (the import step did not export one)"
           fi
           security delete-keychain "$KEYCHAIN" >/dev/null 2>&1 || true
           rm -f "$RUNNER_TEMP/identity.p12" \
