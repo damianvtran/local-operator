@@ -198,7 +198,11 @@ async def test_spawned_worker_seals_a_verified_bundle(
         provider={"provider": "fake", "scripted_score": 1.0},
         interpreter=spawn_interpreter,
     )
-    config = spawn_helpers.spawn_config(tmp_path)
+    # The completion gate is not this test's subject, and it spends one extra
+    # provider cycle on the first ``done`` — which a scripted client sized for
+    # exactly one reply per turn does not have. Name the arm so the test keeps
+    # its own subject (see tests/unit/evaluation/runner/test_completion_gate.py).
+    config = spawn_helpers.spawn_config(tmp_path, completion_gate=False)
 
     runner = EpisodeRunner(
         _spec_for_spawn(episode_id),
@@ -420,7 +424,11 @@ async def test_real_wheel_simulator_answer_enters_public_artifact_and_next_reque
         provider={"provider": "fake", "has_user_simulator": True},
         interpreter=spawn_interpreter,
     )
-    config = spawn_helpers.spawn_config(tmp_path)
+    # The completion gate is not this test's subject, and it spends one extra
+    # provider cycle on the first ``done`` — which a scripted client sized for
+    # exactly one reply per turn does not have. Name the arm so the test keeps
+    # its own subject (see tests/unit/evaluation/runner/test_completion_gate.py).
+    config = spawn_helpers.spawn_config(tmp_path, completion_gate=False)
     model, stream = _offline_ask_client(config.artifact_root)
     outcome = await EpisodeRunner(
         _spec_for_spawn(episode_id), config, selector=selector, model=model, synthetic_model=True
