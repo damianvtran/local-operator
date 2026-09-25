@@ -639,6 +639,7 @@ def run_subagent(
     agent: str = "task",
     effort: str | None = None,
     restricted: bool = False,
+    inherited_model: ModelSpec | None = None,
 ) -> str:
     """Register one child-session run as a background job; return the job id.
 
@@ -667,6 +668,13 @@ def run_subagent(
     rebuilds against the comms-owning root rather than that child's real
     parent, so neither the role nor the parent session can recover the fact and
     it has to be carried forward from the child's record (review round 2, R5).
+
+    ``inherited_model`` exists for the resume path too, for the same reason.
+    It is the model an INHERITING child takes from its real parent when that
+    parent is not ``parent_session`` (D9.1). It is kept apart from
+    ``model_spec`` because it is not a pin: ``owns_model`` stays False and a
+    failure is not described as a pinned model's. ``None`` means the child
+    inherits ``parent_session``'s own model, as on every launch.
     """
     effective_prompt, profile = _effective_prompt(prompt, agent, parent_session)
     queued = jobs_manager.at_capacity()
@@ -683,6 +691,7 @@ def run_subagent(
             agent=agent,
             profile=profile,
             restricted=restricted,
+            inherited_model=inherited_model,
         ),
         queued=queued,
     )
@@ -711,9 +720,10 @@ def run_subagent(
         # absence. The runner still overwrites this once the child is built, and
         # that write must win: a restored provider fallback is the model the
         # child actually calls, and pricing reads this field.
+        named = model_spec if model_spec is not None else inherited_model
         job.model_label = (
-            f"{model_spec.provider}/{model_spec.model_id}"
-            if model_spec is not None
+            f"{named.provider}/{named.model_id}"
+            if named is not None
             else (getattr(parent_session, "effective_model_label", "") or None)
         )
         # And whose choice that was, on the same registration-time rule. Stamped
@@ -777,6 +787,7 @@ def _make_runner(
     agent: str = "task",
     profile: "AgentProfile | None" = None,
     restricted: bool = False,
+    inherited_model: ModelSpec | None = None,
 ) -> Callable[[str, Any, Callable[[str], None]], Awaitable[str | None]]:
     """Build the JobRunFn for one child run (closure over its launch args)."""
     # The parent seam is private-attribute access on purpose: this module is
@@ -803,7 +814,10 @@ def _make_runner(
                 label=label,
                 prompt=effective_prompt,
                 parent_session=parent_session,
-                model_spec=model_spec,
+                # The child is BUILT on its inherited model when a resume found
+                # one (see ``run_subagent``); ``model_spec`` alone keeps its
+                # meaning of "a pin" for the failure text below.
+                model_spec=model_spec if model_spec is not None else inherited_model,
                 job_id=job_id,
                 resume_dir=resume_dir,
                 agent=agent,

@@ -521,6 +521,22 @@ class _ChildRecord:
     #: content are one durable fact after the ephemeral job row is swept.
     result_text: str | None = None
     error_text: str | None = None
+    #: The model this child last ran on (``provider/model_id``), as restored
+    #: from a snapshot. The LIVE answer is the job row's ``model_label`` (see
+    #: :meth:`SubagentComms.last_model_label`), but a nested child's row lives
+    #: on its parent's job manager, which a restart does not rehydrate. So this
+    #: saved copy is the only record of a nested child's model after a restart.
+    #: A resume reads it in two places: the ``(its previous run was on …)``
+    #: receipt note, and the D9.2 fallback when the parent's model is lost.
+    model_label: str = ""
+    #: Whether a tier or role pin chose this child's model (``True``), or it
+    #: inherited its parent's (``False``). ``None`` means unknown: a record
+    #: restored from a sidecar written before this field existed. Saved beside
+    #: ``model_label`` because a resume walking up to this record after it
+    #: settled must know whether that label was a CHOICE, which a descendant
+    #: inherits, or a stale SNAPSHOT of this child's own parent, which it
+    #: must look past (D9.4). The live answer is the job row's ``owns_model``.
+    owns_model: bool | None = None
     #: Attempt handles superseded by this record. Persisted so a parent can
     #: keep using an id it mentioned before either process or child resumed.
     attempt_aliases: list[str] = field(default_factory=list)
@@ -529,6 +545,44 @@ class _ChildRecord:
     #: attempt into this record so the viewer can render every historical
     #: launch row as its concise prompt, not just the current one.
     prior_launch_prompts: dict[str, str] = field(default_factory=dict)
+
+
+def _spec_from_label(label: str) -> ModelSpec | None:
+    """A recorded ``provider/model_id`` label rebuilt into the spec it names.
+
+    Through ``build_model_spec``, the path a tier and ``/model`` both take, so
+    the window and capabilities come from the model and not from whichever
+    session recorded the label. ``None`` for an empty or unbuildable label:
+    the caller then moves to its next source instead of guessing.
+    """
+    provider, _, model_id = label.partition("/")
+    if not provider or not model_id:
+        return None
+    try:
+        from local_operator.model.configure import build_model_spec
+
+        return build_model_spec(provider, model_id)
+    except Exception:  # noqa: BLE001 — an unbuildable label is a missing source
+        return None
+
+
+def _journalled_label(session_dir: Path | None) -> str:
+    """The model a child's own transcript last selected, or ``""``.
+
+    The oldest source of a child's previous model: every child journals one on
+    its first turn, so it survives even a sidecar written before records saved
+    a label. It is what the pre-D9 resume replayed, and the D9.2 fallback is
+    exactly that behaviour, kept for the one case where the lineage is lost.
+    """
+    if session_dir is None:
+        return ""
+    try:
+        from local_operator.session.model_selection import read_model_selection
+
+        saved = read_model_selection(session_dir)
+    except Exception:  # noqa: BLE001 — an unreadable journal is a missing source
+        return ""
+    return saved.selector if saved is not None else ""
 
 
 def _age_of(record: _ChildRecord, job: Any | None, status: str, now: float) -> float | None:
@@ -1047,6 +1101,11 @@ class SubagentComms:
         self._detail_listeners: set[Callable[[str], None]] = set()
         self._change_listeners: set[Callable[[], None]] = set()
         self._aliases: dict[str, str] = {}
+        #: new resumed job id -> ``(from its real parent?, fallback note)``, for
+        #: the ``hub`` receipt. Recorded at resume time because the new job's
+        #: record learns its lineage only at ``attach``, which may not have run
+        #: when the receipt renders. Bounded by the resumes this process made.
+        self._resume_models: dict[str, tuple[bool, str]] = {}
         #: ``session_dir -> (transcript exists, monotonic probe time)``; see
         #: :meth:`_transcript_on_disk` for why it outlives one roster pass.
         self._transcript_probes: dict[Path, tuple[bool, float]] = {}
@@ -1704,6 +1763,12 @@ class SubagentComms:
                     # and a resumed grandchild that can activate the writes it
                     # was refused (review round 3, R6).
                     "restricted": record.restricted,
+                    # Read off the retained row when there is one, because the
+                    # runner keeps that label current (a provider fallback
+                    # rewrites it); the restored copy covers a row that did
+                    # not survive a restart.
+                    "model_label": self._record_model_label(record),
+                    "owns_model": self._record_owns_model(record),
                     # ``None`` — NOT the string "None" — when the child never
                     # attached. ``restore`` and the row guard both read this as
                     # "no transcript", so a stringified ``None`` would make a
@@ -1799,6 +1864,13 @@ class SubagentComms:
                 # never recorded. A denial can only ever be ADDED afterwards,
                 # by the attach stamp or the live computation.
                 restricted=bool(row.get("restricted")),
+                # Missing defaults to "" for a sidecar written before this
+                # field existed; the resume then reads only the live row.
+                model_label=str(row.get("model_label") or ""),
+                # Missing (or not a bool) stays unknown rather than guessing an
+                # inherit: a resume that cannot tell treats the chain as broken
+                # and keeps the child's own previous model (D9.2).
+                owns_model=(row["owns_model"] if isinstance(row.get("owns_model"), bool) else None),
                 session_dir=session_dir,
                 settled=True,
                 settled_at=row.get("settled_at"),
@@ -1956,6 +2028,150 @@ class SubagentComms:
     def label_of(self, job_id: str) -> str:
         record = self._record(job_id)
         return record.label if record is not None else job_id
+
+    def last_model_label(self, job_id: str) -> str:
+        """The model a child last ran on, or ``""`` when nothing recorded it.
+
+        The live job row first, then the label saved on the record. After a
+        restart a nested child has only the saved label, because its row lived
+        on its parent's job manager and that is not rehydrated (QA round 1, Q2).
+        A record from a sidecar written before labels were saved has neither,
+        so the child's own ``selected_model`` journal row is the last source
+        (QA round 2, Q3).
+        """
+        record = self._record(job_id)
+        label = str(getattr(self.job(job_id), "model_label", None) or "")
+        if label:
+            return label
+        if record is None:
+            return ""
+        return record.model_label or _journalled_label(record.session_dir)
+
+    def resume_model_note(self, job_id: str) -> str:
+        """Why a resumed job's model is not the one the launch rule named, or ``""``."""
+        return self._resume_models.get(job_id, (False, ""))[1]
+
+    def resumed_on_parent_model(self, job_id: str) -> bool:
+        """Whether a resumed job inherited its REAL parent's model (D9.1), not the root's."""
+        return self._resume_models.get(job_id, (False, ""))[0]
+
+    @staticmethod
+    def _record_model_label(record: _ChildRecord) -> str:
+        label = getattr(record.job_ref, "model_label", None)
+        return str(label) if label else record.model_label
+
+    @staticmethod
+    def _record_owns_model(record: _ChildRecord) -> bool | None:
+        """Whether a pin chose ``record``'s model: the retained row, then the saved flag.
+
+        Reads ``record.job_ref`` rather than calling :meth:`job`, the same way
+        :meth:`_record_model_label` does. :meth:`snapshot` calls this once per
+        record, and :meth:`job` rebuilds :meth:`_sessions` (a scan of every
+        record) on each call, which made the roster persist O(N^2) on the
+        shared loop (review round 3, M1). ``owns_model`` is stamped on the job
+        row object at registration, and ``job_ref`` holds that same object, so
+        nothing is lost by not searching again.
+        """
+        owns = getattr(record.job_ref, "owns_model", None)
+        return owns if isinstance(owns, bool) else record.owns_model
+
+    def _role_pinned(self, record: _ChildRecord) -> bool:
+        """Whether ``record``'s role profile carries a tier pin.
+
+        Resolved leniently, like :meth:`_owned_model`: a broken pin here only
+        means the walk cannot use it, never that a descendant's resume fails.
+        """
+        role = record.agent_role
+        resolve = getattr(self._session, "_resolve_subagent_model", None)
+        if not role or role == "task" or not callable(resolve):
+            return False
+        try:
+            return isinstance(resolve(role, None), ModelSpec)
+        except Exception:  # noqa: BLE001 — an unreadable profile is "no pin"
+            return False
+
+    def _owned_model(self, record: _ChildRecord) -> ModelSpec | None:
+        """A settled ancestor's own pinned model: its tier re-resolved from current
+        config, the way its own resume would, or else its recorded label.
+
+        Lenient, unlike the resume's own strict resolution: this is a
+        DESCENDANT's resume, and an ancestor's broken tier should not block it
+        while the model that ancestor actually ran on is still on record.
+        """
+        resolve = getattr(self._session, "_resolve_subagent_model", None)
+        if callable(resolve):
+            try:
+                resolved = resolve(record.agent_role or "task", record.effort or None)
+            except Exception:  # noqa: BLE001 — fall back to the recorded label
+                resolved = None
+            if isinstance(resolved, ModelSpec):
+                return resolved
+        return _spec_from_label(self.last_model_label(record.job_id))
+
+    def _inherited_model(self, record: _ChildRecord) -> tuple[ModelSpec | None, str]:
+        """The model an inheriting child resumes on, and a note when it is a fallback.
+
+        ``(None, "")`` means the root's current model, which ``run_subagent``
+        applies: a direct child's parent IS the root. A nested child inherits
+        from its REAL lineage, not from the root this registry belongs to,
+        because the root only owns the registry. A manager pinned to a cheap
+        tier must not have its workers resumed on the root's expensive model
+        (D9.1).
+
+        The walk goes up the ``parent_job_id`` chain to the nearest ancestor
+        that decides a model (D9.4):
+
+        - a LIVE ancestor gives its current model, which already reflects its
+          pin, its inheritance and any ``/model`` switch;
+        - a settled ancestor that OWNED its model gives that pin re-resolved,
+          or else its recorded label;
+        - a settled ancestor that INHERITED is looked past. Its label is only a
+          snapshot of its own parent's model, and trusting it would resume a
+          worker on a model the root has since switched away from (review
+          round 2, R5);
+        - reaching the root gives the root's current model.
+
+        The chain BREAKS when an ancestor's record is missing or its ownership
+        is unknown (a sidecar from before ownership was saved). The child then
+        keeps the model it last ran on (D9.2), or, with no model of its own,
+        runs on this session's model (D9.3). Either way the note says so,
+        because a silent substitution is how the cost incident went unnoticed.
+        """
+        seen: set[str] = set()
+        parent_id = record.parent_job_id
+        while parent_id:
+            ancestor = self._record(parent_id)
+            if ancestor is None or ancestor.job_id in seen:
+                break
+            seen.add(ancestor.job_id)
+            live = getattr(ancestor.child, "model", None)
+            if isinstance(live, ModelSpec):
+                return live, ""
+            owns = self._record_owns_model(ancestor)
+            # A stored tier, or a role whose profile pins one, is a pin whatever
+            # the flag says. Only a record with no flag and no pin of either kind
+            # is genuinely unknown (review round 3, M2: a legacy role-pinned
+            # manager broke the chain).
+            if owns is None and (ancestor.effort or self._role_pinned(ancestor)):
+                owns = True
+            if owns is None:
+                break
+            if owns:
+                pinned = self._owned_model(ancestor)
+                if pinned is None:
+                    break
+                return pinned, ""
+            parent_id = ancestor.parent_job_id
+        else:
+            # The walk reached the root without a break.
+            return None, ""
+        own = _spec_from_label(self.last_model_label(record.job_id))
+        if own is not None:
+            return own, "its parent's model could not be found; kept its previous model"
+        return None, (
+            "its parent's model could not be found and no previous model was recorded; "
+            "using this session's model"
+        )
 
     def session_dir_of(self, job_id: str) -> Path | None:
         record = self._record(job_id)
@@ -2356,6 +2572,15 @@ class SubagentComms:
         # ``effort`` alone would return a child launched at ``hi`` on the
         # parent's model while the panel still displayed ``hi``.
         #
+        # This resolution is what the resumed child actually runs on. The
+        # child's own journalled model is deliberately not restored
+        # (``Session._restore_selected_model`` skips ``model_source="child"``).
+        # A resume therefore follows a parent ``/model`` switch or a tier edit
+        # made since the child last ran, and the ``hub`` receipt names the model.
+        # A child that owns no tier inherits from its REAL parent, which
+        # :meth:`_inherited_model` resolves (D9.1). Only a direct child falls
+        # through to the root's current model.
+        #
         # Guarded rather than called outright: ``_session`` is a full
         # ``Session`` in production, but this class is also driven by the
         # reduced hosts and test doubles that supply only the queue/steer/
@@ -2380,6 +2605,10 @@ class SubagentComms:
                 return None, f"cannot resume {record.label}: {exc}"
             if isinstance(resolved, ModelSpec):
                 model_spec = resolved
+        inherited: ModelSpec | None = None
+        note = ""
+        if model_spec is None:
+            inherited, note = self._inherited_model(record)
         new_job_id = run_subagent(
             label=record.label,
             prompt=message,
@@ -2390,7 +2619,10 @@ class SubagentComms:
             agent=agent,
             effort=effort,
             restricted=record.restricted,
+            inherited_model=inherited,
         )
+        if inherited is not None or note:
+            self._resume_models[new_job_id] = (inherited is not None and not note, note)
         # The pause is over the moment its continuation exists. Left set, the
         # old record would keep advertising ``paused`` in the roster forever
         # beside the running child that replaced it, and a reader would be
