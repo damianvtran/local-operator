@@ -292,294 +292,6 @@ describe("the list teaches its own pin gesture (design round 1, D2)", () => {
 	});
 });
 
-describe("a refused pin reports where the reader is looking (D12/D14, R8-2, Q4)", () => {
-	/* A list LONGER THAN THE SCREEN, which is the case that exposed both earlier
-	   placements: after the last row (D12) and above the first row inside the
-	   scroller (D14). With a handful of rows both were on screen, so a short list
-	   would pass either way. */
-	const ROWS = 32;
-
-	function longList(): SessionSummary[] {
-		return Array.from({ length: ROWS }, (_, index) =>
-			summary({ session_id: `r${index}`, conversation_name: `Row ${index}` }),
-		);
-	}
-
-	/* The band: <div absolute> > <p role=alert>. Its positioning is asserted on
-	   the way in rather than walked past, because every test below leans on the
-	   band being an overlay, and a band that slid back into the flow would have
-	   them asserting on the wrong element's classes. */
-	function errorBox(): HTMLElement {
-		const band = screen.getByRole("alert").parentElement as HTMLElement;
-		expect(band.className).toContain("absolute");
-		return band;
-	}
-
-	/* The band's two states are spelled by these classes alone (hidden:
-	   slid up, faded, click-through; shown: in place, opaque). */
-	const HIDDEN = ["-translate-y-full", "opacity-0", "pointer-events-none"];
-	const SHOWN = ["translate-y-0", "opacity-100"];
-
-	function expectBand(state: string[], not: string[]) {
-		const classes = errorBox().className.split(/\s+/);
-		for (const name of state) expect(classes).toContain(name);
-		for (const name of not) expect(classes).not.toContain(name);
-	}
-
-	/* The list's scroll container, found by what makes it one (its overflow
-	   class), from a row — not by tag, so a refactor that moves the scroll onto a
-	   different element is still what these tests ask about. */
-	function scroller(): HTMLElement {
-		const found = cardByName("Row 0").closest(".overflow-y-auto");
-		expect(found).not.toBeNull();
-		return found as HTMLElement;
-	}
-
-	/* THE PROPERTY, structurally, because happy-dom has no layout: no
-	   `getBoundingClientRect` or `scrollTop` here moves anything, so a pixel
-	   assertion would pass on every placement. What keeps the band on screen at
-	   any scroll position is that it is NOT scroll content, and what keeps it
-	   out of the scroller's layout is that it is taken out of the flow: an
-	   `absolute` sibling of the scroller, pinned to the top of a `relative`
-	   parent they share. An absolutely positioned child of a flex column is not
-	   a flex item, so its height can never come out of the scroller's. The
-	   rendered frames at 100% and 200% root font on the PR are the pixel half of
-	   this claim. */
-	function expectOutsideTheScroller(alert: HTMLElement) {
-		const list = scroller();
-		expect(list.contains(alert)).toBe(false);
-		expect(alert.closest(".overflow-y-auto")).toBeNull();
-		const band = errorBox();
-		expect(band.parentElement).toBe(list.parentElement);
-		const classes = band.className.split(/\s+/);
-		for (const name of ["absolute", "inset-x-0", "top-0"]) expect(classes).toContain(name);
-		/* The overlay is positioned against the list's own wrapper, not the page,
-		   so it sits over the list's top edge rather than over the header. */
-		expect((band.parentElement as HTMLElement).className.split(/\s+/)).toContain("relative");
-	}
-
-	async function refuseAPinOn(name: string) {
-		setSessionPin.mockRejectedValueOnce(
-			new Error("no saved messages yet — pin it after you send one"),
-		);
-		longPress(cardByName(name));
-		fireEvent.click(await screen.findByRole("button", { name: "Pin to the top" }));
-		return waitFor(() => {
-			const alert = screen.getByRole("alert");
-			expect(alert.textContent).not.toBe("");
-			return alert;
-		});
-	}
-
-	it("renders the refusal outside the scroll container, above it", async () => {
-		sessionList = longList();
-		render(<SessionListScreen />);
-		const alert = await refuseAPinOn("Row 0");
-		expect(alert.textContent).toContain("Could not save the pin: no saved messages yet");
-		expectOutsideTheScroller(alert);
-	});
-
-	it("reports a refusal on a row reached by scrolling down the list", async () => {
-		/* The reader's natural position (Q4, D14): scrolled to a row far below the
-		   first screen. The scroll is simulated — happy-dom records `scrollTop` but
-		   lays nothing out — so what is asserted is the structure that makes the
-		   band independent of it: the scroll happened on the element the band is
-		   not inside, and the scroll position is left where the reader put it (the
-		   refusal does not yank the list back to the top to show itself). */
-		sessionList = longList();
-		render(<SessionListScreen />);
-		const list = scroller();
-		list.scrollTop = 900;
-		fireEvent.scroll(list);
-		const alert = await refuseAPinOn(`Row ${ROWS - 2}`);
-		expect(alert.textContent).toContain("Could not save the pin: no saved messages yet");
-		expectOutsideTheScroller(alert);
-		expect(list.scrollTop).toBe(900);
-		expectBand(SHOWN, HIDDEN);
-	});
-
-	/* happy-dom lays nothing out and never clamps `scrollTop`, so the scroller
-	   gets a small model of the column it sits in: a fixed viewport over a
-	   fixed amount of content, with `scrollTop` rounded to whole pixels, clamped
-	   into the scroll range, and every write the SCREEN makes to it counted. The
-	   band is an overlay, so nothing about it is an input to this model — which
-	   is the claim: if a later change put the band back in the flow or brought a
-	   `scrollTop` compensation back, the writes counted here stop being zero. */
-	const COLUMN = 740;
-	const CONTENT = 3000;
-	const BOTTOM = CONTENT - COLUMN;
-
-	function modelTheColumn(list: HTMLElement) {
-		let offset = 0;
-		let writes = 0;
-		const clamp = (value: number) => Math.min(Math.max(Math.round(value), 0), BOTTOM);
-		Object.defineProperty(list, "scrollTop", {
-			configurable: true,
-			get: () => offset,
-			set: (value: number) => {
-				writes += 1;
-				offset = clamp(value);
-			},
-		});
-		Object.defineProperty(list, "scrollHeight", { configurable: true, get: () => CONTENT });
-		Object.defineProperty(list, "clientHeight", { configurable: true, get: () => COLUMN });
-		return {
-			/* The reader scrolls: the offset changes and the browser says so, and
-			   the reader's own scroll is not counted as the screen's write. */
-			scrollTo(value: number) {
-				offset = clamp(value);
-				fireEvent.scroll(list);
-			},
-			writes: () => writes,
-		};
-	}
-
-	/* Any ResizeObserver the screen builds is recorded with what it watches, so
-	   the band's own resize frames can be delivered to it: the old
-	   compensation was driven from exactly this callback. */
-	type Resized = (entries: Array<{ contentRect: { height: number } }>) => void;
-	function observeEverything() {
-		const observed: Array<Resized> = [];
-		vi.stubGlobal(
-			"ResizeObserver",
-			class {
-				constructor(private readonly callback: Resized) {}
-				observe() {
-					observed.push(this.callback);
-				}
-				unobserve() {}
-				disconnect() {}
-			},
-		);
-		return observed;
-	}
-
-	/* Opens the band with a refusal on a row the band does NOT cover (so the one
-	   deliberate move stays out of it), plays the band's frames, fractions
-	   included, to anything watching, then closes it with a successful press on
-	   another row. Returns the scroll offset after each direction and how many
-	   times the screen wrote it. */
-	async function openAndClose(at: number) {
-		const observed = observeEverything();
-		sessionList = longList();
-		render(<SessionListScreen />);
-		const list = scroller();
-		/* Browser scroll anchoring must stay on: opting out moved a scrolled
-		   reader's rows on every unrelated list change (Q6, +76px measured). */
-		expect(list.className).not.toContain("overflow-anchor");
-		const column = modelTheColumn(list);
-		column.scrollTo(at);
-		const frames = (heights: number[]) =>
-			act(() => {
-				for (const height of heights) {
-					for (const callback of observed) callback([{ contentRect: { height } }]);
-				}
-			});
-		await refuseAPinOn("Row 20");
-		frames([0.9, 1.8, 2.7, 3.6, 12.4, 34.8]);
-		const opened = list.scrollTop;
-		longPress(cardByName("Row 21"));
-		fireEvent.click(await screen.findByRole("button", { name: "Pin to the top" }));
-		await waitFor(() => expect(screen.getByRole("alert").textContent).toBe(""));
-		frames([22.1, 9.3, 2.7, 0.9, 0]);
-		return { opened, closed: list.scrollTop, writes: column.writes() };
-	}
-
-	it("holds the rows still while the band opens and closes, whatever the scroll", async () => {
-		/* At the top, mid-list, 60px and 20px from the bottom (D14 / Q4 / Q9 /
-		   Q10). The rows hold because the screen never touches the scroll: the
-		   band paints over the list instead of taking height from it. The old
-		   layout sibling needed a compensation here, and QA measured it leaving
-		   every row one row higher after the rollback (−51.2px at 100% text). */
-		try {
-			for (const at of [0, 1200, BOTTOM - 60, BOTTOM - 20]) {
-				const { opened, closed, writes } = await openAndClose(at);
-				expect(opened).toBe(at);
-				expect(closed).toBe(at);
-				expect(writes).toBe(0);
-				cleanup();
-			}
-		} finally {
-			vi.unstubAllGlobals();
-		}
-	}, SLOW);
-
-	it("does not pay a collapse twice when the browser already clamped it at the bottom (Q5)", async () => {
-		/* THE REGRESSION. At the very bottom, the old layout sibling's collapse
-		   grew `<main>`, the browser clamped `scrollTop` by the band's height, and
-		   the compensation subtracted it again: QA measured the rows ending 34.2px
-		   lower. With the band out of the flow the scroll range never changes, so
-		   there is no clamp to pay and nothing paying it twice — the reader is
-		   still exactly at the end of the list. */
-		try {
-			const { opened, closed, writes } = await openAndClose(BOTTOM);
-			expect(opened).toBe(BOTTOM);
-			expect(closed).toBe(BOTTOM);
-			expect(writes).toBe(0);
-		} finally {
-			vi.unstubAllGlobals();
-		}
-	}, SLOW);
-
-	it("shows and hides the band without reflowing the list", async () => {
-		/* THE PROPERTY THAT RETIRES THE WHOLE CLASS OF DEFECT (Q9–Q11, D18–D21):
-		   if showing the band cannot change the scroller's client height, nothing
-		   has to be compensated and the browser's anchoring is left alone. happy-dom
-		   has no layout engine, so the client height cannot be measured here; what
-		   is asserted is the structural guarantee instead. (1) The band is out of
-		   the flow: `absolute`, positioned inside the `relative` wrapper it shares
-		   with the scroller, so it is not a flex item of that column. (2) Between
-		   its two states only transform, opacity and pointer-events change, none of
-		   which reflow; no height, grid-track, padding or display class toggles.
-		   (3) It transitions only transform and opacity. (4) The scroller itself
-		   is identical in both states. */
-		sessionList = longList();
-		render(<SessionListScreen />);
-		const band = errorBox();
-		const list = scroller();
-		expectOutsideTheScroller(screen.getByRole("alert"));
-		expect(band.className).toContain("transition-[transform,opacity]");
-		const hidden = new Set(band.className.split(/\s+/));
-		const listBefore = list.className;
-		await refuseAPinOn("Row 0");
-		const shown = new Set(errorBox().className.split(/\s+/));
-		const toggled = [...hidden, ...shown].filter((name) => hidden.has(name) !== shown.has(name));
-		expect(toggled.length).toBeGreaterThan(0);
-		for (const name of toggled) {
-			expect(name).toMatch(/^(-?translate-y-|opacity-|pointer-events-)/);
-		}
-		expect(list.className).toBe(listBefore);
-		expect(list.getAttribute("style")).toBeNull();
-	}, SLOW);
-
-	it("keeps the band collapsed and empty until a refusal arrives", () => {
-		sessionList = longList();
-		render(<SessionListScreen />);
-		expectBand(HIDDEN, SHOWN);
-		expect(screen.getByRole("alert").textContent).toBe("");
-		/* Mounted in the fixed region from the first render, so the live region a
-		   screen reader registered is the one the refusal later arrives in. */
-		expectOutsideTheScroller(screen.getByRole("alert"));
-	});
-
-	it("reads the refusal out while the caption is still expanded", async () => {
-		/* The band's predicate is its own, NOT the caption's: with nothing pinned
-		   the caption is expanded (its own condition), and a refusal can arrive on
-		   exactly that list. A shared predicate would have to collapse one of the
-		   two here — and the band is the one that must never be hidden while its
-		   text is on screen (D12's a11y half). */
-		sessionList = longList();
-		render(<SessionListScreen />);
-		const alert = await refuseAPinOn("Row 0");
-		expect(alert.getAttribute("aria-hidden")).toBeNull();
-		expect(alert.closest("[aria-hidden]")).toBeNull();
-		expectBand(SHOWN, HIDDEN);
-		const caption = screen.getByText("touch and hold a row to pin it");
-		const captionBox = caption.parentElement?.parentElement as HTMLElement;
-		expect(captionBox.className).toContain("grid-rows-[1fr]");
-	});
-});
-
 describe("a pin press reorders nothing until the daemon confirms (Q13/Q14/Q15/D18)", () => {
 	/* THE REAL STORE, FED THE FRAMES A DAEMON SENDS. The blocks above stub the
 	   store's optimistic half away, which is exactly the half under test here:
@@ -592,15 +304,6 @@ describe("a pin press reorders nothing until the daemon confirms (Q13/Q14/Q15/D1
 	   below, which is what makes the re-import possible at all. */
 	const ROWS = 12;
 	const NAMES = Array.from({ length: ROWS }, (_, index) => `Row ${index}`);
-
-	/* One card at 100% root font, and the band's box at the two scales Q13 and
-	   Q15 were measured at. happy-dom lays nothing out, so the geometry the
-	   pressed-row rule reads is supplied below. */
-	const ROW_H = 56;
-	const ROW_H_200 = 112;
-	const BAND_H = 44;
-	const BAND_H_200 = 100;
-	const COLUMN = 740;
 
 	function rowsOf(count: number, pinned: string[] = []): SessionSummary[] {
 		return Array.from({ length: count }, (_, index) =>
@@ -691,76 +394,10 @@ describe("a pin press reorders nothing until the daemon confirms (Q13/Q14/Q15/D1
 		return cardByName(name).querySelector("[aria-label=\"pinned\"]") !== null;
 	}
 
-	/* The column, modelled: one `rowHeight`-tall card per rendered row, in DOM
-	   order, offset by the scroller's own `scrollTop`. What it buys is the one
-	   thing these tests are about — a row's position is a function of the ORDER
-	   it is rendered in, so a reorder moves every row below it exactly as it
-	   does in a browser, and the screen's own `getBoundingClientRect` reads
-	   answer about that model. `writes` counts only the SCREEN's writes. */
-	function modelColumn(
-		list: HTMLElement,
-		geometry: { rowHeight: number; bandHeight: number },
-	) {
-		let offset = 0;
-		let writes = 0;
-		const cards = () =>
-			Array.from(list.querySelectorAll("button")) as HTMLElement[];
-		const box = (top: number, height: number): DOMRect =>
-			({
-				top,
-				bottom: top + height,
-				height,
-				left: 0,
-				right: 0,
-				width: 0,
-				x: 0,
-				y: top,
-				toJSON: () => ({}),
-			}) as DOMRect;
-		Object.defineProperty(list, "scrollTop", {
-			configurable: true,
-			get: () => offset,
-			set: (value: number) => {
-				writes += 1;
-				offset = Math.max(0, Math.round(value));
-			},
-		});
-		Object.defineProperty(list, "clientHeight", {
-			configurable: true,
-			get: () => COLUMN,
-		});
-		Object.defineProperty(list, "scrollHeight", {
-			configurable: true,
-			get: () => cards().length * geometry.rowHeight,
-		});
-		const band = screen.getByRole("alert").parentElement as HTMLElement;
-		Object.defineProperty(band, "offsetHeight", {
-			configurable: true,
-			get: () => geometry.bandHeight,
-		});
-		const realRect = HTMLElement.prototype.getBoundingClientRect;
-		HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
-			if (this === list) return box(0, COLUMN);
-			const index = cards().indexOf(this);
-			if (index < 0) return realRect.call(this);
-			return box(index * geometry.rowHeight - offset, geometry.rowHeight);
-		};
-		return {
-			bandBottom: () => geometry.bandHeight,
-			offset: () => offset,
-			writes: () => writes,
-			scrollTo(value: number) {
-				offset = Math.max(0, Math.round(value));
-			},
-			restore() {
-				HTMLElement.prototype.getBoundingClientRect = realRect;
-			},
-		};
-	}
-
-	/* The two frames the pressed-row rule waits for, waited for: the screen's
-	   pair was scheduled at the commit, so a pair scheduled after it runs after
-	   it — the move has been made by the time this resolves. */
+	/* Two animation frames, so a repaint that any part of the mark path
+	   scheduled has landed before the assertion that follows. The assertion is
+	   about the ORDER, and this keeps it from being answered about a frame
+	   nothing has drawn in yet. */
 	async function settled() {
 		await act(async () => {
 			await new Promise((resolve) =>
@@ -770,20 +407,23 @@ describe("a pin press reorders nothing until the daemon confirms (Q13/Q14/Q15/D1
 		});
 	}
 
+	/* A refusal is observed on the mark it takes back: the press paints the ★ and
+	   the refused POST clears it again. That is the whole of the response this
+	   web UI shows — the band that named the daemon's reason is being rebuilt on
+	   its own PR, so the rising and falling ★ is what there is to wait on. The ★
+	   is asserted UP first: without that, a wait for it to be gone would pass
+	   before the press had been painted at all. */
 	async function refusedPinOn(name: string) {
 		setSessionPin.mockRejectedValueOnce(
 			new Error("no saved messages yet — pin it after you send one"),
 		);
 		longPress(cardByName(name));
 		fireEvent.click(await screen.findByRole("button", { name: "Pin to the top" }));
-		await waitFor(() =>
-			expect(screen.getByRole("alert").textContent).not.toBe(""),
-		);
+		expect(starOn(name)).toBe(true);
+		await waitFor(() => expect(starOn(name)).toBe(false));
 	}
 
-	const restores: Array<() => void> = [];
 	afterEach(() => {
-		while (restores.length > 0) restores.pop()?.();
 		/* The faked transport goes with the test that faked it. */
 		vi.unstubAllGlobals();
 		vi.doUnmock("./store");
@@ -818,36 +458,28 @@ describe("a pin press reorders nothing until the daemon confirms (Q13/Q14/Q15/D1
 		expect(rowOrder(list)[0]).toBe("Row 2");
 	}, SLOW);
 
-	it("reorders nothing at all when the pin is refused, at 100% and at 200% (Q13/D18)", async () => {
-		for (const [scale, rowHeight, bandHeight] of [
-			["100%", ROW_H, BAND_H],
-			["200%", ROW_H_200, BAND_H_200],
-		] as Array<[string, number, number]>) {
-			await realStoreHarness();
-			await pushFrame(rowsOf(6));
-			const list = mainScroller();
-			const model = modelColumn(list, { rowHeight, bandHeight });
-			restores.push(() => model.restore());
-			const before = rowOrder(list);
+	it("reorders nothing at all when the pin is refused (Q13/D18)", async () => {
+		await realStoreHarness();
+		await pushFrame(rowsOf(6));
+		const list = mainScroller();
+		const before = rowOrder(list);
 
-			await refusedPinOn("Row 3");
-			await settled();
+		await refusedPinOn("Row 3");
+		await settled();
 
-			/* Both halves of the property, at both scales: the refusal is on
-			   screen, the ★ it refuted has fallen back, no ★ Pinned section ever
-			   existed, and the rows are in the order they were — nothing moved,
-			   so there is nothing to move back. The pixel response of the old
-			   optimistic lift (−51.0px at 100%, −101.5px at 200%) came from this
-			   reorder happening; it cannot happen from here. */
-			expect(screen.getByRole("alert").textContent).toContain(
-				"no saved messages yet",
-			);
-			expect(starOn("Row 3"), `the ★ at ${scale}`).toBe(false);
-			expect(pinnedSection(), `a ★ Pinned section at ${scale}`).toBe(false);
-			expect(rowOrder(list), `rows moved at ${scale}`).toEqual(before);
+		/* The property, whole: the ★ the refusal refuted has fallen back, no
+		   ★ Pinned section ever existed, and the rows are in the order they were
+		   — nothing moved, so there is nothing to move back. The pixel response
+		   of the old optimistic lift (−51.0px at 100%, −101.5px at 200% root font)
+		   came from that reorder happening; it cannot happen from here.
 
-			cleanup();
-		}
+		   Sampled at ONE root font scale, where it used to be sampled at two: the
+		   scale was an input only through the refusal band's own box, which this
+		   change moved out to its own PR. What is asserted here is DOM order, and
+		   no font size changes it. */
+		expect(starOn("Row 3")).toBe(false);
+		expect(pinnedSection()).toBe(false);
+		expect(rowOrder(list)).toEqual(before);
 	}, SLOW);
 
 	it("moves rows for a pin the daemon confirms, and only by that one row (Q14, accepted)", async () => {
@@ -874,53 +506,6 @@ describe("a pin press reorders nothing until the daemon confirms (Q13/Q14/Q15/D1
 		expect(rowOrder(list)).toEqual(confirmed);
 	}, SLOW);
 
-	it("keeps the pressed row clear of the band once the list has settled, at 200% (Q15/D20)", async () => {
-		await realStoreHarness();
-		await pushFrame(rowsOf(ROWS));
-		const list = mainScroller();
-		const model = modelColumn(list, {
-			rowHeight: ROW_H_200,
-			bandHeight: BAND_H_200,
-		});
-		restores.push(() => model.restore());
-		/* The reader is at the top of the row they press: at 200% root font the
-		   band covers that row, so the reason would be unreadable beside it. */
-		model.scrollTo(3 * ROW_H_200);
-
-		await refusedPinOn("Row 3");
-		await settled();
-
-		expect(cardByName("Row 3").getBoundingClientRect().top).toBeGreaterThanOrEqual(
-			model.bandBottom(),
-		);
-		/* The minimum that clears the band, written once. Before the fix this
-		   effect ran in the commit that carried the error text, against a
-		   layout the reader never saw — the row's pre-lift position — so its
-		   own condition was false and it never ran again (writes stayed 0). */
-		expect(model.writes()).toBe(1);
-		expect(model.offset()).toBe(3 * ROW_H_200 - BAND_H_200);
-	}, SLOW);
-
-	it("leaves the scroll untouched when the pressed row is already clear of the band", async () => {
-		await realStoreHarness();
-		await pushFrame(rowsOf(ROWS));
-		const list = mainScroller();
-		const model = modelColumn(list, {
-			rowHeight: ROW_H_200,
-			bandHeight: BAND_H_200,
-		});
-		restores.push(() => model.restore());
-		/* Scrolled PAST the row that was pressed: the reason is behind the
-		   reader, and the rule must not drag them back to a row they left. */
-		model.scrollTo(6 * ROW_H_200);
-
-		await refusedPinOn("Row 3");
-		await settled();
-
-		expect(model.writes()).toBe(0);
-		expect(model.offset()).toBe(6 * ROW_H_200);
-	}, SLOW);
-
 	it("never shows the ★ Pinned section across a refused pin — nothing ever reordered (D18)", async () => {
 		await realStoreHarness();
 		await pushFrame(rowsOf(6));
@@ -930,16 +515,16 @@ describe("a pin press reorders nothing until the daemon confirms (Q13/Q14/Q15/D1
 		/* Sampled at each commit the refusal passes through. The ★ on the row is
 		   the control that proves the samples can see a change at all: if the
 		   section is absent in every one of them, it is because no commit
-		   contained it, not because the sampler was looking at the wrong DOM. */
+		   contained it, not because the sampler was looking at the wrong DOM.
+		   The refusal itself is read off the ★ going back down — the band that
+		   named the daemon's reason moved out of this change. */
 		setSessionPin.mockRejectedValueOnce(
 			new Error("no saved messages yet — pin it after you send one"),
 		);
 		longPress(cardByName("Row 3"));
 		fireEvent.click(await screen.findByRole("button", { name: "Pin to the top" }));
 		const pressed = { star: starOn("Row 3"), section: pinnedSection() };
-		await waitFor(() =>
-			expect(screen.getByRole("alert").textContent).not.toBe(""),
-		);
+		await waitFor(() => expect(starOn("Row 3")).toBe(false));
 		await settled();
 		const refused = { star: starOn("Row 3"), section: pinnedSection() };
 		/* The daemon's own frame, carrying the truth, closes the sequence out. */

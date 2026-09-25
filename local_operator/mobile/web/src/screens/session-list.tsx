@@ -482,16 +482,9 @@ export function SessionListScreen() {
 	   sheet describing a stale object — the row it names is re-read from
 	   `sessions` on every render, so the toggle always acts on current state. */
 	const [pinTarget, setPinTarget] = useState<string | null>(null);
-	const [pinError, setPinError] = useState("");
 	/* FLIP settle state: card DOM by session id, plus each card's content
 	   coordinate from the previous commit. */
 	const mainRef = useRef<HTMLElement>(null);
-	/* The refusal band, measured only to keep the pressed row clear of it. */
-	const pinErrorRef = useRef<HTMLDivElement>(null);
-	/* The row whose pin was just refused, read once by the effect that keeps it
-	   out from under the band. A ref, not state: it is a one-shot hand-off to
-	   that effect and must not cause a render of its own. */
-	const refusedRow = useRef<string | null>(null);
 	const cardRefs = useRef(new Map<string, HTMLButtonElement>());
 	const prevTops = useRef(new Map<string, number>());
 	const visible = sessions.filter((session) =>
@@ -532,20 +525,21 @@ export function SessionListScreen() {
 		pinMarks.get(session.session_id) ?? Boolean(session.pinned);
 
 	/* The ★ shows what the reader asked for; only the daemon may move the row.
-	   A failed POST clears the mark, so the ★ falls back in the same commit as
-	   the reason for it. */
+	   A failed POST clears the mark, and the ★ falls back with it. */
 	const togglePin = async (sessionId: string, pinnedNext: boolean) => {
-		setPinError("");
 		applySessionPin(sessionId, pinnedNext);
 		setPinTarget(null);
 		try {
 			await setSessionPin(sessionId, pinnedNext);
-		} catch (e) {
-			/* Surface it rather than swallow: an unreachable daemon must not read as
-			   "the pin took". The row never moved, so only the mark has to go. */
+		} catch {
+			/* A refusal takes the MARK back with it, and that is the whole of what
+			   the press changed: the row never moved, because only a confirmed list
+			   frame reorders this screen. The reason the daemon gave is not shown
+			   here — a refusal band over the list was removed from this change (it
+			   covered the search field, and the caption at 200% root font) and is
+			   being rebuilt on its own PR, so the mark falling back is all the
+			   reader gets for now. */
 			clearSessionPinMark(sessionId);
-			refusedRow.current = sessionId;
-			setPinError(String((e as Error).message ?? e));
 		}
 	};
 
@@ -562,17 +556,6 @@ export function SessionListScreen() {
 	   alone would take away the only thing explaining the gesture, with nothing
 	   to replace it. */
 	const showPinHint = visible.length > 0 && !sessions.some((session) => session.pinned);
-
-	/* One predicate for the REFUSAL band, spelled exactly as the hint's is: the
-	   track's class and the text inside it are one condition, so the band cannot
-	   be painted expanded while it reads out collapsed (review round 3, NIT 1).
-	   It is deliberately NOT the hint's predicate — the two lifecycles differ.
-	   The caption retires for good on the first pin the STORE holds, while a
-	   refusal can arrive on a list that already has pins and outlives the next
-	   successful press, so sharing one condition would either hide a refusal
-	   that is on screen or bring the retired caption back with it. */
-	const pinErrorText = pinError ? `Could not save the pin: ${pinError}` : "";
-	const showPinError = pinErrorText !== "";
 
 	/* One card factory for all three sections, so a section cannot forget the FLIP
 	   ref or the long-press handler — the bug a fourth copy of this markup would
@@ -639,50 +622,6 @@ export function SessionListScreen() {
 		}
 		prevTops.current = nextTops;
 	});
-	/* THE ONE DELIBERATE MOVE: a refusal that lands over the row the reader
-	   pressed would hide the very row the reason is about, so that row — and
-	   only that row — is scrolled just clear below the band. Anywhere else the
-	   scroll is left alone, and the move is the MINIMUM that clears the band.
-	   Measured against the band's layout box (`offsetHeight`), not its rect,
-	   because its entrance transform is still running.
-
-	   MEASURED ONCE THE LIST HAS SETTLED, not in the commit the text arrives
-	   (QA Q15/D20). It used to run right there, which was the wrong layout to
-	   ask: that commit still carried the optimistic LIFT the press had just
-	   made, so the pressed row's rect was the pre-lift one and the "is this row
-	   under the band" test was answered about a frame the reader never saw —
-	   and since the effect was keyed on the text, it never ran again. Two
-	   frames later the row is drawn where it will stay (a refusal reorders
-	   nothing now), and any repaint already in flight has landed in between.
-	   Idempotent by construction: after the write the row is clear of the band,
-	   so nothing further is written even if the frames run again. */
-	useLayoutEffect(() => {
-		if (!pinErrorText) return;
-		/* Read and clear in the commit that carries the text, so the id is the
-		   pressed row and cannot be overwritten by a later press before the
-		   frames below run. */
-		const id = refusedRow.current;
-		refusedRow.current = null;
-		if (!id) return;
-		let frame = requestAnimationFrame(() => {
-			frame = requestAnimationFrame(() => {
-				const main = mainRef.current;
-				const band = pinErrorRef.current;
-				const row = cardRefs.current.get(id);
-				if (!main || !band || !row) return;
-				const top = main.getBoundingClientRect().top;
-				const bandBottom = top + band.offsetHeight;
-				const rect = row.getBoundingClientRect();
-				/* Under the band: the row's top is covered and some of it is on
-				   screen. A row scrolled clear of the viewport (or scrolled past,
-				   the reason already behind the reader) is left alone. */
-				if (rect.top < bandBottom && rect.bottom > top) {
-					main.scrollTop -= bandBottom - rect.top;
-				}
-			});
-		});
-		return () => cancelAnimationFrame(frame);
-	}, [pinErrorText]);
 	useEffect(() => {
 		getDirectories()
 			.then((d) => setHome(d.home))
@@ -710,10 +649,11 @@ export function SessionListScreen() {
 			    +76px, a session resuming +51px, another client's pin below the fold
 			    +45.5px at 100% and +91px at 200%, all 0px with anchoring on.
 
-			    The wrapper exists only to position the refusal band over the top of
-			    the scroller; `min-h-0` lets `<main>` inside it stay the thing that
-			    scrolls. */}
-			<div className="relative flex min-h-0 flex-1 flex-col">
+			    The wrapper carries the column's `min-h-0` and keeps the scroller's
+			    height off the header and footer, so `<main>` inside it stays the thing
+			    that scrolls. It is no longer `relative`: the only absolutely positioned
+			    child it had was the refusal band, which moved to its own PR. */}
+			<div className="flex min-h-0 flex-1 flex-col">
 				<main
 					ref={mainRef}
 					className="flex flex-1 flex-col overflow-y-auto px-1 pb-2"
@@ -817,43 +757,6 @@ export function SessionListScreen() {
 						</div>
 					)}
 				</main>
-				{/* THE REFUSAL IS REPORTED WHERE THE READER IS LOOKING (design rounds 5
-				    and 6, D12/D14; review round 8, R8-2; QA round 3, Q4). It is never
-				    inside the scroll content, because a band there is on screen only at
-				    `scrollTop` 0 and a reader who scrolled to the row they held would see
-				    the ★ fall back with the reason about a screen ABOVE them. It is pinned
-				    to the top of the list at any scroll position, the way the session view
-				    renders its own refusal under its header.
-
-				    IT IS AN OVERLAY, AND LAYOUT-NEUTRAL (QA round 4). As a layout sibling
-				    between the header and `<main>` its height came out of the scroller, and
-				    the ResizeObserver that handed that height back through `scrollTop`
-				    fought the browser's own anchoring: the rollback left every row one row
-				    higher (−51.2px at 100% text, −101.6px at 200%). Painted over the list,
-				    showing or hiding it cannot change the scroller's client height, so the
-				    rows' geometry and the browser's anchoring are left alone and there is
-				    nothing to compensate. It slides and fades on transform/opacity only,
-				    which never reflow; the one deliberate scroll is the effect that keeps
-				    the pressed row clear of it.
-
-				    NO `aria-hidden`, unlike the caption. When hidden its text is empty, so
-				    there is nothing for assistive tech to read, and the live region is
-				    present from the first render, which is the shape screen readers
-				    announce reliably. `px-3` lines its text up with the header and the
-				    search field (`<main>`'s `px-1` plus the field's `mx-2`). */}
-				<div
-					ref={pinErrorRef}
-					className={cn(
-						"absolute inset-x-0 top-0 z-10 border-b border-hairline bg-canvas px-3 py-2 transition-[transform,opacity] duration-200 ease-out",
-						showPinError
-							? "translate-y-0 opacity-100"
-							: "pointer-events-none -translate-y-full opacity-0",
-					)}
-				>
-					<p role="alert" className="text-meta text-danger">
-						{pinErrorText}
-					</p>
-				</div>
 			</div>
 			<footer className="flex items-center gap-2 border-t border-hairline px-3 py-2 pb-[max(env(safe-area-inset-bottom),0.5rem)]">
 				<button
