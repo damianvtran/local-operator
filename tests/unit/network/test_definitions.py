@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -38,6 +39,39 @@ def _root(tmp_path: Path) -> Path:
     return root
 
 
+def _edit_fields(**overrides: Any) -> "AgentEditFields":
+    """``AgentEditFields`` with EVERY field spelled out, overridden by the few a
+    test cares about.
+
+    Not a style choice: pyright reads the model's synthesised ``__init__`` as
+    requiring all of them (``Field(None, ...)`` is not seen as a default), so a
+    partial construction is a ``reportCallIssue`` error in CI's whole-tree
+    type-check even though it runs fine. The same helper, with the same reason,
+    exists in ``tests/unit/test_agent_profiles.py``.
+    """
+    base: dict[str, Any] = dict(
+        name=None,
+        description=None,
+        tags=None,
+        categories=None,
+        security_prompt=None,
+        hosting=None,
+        model=None,
+        last_message=None,
+        temperature=None,
+        top_p=None,
+        top_k=None,
+        max_tokens=None,
+        stop=None,
+        frequency_penalty=None,
+        presence_penalty=None,
+        seed=None,
+        current_working_directory=None,
+    )
+    base.update(overrides)
+    return AgentEditFields(**base)
+
+
 def _make_agent(
     root: Path,
     name: str,
@@ -50,7 +84,7 @@ def _make_agent(
     """One registered agent row, built the way the product builds one."""
     registry = AgentRegistry(root)
     agent = registry.create_agent(
-        AgentEditFields(
+        _edit_fields(
             name=name,
             description=f"Use when {name} work is needed.",
             tags=list(tags if tags is not None else ["role", "tools:read,grep"]),
@@ -489,7 +523,7 @@ def test_check_expected_refuses_a_revision_that_moved(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _hostile_agent_row(name: str, origin_id: str) -> dict:
+def _hostile_agent_row(name: str, origin_id: str) -> dict[str, Any]:
     """A row shaped exactly as a bundle carries one, with a chosen id."""
     return {
         "kind": "agent",
@@ -501,7 +535,7 @@ def _hostile_agent_row(name: str, origin_id: str) -> dict:
     }
 
 
-def _bundle_of(*rows: dict) -> dict:
+def _bundle_of(*rows: dict[str, Any]) -> dict[str, Any]:
     return {
         "kind": definitions.BUNDLE_KIND,
         "version": definitions.BUNDLE_VERSION,
@@ -740,7 +774,7 @@ def test_two_concurrent_applies_keep_both_rows_and_both_index_entries(tmp_path: 
     barrier = threading.Barrier(2)
     failures: list[BaseException] = []
 
-    def _apply(bundle: dict) -> None:
+    def _apply(bundle: dict[str, Any]) -> None:
         try:
             barrier.wait(10)
             definitions.apply_bundle(bare, bundle, origin_device=str(bundle["origin_device"]))

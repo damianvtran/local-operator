@@ -1404,6 +1404,33 @@ def _fresh_relay(server: relay.RelayServer) -> relay.RelayServer:
     )
 
 
+def _edit_fields(**overrides: Any) -> AgentEditFields:
+    """``AgentEditFields`` with every field spelled out (pyright requires them all —
+    ``Field(None, …)`` is not read as a default), overridden by what a test cares
+    about. The same helper, for the same reason, is in ``test_agent_profiles.py``."""
+    base: dict[str, Any] = dict(
+        name=None,
+        description=None,
+        tags=None,
+        categories=None,
+        security_prompt=None,
+        hosting=None,
+        model=None,
+        last_message=None,
+        temperature=None,
+        top_p=None,
+        top_k=None,
+        max_tokens=None,
+        stop=None,
+        frequency_penalty=None,
+        presence_penalty=None,
+        seed=None,
+        current_working_directory=None,
+    )
+    base.update(overrides)
+    return AgentEditFields(**base)
+
+
 def _dialable_devices(
     devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
     monkeypatch: pytest.MonkeyPatch,
@@ -1513,7 +1540,7 @@ def test_the_definitions_cadence_dials_a_member_it_holds_no_link_to(
     server_a, server_b, _host, _port = devices
     _dialable_devices(devices, monkeypatch)
     AgentRegistry(server_a.root).create_agent(
-        AgentEditFields(name="cadence-agent", description="Reaches the peer with no create.")
+        _edit_fields(name="cadence-agent", description="Reaches the peer with no create.")
     )
     # NOTHING IN MEMORY, which is what a relay that paired and then restarted has.
     fresh_a = _fresh_relay(server_a)

@@ -17,7 +17,14 @@ from typing import Any
 
 import pytest
 
-from local_operator.network import credentials, definitions, mobility, relay, sync, types
+from local_operator.network import (
+    credentials,
+    definitions,
+    mobility,
+    relay,
+    sync,
+    types,
+)
 from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixtures by import
     _pair,
     devices,

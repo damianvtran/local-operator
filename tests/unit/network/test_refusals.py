@@ -13,6 +13,7 @@ import json
 import uuid
 from argparse import Namespace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -1289,8 +1290,11 @@ def test_a_handlers_refusal_crosses_the_link_carrying_its_code(root: Path) -> No
     def _handler(_link: object, _frame: dict[str, object]) -> None:
         raise types.MeshRefusal("definition_stale", "that device's copy is a different revision")
 
+    # The refusal branch never touches the link or the grant, so a stub is honest
+    # here: this cell is about the SHAPE of the frame that leaves the chokepoint.
+    link: Any = Namespace(device_id="d_" + "c" * 32, network_id="n_test", epoch=1)
     reply = server._run_handler(  # noqa: SLF001 — the one place a handler's reply is shaped
-        Namespace(device_id="d_" + "c" * 32, network_id="n_test", epoch=1),
+        link,
         frame,
         _handler,
         None,  # type: ignore[arg-type] — the refusal branch never reads it
