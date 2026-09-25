@@ -11179,7 +11179,7 @@ class Session:
         await self._deliver_job_results([(job_id, text, job)])
 
     async def _deliver_job_results(self, results: list[tuple[str, str, Any]]) -> None:
-        """Queue settled jobs' results as ONE fresh idle-time turn.
+        """Queue settled jobs' results for one fresh turn -- or for the next one.
 
         One turn for the whole batch, not one per job: N children that settle
         during one parent turn are one piece of news, and a turn per child cost
@@ -11188,6 +11188,12 @@ class Session:
         single live delivery has always produced -- so every consumer that reads
         one (the transcript, the stopped-work residue check, the TUI) sees the
         rows it already understands.
+
+        The COUNT is one, the CARRIER is not always a turn: while this session's
+        runtime has committed to leaving the batch is written durably instead
+        (``_hold_job_results_for_next_turn``), because the turn it would
+        otherwise open could only ever be aborted by the disposal that follows
+        (the incident this change fixes, session a81ceec0982b).
         """
         if not results:
             return
@@ -11367,15 +11373,24 @@ class Session:
         row gone and drop the result -- the very loss this path exists to close
         (review round 1, R1-1). The one re-check that remains is ``consumed``,
         read on that same object: a result the turn collected with ``wait`` is
-        not delivered a second time. A disposed session delivers nothing.
-        Never raises into the turn's ``finally``.
+        not delivered a second time. Never raises into the turn's ``finally``.
+
+        THE BATCH IS NOT DROPPED WHEN THE DISPOSAL GOT HERE FIRST (review round
+        1, MAJOR-1). ``dispose`` reaches an in-flight turn before this flush can
+        run whenever its bounded wait for that turn expires (a teardown with a
+        batch of durability writes behind it is exactly that shape), and the
+        batch must still be written: the transcript is closed for APPENDS only
+        at the very end of ``dispose``, after this window, so a row written here
+        lands. Clearing the dict first and returning would destroy it -- no row,
+        no incident, no log -- which is the silent loss this whole change exists
+        to prevent, one ordering over. The leaving arm is what makes it
+        addressable at all: it routes to the durable no-turn write instead of
+        the turn the disposal just refused to let run.
         """
         if not self._deferred_job_results:
             return
         pending = list(self._deferred_job_results.items())
         self._deferred_job_results.clear()
-        if self._disposed:
-            return
         results: list[tuple[str, str, Any]] = []
         for job_id, (job, text) in pending:
             try:
@@ -11384,6 +11399,10 @@ class Session:
                 results.append((job_id, text, job))
             except Exception:  # noqa: BLE001 - a delivery must not fail the turn's teardown
                 logger.warning("deferred job delivery failed for %s", job_id, exc_info=True)
+        if self._disposed and not self._leaving_deliveries:
+            # Off the latch a disposed session has no arm that can write, and the
+            # old behaviour stands: nothing is delivered.
+            return
         try:
             await self._deliver_job_results(results)
         except Exception:  # noqa: BLE001 - a delivery must not fail the turn's teardown
