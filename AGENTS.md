@@ -1793,9 +1793,9 @@ requests* adds when a pull request is not attributed to a person (on by default:
 it raises the configured count, so an unattributed PR needs two approvals), and
 carries **five configured bypass actors, and they are two different controls**
 (as of 2026-09-24): the admin repository role (`RepositoryRole` 5,
-`bypass_mode: always`), plus four `User` actors — the collaborator accounts named
-under Tier 2 below, all `write`-role rather than admin — each with
-`bypass_mode: pull_request`. Keep the two modes apart, because recording the list
+`bypass_mode: always`), plus four `User` actors — four of the five collaborators
+named under Tier 2 below, the `write`-role ones — each with `bypass_mode:
+pull_request`. Keep the two modes apart, because recording the list
 as one admin bypass is how this paragraph had it wrong: `always` bypasses for a
 direct push to `main` as well as for a merge, while `pull_request` "can only
 bypass rules on pull requests" — so those four can complete a pull request the
