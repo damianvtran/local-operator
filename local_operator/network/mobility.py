@@ -86,12 +86,149 @@ MOVE_MAX_WAIT_S = 1800.0
 #: How long the requester waits for a ``--keep`` copy to land at the destination
 #: before answering "still copying". Generous: this covers a full transcript on a
 #: slow link, and nothing on the SOURCE has changed while it runs.
+#:
+#: IT IS ALSO A RECALL'S COPY BUDGET (``move_hold_s``): a recall copies the same
+#: transcript over the same link, and the destination is simply the device that asked
+#: for it — so both directions share one number rather than two that can drift.
 KEEP_COPY_WAIT_S = 300.0
 
 #: How long an offload waits for the destination to confirm the promote. The
 #: commit itself is local and fast (the copy happened before it); this only covers
 #: the peer's promote and its ``done`` frame.
 OFFLOAD_CONFIRM_WAIT_S = 30.0
+
+#: The round trip a caller adds around a move's own work before it stops waiting: the
+#: relay's answer has to travel back over the control socket after the work is done,
+#: and a caller that cut it too fine would report its own timeout for a move the relay
+#: was about to answer (the whole of QA round 1, Q4a).
+MOVE_CONTROL_SLACK_S = 10.0
+
+#: The margin a CLIENT adds to a published bound before its own deadline. It has to
+#: exceed the round trip that carries the answer back — the link has just been busy
+#: for the whole bound — so a client may not simply EQUAL the bound it is given. 15 s
+#: is the desktop's own margin, and the number it was measured with: it gave up at
+#: ``wait_s + 15`` against a route answering at ``wait_s + 30``, so the timeout's
+#: vaguer sentence always won (QA round 1, Q4a).
+MOVE_CLIENT_MARGIN_S = 15.0
+
+
+#: How long the destination waits to hand a refusal back to the inviter. A
+#: NOTIFICATION rather than an act — the owner records it in memory and answers at
+#: once — so it is bounded short instead of taking the move op's own copy-sized
+#: deadline, which would hold a worker for a minute on an owner that had gone away.
+REFUSAL_REPORT_TIMEOUT_S = 10.0
+
+
+def move_bound_s(wait_s: float, *, keep: bool = False) -> float:
+    """How long an OFFLOAD — a move this device INVITED a peer to pull — is held.
+
+    ONE OF THE SHAPES, NOT THE FORMULA FOR ALL OF THEM. ``move_hold_s`` is the one
+    place that names every shape the transfer route accepts and ``move_client_bound_s``
+    is the published client bound derived from it; this function is the offload's term
+    alone, and publishing it as if it were the whole contract is exactly what review
+    round 1 caught (the ``keep`` copy's 300 s term and a recall's retire deadline were
+    both missing from the advice the client lane was implementing).
+
+    A MOVE IS BOUNDED, AND THE BOUND IS DERIVABLE (QA round 1, Q4a). The inviter holds
+    a ``session_move`` request for at most
+
+        ``wait_s + (KEEP_COPY_WAIT_S if keep else OFFLOAD_CONFIRM_WAIT_S)``
+
+    seconds — 30 s at ``wait_s=0``, which is the default on BOTH routes that take it
+    (``TransferSession.wait_s`` and the CLI's ``--wait``) — and a front end whose own
+    deadline is SHORTER never sees that answer. Measured: the desktop gave up at
+    ``wait_s + 15`` s, so the user was told "the move may have happened, check the
+    other device" while this device was about to answer "nothing was deleted" — the
+    timeout's vaguer sentence always won.
+
+    The bound is what an UNANSWERED request costs, not what a move costs: the route
+    returns as soon as it has a definite outcome — the commit, or the destination's
+    refusal, which ``_source_refused`` propagates the moment it arrives.
+    """
+    return (KEEP_COPY_WAIT_S if keep else OFFLOAD_CONFIRM_WAIT_S) + max(0.0, float(wait_s or 0.0))
+
+
+def move_hold_s(wait_s: float, *, keep: bool = False, to: str = "") -> float:
+    """How long THIS DEVICE'S RELAY holds a move before it answers. THE SHAPES, ONCE.
+
+    Every number a client is handed and every deadline this side waits on is taken
+    from here, so a shape cannot be corrected in one place and left wrong in another —
+    which is what happened on review round 1, when the offload's formula was published
+    as if it covered the route.
+
+    * **OFFLOAD** (``to`` names a peer): ``move_bound_s``. This device invited the peer
+      to pull, so what it waits for is its OWN durable progress — and the ``keep`` term
+      is the DESTINATION's copy, which is why the copy's budget (not this device's
+      confirm window) is what bounds it.
+    * **RECALL** (``to="local"``): the copy THIS device runs, i.e. ``wait_s`` of busy
+      re-polls plus ``KEEP_COPY_WAIT_S``. It is NOT ``move_bound_s``, and nothing in
+      that formula bounds it: the direction is reversed (``_recall`` →
+      ``_destination_move`` makes this device the DESTINATION), so there is no invite
+      and no settle window in it at all. The owner's retire-plus-record deadline
+      (``MOVE_OP_DEADLINE_S``) is charged by ``move_client_bound_s``, which counts it
+      for every shape.
+
+    A ``--from-replica`` RECOVERY is neither and is not covered here: it promotes bytes
+    already on THIS disk with no peer in the loop (``_recover_from_replica``), so it
+    keeps the confirm-sized term its caller has always given it rather than borrowing a
+    copy's.
+    """
+    if to == "local":
+        # A COPY, NOT A CONFIRMATION: nothing is confirmed over the link, and the work
+        # is transcript-sized, so the offload's 30 s window is the wrong term by two
+        # orders of magnitude.
+        return KEEP_COPY_WAIT_S + max(0.0, float(wait_s or 0.0))
+    return move_bound_s(wait_s, keep=keep)
+
+
+def move_client_bound_s(wait_s: float, *, keep: bool = False, to: str = "") -> float:
+    """THE PUBLISHED BOUND: the deadline a CLIENT's own request must not be shorter than.
+
+    Derived, never restated, and published with its terms so a front end can check its
+    own arithmetic against this side's:
+
+    ======================  =====================================================
+    shape                   the bound (seconds)
+    ======================  =====================================================
+    offload (``to`` a peer) ``wait_s + 30 + MOVE_OP_DEADLINE_S + 10 + MOVE_CLIENT_MARGIN_S``
+    ``keep`` copy           ``wait_s + 300 + MOVE_OP_DEADLINE_S + 10 + MOVE_CLIENT_MARGIN_S``
+    recall (``to="local"``) ``wait_s + 300 + MOVE_OP_DEADLINE_S + 10 + MOVE_CLIENT_MARGIN_S``
+    ======================  =====================================================
+
+    Concretely, at the ``wait_s=0`` both routes default to: **145 s** for an offload,
+    **415 s** for a ``keep`` copy (``keep`` costs its copy either way), and **415 s**
+    for a recall. A front end that gives up sooner than these reports its own timeout
+    for a move this side was about to answer, which is QA round 1's Q4a symptom — the
+    desktop gave up at ``wait_s + 15`` against a route answering at ``wait_s + 30``, so
+    the user read "the move may have happened, check the other device" instead of this
+    device's own answer.
+
+    THE TERMS, because which one a client is waiting on is the whole question:
+
+    * ``move_hold_s`` — the relay's own held time for that shape (30 s for an offload's
+      confirmation, 300 s for a copy, either way).
+    * ``MOVE_OP_DEADLINE_S`` — the PEER's slow-op budget. It bounds the frame the
+      inviter sent (an offload's prepare/commit) or the owner's retire-plus-record
+      deadline (a recall's prepare), so it is added to EVERY shape rather than folded
+      into one of them.
+    * ``MOVE_CONTROL_SLACK_S`` — the control socket's answer travelling back.
+    * ``MOVE_CLIENT_MARGIN_S`` — the client's own margin over the route's answer, which
+      has to exceed the round trip on a link that has just been busy for the bound.
+
+    A RECALL IS BOUNDED BY A BUDGET, NOT BY A PROMISE, and the difference is what a
+    client must act on: the copy above ``move_hold_s`` is transcript-sized and nothing
+    here caps it, so the route may answer 503 "unconfirmed" — the request WAS sent —
+    with the copy still running past every number above. A client whose own deadline
+    fires on a recall therefore knows NOTHING about the outcome: it must report it as
+    unknown, never as a refusal, and never retry into a second move.
+    """
+    return (
+        MOVE_OP_DEADLINE_S
+        + move_hold_s(wait_s, keep=keep, to=to)
+        + MOVE_CONTROL_SLACK_S
+        + MOVE_CLIENT_MARGIN_S
+    )
+
 
 #: Age after which an abandoned staging directory is swept. `ready.json` marks one
 #: awaiting a commit and exempts it (design §7's GC): the bytes of a verified copy
@@ -241,6 +378,7 @@ class _Progress:
         self._lock = threading.Lock()
         self._phases: dict[str, list[MovePhaseStamp]] = {}
         self._events: dict[str, threading.Event] = {}
+        self._refusals: dict[str, tuple[str, str, str]] = {}
 
     def note(self, session_id: str, phase: SessionMovePhase) -> None:
         with self._lock:
@@ -262,9 +400,40 @@ class _Progress:
             event = self._events.setdefault(f"{session_id}:{marker}", threading.Event())
         event.set()
 
+    def note_refusal(self, session_id: str, *, code: str, message: str, from_device: str) -> None:
+        """Record the DESTINATION's refusal of a move THIS device invited.
+
+        The offload's inviter watches its own durable progress and never asks the
+        destination (§_offload), so a destination that refuses writes nothing here
+        and the wait would run out its whole budget — measured on 2026-09-24 as 60 s
+        against a refusal the destination produced in 3 ms (QA round 1, Q4a). The
+        refusing device says so over the same link it was invited on, which is the
+        only channel that carries the fact.
+
+        ``from_device`` is kept so a refusal can only end the wait it belongs to: the
+        inviter names the device it invited, and a member that was not the destination
+        of this move cannot shorten it.
+        """
+        with self._lock:
+            self._refusals[session_id] = (code, message, from_device)
+
+    def refusal(self, session_id: str, *, from_device: str = "") -> tuple[str, str] | None:
+        """The recorded refusal for ``session_id``, or ``None``.
+
+        ``from_device`` filters by who refused: an empty string takes any device's
+        answer (a caller with no invite to match), and a named device ignores a
+        refusal recorded by anybody else.
+        """
+        with self._lock:
+            found = self._refusals.get(session_id)
+        if found is None or (from_device and found[2] != from_device):
+            return None
+        return found[0], found[1]
+
     def forget(self, session_id: str) -> None:
         with self._lock:
             self._phases.pop(session_id, None)
+            self._refusals.pop(session_id, None)
 
 
 _progress_lock = threading.Lock()
@@ -538,9 +707,10 @@ class LinkTransport:
         self.link = link
         self.session_id = session_id
 
-    def ask(self, frame: dict[str, Any]) -> dict[str, Any]:
+    def ask(self, frame: dict[str, Any], *, timeout: float | None = None) -> dict[str, Any]:
         request = {"req": self.server._next_relay_req(), **frame}  # noqa: SLF001
-        timeout = self.server.slow_request_timeout(str(frame.get("op") or ""))
+        if timeout is None:
+            timeout = self.server.slow_request_timeout(str(frame.get("op") or ""))
         reply = self.link.request(request, timeout=timeout)
         if reply is None:
             raise Moved("unreachable", _unreachable(None))
@@ -1196,6 +1366,48 @@ def settle_promoted_handoff(root: Path, session_id: str) -> bool:
     return True
 
 
+def _source_refused(
+    server: "RelayServer", link: "PeerLink", frame: dict[str, Any]
+) -> dict[str, Any]:
+    """The DESTINATION's refusal of a move this device invited, reported back.
+
+    WHY THIS PHASE EXISTS (QA round 1, Q4a). An offload's inviter watches its OWN
+    durable progress and never asks the destination (``_offload``): the destination
+    drives the copy, so the only thing the source can honestly report is what its own
+    files say. That rule breaks for a REFUSAL, which writes nothing here — so the
+    inviter sat out its whole budget and answered "the outcome is unconfirmed" for a
+    move that never happened. Measured on 2026-09-24 with the desktop's own view
+    holding the session: this device's refusal ("This session is open in another
+    terminal or attached client. Disconnect that client, then move again.") was
+    produced in 3 ms and reached the user 9 times out of 9 as a 60 s timeout reading
+    "the request was sent, so the move may have happened".
+
+    NOTHING IS TRUSTED BEYOND WHICH WAY THE WAIT ENDS. It changes no state and
+    survives no further than the waiting call: the refusal is recorded in memory for
+    the one front end that is waiting (:class:`_Progress.note_refusal`), and it can
+    only SHORTEN a wait — the committed path is checked first on both sides, so a
+    refusal that crosses a commit in flight is ignored rather than reported over it.
+    The recording is keyed by the device that sent it, so a member that did not
+    receive this move cannot end it.
+
+    The sentence is carried VERBATIM. This side never saw the guard that fired, and a
+    paraphrase here would be the second sentence table for one condition that §8.2
+    exists to prevent.
+
+    The reply says ``recorded`` rather than ``refused`` on purpose: ``refused`` is
+    :meth:`LinkTransport.ask`'s sentinel for a REFUSED OP, so a handler answering with
+    it would make the reporting device raise on its own notification.
+    """
+    session_id = str(frame["session_id"])
+    progress_for(server).note_refusal(
+        session_id,
+        code=str(frame.get("code") or "refused"),
+        message=str(frame.get("message") or "the other device refused the move"),
+        from_device=str(getattr(link, "device_id", "") or ""),
+    )
+    return {"result": "recorded", "session_id": session_id}
+
+
 def _source_status(
     server: "RelayServer", link: "PeerLink", frame: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1680,12 +1892,43 @@ def _destination_invite(
         except Exception:  # noqa: BLE001 — the inviter polls durable state, not this
             logger.debug("mobility: invited pull of %s failed", session_id, exc_info=True)
             return
-        # NOTHING IS SIGNALLED HERE. The inviter watches its OWN durable progress
-        # (the tombstone, or this device's `done` handler), never this thread: a
-        # notification from a worker that the inviter cannot observe would be a
-        # second, weaker source of truth for the same fact.
+        # NOTHING IS SIGNALLED *LOCALLY*, and that is still right: the inviter watches
+        # its OWN durable progress (the tombstone, or this device's `done` handler),
+        # never this thread, and a notification from a worker the inviter cannot observe
+        # would be a second, weaker source of truth for the same fact.
+        #
+        # A REFUSAL IS THE EXCEPTION, and it has to cross the link to be visible at all
+        # (QA round 1, Q4a). A refusal writes nothing on the inviter's disk — that is
+        # what makes it a refusal — so an inviter watching only its files sits out its
+        # whole budget and then answers "the outcome is unconfirmed" for a move that
+        # never started. Measured on 2026-09-24: this device refused in 3 ms (the
+        # session was open in another client) and the user was told 60 s later that the
+        # move might have happened. The owner is told here, over the same link it
+        # invited on, which is the only channel that carries the fact.
         if result is None and refusal is not None:
             logger.info("mobility: invited pull of %s refused: %s", session_id, refusal["message"])
+            try:
+                transport.ask(
+                    {
+                        "op": "net_session_move",
+                        "phase": "refused",
+                        "session_id": session_id,
+                        "code": str(refusal.get("code") or "refused"),
+                        "message": str(refusal.get("message") or "this device refused the move"),
+                    },
+                    # A NOTIFICATION, NOT AN OP WITH A BUDGET: the owner answers from
+                    # memory in microseconds, and the move op's own slow-op deadline
+                    # (the copy's) would hold this worker for a minute if the owner
+                    # were gone. A miss is harmless — the inviter still has its own
+                    # deadline — so this is bounded short rather than generously.
+                    timeout=REFUSAL_REPORT_TIMEOUT_S,
+                )
+            except Exception:  # noqa: BLE001 — an unreported refusal is the old behaviour
+                logger.debug(
+                    "mobility: could not report the refusal of %s to the owner",
+                    session_id,
+                    exc_info=True,
+                )
 
     threading.Thread(target=_run, name=f"mesh-move-pull-{session_id}", daemon=True).start()
     return {
@@ -2138,6 +2381,11 @@ def make_handler(
             raise _peer_error("bad_request", "a move needs a conversation id")
         if phase == "invite":
             return _destination_invite(server, link, frame)
+        if phase == "refused":
+            # BEFORE the reconcile below, on purpose: this frame ends a wait rather
+            # than touching the journal, so reconciling for it would be recovery work
+            # done for a move that was refused.
+            return _source_refused(server, link, frame)
         # ONE TARGETED RECONCILE, before anything else: this is where a
         # destination's post-crash retry completes an interrupted commit on this
         # side, and where a stale `prepared` is cleared so the retry can proceed.
@@ -2370,8 +2618,11 @@ def _offload(
     except Moved as refusal:
         return _move_refusal(session_id, refusal.code or "unreachable", refusal.message)
     new_id = str(accepted.get("new_session_id") or "")
-    budget = (KEEP_COPY_WAIT_S if keep else OFFLOAD_CONFIRM_WAIT_S) + wait_s
-    if _await_own_progress(server, session_id, budget=budget):
+    budget = move_bound_s(wait_s, keep=keep)
+    committed, refusal = _await_own_progress(
+        server, session_id, budget=budget, invited=target_device
+    )
+    if committed:
         phases = _phases_from_disk(server.root, session_id) or progress.phases(session_id)
         if not phases:
             phases = [{"phase": "prepared", "at": time.time()}]
@@ -2400,6 +2651,22 @@ def _offload(
     except Exception:  # noqa: BLE001 — an unreadable journal refuses elsewhere
         entry = None
     del entry
+    if refusal is not None:
+        # THE DESTINATION REFUSED, so this is a DEFINITE outcome and not a deadline:
+        # the sentence is the refusing device's own (this side never saw the guard
+        # that fired, and a paraphrase would be a second sentence table for one
+        # condition — §8.2), and the wait ended when it arrived rather than at the
+        # budget (QA round 1, Q4a). ``changed`` is read from THIS device's own phases
+        # by the same rule the deadline path below uses: the refusal is about whether
+        # a retry is safe, and only the disk this device holds can answer that.
+        code, message = refusal
+        return _move_refusal(
+            session_id,
+            code,
+            message,
+            phase_reached=reached,
+            changed=bool(reached and reached != "prepared"),
+        )
     if keep:
         return _move_refusal(
             session_id,
@@ -2425,21 +2692,37 @@ def _offload(
     )
 
 
-def _await_own_progress(server: "RelayServer", session_id: str, *, budget: float) -> bool:
+def _await_own_progress(
+    server: "RelayServer", session_id: str, *, budget: float, invited: str = ""
+) -> tuple[bool, tuple[str, str] | None]:
     """Wait for this device's own side of an invited move to reach ``committed``.
 
     Watches the DURABLE facts (the journal and the tombstone) rather than asking
     anybody: the invite's whole design is that the destination drives, so the only
     thing the source can honestly report is what its own files say.
+
+    THE ONE THING DISK CANNOT SAY is that the destination REFUSED — a refusal writes
+    nothing here, so a wait that only watched files sat out its whole budget and then
+    reported an unknown outcome for a move that never started (QA round 1, Q4a:
+    60 s spent on a refusal that arrived in 3 ms). The refusing device reports it over
+    the link (``_source_refused``), and the second half of this return value is that
+    answer, noticed within one poll (0.2 s).
+
+    ``invited`` names the device this move was invited to, so a refusal can only end
+    the wait it belongs to; the committed check comes FIRST, because a handoff that
+    committed has an answer that a late refusal must not overwrite.
     """
     deadline = time.monotonic() + max(0.0, budget)
     progress = progress_for(server)
     while time.monotonic() < deadline:
         if _tombstone(server.root, session_id):
-            return True
+            return True, None
         if progress.wait_for(session_id, "done", 0.2):
-            return True
-    return bool(_tombstone(server.root, session_id))
+            return True, None
+        refusal = progress.refusal(session_id, from_device=invited)
+        if refusal is not None:
+            return False, refusal
+    return bool(_tombstone(server.root, session_id)), None
 
 
 def _recover_from_replica(
@@ -2589,10 +2872,22 @@ def request_move(
     if record is None:
         return _relay_refusal(session_id, "relay_unavailable", _relay_message())
     action = "recover" if from_replica else ("recall" if to == "local" else "offload")
-    timeout = max(
-        60.0,
-        MOVE_OP_DEADLINE_S + (wait_s or 0.0) + OFFLOAD_CONFIRM_WAIT_S + 10.0,
-    )
+    # THE CALLER'S OWN ENVELOPE IS THE RELAY'S BOUND PLUS ITS MARGIN, and both terms
+    # come from ``move_hold_s`` so the two cannot drift: a caller that gives up FIRST
+    # does not report a slow move, it reports ``relay_unavailable`` — "this device's
+    # relay could not be asked" — while the relay is still working.
+    #
+    # THE TERM IS PER SHAPE, and the recall is why: a recall copies the transcript with
+    # the DESTINATION running the copy, so it is bounded by ``KEEP_COPY_WAIT_S`` (300 s)
+    # rather than the offload's 30 s confirmation window. Charging every shape the
+    # offload's term made this caller give up at 130 s on a recall that was still
+    # copying, and report ``relay_unavailable`` about work in flight.
+    #
+    # A RECOVERY (``from_replica``) IS NEITHER SHAPE and passes ``to=""``: it promotes
+    # bytes already on this disk with no peer in the loop, so it keeps the confirm-sized
+    # term it has always had rather than borrowing a copy's.
+    hold = move_hold_s(wait_s, keep=bool(keep), to="" if from_replica else str(to))
+    timeout = max(60.0, MOVE_OP_DEADLINE_S + hold + MOVE_CONTROL_SLACK_S)
     reply = relay.control_request(
         record,
         "session_move",

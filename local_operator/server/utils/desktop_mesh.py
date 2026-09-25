@@ -163,6 +163,12 @@ def peer_catalogue(root: Path | None = None) -> dict[str, Any]:
     are one answer rather than two reads that can disagree about a mesh that is
     moving. That read is shared with an ``include_peers`` listing, so one poll costs
     one fan-out, not two.
+
+    AND IT COUNTS SESSIONS (QA round 1, Q1): that projection returns one row per
+    SESSION, so a device sharing two networks with this one counts its conversations
+    once. Counting memberships instead — summing what the per-network tables say —
+    reported 4 for a peer holding 2, for every reader of this field, while the sidebar
+    (which counts its own grouped rows) said 2.
     """
     from local_operator.session.peer_rows import peer_session_rows
 
@@ -170,11 +176,19 @@ def peer_catalogue(root: Path | None = None) -> dict[str, Any]:
         return {"self_device_id": None, "peers": [], "degraded": []}
 
     table = _listing_call(root, "net_peer_ls")
-    counts: dict[str, int] = {}
+    # COUNTED AS A SET OF IDS PER DEVICE, not as a tally of rows: the property this
+    # field reports is "how many conversations does that device hold", and a tally
+    # counts whatever the producer hands over. The producer de-duplicates by id for the
+    # same reason (``session.peer_rows.peer_session_rows``), so this is the second half
+    # of one rule rather than a second rule — QA round 1, Q1 measured 4 here for a
+    # device holding 2 conversations it shared two networks with.
+    held: dict[str, set[str]] = {}
     for row in peer_session_rows(root):
         device = str(getattr(row, "owner_device", "") or "")
-        if device:
-            counts[device] = counts.get(device, 0) + 1
+        session_id = str(getattr(row, "id", "") or "")
+        if device and session_id:
+            held.setdefault(device, set()).add(session_id)
+    counts = {device: len(ids) for device, ids in held.items()}
 
     collapsed: dict[str, dict[str, Any]] = {}
     for entry in table if isinstance(table, list) else table.get("value") or []:
@@ -474,7 +488,7 @@ def _remote_status_label(row: Any) -> str:
 
 
 def create_on_peer(
-    root: Path | None, peer: str, *, model: dict[str, Any] | None = None
+    root: Path | None, peer: str, *, cwd: str = "", model: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """Mint a conversation ON ``peer``, through this device's relay.
 
@@ -483,19 +497,29 @@ def create_on_peer(
     implementation of "a session this device does not host" and the id the peer
     answers with is the id both ends use from then on.
 
-    ``cwd`` is NOT SENT AT ALL, which is how the peer defaults to its own home
-    (``relay._op_session_create``: an absent cwd becomes ``Path.home()`` there).
-    Sending this machine's directory would name a path on a disk the peer does not
-    share, and the renderer's ``cwd`` always names one HERE. No first prompt is sent
-    either: the desktop's ``/new`` opens a conversation, and a prompt from this device
-    would be work the user has not asked for yet.
+    ``cwd`` IS FORWARDED, and it names a directory ON THE PEER (QA round 1, Q9). The
+    renderer's field is the one the pane shows, whose hint for a chosen peer reads
+    "Must exist on <peer>" — and this module used to drop the value, so the promise
+    was never kept: a path that did not exist over there was accepted with a 200 and
+    the conversation started in the peer's home directory, which for an agent that
+    runs commands is the wrong place to be. The PEER validates it (it is the only
+    device that can stat that disk) and refuses with a sentence naming itself, so a
+    bad directory is a refusal rather than a silent relocation. An EMPTY ``cwd`` is
+    the "the peer decides" case, and the peer's decision is its own home.
+
+    No first prompt is sent: the desktop's ``/new`` opens a conversation, and a prompt
+    from this device would be work the user has not asked for yet.
     """
     return _call(
         root,
         "peer_session_create",
-        # A spawn plus its first admission, the CLI's own budget for this verb.
+        # A spawn plus its first admission, the CLI's own budget for this verb. A
+        # PROMPTLESS create no longer waits for the spawn at all (the peer warms the
+        # runtime in the background and answers with the id), so this budget is the
+        # one that covers the prompt-ful case; see ``relay._op_session_create``.
         timeout=120.0,
         peer=peer,
+        cwd=cwd,
         model=model,
     )
 

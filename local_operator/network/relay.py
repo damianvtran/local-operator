@@ -3074,6 +3074,80 @@ class ServerPolicy(ListenerPolicy):
 # ---------------------------------------------------------------------------
 
 
+def _model_choice(model: Any) -> dict[str, Any] | None:
+    """The model a create frame asked for, or ``None`` when it named no usable one.
+
+    One predicate for the two places that must agree about it: the reply the create
+    sends back and the ``set_model`` the runtime is asked to apply. A half-filled
+    choice (a provider with no model id) is not a choice, and treating it as one
+    would have the runtime validate a request the caller never made.
+    """
+    if isinstance(model, dict) and model.get("provider") and model.get("model_id"):
+        return model
+    return None
+
+
+def _resolve_peer_cwd(cwd: str, *, owner: str) -> str:
+    """The working directory a peer create names, or a refusal naming ``owner``.
+
+    ``owner`` is the device that would HOST the session, and it is also the device
+    doing this check: the path names a directory on its disk (the requesting device
+    cannot see that disk at all), so this is the only place the question can be
+    answered — and the answer has to be a refusal rather than a silent fallback (QA
+    round 1, Q9: the desktop promised "Must exist on <peer>", the create answered 200,
+    and the conversation ran in the peer's HOME folder with nothing said).
+
+    ABSOLUTE PATHS ONLY, and that is not pedantry: a relative path would resolve
+    against this RELAY's working directory, which is a directory the user never named
+    and cannot see from the request — the same somewhere-else failure this check
+    exists to stop, one step quieter.
+
+    An EMPTY ``cwd`` is the documented "the peer decides" case (§5.3 step 2) and
+    becomes this device's home.
+
+    A DIRECTORY THIS DEVICE CANNOT ENTER IS REFUSED HERE (review round 1, MINOR 1),
+    and `is_dir` is not enough to establish that: ``stat`` needs search permission on
+    the PARENTS only, so a ``chmod 000`` directory passed this check, the create
+    answered 200, and the failure surfaced later as a spawn error whose only trace was
+    a ``session.create.warm_failed`` audit record — leaving the user a row that could
+    never warm. Measured in the same process: `os.chdir` on the directory raises
+    ``PermissionError`` while `is_dir()` returns True. ``os.access`` with ``X_OK`` is
+    the same question the kernel will ask at spawn, and it must be asked HERE, because
+    a 200 from this route is the caller's signal that the peer will be able to open
+    the folder.
+
+    Returns the RESOLVED path rather than the string it was handed, so the runtime
+    starts in the directory this check proved: the desktop's own
+    ``resolve_working_directory`` resolves for the same reason, and the two must name
+    one directory for one request.
+    """
+    if not cwd:
+        return str(Path.home())
+    directory = Path(cwd).expanduser()
+    if not directory.is_absolute():
+        raise MeshRefusal(
+            "cwd_not_absolute",
+            f"{cwd!r} is not a full path, so it cannot name a folder on {owner}; nothing "
+            "was created",
+        )
+    if not directory.is_dir():
+        raise MeshRefusal(
+            "cwd_not_found",
+            f"there is no folder {cwd!r} on {owner}, so the conversation was not created "
+            "there; choose a folder that exists on that device",
+        )
+    # A DISTINCT CODE FROM ``cwd_not_found``, because it is a distinct cause with the
+    # same remedy: the folder is there and this device's user may not open it.
+    if not os.access(directory, os.X_OK):
+        raise MeshRefusal(
+            "cwd_not_enterable",
+            f"the folder {cwd!r} cannot be entered on {owner} — its permissions do not "
+            "allow it — so the conversation was not created there; choose a folder that "
+            "device can open",
+        )
+    return str(directory.resolve())
+
+
 class RelayServer:
     """The listener, the links, the dispatch, and the loopback control surface."""
 
@@ -5243,7 +5317,16 @@ class RelayServer:
 
         session_id = new_session_id()
         session_dir = self.root / "sessions" / session_id
-        cwd = str(frame.get("cwd") or "") or str(Path.home())
+        # THE WORKING DIRECTORY IS VALIDATED HERE, BY THE DEVICE THAT CAN SEE IT (QA
+        # round 1, Q9). The field names a path on THIS device's disk — that is what
+        # makes it answerable at all, and this device is the only party that can stat
+        # it. It used to be dropped entirely: the desktop's hint promised "Must exist
+        # on <peer>", the create answered 200, and the conversation started in the
+        # peer's HOME directory instead — for an agent that runs commands, the wrong
+        # place, and nothing said so. Refused BEFORE anything is written (the id is
+        # minted but no directory exists yet), so a refused create leaves nothing here
+        # to clean up.
+        cwd = _resolve_peer_cwd(str(frame.get("cwd") or ""), owner=self._own_label())
         stamp = MeshStamp(
             session_id=session_id,
             network_id=link.network_id,
@@ -5319,6 +5402,56 @@ class RelayServer:
 
             write_session_title(session_dir, name, user_set=True, past_names=[])
 
+        prompt = str(frame.get("prompt") or "")
+        wanted_model = _model_choice(frame.get("model"))
+        if not prompt:
+            if frame.get("images"):
+                # Images with no text are not a turn. Refused rather than silently
+                # dropped, because a create that discarded them would look like it had
+                # started something.
+                raise MeshRefusal(
+                    "protocol_error", "a create frame carried images but no prompt text"
+                )
+            # ANSWER THE CREATE, THEN WARM IT (QA round 1, Q4b). A warm-up is a spawned
+            # runtime plus its discovery record, measured at 15.9-22.1 s on LOOPBACK on
+            # a loaded host, while the desktop's own window for this call is 20 s: the
+            # create timed out on a conversation it HAD just made, the app reported the
+            # deadline as "refused", and a retry would have minted a second one. The id,
+            # the directory and the stamp are already durable here, and with no first
+            # prompt there is nothing that needs the runtime up before this device
+            # answers — the same reason ``--engage`` can warm a session at all. So the
+            # runtime joins on the SAME path in the background, and the receipt says so
+            # rather than claiming an application that has not happened yet.
+            self._warm_after_create(
+                session_id,
+                cwd=cwd,
+                model=wanted_model,
+                peer=link.device_id,
+                network_id=link.network_id,
+            )
+            return {
+                "session_id": session_id,
+                "admitted": False,
+                "duplicate": False,
+                # SAID AS A FIELD OF ITS OWN, not in ``detail``: ``detail`` is the create's
+                # COMPLAINT (empty when nothing went wrong), and the CLI reads it as the
+                # sentence beside ``created on <peer>`` — "no first prompt was sent". A
+                # join in progress is not a complaint, and moving it into ``detail``
+                # would have rewritten a receipt line QA has already signed off to say
+                # something else.
+                "warming": True,
+                "detail": "",
+                "model": {
+                    "applied": False,
+                    "detail": (
+                        "the runtime is joining; the model is applied when it arrives"
+                        if wanted_model
+                        else ""
+                    ),
+                },
+                "record": self._row_for(session_id),
+            }
+
         engage_error = self._engage_locally(session_id, cwd=cwd)
         if engage_error:
             return {
@@ -5330,19 +5463,12 @@ class RelayServer:
             }
 
         model_result: dict[str, Any] = {"applied": False, "detail": ""}
-        model = frame.get("model")
-        if isinstance(model, dict) and model.get("provider") and model.get("model_id"):
-            model_result = self._set_model_on(session_id, model)
+        if wanted_model:
+            model_result = self._set_model_on(session_id, wanted_model)
         admitted = False
         prompt_detail = ""
-        prompt = str(frame.get("prompt") or "")
         if prompt:
             admitted, prompt_detail = self._prompt_on(session_id, prompt, frame.get("images"))
-        elif frame.get("images"):
-            # Images with no text are not a turn. Refused rather than silently
-            # dropped, because a create that discarded them would look like it
-            # had started something.
-            raise MeshRefusal("protocol_error", "a create frame carried images but no prompt text")
         return {
             "session_id": session_id,
             "admitted": admitted,
@@ -5432,7 +5558,9 @@ class RelayServer:
 
     # -- the two local helpers the ops above share --------------------------
 
-    def _engage_locally(self, session_id: str, *, cwd: str) -> str:
+    def _engage_locally(
+        self, session_id: str, *, cwd: str, engage: Any = None, errand: Any = None
+    ) -> str:
         """Start or join a runtime for a session this device owns.
 
         Returns an EMPTY STRING on success and a sentence on failure, so the
@@ -5443,20 +5571,31 @@ class RelayServer:
         §5.3 step 2: an omitted working directory means "the peer decides", and
         the peer's decision is its own home rather than the requesting
         device's path, which would not exist here.
+
+        ``engage``/``errand`` ARE THE INJECTED WARM, and a background warm must pass
+        them (``_warm_after_create``): this import happens at CALL time, so a thread
+        scheduled after the answer — or, in a test, after the fixture that installed a
+        fake runtime was torn down — would otherwise call whichever ``engage_runtime``
+        exists THEN, which is a real spawn from a test's point of view. A caller that
+        passes nothing gets the production pair, exactly as before.
         """
         from local_operator.session.runtime.launch import WarmErrand, engage_runtime
 
+        if engage is None:
+            engage = engage_runtime
+        if errand is None:
+            errand = WarmErrand()
         if not (self.root / "sessions" / session_id).is_dir():
             return f"{self._own_label()} does not hold a session {session_id}"
         started = cwd or str(Path.home())
         try:
             asyncio.run(
-                engage_runtime(
+                engage(
                     session_id,
                     started,
                     # Delivers nothing: warming is the whole job here, and the
                     # runtime materialises what it needs when real work arrives.
-                    WarmErrand(),
+                    errand,
                     config_dir=self.root,
                     deadline_s=ENGAGE_DEADLINE_S,
                 )
@@ -5464,6 +5603,92 @@ class RelayServer:
         except (TimeoutError, RuntimeError, ConnectionError, OSError) as exc:
             return self._engage_failure_detail(session_id, exc)
         return ""
+
+    def _warm_after_create(
+        self,
+        session_id: str,
+        *,
+        cwd: str,
+        model: dict[str, Any] | None,
+        peer: str,
+        network_id: str,
+    ) -> None:
+        """Join a runtime for a session just created here, OFF the caller's path.
+
+        WHY A THREAD RATHER THAN A SHORTER WAIT (QA round 1, Q4b). ``_engage_locally``
+        is a runtime spawn plus its discovery record, measured at 15.9-22.1 s on
+        LOOPBACK on this fleet — and the desktop's own bound for a create on a peer is
+        20 s, so it timed out on a conversation this device HAD already created, showed
+        the deadline as "refused", and would have minted a second conversation if the
+        user pressed again. Nothing in the create's answer depends on the warm-up: the
+        id, the directory and the stamp are durable before it starts, and a create with
+        no first prompt has no turn waiting on the runtime.
+
+        THE SAME SEQUENCE, IN THE SAME ORDER, AS THE SYNCHRONOUS PATH: join, then apply
+        the model choice — ``_set_model_on`` dials the live runtime, so it cannot be
+        applied before the runtime exists, and a create that dropped the model would be
+        a quieter wrongness than the timeout it replaces. The session's end state is
+        therefore unchanged; only the moment the answer is sent moves.
+
+        Daemon thread: a relay that stops mid-warm takes the warm with it, and the
+        session is left COLD rather than half-warm — the state ``--engage`` exists to
+        fix, and the state a create whose engage failed has always been able to leave.
+
+        The engage callable is resolved BEFORE the thread is created, so the warm runs
+        the build (or the fake) that answered the create rather than whatever is
+        installed when the thread is finally scheduled.
+        """
+
+        def work() -> None:
+            error = self._engage_locally(session_id, cwd=cwd, engage=engage, errand=errand)
+            if error:
+                self._warm_failed(session_id, peer=peer, network_id=network_id, detail=error)
+                return
+            if model is not None:
+                result = self._set_model_on(session_id, model)
+                if not result.get("applied"):
+                    self._warm_failed(
+                        session_id,
+                        peer=peer,
+                        network_id=network_id,
+                        detail=f"the runtime did not take the model choice: {result.get('detail')}",
+                    )
+
+        # RESOLVED HERE, IN THE CALLER'S OWN THREAD (see ``_engage_locally``): a warm
+        # that imported its own runtime-engage after the answer would call whatever is
+        # installed at that moment, which is how a test's fake could be missed and a real
+        # process spawned in its place.
+        from local_operator.session.runtime.launch import WarmErrand, engage_runtime
+
+        engage, errand = engage_runtime, WarmErrand()
+        threading.Thread(target=work, name="mesh-create-warm", daemon=True).start()
+
+    def _warm_failed(self, session_id: str, *, peer: str, network_id: str, detail: str) -> None:
+        """Say a background warm failed, in the LOCAL audit record.
+
+        A BACKGROUND WARM HAS NO CALLER TO REFUSE, so this is the only place the
+        failure can be said: the create already answered with its id (the answer does
+        not depend on the warm-up), and a session left cold is exactly what
+        ``--engage`` exists to fix — but nothing else would ever mention it, and a
+        silently un-warmed conversation is the class of quiet failure this slice has
+        been fixing all along. ``lop network log`` is where an operator reads it.
+
+        Never raises: an unwritable audit log cannot undo a created session.
+        """
+        try:
+            self.audit.record(
+                AuditEvent(
+                    event="session.create.warm_failed",
+                    actor="self",
+                    actor_kind="relay",
+                    subject=session_id,
+                    session_id=session_id,
+                    network_id=network_id,
+                    detail={"peer": peer, "detail": detail},
+                )
+            )
+        except Exception:  # noqa: BLE001 — a record is not a gate
+            pass
 
     def _member_name(self, device_id: str) -> str:
         """The name the MESH knows ``device_id`` by, or ``''`` when it has none.
@@ -5779,10 +6004,13 @@ class RelayServer:
                 "refused rather than carried",
             )
         if required not in link.context.capabilities:
+            # SAME CLASS AS THE AUTHORISER'S REFUSAL (QA round 1, Q8): a device id is not
+            # a thing a user can match to a picker row or a sidebar heading, so the
+            # sentence names the device.
             raise MeshRefusal(
                 "not_authorised",
-                f"{link.device_id} may not do that here (it does not hold the "
-                f"{required!r} capability)",
+                f"{self._peer_label(link.device_id)} may not do that here (it does not hold "
+                f"the {required!r} capability)",
             )
         try:
             stream.dial.send(inner)
@@ -7579,6 +7807,17 @@ class RelayServer:
         returns is one the peer just answered — strictly fresher than a cached
         row, and never a claim the peer did not make.
 
+        ONE ANSWER PER DEVICE, NOT PER MEMBERSHIP (QA round 1, Q1). The loop below
+        walks this device's networks and each network's members, so a device that
+        shares TWO networks with this one arrived twice — dialled twice for one
+        ``net_catalog``, and its rows appended twice, which is how one conversation
+        on such a device became two rows in every listing and four in the sum. A
+        peer is asked once, over the first shared network that answers it: its own
+        catalogue does not depend on which network carried the question (the rows
+        are the device's, not the network's), and a device that is reachable over
+        one shared network and not another is reachable, which is what the peer
+        block reports.
+
         A peer that does not answer contributes a ``reachable: false`` peer block
         and NO rows (§8.3): a listing must not show phantom rows for a device that
         is switched off, and it must still say the device exists.
@@ -7589,6 +7828,12 @@ class RelayServer:
         for record in store.list_networks(self.root):
             for member in record.active_members():
                 if member.device_id == self.identity.device_id:
+                    continue
+                if peers.get(member.device_id, {}).get("reachable"):
+                    # THE SAME DEVICE, ASKED ONCE. Every later shared network would
+                    # re-ask a peer that already answered and append its rows a
+                    # second time; the block already published is the one the rows
+                    # below belong to.
                     continue
                 # ``_ensure_link`` and NOT a bare lookup: a listing that only
                 # read the links it happened to hold would report a peer we can
