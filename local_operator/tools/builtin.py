@@ -19049,10 +19049,39 @@ def _resumed_line(
     model, owns = _row_model(comms, new_job_id) if new_job_id else ("", None)
     if not model:
         return line
-    line += f" {_model_clause(model, owns, session_model)}"
-    if previous_model and previous_model != model:
+    on_parent = getattr(comms, "resumed_on_parent_model", None)
+    if callable(on_parent) and new_job_id and on_parent(new_job_id):
+        # Inherited from a manager rather than from this session (D9.1): "on
+        # this session's model" would be false, and a bare "on <model>" reads
+        # as a pin.
+        line += f" on its parent's model ({model})"
+    else:
+        line += f" {_model_clause(model, owns, session_model)}"
+    # A fallback (D9.2) is said out loud, never silent: an unannounced model is
+    # how the cost incident behind this receipt went unnoticed.
+    note_of = getattr(comms, "resume_model_note", None)
+    note = note_of(new_job_id) if callable(note_of) and new_job_id else ""
+    if note:
+        line += f" ({note})"
+    elif previous_model and previous_model != model:
         line += f" (its previous run was on {previous_model})"
     return line
+
+
+def _previous_model(comms: Any, job_id: str) -> str:
+    """The model a child last ran on, read before its resume replaces the row.
+
+    ``comms.last_model_label`` also covers a nested child after a restart,
+    whose job row was not rehydrated (QA round 1, Q2). The row read is the
+    degrade for a reduced registry that lacks the method.
+    """
+    reader = getattr(comms, "last_model_label", None)
+    if callable(reader):
+        try:
+            return str(reader(job_id) or "")
+        except Exception:  # noqa: BLE001 — a label is decoration, never a resume
+            return ""
+    return _row_model(comms, job_id)[0]
 
 
 @_guard("task")
@@ -20321,7 +20350,7 @@ async def _execute_hub_parent(
         # attaches, the old record folds into it and the old id aliases to the
         # new attempt, so reading it afterwards would compare the new row with
         # itself.
-        previous_models = {job_id: _row_model(comms, job_id)[0] for job_id in ids}
+        previous_models = {job_id: _previous_model(comms, job_id) for job_id in ids}
         resumed: list[tuple[str, str | None, str | None]] = [
             # (resumed-from id, new job id, error)
             (job_id, *comms.resume(job_id, message))

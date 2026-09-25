@@ -15272,7 +15272,7 @@ class Session:
         # ``hub op='resume'`` to the model the child was born on. That defeated
         # a parent ``/model`` switch and a re-configured tier alike: after the
         # operator moved a session to a cheaper model, a paused child resumed
-        # on the expensive one and ran 26 calls there. The first resumed turn
+        # on the expensive one. The first resumed turn
         # still journals a fresh row (``_selection_needs_initial_write`` stays
         # True), so the transcript records the model it actually ran on.
         if self._model_source in ("flag", "child"):
