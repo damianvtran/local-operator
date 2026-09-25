@@ -46,6 +46,7 @@ import ast
 import asyncio
 import contextlib
 import gc
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -209,9 +210,25 @@ class FakeBridge:
         self.release_park: asyncio.Event | None = None
         self.refreshes = 0
         self.published: list[tuple[str, dict[str, Any]]] = []
+        #: ``resume.SessionRow``-shaped when ANOTHER device holds this
+        #: conversation, ``None`` for one on this disk — the real bridge's own
+        #: one-fact test for "is this a peer's session" (``remote_row``), which
+        #: the image mirror reads before it writes anything.
+        self.remote_row: Any = None
+        #: The images the door asked this bridge to stage, per call. RECORDED
+        #: rather than ignored: a double that swallowed the call would hide the
+        #: drop the mirror exists to prevent, and the assertion a cell needs is
+        #: precisely that the route asked.
+        self.staged: list[list[dict[str, str]]] = []
 
     async def refresh_watch(self) -> None:
         self.refreshes += 1
+
+    async def stage_peer_images(self, images: list[dict[str, str]]) -> None:
+        """The new door call, mirrored: nothing for a local conversation."""
+        if self.remote_row is None or not images:
+            return
+        self.staged.append([dict(image) for image in images])
 
     async def acquire(self) -> FakeRemote:
         self.users += 1
@@ -536,7 +553,12 @@ async def test_a_detached_failure_is_published_where_the_ui_can_see_it(desktop) 
         # vetted shapes are (``_admission_failure_detail``).
         "detail": "failed; the owner did not admit the request",
     }
-    # And the hold is given back exactly once, on the same path.
+    # And the hold is given back exactly once, on the same path. WAITED FOR, not
+    # read the instant the frame appears: the detached continuation publishes the
+    # failure and THEN releases, so `published` is not an event that implies the
+    # release landed — the same "wait on the event, never on the clock" rule the
+    # helper above states, on the second event this cell asserts.
+    await until(lambda: bridge.releases == 1)
     assert bridge.users == 0 and bridge.releases == 1
 
 
@@ -1126,3 +1148,42 @@ def test_the_goal_flags_do_not_join_the_action_receipt_vocabulary() -> None:
     answer, and admitting them would submit the empty string as a user turn.
     """
     assert SLASH_ACTION_RECEIPTS == ("team_attached", "agent_attached", "goal_set")
+
+
+# ---------------------------------------------------------------------------
+# the image mirror: the door stages a peer-bound command's attachments
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_peer_bound_command_asks_the_bridge_to_stage_its_images(desktop) -> None:
+    """The second admission door stages too, and only for a PEER's conversation.
+
+    ``admit_receipt_request`` is the path every action-carrying receipt takes
+    (``/goal``, ``/agent``, ``/team``, ``/loop``) and it can carry the composer's
+    images. Those images go to the OWNER, whose runtime externalises them into
+    ITS store — so unless this device mirrors them, the row the owner journals
+    references bytes this device cannot read, which is the 409 the transport cell
+    in ``tests/unit/network/test_remote_viewer.py`` reproduces over real relays.
+
+    BOTH DIRECTIONS ARE ASSERTED, because the gate is the fix's other half: a
+    LOCAL conversation must stage nothing (its own runtime writes that very
+    store), and a call that happened for one would be a second write of the same
+    bytes.
+    """
+    client, _remote, bridge = desktop
+    images = [{"data_b64": "aGk=", "mime_type": "image/png"}]
+
+    local = await _goal(client, "Preserve one identity", images=images)
+    assert local.status_code == 200, local.text
+    assert bridge.staged == [], "a LOCAL conversation staged an image it already owns"
+
+    bridge.remote_row = object()
+    # A FRESH request id: the receipt store is keyed on it and a replay under the
+    # same id with different input is the 409 this route reserves for that, which
+    # would answer about the replayed id rather than about the staging.
+    peer = await _goal(
+        client, "Preserve the other identity", request_id=str(uuid.uuid4()), images=images
+    )
+    assert peer.status_code == 200, peer.text
+    assert bridge.staged == [images], bridge.staged
