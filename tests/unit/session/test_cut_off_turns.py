@@ -292,7 +292,7 @@ async def test_a_restored_cut_off_reaches_the_next_turns_history(tmp_path: Path)
     rendered = _rendered(session._context.messages)
     assert "[session incident]" in rendered
     assert "cut-off" in rendered
-    assert "do not assume the request completed" in rendered
+    assert "do not assume it completed" in rendered
 
     # And only once: a second boot must not narrate the same run again.
     second = _make_session(directory)

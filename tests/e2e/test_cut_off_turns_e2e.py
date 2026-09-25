@@ -475,7 +475,7 @@ async def test_the_next_turn_after_a_restore_carries_the_incident(
                 )
                 assert "[session incident]" in sent
                 assert "cut-off" in sent
-                assert "do not assume the request completed" in sent
+                assert "do not assume it completed" in sent
             finally:
                 await session.dispose()
     finally:

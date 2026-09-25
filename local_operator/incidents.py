@@ -337,10 +337,18 @@ _HINTS: dict[str, str] = {
     # half-happened, so the model must re-establish state before redoing work.
     # The sentence is deliberately general because the CAUSE varies (retire,
     # signal, owner death); the cause itself rides ``Incident.raw``.
+    #
+    # AND SO IS WHOSE RUN IT WAS (UX round 1, U5). "do not assume the request
+    # completed" named a request the reader does not always have: the run this
+    # row describes may be a DELIVERY turn, a wake run or a resume catch-up —
+    # harness-initiated, opened with no human waiting on a receipt — and in that
+    # case the operator's own request HAD completed, which is precisely the
+    # falsehood that cost a turn re-verifying finished work in the report this
+    # change answers. "it" is the run the row is about, which is true of both.
     "cut-off": "The runtime was cut off before this turn produced a result. The transcript "
     "holds whatever was written before it stopped and nothing after. Check the "
     "state of anything it was mid-way through before repeating the work; do not "
-    "assume the request completed.",
+    "assume it completed.",
 }
 
 #: Why a turn was cut off. Harness-authored, so unlike :data:`_RULES` these are
