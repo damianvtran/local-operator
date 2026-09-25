@@ -2031,7 +2031,7 @@ def catalogue_page(
     # the emptiness check is here so a direct caller that ignored that
     # precondition gets no cursor rather than an ``IndexError``.
     next_cursor = encode_cursor(scope, entries[-1].rank) if entries and truncated else None
-    if pinned_off_page and scope is None and position is None:
+    if pinned_off_page and scope is None and (position is None or cursor_missing):
         # FIRST PAGE OF THE HEAD ONLY, and the position clause is the half QA's
         # walk found missing: the extras are appended from ``ranked[limit:]``,
         # and a later page's ``ranked`` is already filtered past its cursor -- so
@@ -2041,10 +2041,17 @@ def catalogue_page(
         # pinned set rides the page the client paints first, and each later page
         # is only the scope's continuation.
         #
-        # GATED ON THE USABLE POSITION rather than on the query string, so the
-        # answer to an unusable or foreign cursor -- which IS this scope's first
-        # page, and says so with ``cursor_missing`` -- carries them exactly as a
-        # cursorless first page does.
+        # GATED ON ``cursor_missing``, which is exactly the sentence "this answer
+        # IS the scope's first page" -- and that predicate has TWO halves: no
+        # usable position at all, and a position that decoded but is not usable
+        # HERE (unreadable, minted for another scope, or minted for the other
+        # request shape). ``position is None`` alone covers only the first half:
+        # a FOREIGN token decodes, so the resume filter is skipped and the page
+        # really is the first page, while the extras were omitted from it -- and
+        # because that same answer is what settles the client's pin facts, the
+        # Pinned section could lose the rows this list exists to keep. Reading
+        # the flag rather than re-deriving the disjunction is also why the two
+        # can never drift apart again.
         #
         # HEAD SCOPE ONLY. A scoped answer cannot speak for the pinned set -- the
         # client gates its pin facts on the head answer for exactly this reason --
