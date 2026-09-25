@@ -575,6 +575,88 @@ describe("a pin press reorders nothing until the daemon confirms (Q13/Q14/Q15/D1
 		expect(refused.star).toBe(false);
 		expect(rowOrder(list)).toEqual(before);
 	}, SLOW);
+
+	it("re-opens a row whose request is still in flight as a dead, explained action (round 12, MAJOR 1)", async () => {
+		/* THE ACCEPTANCE SEQUENCE: press a row, dismiss the sheet, re-open THE SAME
+		   row while its POST is still outstanding. The pre-fix gate was one
+		   screen-wide slot holding "the row last pressed", which the dismissal had
+		   already cleared, so the re-opened sheet was LIVE — and its verb and its
+		   intent came from the ★, the reader's own unanswered mark, so it offered a
+		   live "Unpin from the top" and the press sent `false` for a row the reader
+		   had just asked to pin. */
+		await realStoreHarness();
+		await pushFrame(rowsOf(4));
+
+		/* The POST is held open, so the sheet is re-opened INSIDE the window this
+		   defect lives in: a request the daemon has not answered for. */
+		let answer: (value: { ok: boolean; pinned: boolean }) => void = () => {};
+		setSessionPin.mockImplementationOnce(
+			() =>
+				new Promise<{ ok: boolean; pinned: boolean }>((resolve) => {
+					answer = resolve;
+				}),
+		);
+
+		longPress(cardByName("Row 1"));
+		fireEvent.click(await screen.findByRole("button", { name: "Pin to the top" }));
+		expect(starOn("Row 1")).toBe(true);
+		await waitFor(() => expect(setSessionPin).toHaveBeenCalledWith("r1", true));
+
+		fireEvent.click(screen.getByRole("button", { name: "close sheet" }));
+		expect(screen.queryByRole("dialog")).toBeNull();
+		longPress(cardByName("Row 1"));
+
+		/* The ★ is still up — the reader's own mark — and the sheet must not read
+		   it as this row's state: nothing has been answered, so the verb claims no
+		   target state, and the action is dead. */
+		const action = (await screen.findByRole("button", {
+			name: "Saving…",
+		})) as HTMLButtonElement;
+		expect(action.disabled).toBe(true);
+		expect(action.getAttribute("aria-busy")).toBe("true");
+		/* The ★ stays exactly where it was: the reader's own mark is not retracted.
+		   It simply stops deciding what the sheet says or what a press sends. */
+		expect(starOn("Row 1")).toBe(true);
+
+		/* NOT SILENTLY DEAD: the sheet's own live region names the wait. */
+		await waitFor(() =>
+			expect(screen.getByRole("alert").textContent).toContain("Saving"),
+		);
+
+		/* And a press here sends NOTHING — least of all the opposite intent. */
+		fireEvent.click(action);
+		expect(setSessionPin.mock.calls).toEqual([["r1", true]]);
+
+		/* THE SECOND FORM, AND THE ONE THAT COULD SEND THE OPPOSITE: a press on a
+		   DIFFERENT row. The pre-fix gate was one screen-wide slot holding "the row
+		   last pressed", so Row 2's press evicted Row 1's — Row 1's sheet came back
+		   LIVE, read its ★ as this row's state, and offered "Unpin from the top",
+		   whose press sent `false` for the request still on its way. */
+		fireEvent.click(screen.getByRole("button", { name: "close sheet" }));
+		longPress(cardByName("Row 2"));
+		fireEvent.click(await screen.findByRole("button", { name: "Pin to the top" }));
+		await waitFor(() => expect(setSessionPin).toHaveBeenCalledWith("r2", true));
+		await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+		longPress(cardByName("Row 1"));
+		const reopened = (await screen.findByRole("button", {
+			name: "Saving…",
+		})) as HTMLButtonElement;
+		expect(reopened.disabled).toBe(true);
+		fireEvent.click(reopened);
+
+		/* Two presses, two intents, not one inversion of them. */
+		expect(setSessionPin.mock.calls).toEqual([
+			["r1", true],
+			["r2", true],
+		]);
+
+		/* The daemon's answer, which closes the sheet and the sequence out. */
+		await act(async () => {
+			answer({ ok: true, pinned: true });
+		});
+		await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+	}, SLOW);
 });
 
 describe("a refused pin says why, in the sheet that asked (design round 11, D25)", () => {
@@ -602,6 +684,11 @@ describe("a refused pin says why, in the sheet that asked (design round 11, D25)
 		const reason = await screen.findByText(
 			"Could not save the pin: no saved messages yet — pin it after you send one",
 		);
+		/* Focus is back ON the action once the wait ends. In a browser `disabled`
+		   has already blurred it (the reader is dropped out of the sheet's column
+		   mid-wait, and the Sheet's trap only holds its first and last element), so
+		   the control the reader pressed is where they come back to. */
+		await waitFor(() => expect(document.activeElement).toBe(action));
 		/* The sheet is STILL THERE, with the action still on it. */
 		const sheet = screen.getByRole("dialog");
 		expect(screen.getByRole("button", { name: "Pin to the top" })).toBeTruthy();
@@ -625,10 +712,12 @@ describe("a refused pin says why, in the sheet that asked (design round 11, D25)
 		longPress(cardByName("Alpha"));
 
 		const action = await screen.findByRole("button", { name: "Pin to the top" });
-		/* A failure carrying no message at all — the shape where there is nothing to
-		   pass through. What the reader is owed is a line that does not pretend
-		   otherwise, not silence. */
-		setSessionPin.mockRejectedValueOnce(new Error(""));
+		/* A 409 whose message is only the STATUS — the shape `api.request` produces
+		   when a failing response's body is not JSON, and the real spelling of "the
+		   daemon gave no reason". `HttpError` is the class the route actually
+		   throws, so this exercises the branch the fallback exists for rather than a
+		   lookalike `Error` the transport cannot produce. */
+		setSessionPin.mockRejectedValueOnce(new HttpError(409, "409"));
 		fireEvent.click(action);
 
 		expect(
