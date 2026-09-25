@@ -3135,9 +3135,9 @@ class PeerAttachmentUnavailable(Exception):
 def stage_images_in_store(root: Path | None, images: list[dict[str, str]]) -> None:
     """Mirror wire images into ``root``'s content-addressed attachment store.
 
-    THE TWO READERS THIS IS FOR are :meth:`DesktopSessionBridge.attachment` and
-    its per-child twin, and neither is a decoration: they are how a transcript
-    row that carries ``{"attachment": <digest>}`` becomes pixels on this device.
+    THE READERS THIS IS FOR are ``DesktopSessions.attachment`` and its per-child
+    twin, and neither is a decoration: they are how a transcript row that carries
+    ``{"attachment": <digest>}`` becomes pixels on this device.
     A row written on a PEER carries a digest whose bytes live in the peer's store
     (its runtime externalised them into its own config dir — see
     ``attachments.store_for_transcript_dir``), so a prompt this device SENT is a
