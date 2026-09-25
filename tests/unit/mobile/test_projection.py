@@ -3542,9 +3542,9 @@ def test_a_held_child_report_and_a_delivered_one_do_not_read_alike_on_the_phone(
         held, delivered = entries
 
         assert held.kind == "notice" and delivered.kind == "notice"
-        assert held.details.get("severity") == "warning", (
-            f"the held row takes the tier the shared decision gives it (len={length})"
-        )
+        assert (
+            held.details.get("severity") == "warning"
+        ), f"the held row takes the tier the shared decision gives it (len={length})"
         # THE MARKER SURVIVES AT EVERY LENGTH — the finding, stated as an assertion
         # rather than as a threshold table.
         assert marker in held.text, (
@@ -3552,7 +3552,7 @@ def test_a_held_child_report_and_a_delivered_one_do_not_read_alike_on_the_phone(
             f"{held.text[-120:]!r}"
         )
         # ...and therefore the two rows are never byte-identical.
-        assert held.text != delivered.text, (
-            f"a held row must never fold identical to a delivered one (len={length})"
-        )
+        assert (
+            held.text != delivered.text
+        ), f"a held row must never fold identical to a delivered one (len={length})"
         assert marker not in delivered.text

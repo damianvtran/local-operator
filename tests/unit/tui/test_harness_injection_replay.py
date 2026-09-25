@@ -298,9 +298,9 @@ async def test_a_held_child_report_replays_as_a_warning_and_a_delivered_one_does
     # read — the first wording said "no turn has read it yet", which the durable
     # row can never retract and which U7 measured still painting after the
     # successor's turn had answered both reports.
-    assert "[session warning] held when it arrived" in held._text, (
-        "the head names the tier the row is painted in (design round 3, D14)"
-    )
+    assert (
+        "[session warning] held when it arrived" in held._text
+    ), "the head names the tier the row is painted in (design round 3, D14)"
     assert "no turn ran for it at that point" in held._text
     assert "has read it yet" not in held._text
     # The delivered row's own arrival is the answer it bought, which is not in
