@@ -37731,10 +37731,14 @@ class OperatorApp(App[None]):
         """
         from local_operator.analytics.store import AnalyticsStore
 
+        from local_operator.tui.widgets.analytics_panel import MODEL_RATES_LIMIT
+
         def _read() -> list[Any]:
             store = AnalyticsStore()
             try:
-                return store.model_rates()
+                # The SAME bound the section discloses when it hits it, so the
+                # notice cannot drift from the read that produced it.
+                return store.model_rates(limit=MODEL_RATES_LIMIT)
             finally:
                 store.close()
 
@@ -37745,11 +37749,24 @@ class OperatorApp(App[None]):
             from local_operator.tui.widgets.analytics_panel import MODEL_RATES_FAILED
 
             rows = MODEL_RATES_FAILED
-        # ``is_mounted`` because the user can dismiss the screen while a
-        # seconds-long read is in flight, and a detached screen has nothing to
-        # repaint.
-        if getattr(screen, "is_mounted", False):
-            screen.set_model_rates(rows)
+        # NO MOUNT GUARD, and that is the fix rather than an omission (design
+        # round 1 D1 and review round 2's blocker, found independently in the
+        # real app by both). ``push_screen`` is not awaited — deliberately, since
+        # awaiting a ModalScreen waits for the user to CLOSE it — so the pump may
+        # not have mounted the screen yet when this write lands. Gating on
+        # ``is_mounted`` therefore DISCARDED the answer whenever the read beat the
+        # mount: a small or warm ledger renders "reading the ledger…" forever,
+        # with nothing left to retry. Measured by both reviewers at 3/3 and in
+        # three arms (as shipped the rows are dropped; with the guard removed they
+        # land; the guard is causal).
+        #
+        # Writing the state unconditionally is correct in both directions: before
+        # the mount it is simply the value the FIRST paint reads, and after a
+        # dismissal it is a write to a detached object that repaints nothing
+        # (``set_model_rates`` already wraps its repaint). The file documents this
+        # same trap twice already — ``is_mounted`` is not a liveness test for a
+        # screen that is still being pushed.
+        screen.set_model_rates(rows)
 
     def _cmd_session(self, arg: str, notice: NoticeFn) -> None:
         """Read only this session's ledger, or copy its ID; never treat text as a prompt."""
