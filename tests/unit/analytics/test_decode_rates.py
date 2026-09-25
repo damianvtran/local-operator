@@ -223,8 +223,14 @@ def test_session_report_by_model_inherits_the_measures(tmp_path) -> None:
     store.record_batch(
         [
             _snap(decode_us=2_000_000, decode_tokens=400, decode_calls=1, ts_ms=now),
-            _snap(provider="openai", model_id="gpt", decode_us=1_000_000, decode_tokens=50,
-                  decode_calls=1, ts_ms=now + 1),
+            _snap(
+                provider="openai",
+                model_id="gpt",
+                decode_us=1_000_000,
+                decode_tokens=50,
+                decode_calls=1,
+                ts_ms=now + 1,
+            ),
         ]
     )
     report = store.session_report("s1")
@@ -253,9 +259,9 @@ def test_a_pre_column_rollup_gains_the_measures_on_open(tmp_path) -> None:
     # A fresh store migrates on connect, exactly as the recorder's writer does.
     store = AnalyticsStore(path)
     store._connect()
-    columns = {row[1] for row in sqlite3.connect(str(path)).execute(
-        "PRAGMA table_info(session_daily)"
-    )}
+    columns = {
+        row[1] for row in sqlite3.connect(str(path)).execute("PRAGMA table_info(session_daily)")
+    }
     assert {"decode_us", "decode_tokens", "decode_calls"} <= columns
     # And the guard accepts the shape it just produced.
     assert store._has_session_daily is True
@@ -333,13 +339,20 @@ def test_model_rates_groups_by_model_and_keeps_the_two_rates_apart(tmp_path) -> 
     store.record_batch(
         [
             # A measured decode window AND a wall duration.
-            _snap(output_tokens=100, decode_us=1_000_000, decode_tokens=100, decode_calls=1,
-                  duration_ms=2500.0, ts_ms=now),
+            _snap(
+                output_tokens=100,
+                decode_us=1_000_000,
+                decode_tokens=100,
+                decode_calls=1,
+                duration_ms=2500.0,
+                ts_ms=now,
+            ),
             # Output tokens, no window, but a real duration: appears in ``calls``
             # and in the wall rate only.
             _snap(output_tokens=300, duration_ms=3000.0, ts_ms=now + 1),
-            _snap(provider="openai", model_id="gpt", output_tokens=50, duration_ms=0.0,
-                  ts_ms=now + 2),
+            _snap(
+                provider="openai", model_id="gpt", output_tokens=50, duration_ms=0.0, ts_ms=now + 2
+            ),
         ]
     )
     rows = {f"{r.provider}/{r.model_id}": r for r in store.model_rates()}
@@ -408,8 +421,7 @@ def test_model_rates_on_a_pre_column_ledger_answers_unknown_rather_than_failing(
     """
     path = tmp_path / "analytics.db"
     conn = sqlite3.connect(str(path))
-    conn.executescript(
-        """
+    conn.executescript("""
         CREATE TABLE calls (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           ts_ms INTEGER NOT NULL,
@@ -424,8 +436,7 @@ def test_model_rates_on_a_pre_column_ledger_answers_unknown_rather_than_failing(
           reasoning_tokens INTEGER NOT NULL DEFAULT 0,
           context_tokens INTEGER NOT NULL DEFAULT 0
         );
-        """
-    )
+        """)
     conn.execute(
         "INSERT INTO calls (ts_ms, session_id, provider, model_id, output_tokens) "
         "VALUES (?, 's1', 'anthropic', 'claude', 700)",
