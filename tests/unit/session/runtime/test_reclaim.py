@@ -1334,34 +1334,46 @@ def test_the_spelling_is_the_one_this_platform_should_use(
     reason="procps and /proc are Linux; there is nothing for this cell to measure here",
 )
 def test_on_linux_proc_holds_the_environment_and_ps_rejects_the_bsd_flag(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    env_child: _EnvChild, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """THE TWO FACTS, measured on the platform they are about when CI runs them.
+    """THE TWO FACTS, measured on the platform they are about — CI here, not macOS.
 
-    (1) ``/proc/<pid>/environ`` is where this platform's environment is, which is
-    what the fix reads. (2) ``ps -Eww`` — what the module ran here before it — is
-    REFUSED by procps, non-zero and with a complaint on stderr; the exit-code
-    assertion is also the alarm for the day procps grows ``-E``, at which point the
-    branch can be simplified rather than kept "just in case".
+    (1) ``/proc/<pid>/environ`` is where this platform's environment is, and it is
+    what the fix reads. THE SUBJECT IS A REAL CHILD, launched with the variable, and
+    never this process: the file is the snapshot taken at EXEC — the same rule
+    ``ps -E`` has, and the one ``tools/shell_env`` states — so a variable a test sets
+    on ITSELF is in ``os.environ`` and in neither source. CI rejected the earlier
+    version of this cell for asserting exactly that, which is the trap this comment
+    exists to keep out.
+
+    (2) ``ps -Eww`` — what the module built here before the fix — is REFUSED by
+    procps: non-zero, with the complaint on stderr, and nothing on stdout that could
+    parse into a row. The exit-code assertion is also the alarm for the day procps
+    grows ``-E``, at which point this branch can be simplified rather than kept "just
+    in case".
     """
-    monkeypatch.setenv(_ENV_PROBE_NAME, _ENV_PROBE_VALUE)
-    own = reclaim.proc_environ_text(os.getpid())
+    # (1) the kernel's own snapshot, for a process that is not this one.
+    own = reclaim.proc_environ_text(env_child.pid)
     assert f"{_ENV_PROBE_NAME}={_ENV_PROBE_VALUE}" in own
-    assert f"HOME={os.environ['HOME']}" in own
+    assert config_root_of(own) == str(env_child.root)
 
-    rejected = ["ps", "-Eww", "-p", str(os.getpid()), "-o", "command="]
+    # (2) procps refuses the spelling this module used to build here.
+    rejected = ["ps", "-Eww", "-p", str(env_child.pid), "-o", "command="]
     done = subprocess.run(  # noqa: S603 — fixed argv, no shell
         rejected, capture_output=True, text=True, check=False
     )
     assert done.returncode != 0, "procps accepted -E; this branch can be simplified"
-    assert done.stdout == ""
     assert done.stderr.strip(), "a rejected option is refused WITH a message"
 
-    # ...and that refusal is what the module now reports instead of swallowing.
+    # ...and the module's own reader now REPORTS that, instead of swallowing it. What
+    # it got on the pipe is checked by its consequence — no census row — rather than
+    # by an exact stdout, so the cell does not pin where a usage message is printed.
+    caplog.clear()
     reclaim._REPORTED_FAILURES.clear()
     caplog.set_level(logging.WARNING, logger=reclaim.__name__)
-    assert reclaim._run_command(rejected, 5.0) == ""
+    refused = reclaim._run_command(rejected, 5.0)
     assert len(caplog.records) == 1, [record.getMessage() for record in caplog.records]
+    assert reclaim.parse_process_row(refused) is None
 
 
 def test_a_probe_that_cannot_run_reports_once_and_still_returns_empty(
