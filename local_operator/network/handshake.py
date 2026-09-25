@@ -973,16 +973,32 @@ def sas_matches(derived: str, typed: str) -> bool:
 
 
 def sas_mismatch_sentence() -> str:
-    """What B prints when the codes disagreed. Named once because it is a promise."""
+    """What B prints when the codes disagreed. Named once because it is a promise.
+
+    IT USED TO SAY "Do not retry: ask for a new invite." — which became a false promise
+    (and a wasted trip to the other device) once a mistype inside the forgiving budget
+    stopped spending the token (Q-XH-6). It now says what is true and what to do, and
+    it names the fallback for the case that genuinely is the last failure, so nobody is
+    sent round a loop by a sentence that only covers the common case.
+    """
     return (
-        "the codes did not match — the other device did not admit this machine. "
-        "Do not retry: ask for a new invite."
+        "the codes did not match — the other device did not admit this machine. Run the "
+        "join again with the same token and compare the codes on both screens before "
+        "typing: repeated failures are what spend an invite, so if it is refused as "
+        "already used, ask for a new one."
     )
 
 
-def pair_timeout_seconds(ttl_s: float) -> float:
-    """Whichever fires first: the invite's own life, or the confirm budget."""
-    return min(ttl_s, PAIR_CONFIRM_TIMEOUT_S)
+def pair_timeout_seconds(remaining_s: float) -> float:
+    """Whichever fires first: what is LEFT of the invite, or the confirm budget.
+
+    The parameter is ``remaining_s`` since agent review round 1 (NIT 1) because all
+    three call sites — the joiner's read, the parked question's window and the
+    listener's wait — pass ``invite.remaining_seconds`` / ``relay._remaining_of``. A
+    parameter named ``ttl_s`` invited a reader to assume the MINTED duration was still
+    being passed, which is exactly the confusion that produced the overstated prompt.
+    """
+    return min(remaining_s, PAIR_CONFIRM_TIMEOUT_S)
 
 
 #: How much of a refusing device's own sentence travels in ``net_pair_abort``. The
@@ -1035,12 +1051,24 @@ PAIRING_REMEDIES: dict[str, str] = {
         "that device has marked the network untrusted: an admin runs "
         "`lop network trust <network> --active` there"
     ),
+    # BOTH OF THESE ARE RETRYABLE, AND SAY SO. Neither a mismatch inside the forgiving
+    # budget nor a delay consumes the invite on the admitting device (Q-XH-6) — a
+    # person who read six digits off another screen slowly, or fat-fingered one, was
+    # told to "start over with a fresh invite", which is a fresh token minted on the
+    # device they are NOT sitting at. The sentence now says what is true: the SAME
+    # token works, and it is the repeated failures that spend it. The last clause
+    # covers the case where it genuinely was the final failure, so the advice cannot
+    # send someone round a loop.
     "sas_mismatch": (
-        "the two screens disagreed: start over with a fresh invite and compare the code "
-        "on both devices before typing"
+        "the two screens disagreed: run the join again with the SAME token and compare "
+        "the code on both devices before typing — an invite is spent only after repeated "
+        "failures, so if it is refused as already used, mint a fresh one"
     ),
     "declined_remote": "the other device declined: ask its operator",
-    "timeout": "run it again and answer the prompt on both devices",
+    "timeout": (
+        "nobody typed the code in time: run it again with the SAME token — a delay does "
+        "not spend an invite — and answer the prompt on both devices"
+    ),
 }
 
 
