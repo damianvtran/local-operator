@@ -189,13 +189,21 @@ async def start_exec_control(
     the earlier reading called "for no benefit" is what buys a control plane
     the turn cannot park.
 
-    ``yolo`` maps to the handle's ``auto_approve``, so ``exec --control --yolo``
-    keeps approving every tier inline instead of parking a card no supervisor
-    may be watching. Without it the gates park for an attached supervisor —
-    the behavioural difference this module's header calls out. The flag is
-    also the handle's ``approval_pinned``: an explicit ``--yolo`` on this run
-    outranks a later ``tool_approval_mode`` edit, while an un-flagged run
-    follows the file like every other runtime gate.
+    The handle's boot value comes from the operator's saved
+    ``tool_approval_mode``, exactly as ``spawn_owned_session`` seeds the same
+    value for phone-started sessions. ``--yolo`` maps to ``auto_approve`` and —
+    being an explicit flag on THIS run rather than a default in a file — pins
+    ``approval_pinned``, so a later ``tool_approval_mode`` edit cannot re-arm
+    the gate this run disabled. An un-flagged run seeds ``auto_approve`` from
+    the file AND keeps following it through ``attach_gate_config_watch`` — the
+    promise the header makes, now true FROM THE FIRST DECISION: the watcher
+    only delivers changes that happen after it subscribes
+    (``ConfigWatcher._prime`` deliberately does not notify subscribers), so
+    before this seed a ``tool_approval_mode: auto`` run parked its first
+    write/exec call until the pending-request timeout denied it — the
+    "User denied approval for 'bash'." incident on a run whose owner had set
+    full-auto. Without ``--yolo`` or ``auto`` the gates park for an attached
+    supervisor — the behavioural difference this module's header calls out.
 
     Imports are function-local by contract, not by habit: ``serving`` pulls the
     composition root and ``server`` pulls asyncio, and this package sits on the
@@ -203,6 +211,7 @@ async def start_exec_control(
     """
     import asyncio
 
+    from local_operator.config import ConfigManager
     from local_operator.harness.approval import (
         deliver_operator_cap_to,
         mint_operator_cap,
@@ -216,11 +225,39 @@ async def start_exec_control(
 
     loop = asyncio.get_running_loop()
     config_directory = config_dir()
+    # THE GATE'S BOOT VALUE, read at t0 rather than left to the watcher.
+    # ``attach_gate_config_watch`` (below, supervised runs) subscribes the
+    # handle to FUTURE ``tool_approval_mode`` changes only —
+    # ``ConfigWatcher._prime`` does not notify subscribers about the state it
+    # starts from — so seeding ``auto_approve`` from ``--yolo`` alone made a
+    # config-``auto`` run ASK from its first decision, and a headless run has
+    # nobody to ask: the call parked for PENDING_REQUEST_TIMEOUT_S and was
+    # denied, with the transcript blaming a user who was never consulted.
+    # Mirrors ``spawn_owned_session`` exactly (same key, same default, same
+    # degrade-to-ask): both entry points adopt the operator's saved mode at
+    # boot, and both keep FOLLOWING the file afterwards.
+    try:
+        approval_mode = (
+            str(
+                ConfigManager(config_dir=config_directory).get_config_value(
+                    "tool_approval_mode", "ask"
+                )
+            )
+            .strip()
+            .lower()
+        )
+    except Exception:  # noqa: BLE001 — a missing/odd config means "ask", never a crash
+        logger.debug("could not read tool_approval_mode; defaulting to ask", exc_info=True)
+        approval_mode = "ask"
     handle = ServingSessionHandle(
         session,
         loop,
         cwd=cwd,
-        auto_approve=yolo,
+        # ``--yolo`` wins both ways: it approves inline (``auto_approve``) and,
+        # being an explicit flag on this run rather than a file value, it pins
+        # (``approval_pinned``) — so a later config edit cannot re-arm a gate
+        # the flag disabled. Without it the boot value comes from the file.
+        auto_approve=yolo or approval_mode == "auto",
         approval_pinned=yolo,
         install_gates=supervised,
         # Declared so the §6 registration's store-existence check and the
