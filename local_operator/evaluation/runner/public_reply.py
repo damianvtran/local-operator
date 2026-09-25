@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from enum import Enum
 from typing import Any, Mapping, Sequence, get_args
 from urllib.parse import unquote
 
@@ -387,7 +388,26 @@ class DecisionParseError(ValueError):
     Declared here, beside the decoders that raise it, because this module owns
     what counts as a reply; ``provider_client`` re-exports the name for callers
     that treat it as a client error.
+
+    ``no_value_at_all`` is the ONE discriminator over this family, and it is a
+    typed FIELD rather than a sentence because a sentence cannot carry it:
+    :func:`_decode_leading_json` composes ``decision is not valid JSON:
+    {error}`` for BOTH classes of parse failure -- the reply that never started
+    a value, and the reply that started one and then broke, whose class
+    ``classify_rejection`` splits on the parser's reported POSITION embedded in
+    that same sentence -- so no reader of the text can tell them apart without
+    re-parsing an offset out of a message. Only the first means "this payload
+    states no decision"; :func:`_states_a_decision` reads the marker, and it is
+    why the marker exists. Its ONE setter is the leading-object tolerance, which
+    reads the classification off the typed reason it declined for
+    (:class:`_LeadingObjectDecline`) -- so a new decline reason cannot silently
+    land on the widening side. Every other raiser, here and in
+    ``provider_client``, leaves it ``False``, which is the conservative side.
     """
+
+    def __init__(self, *args: object, no_value_at_all: bool = False) -> None:
+        super().__init__(*args)
+        self.no_value_at_all = no_value_at_all
 
 
 #: Distinguishes "the model wrote no ``public_observations`` key" from "the
@@ -397,8 +417,17 @@ class DecisionParseError(ValueError):
 _ABSENT = object()
 
 
-def _decode_leading_json(payload: str) -> tuple[Any, str]:
+def _decode_leading_json(payload: str) -> tuple[Any, str, int]:
     """Decode the leading JSON value and return it with any trailing noise.
+
+    Returns the value, its trailing text, and how many UTF-8 BYTES of framing
+    preceded the value itself (0 for the ordinary reply, which starts with its
+    decision; the size of the framing the leading tolerance skipped otherwise).
+    The count is carried rather than recomputed by the caller so that a bundle's
+    record of "this reply was read through the tolerance" is this decoder's own
+    answer -- and it is counted in BYTES, which is what the sealed field states
+    and what a consumer slicing the reply's own prefix needs (the framing this
+    tolerance reads is not always ASCII: ``思考中：``, a fullwidth-bar DSML wrapper).
 
     ``json.loads`` demands that the WHOLE string be one value, so a model that
     emitted a complete, correct batch and then appended a stray token lost the
@@ -414,12 +443,19 @@ def _decode_leading_json(payload: str) -> tuple[Any, str]:
     * **Trailing noise** (``{...}原始内容``, ``{...} Hope that helps!``) is
       tolerated. The decision is already complete and unambiguous at the point
       the junk starts; nothing after it can change which actions were chosen.
-    * **Leading noise** (``Sure, here you go: {...}``) is NOT skipped. Hunting
-      forward for the first ``{`` means guessing where the value begins, and a
-      preamble that itself contains a brace makes that guess wrong silently --
-      the failure mode is executing a DIFFERENT batch than the model sent,
-      which is far worse than losing the turn. A leading-junk reply still gets
-      the ordinary parse error and a corrective re-prompt.
+    * **Leading noise** (``Sure, here you go: {...}``) is TOLERATED under the
+      rule :func:`_locate_leading_object` states and measures: the reply's FIRST
+      ``{`` must begin a complete, decodable, decision-shaped JSON value, and
+      NOTHING but the markers of a closing code fence may follow it. The hazard
+      the earlier build refused every leading byte for is real -- hunting
+      forward for the first bare ``{`` guesses where the value begins, and a
+      preamble that itself carries a brace makes that guess wrong SILENTLY,
+      executing a DIFFERENT batch than the model sent -- and the rule is
+      structural rather than a count of candidates because of the shape that
+      counting let through: when this turn's decision is unreadable, a SUPERSEDED
+      decision quoted in the framing region is the only readable one, and
+      executing it is worse than the rejection the tolerance removed. See that
+      function for the three conditions and the measurement behind them.
     * **A second batch for the SAME observation**, anywhere in the remainder,
       is genuinely ambiguous -- which one did the model mean? -- so it is NOT
       tolerated. Taking the first would execute a decision the model may have
@@ -445,6 +481,32 @@ def _decode_leading_json(payload: str) -> tuple[Any, str]:
     model and therefore competes; a batch naming any other observation is a
     quotation of an older turn and cannot.
 
+    Why the second rule was widened, measured rather than argued. Over the
+    arm-0625 OSWorld bundles (``~/worktrees/osworld/runs``, the current-code
+    runs of 2026-09-24; 157 sealed ``decision-rejected`` artifacts) 60 replies
+    were refused as ``leading-delimiter``. They split three ways: 43 published
+    NO reply text at all (the decision arrived as a tool call the harness did
+    not read as the reply channel -- a channel-recognition defect, not this
+    one, and nothing in this module can recover it), 14 published text carrying
+    no decision-shaped object at all (correctly refused), and 3 published a
+    complete, UNIQUE decision behind junk: a prose preamble, and DeepSeek's own
+    native ``<｜DSML｜parameter name="input" ...>`` tail welded to the envelope.
+    Each of those 3 cost a billed corrective round trip with the model's intent
+    already correct. In all 3 the framing holds no ``{`` at all and the envelope
+    ends the reply, which is what lets the rule stay structural instead of
+    counting candidates.
+
+    The reply that rule is written against, in full: ``My earlier reply was:\n
+    {a complete envelope}\nand it was refused because the coordinates were
+    wrong.`` A count of decision-shaped objects reads THAT reply as one decision
+    -- the quoted one -- and executes a superseded decision, which is strictly
+    worse than the rejection the widening removed: a wrong click in a benchmark
+    is unrecoverable, silently scored, and, because it is an acceptance, leaves
+    no rejection artifact to notice it in. A truncated live decision after a
+    quoted one is the same hole (the quote is the only COMPLETE object), and it
+    is the shape the ``incomplete-json`` class -- 12.7% of these refusals --
+    produces.
+
     Shared by BOTH decode paths since the contract collapsed to one shape: the
     envelope decoder used to call ``json.loads`` over the whole string and so
     refused exactly the reply this tolerance exists for, which is an internal
@@ -457,23 +519,68 @@ def _decode_leading_json(payload: str) -> tuple[Any, str]:
     # replaced. Doing it inside rather than relying on the caller matters
     # because this is a general entry point: a second caller that forgot to
     # strip would lose a turn to a leading newline, which is exactly the class
-    # of loss this function exists to prevent. Only leading WHITESPACE is
-    # skipped -- leading junk still fails at offset 0, by design.
+    # of loss this function exists to prevent. Whitespace at the head is not
+    # part of any decision, so skipping it changes nothing; every other byte
+    # before the value is the leading-noise tolerance's question, below.
     payload = payload.lstrip()
+    #: How many UTF-8 bytes of framing preceded the decision's own value, after
+    #: leading whitespace: 0 for a reply that began with its decision, and the
+    #: size of the framing the tolerance skipped otherwise. Carried out rather
+    #: than recomputed by the caller, so a bundle's record of "this reply was
+    #: read through the leading tolerance" is the decoder's own answer.
+    framing_bytes = 0
     try:
         decoded, end = decoder.raw_decode(payload)
     except (ValueError, RecursionError) as error:
-        # Includes the leading-junk case: raw_decode starts at offset 0, so a
-        # preamble fails here rather than being skipped past. Duplicate keys are
-        # refused by the hook, and their wording is kept as it has always been
-        # worded: ``classify_rejection`` keys the class on the phrase, and a
-        # re-spelled sentence would reclassify every sealed artifact that
-        # carries it.
+        # Duplicate keys are refused by the hook, and their wording is kept as
+        # it has always been worded: ``classify_rejection`` keys the class on
+        # the phrase, and a re-spelled sentence would reclassify every sealed
+        # artifact that carries it.
         if "duplicate JSON keys" in str(error):
             raise DecisionParseError(
                 "model reply must be one duplicate-free JSON object"
             ) from error
-        raise DecisionParseError(f"decision is not valid JSON: {error}") from error
+        # The leading-object tolerance, gated on the ONE failure shape it exists
+        # for: offset 0 could not start a value at all. The gate is the classifier's
+        # own discriminator (``_LEADING_DELIMITER_RULE`` in ``provider_client``
+        # reads the same phrase), so the replies this tolerance can recover are
+        # exactly the ones that would otherwise be bucketed ``leading-delimiter``
+        # -- and no reply that already STARTED a value is re-read here. That is
+        # what keeps an object that broke inside (``incomplete-json``) and a
+        # duplicate key at the head on the refusals they already had.
+        if isinstance(error, json.JSONDecodeError) and "line 1 column 1 (char 0)" in str(error):
+            located = _locate_leading_object(payload, decoder)
+            if isinstance(located, _LeadingObjectDecline):
+                # Nothing could start a value at offset 0, and the leading-object
+                # tolerance could not read one behind the framing either. That
+                # tolerance declines for FOUR reasons and only ONE of them means
+                # the payload states no decision, so the marker
+                # ``_states_a_decision`` gates the reply-channel widening on is
+                # read off the DECLINE's own classification rather than
+                # re-derived here from the parser's reported OFFSET -- an offset
+                # is a property of the reply's FRAMING, not of the decision, and
+                # three revisions of this gate each keyed a downstream heuristic
+                # on it, one framing boundary at a time. A decline that is not
+                # ``NOTHING_TO_READ`` is a decision the model STARTED writing
+                # (round 2's class) or wrote in full and then discarded (round
+                # 3's), and the conservative direction for both is the
+                # pre-widening one: refuse on the prose and re-prompt, rather
+                # than execute the call's envelope and never tell the model its
+                # object was cut off or passed over.
+                raise DecisionParseError(
+                    f"decision is not valid JSON: {error}",
+                    no_value_at_all=located.states_no_decision,
+                ) from error
+            decoded, end, value_start = located
+            # Bytes, not code points. The located start is a character index
+            # because that is what ``raw_decode`` takes, so the conversion
+            # happens HERE, at the boundary where a character offset becomes the
+            # sealed count -- a code-point index under-reports every non-ASCII
+            # framing (``思考中：`` counted 5 where the reply carries 13 bytes), and
+            # the field and its consumers are stated in bytes.
+            framing_bytes = len(payload[:value_start].encode("utf-8"))
+        else:
+            raise DecisionParseError(f"decision is not valid JSON: {error}") from error
     trailing = payload[end:].strip()
     if trailing:
         observation_ids, uses_string_actions = _batch_observation_ids(decoded)
@@ -483,7 +590,275 @@ def _decode_leading_json(payload: str) -> tuple[Any, str]:
                 "decision carries a second action batch for the same observation; "
                 "send exactly one action batch"
             )
-    return decoded, trailing
+    return decoded, trailing, framing_bytes
+
+
+def _states_a_decision(payload: str) -> bool:
+    """Whether the payload states a decision, readable or refused.
+
+    The question the reply-channel widening is gated on. Reading an
+    arbitrarily-named tool call as the channel is a RECOVERY -- it exists for a
+    turn whose decision arrived on the call channel and would otherwise be lost
+    (measured: 178 of the arm's 204 ``leading-delimiter`` refusal artifacts,
+    recounted 2026-09-25 over ``~/worktrees/osworld/runs``, published no reply
+    text at all) -- and it must therefore never step over a decision the
+    model wrote in PROSE: a turn that answered on both channels would have its
+    prose discarded and the call's bytes judged in its place, turning an accepted
+    turn into a refusal.
+
+    Deliberately loose, and deliberately asked of the decoder rather than
+    re-derived here: any payload ``_decode_leading_json`` reads a value out of,
+    or refuses for a defect INSIDE a value it read, states one. Only "nothing
+    could be read at all" -- the failure the decoder marks with
+    :attr:`DecisionParseError.no_value_at_all`, which is also what an empty or
+    non-JSON prose reply produces -- answers ``False``.
+
+    That marker is set from the leading tolerance's own typed decline reason
+    (:class:`_LeadingObjectDecline`) and from nothing else, so the four ways
+    that tolerance can decline are classified WHERE THE REASON IS CHOSEN rather
+    than reconstructed here from a parser offset. Only one of them -- no ``{``
+    in the payload at all -- means the model stated no decision; a truncation, a
+    non-decision object, and a decision the reply does not END at all each mean
+    it started or finished one, which is exactly the case this gate must not
+    step over.
+
+    The answer comes from that TYPED MARKER and never from the message text,
+    because the text cannot carry it: the decoder composes one sentence for both
+    parse-failure classes, so a substring test over it puts a TRUNCATED decision
+    -- text that started a value and was cut off, which is a decision the model
+    was writing -- on the widening side, where the pre-widening client refused
+    the turn and re-prompted (26 prose-bearing refusal artifacts in the arm's
+    corpus on 2026-09-25 are that shape, 16 of them beside a call, so the
+    widening fired on them and the model was never told its object was cut off).
+
+    The default is the conservative direction for the caller: a payload this
+    cannot classify as decisionless WITHHOLDS the widening, so the prose is
+    judged exactly as it was before the widening existed. A refusal reason added
+    to the decoder later is on that default side too, because a reason that does
+    not set the marker reads as a decision present -- and a decline reason added
+    to the tolerance later is on it as well, because a new
+    :class:`_LeadingObjectDecline` member states ``states_no_decision`` False
+    until that classification is deliberately declared.
+    """
+
+    if not payload.strip():
+        # The widening's own majority case -- 178 of the arm's 204
+        # ``leading-delimiter`` artifacts above published no reply text at all
+        # -- and an answer the marker below agrees with, so the exception is
+        # skipped rather than built and discarded on every prose-only turn.
+        return False
+    try:
+        _decode_leading_json(payload)
+    except DecisionParseError as error:
+        return not error.no_value_at_all
+    return True
+
+
+#: One line of a Markdown code fence: at least three backticks and, optionally,
+#: an info string (``json``, ``python``) -- and nothing else on the line. An
+#: anchor like ``\A``/``\Z`` rather than ``fullmatch`` with ``$`` so a trailing
+#: newline cannot count as marker-only slack for text on the same line.
+_FENCE_MARKER_LINE = re.compile(r"\A`{3,}[A-Za-z0-9_+.\-]*\Z")
+
+
+def _is_fence_marker_only(remainder: str) -> bool:
+    """Whether the text after a located decision is code-fence markers and whitespace.
+
+    The one exception to "nothing may follow the located object", and it is safe
+    for the reason the exception exists: a fence marker is not a value. It cannot
+    carry a decision, a competition, or the context a quoted decision arrives
+    with, so a remainder made only of marker lines leaves the located object the
+    reply's ONLY readable statement -- which is the property condition 3 is
+    there to guarantee. Refusing it bought nothing and cost the shape a model
+    that follows Markdown actually writes: the closed fence
+    (```` ```json\\n{decision}\\n``` ````) has been read by the offset-0 path since
+    before this tolerance existed, and was refused by the located path's first
+    form, while the unclosed fence -- the half-written spelling -- is what the
+    tests happened to pin.
+
+    Deliberately narrow: a header, prose, or anything beside the marker on its
+    own line is not a fence marker, and any brace anywhere in the remainder still
+    refuses the reply. Only backtick fences are recognised; a ``~~~`` fence has
+    never been observed in this arm's traffic, and widening on that guess is
+    exactly the kind of enumeration the rest of this rule avoids.
+    """
+
+    return all(
+        not stripped or _FENCE_MARKER_LINE.match(stripped)
+        for stripped in (line.strip() for line in remainder.splitlines())
+    )
+
+
+class _LeadingObjectDecline(Enum):
+    """Why the leading-object tolerance could not read the reply's decision.
+
+    :func:`_locate_leading_object` declines for FOUR distinct reasons, and a
+    single ``None`` cannot say which one fired -- which is how three successive
+    revisions of the reply-channel gate each ended up keying a downstream
+    heuristic on the parser's reported OFFSET, a property of the reply's
+    FRAMING rather than of the decision:
+
+    * a foreign-named call overriding a valid prose decision (round 1);
+    * an UNPREFACED truncated decision read as decisionless (round 2);
+    * the same truncation -- and a complete decision with trailing text --
+      arriving behind a preamble, a fence or native call syntax (round 3).
+
+    So the reason is typed HERE, where it is chosen, and the classification the
+    gate needs rides on the reason itself (:attr:`states_no_decision`) instead
+    of being reconstructed by its caller. Only ``NOTHING_TO_READ`` means "this
+    payload states no decision"; the other three each mean the model started or
+    finished one, where the conservative direction is the pre-widening
+    refusal-and-re-prompt.
+    """
+
+    #: No ``{`` in the payload at all: the model stated no decision to read.
+    NOTHING_TO_READ = "nothing-to-read"
+    #: The first ``{`` began a value that did not decode -- a decision the model
+    #: was WRITING (round 2's class, which framing hides from an offset test).
+    BEGINS_NOTHING = "begins-nothing"
+    #: The first ``{`` decoded but states no decision: an example, or an echo of
+    #: the harness's own feedback.
+    NOT_DECISION_SHAPED = "not-decision-shaped"
+    #: It decoded decision-shaped, but the reply does not END at it -- a decision
+    #: written in full and then discarded in favour of trailing text or another
+    #: object (round 3's class).
+    DOES_NOT_END_AT_IT = "does-not-end-at-it"
+
+    @property
+    def states_no_decision(self) -> bool:
+        """Whether this decline means the payload states no decision at all.
+
+        A property rather than a per-member flag so a reason added later
+        defaults to the conservative side without anyone having to remember it:
+        a new member reads as "a decision may be present" until this line is
+        deliberately widened, which is the direction
+        :func:`_states_a_decision` states it wants.
+        """
+
+        return self is _LeadingObjectDecline.NOTHING_TO_READ
+
+
+def _locate_leading_object(
+    payload: str, decoder: json.JSONDecoder
+) -> tuple[Any, int, int] | _LeadingObjectDecline:
+    """The reply's leading DECISION when framing precedes it, else the decline.
+
+    Returns the located ``(value, end, value_start)`` when the three conditions
+    below hold, and otherwise the :class:`_LeadingObjectDecline` naming WHICH one
+    declined -- a typed reason rather than ``None``, because the caller that
+    gates the reply-channel widening on "this payload states no decision" must
+    not have to reconstruct that distinction from an offset. Only
+    ``NOTHING_TO_READ`` states no decision; the other three state one that is
+    unreadable, not decision-shaped, or not the reply's last word.
+
+    The exposure this rule answers is CONDITIONAL, and that belongs here because
+    a bundle cannot show it: whether a misclassified reply changes a turn's
+    OUTCOME depends on the call's own ARGUMENTS, and a sealed artifact publishes
+    the call's name and shape rather than its bytes -- so a corpus can show that
+    the widening fired where base refused and re-prompted, but not what
+    executing that call would have done. The footprint is measured anyway, on
+    2026-09-25 over the arm's 204 ``leading-delimiter`` artifacts: 23 sit beside
+    a call, 14 of those contain a ``{``, and 10 of the 14 took the widening under
+    the offset-keyed marker -- mostly the FRAMED shape, which is the shape these
+    replies actually arrive in. Classifying here keeps the widening on 185 of
+    the 204 (the 10 lost are replies that DID start a decision, which is the
+    trade this rule makes deliberately).
+
+    The question the second rule of :func:`_decode_leading_json` is about: a
+    reply that put a preamble, a code fence or a native tool-call syntax wrapper
+    in front of an otherwise byte-perfect batch. The licence is the narrowest
+    one that reads those replies, and it is stated as three structural
+    conditions rather than as a count of candidates:
+
+    * **The reply's FIRST ``{`` must begin a complete, decodable JSON value.**
+      Not "the first decodable object anywhere": a brace that begins nothing
+      readable is an object that did not survive, and behind a preamble that is
+      what a truncated or half-written decision looks like.
+    * **That value must be decision-shaped** (:func:`_is_decision_shaped`). An
+      object that is not a decision is an EXAMPLE -- the model demonstrating the
+      shape it is about to use, or echoing the harness's own feedback -- and
+      reading it would execute a decision the model did not make.
+    * **Nothing may follow it but the markers of a closing code fence.** No
+      second brace, no prose, no header -- a remainder holding anything with a
+      value in it refuses the reply (see :func:`_is_fence_marker_only` for why a
+      bare marker is the one thing that cannot carry a competing decision).
+
+    Why the third condition is not "and no OTHER decision follows". Counting
+    decision-SHAPED objects reads a superseded decision as this turn's: when
+    this turn's decision is unreadable -- a truncation, which is 12.7% of the
+    rejections measured on this arm -- a quoted envelope from an earlier attempt
+    is then the only readable decision in the reply, and it is executed.
+    Executing a stale decision is strictly worse than the rejection the tolerance
+    removed: a wrong click in a benchmark is unrecoverable, silently scored, and,
+    because it is an ACCEPTANCE, leaves no rejection artifact behind to notice it
+    in. The quoted shape fails the third condition by construction, because a
+    quote arrives with its context around it.
+
+    Which is also why the located path is narrower than the offset-0 path it
+    feeds: a reply that BEGINS with its decision keeps the one-sided trailing
+    tolerance (``{...} Hope that helps!`` is still read -- the decision's
+    position is the model's own statement of what it is answering with), while a
+    located one must END at its decision. Everything before it is framing, about
+    which nothing can be assumed; everything after it is the context a quoted
+    decision is accompanied by, and this module cannot tell the two apart.
+
+    Deliberately NOT a validation: whether the located object is ADMISSIBLE --
+    its binding, its coordinates, its kind's fields -- stays the validator's
+    question, so a located-but-invalid batch is refused with the class its own
+    defect earns rather than disappearing into the leading one. The located
+    object is handed over untouched.
+
+    Cost: a constant number of operations -- one ``find``, one ``raw_decode``,
+    one test over the remainder (two when that remainder is not empty) -- so this
+    needs no attempt bound and states none. There is no scan whose exhaustion
+    could leave a candidate unexamined, which is a property the earlier
+    candidate-counting form had to earn with a bound and did not have.
+    """
+
+    start = payload.find("{")
+    if start < 0:
+        # The ONE decline that means the model stated no decision: there is no
+        # brace to read. Every return below this line is a decision ATTEMPT.
+        return _LeadingObjectDecline.NOTHING_TO_READ
+    try:
+        candidate, end = decoder.raw_decode(payload, start)
+    except (ValueError, RecursionError):
+        # RecursionError as well as ValueError (see ``_competing_batch_offset``),
+        # and a candidate whose own keys are duplicated, which the hook refuses:
+        # a reply carrying one is not read at all, the direction the
+        # duplicate-key rule already set.
+        return _LeadingObjectDecline.BEGINS_NOTHING
+    if not _is_decision_shaped(candidate):
+        return _LeadingObjectDecline.NOT_DECISION_SHAPED
+    if payload[end:].strip() and not _is_fence_marker_only(payload[end:]):
+        # A second brace -- a competing decision, an example, or an object that
+        # did not survive -- or the context a quoted decision arrives with.
+        # Either way the reply does not END at the decision it was read from.
+        return _LeadingObjectDecline.DOES_NOT_END_AT_IT
+    return candidate, end, start
+
+
+def _is_decision_shaped(value: Any) -> bool:
+    """Whether an object states a decision, judged by the normaliser's own rule.
+
+    Deliberately NOT a validation. Whether the actions inside are admissible, or
+    even well-typed, is the action protocol's question and stays the validator's;
+    a located object that fails it must be refused with THAT class rather than
+    disappearing into the leading one. All this asks is whether the normaliser
+    would read a decision out of the object at all, so the located candidate and
+    the accepted reply are judged by one rule instead of two.
+
+    Degrades rather than raising, for the reason ``_batch_observation_ids``
+    states: this runs over every brace in untrusted model text, so a wrapper
+    whose payload is not JSON must read as "no decision here", never as an
+    unexpected exception on the decode path.
+    """
+
+    try:
+        unwrapped = _unwrap_tool_call(value)
+    except DecisionParseError:
+        return False
+    return isinstance(unwrapped, Mapping) and _carries_decision(unwrapped)
 
 
 def _competing_batch_offset(
@@ -558,10 +933,11 @@ def _actions_from_json_string(value: Any) -> tuple[Any, bool]:
     of the model's OWN envelope -- the array followed by
     ``, "public_observations": "..."}`` -- because the model double-encoded the
     rest of the object it was writing. Reusing that decoder means the tolerance
-    keeps the one-sided rule a reply already gets: leading junk is still
-    refused, and a second batch for the same observation inside the string
-    still refuses the reply, so this can never execute a decision the model
-    superseded.
+    keeps the rule a reply already gets: the string's leading JSON value is read
+    (including past a preamble, under :func:`_locate_leading_object`'s
+    exactly-one-decision rule), and a second batch for the same observation
+    inside the string still refuses the reply, so this can never execute a
+    decision the model superseded.
 
     Returns ``(value, False)`` unless the leading JSON value is a NON-EMPTY
     ARRAY OF OBJECTS -- which is what an action array is, and the entire claim
@@ -595,7 +971,7 @@ def _actions_from_json_string(value: Any) -> tuple[Any, bool]:
     if not isinstance(value, str):
         return value, False
     try:
-        decoded, trailing = _decode_leading_json(value)
+        decoded, trailing, _framing = _decode_leading_json(value)
     except DecisionParseError:
         return value, False
     if not isinstance(decoded, list) or not decoded:
@@ -709,7 +1085,10 @@ def _unwrap_tool_call(value: Any) -> Any:
         key = candidates[0]
         inner = value[key]
         if isinstance(inner, str):
-            inner, _trailing = _decode_leading_json(inner)
+            # The framing offset is the INNER string's question and is not
+            # carried out of the normaliser: a wrapper's tolerance is not this
+            # reply's framing, and the record belongs to the reply that was read.
+            inner, _trailing, _framing = _decode_leading_json(inner)
         value = inner
     return value
 
@@ -780,13 +1159,17 @@ def _report_ignored_keys(
 
 def normalise_public_reply(
     value: Any, *, action_binding: str = LEGACY_ACTION_BINDING
-) -> tuple[list[Any], str | None]:
+) -> tuple[list[Any], str | None, int]:
     """The one accepted reply shape, however the reply was framed.
 
-    Returns the action array and the model's public note -- ``None`` for the
-    note when the reply carried no ``public_observations`` key at all, which is
-    what still separates a legacy actions-only batch (nothing to publish) from
-    an envelope that recorded an empty note.
+    Returns the action array, the model's public note -- ``None`` for the note
+    when the reply carried no ``public_observations`` key at all, which is what
+    still separates a legacy actions-only batch (nothing to publish) from an
+    envelope that recorded an empty note -- and how many action fields the
+    sibling-kind tolerance dropped (:func:`drop_sibling_action_fields`),
+    carried out of here because an accepted reply is the only place those
+    replies are still visible: the ones it recovers stop producing the rejection
+    artifacts that used to make the class countable.
 
     What is ACCEPTED here is deliberately framing-blind: a bare action array, a
     bare array under ``action_batch``, the full envelope, any of those inside
@@ -828,6 +1211,13 @@ def normalise_public_reply(
         if batch is not None:
             raise DecisionParseError(_BATCH_SHAPE_ACCEPTED)
         raise DecisionParseError("decision must carry a non-empty actions array")
+    # An action's OWN framing, and therefore this module's business by the same
+    # rule the envelope's is: which fields an action carries is declared by its
+    # ``kind``, so a field of a sibling kind states nothing the kind did not
+    # already state. Dropped and reported -- see
+    # :func:`drop_sibling_action_fields` for why dropping is the disposition this
+    # contract uses and what stays refused.
+    actions, tolerated_action_fields = drop_sibling_action_fields(actions)
     note = _public_note(framed, batch)
     _report_ignored_keys(framed, batch, action_binding=action_binding)
     if top_from_string or nested_from_string:
@@ -844,7 +1234,7 @@ def normalise_public_reply(
             "(%d action(s))",
             len(actions),
         )
-    return actions, note
+    return actions, note, tolerated_action_fields
 
 
 def decode_public_reply(payload: str) -> dict[str, Any]:
@@ -860,8 +1250,8 @@ def decode_public_reply(payload: str) -> dict[str, Any]:
     is one decision.
     """
 
-    value, _trailing = _decode_leading_json(payload)
-    actions, note = normalise_public_reply(value)
+    value, _trailing, _framing = _decode_leading_json(payload)
+    actions, note, _dropped = normalise_public_reply(value)
     return {"actions": actions, "public_observations": note or ""}
 
 
@@ -1051,6 +1441,121 @@ def redact_public_reply(payload: str, redactions: RedactionSet) -> str:
 #: subset, so it advertises them all.
 _ALL_ACTION_MODELS = get_args(get_args(ComputerAction)[0])
 
+#: The fields each action KIND declares, keyed by its ``kind`` discriminator.
+#: Derived from the models rather than transcribed: a field added to a kind is
+#: known to :func:`drop_sibling_action_fields` on the same commit that adds it,
+#: where a hand-kept copy would drift, and the drift would be silent -- the
+#: tolerance would simply stop recognising the field it exists for.
+_ACTION_KIND_FIELDS: dict[str, frozenset[str]] = {
+    kind: frozenset(model.model_fields)
+    for model in _ALL_ACTION_MODELS
+    for kind in get_args(model.model_fields["kind"].annotation)
+}
+
+#: Every field name the action vocabulary declares, across all kinds. A name in
+#: here that the DECLARED kind does not take belongs to a SIBLING kind, and is
+#: the only extra key this module drops. A name absent from here is not part of
+#: the vocabulary at all and keeps the validator's ``extra_forbidden`` refusal:
+#: nothing can say what the model meant by it, so dropping it would guess.
+_ACTION_FIELD_NAMES: frozenset[str] = frozenset().union(*_ACTION_KIND_FIELDS.values())
+
+
+def drop_sibling_action_fields(actions: list[Any]) -> tuple[list[Any], int]:
+    """Drop fields that belong to a SIBLING action kind, and say so.
+
+    THE MEASURED DEFECT. A model that puts ``frame_id`` on a ``wait``, or
+    ``duration_ms`` on a ``click``, states a complete and unambiguous decision:
+    the ``kind`` tag is required and explicit, so the stray field cannot change
+    WHICH action the model chose, and the fields the chosen kind takes are all
+    still there to be validated. Refusing the whole batch for it cost a billed
+    corrective round trip with nothing wrong with the decision -- 46 of the 145
+    decision-rejections counted over the arm-0625 episodes (31.7%) were exactly a
+    field of a sibling kind, across ``frame_id``/``duration_ms``/``delta_y``/
+    ``text`` on the kinds that do not take them; replaying the sealed corpus
+    through both decoders recovers 23 of that kind and no other reply changes
+    verdict (283 published rejected replies, 2026-09-24).
+
+    WHY DROP RATHER THAN REFUSE. It is the disposition this contract already uses
+    for framing that carries no decision information: an extra key the reply
+    contract does not use is ignored and reported (``_report_ignored_keys``), a
+    ``reply_version`` in the wrong place is ignored, and a generic tool-call
+    wrapper is unwrapped. A field of a sibling kind is the action-level case of
+    exactly that, and the alternative dispositions are both worse. Rewriting it
+    into the action it belongs to (``duration_ms`` becoming a ``wait``) invents
+    an action the model did not ask for, in an ORDERED batch, which changes what
+    executes. Keeping the refusal spends a paid round trip on a decision that is
+    already complete, and no hint can repair it better than reading it.
+
+    What is deliberately NOT dropped, and stays refused:
+
+    * a key that is not a field of ANY kind (``extra_forbidden``): nothing says
+      what the model meant by it, and a near-miss field name is a real mistake;
+    * an action whose ``kind`` is missing or not a known kind: there is no
+      declared vocabulary to measure its fields against, so the mapping is left
+      byte-identical and the validator refuses it with its own class;
+    * a required field the chosen kind takes being absent, or present with the
+      wrong type: dropped here means SIBLING fields only, so those still fail
+      validation exactly as before.
+
+    Tolerated is not the same as silent, and the report is one bounded log line
+    per reply -- the same rule, and the same shared renderer, the extra-key
+    tolerance uses. Both reply channels call this: the prose envelope (through
+    :func:`normalise_public_reply`) and the offered reply-channel call
+    (``action_tool._build_batch``), so the tolerance cannot come to mean two
+    different things depending on which channel the model answered on.
+
+    Returns the normalised actions and HOW MANY fields were dropped, and the
+    count is part of the contract rather than a courtesy: a tolerance nobody can
+    count is indistinguishable from one that stopped firing, and this one's
+    whole justification is a measured rate. The dropped names themselves are
+    model-text-free (``kind.field`` out of a fixed vocabulary) but the signed
+    bundle carries only the count, and it carries it as its own
+    ``reply_tolerance`` event (``ReplyTolerancePayload``) rather than as a field
+    of the response it belongs to: that event is what makes the rate countable
+    from bundles written now WITHOUT re-baselining the ``model_response`` events
+    every earlier bundle was sealed with. The log line keeps the roster.
+
+    Precondition: ``actions`` is a list of the reply's own action values. Every
+    caller has already established that -- a reply whose ``actions`` is not a
+    list is refused above them, by the decoder rather than by this tolerance --
+    so there is no pass-through branch here to describe, and a caller that broke
+    the precondition would fail loudly instead of silently dropping the reply's
+    fields.
+    """
+
+    dropped: list[str] = []
+    normalised: list[Any] = []
+    for action in actions:
+        if not isinstance(action, Mapping):
+            normalised.append(action)
+            continue
+        kind = action.get("kind")
+        declared = _ACTION_KIND_FIELDS.get(kind) if isinstance(kind, str) else None
+        if declared is None:
+            normalised.append(action)
+            continue
+        foreign = sorted(
+            key for key in action if key not in declared and key in _ACTION_FIELD_NAMES
+        )
+        if not foreign:
+            normalised.append(action)
+            continue
+        # Named ``kind.field`` so the line says which action kind received the
+        # field and which kind it belongs to, out of a fixed vocabulary rather
+        # than out of model text -- the renderer is shared anyway, because the
+        # bound and the guard are the security property and a second copy of
+        # them would be a second place to get it wrong.
+        dropped.extend(f"{kind}.{key}" for key in foreign)
+        normalised.append({key: value for key, value in action.items() if key not in foreign})
+    if dropped:
+        logger.warning(
+            "model reply put %d action field(s) on a kind that does not take them; "
+            "dropped, and the action was judged on its declared kind: %s",
+            len(dropped),
+            _unexpected_key_summary(dropped),
+        )
+    return normalised, len(dropped)
+
 
 def public_reply_schema(
     action_surface: ActionSurface | None = None, action_binding: str = LEGACY_ACTION_BINDING
@@ -1178,8 +1683,10 @@ def public_reply_contract(action_binding: str = LEGACY_ACTION_BINDING) -> dict[s
     contract = {
         "schema": schema,
         "accepted_framings": (
-            "one leading JSON object, and any trailing text after it; duplicate keys and a "
-            "second action batch for the same observation are refused"
+            "one leading JSON object, any trailing text after it, and any preamble, code "
+            "fence or native tool-call wrapper in FRONT of it when the reply carries "
+            "exactly one decision; duplicate keys and a second action batch for the same "
+            "observation are refused"
         ),
         "accepted_shapes": (
             '{"actions": [...]}, or the same array under one "action_batch" wrapper, or '
@@ -1190,6 +1697,12 @@ def public_reply_contract(action_binding: str = LEGACY_ACTION_BINDING) -> dict[s
             "every action is bound to the current observation and its frames by the "
             "harness before validation, so an observation_id or frame_id in the reply "
             "selects nothing; the negotiated action_surface still gates every action"
+        ),
+        "action_fields": (
+            "a field that belongs to a SIBLING action kind is dropped and reported, never "
+            "refused, because the required kind tag already states the action chosen; a "
+            "field no kind declares, a missing or unknown kind, and a missing or mistyped "
+            "required field are still refused"
         ),
         "public_observations": (
             "concise new observed facts/progress only; no deliberation or credentials"

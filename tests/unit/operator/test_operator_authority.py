@@ -32,6 +32,8 @@ module docstring for the measurement that makes the Secure Enclave untestable.
 from __future__ import annotations
 
 import argparse
+import ctypes
+import ctypes.util
 import json
 import os
 import time
@@ -52,6 +54,7 @@ from local_operator.operator import (
     verify,
 )
 from local_operator.operator.keychain import FILE_ONLY, FileKeyBackend
+from local_operator.operator.macos import keyagent
 from local_operator.operator.sign import (
     anchor_for_handle,
     create_key,
@@ -97,7 +100,11 @@ def keyed(tmp_path: Path) -> Any:
             staged.write_bytes(trust.anchor_bytes(self.anchor))
             self.signer = self.backend.load()
 
-        def sign(self, **fields: str) -> dict[str, str]:
+        def sign(self, **fields: Any) -> dict[str, str]:
+            # `Any` rather than `str`: this stub forwards whatever the caller passed,
+            # and ``sign_challenge`` now takes a numeric ``timeout`` as well as its
+            # string fields — a passthrough that narrowed the type would have to know
+            # every parameter of the function it exists to stand in for.
             challenge = fields.pop("challenge")
             return sign_challenge(
                 challenge=challenge,
@@ -670,6 +677,10 @@ def test_the_spawn_only_status_lines_are_wrapped_by_the_terminal_not_by_hand(
     from local_operator.operator import handlers
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    # NO KEY-AGENT FAULT IN THIS STATE: the probe asks the real key agent on this host,
+    # and a broken one changes the block's shape (the remedy is named instead of `init`,
+    # design round 1 D3) — which is a different subject from the wrapping asserted here.
+    monkeypatch.setattr(handlers, "_keyagent_state", lambda backend: None)
     monkeypatch.setattr(
         handlers,
         "operator_authority_report",
@@ -681,7 +692,7 @@ def test_the_spawn_only_status_lines_are_wrapped_by_the_terminal_not_by_hand(
             "backend": "",
             "presence_enforced_by_os": False,
             "capability_guarantee": "spawn-capability",
-            "reason": "no anchor installed",
+            "reason": "no anchor is installed, so the runtime trusts no key yet",
         },
     )
     assert handlers._status() == 0
@@ -694,3 +705,521 @@ def test_the_spawn_only_status_lines_are_wrapped_by_the_terminal_not_by_hand(
         assert "  " not in line, f"a doubled space for a terminal to strand: {line!r}"
     assert lines[0].endswith("host.")
     assert "lop operator init" in lines[1], lines
+
+
+# ---------------------------------------------------------------------------
+# 11. The Secure Enclave backend: Apple's flags, the ladder, and the ownership
+# ---------------------------------------------------------------------------
+#
+# Four defects, in the order a caller meets them:
+#
+# 1. the access-control flag pair was a shift guess (``1 << 0`` / ``1 << 2``)
+#    instead of Apple's (``userPresence`` 1<<0, ``privateKeyUsage`` 1<<30), so
+#    ``SecAccessControlCreateWithFlags`` answered ``errSecParam`` (-50) for every
+#    protection class and ``create`` never once reached key generation;
+# 2. the key-generation dictionaries were built with NULL CoreFoundation callbacks
+#    (``CFDictionaryCreate(..., None, None)``), which retain nothing and release
+#    nothing. Measured on this host with the corrected flags, that is a SIGSEGV
+#    INSIDE ``SecKeyCreateRandomKey`` on the FIRST attempt (``TKSEPKey`` /
+#    ``objc_retain``), on an unsigned interpreter and on an Apple-signed one alike —
+#    so it is not the tag lifetime and not a caller problem;
+# 3. ``tag`` was released INSIDE the ladder and then handed to the next iteration's
+#    dictionary — a released ``CFDataRef``. This is a SECOND, distinct crash, reachable
+#    only once (2) is fixed and key generation then fails on attempt 1, so fixing only
+#    the callbacks and flags would leave a use-after-free on the fallback path;
+# 4. the ``CFNumberRef`` handed to ``kSecAttrKeySizeInBits`` was never released,
+#    because its docstring said the dictionary would do it while the dictionary was
+#    built with those NULL callbacks.
+#
+# WHAT REPLACED THE OWNERSHIP NET, and why. This file used to drive a fake ``_CF``
+# that modelled CoreFoundation ownership across a Python implementation of the ladder.
+# That implementation is GONE from the product (it could never work — the entitlement
+# comes from a code signature and a provisioning profile, see ``keychain.py``), so a
+# fake for it would be a net under code that does not exist. What takes its place:
+#
+#   * the constants vs the SDK HEADER, below (unchanged, and still the one copy of the
+#     value that lives outside this repository);
+#   * THE C SOURCE, pinned symbol-for-symbol against those same constants — the native
+#     sequence now exists once, in ``packaging/macos/lop-keyagent/se-keyagent.c``, and
+#     drift between the two copies of it is the hazard this arrangement creates;
+#   * the KEY AGENT's OWN ``selftest`` verb, which asserts the release discipline with
+#     ``CFGetRetainCount`` against the very constructors ``create`` runs. It needs no
+#     entitlement and no keychain, and the release job runs it on the built binary
+#     (see ``.github/workflows/publish.yml``); from here it is exercised only when a
+#     built helper is pointed at by ``LOP_KEYAGENT_BINARY``;
+#   * a real framework call for the ONE assertion a fake cannot make — that
+#     ``SecAccessControlCreateWithFlags`` ACCEPTS the flag pair for both classes (the
+#     defect that shipped). It writes nothing and prompts nothing.
+#
+# Nothing in this section creates a key, raises a prompt, or writes to any keychain.
+# The one exception is the opt-in test at the end, gated on
+# ``LOP_OPERATOR_ENCLAVE_TEST=1``, which creates ONE item under a unique tag through the
+# signed key agent and deletes it again.
+
+#: A real uncompressed P-256 point, exported from a Secure Enclave key created on
+#: this machine (public data — the private half never leaves the Enclave). A fixed
+#: value rather than a generated one keeps the ladder tests deterministic.
+_A_REAL_P256_POINT = bytes.fromhex(
+    "04db295b8129a1ba169a538a3b69f1caa1dbdd2ed34332c33ec5d3e0364ecb87"
+    "8845a59a4f54c9728f8ed81905ad9765ad752b9e1e9080a528cc37e8098534167b"
+)
+
+
+def test_the_access_control_flags_are_apple_s_values_and_not_a_shift_guess() -> None:
+    """The pair that shipped was transposed and two bits off Apple's ``PrivateKeyUsage``.
+
+    ``kSecAccessControlUserPresence = 1u << 0`` and ``kSecAccessControlPrivateKeyUsage
+    = 1u << 30`` (``Security.framework/Headers/SecAccessControl.h``); the file shipped
+    ``PRIVATE_KEY_USAGE = 1 << 0`` and ``USER_PRESENCE = 1 << 2``, which the framework
+    refuses with ``errSecParam``. Asserted as VALUES rather than as "the two flags
+    differ", because a pair that is merely self-consistent is exactly what was wrong.
+    """
+    backend = keychain.SecureEnclaveBackend
+    assert backend.USER_PRESENCE == 1 << 0
+    assert backend.PRIVATE_KEY_USAGE == 1 << 30
+    # The shipped pair, spelled out: a wrong pair must not be able to look right again.
+    shipped_wrong = (1 << 0) | (1 << 2)
+    assert (backend.USER_PRESENCE | backend.PRIVATE_KEY_USAGE) != shipped_wrong
+
+
+def _sdk_header() -> Path | None:
+    """The Security header that DEFINES the two flags, or ``None`` without an SDK."""
+    import subprocess
+
+    try:
+        sdk = subprocess.run(
+            ["xcrun", "--show-sdk-path"], capture_output=True, text=True, check=True, timeout=60
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    header = Path(sdk) / "System/Library/Frameworks/Security.framework/Headers/SecAccessControl.h"
+    return header if header.is_file() else None
+
+
+def test_the_constants_match_the_sdk_header_that_defines_them() -> None:
+    """Read Apple's own header, so the values are checked against the source of truth.
+
+    A test that only compares the constant to a literal this file also contains
+    cannot catch the failure it exists for: whoever transposed the pair would write
+    the transposed pair in both places. The header is the one copy of the value that
+    lives outside this repository, so it is the copy the test reads — and it is read
+    from whatever SDK the host actually compiles against.
+    """
+    import re
+
+    header = _sdk_header()
+    if header is None:
+        pytest.skip("no macOS SDK on this host (xcrun --show-sdk-path found no header)")
+
+    text = header.read_text()
+    assert "kSecAccessControlUserPresence" in text and "kSecAccessControlPrivateKeyUsage" in text
+    backend = keychain.SecureEnclaveBackend
+    for symbol, constant in (
+        ("kSecAccessControlUserPresence", backend.USER_PRESENCE),
+        ("kSecAccessControlPrivateKeyUsage", backend.PRIVATE_KEY_USAGE),
+    ):
+        match = re.search(rf"{symbol}[^\n]*?=\s*1u\s*<<\s*(\d+)", text)
+        assert match is not None, f"{symbol} is not defined the way this test reads it"
+        assert constant == 1 << int(match.group(1)), (
+            f"{symbol} is 1u << {match.group(1)} in {header}, " f"but this build uses {constant}"
+        )
+
+
+def _framework() -> tuple[Any, Any]:
+    """CoreFoundation and Security, bound for the ONE call this file still makes.
+
+    Bound HERE rather than in shipped code on purpose: the product no longer touches
+    these functions from Python (the signed key agent does), so a binding in
+    ``keychain.py`` would be a second implementation of a native sequence — which is
+    exactly what was deleted. A test may hold one because its subject IS the framework.
+    """
+    cf = ctypes.CDLL(ctypes.util.find_library("CoreFoundation"))
+    security = ctypes.CDLL(ctypes.util.find_library("Security"))
+    security.SecAccessControlCreateWithFlags.restype = ctypes.c_void_p
+    security.SecAccessControlCreateWithFlags.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    cf.CFRelease.argtypes = [ctypes.c_void_p]
+    cf.CFStringGetCString.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.c_long,
+        ctypes.c_uint32,
+    ]
+    cf.CFStringGetCString.restype = ctypes.c_bool
+    cf.CFErrorCopyDescription.restype = ctypes.c_void_p
+    cf.CFErrorCopyDescription.argtypes = [ctypes.c_void_p]
+    return cf, security
+
+
+def _framework_constant(lib: Any, name: str) -> int:
+    """The ``CFTypeRef`` a framework global HOLDS, as the address of the global.
+
+    ``in_dll`` gives the ADDRESS of the symbol; for a ``CFStringRef`` constant the
+    value that belongs in a dictionary is what is stored THERE, which is what the
+    dereference reads. This is the shape ``keychain._CF.const`` used before it was
+    deleted, kept here because the call it feeds needs it.
+    """
+    value = ctypes.c_void_p.from_address(
+        ctypes.addressof((ctypes.c_char * 0).in_dll(lib, name))
+    ).value
+    assert value is not None, f"{name} holds no pointer"
+    return value
+
+
+def _framework_error(cf: Any, err: Any) -> str:
+    """The framework's own sentence for a failed call, releasing the error object."""
+    import ctypes
+
+    if not err.value:
+        return "no error object was published"
+    text = cf.CFErrorCopyDescription(err)
+    if not text:
+        return "the error had no description"
+    buffer = ctypes.create_string_buffer(512)
+    cf.CFStringGetCString(text, buffer, 512, 0x08000100)
+    cf.CFRelease(text)
+    cf.CFRelease(err.value)
+    return buffer.value.decode("utf-8", "replace")
+
+
+@pytest.mark.skipif(os.uname().sysname != "Darwin", reason="SecAccessControl is macOS-only")
+def test_every_protection_class_accepts_the_flag_pair_this_build_uses() -> None:
+    """THE TEST THAT WOULD HAVE CAUGHT THE RELEASED BUG — so it asks the framework.
+
+    ``SecAccessControlCreateWithFlags`` is not our code, and it is the call that
+    returned NULL/-50 for both protection classes with the shipped flags. It writes
+    nothing to any keychain and raises no prompt, so it is safe in the default suite,
+    and it fails loudly on the pre-fix constants with the framework's own sentence.
+
+    COVERAGE SPLIT — this is a DEV-HOST GUARD, not a CI gate: it is gated on Darwin and
+    the framework call cannot be exercised on Linux at all, so a green Linux CI does not
+    cover this boundary. What CI covers with certainty is the constants, the SDK header
+    read and the C source that makes the same two calls (``keyagent-selftest``).
+    """
+    import ctypes
+
+    cf, security = _framework()
+    backend = keychain.SecureEnclaveBackend
+    for protection in backend.PROTECTION_LADDER:
+        err = ctypes.c_void_p()
+        access = security.SecAccessControlCreateWithFlags(
+            None,
+            _framework_constant(security, protection),
+            backend.PRIVATE_KEY_USAGE | backend.USER_PRESENCE,
+            ctypes.byref(err),
+        )
+        assert access, (
+            f"{protection} was refused by the framework with the flag pair "
+            f"{backend.USER_PRESENCE} | {backend.PRIVATE_KEY_USAGE}: {_framework_error(cf, err)}"
+        )
+        cf.CFRelease(access)
+
+
+class _StubEnclaveBackend:
+    """A presence store that answers the two questions ``init`` asks, without a key.
+
+    ``load`` returns ``None`` until ``create`` has run, so ONE object models both the
+    "first init" and the "second init" state while ``create`` is counted — which is
+    what makes "idempotent" and "never silently falls back" assertable without
+    creating anything on the machine.
+    """
+
+    def __init__(self) -> None:
+        self.handle = keychain.KeyHandle(
+            backend=keychain.SECURE_ENCLAVE,
+            key_id=verify.key_id_for(_A_REAL_P256_POINT),
+            spki=_A_REAL_P256_POINT,
+            presence=True,
+        )
+        self.created = 0
+
+    def create(self) -> Any:
+        self.created += 1
+        return self.handle
+
+    def load(self) -> Any:
+        return keychain.Signer(self.handle) if self.created else None
+
+    def supported(self) -> bool:
+        return True
+
+
+def _stub_enclave(monkeypatch: pytest.MonkeyPatch, stub: _StubEnclaveBackend) -> None:
+    """Wire the stub into BOTH callers of ``choose_backend``.
+
+    ``handlers._existing_key`` imports it per call; ``sign.create_key`` bound it at
+    import time. Patching one and not the other is how a stub test silently exercises
+    the real ladder on a machine that has a Secure Enclave.
+    """
+    from local_operator.operator import sign
+
+    monkeypatch.setattr(keychain, "choose_backend", lambda preference, *, config_root: stub)
+    monkeypatch.setattr(sign, "choose_backend", lambda preference, *, config_root: stub)
+
+
+def test_init_on_a_presence_host_reports_the_presence_level_and_never_falls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    """A presence host must not be quietly demoted to ``file-only``.
+
+    The failure this guards is a SETUP STEP that reports success at a level weaker
+    than the one asked for: the operator asked for the presence tier, so a key written
+    as a readable file instead would be a silent downgrade of the security claim —
+    which is why the assertion is the ABSENCE of the file, not just the presence of
+    the right stdout line.
+    """
+    from local_operator.operator import handlers, trust
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        "local_operator.operator.trust._ANCHOR_ROOT_OVERRIDE",
+        tmp_path / "anchor-root",
+        raising=False,
+    )
+    stub = _StubEnclaveBackend()
+    _stub_enclave(monkeypatch, stub)
+    args = argparse.Namespace(operator_command="init", backend="secure-enclave", label="enclave")
+
+    assert handlers.dispatch(args) == 0
+    captured = capsys.readouterr()
+    assert "operator key created in the secure-enclave store" in captured.out, captured.out
+    assert "secure-enclave: every signature requires a human gesture" in captured.out
+    assert "has no presence store" not in captured.err, captured.err
+
+    anchor = json.loads(trust.staging_path(tmp_path).read_text())
+    assert anchor["backend"] == keychain.SECURE_ENCLAVE
+    assert anchor["presence"] is True
+    assert anchor["key_id"] == verify.key_id_for(_A_REAL_P256_POINT)
+    assert stub.created == 1
+    # THE SILENT-DOWNGRADE CHECK: no software key was written behind the operator's back.
+    assert not (tmp_path / "operator" / "operator-key.pem").exists()
+
+
+def test_init_twice_on_a_presence_host_replaces_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    """The same idempotency contract the file-only test asserts, on the presence path.
+
+    ``init`` on a host that already has a presence key is a duplicate-item create
+    there, and a second key would invalidate every device certificate signed under the
+    first anchor. So the second run reports what it found and CREATE IS NOT CALLED
+    AGAIN — asserted on the stub's own counter, which is what distinguishes "reported
+    as unchanged" from "changed and reported nothing".
+    """
+    from local_operator.operator import handlers, trust
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        "local_operator.operator.trust._ANCHOR_ROOT_OVERRIDE",
+        tmp_path / "anchor-root",
+        raising=False,
+    )
+    stub = _StubEnclaveBackend()
+    _stub_enclave(monkeypatch, stub)
+    args = argparse.Namespace(operator_command="init", backend="secure-enclave", label="enclave")
+
+    assert handlers.dispatch(args) == 0
+    first_anchor = json.loads(trust.staging_path(tmp_path).read_text())
+    capsys.readouterr()
+
+    assert handlers.dispatch(args) == 0
+    said = capsys.readouterr().out
+    assert "already exists in the secure-enclave store; nothing replaced" in said, said
+    assert json.loads(trust.staging_path(tmp_path).read_text()) == first_anchor
+    assert stub.created == 1, "the second init created a second key"
+    assert not (tmp_path / "operator" / "operator-key.pem").exists()
+
+
+@pytest.mark.skipif(
+    os.environ.get("LOP_OPERATOR_ENCLAVE_TEST") != "1",
+    reason="opt-in: creates ONE item in the operator's login keychain, under a unique tag",
+)
+def test_a_real_secure_enclave_key_round_trips_and_is_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The only test here that may create a real key: opt-in, uniquely tagged, cleaned up.
+
+    Gated on ``LOP_OPERATOR_ENCLAVE_TEST=1`` because a Secure Enclave key can only live
+    in the data-protection keychain, i.e. the operator's login keychain (see the module
+    docstring). It uses a UNIQUE application tag so it can never touch the operator's own
+    operator key, creates the key through the product's own ``backend.create()``, and
+    purges that item in teardown so the machine is left exactly as found.
+
+    On an installation with no usable key agent this SKIPS rather than fails: without the
+    signed helper there is no process that could hold this key at all, which is a fact
+    about the INSTALL (and the reason ``health()`` exists), not a defect in this code.
+
+    The purge is the interesting half. Deletion is gated by the SAME entitlement as
+    creation — measured: an unsigned process asking to delete an item that exists gets
+    errSecItemNotFound (-25300) — so the cleanup has to go through the entitled process
+    too, which is why the key agent has a ``purge`` that refuses the operator's own tag.
+    """
+    unique = f"com.local-operator.operator.test.{os.getpid()}"
+    monkeypatch.setattr(keychain, "APPLICATION_TAG", unique)
+    backend = keychain.SecureEnclaveBackend()
+    healthy, why = backend.health()
+    if not healthy:
+        pytest.skip(f"this installation cannot reach an entitled key agent: {why}")
+    try:
+        handle = backend.create()
+        assert len(handle.spki) == 65 and handle.spki[0] == 0x04
+        assert verify.decode_point(handle.spki) is not None
+        signer = backend.load()
+        assert signer is not None, "load() did not find the key create() just made"
+        try:
+            assert signer.handle.key_id == handle.key_id
+            assert signer.handle.spki == handle.spki
+        finally:
+            signer.close()
+    finally:
+        deleted = keyagent.KeyagentClient(tag=unique).purge()
+        assert deleted in (
+            0,
+            keychain._ERR_SEC_ITEM_NOT_FOUND,
+        ), f"the test's own key was not removed: SecItemDelete={deleted}"
+
+
+# ---------------------------------------------------------------------------
+# 12. The native sequence now lives in C: pin it against this module
+# ---------------------------------------------------------------------------
+
+#: The helper's source, in-tree. Its ABSENCE would make this file's checks vacuous, so
+#: the path is asserted to exist rather than skipped on.
+_HELPER_C = (
+    Path(__file__).resolve().parents[3] / "packaging" / "macos" / "lop-keyagent" / "se-keyagent.c"
+)
+
+
+def _helper_code() -> str:
+    """The C source with its comments removed, so a prose mention cannot pass a check."""
+    import re
+
+    source = _HELPER_C.read_text()
+    assert "se-keyagent.c" in source or source, "the helper source is empty"
+    return re.sub(r"/\*.*?\*/", "", source, flags=re.S)
+
+
+def test_the_c_helper_uses_the_same_native_sequence_as_this_module() -> None:
+    """Drift between the two copies of one native sequence is this design's hazard.
+
+    The Python implementation of the Secure Enclave sequence is gone — it could never
+    work, and two implementations of one sequence, one of which no test on any host can
+    exercise, is a second way of doing things rather than a fallback. What remains is the
+    C helper, so the constants this module still defines are pinned to what THAT file
+    compiles and to the same SDK header the values came from.
+    """
+    assert _HELPER_C.is_file(), f"no helper source at {_HELPER_C}"
+    code = _helper_code()
+    backend = keychain.SecureEnclaveBackend
+
+    # 1. THE LADDER, in the order this module documents: strictest first, so a host that
+    #    accepts passcode-set never settles for unlocked.
+    order = [code.index(protection) for protection in backend.PROTECTION_LADDER]
+    assert order == sorted(
+        order
+    ), f"the helper's ladder order differs from {backend.PROTECTION_LADDER}"
+
+    # 2. APPLE'S SYMBOLS, never a shift literal: the released pair was 1<<0 | 1<<2 and
+    #    every protection class was refused with errSecParam.
+    assert "kSecAccessControlUserPresence" in code
+    assert "kSecAccessControlPrivateKeyUsage" in code
+    for wrong in ("1 << 0", "1 << 2", "1 << 30", "1u << 0", "1u << 30"):
+        assert wrong not in code, f"a shift literal ({wrong}) crept into the flag pair"
+
+    # 3. THE GENERATION DICTIONARY: EC P-256 on the Enclave token, 256 bits.
+    for symbol in (
+        "kSecAttrKeyType",
+        "kSecAttrKeyTypeECSECPrimeRandom",
+        "kSecAttrKeySizeInBits",
+        "kSecAttrTokenID",
+        "kSecAttrTokenIDSecureEnclave",
+        "kSecPrivateKeyAttrs",
+        "kSecAttrIsPermanent",
+        "kSecAttrApplicationTag",
+        "kSecAttrAccessControl",
+    ):
+        assert symbol in code, f"the helper no longer names {symbol}"
+    assert "int bits = 256;" in code
+
+    # 4. TYPED CALLBACKS BY ADDRESS. NULL callbacks retain nothing and release nothing,
+    #    and a generation dictionary so built SIGSEGVs inside SecKeyCreateRandomKey
+    #    (measured, 6 of 6 runs). This is the one thing a rewrite must not "simplify".
+    assert "&kCFTypeDictionaryKeyCallBacks" in code
+    assert "&kCFTypeDictionaryValueCallBacks" in code
+    assert "NULL, 0, NULL, NULL" not in code
+
+    # 5. THE ALGORITHM, which is exactly what ``verify_signature`` consumes (DER ECDSA
+    #    over SHA-256).
+    assert "kSecKeyAlgorithmECDSASignatureMessageX962SHA256" in code
+
+    # 6. NO kSecUseDataProtectionKeychain: not in Apple's documented Enclave generation
+    #    dictionary, not load-bearing (the passing probe does not set it), and measured
+    #    identical with and without it. The helper is built without it.
+    assert "kSecUseDataProtectionKeychain" not in code
+
+    # 7. THE TAG IS CREATED ONCE, BY main, AND THE LADDER ONLY BORROWS IT. That is the
+    #    structural answer to the use-after-free (#1547): a tag created and released
+    #    INSIDE the loop handed the next iteration a released CFDataRef. Asserted as
+    #    "exactly one creation, exactly one release, neither inside cmd_create".
+    assert code.count("CFDataCreate(NULL, (const UInt8 *)tagtext") == 1
+    assert code.count("CFRelease(tag);") == 1
+    ladder = code[
+        code.index("static int cmd_create(CFDataRef tag) {") : code.index(
+            "static int cmd_public_or_exists"
+        )
+    ]
+    assert "CFDataCreate" not in ladder, "the ladder creates a tag of its own"
+    assert "CFRelease(tag)" not in ladder, "the ladder releases the tag main owns"
+
+    # 8. THE SITE VOCABULARY and the exit codes the client maps to copy, so a reply
+    #    cannot arrive in a dialect this module does not speak.
+    for site in (
+        keychain.ACCESS_CONTROL_REFUSED,
+        keychain.KEY_GENERATION_REFUSED,
+        keychain.SIGNATURE_REFUSED,
+        keychain.KEY_LOOKUP_REFUSED,
+    ):
+        assert f'"{site}"' in code, f"the helper does not report the site {site!r}"
+    import re
+
+    for name, value in (
+        ("EXIT_CANCELLED", 2),
+        ("EXIT_NO_KEY", 3),
+        ("EXIT_REFUSED", 4),
+        ("EXIT_USAGE", 5),
+    ):
+        assert re.search(rf"#define {name} {value}\b", code), f"{name} != {value} in C"
+    protocol = re.search(r"#define PROTOCOL (\d+)", code)
+    assert protocol is not None, "the helper has no PROTOCOL define"
+    assert int(protocol.group(1)) == keyagent.PROTOCOL
+
+
+@pytest.mark.skipif(
+    not os.environ.get("LOP_KEYAGENT_BINARY"),
+    reason="set LOP_KEYAGENT_BINARY to a built lop-keyagent to run its ownership selftest",
+)
+def test_the_built_helper_asserts_its_own_ownership_model() -> None:
+    """The C-side ownership check the release job runs, reachable for a local build.
+
+    It needs no entitlement and no keychain, so a plain ``clang`` build is enough —
+    which is what makes it usable in a workflow that has not imported an identity yet.
+    Every check it reports must agree: a mismatch is a reference this program created
+    and did not give back, or gave back twice.
+    """
+    import subprocess
+
+    result = subprocess.run(
+        [os.environ["LOP_KEYAGENT_BINARY"], "selftest", "--tag", keyagent.HEALTH_TAG],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.stdout.strip(), result.stderr
+    report = json.loads(result.stdout)
+    mismatched = [check for check in report["checks"] if check["expected"] != check["actual"]]
+    assert report["ok"] is True and result.returncode == 0, mismatched
+    assert len(report["checks"]) >= 10, "the selftest stopped asserting the model"

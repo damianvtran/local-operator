@@ -81,16 +81,18 @@ tools the parent had already enabled while being refused the ability to enable
 more (:func:`_child_mcp_wiring`). Nothing in either path grants an edit, a
 write or an execution the allowlist denies.
 
-``jobs`` is a SECOND, CONDITIONAL exception, on a different principle. It
-observes and cancels the child's OWN background jobs — it spawns nothing
-(that is ``task``) and dies with the child's job manager — so it crosses no
-boundary the prune protects. But a child can only produce a background job
-while its ``bash`` retains ``background``, and the bash receipt tells the
-model to poll such a job with ``jobs(op='peek')``. So the invariant is: a
-child keeps ``jobs`` IFF it can still background a bash command. The prune
-below re-adds ``jobs`` exactly under that condition (:func:`_can_background`),
-which is what stops a non-delegating role or grandchild that backgrounds a
-long command from looping forever on ``Tool not found: jobs``.
+``jobs`` and ``wait`` are a SECOND, CONDITIONAL exception, on a different
+principle. They observe, cancel and block on the child's OWN background jobs —
+they spawn nothing (that is ``task``) and die with the child's job manager —
+so they cross no boundary the prune protects. But a child can only produce a
+background job while its ``bash`` retains ``background``, and the bash receipt
+tells the model to poll such a job with ``jobs(op='peek')``. So the invariant
+is: a child keeps ``jobs`` and ``wait`` IFF it can still background a bash
+command. The prune below re-adds them exactly under that condition
+(:func:`_can_background`), which is what stops a non-delegating role or
+grandchild that backgrounds a long command from looping forever on ``Tool not
+found: jobs`` — and, for ``wait``, from blocking on it with a foreground
+``sleep`` that no hub note can interrupt.
 
 Approvals the child asks for carry ``ToolContext.job_id`` — the id of the job
 this child IS — so a host can scope an approval decision to the delegated
@@ -637,6 +639,7 @@ def run_subagent(
     agent: str = "task",
     effort: str | None = None,
     restricted: bool = False,
+    inherited_model: ModelSpec | None = None,
 ) -> str:
     """Register one child-session run as a background job; return the job id.
 
@@ -665,6 +668,13 @@ def run_subagent(
     rebuilds against the comms-owning root rather than that child's real
     parent, so neither the role nor the parent session can recover the fact and
     it has to be carried forward from the child's record (review round 2, R5).
+
+    ``inherited_model`` exists for the resume path too, for the same reason.
+    It is the model an INHERITING child takes from its real parent when that
+    parent is not ``parent_session`` (D9.1). It is kept apart from
+    ``model_spec`` because it is not a pin: ``owns_model`` stays False and a
+    failure is not described as a pinned model's. ``None`` means the child
+    inherits ``parent_session``'s own model, as on every launch.
     """
     effective_prompt, profile = _effective_prompt(prompt, agent, parent_session)
     queued = jobs_manager.at_capacity()
@@ -681,6 +691,7 @@ def run_subagent(
             agent=agent,
             profile=profile,
             restricted=restricted,
+            inherited_model=inherited_model,
         ),
         queued=queued,
     )
@@ -709,9 +720,10 @@ def run_subagent(
         # absence. The runner still overwrites this once the child is built, and
         # that write must win: a restored provider fallback is the model the
         # child actually calls, and pricing reads this field.
+        named = model_spec if model_spec is not None else inherited_model
         job.model_label = (
-            f"{model_spec.provider}/{model_spec.model_id}"
-            if model_spec is not None
+            f"{named.provider}/{named.model_id}"
+            if named is not None
             else (getattr(parent_session, "effective_model_label", "") or None)
         )
         # And whose choice that was, on the same registration-time rule. Stamped
@@ -775,6 +787,7 @@ def _make_runner(
     agent: str = "task",
     profile: "AgentProfile | None" = None,
     restricted: bool = False,
+    inherited_model: ModelSpec | None = None,
 ) -> Callable[[str, Any, Callable[[str], None]], Awaitable[str | None]]:
     """Build the JobRunFn for one child run (closure over its launch args)."""
     # The parent seam is private-attribute access on purpose: this module is
@@ -801,7 +814,10 @@ def _make_runner(
                 label=label,
                 prompt=effective_prompt,
                 parent_session=parent_session,
-                model_spec=model_spec,
+                # The child is BUILT on its inherited model when a resume found
+                # one (see ``run_subagent``); ``model_spec`` alone keeps its
+                # meaning of "a pin" for the failure text below.
+                model_spec=model_spec if model_spec is not None else inherited_model,
                 job_id=job_id,
                 resume_dir=resume_dir,
                 agent=agent,
@@ -2342,8 +2358,29 @@ async def _construct_child_session(
     # ``task``/``wait``/``wake`` keep their treatment: ``jobs`` polling is
     # non-blocking and is the advertised path, so sparing ``jobs`` alone is the
     # minimal correct fix, and a child that must not fan out still cannot.
+    #
+    # ``wait`` rides the SAME invariant, for the reason ``jobs`` alone did not
+    # cover: ``jobs`` can observe a background job but cannot BLOCK on one, so a
+    # child that backgrounded a long command had only two ways to await it —
+    # re-peek in a loop, or a foreground ``sleep N; tail log``. The second is
+    # what child f7318cc06bdd did for hours (2026-09-24), and a foreground bash
+    # is not a tool boundary, so each of its parent's hub notes waited out a
+    # 15-30 min sleep. ``wait`` is the blocking primitive that is NOT deaf: it
+    # returns on the job settling, on a hub note (``queue_aside`` marks the
+    # peer-arrival event it parks on) and on a steer. It spawns nothing, and it
+    # is scoped to THIS child's own job manager: an id that resolves through the
+    # shared comms registry to a sibling is not in ``child.jobs`` and is refused
+    # as ``unknown job`` (pinned in tests/unit/session/test_child_wait.py).
+    # Precisely what it promises about a note, because the two cases differ: a
+    # note arriving WHILE the wait is parked interrupts it at once (that is the
+    # wake above), while one already queued before the wait parks has been
+    # counted by the peer snapshot the wait takes before parking — it is
+    # delivered at the next boundary, not lost, but it does NOT shorten this
+    # park.
+    # ``wake`` stays pruned: a child's session ends after one prompt, so a wake
+    # it armed would be silently lost.
     if _can_background(tools):
-        drop = drop - {"jobs"}
+        drop = drop - {"jobs", "wait"}
     child.refresh_tools([tool for tool in child._tools if tool.name not in drop])
     # A DECLARED parent inventory carries down, or a bounded session could reach
     # an excluded tool by delegating to a child that never heard of the bound.

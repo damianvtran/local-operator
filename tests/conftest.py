@@ -64,6 +64,12 @@ _AMBIENT_VARS = (
     # reach a test. (The guard itself reads only the command's own assignments,
     # never the process environment, but the name still has to be scrubbed.)
     "LOCAL_OPERATOR_ALLOW_UNBOUNDED_SEARCH",
+    # The long-sleep guard's escape hatch (``tools/sleep_guard.ALLOW_ENV``),
+    # the same ESCAPE-HATCH class and scrubbed for the same reason: an
+    # inherited value would waive the refusal every cell in
+    # ``test_bash_long_sleep_guard.py`` asserts. Read off the command's own
+    # assignments only, never the process environment.
+    "LOCAL_OPERATOR_ALLOW_LONG_SLEEP",
     "LOCAL_OPERATOR_HOME",
     "LOCAL_OPERATOR_DEBUG",
     # Names the session a `lop secret` retrieval is attributed to in the audit
@@ -79,6 +85,14 @@ _AMBIENT_VARS = (
     # and the cells would keep passing while testing a window nothing ships.
     "LOP_UPDATE_LOCK_S",
     "LOP_UPDATE_LOCK_HEARTBEAT_S",
+    # The runtime standby's own off switch (`session/runtime/standby.py`,
+    # ``DISABLE_ENV``), which the suite SETS for the processes it starts
+    # (``_PROCESS_DESKTOP_GATES`` below) and must therefore also SCRUB. An
+    # inherited value is the escape-hatch class this list exists for: every cell
+    # that drives a warming point would take the disabled path while still
+    # looking like it tested the feature. The standby's own tests clear it for the
+    # children they explicitly want to warm.
+    "LOP_RUNTIME_STANDBY_DISABLED",
     # The marker the desktop app injects into a console surface's environment
     # (design ui-console-tab §6.5), read by ``local_operator/terminals.py``'s
     # ``is_local_operator_console`` and therefore by
@@ -283,6 +297,15 @@ _AMBIENT_VARS = (
 _PROCESS_DESKTOP_GATES: tuple[tuple[str, str], ...] = (
     ("LOCAL_OPERATOR_NO_NOTIFICATIONS", "1"),
     ("LOCAL_OPERATOR_NO_DESKTOP_LAUNCH", "1"),
+    # The runtime standby (``session/runtime/standby.py``) is an interpreter the
+    # warming console FORKS and holds a private descriptor to: it is a child of
+    # that host, publishes nothing until it is adopted, and exits the instant the
+    # host's end of the channel closes. The suite drives ``cli.main()`` for
+    # ``serve`` and the TUI launch, which are the two warming points, and a run
+    # without this switch left real standbys running under roots the suite had
+    # already deleted (measured on the branch that introduced them). The
+    # standby's own tests clear it for the processes they start and reap.
+    ("LOP_RUNTIME_STANDBY_DISABLED", "1"),
 )
 
 
@@ -433,6 +456,17 @@ def isolate_environment(tmp_path_factory, monkeypatch):
     # specifically exercises the launch ladder clears this (the visible,
     # deliberate opt-in, as with the line above).
     monkeypatch.setenv("LOCAL_OPERATOR_NO_DESKTOP_LAUNCH", "1")
+    # ...AND RE-ASSERT EVERY PROCESS-WIDE GATE, because the scrub above UNSETS the
+    # ones that are also in ``_AMBIENT_VARS``. A name can legitimately be in both
+    # lists and two of them now are (``LOCAL_OPERATOR_NO_DESKTOP_LAUNCH`` and
+    # ``LOP_RUNTIME_STANDBY_DISABLED``): the ambient list scrubs an inherited value
+    # so the suite cannot be steered by the developer's shell, and this loop then
+    # puts the SUITE's value back for the test, which is the state every cell is
+    # written against. Doing it through ``monkeypatch`` is what makes it a
+    # restore: a test that deliberately clears a gate cannot leave the rest of the
+    # worker un-gated.
+    for name, value in _PROCESS_DESKTOP_GATES:
+        monkeypatch.setenv(name, value)
     yield home
 
 

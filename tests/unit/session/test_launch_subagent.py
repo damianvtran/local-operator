@@ -1463,9 +1463,11 @@ async def test_a_non_delegating_role_loses_delegation_at_every_depth(tmp_path, m
     )
 
     names = {tool.name for tool in child._tools}
-    assert names.isdisjoint({"task", "wait", "wake"})
-    # ...but it can observe/cancel its OWN background job.
-    assert "jobs" in names
+    assert names.isdisjoint({"task", "wake"})
+    # ...but it can observe/cancel/block on its OWN background job. ``wait`` is
+    # the blocking primitive a hub note can interrupt; without it the child
+    # polled with a foreground ``sleep`` no note could reach.
+    assert {"jobs", "wait"} <= names
     assert {"bash", "read", "edit", "write"} <= names
     await child.dispose()
     await parent.dispose()
@@ -1852,6 +1854,7 @@ async def test_a_tool_restricted_role_keeps_hub_so_it_can_answer(tmp_path, monke
         "todo",
         "hub",
         "jobs",
+        "wait",
         # Floored in regardless of what the allowlist names — see
         # ``test_a_stale_role_allowlist_still_gets_the_network_floor``.
         "web_search",
@@ -1864,7 +1867,10 @@ async def test_a_tool_restricted_role_keeps_hub_so_it_can_answer(tmp_path, monke
     assert "jobs" in names
     # The boundary itself is intact: nothing the allowlist denies survived,
     # and a role that must not fan out still has no spawn/persist tools.
-    assert {"edit", "write", "eval", "task", "wait", "wake"}.isdisjoint(names)
+    assert {"edit", "write", "eval", "task", "wake"}.isdisjoint(names)
+    # ``wait`` rides with ``jobs``: it blocks on the child's own background job
+    # and wakes on a hub note, which a foreground ``sleep`` cannot.
+    assert "wait" in names
     await child.dispose()
     await parent.dispose()
 
@@ -1980,8 +1986,8 @@ async def test_non_delegating_role_keeps_jobs_to_poll_its_background_bash(tmp_pa
 
     names = {tool.name for tool in child._tools}
     assert "bash" in names
-    assert "jobs" in names
-    assert {"task", "wait", "wake"}.isdisjoint(names)
+    assert {"jobs", "wait"} <= names
+    assert {"task", "wake"}.isdisjoint(names)
     await child.dispose()
     await parent.dispose()
 

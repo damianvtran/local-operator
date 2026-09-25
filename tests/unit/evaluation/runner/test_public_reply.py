@@ -24,6 +24,7 @@ from local_operator.evaluation.evidence.models import (
     ActionBatchPayload,
     ModelRequestPayload,
     ModelResponsePayload,
+    ReplyTolerancePayload,
     canonical_digest,
 )
 from local_operator.evaluation.evidence.verify import verify_bundle
@@ -38,6 +39,7 @@ from local_operator.evaluation.runner.provider_client import (
     DecisionParseError,
     _ContextBuilder,
     build_system_prompt,
+    classify_rejection,
     parse_decision,
 )
 from local_operator.evaluation.runner.public_reply import (
@@ -148,6 +150,8 @@ def _changed(change: str, raw: str, current: Any) -> str:
         value["action_batch"]["public_observations"] = value.pop("public_observations")
     elif change == "extra-top-level-key":
         value["thinking"] = "ignored"
+    elif change == "leading-prose":
+        return "commentary " + json.dumps(value)
     elif change == "extra-batch-key":
         value["action_batch"]["episode_id"] = "another-episode"
     elif change == "hoisted-batch":
@@ -185,11 +189,21 @@ def _refused(change: str, raw: str, current: Any) -> str:
         return raw[:-6]
     if change == "extra-action-key":
         # An action-level defect, which stays refused: the envelope around it
-        # being tolerated says nothing about the actions inside it.
-        value["action_batch"]["actions"][0]["x"] = 1
+        # being tolerated says nothing about the actions inside it, and the
+        # SIBLING-field tolerance does not reach a name no action kind declares.
+        # This row used to put ``x`` on a ``type`` action, which the sibling rule
+        # now drops; the field below is deliberately outside the vocabulary, and
+        # a near-miss of a real field is pinned beside it in
+        # ``test_the_field_tolerance_stops_at_the_vocabulary``.
+        value["action_batch"]["actions"][0]["frobnicate"] = 1
         return json.dumps(value)
-    if change == "leading-prose":
-        return "commentary " + raw
+    if change == "decoy-batch-in-preamble":
+        # The shape that REPLACED it as a refusal: a preamble carrying a second
+        # decision-shaped object, so which one the model meant is a question
+        # about meaning. One of the two binds another observation, which the
+        # competing-batch rule cannot see -- the ambiguity is about which object
+        # is the decision, not about which observation it names.
+        return "commentary " + raw + " " + type_payload(observation(1))
     if change == "stale-observation-binding":
         value["action_batch"] = json.loads(type_payload(observation(1)))
         return json.dumps(value)
@@ -513,7 +527,7 @@ def test_the_string_tolerance_adds_nothing_to_an_already_well_formed_reply(
         "duplicate-action",
         "duplicate-version",
         "trailing-competing-batch",
-        "leading-prose",
+        "decoy-batch-in-preamble",
         "stale-observation-binding",
     ],
 )
@@ -522,14 +536,15 @@ def test_ambiguity_and_broken_input_still_cost_the_turn(change: str) -> None:
 
     Two action arrays that could each be the decision, a batch object that
     carries none, duplicated JSON keys, a second batch for the same observation,
-    a preamble before the object (skipping to the first ``{`` can execute a
-    batch the model never sent), and a batch bound to another observation are
-    all still refused. Widening what counts as framing was never allowed to
-    widen what counts as a decision.
+    a preamble carrying a decoy batch (an object the model may or may not have
+    meant as its answer), and a batch bound to another observation are all still
+    refused. Widening what counts as framing was never allowed to widen what
+    counts as a decision.
 
-    The leading-prose case is why the trailing-text tolerance stays ONE-SIDED:
-    it is the same measured rule the legacy decoder has always had, not a new
-    leniency.
+    The decoy case is what keeps the leading tolerance honest: the hunt for the
+    object behind a preamble counts DECISIONS, not braces, and reads the reply
+    only when exactly one exists. A single-brace skip would execute the decoy,
+    and a "first batch wins" rule would execute a batch the model superseded.
     """
 
     current = observation()
@@ -903,7 +918,10 @@ async def test_an_episode_runs_on_wrapper_framed_replies(tmp_path: Path, episode
             )
         return _wrapped(wrappers[(calls - 1) % len(wrappers)], envelope(raw, note))
 
-    config = build_config(tmp_path)
+    # Control arm: the subject here is the reply WRAPPERS a real provider emits, so the episode
+    # runs without the completion gate's own extra cycle (covered by
+    # tests/unit/evaluation/runner/test_completion_gate.py).
+    config = build_config(tmp_path, completion_gate=False)
     stream = RecordingStream(reply)
     client = _client(stream, config.artifact_root)
     runner = EpisodeRunner(
@@ -932,6 +950,87 @@ async def test_an_episode_runs_on_wrapper_framed_replies(tmp_path: Path, episode
     batches = payloads(root, ActionBatchPayload)
     batch = json.loads((root / "artifacts" / batches[0].action_artifact.sha256).read_text())
     assert batch["actions"] == json.loads(recorded)["actions"]
+
+
+@pytest.mark.asyncio
+async def test_a_tolerated_reply_reaches_the_bundle_with_its_counts(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """Both tolerances' rates are readable from a SEALED, verified bundle.
+
+    Why this is a bundle test and not one more unit assertion on the decision: a
+    reply the tolerance RECOVERS produces no rejection artifact, so without a
+    record the class left the bundle the moment the tolerance started working --
+    which is exactly when a campaign needs to know whether the model is still
+    confused. The first reply needs BOTH tolerances at once (a decision behind a
+    preamble, and ``frame_id`` on a kind that does not take it); the second needs
+    neither, so its ABSENCE is a measurement rather than a gap.
+
+    The record is its own event kind, not fields of the response, and the
+    ``verify_bundle`` above is the reason: a field added to a payload model that
+    already has sealed events moves every one of those events' ids. What makes
+    this test load-bearing is that it asserts the tolerant reply's counts AND
+    that the tolerant-free reply contributes no record at all -- a reader
+    computing the recovered rate divides these by the ``model_response`` count.
+    """
+
+    preamble = "Working out where to wait.\n"
+    note = "Visible status: tolerated and still carried"
+    calls = 0
+
+    def reply(message: Message) -> str:
+        nonlocal calls
+        calls += 1
+        raw = _wait_reply(message)
+        if calls == 1:
+            batch = json.loads(raw)
+            batch["actions"][0]["frame_id"] = "screen"
+            return preamble + envelope(json.dumps(batch), note)
+        oid = json.loads(raw)["actions"][0]["observation_id"]
+        return envelope(
+            json.dumps(
+                {
+                    "actions": [
+                        {
+                            "kind": "finish",
+                            "observation_id": oid,
+                            "status": "done",
+                            "reason": "complete",
+                        }
+                    ]
+                }
+            ),
+            note,
+        )
+
+    # Control arm: the subject here is the tolerance counts a reply's framing costs, so the episode
+    # runs without the completion gate's own extra cycle (covered by
+    # tests/unit/evaluation/runner/test_completion_gate.py).
+    config = build_config(tmp_path, completion_gate=False)
+    stream = RecordingStream(reply)
+    client = _client(stream, config.artifact_root)
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        config,
+        selector=selector(tmp_path),
+        model=client,
+        launch=lambda _: FakeAdapter(tmp_path, episode_id),
+        rescue=_rescue_ok,
+        redactions=RedactionSet.from_resolved_values([]),
+    )
+    outcome = await runner.run()
+
+    assert outcome.status == "completed"
+    root = outcome.bundle_root
+    assert root is not None
+    assert verify_bundle(root).valid
+    responses = payloads(root, ModelResponsePayload)
+    tolerances = payloads(root, ReplyTolerancePayload)
+    # Exactly one record, on the reply that needed a tolerance, keyed to that
+    # attempt; the reply that needed neither seals nothing.
+    assert [record.request_id for record in tolerances] == [responses[0].request_id]
+    assert tolerances[0].leading_framing_bytes == len(preamble.encode("utf-8"))
+    assert tolerances[0].tolerated_action_fields == 1
 
 
 def test_an_unsafe_reply_degrades_without_losing_the_rejection() -> None:
@@ -1188,7 +1287,10 @@ async def test_real_provider_runner_records_and_replays_public_evidence(
             )
         return envelope(raw, note if calls == 1 else "")
 
-    config = build_config(tmp_path)
+    # Control arm: the subject here is which public evidence is replayed, so
+    # the episode runs without the completion gate's own extra cycle (covered
+    # by tests/unit/evaluation/runner/test_completion_gate.py).
+    config = build_config(tmp_path, completion_gate=False)
     stream = RecordingStream(reply)
     client = _client(stream, config.artifact_root)
     runner = EpisodeRunner(
@@ -1431,7 +1533,7 @@ _MEASURED_REJECTION_CLASSES = [
     ("batch-shape", "tool_name-parameters", True),
     ("batch-shape", "input-object", True),
     ("observation-binding", "stale-observation-binding", False),
-    ("leading-delimiter", "leading-prose", False),
+    ("leading-delimiter", "leading-prose", True),
     ("other", "wrong-version", True),
     ("other", "extra-action-key", False),
 ]
@@ -1450,15 +1552,14 @@ def test_each_measured_rejection_class_after_the_contract_change(
     A reply is judged on its ACTIONS. Every class whose payload was already a
     complete, executable decision now decodes -- the missing or wrong or nested
     ``reply_version``, the notes key below instead of above, the envelope inside
-    a generic tool-call wrapper, a complete envelope followed by text, and a
-    version literal this harness does not serve. Two classes still refuse, and
-    both are deliberate: ``observation-binding``, because a decision about a
+    a generic tool-call wrapper, a complete envelope followed by text, a version
+    literal this harness does not serve, and a preamble in front of the object
+    when the reply carries exactly one decision. One class still refuses for a
+    reason about meaning -- ``observation-binding``, because a decision about a
     screen the environment has moved past is the one failure worse than losing
-    the turn, and ``leading-delimiter``, because the trailing-text tolerance has
-    only ever run forwards (skipping to the first ``{`` can execute a batch the
-    model never sent). The malformed and action-level defects are pinned as
-    still-refused rows beside them, so a tolerance that quietly widened would
-    fail here rather than in a paid run.
+    the turn -- and the malformed and action-level defects are pinned as
+    still-refused rows beside it, so a tolerance that quietly widened would fail
+    here rather than in a paid run.
     """
 
     current = observation()
@@ -1475,3 +1576,93 @@ def test_each_measured_rejection_class_after_the_contract_change(
     else:
         with pytest.raises(DecisionParseError):
             parse_decision(payload, current, route=ROUTE)
+
+
+# ---------------------------------------------------------------------------
+# An action's own framing: a field belonging to a SIBLING action kind
+# ---------------------------------------------------------------------------
+#
+# The measured defect these pin: a model that puts ``frame_id`` on a ``wait``, or
+# ``duration_ms`` on a ``click``, states a complete decision -- the ``kind`` tag
+# is required and explicit -- and the whole batch used to be refused for it.
+# 46 of the 145 decision-rejections counted over the arm-0625 episodes were
+# exactly this, each one a billed corrective round trip.
+
+
+def test_a_sibling_field_is_dropped_and_the_rest_of_the_action_stands(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The action is judged on its DECLARED kind, and the drop is reported.
+
+    Tolerated is not the same as silent: the log line is the only record a
+    campaign can count the tolerance against, so the field is named
+    ``kind.field`` -- which kind received it and which kind it belongs to -- out
+    of the vocabulary rather than out of model text.
+    """
+
+    current = observation()
+    payload = json.dumps(
+        {
+            "actions": [
+                {
+                    "kind": "wait",
+                    "observation_id": current.observation_id,
+                    "duration_ms": 800,
+                    "frame_id": "screen",
+                }
+            ]
+        }
+    )
+
+    with caplog.at_level(logging.WARNING):
+        decision = parse_decision(payload, current, route=ROUTE)
+
+    (action,) = decision.action_batch.actions
+    assert action.kind == "wait"
+    assert action.duration_ms == 800
+    assert "wait.frame_id" in caplog.text
+
+
+def test_a_field_no_kind_declares_is_still_refused() -> None:
+    """The drop is bounded by the VOCABULARY, not by "unknown key, carry on".
+
+    A name no action kind declares is not readable as anything, so dropping it
+    would guess at what the model meant -- and a near-miss of a real field is
+    exactly the mistake that must stay loud.
+    """
+
+    current = observation()
+    payload = json.dumps(
+        {
+            "actions": [
+                {
+                    "kind": "wait",
+                    "observation_id": current.observation_id,
+                    "duration_ms": 800,
+                    "duration": 900,
+                }
+            ]
+        }
+    )
+
+    with pytest.raises(DecisionParseError) as info:
+        parse_decision(payload, current, route=ROUTE)
+
+    assert classify_rejection(str(info.value)) == "extra-action-key"
+
+
+def test_a_decision_behind_leading_junk_keeps_its_own_validation_class() -> None:
+    """The two tolerances compose without widening what counts as a decision.
+
+    A preamble in front of a batch whose actions name another observation is not
+    rescued by either one: the object is located (framing), and then refused for
+    the binding it states (meaning), with the class that defect earns.
+    """
+
+    current = observation()
+    stale = _full_envelope(observation(1), "older turn")
+
+    with pytest.raises(DecisionParseError) as info:
+        parse_decision("commentary " + stale, current, route=ROUTE)
+
+    assert classify_rejection(str(info.value)) == "observation-binding"

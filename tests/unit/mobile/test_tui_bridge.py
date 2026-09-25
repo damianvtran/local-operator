@@ -76,6 +76,62 @@ async def test_tui_same_id_concurrent_steers_cross_thread_once() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tui_a_refused_prompt_retried_as_a_prompt_is_really_admitted() -> None:
+    """QA on PR #1528, Q1-5, on the TUI-hosted handle.
+
+    A prompt the owner refused with ``TurnInFlight`` used to leave its id parked
+    as ``prompt-transfer``, so the same id retried as a PROMPT — what the phone
+    and the desktop's receipt journal send after a failed attempt — answered
+    "already admitted" and reached no transcript. The retry must reach the
+    session and its receipt must be the real admission.
+    """
+    from local_operator.session.errors import TURN_IN_FLIGHT, TurnInFlight
+
+    class Session(FakeSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attempts: list[str] = []
+
+        async def prompt(  # type: ignore[override]  # noqa: ANN001, ANN201
+            self, text, images=None, *, message_id=None, admitted=None
+        ):
+            self.attempts.append(text)
+            if len(self.attempts) == 1:
+                raise TurnInFlight(TURN_IN_FLIGHT)
+            assert admitted is not None
+            self._history = [Message.user(text, id=message_id)]
+            admitted.set_result(None)
+
+    class App:
+        """Runs hops ON the loop thread, as Textual does (see the aside test)."""
+
+        def __init__(self, session) -> None:  # noqa: ANN001
+            self._session = session
+            self._loop = asyncio.get_running_loop()
+
+        def call_from_thread(self, callback) -> None:  # noqa: ANN001
+            done = threading.Event()
+
+            def run() -> None:
+                try:
+                    callback()
+                finally:
+                    done.set()
+
+            self._loop.call_soon_threadsafe(run)
+            assert done.wait(timeout=5.0), "the app loop never ran the hop"
+
+    session = Session()
+    handle = TuiSessionHandle(App(session))  # type: ignore[arg-type]
+    with pytest.raises(TurnInFlight):
+        await handle.prompt("raced", command_id="retried-id")
+    assert await handle.prompt("raced", command_id="retried-id") == "prompt admitted"
+    assert session.attempts == ["raced", "raced"], "the retry never reached the session"
+    assert await handle.prompt("raced", command_id="retried-id") == "already admitted"
+    assert session.attempts == ["raced", "raced"]
+
+
+@pytest.mark.asyncio
 async def test_tui_stalled_steers_apply_owner_loop_backpressure() -> None:
     class Session(FakeSession):
         def __init__(self) -> None:
@@ -193,6 +249,10 @@ async def test_nested_child_detail_events_refresh_after_warm(monkeypatch) -> Non
 
         def roster(self):  # noqa: ANN201
             return []
+
+        def lifecycles(self):  # noqa: ANN201
+            # The per-event read ``set_subagent_details`` makes.
+            return {}
 
         def nodes(self):  # noqa: ANN201
             return [self.child]
@@ -1006,3 +1066,190 @@ async def test_a_phone_shaped_slash_op_runs_its_commands_and_refuses_the_rest() 
     local_images = await handle.slash_images("move", "abc --to evil", None, locality="local")
     assert local_images == "ran /move abc --to evil", local_images
     assert ran == ["/move abc --to evil"], ran
+
+
+class _IdentitySession(FakeSession):
+    """A fake whose id, title and model differ per instance, as a ``/new`` or
+    ``/resume`` target's do; ``FakeSession`` pins all three."""
+
+    def __init__(self, session_id: str, title: str, model: str) -> None:
+        super().__init__()
+        self._sid = session_id
+        self._title = title
+        self._model = model
+
+    @property
+    def session_id(self) -> str:
+        return self._sid
+
+    @property
+    def conversation_name(self) -> str:
+        return self._title
+
+    @property
+    def model_label(self) -> str:
+        return self._model
+
+    @property
+    def effective_model_label(self) -> str:
+        return self._model
+
+
+class _SwapApp:
+    def __init__(self, session: Any) -> None:
+        self._session = session
+
+    def call_from_thread(self, callback: Any) -> None:
+        callback()
+
+
+async def _record_after(server: Any, want: tuple[str, str, str], seconds: float = 3.0) -> Any:
+    """Poll the PUBLISHED record (what `lop sessions` scans) until it reads
+    ``want`` or the deadline passes — far inside the 15 s heartbeat."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + seconds
+    record: dict[str, Any] = {}
+    while loop.time() < deadline:
+        record = json.loads(server.record_path.read_text())
+        if (record["session_id"], record["conversation_name"], record["model_label"]) == want:
+            break
+        await asyncio.sleep(0.02)
+    return (record["session_id"], record["conversation_name"], record["model_label"])
+
+
+@pytest.mark.asyncio
+async def test_new_after_a_named_conversation_drops_the_old_title_from_the_record() -> None:
+    """QA Q3 (#1555). ``rebind`` reset the id but not the title, and
+    ``_refresh_state`` skips an empty title, so after ``/new`` on a TUI host the
+    record paired the NEW id with the OLD conversation's name — forever, since
+    every writer copies from that projection."""
+    from local_operator.session.runtime.server import RuntimeServer
+
+    named = _IdentitySession("synthnamed01", "triage the flaky shard", "test/model")
+    app = _SwapApp(named)
+    handle = TuiSessionHandle(app)  # type: ignore[arg-type]
+    server = RuntimeServer(handle, kind="tui")
+    await server.start_in_process()
+    try:
+        assert await _record_after(
+            server, ("synthnamed01", "triage the flaky shard", "test/model")
+        ) == ("synthnamed01", "triage the flaky shard", "test/model")
+
+        app._session = _IdentitySession("synthfresh01", "", "test/model")
+        handle.rebind()
+
+        assert handle.session_projection_seed.conversation_name == ""
+        assert await _record_after(server, ("synthfresh01", "", "test/model")) == (
+            "synthfresh01",
+            "",
+            "test/model",
+        )
+    finally:
+        await server.aclose()
+
+
+@pytest.mark.asyncio
+async def test_an_idle_resume_reaches_the_record_without_waiting_for_the_heartbeat() -> None:
+    """QA Q4 (#1555). An idle ``/resume`` emits no session event, so nothing
+    pushed and the record carried the previous conversation's identity until
+    the 15 s heartbeat. ``rebind`` now nudges the push tick itself; the poll
+    bound is 3 s and nothing else happens in between."""
+    from local_operator.session.runtime.server import RuntimeServer
+
+    first = _IdentitySession("synthfirst01", "first", "test/model")
+    app = _SwapApp(first)
+    handle = TuiSessionHandle(app)  # type: ignore[arg-type]
+    server = RuntimeServer(handle, kind="tui")
+    await server.start_in_process()
+    try:
+        await _record_after(server, ("synthfirst01", "first", "test/model"))
+
+        app._session = _IdentitySession("synthresum01", "the resumed one", "deepseek/flash")
+        handle.rebind()
+
+        assert await _record_after(
+            server, ("synthresum01", "the resumed one", "deepseek/flash")
+        ) == ("synthresum01", "the resumed one", "deepseek/flash")
+    finally:
+        await server.aclose()
+
+
+def test_rebind_carries_the_model_on_a_host_without_a_projection_subscription() -> None:
+    """Review R3-2 (#1555). On every attached host ``subscribe()`` →
+    ``_refresh_state()`` also writes the new model, which hid the ``rebind``
+    reset behind it. A handle nobody subscribed to (no registrant yet, or one
+    torn down) must still describe the NEW session, not the old one's model."""
+    app = _SwapApp(_IdentitySession("synthfirst01", "first", "test/model"))
+    handle = TuiSessionHandle(app)  # type: ignore[arg-type]
+    assert handle._on_projection is None, "the case under test is the unsubscribed host"
+
+    app._session = _IdentitySession("synthresum01", "the resumed one", "deepseek/flash")
+    handle.rebind()
+
+    seed = handle.session_projection_seed
+    assert (seed.session_id, seed.conversation_name, seed.model_label) == (
+        "synthresum01",
+        "the resumed one",
+        "deepseek/flash",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_rebind_during_an_in_flight_push_is_owed_a_follow_up_push() -> None:
+    """Review R3-1 (#1555). ``_push_soon`` returned early while a push was in
+    flight, so a ``rebind`` nudge landing after that push had already read the
+    identity was dropped — and on an idle session nothing else ever pushed, so
+    the record waited for the 15 s heartbeat.
+
+    Structural, no clock: the in-flight push is PARKED in its send (a recipient
+    exists, as a phone or daemon would be), the rebind lands, the send is
+    released, and the test then joins every push the server schedules. On the
+    unfixed tree the chain ends after the first push with the OLD identity."""
+    from local_operator.session.runtime.server import RuntimeServer
+
+    app = _SwapApp(_IdentitySession("synthfirst01", "first", "test/model"))
+    handle = TuiSessionHandle(app)  # type: ignore[arg-type]
+    server = RuntimeServer(handle, kind="tui")
+    await server.start_in_process()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def parked_send(_conn: Any, _frame: Any) -> None:
+        entered.set()
+        await release.wait()
+
+    try:
+        # One projection consumer, so ``_push`` goes past the no-recipients
+        # return and holds the push open in its send.
+        server._projection_recipients = lambda: [object()]  # type: ignore[method-assign]
+        server._projection_frame = lambda _conn, ordinary: ordinary  # type: ignore[method-assign]
+        server._send_to = parked_send  # type: ignore[method-assign]
+
+        server._schedule_push()
+        await asyncio.wait_for(entered.wait(), 10)
+        assert server._push_scheduled, "the first push must still be in flight"
+
+        app._session = _IdentitySession("synthresum01", "the resumed one", "deepseek/flash")
+        handle.rebind()  # the nudge: _schedule_push -> call_soon_threadsafe(_push_soon)
+        for _ in range(50):  # loop turns, not seconds: the hop is one callback
+            if server._push_dirty:
+                break
+            await asyncio.sleep(0)
+        assert server._push_dirty, "the nudge was dropped instead of marked"
+
+        release.set()
+        # Join the whole push chain the server itself schedules.
+        while server._push_task is not None and not server._push_task.done():
+            await asyncio.wait_for(asyncio.shield(server._push_task), 10)
+            await asyncio.sleep(0)  # let a follow-up's create_task land
+
+        record = json.loads(server.record_path.read_text())
+        assert (record["session_id"], record["conversation_name"], record["model_label"]) == (
+            "synthresum01",
+            "the resumed one",
+            "deepseek/flash",
+        )
+        assert not server._push_dirty and not server._push_scheduled
+    finally:
+        release.set()
+        await server.aclose()

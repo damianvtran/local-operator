@@ -150,6 +150,38 @@ def _wait_for_health(client: Any, url: str, proc: subprocess.Popen[bytes]) -> No
     raise SystemExit("server never answered /health")
 
 
+def _standby_children(daemon_pid: int) -> list[int]:
+    """This daemon's live ``[standby]`` children, by exact pid.
+
+    THE READINESS OF THE DAEMON'S STANDBY IS DELIBERATELY UNOBSERVABLE FROM
+    OUTSIDE, so this arm reports EVERY run and labels the first one. The daemon's
+    standby is reached over a socketpair the daemon forked: the previous revision
+    announced readiness with a file in the rooted store, and a path a reader can
+    inspect is a path a same-uid impostor can bind (review round 1, R1-1). What is
+    observable is that the child EXISTS; whether its warm has finished decides
+    whether the send that arrives now is adopted or appended to a cold spawn, and
+    the per-run numbers show which happened.
+    """
+    from local_operator.session.runtime import standby
+
+    # Same trap, same fix as ``bench_standby_engage._standby_child`` (round 8, R8-1):
+    # procps truncates ``command`` at the terminal width, so on Linux this recorded
+    # ``standby_children: 0`` as a MEASUREMENT and reaped nothing — a dead instrument
+    # returning a plausible zero. ``-eww`` for the width, ``-m <module>`` for the shape.
+    out = subprocess.run(
+        ["ps", "-eww", "-o", "pid=,ppid=,command="], capture_output=True, text=True
+    )
+    found: list[int] = []
+    for line in out.stdout.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) < 3:
+            continue
+        pid, ppid, command = fields
+        if int(ppid) == daemon_pid and f"-m {standby.STANDBY_MODULE}" in command:
+            found.append(int(pid))
+    return sorted(found)
+
+
 def _kill_runtime(config_dir: Path, session_id: str) -> None:
     """Kill the runtime this session spawned, so runs stay independent.
 
@@ -303,6 +335,34 @@ def main() -> int:
             "refused when they disagree (review round 2, R2-1)"
         ),
     )
+    parser.add_argument(
+        "--standby",
+        choices=("off", "on"),
+        default="off",
+        help=(
+            "off: LOP_RUNTIME_STANDBY_DISABLED=1, the fork+import cold spawn. on: the "
+            "daemon keeps its pre-imported standby (session/runtime/standby.py). "
+            "EVERY run is reported and NOTHING waits for the warm: a send that "
+            "arrives before the standby is warm takes the cold path, which is the "
+            "run-1 the operator actually gets after a boot — read the runs after "
+            "that as the steady state"
+        ),
+    )
+    parser.add_argument(
+        "--warm-wait",
+        type=float,
+        default=0.0,
+        help=(
+            "seconds to wait after the daemon starts, before the first timed send "
+            "(default 0: no wait). The standby's readiness is not observable from "
+            "another process by design, so this is the only honest way to ask for "
+            "the steady state, and the number is only meaningful when it exceeds "
+            "the warm measured on this host (51.4 s at load ~120, and "
+            "bench_standby_engage.py reports it per pass). With 0 the timed sends "
+            "race the warm and the first one is the cold send the operator gets "
+            "after a boot"
+        ),
+    )
     args = parser.parse_args()
     # Refuse BEFORE measuring (and the fields are re-derived at the end, so a
     # subtree that moved under the run is caught too): a campaign that records a
@@ -325,7 +385,10 @@ def main() -> int:
     port = _free_port()
     base = f"http://127.0.0.1:{port}"
 
-    saved = {k: os.environ.get(k) for k in ("HOME", "LOCAL_OPERATOR_CONFIG_DIR", "PYTHONPATH")}
+    saved = {
+        k: os.environ.get(k)
+        for k in ("HOME", "LOCAL_OPERATOR_CONFIG_DIR", "PYTHONPATH", "LOP_RUNTIME_STANDBY_DISABLED")
+    }
     _strip_inherited()
     # The daemon below (``lop serve``) is the process whose machine-wide feed
     # raises desktop banners, and this rig drives a real send through it.
@@ -334,6 +397,8 @@ def main() -> int:
     os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(config_dir)
     os.environ["LOCAL_OPERATOR_DESKTOP_TOKEN"] = token
     os.environ.pop("LOCAL_OPERATOR_DESKTOP_ORIGINS", None)
+    if args.standby == "off":
+        os.environ["LOP_RUNTIME_STANDBY_DISABLED"] = "1"
     os.environ["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
 
     server_log = root / "serve.log"
@@ -360,8 +425,16 @@ def main() -> int:
             with httpx.Client(base_url=base, headers=headers, timeout=300.0) as client:
                 _wait_for_health(client, base, proc)
                 print(f"  server up on {base} (pid {proc.pid})", flush=True)
+                if args.warm_wait:
+                    print(
+                        f"  waiting {args.warm_wait:.0f} s for the daemon's standby "
+                        f"to warm (children now: {_standby_children(proc.pid)})",
+                        flush=True,
+                    )
+                    time.sleep(args.warm_wait)
                 for index in range(args.runs):
                     row = _one_run(client, base, workspace, config_dir, index, args.mcp_variant)
+                    row["standby_children"] = _standby_children(proc.pid)
                     rows.append(row)
                     print(
                         f"  run {index + 1}/{args.runs}: first send = "
@@ -371,6 +444,19 @@ def main() -> int:
                         flush=True,
                     )
     finally:
+        # The daemon's standby is a detached process of its own (a standby must
+        # outlive the host that warmed it), so it is ended here by exact pid: the
+        # holder of THIS root's standby lock, which no other process can hold.
+        # The daemon's standby is a detached child of the daemon, and it exits on
+        # its own when the daemon's end of the private channel closes - so ending
+        # the daemon is most of the reaping. The rest is by exact pid, taken from
+        # the daemon's own child list while it is still alive.
+        if proc is not None and proc.poll() is None:
+            for pid in _standby_children(proc.pid):
+                try:
+                    os.kill(pid, 15)
+                except OSError:
+                    pass
         if proc is not None and proc.poll() is None:
             proc.terminate()
             try:
@@ -391,8 +477,15 @@ def main() -> int:
     stats["worktree_head"] = tree["worktree_head"]
     stats["measured_tree_verified"] = tree["verified"]
     stats["label"] = args.label
+    stats["standby"] = args.standby
     print("\n--- first POST /messages wall time (ms) ---")
-    print(f"  mcp variant: {args.mcp_variant}")
+    print(f"  mcp variant: {args.mcp_variant}  standby: {args.standby}")
+    if args.standby == "on":
+        print(
+            "  every run is reported: a send that arrives before the daemon's standby\n"
+            "  finishes warming takes the cold path, and the per-run numbers are what\n"
+            "  shows it (readiness is not externally observable by design)."
+        )
     print(bench_tree.format_banner(tree))
     if args.label:
         print(f"  label: {args.label}")

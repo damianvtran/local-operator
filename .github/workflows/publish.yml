@@ -182,12 +182,254 @@ jobs:
           name: release-dists
           path: dist/
 
+  # ---------------------------------------------------------------------------
+  # The macOS key agent: build it, sign it, and retag the wheel around it.
+  #
+  # WHY THIS CANNOT BE DONE ON THE UBUNTU RUNNER. `lop-keyagent.app` is the only
+  # process that can touch the Secure Enclave operator key, and it is worth
+  # nothing unless it is signed with the Developer ID identity AND carries an
+  # embedded provisioning profile. Measured on macOS 27.0 with this identity:
+  #
+  #   bare tool, signed, no entitlement            -> errSecMissingEntitlement (-34018)
+  #   bare tool, signed, entitled                  -> -34018
+  #   bundle, entitled, NO embedded profile        -> -34018 (application id only)
+  #   bundle, entitled, no profile, with a
+  #     keychain-access-groups entitlement         -> SIGKILL (137)
+  #   bundle, entitled, profile embedded           -> PASS
+  #
+  # `codesign` does not exist on Linux, and cross-signing with a third-party
+  # Mach-O signer is unmeasured — and unmeasurable in the way that matters, since
+  # the whole claim is that securityd and the kernel accept the result.
+  #
+  # THE RUNNER IS PINNED, deliberately, while the rest of this file tracks
+  # `*-latest`: the signing toolchain (clang, codesign, the SDK, the profile
+  # mechanism) must not move underneath the artefact the entitlement depends on.
+  # Bumping `macos-15` is a deliberate act with a re-measured probe, not a routine
+  # version bump. `macos-15` is arm64, and `-arch arm64 -arch x86_64` in the
+  # assembly script is what makes the result universal2.
+  # ---------------------------------------------------------------------------
+  keyagent-macos:
+    needs:
+      - release-build
+    if: ${{ needs.release-build.result == 'success' && needs.release-build.outputs.skip_build == 'false' }}
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          # Only for the wheel assembly script and the plist comparisons, both
+          # stdlib-only.
+          python-version: "3.12"
+
+      - name: Retrieve the pure wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: release-dists
+          path: dist/
+
+      - name: Import the Developer ID identity into a throwaway keychain
+        env:
+          P12_BASE64: ${{ secrets.MACOS_SIGNING_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # The operator's login keychain is never touched: no `security
+          # default-keychain`, no import into `login.keychain-db`, and the whole
+          # throwaway keychain is deleted in the always() step below.
+          KEYCHAIN="$RUNNER_TEMP/keyagent.keychain-db"
+          KPW="$(uuidgen)"   # random, throwaway, and never a stored secret
+          {
+            echo "KEYCHAIN=$KEYCHAIN"
+            echo "KEYCHAIN_PW=$KPW"
+          } >> "$GITHUB_ENV"
+          security create-keychain -p "$KPW" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KPW" "$KEYCHAIN"
+
+          # 0600 under $RUNNER_TEMP: the p12 is one of the two things that must
+          # never become an artefact (the keychain is the other).
+          umask 077
+          printf '%s' "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/identity.p12"
+          # `security import -P` puts the password in argv, where `ps` on an
+          # ephemeral runner can see it. Recorded as a residual rather than
+          # papered over: there is no stdin form for this flag.
+          security import "$RUNNER_TEMP/identity.p12" -k "$KEYCHAIN" -P "$P12_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security >/dev/null
+          # Without the partition list the identity imports and `codesign` still
+          # cannot use it.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KPW" "$KEYCHAIN" >/dev/null 2>&1
+
+          # The G2 intermediate, fetched in-job (it is public). Without it the
+          # identity imports but is not VALID: `find-identity -v` reports none and
+          # codesign cannot build the chain. Pinned by hash, so a substituted or
+          # re-issued certificate is a loud failure rather than a signature nobody
+          # can verify; a genuine Apple re-issue means updating this line.
+          curl -fsSL https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer \
+            -o "$RUNNER_TEMP/DeveloperIDG2CA.cer"
+          echo "f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a  $RUNNER_TEMP/DeveloperIDG2CA.cer" \
+            | shasum -a 256 -c -
+          security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -k "$KEYCHAIN" -T /usr/bin/codesign >/dev/null 2>&1
+
+          IDENTITY_SHA="$(security find-identity -v -p codesigning "$KEYCHAIN" | awk 'NR==1 {print $2}')"
+          if [ -z "$IDENTITY_SHA" ]; then
+            echo "::error::no valid code-signing identity in the throwaway keychain"
+            exit 1
+          fi
+          # Addressed by HASH rather than by name, so this workflow does not carry
+          # a person's name and signs with whatever identity the p12 provides —
+          # whose app id the assembly script then checks against the profile and
+          # the entitlements.
+          echo "IDENTITY_SHA=$IDENTITY_SHA" >> "$GITHUB_ENV"
+          security find-identity -v -p codesigning "$KEYCHAIN"
+
+      # THE SIGNATURE MUST CARRY A SECURE TIMESTAMP, AND THE SCRIPT READS IT BACK.
+      # Decision, so it is not re-litigated: the entitlement is checked against the
+      # signature at RUN TIME, so a Developer ID signature with no secure timestamp stops
+      # validating when the certificate expires — for every wheel already installed. The
+      # design document's rotation plan (§8) depends on the opposite, so the timestamp
+      # is cheap here and its absence is not. This is NOT about notarization, which this
+      # landing deliberately does not do (§9). `assemble_keyagent_bundle.sh` therefore signs
+      # with `--timestamp` EXPLICITLY (its default `secure` mode) and asserts a
+      # `Timestamp=` line is present, so an unreachable Apple timestamp authority FAILS
+      # this job rather than shipping an artefact that stops working in 2031. There is no
+      # fallback in this job and no `--timestamp=none`: that mode exists for a local build
+      # on a host that cannot reach the TSA, refuses without a deliberate non-release
+      # override (`LOP_KEYAGENT_ALLOW_UNTIMESTAMPED_BUILD=1`, which this job never sets),
+      # warns loudly, and must never reach a release.
+      #
+      # UNPROVEN, stated rather than implied: this job has never executed — it first runs
+      # on the next release — so timestamp retrieval in CI is unmeasured. Measured locally
+      # on 2026-09-25 with this identity: three fresh universal2 binaries and the assembled
+      # bundle all signed with a real `Timestamp=`, which refutes QA round 2's report that
+      # a universal2 binary could not be timestamped on this host as a property — but its
+      # MECHANISM is deliberately left unstated: three fat-binary failures in a row while
+      # thin binaries succeeded on the same host does not fit a TSA outage, and nothing
+      # further was measured. Only the refutation is claimed, and the check above is what
+      # makes the distinction moot: either way it cannot ship silently.
+      - name: Assemble and sign lop-keyagent.app
+        env:
+          PROFILE_BASE64: ${{ secrets.MACOS_SIGNING_PROFILE_BASE64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s' "$PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/keyagent.provisionprofile"
+          # No --timestamp flag on purpose: the default is `secure`, and step 5c of the
+          # script fails this job if the signature comes back without a timestamp.
+          packaging/macos/assemble_keyagent_bundle.sh \
+            --out "$RUNNER_TEMP/lop-keyagent.app" \
+            --identity "$IDENTITY_SHA" \
+            --keychain "$KEYCHAIN" \
+            --profile "$RUNNER_TEMP/keyagent.provisionprofile"
+
+      - name: The helper's own ownership selftest
+        run: |
+          set -euo pipefail
+          # No keychain, no entitlement, no writes: it asserts the CoreFoundation
+          # ownership model with CFGetRetainCount, against the very constructors
+          # `create` runs. This is the C-side check the design asked to do with
+          # ASan or `leaks` — measured, neither is an instrument on this macOS
+          # (dyld refuses the sanitizer runtime into a signed process, and `leaks`
+          # reports 0 leaks for a binary that leaks 4 KiB on purpose), so the
+          # invariant is asserted directly instead.
+          "$RUNNER_TEMP/lop-keyagent.app/Contents/MacOS/lop-keyagent" selftest \
+            --tag com.local-operator.lopkeyagent.selftest | tee "$RUNNER_TEMP/selftest.json"
+          python3 - "$RUNNER_TEMP/selftest.json" <<'PY'
+          import json, sys
+          report = json.load(open(sys.argv[1]))
+          bad = [c for c in report["checks"] if c["expected"] != c["actual"]]
+          if report["ok"] is not True or bad:
+              raise SystemExit(f"the helper's ownership selftest failed: {bad}")
+          print(f"selftest: {len(report['checks'])} ownership checks agree")
+          PY
+
+      - name: Build the macOS wheel
+        run: |
+          set -euo pipefail
+          python3 packaging/macos/make_macos_wheel.py \
+            --wheel "$(ls dist/local_operator-*-py3-none-any.whl)" \
+            --app "$RUNNER_TEMP/lop-keyagent.app" \
+            --out-dir dist/ | tee "$RUNNER_TEMP/macos-wheel.txt"
+          MACOS_WHEEL="$(cat "$RUNNER_TEMP/macos-wheel.txt")"
+          # Two properties of the SHIPPING artefact, checked on the real wheel
+          # rather than trusted from the script that built it: the bundle is in
+          # there at the path the runtime resolves, and the helper is executable
+          # (a wheel that drops the mode installs cleanly and fails on the
+          # operator's first verb).
+          python3 - "$MACOS_WHEEL" <<'PY'
+          import subprocess, sys, tempfile, zipfile
+          from pathlib import Path
+          path = sys.argv[1]
+          with zipfile.ZipFile(path) as zf:
+              helper = "local_operator/operator/macos/lop-keyagent.app/Contents/MacOS/lop-keyagent"
+              profile = "local_operator/operator/macos/lop-keyagent.app/Contents/embedded.provisionprofile"
+              names = zf.namelist()
+              for wanted in (helper, profile):
+                  if wanted not in names:
+                      raise SystemExit(f"{wanted} is missing from {path}")
+              mode = (zf.getinfo(helper).external_attr >> 16) & 0o777
+              if mode != 0o755:
+                  raise SystemExit(f"the helper installs mode {mode:o}, not 755")
+              # THE ARCHITECTURES, READ FROM THE MACH-O HEADERS OF THE SHIPPING FILE.
+              # The wheel tag says macosx_11_0_universal2 and a tag is not a binary:
+              # `assemble_keyagent_bundle.sh` asserts this on the staged binary, and this
+              # asserts it again on the helper EXTRACTED FROM THE WHEEL, because the thing
+              # an Intel Mac downloads is the wheel and not the staging directory. A
+              # single-arch helper under a universal2 tag installs cleanly and then cannot
+              # execute — the silent downgrade this job exists to prevent.
+              with tempfile.TemporaryDirectory() as scratch:
+                  landed = Path(scratch) / "lop-keyagent"
+                  landed.write_bytes(zf.read(helper))
+                  landed.chmod(0o755)
+                  archs = subprocess.run(
+                      ["lipo", "-archs", str(landed)], capture_output=True, text=True, check=True,
+                  ).stdout.split()
+          for wanted_arch in ("x86_64", "arm64"):
+              if wanted_arch not in archs:
+                  raise SystemExit(
+                      f"the helper in {path} is not universal2: lipo -archs reports {archs}, "
+                      f"which has no {wanted_arch} slice"
+                  )
+          print(f"{path}: bundle present, helper mode 755, universal2 {archs}")
+          PY
+
+      - name: Upload the macOS distribution
+        uses: actions/upload-artifact@v7
+        with:
+          # A separate artefact from the pure one, and only the macOS wheel in it:
+          # `release-dists` already carries the sdist, and re-uploading it would
+          # publish the same file twice.
+          name: release-dists-macos
+          path: dist/local_operator-*-py3-none-macosx_*.whl
+
+      - name: Delete the throwaway keychain and the identity files
+        if: always()
+        run: |
+          # ALWAYS, including on failure: the keychain holds the private key of the
+          # signing identity and must not survive the job, and neither must the
+          # p12 or the decoded profile.
+          security delete-keychain "$KEYCHAIN" >/dev/null 2>&1 || true
+          rm -f "$RUNNER_TEMP/identity.p12" \
+                "$RUNNER_TEMP/keyagent.provisionprofile" \
+                "$RUNNER_TEMP/DeveloperIDG2CA.cer"
+
   pypi-publish:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs:
       - release-build
-    if: ${{ needs.release-build.result == 'success' && needs.release-build.outputs.skip_build == 'false' }}
+      # HARD DEPENDENCY, on purpose: a release that cannot build the signed key
+      # agent must not silently ship a macOS wheel without it. `supported()` is
+      # True on macOS and the operator key's presence tier is what this wheel
+      # carries, so publishing the pure wheel alone would be the silent downgrade
+      # the design forbids — a fork with its own identity and profile substitutes
+      # them (see `packaging/macos/keyagent.entitlements`) rather than skipping.
+      - keyagent-macos
+    if: ${{ needs.release-build.result == 'success' && needs.release-build.outputs.skip_build == 'false' && needs.keyagent-macos.result == 'success' }}
     permissions:
       id-token: write
 
@@ -201,7 +443,39 @@ jobs:
           name: release-dists
           path: dist/
 
+      - name: Retrieve the macOS distribution
+        uses: actions/download-artifact@v8
+        with:
+          name: release-dists-macos
+          path: dist/
+
       - name: Publish release distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
+          # PEP 740 attestations, for every platform rather than only for macOS
+          # users who need the key agent: the pure wheel and the sdist get one
+          # too, so `pip`/`uv` users on Linux and Windows can audit where their
+          # bytes came from.
+          #
+          # ALREADY THE DEFAULT, and set explicitly so that disabling it has to be
+          # a deliberate edit rather than a deletion nobody notices: the action's
+          # own `action.yml` declares `attestations` with `default: 'true'` and
+          # "Only works with PyPI and TestPyPI via Trusted Publishing", and its
+          # README says generating and uploading digital attestations "is now on
+          # by default for all projects using Trusted Publishing". The only
+          # permission it needs is the `id-token: write` above — the attestation
+          # is signed with the SAME OIDC identity that authenticates the upload,
+          # and no `attestations: write` permission appears in the action's
+          # manifest or documentation (checked 2026-09-24).
+          #
+          # HOW A USER VERIFIES A WHEEL'S PROVENANCE: PyPI's file page shows the
+          # attestation, and the Integrity API serves it as JSON —
+          #   curl -sH 'Accept: application/vnd.pypi.integrity.v1+json' \
+          #     https://pypi.org/integrity/local-operator/<version>/<wheel-filename>/provenance
+          # returns a provenance object naming this repository, this workflow and
+          # the commit. Neither pip nor uv verifies attestations at install time
+          # today (uv's PEP 740 verification is an open request,
+          # astral-sh/uv#9122), so this is audit evidence rather than an
+          # install-time guarantee — stated plainly rather than implied.
+          attestations: true

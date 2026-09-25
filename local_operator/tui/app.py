@@ -178,6 +178,7 @@ from local_operator.session.runtime.types import (
 from local_operator.slash_commands import (
     NETWORK_SUBCOMMANDS,
     PERSIST_HINT,
+    SESSION_COPY_FLAG,
     SLASH_COMMANDS,
     network_subcommand_rows,
     primary_slash_name,
@@ -735,9 +736,14 @@ RESTORE_SEAM = "\n\n"
 #: told it was switching to a newer build, when the install had not moved and no
 #: successor was coming. See :data:`SIGNAL_DRAIN_NOTICE` and the ``leaving``
 #: phrase the frame now carries.
+#: The notice's last clause is its OWN SENTENCE rather than a semicolon appendage
+#: (design review round 2, D12): it is the half a skimming operator most needs —
+#: a child reporting in now arrives on the next turn — and appended it landed as
+#: the tail of a sentence already running to three rows at 76 columns.
 DRAIN_NOTICE = (
     "this session is switching to a newer build; it is finishing in-flight work "
-    "first, so a new message will not start a turn until the new build is up"
+    "first, so a new message will not start a turn until the new build is up. A "
+    "child that reports in after this point arrives on the next turn"
 )
 
 #: The same notice for a runtime that was TERMINATED while it had work in flight
@@ -922,6 +928,65 @@ _SUBAGENT_DOCK_ROWS = 10
 #: measurement. Named rather than inlined so the reason survives next to the
 #: number.
 _BAND_SETTLE_PASSES = 3
+
+#: Canonical-state paint spacing (``OperatorApp._on_frontend_update``): the
+#: floor between two paints, the share of the UI loop they may take, and the
+#: longest a non-urgent field may wait. The same shape and numbers #1528 gave the
+#: runtime's own roster tick (``session._frontend_jobs_delay``), for the same
+#: reason one process over: this loop is the one that turns Enter into a bubble.
+_FRONTEND_APPLY_FLOOR_S = 0.05
+_FRONTEND_APPLY_MAX_SHARE = 0.25
+_FRONTEND_APPLY_CEILING_S = 1.0
+
+#: Canonical fields whose change is painted on the NEXT loop turn, never spaced.
+#: Each is something the user is waiting on or must act on: the working signal,
+#: an approval or ask card, and the completion receipt. A child starting,
+#: settling or leaving is the fourth exemption and is read off the store's
+#: ``lifecycle`` revision rather than a field name, because it rides ``jobs``
+#: beside the per-token progress churn that IS worth spacing.
+#: ``test_frontend_apply_spacing.py`` pins each entry with its own test.
+_URGENT_FRONTEND_FIELDS = frozenset({"streaming", "pending_gate", "attention"})
+
+
+def _frontend_apply_delay(last_cost_s: float) -> float:
+    """How long after a canonical paint the next non-urgent one may start.
+
+    WHY IT ADAPTS. Every canonical delta used to schedule a paint on the next
+    loop turn, and on a viewer of a loaded parent (12 stepping lanes, 240
+    settled children) one paint cost 40-60 ms of CPU -- status band, roster
+    projection, three panel passes -- so a stream of deltas held this loop most
+    of the time and an Enter waited 2-4 s p50 to be handled at all. Spacing the
+    next paint by ``cost / share`` caps this work at
+    ``_FRONTEND_APPLY_MAX_SHARE`` of the loop whatever the roster's size; a
+    cheap paint keeps the 50 ms floor, i.e. at most 20 paints a second.
+
+    NOTHING GOES STALE BY THIS: the paint reads the session's live state when it
+    fires, so it shows everything the skipped ones would have; only the number
+    of intermediate frames drops.
+    """
+    if last_cost_s <= 0.0:
+        return _FRONTEND_APPLY_FLOOR_S
+    return min(
+        _FRONTEND_APPLY_CEILING_S,
+        max(_FRONTEND_APPLY_FLOOR_S, last_cost_s / _FRONTEND_APPLY_MAX_SHARE - last_cost_s),
+    )
+
+
+def _frontend_revision(session: Any) -> Any:
+    """The session's canonical collection revision, or ``None`` if it has none.
+
+    ``None`` is every host that cannot say (the in-process owner, the test
+    fakes), and callers treat it as "assume everything moved" -- the behaviour
+    those hosts had before the revision existed.
+    """
+    reader = getattr(session, "frontend_revision", None)
+    if not callable(reader):
+        return None
+    try:
+        return reader()
+    except Exception:  # noqa: BLE001 -- not synchronized yet reads as "unknown"
+        return None
+
 
 #: Background-completion banners one observer tick may SPAWN. Everything past
 #: the cap is still claimed — the arbitration is unchanged — and collapsed into
@@ -5190,6 +5255,37 @@ class OperatorApp(App[None]):
         #: ``_request_login_key``). Distinct from ``_key_prompt``, which is
         #: cleared the moment the prompt is answered.
         self._last_login_prompt: Any = None
+        #: The receipt block the last answered APPROVAL appended to the
+        #: transcript, WITH that card's gate identity — retained after it settles
+        #: so an answer that never reached the owner can have its claim taken back
+        #: (see ``_note_gate_reply_undelivered_on_app_loop``). The transcript block
+        #: is the record of the decision, and nothing downstream of the keypress
+        #: can know the post failed, so the correction has to reach back to it.
+        #:
+        #: THE IDENTITY IS PART OF THE SLOT, not decoration (agent review round 3,
+        #: A12 = QA Q5). The reply whose delivery failed is not always the one that
+        #: wrote the retained block — an approval answered with no card at all (the
+        #: allow-all latch, a background approval) writes none — so a slot that
+        #: held "the last receipt" let a later undelivered post remove a DELIVERED
+        #: row belonging to an unrelated gate. Matching the identity the session
+        #: reports is what makes the retraction the right row's.
+        self._last_gate_receipt: tuple[Any, Any] | None = None
+        #: The transcript notices that said a gate reply never reached its owner,
+        #: retained so they can be RETIRED when the link comes back. They are
+        #: present-progressive about a state the app owns ("not connected"), so
+        #: they may not outlive that state: measured still up 45 s later with the
+        #: card back, answerable, and a message sent successfully beneath them (UX
+        #: round 2, U5). A LIST because a second failed answer is a second event
+        #: and gets its own row (design round 2 verified that), while the state
+        #: they all report ends at once. The mechanism is the one
+        #: `_composer_refusal_notice` already uses — a slot plus a retire call from
+        #: the states that end it.
+        #:
+        #: KEYED BY THE SOURCE THAT WROTE THEM (its ``token``), because the state
+        #: they report is ONE session's link: a card coming back on session A is
+        #: no evidence that session B's owner is reachable, and a flat list would
+        #: let A's re-mount retire B's still-true sentence from B's retained view.
+        self._gate_reply_notices: list[tuple[str, Any]] = []
         self._approve_all = False
         #: The phone-facing bridge: registrant (discovery record + control
         #: socket) and the handle adapting this app to it. None until the
@@ -7088,8 +7184,64 @@ class OperatorApp(App[None]):
             source
         ):
             source.gate_draft = None
+        self._reconcile_gate_surface(source)
         if self._sidebar_source_releasable(source) and self.is_running:
             self.run_worker(self._release_sidebar_source(source))
+
+    def _reconcile_gate_surface(self, source: SessionInteraction) -> None:
+        """Re-arm the gate bridge when the visible session owes a card it lacks.
+
+        LEVEL-TRIGGERED, deliberately. Every edge that re-arms the bridge is a
+        navigation event, so a gate whose edge was missed \u2014 or whose only edges
+        were spent while the bridge was detached \u2014 has no further edge coming
+        and stays invisible with its turn blocked. This hook already fires for
+        the current source on the very delta that carries the gate, so it is the
+        one place that can notice \"pending gate, no card\" as a STATE rather than
+        as a transition.
+
+        `_is_current` FIRST: this runs on every frontend delta of every leased
+        source, and the N-1 hidden ones must pay one identity compare and
+        nothing more. A hidden source re-arming here would also break the rule
+        that a late gate from A must never mount while B is displayed.
+
+        `requested_id` excludes a navigation in flight, whose commit does its
+        own re-arm; re-arming underneath it would race the suspend it is about
+        to run.
+
+        `_session_transition_pending` and `_restart_plan` exclude the windows in
+        which `detach_viewer_gates` runs. That call is a DEPARTURE, not a
+        suspension: the session is about to be disposed (`/resume` onto a live
+        owner) or the process is relaunching. A delta that lands inside the
+        detach's await would otherwise read "pending gate, no card" and re-arm a
+        bridge for a conversation that is being torn down. A detach and a
+        suspend set the same `_gates_detached` latch, so the reconcile tells
+        them apart by the window it runs in, not by the latch. (`/reload`, the
+        third caller, retires the source first, and `_source_frontend_changed`
+        never calls this for a retired source.)
+
+        The answered-gate fence (`_gate_answered_key`, G3 in
+        `_maybe_start_gate`) still decides whether an ALREADY ANSWERED question
+        may re-mount \u2014 this raises how often that guard is consulted, it does
+        not weaken it.
+        """
+        if not self._is_current(source):
+            return
+        session = source.session
+        if not _is_viewer(session):
+            return
+        # The narrow accessor, never `frontend_state`: its clone was measured at
+        # ~30 ms of a 135 ms cold frame, and this runs on every delta.
+        if getattr(session, "pending_gate", None) is None:
+            return
+        if (
+            self._sidebar_navigation.requested_id
+            or self._session_transition_pending
+            or self._restart_plan is not None
+        ):
+            return
+        if self._sidebar_gate_card_ready(source, require_paint=False):
+            return
+        session.resume_viewer_gates()
 
     def _restore_gate_draft(self, source: SessionInteraction, card: AskPickerScreen) -> None:
         saved = source.gate_draft
@@ -7115,7 +7267,41 @@ class OperatorApp(App[None]):
             if card is not None:
                 if owns_card and key is not None and not card.settled:
                     snapshot = card.snapshot_state()
-                    snapshot.focused = source.draft.focus_id == "@gate"
+                    # WHICH CARD CLAIMS THE KEYBOARD ON THE WAY BACK, read from
+                    # the live facts and not from one lagging record.
+                    #
+                    # `snapshot_state()` has already asked the card itself
+                    # (`card.has_focus`); this line used to REPLACE that answer
+                    # with the mirror `source.draft.focus_id == "@gate"`, and the
+                    # mirror is a message hop behind the fact it mirrors:
+                    # `on_descendant_focus` writes it, that event is posted to the
+                    # widget's PARENT and climbs one hop per node
+                    # (textual/widget.py:4766), and its handler is skipped while a
+                    # swap is in flight (`_swapping_session`). TWO windows follow
+                    # from that, both measured under load on this fleet, and both
+                    # recorded `focused=False` for a card the app was routing keys
+                    # to: the card had taken the keyboard but the mirror did not
+                    # say so yet, and the card was ATTACHED with its mount still
+                    # in flight, so nothing had said so yet. `on_mount` reads that
+                    # back as `_restored_focus=False` and declines the keyboard,
+                    # while the band goes on saying "Answer the question above" —
+                    # and the Enter that instruction names is declined by the
+                    # composer (a bare Enter has no `character`, app.py:21189), so
+                    # it points at a dead key.
+                    #
+                    # The third term is not a guess about the card: it is the
+                    # decision the card's own mount rule is about to make, read
+                    # through the same predicate that rule reads
+                    # (`AskPickerScreen.on_mount` asks `_composer_has_draft`, so
+                    # the two cannot drift), for the one state in which the card
+                    # never got to make it. `is_mounted` turns true immediately
+                    # AFTER `on_mount` returns (textual/message_pump.py:612), so it
+                    # is exactly "that decision is still owed".
+                    snapshot.focused = (
+                        card.has_focus
+                        or source.draft.focus_id == "@gate"
+                        or (not card.is_mounted and not card._composer_has_draft())
+                    )
                     source.gate_draft = (key, snapshot)
                 card.disabled = True
             keep_answer = owns_card and bool(
@@ -7207,12 +7393,69 @@ class OperatorApp(App[None]):
                 offset = min(source.draft.scroll_offset, max(0, anchor_region.height - 1))
                 if anchor_region.y + offset != content.y and 0 < view.scroll_y < view.max_scroll_y:
                     return False
+        # A `display_only` frame is a PREVIEW, and a preview owes no gate card.
+        # With no card on screen it is correct as painted, so it is ready. This
+        # cannot wait for a card to arrive. The bridge that mounts one refuses
+        # while the viewer is not ready for events (G1 in `_maybe_start_gate`),
+        # and that is one of the states that latch `display_only` in the first
+        # place. The connect that would end it is `connect_after_paint` in
+        # `_commit_sidebar_session`, which starts only once THIS frame resolves.
+        # So a card-less preview that waited for its card would be waiting on
+        # itself. It would sit out `_await_sidebar_frame`'s 15 s timer and
+        # raise the terminal `SurfaceNotReady` over a frame that was painted
+        # correctly.
+        #
+        # The card still comes back: the escape is here, in the FRAME verdict,
+        # and deliberately not in `_sidebar_gate_card_ready`, which the
+        # level-triggered `_reconcile_gate_surface` also asks. Out there it would
+        # tell the reconcile that a card-less preview is fine, and the re-arm
+        # that brings the card back once the viewer is ready would never run.
+        #
+        # A preview WITH a card mounted runs the same check as a live frame: a
+        # card bound to this source's current gate is ready, and one bound to
+        # anything else (a superseded gate view, another session) is refused.
+        # The `is_cold`/`display_history_current` preconditions stay excluded
+        # for `display_only` (see the guard at the top of this method).
+        if source.display_only and self._ask_screen is None and self._approval is None:
+            return True
+        return self._sidebar_gate_card_ready(source, region)
+
+    def _sidebar_gate_card_ready(
+        self,
+        source: SessionInteraction,
+        region: Callable[[Widget], Any] | None = None,
+        *,
+        require_paint: bool = True,
+        require_mount: bool = True,
+    ) -> bool:
+        """Whether this source's pending gate (if any) is correctly on screen.
+
+        THE ONE SPELLING of "the mounted card belongs to this source's current
+        gate". `_sidebar_gate_surface_ready` asks it of a painted frame and
+        `_source_frontend_changed` asks it of the live widget tree; a second
+        copy of the identity comparison is exactly the class of defect that
+        stranded the gate card in the first place, so both go through here.
+
+        ``region`` reports where a widget was actually painted: the frame check
+        passes the compositor map of the display being judged. A caller that
+        only needs binding identity has no such map and has to say so with
+        ``require_paint=False``. That opt-out is a keyword and not an
+        always-truthy ``region``, so that dropping the paint assertion is
+        visible at the call site. With ``require_paint`` left on and no
+        ``region`` supplied, the check fails closed.
+
+        ``require_mount=False`` is the second, narrower opt-out, for the one
+        caller that decides something ABOUT the mount rather than FROM it: the
+        band's own sentence (see `_gate_card_is_answerable`). `host.mount` is
+        applied by the pump, so a card that was just handed over is composed,
+        bound and answerable while reporting `is_mounted` False — and a band that
+        withheld its sentence until the next pump is a band that keeps telling
+        the user to reselect over a question that is already there.
+        """
         # `pending_gate`, not `frontend_state.pending_gate`: the latter clones
         # the entire state (jobs, usage, trajectories) on every display, which
         # profiling measured as the largest single cost of the cold frame. A
         # reduced facade without the narrow accessor still falls back below.
-        if source.display_only:
-            return self._ask_screen is None and self._approval is None
         session = source.session
         gate = getattr(session, "pending_gate", None)
         if gate is None and not hasattr(session, "pending_gate"):
@@ -7226,8 +7469,8 @@ class OperatorApp(App[None]):
             card is not None
             and card.source_binding
             == (source.token, self._sidebar_gate_identity(source), source.gate_view_generation)
-            and card.is_mounted
-            and region(card) is not None
+            and (not require_mount or card.is_mounted)
+            and (not require_paint or (region is not None and region(card) is not None))
             and not card.disabled
             and not card.settled
         )
@@ -7544,7 +7787,16 @@ class OperatorApp(App[None]):
         if _is_viewer(current):
             if session_id:
                 self._suspend_sidebar_gates(self._interaction)
-            elif not self._interaction.display_only:
+            else:
+                # The SECOND re-arm, reached from `_prepare_and_commit`'s
+                # `finally` (session_navigation.py:184-187) on every settled
+                # navigation — including a failed or superseded one. It is what
+                # heals a detached bridge after a burst of switches, and it was
+                # gated on `not display_only` for the same #808 reason as the
+                # commit site. Re-arming a gate bridge is not a submission (see
+                # `_commit_sidebar_session`), so the latch must not suppress it:
+                # while it did, a `display_only` source lost both of its routes
+                # back at once.
                 current.resume_viewer_gates()
         if session_id:
             self._begin_sidebar_transition()
@@ -8440,9 +8692,33 @@ class OperatorApp(App[None]):
                 self._system_notice(text, kind)
             source.notices.clear()
             self._resurface_attach_behind(source)
+            # These two were fused behind `not source.display_only` by
+            # e1f1603c3 (#808). They are not the same kind of act and must not
+            # share a condition. `_submit_boot_prompt` SUBMITS — it starts a
+            # turn — and firing it on a saved preview is what #808 correctly
+            # prevented, so it keeps the guard. `resume_viewer_gates` submits
+            # nothing: it clears the `_gates_detached` latch and re-runs the
+            # `_maybe_start_gate` ladder, which is idempotent (it returns early
+            # when `_gate_task is not None`) and has no answer path.
+            #
+            # AND THE LADDER IS WHERE THE DECISION BELONGS, so this call is
+            # unconditional rather than gated on a second copy of the question
+            # here. A `display_only` source is cold for four different reasons
+            # and only one of them is terminal: a socket blip, a recovery loop
+            # mid-flight and a live owner whose display history is refreshing are
+            # all cold, all lift on their own, and all hold a gate the user must
+            # be able to answer. Leaving the call fused behind the latch meant
+            # those three kept `display_only` latched forever and the ONLY route
+            # back on screen for their pending gate was never taken — the card
+            # was lost permanently (the defect this PR fixes). The fourth reason
+            # — a facade that can never bind — is refused one level down, by the
+            # ladder's G6 on `can_ever_bind`, because a card there could only
+            # take an answer no owner would receive (UX round 1, U1). Splitting
+            # the fuse is what makes that distinction expressible at all; this
+            # line does not have to make it.
             if not source.display_only:
                 self._submit_boot_prompt(session)
-                session.resume_viewer_gates()
+            session.resume_viewer_gates()
             self._session_sidebar.current_id = session_id
             self._session_sidebar.refresh()
             if refreshing and focused_before_refresh is not None:
@@ -8591,8 +8867,23 @@ class OperatorApp(App[None]):
     def _show_sidebar_connection(self, source: SessionInteraction) -> None:
         if not self._is_current(source):
             return
+        # IS THERE AN ANSWERABLE CARD ON SCREEN FOR THIS SOURCE? Asked once, here,
+        # because two of the band's sentences and the undelivered-reply rows all
+        # turn on it: a card the operator can answer is the proof that the link is
+        # back, so the sentence saying it was gone has to end with it (UX round 2,
+        # U5 — measured still up 45 s later with the card re-mounted and a message
+        # sent under it). Retiring on the card (rather than only on the connect's
+        # own exit) is what covers the route those frames took: a re-arm that
+        # never left the session. Each block is removed from its OWN parent, for
+        # `_retire_composer_refusal`'s reason.
+        answerable = self._gate_card_is_answerable(source)
+        if answerable:
+            self._retire_gate_reply_notice(source)
         status = ""
         connecting = False
+        #: Whether the sentence above is an INSTRUCTION rather than a verdict, and
+        #: therefore takes the muted ink instead of `danger` (design round 2, D7).
+        instruction = False
         if source.display_only or source.can_never_bind:
             saved = (
                 "Saved excerpt"
@@ -8626,9 +8917,25 @@ class OperatorApp(App[None]):
                 verdict = self._stopped_session_notice(source)
                 status = f"{saved} · {verdict}" if source.display_only else verdict
             else:
-                status = f"{saved} · Reconnect failed · Select again to retry"
+                # OR THE QUESTION ITSELF IS ALREADY ON SCREEN, in which case
+                # neither sentence above is the useful one: the retry advice
+                # offers a navigation the user does not need (the card came back
+                # on its own, which is this PR's whole subject) and the
+                # stopped-session verdict would deny a question that is right
+                # there and answerable. The band and the card are two surfaces
+                # making one claim about the same session, so the band yields to
+                # the card (design round 1, D1).
+                #
+                # AND THE CARD'S RETURN RETIRES THE OTHER SURFACE'S CLAIM, which
+                # `answerable` above has already done — this branch only names the
+                # sentence that follows from it.
+                if answerable:
+                    instruction = True
+                    status = f"{saved} · Answer the question above"
+                else:
+                    status = f"{saved} · Reconnect failed · Select again to retry"
         if self._status is not None:
-            self._status.update(connection=status)
+            self._status.update(connection=status, connection_muted=instruction)
             # The glyph is what tells the user the app is working rather than
             # wedged; see `StatusLine.set_connecting`.
             self._status.set_connecting(connecting)
@@ -8641,6 +8948,30 @@ class OperatorApp(App[None]):
             editor.placeholder = SHELL_PLACEHOLDER
         else:
             editor.placeholder = "Draft a message…" if status else editor.resting_placeholder
+
+    def _gate_card_is_answerable(self, source: SessionInteraction) -> bool:
+        """Whether an ANSWERABLE card is on screen for ``source``'s live gate.
+
+        The band's question, and not ``_sidebar_gate_card_ready``'s: that
+        predicate answers "the mounted card belongs to this source's current
+        gate" and reports True when there is nothing to present at all (no
+        pending gate, no card), which is the opposite of what a band asking
+        "should I mention a question?" wants. The widget test in front of it is
+        the cheap half of that difference, and the identity comparison is left
+        to the one place that owns it — a second copy is the class of defect
+        that stranded the gate card in the first place.
+
+        ``require_mount=False`` because one of this predicate's callers IS the
+        mount: both card paths ask it in the pump that hands the card over, when
+        the card is bound and answerable but not yet in the tree. The alternative
+        — asking again from a deferred callback — was measured and does not
+        work: `call_after_refresh` fires BEFORE the mount is applied, so the band
+        kept the connect's "Select again to retry" over a question that was on
+        screen, which is the whole of design round 1's D1.
+        """
+        if self._ask_screen is None and self._approval is None:
+            return False
+        return self._sidebar_gate_card_ready(source, require_paint=False, require_mount=False)
 
     def _start_sidebar_connection(
         self, source: SessionInteraction, *, continues_retry: bool = False
@@ -8941,6 +9272,12 @@ class OperatorApp(App[None]):
             # from `_transcript_view()`, because the row was written into the
             # INCOMING session's view and this commit is what made that view
             # current.
+            #
+            # The undelivered-reply rows describe the same state and end with it,
+            # from the same event: a connect that COMPLETED is the proof that the
+            # link is back, which is what makes "not connected" false (UX round 2,
+            # U5).
+            self._retire_gate_reply_notice(source)
             self._retire_composer_refusal()
         except asyncio.CancelledError:
             cancelled = True
@@ -10317,6 +10654,15 @@ class OperatorApp(App[None]):
         _watch_refusals = getattr(session, "set_gate_refusal_handler", None)
         if callable(_watch_refusals):
             _watch_refusals(partial(self._note_gate_refusal_on_app_loop, source=source))
+        # The other half of that sentence, for the ordinary case rather than the
+        # refused one: the pane pressed the key, the card resolved, and the
+        # post to the owner did not land. Without this the transcript keeps a
+        # `✓ allowed` claim over a decision nobody received (UX round 1, U1).
+        _watch_undelivered = getattr(session, "set_gate_undelivered_handler", None)
+        if callable(_watch_undelivered):
+            _watch_undelivered(
+                partial(self._note_gate_reply_undelivered_on_app_loop, source=source)
+            )
         if reuse_controller and source.controller is not None:
             self._controller = source.controller
         else:
@@ -10414,6 +10760,44 @@ class OperatorApp(App[None]):
         # The old callback remains queued in Textual, but it carries the retired
         # generation and returns without clearing a newer session's scheduled bit.
         self._frontend_apply_scheduled = False
+        self._frontend_apply_spaced = False
+        self._cancel_frontend_apply_timer()
+        # The SPACING state is retired with them, not kept across the switch. The
+        # cost describes the roster that was just left, and the first paint after
+        # a switch is the cold one whose latency the user actually sees: spacing
+        # it by up to a stale second would delay exactly the frame this app is
+        # judged on. `_band_painted_revision` goes too -- it names the departed
+        # session, and the new session's first paint must establish its own.
+        self._frontend_paint_cost_s = 0.0
+        self._frontend_painted_at = None
+        self._frontend_painted_lifecycle = None
+        self._band_painted_revision = None
+
+    def _cancel_frontend_apply_timer(self) -> None:
+        timer = getattr(self, "_frontend_apply_timer", None)
+        self._frontend_apply_timer = None
+        if timer is not None:
+            timer.stop()
+
+    def _frontend_update_is_urgent(self, session: Any, update: Any) -> bool:
+        """Whether this delta must be painted now rather than on the spaced cadence.
+
+        Anything this cannot classify is urgent, so a caller that hands in no
+        typed update keeps the paint-next-turn behaviour every caller had.
+        """
+        changes = getattr(update, "changes", None)
+        if not isinstance(changes, Mapping):
+            return True
+        if not _URGENT_FRONTEND_FIELDS.isdisjoint(changes):
+            return True
+        if "jobs" in changes:
+            revision = _frontend_revision(session)
+            if revision is None:
+                return True
+            return (session, revision.epoch, revision.lifecycle) != getattr(
+                self, "_frontend_painted_lifecycle", None
+            )
+        return False
 
     def _on_frontend_update(self, update: Any) -> None:
         session = self._session
@@ -10426,10 +10810,50 @@ class OperatorApp(App[None]):
         # child row shells; reading it before the scheduled-bit guard repeated
         # that O(children) work for EVERY update in a coalesced burst.
         self._pending_frontend_session = session
+        urgent = self._frontend_update_is_urgent(session, update)
         if getattr(self, "_frontend_apply_scheduled", False):
+            # Already owed. An urgent delta behind a SPACED paint pulls it
+            # forward: an approval card must not wait out a roster's spacing.
+            if urgent and getattr(self, "_frontend_apply_spaced", False):
+                self._frontend_apply_spaced = False
+                self.call_later(self._pull_frontend_apply_forward, generation)
             return
         self._frontend_apply_scheduled = True
-        self.call_later(self._apply_pending_frontend_state, generation)
+        done_at = getattr(self, "_frontend_painted_at", None)
+        wait = (
+            0.0
+            if urgent or done_at is None
+            else done_at
+            + _frontend_apply_delay(getattr(self, "_frontend_paint_cost_s", 0.0))
+            - time.perf_counter()
+        )
+        if wait <= 0.0:
+            self.call_later(self._apply_pending_frontend_state, generation)
+        else:
+            # ARMED ON THE APP, not here: this callback runs on whatever task
+            # delivered the delta -- the attach client's socket pump on a viewer
+            # -- and a Textual timer created outside the app's context fails at
+            # shutdown (``LookupError: active_app``). ``call_later`` is the one
+            # scheduling call that is safe from anywhere.
+            self._frontend_apply_spaced = True
+            self.call_later(self._arm_frontend_apply_timer, generation, wait)
+
+    def _arm_frontend_apply_timer(self, generation: int, wait: float) -> None:
+        if generation != getattr(self, "_frontend_session_generation", 0):
+            return
+        if not getattr(self, "_frontend_apply_spaced", False):
+            # Pulled forward by an urgent delta before this hop ran.
+            return
+        self._frontend_apply_timer = self.set_timer(
+            wait, partial(self._apply_pending_frontend_state, generation)
+        )
+
+    def _pull_frontend_apply_forward(self, generation: int) -> None:
+        if not getattr(self, "_frontend_apply_scheduled", False):
+            # The spaced paint already fired between the delta and this hop.
+            return
+        self._cancel_frontend_apply_timer()
+        self._apply_pending_frontend_state(generation)
 
     def _apply_pending_frontend_state(self, generation: int) -> None:
         if self._restart_plan is not None:
@@ -10437,8 +10861,26 @@ class OperatorApp(App[None]):
         if generation != getattr(self, "_frontend_session_generation", 0):
             return
         self._frontend_apply_scheduled = False
+        self._frontend_apply_spaced = False
+        self._cancel_frontend_apply_timer()
         session = getattr(self, "_pending_frontend_session", None)
         self._pending_frontend_session = None
+        # Wall, not CPU, as #1528's runtime tick measures it: what the loop could
+        # not do while this ran -- handle a key -- is wall time.
+        started = time.perf_counter()
+        try:
+            self._paint_frontend_session(session)
+        finally:
+            finished = time.perf_counter()
+            self._frontend_paint_cost_s = finished - started
+            self._frontend_painted_at = finished
+
+    def _paint_frontend_session(self, session: Any) -> None:
+        revision = _frontend_revision(session)
+        if revision is not None:
+            # Read BEFORE the paint: a delta landing during it is a later
+            # revision and must still be judged against this one.
+            self._frontend_painted_lifecycle = (session, revision.epoch, revision.lifecycle)
         state = getattr(session, "frontend_state", None) if session is not None else None
         # ONLY on an ordered update, never on the adoption snapshot painted by
         # `_adopt_session`. That snapshot is taken BEFORE the remembered choice
@@ -10605,7 +11047,30 @@ class OperatorApp(App[None]):
             active_seconds=float(getattr(state, "active_duration_s", 0.0) or 0.0),
             activity_started_at=getattr(state, "activity_started_at", None),
         )
-        self._refresh_band()
+        # BEFORE the gate, and deliberately: the live prompt's backstop is the
+        # second caller below, so gating this whole block with the band would
+        # leave a card whose trigger emits nothing to be re-checked only by the
+        # 1 Hz poll -- up to a second of a footer naming keys that no longer
+        # apply (review round 1, F2). It runs twice on a delta that does move the
+        # roster (here and at the tail of `_refresh_band`); that is a no-op the
+        # second time, by that method's own contract.
+        self._repaint_live_prompt_if_stale()
+        # The band is painted from the roster, todos and wakes alone, so a delta
+        # that moved none of them (a token count, a phase, a title) has nothing
+        # to show there -- and on a 252-child roster the band cost 35-50 ms a
+        # pass. Its time-driven and viewport-driven changes have their own
+        # callers (the 1 Hz poll, resize, density), which are not gated.
+        session = self._session
+        revision = _frontend_revision(session)
+        painted = getattr(self, "_band_painted_revision", None)
+        if (
+            revision is None
+            or painted is None
+            or painted[0] is not session
+            or painted[1] != revision
+        ):
+            self._band_painted_revision = (session, revision)
+            self._refresh_band()
 
     def _on_watched_session_stopped(self, source: SessionInteraction | None = None) -> None:
         """A viewer's session was ended deliberately by whoever owns it.
@@ -10708,6 +11173,11 @@ class OperatorApp(App[None]):
         _watch_refusals = getattr(session, "set_gate_refusal_handler", None)
         if callable(_watch_refusals):
             _watch_refusals(partial(self._note_gate_refusal_on_app_loop, source=source))
+        _watch_undelivered = getattr(session, "set_gate_undelivered_handler", None)
+        if callable(_watch_undelivered):
+            _watch_undelivered(
+                partial(self._note_gate_reply_undelivered_on_app_loop, source=source)
+            )
         source.controller = EventController(session, self)
         self._event_sources[source.controller] = source
         source.controller.subscribe()
@@ -10878,6 +11348,148 @@ class OperatorApp(App[None]):
             # No running app (a pilot's shutdown, an embed). The refusal is
             # already logged by the session, which is the fallback channel.
             logger.debug("gate refusal notice could not be scheduled", exc_info=True)
+
+    def _note_gate_reply_undelivered_on_app_loop(
+        self,
+        kind: str,
+        identity: tuple[str, str, int] | None = None,
+        *,
+        source: SessionInteraction | None = None,
+    ) -> None:
+        """Say that an answer the operator gave never reached its session (U1).
+
+        The sibling of ``_note_gate_refusal_on_app_loop``, one fact over, and it
+        exists because the door that finding named is not the only one an answer
+        can leave by: a stop landing under a live card is not a REFUSAL (nothing
+        answered), and the swallow arms in the session treat it as an ordinary
+        race. So the keypress produced a settled card, a receipt and no delivery,
+        which leaves exactly two things to put right here, and both are done in
+        this one place because only the host owns either surface:
+
+        * THE RECEIPT IS LIFTED OFF THE TRANSCRIPT, and only the one THIS reply's
+          gate wrote. ``ApprovalBlock.receipt`` was appended by the keypress, and
+          a `✓ allowed` over a decision that reached no owner is a false record
+          of an authorisation — the strongest "it worked" affordance the
+          transcript has. REMOVED rather than rewritten: the row records a
+          decision that was never taken, so there is no true version of it to
+          paint, and ``TranscriptView.remove_block`` is the established way to
+          take back a block that should not be on screen (``/clear``, the boot
+          hint). The refusal beside this one cannot do the same: it fires while
+          the operator is watching a card do nothing, and the words that explain
+          it have to be the notice's own (see U13 there). An ask writes no
+          receipt, so that half is approval-only by construction.
+
+          ``identity`` is what keeps that removal honest (agent review round 3,
+          A12 = QA Q5): the reply that failed is not always the one that wrote the
+          retained row — an approval answered with NO card (the allow-all latch,
+          a background approval) writes none — so "the last receipt" is not the
+          same fact as "this reply's receipt", and retracting on the kind alone
+          deleted a DELIVERED row belonging to another gate. The slot is matched
+          by identity and never touched on a mismatch.
+
+        * IT SPEAKS ONCE PER EVENT, in a sentence that fits the one-row viewport
+          a card leaves behind. ``_unavailable_notice`` used to supply the tail,
+          but at 60 columns under a mounted card the transcript has a single
+          visible row and that whole sentence wrapped to two, so the only text on
+          screen was its last fragment — ``connected.`` (design round 2, D6).
+          The outcome now leads and the clause survives the truncation, and the
+          runnable next step is not lost with it: the band and the composer's
+          refusal row both name it (``Select again to retry``, or the stopped
+          session's ``/resume``).
+
+        RETIRED WHEN THE LINK IS BACK, by ``_retire_gate_reply_notice`` — the
+        sentence describes a connection state, so it may not outlive it (UX round
+        2, U5).
+
+        ``call_later`` for the same reason as the refusal beside it: the notice
+        is composed inside Textual's active-app context rather than from the
+        socket task that carried the failure.
+        """
+        source = source or self._interaction
+
+        def show() -> None:
+            if not self._is_current(source):
+                return
+            # BEFORE the notice: the correction has to be on the same frame as
+            # the sentence explaining it, or the operator reads a receipt that
+            # says the call was allowed and a line about something else.
+            slot, self._last_gate_receipt = self._last_gate_receipt, None
+            if kind == "approval" and slot is not None and identity is not None:
+                retained, receipt = slot
+                if retained == identity:
+                    try:
+                        # A no-op when the block is not in this view — the row
+                        # belongs to the conversation that raised the gate, and
+                        # the transcript may have been swapped or cleared while
+                        # the reply was in flight.
+                        self._transcript_view().remove_block(receipt)
+                    except Exception:
+                        logger.debug("no transcript to retract the approval from", exc_info=True)
+            self._gate_reply_notices.append(
+                (
+                    source.token,
+                    self._system_notice_block(self._gate_reply_undelivered_text(source), "warning"),
+                )
+            )
+
+        try:
+            self.call_later(show)
+        except RuntimeError:
+            # No running app (a pilot's shutdown, an embed). The session has
+            # already logged the drop, which is the fallback channel.
+            logger.debug("undelivered gate reply notice could not be scheduled", exc_info=True)
+
+    def _gate_reply_undelivered_text(self, source: SessionInteraction) -> str:
+        """The one-row sentence for an answer that never reached its owner.
+
+        Two arms, and the discrimination is `_unavailable_notice`'s — the app's
+        single reading of "this session cannot take what you gave it and none is
+        coming" (a verdict that HAS no retry behind it). Only the tail differs,
+        deliberately: a sentence that wraps out of a one-row viewport says
+        nothing at all (design round 2, D6), and the remedy each arm would have
+        named is already on screen in the band directly below and in the
+        composer's refusal row.
+        """
+        if source.connection_error and source.can_never_bind:
+            return "Answer not delivered — this session was stopped."
+        return "Answer not delivered — not connected."
+
+    def _retire_gate_reply_notice(self, source: SessionInteraction) -> None:
+        """Take the undelivered-reply rows down once the link is back (U5).
+
+        "Send unavailable until connected" is present-progressive about a state
+        the app OWNS, so it may not outlive that state the way a chat message
+        can: UX round 2 measured it still on screen at t=33 s with the card back
+        and answerable, at t=37.6 s after a message had been accepted and sent
+        (so Send was demonstrably available), and idle at t=44.9 s. The states
+        that end it are the two this is called from — the gate becoming
+        answerable again, which the band already reads as
+        `_gate_card_is_answerable`, and a sidebar connect that COMPLETED (the
+        same pair of ends `_retire_composer_refusal` fires from, for the same
+        reason).
+
+        EVERY row this channel wrote goes, not just the newest: a second failed
+        answer is worth a second row while the state lasts, but the state is one
+        fact and all of the rows asserting it are false together once it ends.
+        Retired from each block's OWN parent, for `_retire_composer_refusal`'s
+        reason — the row was written into the view that was current when it was
+        composed, and a later switch makes that view a different widget.
+
+        ONLY ``source``'s rows: the link that came back is that session's, so
+        another session's undelivered sentence is still true and stays. Nothing
+        but ``_note_gate_reply_undelivered_on_app_loop`` writes to this slot, so
+        no other notice — a refusal, a composer row, a chat line — can be taken
+        down from here.
+        """
+        kept: list[tuple[str, Any]] = []
+        for token, notice in self._gate_reply_notices:
+            if token != source.token:
+                kept.append((token, notice))
+                continue
+            parent = notice.parent
+            if isinstance(parent, TranscriptView):
+                parent.remove_block(notice)
+        self._gate_reply_notices = kept
 
     async def _request_user_choice_on_app_loop(
         self, questions: list[AskQuestion], *, source: SessionInteraction | None = None
@@ -22607,6 +23219,9 @@ class OperatorApp(App[None]):
         # transcript block that changes after later blocks were appended is the
         # one thing the transcript's finalize discipline forbids.
         self._mount_prompt(prompt)
+        # Same rewrite as the ask card's mount: the band must not offer a retry
+        # while the question it is about is answerable above it (D1).
+        self._show_sidebar_connection(source)
         self._notify_mobile_approval_pending(prompt)
         # The turn is now parked on the user, and the working line says so —
         # this is the one wait in a turn that the agent is not responsible for.
@@ -22626,6 +23241,16 @@ class OperatorApp(App[None]):
             self._unmount_prompt(prompt)
             if self._is_current(source):
                 self._notify_mobile_approval_settled(prompt)
+                # THE BAND SAID WHICH SENTENCE THE CARD OWED; the card is gone
+                # now, so it has to be asked again. Without this the band kept
+                # `Saved · Answer the question above` over an empty dock for as
+                # long as the operator looked at it — measured at +20 s, with
+                # nothing above it to answer, while the composer's own verdict
+                # said `Send unavailable until connected` (design round 2, D5 =
+                # QA Q6). Re-evaluated through the same predicate the band uses,
+                # so it falls back to the card-less sentence on every route out
+                # of the gate: answered, skipped, cancelled or unmounted.
+                self._show_sidebar_connection(source)
             # The decision belongs in the conversation: what was asked, and what
             # was answered. Appended after the fact so the transcript records a
             # settled fact rather than a question it would then have to revise.
@@ -22638,9 +23263,21 @@ class OperatorApp(App[None]):
             # of the approval gate and fail the tool call itself.
             if self._is_current(source) and prompt.answered:
                 try:
-                    self._append_block(
-                        ApprovalBlock.receipt(tool_name, description, prompt.answer or "n")
-                    )
+                    block = ApprovalBlock.receipt(tool_name, description, prompt.answer or "n")
+                    self._append_block(block)
+                    # RETAINED AFTER IT SETTLES, WITH THE GATE IT SPEAKS FOR. An
+                    # approval receipt is appended on the KEYPRESS, and whether
+                    # the answer reached the owner is only known one await later;
+                    # `mark_undelivered` is the way back to this row when it did
+                    # not. The identity is stored in the shape the SESSION reports
+                    # it (`set_gate_undelivered_handler`), which is this app's own
+                    # key one element in: `_sidebar_gate_identity` prefixes the
+                    # epoch, and the rest IS `(kind, request_id, question_index)`
+                    # — the tuple the viewer ladder keys bridges on. Matching that
+                    # is what keeps a later undelivered post from retracting an
+                    # unrelated, delivered row (agent review round 3, A12).
+                    identity = None if gate_key is None else tuple(gate_key[1:])
+                    self._last_gate_receipt = (identity, block)
                 except Exception:  # pragma: no cover - teardown races only
                     logger.debug("no transcript to record the approval in", exc_info=True)
             if self._approval is prompt:
@@ -22729,6 +23366,12 @@ class OperatorApp(App[None]):
         self._ask_screen = card
         self._ask_pending = future
         self._mount_prompt(card)
+        # The band may still be carrying the connect's own sentence — "Select
+        # again to retry" over a question that is now on screen. Rewritten here,
+        # the moment that becomes false, rather than left to the connect's next
+        # tick, which may already be its last (design round 1, D1). A no-op when
+        # this source is not the one in front.
+        self._show_sidebar_connection(source)
         # Project the question to the phone as an ANSWERABLE card. Guarded and
         # best-effort, exactly like _mobile_adopted/_mobile_teardown: a phone
         # bridge that is absent or throwing must never break the terminal ask.
@@ -22766,6 +23409,10 @@ class OperatorApp(App[None]):
             # a later ask already mounted.
             if self._is_current(source):
                 self._notify_mobile_ask_settled(card)
+                # The approval settle's twin, for the ask card: the band stops
+                # offering "Answer the question above" the moment there is no
+                # question above (design round 2, D5 = QA Q6).
+                self._show_sidebar_connection(source)
                 self._refresh_working_activity()
 
     def _notify_mobile_ask_pending(self, card: AskPickerScreen) -> None:
@@ -29202,15 +29849,30 @@ class OperatorApp(App[None]):
         # moved.
         self.call_after_refresh(self._sync_overlay_layout)
         # A live prompt rides it too, as a BACKSTOP rather than as its primary
-        # trigger. The card's footer is derived from state the card does not
-        # own — whether it holds focus, and whether the composer holds a draft —
-        # and neither emits anything the card hears, so "correct in the model,
-        # stale on screen" arrived three review rounds running on three
-        # different inputs. Each was fixed by adding one more explicit trigger,
-        # which is a fix per input and leaves the next one to be found by a
-        # reviewer. This asks the card whether what it is showing is still what
-        # it would draw, so a missed trigger is a frame late instead of
-        # permanently wrong. It is a no-op on every tick where nothing moved.
+        # trigger -- see :meth:`_repaint_live_prompt_if_stale`.
+        self._repaint_live_prompt_if_stale()
+
+    def _repaint_live_prompt_if_stale(self) -> None:
+        """Ask the live prompt card whether what it shows is still what it would draw.
+
+        The card's footer is derived from state the card does not own — whether it
+        holds focus, and whether the composer holds a draft — and neither emits
+        anything the card hears, so "correct in the model, stale on screen"
+        arrived three review rounds running on three different inputs. Each was
+        fixed by adding one more explicit trigger, which is a fix per input and
+        leaves the next one to be found by a reviewer. This asks the card
+        directly, so a missed trigger is a frame late instead of permanently
+        wrong. A no-op on every call where nothing moved.
+
+        Called from TWO places, and the second is load-bearing: ``_refresh_band``
+        (whose other callers are the 1 Hz poll, a resize and the density toggles)
+        and ``_apply_frontend_state`` BEFORE its collection-revision gate. The
+        gate skips the band for a delta that moved no roster row -- the routine
+        token/phase delta -- and without this the card's only remaining trigger
+        there would be the 1 Hz poll, i.e. up to a second of a footer naming keys
+        that no longer apply (review round 1, F2). Cheap enough to run on both
+        paths for the same reason it is safe on either.
+        """
         prompt = self._live_prompt()
         repaint_if_stale = getattr(prompt, "repaint_if_stale", None)
         if callable(repaint_if_stale):
@@ -32791,7 +33453,21 @@ class OperatorApp(App[None]):
             self._stop_all_armed_at = None
             self._system_notice("no sessions to stop")
             return
-        drained = frozenset(rec.pid for rec in targets if (getattr(rec, "leaving", "") or ""))
+        leaving = [rec for rec in targets if (getattr(rec, "leaving", "") or "")]
+        # A DRAIN THE LADDER NO LONGER BELIEVES IS NOT LEFT ALONE (agent review round 1,
+        # m2): ``control._drain_stalled`` is the exact predicate the second press applies,
+        # so the listing asks it too rather than promising "left alone" for a runtime the
+        # press will then stop. Off the loop, because it reads dumps and may fork ``ps``.
+        stalled = {
+            rec.pid: control.stall_tag(why)
+            for rec, why in zip(
+                leaving,
+                await asyncio.to_thread(lambda: [control._drain_stalled(r) for r in leaving]),
+            )
+            if why
+        }
+        stalled_pids = frozenset(stalled)
+        drained = frozenset(rec.pid for rec in leaving) - stalled_pids
         rows: list[tuple[int, str, str]] = [
             (
                 rec.pid,
@@ -32803,8 +33479,14 @@ class OperatorApp(App[None]):
                 # more session to stop promises a stop that will not happen. The
                 # outcome line already reconciles the count afterwards; this is
                 # the same fact one step earlier, where it can still change the
-                # decision (UX round 2, NIT-1).
-                " (already leaving)" if rec.pid in drained else "",
+                # decision (UX round 2, NIT-1). A STALLED drain is marked apart, because
+                # the press does stop it (agent review round 1, m2), and with its reason
+                # in the words ``lop sessions`` and ``lop stop`` use (design round 1, D1).
+                (
+                    " (already leaving)"
+                    if rec.pid in drained
+                    else f" ({stalled[rec.pid]})" if rec.pid in stalled else ""
+                ),
             )
             for rec in targets
         ]
@@ -32820,14 +33502,29 @@ class OperatorApp(App[None]):
         # off the painted block (D2-1).
         budget = NoticeBlock.body_budget(max(0, self._transcript_view().size.width - 1))
         lines = [f"will stop {total} session{'s' if total != 1 else ''}:"]
+        qualifiers = []
         if drained:
             # Named once, above the rows: every marked row below is a session the
             # press ASKS again and then leaves alone — the plain count would read
             # as "these will all be stopped".
-            lines[0] = (
-                f"will stop {total} session{'s' if total != 1 else ''} "
-                f"({len(drained)} already leaving — asked again, then left alone):"
+            qualifiers.append(f"{len(drained)} already leaving — asked again, then left alone")
+        if stalled_pids:
+            # The other half: these are leaving too, but the press does NOT leave them
+            # alone. CAUSE-NEUTRAL (design round 1 on #1541 D1, QA Q-1): the row tag
+            # already names each one's cause, and the two arms differ — a held runtime
+            # IS reporting — so a shared line naming one cause is false for the other.
+            # FUTURE TENSE, because the identity gate can still refuse (QA Q-5 on #1527).
+            n = len(stalled_pids)
+            qualifiers.append(
+                f"{n} leaving, but {'it' if n == 1 else 'they'} will be stopped, "
+                "not left to finish"
             )
+        # ONE LAYOUT, ONE QUALIFIER PER LINE, whenever any exists (design D2 on #1527 and
+        # #1541, QA Q-2): folded into the header, the drained-only form alone was 72 cells
+        # against the 70-cell notice body at 80 columns and wrapped, and a header wrap
+        # sharing an indent with a qualifier line read as one paragraph. The longest
+        # qualifier is 58 cells at two-digit counts, 12 inside that 70-cell budget.
+        lines.extend(f"({q})" for q in qualifiers)
         for pid, name, tag in rows:
             lead = f"  pid {pid:>{pid_w}}  "
             # The qualifier rides inside the truncation budget so it can
@@ -37649,7 +38346,27 @@ class OperatorApp(App[None]):
         )
 
     def _cmd_session(self, arg: str, notice: NoticeFn) -> None:
-        """Read only this session's ledger; never interpret arguments as a prompt."""
+        """Read only this session's ledger, or copy its ID; never treat text as a prompt."""
+
+        if arg.strip() == SESSION_COPY_FLAG:
+            # The ID onto the clipboard and nothing else (decision D2). No
+            # SessionScreen and no ledger read: the pushed screen would take focus
+            # from the composer the user is about to paste into. The write goes
+            # through `_put_on_clipboard` so this gesture cannot drift from the
+            # others, and its courtesy toast stays. "sent to", because OSC 52 is
+            # unacknowledged; the ID is printed so a terminal that ignored the
+            # write still leaves something selectable in the transcript.
+            session = self._session
+            session_id = session.session_id if session is not None else ""
+            if not session_id:
+                # Not "not ready yet": `_session is None` is also the state after
+                # a failed start, and this branch cannot tell the two apart. A
+                # failed start has its own error notice above (design DR2).
+                self._system_notice("no session ID to copy", "warning")
+                return
+            self._put_on_clipboard(session_id)
+            self._system_notice(f"session ID {session_id} sent to the clipboard", "info")
+            return
 
         from local_operator.tui.widgets.session_panel import (
             SessionDiagnostics,
@@ -37657,9 +38374,9 @@ class OperatorApp(App[None]):
         )
 
         if arg.strip():
-            self._system_notice(
-                "/session takes no arguments; it reports the current session", "warning"
-            )
+            # Names the one exception and leaves what it does to the description,
+            # so the sentence does not contradict itself (design DR1).
+            self._system_notice(f"/session takes no text except {SESSION_COPY_FLAG}", "warning")
             return
         session = self._session
         if session is None:
@@ -47024,7 +47741,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 127
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 129
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own

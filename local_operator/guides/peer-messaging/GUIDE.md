@@ -130,6 +130,102 @@ Refusals are answers too, and each names its own fix:
   message **may or may not** have arrived rather than claiming failure — check
   with the peer instead of resending, or it lands twice.
 
+## Switching another session's model
+
+The same `send` tool switches a peer's model: pass `model="<provider>/<model-id>"`
+instead of `message`. Humans use `lop model` (below). Both have `/model`'s
+semantics in that session: the switch lands at its **next provider call**, so a
+call already streaming finishes on the old model and every later call, including
+the rest of a running turn, uses the new one.
+
+```
+send(target="experiment 1", model="deepseek/deepseek-flash")
+switched to deepseek/deepseek-flash (was anthropic/claude-opus-5)
+its next turn runs on it
+→ experiment 1 (pid 64190)
+```
+
+The result is the target's own answer, outcome first, in short lines, with the
+address last in `lop send`'s grammar. `lop model` prints the same lines.
+
+```
+lop model "experiment 1" deepseek/deepseek-flash
+lop model --pid 64190 deepseek/deepseek-flash
+lop model --session 7661a465019b deepseek/deepseek-flash
+```
+
+Rules:
+
+- **Exactly one of `message` or `model`.** Passing both is refused (send the
+  note in a second call); `now=True` does not apply to a switch, and `wake` is
+  ignored.
+- **The target validates, not the sender.** The pair is checked against the
+  TARGET's config, catalogue and credentials: a known provider, a model its
+  catalogue serves (an aggregator or local endpoint that cannot be listed
+  offline is accepted), and a credential it can run on. A refused pair changes
+  nothing.
+- **Live, engaged sessions only.** A closed or stored session is not switched
+  remotely: open it and use `/model`, or `lop --resume <id> --hosting <p>
+  --model <m>`. An unengaged `/new` is refused as for a message. A live session
+  whose new name has not reached its record yet is still found, through its id.
+- **A pinned fallback is not "already on".** If a provider fallback is serving
+  the model you ask for while the session's selection is another model, the
+  switch still runs and makes it the selection, withdrawing the fallback — as
+  `/model` does.
+- **The model is a positional.** `lop model <target> <provider>/<model>`;
+  `--model`/`--hosting` are refused there with that correction.
+- **Effort is not carried.** A TUI target applies its own effort choice; a
+  runtime-owned target uses the model's default level.
+- **Children keep their model.** A child's model is decided when it starts or
+  resumes. An inheriting child takes the parent's model at that moment; a
+  pinned child re-resolves its tier. Switching the parent — `/model`, the
+  phone, or another session — does not change children already running; pause
+  and resume one to move it. The result counts them.
+- **The card says who, never why.** `model` and `message` are exclusive, so
+  follow a switch with a one-line `send` note when the owner should know the
+  reason.
+- The approval prompt reads `switch <target>'s model to <p/m> (changes that
+  session's billing)`.
+
+What the result tells you (the first line is the outcome; the send card's
+collapsed row shows it as `switched`, `no change` or `pending`):
+
+- `switched to <new> (was <old>)` / `its next turn runs on it` — the target was
+  idle.
+- `switched to <new> (was <old>)` / `mid-turn: the call in flight finishes on
+  the old model` — the target was waiting on a provider call; every later call
+  uses the new one. `the current step` instead of `the call in flight` when it
+  was in a tool or an approval.
+- `back on <model> (was on fallback <fallback>)` — you asked for the model the
+  session had selected while a provider fallback was serving instead; the
+  fallback was dropped.
+- `<n> running subagent(s) stay(s) on the old model; new and resumed ones
+  switch` — added when the target has running children.
+- `already on <new>` / `nothing changed`.
+- `pending: switch to <new> accepted` — a local-setup provider on a TUI target;
+  it applies once that session's capacity check finishes, and may still fail.
+- `switched to <new> (was <old>)` / `with an error after the switch: …` — the
+  switch is in force, but a later step of it raised. The send row shows
+  `switched (error)` with the warning glyph.
+- `refused: <reason>; still on <old>` — nothing changed (non-zero exit for
+  `lop model`). A switch that did not take is reported this way even when a
+  fallback happens to be serving the requested model already.
+- `older lop: it cannot switch models remotely; nothing changed — update it
+  (lop update) or run /model in that session`.
+- `could not reach that session; nothing changed (…)` — the socket never
+  opened.
+- `no answer — the switch may or may not have landed; check lop sessions
+  before retrying` — the op was sent and no answer came back within 15 s.
+
+The target's transcript records the switch twice: the usual `[model switch]`
+notice, and a peer card whose header names the sender and whose body reads
+`[remote model switch] now on <new> (was <old>)`. The new model leads because on
+resume this card is the only trace of the switch. A `lop model` from a plain
+terminal is the sender `terminal`, and the body ends `— from a terminal in
+<dir>`; one run inside a lop session names that session. A pending local switch
+writes `switch to <new> requested (on <old> until it applies)` instead. The card
+is record-only; it does not start a turn.
+
 ## `lop sessions` — what is running and what it costs
 
 ```

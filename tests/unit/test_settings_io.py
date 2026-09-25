@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -2235,3 +2236,197 @@ def test_a_windows_launcher_is_judged_by_what_windows_can_run(
     monkeypatch.setenv("PATHEXT", ".PY")
     assert settings_io._windows_command_is_runnable(r"C:\tools\tool.py")
     assert not settings_io._windows_command_is_runnable(r"C:\tools\app.exe")
+
+
+class TestConfigEditStoresACascadeAsAMapping:
+    """``lop config edit retry.fallbackChains '<json>'`` must store a MAPPING.
+
+    ``config_edit_command`` guesses a typed value's type with its own
+    int/float/bool/null ladder and never consults :func:`coerce`, which has no
+    ``CASCADE`` arm either. A JSON object therefore falls through both as a
+    plain ``str`` and is written verbatim into ``config.yml``:
+
+        fallbackChains: '{"default":["anthropic/claude-sonnet-5"]}'
+
+    ``validate`` cannot catch it because it has no ``CASCADE`` arm and returns
+    ``None`` for the kind, so the write is accepted and the command prints
+    "Successfully updated". Every reader of the cascade
+    (``providers.failover.resolve_chain``, ``read_chains``) requires a
+    ``Mapping`` and silently treats a string as no cascade at all, so the
+    failover the user just configured never runs. The receipt says it worked;
+    nothing else does.
+
+    Observed on 0.54.13 and still on 0.62.12.
+    """
+
+    CHAIN = '{"default":["anthropic/claude-haiku-4-5-20251001"]}'
+
+    def test_the_stored_value_is_a_mapping(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import argparse
+
+        from local_operator.cli import config_edit_command
+
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        code = config_edit_command(argparse.Namespace(key="retry.fallbackChains", value=self.CHAIN))
+        assert code == 0, capsys.readouterr()
+
+        stored = ConfigManager(tmp_path).get_config_value("retry")["fallbackChains"]
+        assert isinstance(stored, Mapping), f"stored as {type(stored).__name__}: {stored!r}"
+        assert stored == {"default": ["anthropic/claude-haiku-4-5-20251001"]}
+
+    def test_the_stored_cascade_resolves_for_the_failover_layer(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The point of the write: the cascade the user configured is LIVE.
+
+        Asserted through the failover layer's own resolver rather than by
+        re-reading the file, because "is a dict" is not the contract the user
+        cares about — "a quota failure now has somewhere to go" is.
+        """
+        import argparse
+
+        from local_operator.cli import config_edit_command
+        from local_operator.providers.failover import (
+            RetrySettings,
+            expand_fallback_candidates,
+            resolve_chain,
+        )
+
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        assert (
+            config_edit_command(argparse.Namespace(key="retry.fallbackChains", value=self.CHAIN))
+            == 0
+        ), capsys.readouterr()
+
+        raw = ConfigManager(tmp_path).get_config_value("retry")["fallbackChains"]
+        # Through ``RetrySettings.from_settings`` rather than handing ``raw``
+        # straight to ``resolve_chain``: no production caller reads the config
+        # mapping directly, and ``_normalize_chains`` in between is where a
+        # hop that survived validation but cannot become a route is silently
+        # dropped. Asserting past it is what makes "the failover now has
+        # somewhere to go" an end-to-end claim.
+        chains = RetrySettings.from_settings({"retry": {"fallbackChains": raw}}).fallback_chains
+        selector = "anthropic/claude-opus-5"
+        chain = resolve_chain(selector, chains)
+        assert chain is not None, "no chain resolved for the configured selector"
+        assert expand_fallback_candidates(selector, chain) == [
+            "anthropic/claude-haiku-4-5-20251001"
+        ]
+
+    def test_a_malformed_cascade_is_refused_rather_than_stored(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Refusing beats storing a shape every reader will ignore.
+
+        The failure this guards is the one above wearing a different hat: a
+        value the cascade cannot use must not be written and then reported as
+        a success, whether it arrived as bare text or as JSON of the wrong
+        shape.
+
+        Run against a config that ALREADY holds a working cascade, because
+        the exit code is only half the contract the name promises. On an empty
+        store "refused" and "stored nothing" are indistinguishable, and the
+        case that costs a user something is the one where a fat-fingered edit
+        lands on a cascade they were relying on.
+        """
+        import argparse
+        import json as _json
+
+        from local_operator.cli import config_edit_command
+
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        good = {"default": ["anthropic/claude-haiku-4-5-20251001"]}
+        assert (
+            config_edit_command(
+                argparse.Namespace(key="retry.fallbackChains", value=_json.dumps(good))
+            )
+            == 0
+        ), capsys.readouterr()
+
+        for bad in (
+            "not json at all",
+            '["a","b"]',
+            '{"default":"not-a-list"}',
+            # Parses, is a mapping, and every hop is a non-empty string — but
+            # `gpt-4o` names no provider, so `expand_fallback_targets` would
+            # drop it and the cascade would route nothing. The display helper
+            # `_hop_label` accepts it; `validate_hop` is what catches it.
+            '{"default":["gpt-4o"]}',
+            '{"default":["anthropic/claude-opus-5 (low)"]}',
+            '{"":["anthropic/claude-opus-5"]}',
+            # The mapping-hop shape (F8, round 2): `_hop_label` only checks
+            # `provider`/`model` are non-empty strings, so this passed it,
+            # was stored, and reported success — `_normalize_chain_entry`
+            # then dropped it with a log warning nobody sees at the command
+            # line, and `expand_fallback_targets` routed nothing.
+            '{"default":[{"provider":"anthropic","model":"claude-opus-5","effort":"bogus"}]}',
+        ):
+            code = config_edit_command(argparse.Namespace(key="retry.fallbackChains", value=bad))
+            assert code == 1, f"{bad!r} was accepted: {capsys.readouterr()}"
+            stored = ConfigManager(tmp_path).get_config_value("retry")["fallbackChains"]
+            assert (
+                stored == good
+            ), f"{bad!r} was refused but still overwrote the cascade: {stored!r}"
+
+    def test_a_mapping_hop_with_an_unsupported_effort_is_refused(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """F8 (round 2): the mapping-hop arm must check `effort` too.
+
+        `_hop_label`, which gates a structured hop, only checks that
+        `provider` and `model` are non-empty strings — it does not read
+        `effort` at all. Before this fix, `{"provider": ..., "model": ...,
+        "effort": "bogus"}` passed `validate`, was reported as stored, and
+        then `_normalize_chain_entry` (the runtime's own reader) dropped it
+        with a log warning nobody sees at the command line, so
+        `expand_fallback_targets` resolved zero routes for it — byte-for-byte
+        the defect this PR exists to close, one hop shape over from F1's
+        string-array repro.
+
+        Resolved through `RetrySettings.from_settings` and
+        `expand_fallback_targets` rather than re-reading the raw config,
+        matching `test_the_stored_cascade_resolves_for_the_failover_layer`
+        above: the contract is "a configured hop routes somewhere", not
+        merely "is a dict".
+        """
+        import argparse
+        import json as _json
+
+        from local_operator.cli import config_edit_command
+        from local_operator.providers.failover import (
+            RetrySettings,
+            expand_fallback_targets,
+            resolve_chain,
+        )
+
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        bad = {"default": [{"provider": "anthropic", "model": "claude-opus-5", "effort": "bogus"}]}
+        code = config_edit_command(
+            argparse.Namespace(key="retry.fallbackChains", value=_json.dumps(bad))
+        )
+        assert code == 1, capsys.readouterr()
+
+        raw = ConfigManager(tmp_path).get_config_value("retry")
+        stored_chains = (raw or {}).get("fallbackChains") or {}
+        assert not stored_chains, f"refused edit still wrote a cascade: {stored_chains!r}"
+        # Even if it HAD been written, prove it resolves to nothing — the
+        # silent-drop this whole setting exists to refuse.
+        chains = RetrySettings.from_settings({"retry": {"fallbackChains": bad}}).fallback_chains
+        selector = "openai/gpt-5"
+        chain = resolve_chain(selector, chains)
+        assert chain is not None, "no chain resolved for the configured selector"
+        assert expand_fallback_targets(selector, chain) == []

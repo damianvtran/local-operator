@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from pathlib import Path
 
 from local_operator import procstate
@@ -518,3 +519,70 @@ def test_backfill_limit_caps_work_done(tmp_path: Path):
     assert backfill_session_titles(tmp_path, limit=2) == 2
     # The remaining one is stamped on a later run — nothing is skipped forever.
     assert backfill_session_titles(tmp_path, limit=2) == 1
+
+
+def _seed_named_session(root: Path, name: str, title: str) -> None:
+    """One session directory whose transcript carries a journalled title."""
+    session = root / "sessions" / name
+
+    async def build() -> None:
+        transcript = Transcript(session)
+        await transcript.append_message(Message(role="user", content=[TextContent(text="opening")]))
+        await transcript.append_custom(
+            CONVERSATION_NAME_CUSTOM_TYPE, {"text": title, "user_set": False}
+        )
+
+    asyncio.run(build())
+
+
+def test_the_title_sweep_leaves_between_directories_when_a_runtime_is_leaving(tmp_path: Path):
+    """The cooperative halt is per DIRECTORY, so a leaving runtime pays ~1 dir.
+
+    A pass that only checked between passes is worth minutes on a real store
+    (10 737 directories at 16.7-38.4 ms each), which is what a departing
+    runtime used to serve after it had already decided to leave; the check here
+    costs one predicate call against the scan it gates, and this scan is the
+    most expensive single step in the family (a FULL transcript read).
+    """
+    for index in range(4):
+        _seed_named_session(tmp_path, f"sess{index}", "A Name")
+
+    checks: list[None] = []
+
+    def should_stop() -> bool:
+        checks.append(None)
+        return len(checks) > 2
+
+    assert backfill_session_titles(tmp_path, should_stop=should_stop) == 2
+    # Asked once per directory: two visits that wrote, one that stood down.
+    assert len(checks) == 3
+    answered = [p for p in (tmp_path / "sessions").iterdir() if (p / TITLE_SIDECAR_NAME).exists()]
+    assert len(answered) == 2, "the stop did not leave the walk between directories"
+    # Nothing is left half-written, and a later run finishes the store.
+    assert backfill_session_titles(tmp_path) == 2
+
+
+def test_the_title_sweep_without_a_predicate_finishes_even_while_a_runtime_leaves(
+    tmp_path: Path, monkeypatch
+):
+    """The CLI ``--resume`` sweeps pass no predicate, so nothing can halt them.
+
+    ``cli.main``'s resume branch is a FOREGROUND command whose whole job is to
+    answer the store before the picker reads it, and it runs in a process that
+    may well have a maintenance walk in flight — so the runtime's own departure
+    request must not reach it. This pins the default: the request is on the
+    module's event, and the sweep does not look at that event until a caller
+    hands it in as a predicate.
+    """
+    from local_operator import session_factory
+
+    for index in range(3):
+        _seed_named_session(tmp_path, f"sess{index}", "A Name")
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_STOP", threading.Event())
+    # Read back through the module, so the type is the module's own Optional
+    # rather than a local: a departure request is exactly what sets this.
+    stop_event = session_factory._STORE_MAINTENANCE_STOP
+    assert stop_event is not None
+    stop_event.set()
+
+    assert backfill_session_titles(tmp_path) == 3

@@ -392,7 +392,21 @@ _install_real_store_guard()
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    shard_stall_watchdog.install(config)
+    shard_stall_watchdog.install(config, on_ci=_on_ci_host())
+
+
+def _on_ci_host() -> bool:
+    """Is this a dedicated CI runner, as opposed to an agent shell on a laptop?
+
+    ONE predicate, used by the worker-cap hook and by the stall reporter, because
+    the two must agree about the kind of machine they are on: the cap takes every
+    core on CI and a share locally, and the reporter keeps the shard bound only on
+    CI. They disagreed by construction before -- the cap denied our own bash
+    tool's ``CI=1`` while the reporter would have believed it -- which is how a
+    subagent running the suite on the operator's laptop would have been told
+    "dedicated runner" twice over.
+    """
+    return bool(os.environ.get("CI")) and not _in_agent_shell()
 
 
 def pytest_runtest_logstart(nodeid: str, location: tuple[str, int | None, str]) -> None:
@@ -403,9 +417,112 @@ def pytest_runtest_logreport(report: pytest.TestReport) -> None:
     shard_stall_watchdog.note_report(report)
 
 
+# ---------------------------------------------------------------------------
+# Dead xdist workers
+# ---------------------------------------------------------------------------
+# xdist's own line for this is `[gw1] node down: Not properly terminated`, and it
+# is easy to read past -- it is one line among the progress dots, and it says
+# nothing about WHY the worker went (a kill and a lost channel print the same
+# words). Measured 2026-09-24 by killing every worker of a live run: xdist
+# replaced them (`replacing crashed worker gw0`), the run continued, and the item
+# each dead worker had been running was reported as a FAILED crash item
+# (`worker 'gw2' crashed while running '<nodeid>'`) -- so the exit status was
+# non-zero THERE, because an item happened to be in flight. Nothing reports the
+# case this guard exists for, and the exit status cannot be depended on for it: a
+# worker killed with NOTHING in flight -- between two dispatches, before xdist has
+# ordered its shutdown -- reaches xdist as `Not properly terminated` with no
+# failing item at all, which is what `_fail_on_dead_workers` refuses to let pass.
+#
+# What separates those two is what the worker was doing, not who killed it: an item
+# in flight produces the crash item and a red run by itself, while an empty dispatch
+# queue produces no item to fail.
+#
+# The third case is why the window for the second is narrow, and this is measured
+# rather than assumed -- an idle worker is idle only between its last report and its
+# next dispatch, and xdist has usually already ordered its clean shutdown by then. A
+# worker that had emitted `workerfinished` is reported with
+# `pytest_testnodedown(error=None)`; SIGKILLing one (three repeats on a `-n 3` run
+# with an empty dispatch queue) produced rc=0, `2 passed`, and no diagnostic -- the
+# kill landing on a worker xdist had already finished with. That is the correct
+# reading, not a hole: the tests that worker owned really had completed.
+#
+# The other half of that measurement is what a reader needs in order NOT to
+# misread the artifact. A 37-minute run whose controller had 6.56 s of CPU across
+# the whole window is that case: its log ends with a `PluggyTeardownRaisedWarning`
+# over an xdist plugin and `OSError: cannot send (already closed?)`, which reads
+# like a worker death. It is not: those lines are written by WORKER processes whose
+# controller had already been killed by the operator 9 s earlier (their
+# `pytest_sessionfinish` tried to send `workerfinished` on a dead channel), and
+# the controller's own process had 6.56 s of CPU because its workers were already
+# gone. That shape -- workers gone, controller parked, no line naming either -- is
+# what this block exists to replace.
+_DEAD_WORKERS: list[tuple[str, str]] = []
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node: object, error: object | None) -> None:
+    """Name a worker that went down with an error, and never let that be a pass.
+
+    ``error is None`` is the CLEAN path -- xdist fires this for a worker that
+    finished its session normally -- so it is ignored here, deliberately and only
+    there. Anything else is a worker that did not finish its session: a kill
+    (``Not properly terminated``), a remote exception, or a channel that closed.
+
+    ``optionalhook=True`` because xdist defines this hook, not pytest: without it
+    a conftest imported by an environment that has no xdist raises on the unknown
+    hook name, i.e. the diagnostic would take out the run it is watching.
+
+    This is the CLEAN path's mirror image, so be precise about what it covers: the
+    hook fires for a worker that did not emit ``workerfinished`` -- killed while
+    holding an item, or while waiting between dispatches for work it never got. A
+    worker killed AFTER its clean finish reaches here as ``error is None`` and is
+    invisible to everything on this side, which is also correct, because its tests
+    had completed.
+    """
+    if error is None:
+        return
+    worker = getattr(getattr(node, "gateway", None), "id", None) or repr(node)
+    cause = f"{type(error).__name__}: {error}" if not isinstance(error, str) else error
+    _DEAD_WORKERS.append((worker, cause))
+    position = "" if len(_DEAD_WORKERS) == 1 else f" ({len(_DEAD_WORKERS)} so far)"
+    print(
+        f"\nDEAD WORKER: {worker} did not finish its session{position}: {cause}. "
+        "A worker that is killed (OOM, a process-group memory cap, a fired "
+        "per-test bound) or that dies inside a syscall reaches xdist as a closed "
+        "channel, which is what this message replaces.",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _fail_on_dead_workers(session: pytest.Session, exitstatus: int) -> None:
+    """Turn a run that lost a worker while passing into a failing one.
+
+    Only when the run would otherwise PASS: if anything already failed, the
+    status is the failure and this would only relabel it. The point is the case
+    xdist leaves silent -- a worker replaced mid-run, the crash item reported as a
+    failed item, and (with nothing in flight) an exit status of 0 for a suite that
+    did not actually run the way it says it did. A suite whose result cannot be
+    trusted is not a pass, which is the same rule as "a run that STOPS EARLY with
+    exit 0 is not a pass" in AGENTS.md, arriving through xdist's door instead of
+    pytest's.
+    """
+    if not _DEAD_WORKERS or exitstatus != 0:
+        return
+    workers = ", ".join(f"{worker} ({cause})" for worker, cause in _DEAD_WORKERS)
+    message = (
+        f"DEAD WORKER(S) DURING A PASSING RUN: {workers}. The run's exit status "
+        "would have been 0, which is not a result anything can be read from -- "
+        "tests the dead worker owned may not have run at all."
+    )
+    print(f"\n{message}", file=sys.stderr, flush=True)
+    session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     """Fail the run if any pre-existing entry of the real store is gone."""
     shard_stall_watchdog.shutdown()
+    _fail_on_dead_workers(session, exitstatus)
     if _REAL_STORE is None or _REAL_STORE_ENTRIES is None:
         return
     try:
@@ -1151,7 +1268,7 @@ def pytest_xdist_auto_num_workers(config: pytest.Config) -> int:
         # cores" on the shared laptop the share exists to protect, and only
         # there. Denying that marker keeps every real provider at full
         # parallelism; see `_AGENT_SHELL_ENV` for why this is not an allowlist.
-        on_ci = bool(os.environ.get("CI")) and not _in_agent_shell()
+        on_ci = _on_ci_host()
 
         cpu_arm = cpus if on_ci else max(1, int(cpus * _CPU_SHARE))
         cap = cpu_arm

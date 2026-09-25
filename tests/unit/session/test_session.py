@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import logging
 import sys
 import textwrap
 import time
@@ -13,14 +14,16 @@ import types
 import warnings
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from local_operator.compaction.api import CompactionSettings
-from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE
+from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE, AsyncJob
 from local_operator.harness.message_types import (
     HUB_MESSAGE_TYPE,
     SESSION_CREDENTIAL_MESSAGE_TYPE,
+    SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
     SESSION_INCIDENT_MESSAGE_TYPE,
     SESSION_MCP_RECOVERY_MESSAGE_TYPE,
     SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
@@ -4542,6 +4545,319 @@ async def test_a_job_result_cannot_restart_a_stopped_session(tmp_path):
     await session.dispose()
 
 
+def _settled_job(job_id: str) -> AsyncJob:
+    """A job that has settled, as the manager hands it to ``_on_job_completed``.
+
+    The real object rather than a stand-in: the delivery guard reads ``type``,
+    ``consumed`` and (for the message text) ``label``/``status``, and a cell that
+    fakes those would not be testing the path the manager drives.
+    """
+    return AsyncJob(
+        id=job_id,
+        type="task",
+        status="completed",
+        label=job_id,
+        start_time=1.0,
+        result_text=f"{job_id} done",
+    )
+
+
+def _job_result_rows(session) -> list[Any]:
+    """The durable ``job_result`` message rows, in transcript order."""
+    return [
+        entry
+        for entry in session._transcript.entries()
+        if entry.type == "message" and entry.payload.get("custom_type") == JOB_RESULT_MESSAGE_TYPE
+    ]
+
+
+def _attention_starts(session) -> list[Any]:
+    """The durable ``attention_started`` rows — one per RUN that opened."""
+    return [
+        entry
+        for entry in session._transcript.entries()
+        if entry.type == "custom" and entry.payload.get("custom_type") == "attention_started"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_batch_the_disposal_got_to_first_is_still_made_durable(tmp_path):
+    """MAJOR-1 (review round 1): the disposal must not destroy the batch.
+
+    ``dispose`` reaches an in-flight turn before its flush can run whenever its
+    bounded wait for that turn expires, and the flush then used to clear
+    ``_deferred_job_results`` and return on ``_disposed`` -- no row, no incident,
+    no log. That is the silent loss this change exists to prevent, one ordering
+    over, and it is reachable on the arrival ordering the incident itself was one
+    allocation away from (the incident's own batch was nine children).
+
+    The transcript accepts appends until the very end of ``dispose``, so a row
+    written here lands -- which is what makes routing the batch through the
+    leaving arm the fix rather than a wish. Off the latch the old behaviour
+    stands, and that is asserted here too: the guard is on the LATCH, not on a
+    disposal having happened.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("start a job")
+    session._is_streaming = True
+    await session._on_job_completed("qa-r2", "one", _settled_job("qa-r2"))
+    await session._on_job_completed("rev-r6", "two", _settled_job("rev-r6"))
+    assert session._deferred_job_results, "precondition: the batch is deferred"
+    session.retire_job_deliveries_to_transcript()
+
+    # The disposal gets there first, exactly as it does when the bounded wait for
+    # a turn with a batch behind it expires.
+    session._disposed = True
+    await session._deliver_deferred_job_results()
+
+    assert [row.payload["details"]["job_id"] for row in _job_result_rows(session)] == [
+        "qa-r2",
+        "rev-r6",
+    ], "the disposal must not destroy a batch it did not deliver"
+    assert not session._deferred_job_results
+
+
+@pytest.mark.asyncio
+async def test_a_disposal_off_the_latch_still_delivers_nothing(tmp_path):
+    """The other half of MAJOR-1's guard: it keys on the LATCH, not on disposal.
+
+    A session disposed with no departure armed has no arm that can write, and
+    widening the guard to "any disposed session writes" would change a path
+    nothing asked to change.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("start a job")
+    session._is_streaming = True
+    await session._on_job_completed("qa-r2", "one", _settled_job("qa-r2"))
+    session._disposed = True
+
+    await session._deliver_deferred_job_results()
+
+    assert _job_result_rows(session) == [], "off the latch, a disposal still delivers nothing"
+
+
+@pytest.mark.asyncio
+async def test_a_job_result_opens_no_turn_on_a_leaving_runtime(tmp_path):
+    """A delivery that lands after the departure latch is DURABLE, not run.
+
+    The measured defect (session a81ceec0982b, 2026-09-24): a finishing turn's
+    ``finally`` flushed nine settled children into ONE delivery turn, the exit's
+    disposal aborted that turn before its first provider call, and the operator
+    got a cut-off error card 650 ms after their own honest ``complete``. The
+    latches refuse ``prompt``/``receive_peer_message``, but a job result is not
+    an admission — it entered through ``_deliver_job_results`` and nothing
+    refused it.
+
+    Three facts, and all three are the contract: no provider call, no run
+    opened, and every result still durable in settle order.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("start a job")
+    spent_before = len(stream.requests)
+    session.retire_job_deliveries_to_transcript()
+
+    await session._deliver_job_results(
+        [("j1", "one", _settled_job("j1")), ("j2", "two", _settled_job("j2"))]
+    )
+
+    assert len(stream.requests) == spent_before, "the latch must not buy a provider call"
+    assert len(_attention_starts(session)) == 1, "only the prompt's own run may exist"
+    assert [row.payload["details"]["job_id"] for row in _job_result_rows(session)] == ["j1", "j2"]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_batch_is_held_durably_when_the_latch_beats_its_flush(tmp_path):
+    """The incident's exact shape: a turn's ``finally`` flushes a deferred batch
+    onto a runtime that has already committed to leaving.
+
+    Same three facts as the cell above, reached through the flush rather than
+    through ``_deliver_job_results`` directly — because the flush is the path the
+    incident took, and because it is the one that runs while the pipeline still
+    holds ``_turn_lock``.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("start a job")
+    spent_before = len(stream.requests)
+    session._is_streaming = True
+    await session._on_job_completed("j1", "one", _settled_job("j1"))
+    await session._on_job_completed("j2", "two", _settled_job("j2"))
+    assert session._deferred_job_results, "precondition: the batch is deferred"
+    session.retire_job_deliveries_to_transcript()
+
+    await session._deliver_deferred_job_results()
+
+    assert len(stream.requests) == spent_before
+    assert [row.payload["details"]["job_id"] for row in _job_result_rows(session)] == ["j1", "j2"]
+    assert not session._deferred_job_results
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_job_result_settling_after_the_latch_is_not_left_in_memory(tmp_path):
+    """A result arriving post-latch must not be DEFERRED onto a dying process.
+
+    ``_deferred_job_results`` is memory, and the process that holds it is on its
+    way out, so the deferral branch is a second way to lose the result — the one
+    the latch makes reachable, because a turn can still be streaming when it is
+    taken (the exit waits for that turn to finish).
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("start a job")
+    spent_before = len(stream.requests)
+    session.retire_job_deliveries_to_transcript()
+    session._is_streaming = True  # the turn the exit is waiting out
+
+    await session._on_job_completed("j1", "one", _settled_job("j1"))
+
+    assert session._deferred_job_results == {}, "nothing may be parked in dying memory"
+    assert len(stream.requests) == spent_before
+    assert [row.payload["details"]["job_id"] for row in _job_result_rows(session)] == ["j1"]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_delivery_that_cannot_be_made_durable_is_reported(tmp_path, monkeypatch, caplog):
+    """A failed durability write is LOUD: an incident row, not silence and not a turn.
+
+    The fix must not become silent data loss. The two fallbacks that look
+    tempting are both wrong: opening the turn anyway re-creates the incident on a
+    runtime that is leaving, and returning quietly is a result the operator never
+    learns they lost.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("start a job")
+    spent_before = len(stream.requests)
+    session.retire_job_deliveries_to_transcript()
+    transcript = session._transcript
+    real_append = transcript.append_message
+
+    async def exploding_append(message, **kwargs):
+        if getattr(message, "custom_type", None) == JOB_RESULT_MESSAGE_TYPE:
+            raise OSError("no space left on device")
+        return await real_append(message, **kwargs)
+
+    monkeypatch.setattr(transcript, "append_message", exploding_append)
+    with caplog.at_level(logging.ERROR):
+        await session._deliver_job_results([("j1", "one", _settled_job("j1"))])
+
+    assert len(stream.requests) == spent_before, "a failure must not open the forbidden turn"
+    incidents = [
+        entry
+        for entry in session._transcript.entries()
+        if entry.type == "message"
+        and entry.payload.get("custom_type") == SESSION_INCIDENT_MESSAGE_TYPE
+    ]
+    assert len(incidents) == 1, "the loss must be durable and model-visible"
+    text = incidents[0].payload["details"]["text"]
+    assert "j1" in text and "no space left on device" in text
+    # It says what FAILED, in the row that exists because the hold did not happen
+    # (design review round 2, D7 / UX U10): an earlier revision spent its first
+    # clause on the hold it never achieved, which told the reader there was
+    # nothing to go and read.
+    assert "could not be held" in text
+    # ...and names a route the reader can actually follow, by ID — the head used
+    # to print labels only, so ``<job id>`` had nothing to substitute into it
+    # (UX round 2, U9).
+    assert "hub op='peek'" in text and "Jobs: j1" in text
+    assert "range='a-b'" in text, "the printed paging parameter must be the one HubParams accepts"
+    # Both shapes are told the truth about their own store: a subagent child has
+    # a transcript, a background bash command does not.
+    assert "a background bash command has no transcript at all" in text
+    assert any(
+        "could not persist the result of job j1" in record.message for record in caplog.records
+    )
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_hold_is_still_durable_when_the_disposal_won(tmp_path, monkeypatch, caplog):
+    """QA round 2, Q-R2-2: the failure path must not lose the batch SILENTLY.
+
+    The whole point of this row is "do not lose this without saying so", and in the
+    ordering this change exists for — the disposal reaching the turn before its
+    flush — ``journal_incident`` returns early on ``self._disposed``, so the one
+    path that must never be quiet ended as an ERROR log line and nothing else.
+    Measured before the disposed-tolerant arm: ``job_result`` rows ``[]`` and
+    ``session_incident`` rows ``0`` with the batch gone.
+
+    Both halves are asserted: the failure is reported at all, and it is reported
+    when the session is already disposed. The transcript is what makes the second
+    possible — it accepts appends until the very end of ``dispose``, which is the
+    same fact MAJOR-1's fix rests on.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("start a job")
+    transcript = session._transcript
+    real_append = transcript.append_message
+
+    async def exploding_append(message, **kwargs):
+        if getattr(message, "custom_type", None) == JOB_RESULT_MESSAGE_TYPE:
+            raise OSError("no space left on device")
+        return await real_append(message, **kwargs)
+
+    # The ORDER is the incident's, and each step is load-bearing: the child settles
+    # into a streaming turn (so it DEFERS rather than delivering), the departure is
+    # latched, and only then does the disposal win — before the flush.
+    monkeypatch.setattr(transcript, "append_message", exploding_append)
+    session._is_streaming = True
+    await session._on_job_completed("j1", "one", _settled_job("j1"))
+    assert session._deferred_job_results, "precondition: the batch is deferred"
+    session.retire_job_deliveries_to_transcript()
+    with caplog.at_level(logging.ERROR):
+        session._disposed = True
+        await session._deliver_deferred_job_results()
+
+    incidents = [
+        entry
+        for entry in session._transcript.entries()
+        if entry.type == "message"
+        and entry.payload.get("custom_type") == SESSION_INCIDENT_MESSAGE_TYPE
+    ]
+    assert len(incidents) == 1, (
+        "a failure in the disposal-first ordering must still leave a durable row, "
+        f"not only a log line: {incidents!r}"
+    )
+    assert "could not be held" in incidents[0].payload["details"]["text"]
+    assert any(
+        "could not persist the result of job j1" in record.message for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_job_result_still_opens_exactly_one_turn_off_the_latch(tmp_path):
+    """THE NEGATIVE CONTROL for the latch, and the guard against over-fixing.
+
+    Consult the latch on the wrong side and every child's report in the fleet is
+    held instead of delivered — silent under-delivery, the very bug the deferral
+    path was written to fix (see ``_deferred_job_results``). Off the latch, N
+    results are still exactly ONE batched turn.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("start a job")
+    spent_before = len(stream.requests)
+    assert session._leaving_deliveries is False, "precondition: no latch is taken"
+
+    await session._deliver_job_results(
+        [("j1", "one", _settled_job("j1")), ("j2", "two", _settled_job("j2"))]
+    )
+    deadline = asyncio.get_running_loop().time() + 10.0
+    while len(stream.requests) == spent_before:
+        assert asyncio.get_running_loop().time() < deadline, "the batched turn never ran"
+        await asyncio.sleep(0.01)
+
+    assert len(stream.requests) == spent_before + 1, "one turn for the whole batch"
+    await session.dispose()
+
+
 @pytest.mark.asyncio
 async def test_a_users_own_wake_still_revives_a_stopped_session(tmp_path):
     """The guard against over-fixing the money bug.
@@ -5203,6 +5519,35 @@ def test_mcp_unavailable_is_persistable_and_the_recovery_is_not() -> None:
     )
     assert _is_persistable_message(warning) is True
     assert _is_persistable_message(recovery) is False
+
+
+def test_the_credential_redaction_row_is_persistable() -> None:
+    """The operator's ticket survives a resume, pinned as MEMBERSHIP.
+
+    Agent review round 1 (F1-1): the comment beside the literal claimed this
+    membership and the frozenset literal did not contain it — the member line
+    was never added. The row survived anyway, because ``journal_shape_incident``
+    writes it with an explicit ``append_message`` rather than through this
+    predicate, so the defect was latent: a comment asserting an invariant that a
+    future path relying on the predicate would silently break. Pinned here so a
+    comment cannot drift from the set again — this is the same shape the MCP
+    pair is pinned with, for the same reason.
+
+    Persisted rather than live-only because what the row records (a credential
+    reached a tool result, and it is readable in this context) is still true in
+    a resumed session. The MODEL half of the split is deliberately NOT this
+    predicate's business: the renderer's own allow-list excludes the type, which
+    is why adding it here does not put the notice back in front of the model.
+    """
+    from local_operator.session.session import _PERSISTABLE_CUSTOM_TYPES
+
+    assert SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE in _PERSISTABLE_CUSTOM_TYPES
+    row = CustomMessage(
+        custom_type=SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
+        attribution="system",
+        details={"text": "…", "tool": "bash", "shapes": [], "summary": ""},
+    )
+    assert _is_persistable_message(row) is True
 
 
 # ---------------------------------------------------------------------------

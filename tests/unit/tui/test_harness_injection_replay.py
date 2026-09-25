@@ -231,3 +231,78 @@ async def test_the_mcp_unavailable_row_replays_on_the_warning_tier() -> None:
     assert "previous turn ended" not in warning._text
     assert "previous turn ended" in incident._text
     assert "until it reconnects" not in shown
+
+
+@pytest.mark.asyncio
+async def test_a_held_child_report_replays_as_a_warning_and_a_delivered_one_does_not() -> None:
+    """UX round 1, U1/U2/U6: the held row's ARRIVAL SIGNAL, and only for held rows.
+
+    A row written by ``Session._hold_job_results_for_next_turn`` opened no turn,
+    published no outcome and painted nothing — so a resumed session read "idle,
+    turn complete" while a report the operator had delegated was owed to a turn
+    that had not happened yet, which is indistinguishable from the children having
+    reported nothing. The phone already showed it (its generic custom-message
+    fallback paints the row); the TUI's branches did not, because a
+    ``job_result`` custom message with no role fell past every arm.
+
+    BOTH ROWS ARE HERE ON PURPOSE, and the difference is the finding: the held row
+    must paint, and a DELIVERED one must not — the delivered row was acknowledged
+    by the turn it opened, whose answer is already in the frame, so painting it
+    too would duplicate every ordinary child delivery. The two rows differ by
+    exactly one flag, which is why the assertion is on the pair rather than on
+    each alone.
+    """
+    from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE
+    from local_operator.harness.types import CustomMessage
+    from local_operator.tui.widgets.transcript import (
+        NOTICE_GLYPHS,
+        NoticeBlock,
+        TranscriptView,
+    )
+
+    def row(job_id: str, *, held: bool) -> CustomMessage:
+        details: dict[str, object] = {
+            "job_id": job_id,
+            "text": f"background job '{job_id}' completed:\nthe report",
+        }
+        if held:
+            details["held"] = True
+        return CustomMessage(
+            custom_type=JOB_RESULT_MESSAGE_TYPE, attribution="user", details=details
+        )
+
+    session = FakeSession()
+    session._history = [row("qa-r2", held=True), row("rev-r6", held=False)]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        notices = [
+            block
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock)
+        ]
+        shown = _transcript_text(app)
+
+    assert len(notices) == 1, f"exactly the held row paints: {[b._text for b in notices]}"
+    held = notices[0]
+    assert held._token == "warning", (
+        "a report waiting for a turn nobody has run is a state the operator must "
+        "know about, not a receipt"
+    )
+    assert held._glyph == NOTICE_GLYPHS["warning"] == "!"
+    # The child's own text is carried unchanged, and the notice line is what
+    # distinguishes it from a delivered row.
+    assert "background job 'qa-r2' completed" in held._text
+    # The marker between the child's own words and the harness's sentence (design
+    # review round 2, D11), and a claim that stays TRUE after the report has been
+    # read — the first wording said "no turn has read it yet", which the durable
+    # row can never retract and which U7 measured still painting after the
+    # successor's turn had answered both reports.
+    assert (
+        "[session warning] held when it arrived" in held._text
+    ), "the head names the tier the row is painted in (design round 3, D14)"
+    assert "no turn ran for it at that point" in held._text
+    assert "has read it yet" not in held._text
+    # The delivered row's own arrival is the answer it bought, which is not in
+    # this history — so nothing licenses painting it here.
+    assert "rev-r6" not in shown

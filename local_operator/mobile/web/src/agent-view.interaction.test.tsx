@@ -191,6 +191,7 @@ describe("AgentConversation", () => {
 		vi.mocked(api.getSubagentDetail).mockResolvedValue(topLevel);
 		vi.spyOn(store, "useProjection").mockReturnValue({ projection, connected: true });
 		vi.spyOn(store, "retainProjectionStream").mockReturnValue(() => undefined);
+		vi.spyOn(store, "retainSessionListStream").mockReturnValue(() => undefined);
 		vi.stubGlobal("crypto", {
 			randomUUID: vi.fn(() => "12345678-1234-4678-9234-567812345678"),
 		});
@@ -238,6 +239,7 @@ describe("AgentConversation", () => {
 		vi.stubGlobal("crypto", { randomUUID });
 		vi.spyOn(store, "useProjection").mockReturnValue({ projection, connected: true });
 		vi.spyOn(store, "retainProjectionStream").mockReturnValue(() => undefined);
+		vi.spyOn(store, "retainSessionListStream").mockReturnValue(() => undefined);
 		history.replaceState({}, "", "#/s/root/a/current");
 		render(<App />);
 		await waitFor(() =>
@@ -262,7 +264,7 @@ describe("AgentConversation", () => {
 		   alert — there is no alert once recovery succeeds. */
 		expect(screen.queryByRole("alert")).toBeNull();
 		expect(
-			screen.getByText("Earlier instruction delivered. Your edited draft is ready to send."),
+			screen.getByText("Earlier instruction delivered. Your draft is ready to send."),
 		).toBeTruthy();
 		expect(composer.value).toBe("Edited draft");
 
@@ -290,6 +292,7 @@ describe("AgentConversation", () => {
 		vi.stubGlobal("crypto", { randomUUID });
 		const projectionSpy = vi.spyOn(store, "useProjection").mockReturnValue({ projection: idle, connected: true });
 		vi.spyOn(store, "retainProjectionStream").mockReturnValue(() => undefined);
+		vi.spyOn(store, "retainSessionListStream").mockReturnValue(() => undefined);
 		history.replaceState({}, "", "#/s/root");
 		const mounted = render(<App />);
 		const composer = screen.getByPlaceholderText("Message Local Operator…") as HTMLTextAreaElement;
@@ -317,7 +320,7 @@ describe("AgentConversation", () => {
 		);
 		expect(screen.queryByRole("alert")).toBeNull();
 		expect(
-			screen.getByText("Earlier instruction delivered. Your edited draft is ready to send."),
+			screen.getByText("Earlier instruction delivered. Your draft is ready to send."),
 		).toBeTruthy();
 		fireEvent.click(screen.getByRole("button", { name: "steer" }));
 		await waitFor(() => expect(api.sendCommand).toHaveBeenCalledTimes(3));
@@ -337,6 +340,7 @@ describe("AgentConversation", () => {
 		);
 		vi.spyOn(store, "useProjection").mockReturnValue({ projection, connected: true });
 		vi.spyOn(store, "retainProjectionStream").mockReturnValue(() => undefined);
+		vi.spyOn(store, "retainSessionListStream").mockReturnValue(() => undefined);
 		history.replaceState({}, "", "#/s/root/a/current");
 		render(<App />);
 		await waitFor(() =>
@@ -663,6 +667,7 @@ describe("AgentConversation", () => {
 		vi.mocked(api.getSubagentDetail).mockReturnValue(new Promise(() => undefined));
 		vi.spyOn(store, "useProjection").mockReturnValue({ projection: withRow, connected: true });
 		vi.spyOn(store, "retainProjectionStream").mockReturnValue(() => undefined);
+		vi.spyOn(store, "retainSessionListStream").mockReturnValue(() => undefined);
 		history.replaceState({}, "", `#/s/root/a/${jobId}`);
 		render(<App />);
 		// The tapped row's real label shows immediately, never the placeholder.

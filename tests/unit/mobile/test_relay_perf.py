@@ -12,6 +12,7 @@ import asyncio
 import json
 import string
 import uuid
+from typing import Any
 
 import pytest
 from starlette.testclient import TestClient
@@ -1022,3 +1023,671 @@ def test_seen_endpoint_clears_unseen_in_summaries(tmp_path, monkeypatch) -> None
     response = client.post("/api/sessions/durable-1/seen", json={"completion_token": token})
     assert response.status_code == 200
     assert unseen_for("durable-1") is False
+
+
+# ---------------------------------------------------------------------------
+# List ordering and sectioning: ONE home for the key
+# ---------------------------------------------------------------------------
+
+
+def _live_entry(pid: int, session_id: str, *, streaming: bool = False) -> Any:
+    """A live entry whose projection streams iff asked; the record is plain."""
+    import time as _time
+
+    from local_operator.mobile.daemon import SessionEntry
+    from local_operator.mobile.types import SessionRecord
+
+    record = SessionRecord(
+        pid=pid,
+        kind="tui",
+        session_id=session_id,
+        conversation_name=session_id,
+        cwd="/tmp",
+        model_label="m",
+        control_port=1,
+        control_key="k",
+    )
+    record.started_at = _time.time()
+    # A record with a fresh beat, so ``_rank_row``'s wedged arm does not fire.
+    record.heartbeat_at = _time.time()
+    entry = SessionEntry(record)
+    entry.projection = SessionProjection(
+        session_id=session_id, pid=pid, kind="tui", streaming=streaming
+    )
+    return entry
+
+
+def test_a_live_session_does_not_jump_when_its_birth_resolves() -> None:
+    """THE REPORTED JITTER, pinned at the key.
+
+    The phone used to sort on a key it re-derived here, from whatever the merge
+    held — including a live row's ``created_at`` falling back to 0.0 until the
+    1 s durable refresh resolved it. Two live sessions in the same tier are the
+    case that showed it: the just-started one (birth not yet resolved) sorted
+    BELOW the older one, then JUMPED above it the moment its real, newer birth
+    landed. The fix ranks through the shared catalog home (``_rank_row``) and
+    falls back to the runtime's own ``started_at`` rather than a zero, so the
+    row holds its place across the transition.
+
+    This drives the real merge, not a copy of the key: a changed ``_rank_row``
+    must move the order asserted here.
+    """
+    table = SessionTable()
+    # Both idle (tier 5), so ONLY the birth term can separate them — which is
+    # the term the 0.0 fallback used to corrupt.
+    table.entries[11] = _live_entry(11, "older-live")
+    table.entries[12] = _live_entry(12, "newest-live")
+    # The newest session is the one that started most recently, so its record's
+    # started_at is the larger; make that explicit rather than racing the clock.
+    table.entries[11].record.started_at = 1_000.0
+    table.entries[12].record.started_at = 2_000.0
+    table._durable_rows_cache = {}
+    # The older session's birth is resolved; the newest one's is NOT yet.
+    table._creation_dates = {"older-live": 1_000.0}
+
+    first = [r["session_id"] for r in table._merge_summaries({})]
+    assert first == ["newest-live", "older-live"], (
+        "a live session whose durable birth has not resolved must still rank "
+        "by its runtime's own started_at, not by a zero that flips ends"
+    )
+
+    # The durable refresh now resolves the newest session's birth, which is (as
+    # its started_at already said) the larger. The order must not change.
+    table._creation_dates = {"older-live": 1_000.0, "newest-live": 2_000.0}
+    second = [r["session_id"] for r in table._merge_summaries({})]
+    assert second == first, "resolving a birth must not move a row that already ranked by it"
+
+
+def _durable_record(session_id: str, birth: float):
+    """A minimal durable-row stand-in: the merge only reads name/created_at/mtime."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(name=session_id, created_at=birth, mtime=birth, id=session_id)
+
+
+def test_section_membership_is_the_shared_active_rule() -> None:
+    """A durable-only UNREAD conversation is ACTIVE on every surface.
+
+    ``CatalogEntry.active`` is ``pending or unseen or live_state``. The phone
+    derived ``section`` from \"a live entry exists\" instead, so a conversation
+    that finished while no phone was watching carried an unseen receipt, ranked
+    tier 1 in the shared catalogue, and still landed under Previous here — the
+    two surfaces disagreeing about which list a row is in. Pinned against the
+    shared entry too, so the assertion is about agreement rather than a literal.
+    """
+    from local_operator.resume import SessionRow
+    from local_operator.session.catalog import entry_for
+
+    table = SessionTable()
+    table._attention_states = {"session/unread-cold": {"unseen": True, "kind": ""}}
+    durable = {
+        "unread-cold": _durable_record("unread-cold", 200.0),
+        "read-cold": _durable_record("read-cold", 100.0),
+    }
+    rows = {r["session_id"]: r for r in table._merge_summaries(durable)}
+    assert rows["unread-cold"]["section"] == "active"
+    assert rows["read-cold"]["section"] == "previous"
+
+    # The shared entry agrees about the same two rows with the same attention.
+    unread = entry_for(
+        SessionRow(id="unread-cold", mtime=200.0, name="unread-cold", created_at=200.0),
+        {"unseen": True, "kind": ""},
+    )
+    read = entry_for(
+        SessionRow(id="read-cold", mtime=100.0, name="read-cold", created_at=100.0),
+        {"unseen": False, "kind": ""},
+    )
+    assert unread.active is True and read.active is False
+
+
+def test_a_durable_unread_row_sorts_where_the_catalogue_puts_it() -> None:
+    """Order PARITY with ``entry_for(...).rank``, not merely a plausible order.
+
+    The phone's key IS the catalogue's key now, so the two must produce the same
+    sequence for the same store. This asserts the merged order equals the shared
+    ranking of the same rows — a regression that reintroduced a second key would
+    fail here even if that key happened to look reasonable.
+    """
+    from local_operator.resume import SessionRow
+    from local_operator.session.catalog import entry_for
+
+    table = SessionTable()
+    table._attention_states = {"session/mid": {"unseen": True, "kind": ""}}
+    durable = {
+        "old": _durable_record("old", 100.0),
+        "mid": _durable_record("mid", 200.0),
+        "new": _durable_record("new", 300.0),
+    }
+    phone = [r["session_id"] for r in table._merge_summaries(durable)]
+    shared = sorted(
+        durable,
+        key=lambda sid: entry_for(
+            SessionRow(
+                id=sid,
+                mtime=durable[sid].mtime,
+                name=sid,
+                created_at=durable[sid].created_at,
+            ),
+            table._attention_states.get(f"session/{sid}", {}),
+        ).rank,
+    )
+    assert phone == shared == ["mid", "new", "old"]
+
+
+# ---------------------------------------------------------------------------
+# Pins: one durable store, shared with the terminal and the desktop
+# ---------------------------------------------------------------------------
+
+
+def test_pin_route_writes_the_shared_store_and_the_frame_carries_it(tmp_path, monkeypatch) -> None:
+    """A phone pin IS the sidebar pin, and the list frame reports it.
+
+    The whole point of routing the phone's pin through
+    ``local_operator.tui.sidebar_pins`` is that a pin made on one surface is the
+    same pin the others read. This drives the real route and then reads the pin
+    file with the TERMINAL's own reader, so a second store would fail here even
+    if the phone's own list agreed with itself.
+    """
+    from local_operator.tui.sidebar_pins import read_pins
+
+    cfg = tmp_path / "config"
+    session_dir = cfg / "sessions" / "durable-1"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
+    _write_turns(session_dir, 1)
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+
+    def pinned_for(session_id: str) -> bool | None:
+        rows = client.get("/api/sessions").json()["sessions"]
+        return next(r.get("pinned") for r in rows if r["session_id"] == session_id)
+
+    assert pinned_for("durable-1") is False
+    assert read_pins(cfg) == []
+
+    response = client.post("/api/sessions/durable-1/pin", json={"pinned": True})
+    assert response.status_code == 200
+    assert response.json()["pinned"] is True
+    # THE TERMINAL'S READER sees the same pin.
+    assert read_pins(cfg) == ["durable-1"]
+    assert pinned_for("durable-1") is True
+
+    # Idempotent in the pin direction: the stored newest-pin-first order does not
+    # change on a re-pin, which is what keeps a flaky link from rewriting it.
+    client.post("/api/sessions/durable-1/pin", json={"pinned": True})
+    assert read_pins(cfg) == ["durable-1"]
+
+    unpin = client.post("/api/sessions/durable-1/pin", json={"pinned": False})
+    assert unpin.json()["pinned"] is False
+    assert read_pins(cfg) == []
+    assert pinned_for("durable-1") is False
+
+
+def test_pin_route_refuses_an_unknown_session_and_a_non_boolean(tmp_path, monkeypatch) -> None:
+    """The two refusals that keep the store honest.
+
+    An unknown id must 404 like ``/seen`` beside it, so the route cannot plant
+    ids that resolve to nothing; and a non-boolean must 422 rather than be
+    truthy-coerced, because a pin whose provenance nobody can reconstruct is
+    exactly what the desktop route's strict model refuses.
+    """
+    from local_operator.tui.sidebar_pins import read_pins
+
+    cfg = tmp_path / "config"
+    session_dir = cfg / "sessions" / "durable-1"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
+    # A real conversation, so the id is resolvable and the 422s below are about
+    # the BODY rather than a 404 for an unknown session taking the wrong arm.
+    _write_turns(session_dir, 1)
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+
+    assert client.post("/api/sessions/nope/pin", json={"pinned": True}).status_code == 404
+    for bad in ({"pinned": "yes"}, {"pinned": 1}, {}):
+        assert client.post("/api/sessions/durable-1/pin", json=bad).status_code == 422
+    assert read_pins(cfg) == []
+
+
+def test_a_phone_woken_session_is_active_before_its_record_arrives() -> None:
+    """The provisional wake window is Active, not a flash of Previous.
+
+    ``retain_provisional_active`` marks a session this daemon accepted a ``/wake``
+    for but has not yet seen register. It has no ``SessionEntry``, so the shared
+    ``active`` rule — correctly applied — would file it under Previous, and the
+    row would pop into Active a moment later. That is the same kind of jump this
+    whole change exists to remove, so the merge ranks a provisional row as the
+    live row it is about to become (review round 1, MAJOR 1).
+    """
+    table = SessionTable()
+    # A durable row for the woken conversation — a /wake resumes an EXISTING one,
+    # so the row is in the listing and only its SECTION is in question.
+    durable = {"woken": _durable_record("woken", 500.0)}
+    table.provisional_active.add("woken")
+    rows = {r["session_id"]: r for r in table._merge_summaries(durable)}
+    assert rows["woken"]["section"] == "active"
+
+    # And the marker is what does it: without it the same row is Previous.
+    table.provisional_active.discard("woken")
+    rows = {r["session_id"]: r for r in table._merge_summaries(durable)}
+    assert rows["woken"]["section"] == "previous"
+
+
+def test_set_pins_does_not_touch_the_event_loop(tmp_path, monkeypatch) -> None:
+    """The pin write is worker-thread work and must not put onto asyncio queues.
+
+    ``notify_list_changed`` calls ``asyncio.Queue.put_nowait``, which is only
+    safe on the loop, and ``api_session_pin`` runs ``set_pins`` inside
+    ``asyncio.to_thread``. Doing the notify there would be a cross-thread queue
+    write whose repaint can be dropped (review round 1, MAJOR 2). So this pins
+    the SPLIT: ``set_pins`` reads/writes/invalidates only, and the route wakes
+    the stream afterwards on the loop.
+    """
+    from local_operator.tui.sidebar_pins import read_pins
+
+    cfg = tmp_path / "config"
+    session_dir = cfg / "sessions" / "durable-1"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
+    _write_turns(session_dir, 1)
+
+    table = SessionTable()
+    woken: list[int] = []
+    monkeypatch.setattr(table, "notify_list_changed", lambda: woken.append(1))
+
+    state = table.set_pins("durable-1", True)
+
+    assert state is True
+    assert read_pins(cfg) == ["durable-1"]
+    assert woken == [], "set_pins must not wake the stream; the route does that on the loop"
+
+
+def test_pin_route_wakes_the_list_stream(tmp_path, monkeypatch) -> None:
+    """The route is what wakes the SSE stream, on the loop (review round 2, M2-4).
+
+    ``set_pins`` is worker-thread work and must not touch the asyncio queues
+    (MAJOR 2), so the wake lives in the route. A test that only watched
+    ``set_pins`` would therefore pass with the route's ``notify_list_changed``
+    deleted — the pin would land in the store and the phone's list would never
+    be told. This drives the real HTTP route with a real list subscriber held
+    open and asserts a repaint arrives.
+    """
+    cfg = tmp_path / "config"
+    session_dir = cfg / "sessions" / "durable-1"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
+    _write_turns(session_dir, 1)
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    # A live list subscriber: ``notify_list_changed`` puts onto each of these
+    # queues, so an empty queue after the POST is the route having failed to wake.
+    queue: asyncio.Queue[None] = asyncio.Queue()
+    daemon.table.list_subscribers.add(queue)
+
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+    assert client.post("/api/sessions/durable-1/pin", json={"pinned": True}).status_code == 200
+    assert not queue.empty(), "the pin route must wake the list SSE stream"
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_pin_wakes_an_open_phone_list(tmp_path, monkeypatch) -> None:
+    """A pin written by ANOTHER surface reaches an open phone list on its own (QA Q1).
+
+    The terminal's ``F10`` and the desktop app write ``sidebar-pins.json``
+    directly, never through this daemon's route, so nothing used to ring the list
+    stream for them: the phone showed the pin only after some unrelated event
+    repainted the list (QA measured nothing after 40 s and 110 s). The daemon's
+    own periodic pass now fingerprints the file, so this writes it with the
+    TERMINAL's own writers and waits for the list subscriber to be woken by the
+    real ``scan_loop`` -- on the event, bounded only as a failure ceiling -- then
+    reads the row the phone would be sent. Both directions, because an unpin
+    that never reached the phone is the same defect.
+    """
+    from local_operator.mobile import daemon as daemon_module
+    from local_operator.tui.sidebar_pins import set_pin, toggle_pin
+
+    cfg = tmp_path / "config"
+    session_dir = cfg / "sessions" / "durable-1"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
+    await _write_turns_async(session_dir, 1)
+    # The pass's cadence is not what is under test; a short interval keeps the
+    # wait short without the test depending on how short it is.
+    monkeypatch.setattr(daemon_module, "SCAN_INTERVAL_S", 0.05)
+
+    daemon = MobileDaemon(port=0, password="pw123", dial_registrants=False)
+    # The boot sweep is its own path; production reaches this pass on every tick
+    # after the first, which is what pre-marking lands on (as test_attention does).
+    daemon._attention_bootstrapped = True
+    # One pass to SEED: the first tick observes the attention revision and the
+    # pin file for the first time, and the attention half wakes the stream then.
+    await daemon._scan_once()
+    queue: asyncio.Queue[None] = asyncio.Queue()
+    daemon.table.list_subscribers.add(queue)
+
+    async def pinned_after_wake() -> bool:
+        await asyncio.wait_for(queue.get(), timeout=30)
+        rows = await daemon.table.summaries()
+        return next(r["pinned"] for r in rows if r["session_id"] == "durable-1")
+
+    loop_task = asyncio.create_task(daemon.scan_loop())
+    try:
+        # Written OUTSIDE the daemon's pin route, by the terminal's own verb.
+        assert toggle_pin(cfg, "durable-1") is True
+        assert await pinned_after_wake() is True
+        # And the other direction, through the desired-state verb the desktop
+        # route uses: the unpin has to reach the phone just the same.
+        assert set_pin(cfg, "durable-1", False) is False
+        assert await pinned_after_wake() is False
+    finally:
+        loop_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await loop_task
+
+
+@pytest.mark.asyncio
+async def test_an_unchanged_pin_file_does_not_repaint_the_list(tmp_path, monkeypatch) -> None:
+    """The pin fingerprint must not turn every scan tick into a list repaint.
+
+    The check rides the daemon's 2 s pass, so a comparison that always fired
+    would repaint every open phone list every tick. Two passes over an untouched
+    file (present, then absent) must leave the subscriber queue empty.
+    """
+    from local_operator.tui.sidebar_pins import PINS_FILE, set_pin
+
+    cfg = tmp_path / "config"
+    session_dir = cfg / "sessions" / "durable-1"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
+    await _write_turns_async(session_dir, 1)
+    set_pin(cfg, "durable-1", True)
+
+    daemon = MobileDaemon(port=0, password="pw123", dial_registrants=False)
+    daemon._attention_bootstrapped = True
+    await daemon._scan_once()
+    assert daemon.table.pins == ("durable-1",), "the first pass seeds the table's pins"
+    queue: asyncio.Queue[None] = asyncio.Queue()
+    daemon.table.list_subscribers.add(queue)
+
+    await daemon._scan_once()
+    await daemon._scan_once()
+    assert queue.empty(), "an untouched pin file must not wake the list"
+
+    # A file that disappears while its ids were pinned IS a change.
+    (cfg / PINS_FILE).unlink()
+    await daemon._scan_once()
+    assert not queue.empty()
+    assert daemon.table.pins == ()
+
+
+@pytest.mark.asyncio
+async def test_a_second_clients_listing_load_cannot_swallow_the_wake(tmp_path, monkeypatch) -> None:
+    """A listing load between the terminal's write and the next pass must not eat
+    the wake for a list that is ALREADY open (review round 7, F1).
+
+    The durable load runs unannounced whenever something wants a listing, and a
+    second client's first frame is enough. It used to re-read the pin file and
+    publish the result as the table's own pins, so the pass that followed
+    compared its read against a copy that already held the new set, saw no
+    difference, and woke nobody -- the phone that had the list open stayed on
+    its stale rows until some unrelated repaint. The load still runs here (spied
+    against the real scanner, so a load that never happened cannot make this
+    pass), it simply no longer owns the state the pass compares against.
+
+    The listing the load itself built is deliberately NOT asserted to be fresh:
+    with one owner of the pins, a frame built before the pass can lag the file by
+    up to one pass, and the pass then repaints every subscriber. What is
+    asserted is that convergence -- the wake AND the frame the phone is sent
+    after it.
+    """
+    from local_operator import resume as resume_module
+    from local_operator.tui.sidebar_pins import toggle_pin
+
+    cfg = tmp_path / "config"
+    session_dir = cfg / "sessions" / "durable-1"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
+    await _write_turns_async(session_dir, 1)
+
+    calls = {"n": 0}
+    real_rows = resume_module.recent_session_rows
+
+    def counting_rows(config_dir, limit=None, *, strict=False):
+        calls["n"] += 1
+        return real_rows(config_dir, limit, strict=strict)
+
+    monkeypatch.setattr(resume_module, "recent_session_rows", counting_rows)
+
+    daemon = MobileDaemon(port=0, password="pw123", dial_registrants=False)
+    daemon._attention_bootstrapped = True
+    await daemon._scan_once()
+    queue: asyncio.Queue[None] = asyncio.Queue()
+    daemon.table.list_subscribers.add(queue)
+
+    # Written OUT OF BAND, by the terminal's own verb.
+    assert toggle_pin(cfg, "durable-1") is True
+    # A second client opens the list: this is what its first frame does.
+    daemon.table.invalidate_summaries_cache()
+    before = calls["n"]
+    await daemon.table.summaries()
+    assert calls["n"] > before, "the listing load under test must actually run"
+
+    # The list that was already open must still be woken by the pass that follows,
+    # and the frame it is then sent must carry the pin.
+    await daemon._scan_once()
+    assert not queue.empty(), "a listing load must not swallow the wake for an open list"
+    assert daemon.table.pins == ("durable-1",)
+    woken = await daemon.table.summaries()
+    assert next(r["pinned"] for r in woken if r["session_id"] == "durable-1") is True
+
+
+@pytest.mark.asyncio
+async def test_a_listing_load_in_flight_cannot_overwrite_newer_pins(tmp_path, monkeypatch) -> None:
+    """A durable load already in flight must not land its older read on top of the
+    set the pass announced while it was away (review round 7, F2).
+
+    Nothing re-wakes the list after this: the fingerprint has not moved again, so
+    a phone that was woken by the pass and then read these rows would sit on
+    ``pinned: False`` until the file changed for some other reason -- the very
+    stale-list symptom the pass exists to remove. The ordering is made
+    deterministic rather than raced: the load is held at its first step, so the
+    write and the pass both land while it is genuinely in flight, and its own
+    pins read is answered from what it saw when it started.
+    """
+    import threading
+
+    from local_operator import resume as resume_module
+    from local_operator.mobile import daemon as daemon_module
+    from local_operator.tui.sidebar_pins import read_pins as real_read_pins
+    from local_operator.tui.sidebar_pins import set_pin
+
+    cfg = tmp_path / "config"
+    session_dir = cfg / "sessions" / "durable-1"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
+    await _write_turns_async(session_dir, 1)
+
+    daemon = MobileDaemon(port=0, password="pw123", dial_registrants=False)
+    daemon._attention_bootstrapped = True
+    await daemon._scan_once()
+    queue: asyncio.Queue[None] = asyncio.Queue()
+    daemon.table.list_subscribers.add(queue)
+
+    # The load's own thread, and the pins it saw when it looked -- which is what
+    # a read that started before the write hands back after it.
+    load_thread: list[int] = []
+    seen_by_the_load: dict[str, list[str]] = {}
+    load_started = threading.Event()
+    load_may_finish = threading.Event()
+    real_rows = resume_module.recent_session_rows
+
+    def held_rows(config_dir, limit=None, *, strict=False):
+        load_thread.append(threading.get_ident())
+        seen_by_the_load["pins"] = real_read_pins(config_dir)
+        load_started.set()
+        # A failure ceiling, not the sync: the test itself releases this below.
+        assert load_may_finish.wait(30), "the in-flight load was never released"
+        return real_rows(config_dir, limit, strict=strict)
+
+    def read_pins_during_the_load(directory):
+        # Only the load's own read is answered from the earlier look; the pass and
+        # the route run on other threads and read the file as they always did.
+        if threading.get_ident() in load_thread:
+            return list(seen_by_the_load["pins"])
+        return real_read_pins(directory)
+
+    monkeypatch.setattr(resume_module, "recent_session_rows", held_rows)
+    monkeypatch.setattr(daemon_module, "read_pins", read_pins_during_the_load)
+
+    task = asyncio.create_task(daemon.table.summaries())
+    assert await asyncio.to_thread(load_started.wait, 30), "the load never started"
+    try:
+        # OUT OF BAND, while the load is away.
+        assert set_pin(cfg, "durable-1", True) is True
+        # The pass announces the new set -- and the phone is woken for it.
+        await daemon._scan_once()
+        assert not queue.empty(), "the pass must wake the list for the pin it read"
+        assert daemon.table.pins == ("durable-1",)
+    finally:
+        load_may_finish.set()
+
+    rows = await task
+    # The announced set must survive the load it was announced alongside.
+    assert daemon.table.pins == ("durable-1",), "an in-flight load overwrote newer pins"
+    assert next(r["pinned"] for r in rows if r["session_id"] == "durable-1") is True
+
+
+@pytest.mark.asyncio
+async def test_a_same_size_same_mtime_replace_is_still_detected(tmp_path, monkeypatch) -> None:
+    """The fingerprint's INODE term separates two same-size, same-mtime
+    replaces, and it has to be shown doing work (review round 7, F3: dropping
+    ``st_ino`` left every pin test green).
+
+    Two writes are forced to agree on the fingerprint's other two terms -- the
+    same byte length (two four-character ids, the same JSON shape) and the same
+    ``st_mtime_ns``, set explicitly rather than hoped for -- so the new inode is
+    the only difference left. The pass must still see a change, wake the list and
+    publish the new set; with the inode stubbed out of ``fingerprint()`` the two
+    reads compare equal and this fails.
+
+    WHAT THIS DEPENDS ON, and why it holds on Linux (review round 8, R8-1): the
+    inode only differs if the filesystem does not hand the replaced file's inode
+    NUMBER straight back to the next write. ext4 does exactly that -- the first
+    ``set_pin`` freed ``before``'s inode and the second one's ``mkstemp`` got the
+    same number back, so CI failed where APFS (which does not reuse promptly)
+    passed. The test therefore holds ``before``'s inode allocated with a hard
+    link for the whole rewrite: an inode with a live link cannot be freed, so no
+    filesystem can reissue its number, and the inequality below is a property of
+    ``os.replace`` rather than of the OS's reuse policy.
+    """
+    import os
+
+    from local_operator.tui.sidebar_pins import PINS_FILE, set_pin
+
+    cfg = tmp_path / "config"
+    # Both ids need a folder: ``read_pins`` prunes ids with no directory, and a
+    # pruned read would make this pass for the wrong reason.
+    for session_id in ("aaaa", "bbbb"):
+        (cfg / "sessions" / session_id).mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
+
+    daemon = MobileDaemon(port=0, password="pw123", dial_registrants=False)
+    daemon._attention_bootstrapped = True
+    set_pin(cfg, "aaaa", True)
+    await daemon._scan_once()
+    assert daemon.table.pins == ("aaaa",), "the first pass seeds the table's pins"
+    before = (cfg / PINS_FILE).stat()
+    # Pin ``before``'s inode alive (see the docstring): without this link ext4
+    # recycles it for the second write and the premise below fails on CI.
+    os.link(cfg / PINS_FILE, tmp_path / "hold-previous-pins-inode")
+    queue: asyncio.Queue[None] = asyncio.Queue()
+    daemon.table.list_subscribers.add(queue)
+
+    # A same-length id, then the new file's mtime forced back onto the old one: a
+    # same-mtime, same-size replace, which is what a burst of writes on a coarse
+    # clock looks like.
+    set_pin(cfg, "aaaa", False)
+    set_pin(cfg, "bbbb", True)
+    os.utime(cfg / PINS_FILE, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = (cfg / PINS_FILE).stat()
+    assert (after.st_size, after.st_mtime_ns) == (
+        before.st_size,
+        before.st_mtime_ns,
+    ), "this test only means anything if size and mtime_ns are held equal"
+    assert after.st_ino != before.st_ino, "a held inode cannot be reissued to the replace"
+
+    await daemon._scan_once()
+    assert not queue.empty(), "a same-size same-mtime replace must still reach the phone"
+    assert daemon.table.pins == ("bbbb",)
+
+
+def test_pin_route_refuses_a_live_session_with_no_folder_yet(tmp_path, monkeypatch) -> None:
+    """A pin the list cannot show is refused, not answered 200 (QA Q2).
+
+    A live session in the window before its conversation materialises has a
+    runtime entry but no ``sessions/<id>`` folder, and ``read_pins`` prunes any
+    id without one. The route used to answer ``200 pinned: true`` while the row
+    stayed unpinned, and leave the id in the file to pin itself later once the
+    folder appeared. It must now refuse with 409, write nothing, and still wake
+    the list so the client's optimistic star is corrected; and once the folder
+    exists the same request pins for real.
+    """
+    from local_operator.tui.sidebar_pins import PINS_FILE, read_pins
+
+    cfg = tmp_path / "config"
+    (cfg / "sessions").mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    daemon.table.entries[4242] = _live_entry(4242, "ghost-1")
+    queue: asyncio.Queue[None] = asyncio.Queue()
+    daemon.table.list_subscribers.add(queue)
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+
+    refused = client.post("/api/sessions/ghost-1/pin", json={"pinned": True})
+    assert refused.status_code == 409, refused.text
+    # The actionable half only: both screens wrap this as
+    # "Could not save the pin: <body>", and a body that repeated the failure read
+    # as two clauses doing one job (design round 5, D13).
+    assert refused.json()["error"] == "no saved messages yet — pin it after you send one"
+    assert not (cfg / PINS_FILE).exists(), "a refused pin must not reach the store"
+    assert not queue.empty(), "the refusal must repaint the list over the optimistic star"
+    # Unpinning is harmless and stays answerable.
+    unpin = client.post("/api/sessions/ghost-1/pin", json={"pinned": False})
+    assert (unpin.status_code, unpin.json()["pinned"]) == (200, False)
+
+    (cfg / "sessions" / "ghost-1").mkdir()
+    pinned = client.post("/api/sessions/ghost-1/pin", json={"pinned": True})
+    assert (pinned.status_code, pinned.json()["pinned"]) == (200, True)
+    assert read_pins(cfg) == ["ghost-1"]
+
+
+def test_set_pins_answers_what_the_reader_reports(tmp_path, monkeypatch) -> None:
+    """``set_pins`` reports the READ-BACK state, so the route cannot claim a pin
+    the list will not show even if the folder vanishes under the write."""
+    from local_operator.tui.sidebar_pins import PINS_FILE
+
+    cfg = tmp_path / "config"
+    (cfg / "sessions").mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    table = SessionTable()
+    # No folder: the store takes the id, the reader prunes it.
+    assert table.set_pins("gone-1", True) is False
+    assert json.loads((cfg / PINS_FILE).read_text()) == ["gone-1"]
+    assert table.pins == ()

@@ -20,22 +20,116 @@ So a runtime now bounds its own stall by preserving diagnostic evidence. Automat
 termination remains disabled until idle state and every work-admission path can be
 linearized together; an operator must inspect and stop a runtime that stays wedged.
 
-WHY A C TIMER AND NOTHING IN PYTHON
------------------------------------
+WHY THERE IS NO C TIMER ANY MORE, AND WHAT REPLACED IT
+------------------------------------------------------
 A ``threading.Thread`` watchdog, an ``asyncio`` timer and a signal handler all
-fail here, and ``tests/e2e/watchdog.py`` documents the measurements: a hung
-thread never releases the GIL, so a thread watchdog cannot run; a Python signal
-handler runs only between bytecodes, so ``pytest-timeout``'s default method
-never fires; and a loop parked in a C call never schedules the coroutine that
-would report the sample. (The same GIL is why the SIGUSR1 dump above cannot
-answer this class of question: its handler is an asyncio signal handler and
-needs the loop that is blocked.)
+fail for the class this module was built for: a hung thread never releases the
+GIL, so a thread watchdog cannot run; a Python signal handler runs only between
+bytecodes, so ``pytest-timeout``'s default method never fires; and a loop parked
+in a C call never schedules the coroutine that would report the sample.
 
-``faulthandler.dump_traceback_later`` is the one mechanism that survives it. It
-arms a timer in a dedicated **C** thread that writes every thread's stack with
-``write(2)`` straight to a file descriptor without the GIL. Production configures
-it with ``exit=False`` because a Python idle sample cannot be atomic with every
-work-admission path, and the native timer cannot re-check state before expiry.
+The bound was therefore armed through ``faulthandler.dump_traceback_later``, a
+timer in a dedicated C thread. THE ARMING PATH OF THAT FUNCTION IS ITSELF
+TERMINAL, and that is what this module no longer touches — measured on two live
+runtimes on this host and read out of CPython 3.14.3:
+
+* ``dump_traceback_later`` calls ``cancel_dump_traceback_later()`` FIRST
+  (``Modules/faulthandler.c:806``): every arm is a replace, and the only arm that
+  returns early is the first one (``:687``);
+* that cancel releases ``cancel_event`` and then blocks on
+  ``PyThread_acquire_lock(thread.running, 1)`` until the previous timer thread has
+  exited (``:686``, ``:689``), with ``intr_flag=0`` — no ``PyEval_SaveThread`` on
+  that path, so the caller keeps the GIL for the whole wait;
+* and between that cancel and the new timer being started (``:806`` to ``:821``)
+  the process holds NO ARMED TIMER AT ALL.
+
+So one loop thread parked in that cancel while holding the GIL starves every
+other Python thread in the process — ``stall-watchdog-progress`` first, which is
+the leg that exists to report the stall. ``sample`` on pids 43911 and 42983 shows
+exactly that (``task_step`` -> ``faulthandler_dump_traceback_later`` ->
+``cancel_dump_traceback_later`` -> ``PyThread_acquire_lock_timed`` ->
+``__psynch_cvwait`` on the main thread, ``take_gil`` on the sampler), and the
+unarmed window above is why a bound can be reported as fired with no dump on
+disk. Every re-arm is exposed to it, and the module re-arms immediately after
+observing a fire — exactly when a dump is most likely to be in flight.
+
+THE FIX IS TO STOP RE-ARMING IT ON EVERY BEAT, WHICH LEAVES THE GIL-HELD CLASS
+AS A NAMED GAP rather than as a covered one. ``dump_traceback_later`` is the ONLY
+mechanism that writes a dump while no Python thread can run at all (its timer lives on
+a C thread that never takes the GIL), and that is the exact class this module was built
+for — a loop parked in a GIL-holding C call. Both ways of keeping it were built and
+measured, and NEITHER is shippable:
+
+* ARMED ONCE PER EPISODE it never re-arms, so it expires on its own schedule however
+  healthily the process beats. Measured on a child beating both planes every 0.1 s
+  under a 2 s bound: it fired at exactly ``0:00:02`` and the pid appeared in
+  :func:`fired_pids`, i.e. a HEALTHY runtime was reported as one that fired the bound.
+  On ``main`` that cannot happen, because every beat there replaces the C timer.
+* RE-ARMED ON A CADENCE the replace cancels a pending timer FIRST and waits on its C
+  thread with the GIL held, so it parks the moment a dump is in flight — measured at
+  **4-9 s** of held GIL against a live fire dump (worst 9109.7 ms, the calling thread's
+  ticker advancing zero across it). That is precisely the deadlock :func:`_fire` exists
+  to remove, on the pass most likely to coincide with it.
+
+So the automatic in-process leg is REMOVED rather than fixed, and what is left for that
+class is the artifact this module can still write (see "WHAT THIS DOES NOT COVER" below
+for what is, and is not, verified about its reader): the ``.deadline`` sibling beside the
+dump and the registry heartbeat, with the dump pulled ON DEMAND by ``SIGUSR1``. **A named
+gap, never a false stall report** — and
+:func:`_arm_may_not_be_automatic_here` records both measurements so a future reader does
+not restore a leg that has already failed twice.
+
+WHAT REPLACED THE PER-BEAT ARMS:
+
+* THE FIRE IS PYTHON (:func:`_fire`). The deadline the sampler already re-derives
+  on every wake is recorded by :func:`_arm_timer` and honoured by the sampler, and
+the fire writes the leg marker — in ``faulthandler``'s own
+  ``Timeout (H:MM:SS.ssssss)!`` spelling, which every reader in this tree tests
+  for — and then takes the dump with
+  ``faulthandler.dump_traceback(file=..., all_threads=True)``. That path walks the
+  same thread states through the same writer, truncating at the same 100 threads
+  and 100 frames, and touches NO timer state, so there is nothing left to park in.
+  It is taken OUTSIDE :data:`_LOCK`: an all-thread dump is hundreds of
+  milliseconds on a loaded host, and the gate is what every ``beat`` needs.
+  ONE OWNER, AND IT IS THIS THREAD: with no C timer left, the sampler is the only
+  thing in the process that can take a deadline, so it reads ``due_at`` BEFORE it
+  asks the progress predicate again (:func:`_progress_sampler`). The progress leg
+  records a fresh deadline on every sample it fires on, and a predicate asked
+  first would re-arm over the deadline it had just set — an arm that cancels
+  itself, leaving a loop that burns without ever dipping with one ``no progress``
+  line and no dump at all (2026-09-24).
+  **THIS LEG NEEDS PYTHON, which is the whole of the gap below**: a process whose
+  every thread is parked in a GIL-holding C call never reaches it.
+* THE OUT-OF-PROCESS LEG IS A SIGNAL (:func:`_register_evidence_signal`).
+  ``arm`` registers ``SIGUSR1`` on the SAME ``O_APPEND`` handle, so a supervisor
+  or an operator can obtain a dump from a runtime whose Python is not running at
+  all — the class no leg of this module can serve. Registered ONCE and with
+  ``chain=False``: the chain spelling was measured to SEGFAULT a real armed
+  child (see the function), so this leg owns the sigaction slot rather than
+  layering on another handler. A signal handler is per-process state that ``exec``
+  resets, so an exec'd child cannot inherit it. TWO LIMITS, stated rather than
+  implied: this leg owns the sigaction slot for the arm's lifetime and is never
+  displaced — ``process.amain`` installs no ``SIGUSR1`` handler of its own, and the
+  runtime's ``LOP_RUNTIME_DEBUG_STACKS`` task-stack walk rides
+  :func:`notify_on_evidence_signal` instead (the callback the sampler fires once a
+  dump it did not write lands in this module's file), so the walk waits for Python
+  while this leg's dump does not; and a runtime that forks without exec does
+  inherit the descriptor and the handler.
+
+WHAT THIS DOES NOT COVER, so that nothing here is read as covered: the
+HARD-DEADLINE class — no Python running at all, e.g. a loop parked in a
+GIL-holding C scan — is NOT self-bounded from inside, and after this change it is not
+dumped automatically either (see the two measurements above; there is no automatic
+in-process leg left for it). What this module provides for that class is the ARTIFACT and
+not a reader: the ``.deadline`` sibling it writes beside the dump, and the registry
+heartbeat, are both written and readable while a thread is parked, with the signal leg
+above for evidence ON DEMAND. The reader that would turn them into a detection lives
+OUTSIDE this repository and was NOT exercised by this change, so the supervisor half of
+that mitigation is ASSERTED rather than verified here. This change composes with the
+dump-only policy: a fire that
+only dumps loses nothing by moving into Python. **THE GAP IS NAMED HERE AND ON THE
+PR, deliberately, rather than papered over with a leg that reports stalls that are not
+there.**
 
 WHAT "STALL" MEANS HERE: NO PROGRESS, NOT SLOW WORK
 ---------------------------------------------------
@@ -642,6 +736,7 @@ from __future__ import annotations
 import faulthandler
 import logging
 import os
+import signal
 import sys
 import threading
 import time
@@ -886,9 +981,16 @@ FIRE_UNKNOWN = "unknown"
 OBSERVATION_NOT_VERDICT = (
     "THIS IS A TIMER OBSERVATION, NOT A VERDICT.\n\n"
     "THIS PROCESS MAY STILL BE ALIVE ON THIS SAME PID. Check the PID; it may still serve.\n\n"
-    f"{DUMP_ONLY_STATEMENT}: the native timer is armed with exit=False.\n\n"
-    "The timer expired without a re-arm from this process's own loops, and that is ALL it "
-    "measured. It is NOT a statement that the runtime stopped -- the timer can expire on a "
+    # THE POLICY CLAUSE IS ABOUT THE FIRE, NOT ABOUT THE ARMING PATH (fold of #1463 with
+    # #1517). Main's wording here -- "the native timer is armed with exit=False" -- names
+    # an instrument no build of this module installs any more: the C timer is gone
+    # entirely and the fire is Python. What did NOT change, and what this clause now
+    # states, is that no fire this module takes ends a process. The marker is kept
+    # because readers key on the whole sentence, not on this clause
+    # (``journal._stall_bound_evidence``, :func:`fire_outcome`).
+    f"{DUMP_ONLY_STATEMENT}: no fire this module takes ends the process.\n\n"
+    "The bound expired without a re-arm from this process's own loops, and that is ALL it "
+    "measured. It is NOT a statement that the runtime stopped -- the bound can expire on a "
     "process that is mid-turn and working, and it may carry on serving AFTER this dump is "
     "written.\n\n"
     "This header is written at ARM time, BEFORE any of those re-arms, so it cannot name the "
@@ -925,7 +1027,8 @@ HOW_TO_READ_THE_FIRED_VALUE = (
     "never-engaged reading safe. It is a SMALLER value when a beat recomputed it "
     "from the oldest plane's stamp, which is how a plane that went quiet shows up as a number "
     f"below the bound. {DUMP_PREFIX}-<pid>{DEADLINE_SUFFIX} holds the deadline the timer is "
-    "currently armed for and the leg that pinned it, rewritten by every beat THAT RE-ARMED, and "
+    "currently armed for (as an epoch), the leg that pinned it and the same deadline on the "
+    "process's monotonic clock, rewritten by every beat THAT RE-ARMED, and "
     "removed when a runtime arms -- so it describes the runtime holding this pid NOW, never an "
     "earlier one (a pid is recycled). Its ABSENCE means no beat ever re-armed this timer, and "
     "its mtime is the last SUCCESSFUL re-arm: read any line below carrying the word 're-arm' "
@@ -971,6 +1074,19 @@ def min_bound_seconds() -> float:
 #: ``faulthandler`` as zero or a negative number. A fiftieth of a second is
 #: short enough that "overdue" and "fires now" are the same thing to a reader.
 MIN_REARM_S = 0.05
+
+#: How often the sampler looks while a runtime has registered an evidence callback
+#: (:func:`notify_on_evidence_signal`). That callback is the route by which the
+#: runtime's own ``SIGUSR1`` action is reached once Python can run again, and the
+#: notification is an OBSERVATION of the dump file rather than a signal — so this is
+#: the latency an operator's ``kill -USR1`` waits for the runtime's half of the
+#: evidence. Well under the 15 s heartbeat because it is a person waiting, and paid
+#: only by a process that registered a listener — WHICH PRODUCTION DOES ONLY WHEN
+#: ``LOP_RUNTIME_DEBUG_STACKS`` IS ON: ``process.py`` gates the registration on it,
+#: so with stacks switched off there is no callback, nothing here applies, and the
+#: signal recovers this module's own dump alone. That switch turns off the runtime's
+#: half of the evidence, never the leg.
+EVIDENCE_POLL_S = 1.0
 
 #: How many times one window is LOOKED AT, which is the leg's resolution and
 #: nothing more: the decision is a claim about the trailing window (see
@@ -1304,6 +1420,11 @@ class _Armed:
         "held",
         "arm_size",
         "seen_fires",
+        "due_at",
+        "due_seconds",
+        "registered_signal",
+        "evidence_size",
+        "evidence_callbacks",
         "held_fires",
         "after_fire_at",
         "fired_held",
@@ -1453,10 +1574,34 @@ class _Armed:
         self.busy = busy
         self.held = _holds_work(busy)
         #: The dump's size as of the last successful arm, which is how a fire is
-        #: OBSERVED from Python: the C timer appends the ``Timeout (`` line and every
+        #: OBSERVED from Python: every fire appends the ``Timeout (`` line and every
         #: thread's stack, so file growth after an arm is the fire's own signature and
         #: needs no parsing on the common path (see :func:`_record_held_fire`).
         self.arm_size = _dump_size(path)
+        #: WHEN THE BOUND NEXT HOLDS, in ``time.monotonic`` seconds, and the value the
+        #: fire's own line reports. Written by :func:`_arm_timer` and nothing else, so
+        #: there is one writer for the instant the whole mechanism turns on — the
+        #: sampler's deadline arithmetic, the held-fire backoff and the executing-loop
+        #: extension all reach this field through that one spelling.
+        self.due_at = time.monotonic() + seconds
+        #: The remaining time the deadline above was set FOR, kept because the
+        #: ``Timeout (`` line reports it and a reader uses it to tell a boot-bound fire
+        #: from a steady-bound one (see ``HOW_TO_READ_THE_FIRED_VALUE``).
+        self.due_seconds = seconds
+        #: The signal ``arm`` registered for the out-of-process leg, or ``None`` where
+        #: the platform has no ``SIGUSR1``. Kept so a reader can answer "is this process
+        #: reachable by signal" — NEVER so it can be unregistered: see
+        #: :func:`_register_evidence_signal` on why nothing here touches the slot again.
+        self.registered_signal: int | None = None
+        #: The dump file's size as of the last look that could tell a signal dump apart
+        #: (:func:`_note_evidence_dump`) — separate from ``arm_size``, which the held-fire
+        #: policy re-baselines, so an observation here cannot disturb that policy.
+        self.evidence_size = _dump_size(path)
+        #: Who to tell when a dump this module did not write lands — see
+        #: :func:`notify_on_evidence_signal`.
+        #: A list rather than one callable, because registration is append-only and a
+        #: second caller must not silently replace the first.
+        self.evidence_callbacks: list[Callable[[], object]] = []
         #: How many fires this arm has already ANNOTATED. A counter rather than a flag
         #: because a runtime can survive several: each held fire re-arms for the next
         #: episode, and a second one must be recorded too rather than swallowed by the
@@ -1798,7 +1943,7 @@ def dump_candidates(pid: int | None = None, directory: Path | None = None) -> tu
 def deadline_path(pid: int | None = None, directory: Path | None = None) -> Path:
     """Where the CURRENT deadline goes: ``<log dir>/runtime-stall-<pid>.deadline``.
 
-    THE SIBLING OF THE DUMP, one number and one name on a line (~24 bytes), rewritten
+    THE SIBLING OF THE DUMP, ``<epoch> <leg> <monotonic>`` on one line (~40 bytes), rewritten
     by every :func:`beat` THAT RE-ARMED -- so a reader with a dead pid has, without
     opening anything else: the deadline the timer was armed for (compare it with the
     fire to say whether the bound came due or something else pre-empted it), the leg
@@ -2074,10 +2219,11 @@ def arm(
         except OSError:
             pass
         try:
-            # THE HEADER IS WRITTEN BEFORE THE TIMER IS ARMED, never deferred:
-            # faulthandler writes with a raw descriptor from a C thread, so the
-            # file and its header have to exist first. Everything below this
-            # line is what a reader finds when the bound fires, in this order.
+            # THE HEADER IS WRITTEN BEFORE THE DEADLINE IS RECORDED AND BEFORE THE
+            # SIGNAL LEG IS REGISTERED, never deferred: everything below is what a
+            # reader finds when the bound fires, in this order, and a dump pulled by
+            # the out-of-process leg must land BELOW its own header rather than
+            # before it.
             handle.write(
                 f"{ARM_MARKER}pid {pid or os.getpid()} armed for {bound:g}s at {time.time():.0f} "
                 f"({time.strftime('%Y-%m-%d %H:%M:%S')}); the runtime's own loops re-arm this "
@@ -2118,6 +2264,10 @@ def arm(
                 target, handle, bound, pid or os.getpid(), probe, busy, steady_seconds=steady
             )
             _rearm(to_arm, remaining=bound)
+            # THE OUT-OF-PROCESS LEG, registered on the SAME handle the dump is written
+            # to and only after the deadline is settled: a runtime that cannot run
+            # Python has no leg of this module left, and this is the one way in.
+            _register_evidence_signal(to_arm)
         except (OSError, ValueError, OverflowError, RuntimeError):
             logger.warning("stall watchdog could not arm; no dump will be written", exc_info=True)
             # The header this call just wrote would otherwise read as evidence of
@@ -2130,14 +2280,16 @@ def arm(
                 pass
             return False
         _ARMED = to_arm
-        if probe is not None or busy is not None:
-            # EITHER PROBE EARNS THE SAMPLER, and ``busy`` alone is a reason: the
-            # sampler is what re-reads the work-in-flight reading while the timer is
-            # pending (:func:`_apply_exit_leg`), so a caller that supplies only the busy
-            # probe would otherwise hold a reading that could never flip back — and a
-            # runtime that picked up a turn after its last arm would then be recorded as
-            # an idle observation for the rest of that arm.
-            _start_sampler(_ARMED)
+        # THE SAMPLER IS NOT OPTIONAL ANY MORE. It used to be started only for a caller
+        # that supplied a probe or a busy answer, because its job was the PROGRESS leg
+        # (and the exit-leg re-read) while the FIRE came from the C thread. The fire is
+        # Python now (:func:`_fire`), so this thread is the only thing in the process
+        # that can fire the bound at all: an arm without one would be armed and silent.
+        # The probe still gates what the thread may CONCLUDE — a run with no probe keeps
+        # the progress leg inert by construction (see :func:`_read_probe`, and
+        # ``_extend_for_execution``'s refusal without a live second leg) — so nothing
+        # here widens what that leg decides.
+        _start_sampler(_ARMED)
         return True
 
 
@@ -2238,28 +2390,227 @@ def _fired_count(path: Path) -> int:
     return sum(1 for line in text.splitlines() if line.startswith(FIRED_MARKER))
 
 
-def _arm_timer(handle: IO[str], remaining: float, *, exit_leg: bool) -> None:
-    """Arm (or replace) the C timer for diagnostics, never process termination.
+def _arm_timer(armed: "_Armed", remaining: float) -> None:
+    """Record when the bound next holds, ``remaining`` seconds from now.
 
-    ``exit_leg`` remains an input because callers compute and record their local
-    decision, but a sampled idle state is not atomic with every work-admission path.
-    No production timer may use it to authorize a native process exit.
+    THE ONE SPELLING FOR EVERY SITE THAT DECIDES A DEADLINE (the arm, a plane's
+    beat, the progress leg's own fire, the executing-loop extension), and it is a
+    RECORD rather than a C call since the fix for the arm/cancel deadlock — the
+    module docstring carries the measurement of why:
+    ``faulthandler.dump_traceback_later`` cancels a previous timer first and waits
+    for an in-flight dump with the GIL held, which is a park no thread of this
+    process can afford. Two consequences, both load bearing:
 
-    ONE SPELLING FOR EVERY PRODUCTION TIMER SITE (the arm, a plane's beat, the
-    progress leg's own fire). ``exit_leg`` remains explicit because callers record
-    their Python-side sample, but the native call below is ALWAYS ``exit=False``: no
-    value a caller can pass reaches it, which is why the argument can no longer decide
-    anything about a process (finding C of the 2026-09-23 convergence round, and
-    ``test_no_production_timer_site_can_arm_a_fatal_expiry`` pins both halves of it).
-    A Python sample cannot be re-checked at native expiry, so a sampled idle state can
-    never be treated as authority to end a process that may already be serving again.
+    * THERE IS NO C TIMER TO REPLACE, so there is no cancel: the park cannot be
+      reached from this module at all, whatever thread calls it.
+    * THE EXIT LEG IS GONE WITH THE C TIMER, and its ABSENCE rather than its value is
+      what this signature now states. It used to be a parameter because a C thread
+      carried it into a fire that no Python frame witnessed; the fire is
+      :func:`_fire`, which reads the work-in-flight answer on the sample it fires on
+      and uses it only to choose the annotation. Nothing a caller could pass here
+      could end a process any more, and a vestigial parameter that cannot decide
+      anything is exactly how the fatal arm gets spelled back in.
 
-    REPLACING IS THE ARMED STATE: a second call supersedes the pending timer rather
-    than adding one (measured, and the module docstring's inventory says so), so
-    each re-arm replaces the prior diagnostic deadline without creating a second
-    timer.
+    ``remaining`` is kept as well as the instant it produces, because the
+    ``Timeout (`` line reports the value the timer was armed with and a reader uses
+    that value to tell one class of fire from another.
     """
-    faulthandler.dump_traceback_later(max(MIN_REARM_S, remaining), file=handle, exit=False)
+    armed.due_seconds = max(MIN_REARM_S, remaining)
+    armed.due_at = time.monotonic() + armed.due_seconds
+
+
+def _arm_may_not_be_automatic_here() -> None:
+    """WHY NO NATIVE TIMER IS ARMED FROM THIS MODULE'S AUTOMATIC PATH (a named gap).
+
+        THIS REPLACES A HELPER THAT WAS HERE, and it is left in its place rather than
+    deleted outright for one reason: a reader who knows that ``faulthandler``'s C timer is
+    the ONLY mechanism that can dump a process with no Python thread running (the 2026-09-20
+    class: 100% of the loop inside one GIL-holding C call) will be tempted to arm it here
+    again. Both shapes were built and measured, and neither is shippable:
+
+    * **armed ONCE per episode** (at ``arm``/``engage``/after a fire): it never re-arms, so
+      it expires on its own schedule however healthily the process beats. Measured on a
+      child beating both planes every 0.1 s under a 2 s bound: it fired at exactly
+      ``0:00:02`` and the pid appeared in ``fired_pids``, so a HEALTHY runtime is reported
+      as one that fired the bound. On ``main`` this cannot happen, because every beat there
+      replaces the C timer.
+    * **re-armed on a cadence** (from the sampler, or from ``beat``): the replace cancels a
+      pending timer FIRST and waits on its C thread with the GIL held, so it parks the
+      moment a dump is in flight — measured at **4-9 s** of held GIL against a live fire
+      dump (worst 9109.7 ms, the calling thread's ticker advancing zero across it). That is
+      precisely the deadlock :func:`_fire` exists to remove, reintroduced on the pass that
+      is most likely to coincide with it.
+
+    Neither direction is acceptable, so the AUTOMATIC in-process coverage for the GIL-held
+    class is a NAMED GAP rather than a feature of this module. What the module provides for
+    that class is the ARTIFACT: the ``.deadline`` sibling written beside the dump and the
+    registry heartbeat — both written and readable while a thread is parked — with the
+    evidence pulled ON DEMAND with ``SIGUSR1`` via :func:`_register_evidence_signal`, which
+    writes the same ``O_APPEND`` dump and needs no GIL of ours. The reader that would turn
+    that artifact into a detection lives OUTSIDE this repository and was not exercised by
+    this change, so the supervisor half of the mitigation is asserted rather than verified
+    here — see the module docstring's "WHAT THIS DOES NOT COVER". A future change that gives
+    this class automatic in-process coverage has to come with a mechanism that is neither of
+    the two above.
+    """
+    return None
+
+
+def _register_evidence_signal(armed: "_Armed") -> None:
+    """Let an operator or a supervisor take this runtime's dump by signal.
+
+    THE LEG FOR THE CLASS THIS MODULE CANNOT SERVE: when no Python runs at all — a
+    loop parked in a GIL-holding C scan — neither the sampler nor any other leg of
+    this module executes, so the dump has to be pulled from OUTSIDE the process.
+    The signal writes the signal's OWN thread — ``all_threads=False``, which the
+    register call decides rather than defaults to: the all-threads walk is what
+    SEGFAULTED a booting armed child in this leg's measurements, and the thread that
+    interests an operator, the one parked in the loop, IS the signal's thread — and
+    it goes through the same ``O_APPEND`` handle, so the evidence stays inside this
+    module's file policy rather than appearing wherever the signaller chose.
+
+    NO CHAIN, AND THAT IS A MEASUREMENT RATHER THAN A PREFERENCE: a signal has one
+    sigaction slot. An earlier revision registered with ``chain=True`` so that it could
+    sit on top of whatever handler the runtime had already installed and still run it;
+    on a real armed runtime child that SEGFAULTED (``rc=-11``, "Fatal Python error:
+    Segmentation fault", no frames) because ``faulthandler``'s chain re-raises against
+    the handler it SAVED, and ``unregister`` restores that saved disposition rather than
+    the live one. So this module registers ONCE, with ``chain=False``, and NEVER calls
+    ``unregister`` — see the disarm comment for the second half of that rule. A
+    diagnostic that can crash a runtime is worse than a diagnostic that is missing.
+
+    THE RUNTIME'S OWN WALK IS NOT LOST WITH THE SLOT: it is reached from the same signal
+    by :func:`notify_on_evidence_signal`, which fires when the module's sampler sees a
+    dump it did not write land in its own file. That is the callback route, it needs no
+    sigaction at all, and it is why ``process.amain`` no longer installs a handler for
+    this signal.
+
+    Never raises: a diagnostic that cannot install its own leg must leave the
+    runtime otherwise untouched.
+    """
+    signum = getattr(signal, "SIGUSR1", None)
+    if signum is None:
+        # Windows: no SIGUSR1, so no out-of-process leg there.
+        return
+    try:
+        faulthandler.register(signum, file=armed.handle, all_threads=False, chain=False)
+    except (OSError, RuntimeError, ValueError):
+        logger.warning("stall watchdog could not register its evidence signal", exc_info=True)
+        return
+    armed.registered_signal = signum
+
+
+def notify_on_evidence_signal(callback: "Callable[[], object]") -> None:
+    """Ask to be told when a dump this module did NOT write lands in its own file.
+
+    WHAT THIS IS FOR, and why it is not a signal handler: the runtime has its own
+    ``SIGUSR1`` action (the ``LOP_RUNTIME_DEBUG_STACKS`` asyncio task-chain walk, which
+    must run on the loop). This module owns the signal's slot, and a C signal handler
+    cannot both dump and run Python — so the notification is delivered by the module's
+    SAMPLER, which is Python and already awake on a cadence, and the caller decides what
+    to do with it (the runtime uses ``loop.call_soon_threadsafe``, so its walk is
+    scheduled on the loop and never runs in signal context).
+
+    WHEN PYTHON CANNOT RUN THE CALLBACK DOES NOT RUN EITHER, and that is the honest
+    shape of it: this route is additive, never a substitute. The dump has already been
+    written by then — that is the leg's whole point — and this is what recovers the
+    runtime's own action once Python is running again.
+
+    Callbacks are called from the sampler thread and never under :data:`_LOCK`; one that
+    raises is logged and dropped rather than allowed to end the sampler, because this is
+    a diagnostic hook and a caller's bug must not take the reporter down.
+    """
+    with _LOCK:
+        armed = _ARMED
+        if armed is None:
+            return
+        armed.evidence_callbacks.append(callback)
+
+
+def _note_evidence_dump(armed: "_Armed") -> bool:
+    """True when the dump file grew by something this module did not write.
+
+    THE SAME PAIRING THE HELD-FIRE DETECTOR USES, and for the same reason: growth alone
+    cannot tell a foreign dump from this module's own lines, but growth WITHOUT a new
+    ``Timeout (`` count can — a fire always writes that line and a signal dump never
+    does. The watermark advances here either way, so one dump notifies once.
+    """
+    size = _dump_size(armed.path)
+    if size < 0 or size <= armed.evidence_size:
+        return False
+    armed.evidence_size = size
+    return _fired_count(armed.path) <= armed.seen_fires
+
+
+def _format_timeout(seconds: float) -> str:
+    """``faulthandler``'s own timeout stamp, reproduced byte for byte for a bound
+    whose fraction is non-zero; a whole-second bound is the one shape spelled
+    differently, measured below rather than implied.
+
+    THE FORMAT IS A CONTRACT WITH READERS THAT ARE NOT IN THIS MODULE:
+    :data:`FIRED_MARKER` is the prefix every reader in this tree tests for, the
+    stamp after it parses as ``H:MM:SS.ssssss`` (the test tree's ``_fired_seconds``
+    is the reader that parses it), and the incident taxonomy and
+    ``journal._stall_bound_evidence`` are keyed to both — so the fire writes the C
+    thread's spelling rather than a Python-flavoured one.
+
+    THE ONE DIVERGENCE, and it is the shipping case rather than an edge:
+    ``faulthandler`` prints the fraction only when it is non-zero — ``Timeout
+    (0:00:01)!`` for a whole-second bound, ``Timeout (0:00:01.500000)!`` for a
+    fractional one — while this writer always emits six digits, so a whole-second
+    bound reads ``Timeout (0:00:01.000000)!``. Every reader tests the prefix and
+    parses defensively, so the difference is inert.
+    """
+    minutes, secs = divmod(max(0.0, seconds), 60.0)
+    hours, minutes = divmod(int(minutes), 60)
+    return f"{hours}:{minutes:02d}:{secs:09.6f}"
+
+
+def _fire(armed: "_Armed", now: float) -> None:
+    """The bound's fire, taken in PYTHON, and the leg it ends on.
+
+    WHAT THIS REPLACED, and why the replacement is exact for every reader: the C
+    timer's thread wrote the ``Timeout (…)`` header with a raw ``write(2)`` and then
+    walked every thread's frames. Here the same two things happen in Python — the
+    header through this module's own writer, the dump through
+    ``faulthandler.dump_traceback(file=..., all_threads=True)`` — and no timer state
+    is touched by either, which is the whole point: there is no cancel to park in.
+
+    TAKEN OUTSIDE :data:`_LOCK`, deliberately, and that is a requirement rather than
+    a style choice: an all-thread dump measures in the hundreds of milliseconds on
+    this fleet, and the gate is what every :func:`beat` and every sample takes. The
+    critical section decides THAT a fire is due; this function takes it.
+
+    A FIRE IS AN OBSERVATION AND NEVER AN EXIT, so this function has no leg that ends
+    the process. The C thread this replaced carried one (``_exit(1)`` on an idle arm)
+    and dropping it is the whole of what the dump-only policy (``#1463``) asks of this
+    path: the fire is Python now, taken on the very thread whose GIL the dump holds
+    for its whole duration, so the process that would exit is the one that has just
+    been unresponsive — a bar this module can never make safe, only retire. It also
+    removes the last way a fire's death could be attributed to a state the artifact
+    cannot prove (:func:`fire_outcome` reads the header, and there is no longer an
+    exit it could mis-read).
+
+    WHICH ANNOTATION THE NEXT PASS APPENDS is still decided by the work-in-flight
+    reading, read here and again in :func:`_record_held_fire` — :data:`HELD_MARKER`
+    for a runtime stalled WITH work, :data:`OBSERVED_MARKER` for one that was idle, so
+    "nothing in flight" stays a diagnostic observation rather than turning the live
+    ``stall_held`` state on. The reading decides the LINE; it never decides whether a
+    process leaves.
+    """
+    if not _write_dump_line(armed, f"{FIRED_MARKER}{_format_timeout(armed.due_seconds)})!\n"):
+        logger.warning("stall watchdog could not write its fired marker for pid %s", armed.pid)
+    try:
+        faulthandler.dump_traceback(file=armed.handle, all_threads=True)
+    except (OSError, ValueError, RuntimeError):
+        # A dump that cannot be written must not become a way for a bound to fail
+        # silently: the marker above is already on disk, and the observation stands
+        # without the stack.
+        logger.warning(
+            "stall watchdog could not dump every thread for pid %s", armed.pid, exc_info=True
+        )
+    if _holds_work(armed.busy):
+        armed.held = True
 
 
 def _rearm(armed: "_Armed", *, remaining: float | None = None) -> None:
@@ -2317,7 +2668,7 @@ def _rearm(armed: "_Armed", *, remaining: float | None = None) -> None:
                 ),
             )
             remaining = max(remaining, interval - (time.monotonic() - armed.after_fire_at))
-    _arm_timer(armed.handle, remaining, exit_leg=not armed.held)
+    _arm_timer(armed, remaining)
     armed.arm_size = _dump_size(armed.path)
 
 
@@ -2343,12 +2694,14 @@ def _append_dump_line(armed: "_Armed", line: str) -> bool:
 def _record_held_fire(armed: "_Armed") -> bool:
     """Record a fire that did NOT end this process, and settle what happens next.
 
-    THE FIRE'S OWN AFTERMATH, which until this change had no writer anywhere: the C
-    thread dumps every thread and returns, and nothing in Python is told that it
-    happened. What the sampler can see is that the file GREW past the size recorded
-    at the last arm and that it is still running — which together are exactly "a fire
-    landed and it did not end this runtime", with no parsing of the dump text on this
-    path at all.
+    THE FIRE'S OWN AFTERMATH, which the C thread never reported: it dumped every
+    thread and returned, and nothing in Python was told that it had happened. What
+    the sampler sees is that the file GREW past the size recorded at the last arm and
+    that it is still running — which together are exactly "a fire landed and it did
+    not end this runtime", with no parsing of the dump text on this path at all. The
+    fire is Python now (:func:`_fire`), so this detector is reached by a fire THIS
+    process took, through the very same growth signature — one writer for the held
+    annotation, rather than a second spelling beside the new fire.
 
     A CONSEQUENCE WORTH STATING FOR THE CALLER: this is reached from :func:`_rearm`,
     which the BEAT path also runs, so a healthy plane's next beat records a held fire
@@ -2401,7 +2754,8 @@ def _record_held_fire(armed: "_Armed") -> bool:
         return False
     armed.seen_fires = fires
     armed.fired_held = True
-    armed.after_fire_at = time.monotonic()
+    fired_mono = time.monotonic()
+    armed.after_fire_at = fired_mono
     # WHICH MARKER GOES IN IS DECIDED BEFORE EITHER LINE IS WRITTEN (finding B of the
     # 2026-09-23 convergence round). The order used to be append-then-decide, which is
     # how a fire over an IDLE runtime came to carry ``HELD_MARKER`` — the very word the
@@ -2415,8 +2769,16 @@ def _record_held_fire(armed: "_Armed") -> bool:
         armed.held_fires += 1
         _append_dump_line(
             armed,
-            f"{HELD_MARKER}the bound fired at "
-            f"{time.strftime('%Y-%m-%d %H:%M:%S')} and did NOT end this runtime. Work was "
+            # THE MONOTONIC STAMP IS THE MACHINE-READABLE HALF; the local time beside it is
+            # for a person. :func:`_holds` compares it with the sibling's monotonic
+            # deadline, both written by THIS process on ONE clock, because a wall-clock
+            # comparison broke three ways (agent review round 1 M1/m1, QA Q-1): macOS
+            # pauses ``monotonic`` across sleep so a monotonic-derived epoch drifts
+            # forward, the repeated DST hour parses an hour early, and a reader in another
+            # zone parses by its offset — each reading a stuck runtime as recovered.
+            f"{HELD_MARKER}{_FIRED_AT_PHRASE}"
+            f"{time.strftime(_FIRED_AT_FORMAT)} ({_MONOTONIC_TAG}{fired_mono:.3f}) "
+            "and did NOT end this runtime. Work was "
             "in flight when the fire was observed, so the runtime is stalled with it. "
             "Every thread's stack is above. Inspect this dump and stop the runtime "
             "explicitly if it remains stuck.\n",
@@ -2528,7 +2890,13 @@ def _record_deadline(armed: "_Armed") -> None:
     try:
         leg, deadline = armed.pin()
         epoch = time.time() + (deadline - time.monotonic())
-        temp.write_text(f"{epoch:.3f} {leg}\n", encoding="utf-8")
+        # THE THIRD FIELD IS THE SAME DEADLINE ON THE CLOCK IT WAS COMPUTED ON. The epoch
+        # is for a reader holding a dead pid (compare it with the fire's wall time); the
+        # monotonic value is what :func:`_holds` compares with the held marker's own
+        # stamp, because the epoch is derived through ``time.time() - monotonic()``, an
+        # offset that grows across every host sleep (agent review round 1, M1). Appended
+        # rather than inserted, so ``epoch leg`` stays the first two tokens it always was.
+        temp.write_text(f"{epoch:.3f} {leg} {deadline:.3f}\n", encoding="utf-8")
         os.replace(temp, armed.deadline_path)
     except (OSError, ValueError) as exc:
         logger.debug("stall watchdog could not record its deadline: %s", exc)
@@ -2593,12 +2961,13 @@ def beat(plane: str) -> None:
     about the work it was running: see the module docstring for what the bound
     does and does not measure.
 
-    NO ``cancel`` BEFORE THE RE-ARM, deliberately. ``faulthandler`` replaces a live
-    timer when ``dump_traceback_later`` is called again (measured: no exception,
-    the new bound wins), so the cancel was two extra C calls that also opened a
-    window in which the process had NO bound — a failed re-arm after a successful
-    cancel would leave a runtime unbounded while the old comment claimed the
-    worst case was only an early expiry. One call, one atomic replace.
+    NO ``cancel`` BEFORE THE RE-ARM, deliberately, and now for a second reason as
+    well: ``cancel_dump_traceback_later`` is half of the deadlock the module
+    docstring measures — it waits for an in-flight dump while the caller holds the
+    GIL — so this module never calls it. A beat records a deadline through
+    :func:`_arm_timer` and changes not one byte of timer state; the old C replace
+    (“one call, one atomic replace”, which needed no cancel because
+    ``dump_traceback_later`` superseded a live timer) is gone with the C timer.
 
     A no-op when nothing is armed, which is what keeps this safe to call from an
     in-process host (a TUI or a test) that never armed the process timer.
@@ -2705,15 +3074,14 @@ def engage() -> bool:
     this on a boot path that never armed the process timer, and it must cost it
     nothing.
 
-    IT RE-ARMS THROUGH :func:`_rearm`, NOT WITH A TIMER CALL OF ITS OWN, and that is
-    a requirement rather than a refactor: ``_rearm`` is the one place that decides how
-    a fire is recorded (the fired-held bookkeeping, which is what
-    :func:`_record_held_fire` and the held/neutral split hang off) and the one that
-    passes the exit leg. A timer call written here would silently BYPASS that
-    bookkeeping for the one arming that starts the steady phase — the arming whose
-    bound the rest of the design rests on. The remaining time it is
-    handed is derived from the stamps this call just moved, so the timer holds
-    exactly the steady bound measured from NOW.
+    IT RE-ARMS THROUGH :func:`_rearm`, NOT WITH A DEADLINE OF ITS OWN, and that is
+    a requirement rather than a refactor: ``_rearm`` is the one place that decides
+    the deadline (including the fired-held backoff) and resets the detector's
+    baseline. The exit leg is no longer part of that decision — :func:`_fire` reads
+    the work-in-flight answer on the sample it fires on — so the one arming that
+    starts the steady phase cannot override the policy by accident either. The
+    remaining time it is handed is derived from the stamps this call just moved, so
+    the deadline is exactly the steady bound measured from NOW.
 
     Returns whether THIS call moved the bound, which is what lets a caller — and a
     cell — tell the boot-to-steady transition from a call that had nothing to do. It
@@ -2958,14 +3326,13 @@ def _extend_for_execution(armed: "_Armed", now: float, moved: "tuple[str, ...]")
         # BEFORE the re-arm, because the re-arm reads it back through ``deadline()``.
         armed.executing_at[plane] = now
     try:
-        # THROUGH ``_arm_timer``, the one production policy boundary. This sample
-        # extends the diagnostic deadline while a loop frame moves; it must not bypass
-        # the shared wrapper, which guarantees ``exit=False`` on every re-arm.
-        _arm_timer(
-            armed.handle,
-            max(MIN_REARM_S, armed.deadline() - now),
-            exit_leg=not armed.held,
-        )
+        # THROUGH ``_arm_timer``, THE ONE SPELLING FOR A DEADLINE. This site used to
+        # bypass it with a literal ``exit=True`` (agent review round 3, BLOCKER), and the
+        # fold existed because a fatal arm here would end a runtime whose work was in
+        # flight. The exit leg is not a parameter any more: ``_fire`` reads the
+        # work-in-flight answer on the sample it fires on, so there is nothing left for
+        # this call site to get wrong.
+        _arm_timer(armed, max(MIN_REARM_S, armed.deadline() - now))
     except (OSError, ValueError, RuntimeError):
         # A re-arm that cannot happen leaves the timer on its previous deadline, which
         # is SHORTER than this extension. That direction is safe — the bound fires
@@ -3011,14 +3378,17 @@ def _progress_sampler(armed: "_Armed", stop: threading.Event) -> None:
         # ONLY thing that re-reads the work-in-flight reading after the arm, and a raise from the
         # sample or from the fire bookkeeping would end it silently: ``armed.held``
         # would then stay frozen at whatever it last read, and a frozen ``False`` with
-        # work in flight is precisely why production expiry remains diagnostic-only;
-        # the native timer fire needs no Python at all. A reporter that dies takes
-        # its plane's evidence with it; the fix is to keep it running.
+        # work in flight is precisely the defect this change removes — after T1 the
+        # fire is this thread's own work (:func:`_fire`, and there is no C thread left
+        # to take it), so a reporter that dies takes the fire with it, not just its
+        # plane's evidence. The fix is to keep it running.
         try:
             # #1438's probe read, UNCHANGED: the progress probe is taken from under
             # the lock and CALLED outside it, then the armed-ness is re-checked after
             # the unlocked section rather than trusted from before it (that section can
             # take arbitrarily long, and ``disarm`` can run inside it).
+            due = False
+            notified = False
             with _LOCK:
                 if _ARMED is not armed:
                     return
@@ -3050,16 +3420,68 @@ def _progress_sampler(armed: "_Armed", stop: threading.Event) -> None:
                 # Re-derived BEFORE the fire bookkeeping, so the ``continue`` on a
                 # recorded held fire waits on the fresh value too.
                 interval = _sample_interval(armed.seconds)
+                if armed.evidence_callbacks:
+                    # AND IT FOLLOWS A REGISTERED EVIDENCE CALLBACK TOO, because that
+                    # callback is how the runtime's own SIGUSR1 action is reached now
+                    # (:func:`notify_on_evidence_signal`): the notification is an
+                    # observation of the dump file, so this cadence bounds how long an
+                    # operator's signal waits for the runtime's half of the evidence.
+                    # Only while somebody is listening, so a runtime that registers
+                    # nothing pays nothing.
+                    interval = min(interval, EVIDENCE_POLL_S)
+                notified = _note_evidence_dump(armed)
                 # BEFORE the sample, and in this order: a fire that landed since the
                 # last wake is recorded and re-armed on the same pass, only then is the
-                # work-in-flight reading applied — so a flip made while the timer was
-                # pending is in force before anything else acts on the arm — and only then
-                # is the next progress decision taken.
+                # exit leg applied — so a flip made while the timer was pending is in
+                # force before anything else acts on the arm — and only then is the
+                # deadline read and the next progress decision taken.
                 _apply_exit_leg(armed, held)
                 if _record_held_fire(armed):
                     continue
-                if _sample(armed, observation):
-                    return
+                # THE FIRE IS DECIDED UNDER THE GATE AND TAKEN OUTSIDE IT (see
+                # :func:`_fire`): an all-thread dump is hundreds of milliseconds, and
+                # the gate is what the other plane's ``beat`` needs. ``_record_held_fire``
+                # above runs FIRST, so a fire this process already wrote is annotated and
+                # re-armed before this decision can fire on the same episode twice.
+                #
+                # THE RECORDED DEADLINE IS READ BEFORE THE PREDICATE IS ASKED AGAIN,
+                # and the order is a correctness requirement rather than tidiness.
+                # THE RECORDER OF A DEADLINE IS ALSO ITS ONLY CONSUMER here (there is
+                # no C timer left — see :func:`_arm_timer`), and the progress leg
+                # records one on every sample it fires on: set to ``now``, it makes
+                # ``pin``/``deadline`` answer ``now + MIN_REARM_S``. Read the predicate
+                # FIRST and that re-arm pre-empts the read every single time the leg
+                # fires again — an arm that cancels itself, which is what made the
+                # deadline unreachable for a loop whose burn never dips — so the dump
+                # would land only on a pass that happened to skip the predicate (a
+                # reset run, or a sample with no window behind it) and never on a
+                # cleanly spinning one. Read the deadline first and the wake the leg
+                # recorded is taken on this pass, at the instant it was recorded for.
+                due = time.monotonic() >= armed.due_at
+                _sample(armed, observation)
+                # AND THE NEXT WAKE FOLLOWS THE DEADLINE *AS IT NOW STANDS*, which is
+                # why this clamp sits AFTER the sample rather than above it: the leg
+                # records its fire during that call, and a clamp taken before it would
+                # sleep on the deadline that fire has just replaced — up to a whole
+                # window-sample late, 8.33 s at the shipped 300 s bound, where the C
+                # timer this replaced expired exactly on time. The clamp is still the
+                # dead instrument's guard, so it stays: a liveness fire may not land
+                # later than ``max(MIN_REARM_S, due_at - now)``.
+                interval = min(interval, max(MIN_REARM_S, armed.due_at - time.monotonic()))
+            if notified:
+                # OUTSIDE THE GATE, and on the sampler's own thread: the runtime's
+                # callback schedules its work on the loop (``call_soon_threadsafe``),
+                # which must not happen while a beat is waiting for this gate. A listener
+                # that raises is logged and dropped — see the docstring of
+                # :func:`notify_on_evidence_signal`.
+                for callback in list(armed.evidence_callbacks):
+                    try:
+                        callback()
+                    except Exception:  # noqa: BLE001 — a diagnostic hook is not a control path
+                        logger.warning("stall watchdog: an evidence callback raised", exc_info=True)
+            if due:
+                _fire(armed, time.monotonic())
+                continue
         except Exception:  # noqa: BLE001 — a diagnostic never ends a reporter
             logger.warning(
                 "stall watchdog: the work-in-flight sampler raised; it keeps running so the "
@@ -3069,7 +3491,18 @@ def _progress_sampler(armed: "_Armed", stop: threading.Event) -> None:
 
 
 def _sample(armed: "_Armed", observation: object = _UNSET) -> bool:
-    """One progress sample. True when the bound was FIRED, so the sampler is done.
+    """One progress sample. True when the progress leg FIRED on this sample.
+
+    THE RETURN VALUE IS AN ANSWER, NOT AN INSTRUCTION. It used to be an instruction —
+    "the sampler is done" — because the fire it announced was a timer the process did
+    not have to stay alive for; with the fire in Python (:func:`_fire`) the sampler is
+    the only thread that can take a deadline at all, so a leg that ended it here would
+    leave the deadline it had just recorded with nobody to honour it: the loop's
+    ``_fire`` would never run, the dump would never be written, and the runtime's stall
+    would be reported by one line and then be undetectable — a fire that is silent
+    about itself, which is the class of defect this module exists to end. The sampler
+    therefore keeps waking for every arm (see :func:`_progress_sampler`), and this
+    answer is what the predicate cells read to say the leg fired.
 
     Called with :data:`_LOCK` held, and it must be: it reads and writes the same
     ``progress_deadline`` that :func:`beat` re-arms from, on another thread, and
@@ -3141,40 +3574,52 @@ def _sample(armed: "_Armed", observation: object = _UNSET) -> bool:
     if mean is not None and mean >= PROGRESS_CPU_FLOOR:
         _fire_progress(armed, now)
 
-        # A HELD FIRE DOES NOT END THE SAMPLER, and it must not: the sampler is the
-        # only Python thread left in exactly that case, and the next wake is where a
-        # held fire is recorded and the bound is re-armed for the episode after it
-        # (``_record_held_fire``). Returning here would leave the dump unannotated,
-        # the timer unfired-again and the runtime's stall undetectable — a fire that
-        # is silent about itself, which is the class of defect this module exists to
-        # end.
-        return not armed.held
+        # TRUE IS "THIS LEG FIRED ON THIS SAMPLE", and the deadline it just recorded is
+        # what fires the runtime — the sampler's next pass reads ``due_at`` BEFORE it
+        # asks this predicate again, so the wake is taken even though the predicate is
+        # still true now. Both arms are answered the same way: an arm that is HELD is
+        # recorded, annotated and re-armed for the episode after it on the next pass
+        # (``_record_held_fire``), and an arm that is not held reaches ``_fire``'s own
+        # reading of the leg like every other fire — neither of them ends the sampler,
+        # which is the only thing left in the process that can take a deadline.
+        return True
     _extend_for_execution(armed, now, executing if probe_answered else ())
     return False
 
 
 def _fire_progress(armed: "_Armed", now: float) -> None:
-    """Record a progress-leg fire in the same diagnostic dump used by the liveness leg.
+    """Record the progress leg's fire: the line that names the leg, and its deadline.
 
-    The progress predicate still writes its identifying line and sets an immediate
-    diagnostic deadline, but this function does not terminate the runtime. Production
-    ``_arm_timer`` always passes ``exit=False`` because a Python sample cannot be
-    atomic with every work admission before native expiry.
+    Past the window the runtime must stop being a session that burns a core to
+    produce nothing, and the graceful rungs cannot be reached from the state
+    being detected — that is the module's oldest constraint, and it is why the exit,
+    on an arm that takes one at all, is an immediate ``_exit`` (:func:`_fire`) rather
+    than anything Python can sequence.
 
-    THE SAME ARTIFACT, rather than a second one: the dump file, the ``FIRED_MARKER``
-    and every-thread stack are shared by both legs, which keeps a reader's rule
-    ("a dump with the fired marker is evidence a bound actually fired") true for both.
-    What this adds is
-    the ONE line above it naming WHICH leg fired — without it a reader could not
-    tell a runtime that went silent from one that spun, and the two want
-    different investigations.
+    SO THE FIRE GOES OUT THROUGH THE SAME PATH THE SILENCE LEG USES rather than
+    adding a second one: the dump file, the ``FIRED_MARKER``, the every-thread
+    stack and the leg's own reading at that instant are all :func:`_fire`'s, which
+    is what keeps a reader's rule ("a dump with the fired marker is evidence a
+    bound actually fired") true for both. What this adds is the ONE line above it
+    naming WHICH leg fired — without it a reader could not tell a runtime that went
+    silent from one that spun, and the two want different investigations.
 
-    ARMING FOR ``MIN_REARM_S`` IS WHAT FIRES IT: ``deadline()`` takes the minimum
-    over the legs, and setting the progress leg to ``now`` makes that minimum the
-    present moment, so this call and every later :func:`beat` agree on when the
-    timer expires. The write is before the arm, and it has to be: ``faulthandler``
-    reaches its timer from a C thread that runs no Python, so this line has no
-    later moment available to it.
+    THE DEADLINE RECORDED HERE IS HONOURED BY THE SAMPLER'S OWN NEXT PASS, and that
+    is the whole of the wake contract now. "Arming for :data:`MIN_REARM_S` is what
+    fires it" described the retired C timer (see :func:`_arm_timer`): nothing
+    outside this process comes due any more, so the only thing that can take this
+    deadline is the thread that recorded it, reading ``due_at`` BEFORE it asks the
+    predicate again — read the predicate first and this re-arm, taken on every
+    sample the leg fires on, would pre-empt its own deadline for ever and the dump
+    would never be written at all. THE VALUE IS STILL THE PRESENT MOMENT and still
+    has to be: ``deadline()`` takes the minimum over the legs, so setting the
+    progress leg to ``now`` is what makes the sibling, the ``Timeout (`` value and
+    the sampler all agree on one instant.
+
+    The write is before the re-arm, and that order matters for a reader rather than
+    for a timer: the leg's line has to be in the file above the ``Timeout (`` line
+    that :func:`_fire` appends, which is what lets whoever opens the dump attribute
+    the fire to the progress predicate.
     """
     armed.progress_deadline = now
     line = (
@@ -3197,15 +3642,14 @@ def _fire_progress(armed: "_Armed", now: float) -> None:
     try:
         _rearm(armed)
     except (OSError, ValueError, RuntimeError):
-        # The deadline STAYS set, deliberately. The timer already armed from the
-        # last beat is at most one heartbeat away, and every beat re-arms from
-        # ``deadline()``, so a failed re-arm here still ends the process within
-        # that heartbeat rather than silently withdrawing a decision already
-        # taken. Withdrawing it would make a transient arming failure a way for
-        # this leg never to fire again.
+        # The deadline STAYS set, deliberately. The sampler is the only consumer this
+        # deadline has, and it re-reads ``due_at`` on its next pass whatever this call
+        # did, so a failed re-arm here still leaves the sampler's own wake carrying the
+        # decision rather than silently withdrawing one already taken. Withdrawing it
+        # would make a transient arming failure a way for this leg never to fire again.
         logger.warning("stall watchdog could not fire its progress leg", exc_info=True)
     else:
-        # The progress leg's own deadline is what the timer is now armed for, so the
+        # The progress leg's own deadline is what the wake is now due from, so the
         # sibling has to be rewritten here too: leaving the last beat's number would
         # state a deadline that is no longer in force.
         _record_deadline(armed)
@@ -3235,10 +3679,13 @@ def disarm() -> None:
         _ARMED = None
         if armed is None:
             return
-        try:
-            faulthandler.cancel_dump_traceback_later()
-        except (OSError, RuntimeError):
-            logger.debug("stall watchdog could not cancel its timer", exc_info=True)
+        # NO CANCEL AND NO UNREGISTER ANY MORE, and both omissions are deliberate: there
+        # is no C timer to cancel (see the module docstring), and
+        # ``faulthandler.unregister`` restores the disposition SAVED at arm time rather
+        # than the live one — the measured segfault :func:`_register_evidence_signal`
+        # records. The signal leg is left installed: it would write into a file this call
+        # is unlinking (so a stray signal after a clean exit produces nothing a reader can
+        # find) and it dies with the process, which is the only moment it needs to.
         try:
             armed.handle.close()
         except OSError:
@@ -3270,7 +3717,7 @@ def disarm() -> None:
 
 
 def is_armed() -> bool:
-    """Whether THIS process holds the C timer through this module."""
+    """Whether THIS process holds an armed stall bound through this module."""
     with _LOCK:
         return _ARMED is not None
 
@@ -3525,7 +3972,189 @@ def held_fire(pid: int | None = None, directory: Path | None = None) -> bool:
     watchdog fires are never fatal, and the quiet direction is the
     one that cannot narrate a runtime as stalled when it never fired.
     """
-    text = _evidence_text(pid, directory)
+    evidence = dump_evidence(pid, directory)
+    if evidence is None:
+        return False
+    return _holds(*evidence)
+
+
+#: The phrase both post-fire markers carry before the moment they were written, and the
+#: local-time format of that moment. Shared by the writer (:func:`_record_held_fire`) and
+#: the reader (:func:`_held_fired_mono`), so the two cannot drift apart.
+_FIRED_AT_PHRASE = "the bound fired at "
+_FIRED_AT_FORMAT = "%Y-%m-%d %H:%M:%S"
+#: The tag the held marker writes its observation's ``time.monotonic()`` behind, in the
+#: parenthesis after the local time: ``… fired at <local> (monotonic 1234.567) and …``.
+_MONOTONIC_TAG = "monotonic "
+
+
+def _held_fired_mono(text: str) -> float | None:
+    """The ``time.monotonic()`` the LAST :data:`HELD_MARKER` was written at, or ``None``.
+
+    The LAST one, because a runtime that stays stalled re-fires on the held backoff and
+    every repeat appends its own marker: the question a listing asks is whether the
+    runtime has recovered since the MOST RECENT fire, not since the first.
+
+    THE MONOTONIC STAMP AND NEVER THE LOCAL TIME, for the reasons the writer states:
+    the local time has no zone and no DST flag, so turning it back into an instant is
+    wrong by an hour in the repeated fall-back hour and by the zone offset for a reader
+    east of the writer, and both errors read a stuck runtime as recovered (QA round 1,
+    Q-1). ``None`` for a marker without the stamp — every dump written before it existed,
+    or a torn line — which the caller reads as "cannot show a recovery" and so keeps the
+    held reading the marker states.
+
+    Searched within the marker's OWN line only: the marker can land mid-line when
+    ``faulthandler``'s buffered write interleaves (Q-4), and a stamp found further down
+    the file would belong to some other line.
+    """
+    at = text.rfind(HELD_MARKER)
+    if at < 0:
+        return None
+    line = text[at + len(HELD_MARKER) :].split("\n", 1)[0]
+    if not line.startswith(_FIRED_AT_PHRASE):
+        return None
+    _, found, rest = line.partition(f"({_MONOTONIC_TAG}")
+    if not found:
+        return None
+    try:
+        return float(rest.split(")", 1)[0])
+    except ValueError:
+        return None
+
+
+def _rearmed_since(fields: list[str] | None, fired_mono: float) -> bool:
+    """Has EVERY plane reported since the fire, per this dump's deadline sibling's fields?
+
+    THE SIBLING'S CONTENT, NOT ITS MTIME, and the difference is the whole predicate. The
+    mtime moves on every successful re-arm, and a runtime whose WORKLOAD loop is parked
+    keeps re-arming off its healthy SERVING plane every 15 s — measured on this fleet:
+    pid 65820's dump reads "workload last reported 4932.88s ago … the serving plane
+    reported 0s ago" — so a fresh mtime is exactly what a genuinely stuck runtime shows.
+    The content is :meth:`_Armed.pin`: the EARLIEST plane's last sign of life plus the
+    bound (or the progress leg's decided deadline). It therefore moves past the fire
+    only when EVERY plane has shown life after it, which is the definition of a
+    recovered runtime; while any plane is still silent it stays at or before the fire,
+    because that plane's deadline is what fired.
+
+    ONE CLOCK: the sibling's THIRD field (the pinned deadline in ``time.monotonic()``)
+    against the held marker's own monotonic stamp. Both are written by the runtime that
+    owns the pid, from the one clock ``pin`` computes on, so a host sleep, a wall-clock
+    step, the DST fall-back hour and the reader's zone cannot move one side without the
+    other (agent review round 1 M1/m1, QA round 1 Q-1).
+
+    THE MARGIN IS HALF THE SMALLEST BOUND (``min_bound_seconds() / 2``, 22.5 s), sized
+    against both sides of the comparison rather than tuned: a stuck runtime's pinned
+    deadline is at or BEFORE the fire's observation (that plane's deadline is what
+    fired), while a recovered one is at least a whole bound (>= 45 s) past it. Half the
+    floor separates the two with room on either side.
+
+    THE PROGRESS LEG STAYS HELD HERE, stated because it is the conservative direction:
+    its decided deadline is the fire's own moment and nothing in the watchdog clears
+    it, so a sibling naming ``progress`` never reads as recovered. That is the reading
+    the markers themselves keep giving, since that leg keeps re-firing.
+
+    Unreadable, absent, malformed or OLD-FORMAT (two-field) siblings answer ``False`` —
+    the evidence of a recovery is missing, so the held reading the dump states stands.
+    So does a sibling OLDER THAN THE DUMP, which :func:`_sibling_fields` fences out.
+    """
+    deadline_mono = _deadline_mono(fields)
+    if deadline_mono is None:
+        return False
+    return deadline_mono - fired_mono >= min_bound_seconds() / 2
+
+
+def _deadline_mono(fields: list[str] | None) -> float | None:
+    """The sibling's third field — the pinned deadline on ``time.monotonic()`` — or ``None``.
+
+    ``None`` for an absent or fenced-out sibling, a two-field (pre-monotonic) one and a
+    torn or malformed one alike: each is "no evidence on the one clock".
+    """
+    if fields is None:
+        return None
+    try:
+        return float(fields[2])
+    except (ValueError, IndexError):
+        return None
+
+
+def _sibling_fields(dump: Path, text: str) -> list[str] | None:
+    """This dump's deadline sibling, split, or ``None`` when it cannot be this life's.
+
+    ONE READ OF EACH FILE (agent review round 3, N-2): ``text`` is the dump text the
+    caller already holds, so the arm header comes from it rather than from a second
+    read, and the sibling is opened once and its mtime taken from the SAME open file
+    (``fstat``) — so the fence and the fields describe one inode, with no window for a
+    re-arm's atomic replace to land between two reads. ``held_pids`` calls this once per
+    dump in a listing.
+
+    THE PID FENCE, APPLIED TO THE SIBLING (agent review round 2, m-A). :func:`arm`
+    truncates the dump and unlinks the sibling for each new life, but the unlink is
+    best-effort, and a sibling that survives it belongs to the PREVIOUS holder of the
+    pid. After a reboot that holder's monotonic values are on the old boot's base, far
+    ABOVE this life's, so its deadline would read as "re-armed long after the fire" — a
+    stuck runtime reported recovered, the unsafe direction.
+
+    The fence is ORDER, measured on the file system that holds both: the dump is
+    truncated when a life ARMS and the sibling is written only by that life's later
+    re-arms, so a sibling whose mtime is OLDER than its dump's arm header cannot have
+    been written by this life. The header's epoch (:func:`armed_at`) is the arm moment,
+    and every dump :func:`arm` writes carries it — builds before this fence included — so
+    a dump without a readable header, or an unreadable sibling, answers "cannot tell"
+    (``None``), the held direction. The one-second slack is ``armed_at``'s resolution
+    (``{time.time():.0f}``).
+
+    BOTH SIDES ARE WALL TIME, and what that leaves open is stated rather than denied
+    (agent review round 3, N-1): a forward step or a sleep only makes a foreign sibling
+    look OLDER than the arm (held). It reads as this life's only if the wall clock
+    REGRESSED across the reboot — the new life's arm stamped behind the old life's last
+    sibling write, as a backward correction or a board with no RTC can do. That residue
+    needs m-A's failed unlink AND a held fire before this life's first re-arm on top.
+    """
+    arm = armed_at(text)
+    if arm is None:
+        return None
+    try:
+        with dump.with_suffix(DEADLINE_SUFFIX).open(encoding="utf-8") as handle:
+            written = os.fstat(handle.fileno()).st_mtime
+            fields = handle.read().split()
+    except (OSError, ValueError):
+        return None
+    return fields if written >= arm - 1.0 else None
+
+
+#: What :func:`held_reading` answers. ``HELD_PROVEN`` — a new-format held fire whose
+#: sibling is present, belongs to this life and shows NO re-arm since: the runtime is
+#: stalled, and the artifacts say so on one clock. ``HELD_UNPROVEN`` — held by the
+#: marker, but the evidence that would settle recovery is missing (an old-format marker
+#: or sibling, a sibling from another life, or none at all). ``NOT_HELD`` — no held
+#: fire, or one that is superseded.
+HELD_PROVEN = "proven"
+HELD_UNPROVEN = "unproven"
+NOT_HELD = "not held"
+
+
+def _holds(dump: Path, text: str) -> bool:
+    """THE ONE HELD PREDICATE: fired, held over work, and not superseded since.
+
+    Every surface that renders the third state reads it through here —
+    :func:`held_fire`, :func:`held_dumps`/:func:`held_pids` (and so ``info.collect``'s
+    ``stall_held``, the ``/info`` panel's ``bound held`` and ``lop sessions``'
+    ``bound held; lop stop`` cell) and the kill ladder's drain check — so no two of them
+    can disagree about one dump.
+
+    SUPERSESSION IS WHAT THIS ADDS, and the defect it closes was a sticky flag: the
+    marker is appended once per fire and nothing ever withdrew it, so a runtime that
+    recovered minutes after a fire read ``bound held; lop stop`` for the rest of its
+    life (pids 65820 and 83160 on 2026-09-24, 5 and 14 hours after their fires, while
+    heartbeating every 15 s — an operator nearly stopped both). Two later facts end it:
+
+    * a later :data:`OBSERVED_MARKER` — the most recent fire found NO work in flight, so
+      whatever the earlier fire held has cleared;
+    * the deadline sibling showing every plane re-armed after the last held fire
+      (:func:`_rearmed_since`).
+
+    A runtime that is genuinely stuck has neither, and keeps the held reading.
+    """
     # A SUBSTRING TEST, NOT A LINE-START ONE (QA round 2, Q-4). This marker is the one
     # line of ours written into a file ANOTHER WRITER IS STILL FLUSHING: ``faulthandler``
     # writes its dump from its own thread with a buffered handle, we append this from
@@ -3536,8 +4165,86 @@ def held_fire(pid: int | None = None, directory: Path | None = None) -> bool:
     # ``held_fire=False``, ``held_pids()`` empty, no STALLED cell — and ``death_verdict``
     # narrating a STILL-ALIVE runtime as "the runtime ended ITSELF". The module's own
     # header states the rule this restores: readers test these markers as substrings,
-    # which is exactly why no header quotes one.
-    return _fires(text) and HELD_MARKER in text
+    # which is exactly why no header quotes one. ``rfind`` keeps that rule for the
+    # ordering test too: an interleaved marker is still found, wherever it landed.
+    return held_reading(dump, text) != NOT_HELD
+
+
+def held_reading(dump: Path, text: str) -> str:
+    """:func:`_holds`, with "held because proven" told apart from "held because unknown".
+
+    TWO READERS, TWO DEFAULTS, ONE PREDICATE (agent review round 2, M-A). The LABEL
+    (``bound held; lop stop``, ``/info``, ``stall_held``) is advice to a person, and when
+    the artifacts cannot show a recovery the conservative label is "held" — a false
+    "held" costs a look, a false "not held" hides a stall. The KILL LADDER acts on the
+    reading, and there the conservative direction is the OPPOSITE: a false "held" cuts
+    the turn a draining runtime is finishing. Runtimes started by a build that predates
+    the monotonic stamp are exactly the ones still carrying a drain latch today, and
+    every one of their held markers is old-format. So the ladder takes only
+    :data:`HELD_PROVEN` (see ``control._drain_stalled``) and the label takes both
+    held answers; neither re-derives the rule.
+    """
+    if not _fires(text) or HELD_MARKER not in text:
+        return NOT_HELD
+    if text.rfind(OBSERVED_MARKER) > text.rfind(HELD_MARKER):
+        return NOT_HELD
+    fired_mono = _held_fired_mono(text)
+    if fired_mono is None:
+        return HELD_UNPROVEN
+    fields = _sibling_fields(dump, text)
+    if _rearmed_since(fields, fired_mono):
+        return NOT_HELD
+    # Proven only when the sibling that failed to show a re-arm is this life's and
+    # carries the monotonic field: an absent, foreign or old-format sibling answered
+    # "no re-arm" for want of evidence, not because of it.
+    return HELD_PROVEN if _deadline_mono(fields) is not None else HELD_UNPROVEN
+
+
+def held_now(
+    pid: int, started_at: float, directory: Path | None = None, *, proven: bool = False
+) -> bool:
+    """Is THIS life of ``pid`` held right now? :func:`held_fire` behind the pid-reuse fence.
+
+    The per-pid spelling of what ``info.collect`` does for a whole listing (the held
+    scan plus :func:`dump_is_current`), for a caller holding one record — the kill
+    ladder, deciding whether a draining runtime can still reach the turn boundary it
+    is waiting for. One spelling, so the ladder and the listing cannot disagree.
+
+    ``proven=True`` is the ladder's reading: held only on :data:`HELD_PROVEN` evidence
+    (see :func:`held_reading` for why the two readers default differently).
+    """
+    evidence = dump_evidence(pid, directory)
+    if evidence is None or not dump_is_current(evidence[0], started_at):
+        return False
+    reading = held_reading(*evidence)
+    return reading == HELD_PROVEN if proven else reading != NOT_HELD
+
+
+#: What :func:`unproven_cause` answers for an UNPROVEN held reading: the marker itself
+#: predates the monotonic stamp (a build before #1527), or it is a current-build marker
+#: whose deadline sibling is missing, foreign or torn.
+UNPROVEN_OLD_BUILD = "older build"
+UNPROVEN_EVIDENCE = "evidence"
+
+
+def unproven_cause(pid: int, started_at: float, directory: Path | None = None) -> str:
+    """Why THIS life's held reading is unproven, or ``""`` when it is not unproven.
+
+    FOR THE WORDS, NOT THE DECISION (agent review round 1 on #1541, m1): the ladder's
+    skip line explains why a ``bound held`` label did not stop the runtime, and "comes
+    from an older build" is true only when the marker carries no monotonic stamp. A
+    current build can leave an unproven reading too — ``_record_held_fire`` re-arms
+    without writing the sibling, so a fire before the next beat has none — and that
+    runtime must not be told its evidence is from another build. The same fence and the
+    same :func:`held_reading` as :func:`held_now`, so the line and the label agree about
+    which runtime is unproven.
+    """
+    evidence = dump_evidence(pid, directory)
+    if evidence is None or not dump_is_current(evidence[0], started_at):
+        return ""
+    if held_reading(*evidence) != HELD_UNPROVEN:
+        return ""
+    return UNPROVEN_OLD_BUILD if _held_fired_mono(evidence[1]) is None else UNPROVEN_EVIDENCE
 
 
 def fire_outcome(pid: int | None = None, directory: Path | None = None) -> str:
@@ -3664,8 +4371,8 @@ def _scan_marked(directory: Path | None, *, held_only: bool) -> dict[int, Path]:
             text = _dump_text(path)
             if not _fires(text):
                 continue
-            if held_only and HELD_MARKER not in text:
-                # a substring, for the interleaving reason above (Q-4)
+            if held_only and not _holds(path, text):
+                # the one held predicate, so a superseded fire leaves the set too
                 continue
             suffix = path.name[len(DUMP_PREFIX) + 1 : -len(".log")]
             if suffix.isdigit():

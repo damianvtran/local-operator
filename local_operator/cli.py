@@ -682,6 +682,33 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="if the target is idle, drive a turn now (mailbox mode only)",
     )
 
+    # `lop model`: switch ANOTHER live session's model (design D4). Its own
+    # subcommand rather than `lop send --model`, because a switch has no body and
+    # `send`'s positional/stdin binder would need a model-mode exception for every
+    # one of its rules. Same selector flags and the same resolver as `lop send`.
+    model_parser = subparsers.add_parser(
+        "model",
+        help="Switch another running lop session's model (like /model there)",
+        parents=[parent_parser],
+    )
+    model_parser.add_argument(
+        "target",
+        nargs="?",
+        help=(
+            "conversation-name / session-id / cwd substring (case-insensitive). "
+            "Omit when addressing with --pid/--session."
+        ),
+    )
+    model_parser.add_argument(
+        "selector",
+        nargs="?",
+        metavar="provider/model",
+        help="the model to switch to, e.g. deepseek/deepseek-flash",
+    )
+    model_selector = model_parser.add_mutually_exclusive_group()
+    model_selector.add_argument("--pid", type=int, help="target by exact pid")
+    model_selector.add_argument("--session", dest="session", help="target by exact session id")
+
     sessions_parser = subparsers.add_parser(
         "sessions",
         help=(
@@ -1173,6 +1200,18 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    # Hidden for the same reason, and it exists because that flag has TWO callers.
+    # The upgrade's child is told this: the parent bounces the mobile daemon itself
+    # right after the child, so a child that bounced it too would restart the phone
+    # relay twice for one upgrade. A hand-run ``--refresh-daemons`` is given nothing,
+    # has no caller to do that bounce, and therefore does both halves — which is what
+    # an upgrade does. See ``update._run_daemon_repair``.
+    update_parser.add_argument(
+        "--services-only",
+        dest="services_only",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     # Install a build that is already on this machine into its own generation:
     # a source directory, or a git ref of the repository this command runs in.
     # Named separately from the PyPI path because it answers a different
@@ -1257,6 +1296,34 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "not make it is reported, left serving the build it loaded, and retried by "
             "the next `lop services restart`."
         ),
+    )
+    # The RECOVERY verb, and the only destructive one in this group. It exists
+    # because a `lop serve` daemon that is alive and not serving its address is
+    # reachable by NO other command on this machine: `lop stop` resolves session
+    # runtimes, `sessions reclaim` refuses any candidate that has a record, and
+    # `services restart` only ASKS a daemon to move. On 2026-09-23 that left the
+    # operator's desktop app down for twelve minutes with `kill` by hand as the
+    # only way out, and the pid to kill discoverable only by `lsof`.
+    services_reclaim = services_subparsers.add_parser(
+        "reclaim",
+        help=(
+            "End a `lop serve` daemon that is recorded but not serving its address "
+            "(never one that is serving)"
+        ),
+        description=(
+            "Ask ONE serve daemon, named by pid, to leave, escalating from SIGTERM to "
+            "SIGKILL at a bound, after proving the process is this product's serve "
+            "daemon and that it is not the one serving the address its record names. "
+            "`lop services status` lists the daemons this is for. It is never "
+            "automatic: the daemon may be supervising session runtimes, and no reader "
+            "of a record can prove a successor is ready to take its place."
+        ),
+        parents=[parent_parser],
+    )
+    services_reclaim.add_argument(
+        "pid",
+        type=int,
+        help="The daemon's pid, exactly as `lop services status` prints it",
     )
 
     # The install LAYOUT's own commands. One verb group rather than flags on
@@ -1837,6 +1904,17 @@ def config_edit_command(args: argparse.Namespace) -> int:
             )
         if matched_choice is not None:
             value = matched_choice.value
+        elif setting.kind is settings_io.Kind.CASCADE:
+            # The guessing ladder below knows int/float/bool/null and nothing
+            # structured, so a cascade's JSON fell through it as a plain
+            # string and was stored verbatim. ``coerce`` owns the CASCADE
+            # parse — one definition shared with the page — and raises a
+            # ``ValueError`` written for the user, which this function's
+            # existing ``except ValueError`` reports in the same words, on the
+            # same stream, with the same exit code as every other refusal
+            # here. Catching it again at this call site would be a second copy
+            # of that format to keep in sync.
+            value = settings_io.coerce(setting, value)
         else:
             # Try to convert to int
             try:
@@ -3513,6 +3591,139 @@ def send_command(args: argparse.Namespace) -> int:
     else:
         print(f"→ {cold_session_id} (not running): {detail}{skipped_clause(skipped)}")
     return 0
+
+
+def model_command(args: argparse.Namespace) -> int:
+    """``lop model [<target>] <provider>/<model> [--pid N | --session ID]``.
+
+    Switches ANOTHER live, engaged session's model, with ``/model`` semantics:
+    the switch lands at that session's next provider call. The target validates
+    the pair against its own config and credentials and answers with its own
+    sentence, which is printed as-is; every refusal exits non-zero, like
+    ``lop send``.
+
+    One positional is the MODEL when a selector flag names the target, and the
+    TARGET-then-model pair otherwise — the same "a selector fully determines
+    the recipient" rule ``lop send``'s binder applies, without its body/stdin
+    grammar, because a switch has no body.
+    """
+    import asyncio
+
+    from local_operator.mobile.peer_send import (
+        PeerModelUnconfirmed,
+        candidate_lines,
+        parse_model_selector,
+        resolve_switch_target,
+        switch_peer_model,
+        switch_receipt,
+    )
+
+    if getattr(args, "model", None) or getattr(args, "hosting", None):
+        # The run-shaping `--model`/`--hosting` every subcommand inherits
+        # (`_propagate_global_flags`) mean "the model for THIS run", and a
+        # command named `model` makes `--model <p/m>` the natural guess. Parsed
+        # silently it left the selector empty and the error blamed the target
+        # (UX round 1, U4), so the mistake is named instead.
+        _peer_red(
+            "the model is a positional here, not a flag: "
+            "`lop model <name> <provider>/<model>` or `lop model --pid N <provider>/<model>`"
+        )
+        return 1
+
+    has_selector = args.pid is not None or args.session is not None
+    target, selector = args.target, args.selector
+    if has_selector:
+        if selector is not None:
+            # Two positionals AND a selector name two recipients; refuse rather
+            # than guess which one was meant (the `lop send` rule).
+            _peer_red(
+                "pass the target as a name OR as --pid/--session, not both "
+                "(e.g. `lop model --pid 48213 deepseek/deepseek-flash`)"
+            )
+            return 1
+        target, selector = None, target
+    elif target and not selector:
+        # One positional and no selector: argparse slotted it as the TARGET, but
+        # a lone word is almost always the model someone meant to apply. Say
+        # what is missing rather than printing bare usage.
+        _peer_red(
+            "name the session to switch as well: `lop model <name> <provider>/<model>` "
+            "or `lop model --pid N <provider>/<model>`"
+        )
+        return 1
+    if not selector:
+        _peer_red("usage: lop model [<target>] <provider>/<model> [--pid N | --session ID]")
+        return 1
+    parsed = parse_model_selector(selector)
+    if isinstance(parsed, str):
+        _peer_red(parsed)
+        return 1
+    provider, model_id = parsed
+
+    record, candidates, error = resolve_switch_target(
+        target=target,
+        pid=args.pid,
+        session=args.session,
+        pid_hint="--pid",
+        session_hint="--session",
+    )
+    if candidates:
+        print(
+            f"{len(candidates)} sessions match; replace the target with one of these:",
+            file=sys.stderr,
+        )
+        for line in candidate_lines(candidates, indent="  ", prefix="--pid"):
+            print(line, file=sys.stderr)
+        print(
+            f"  e.g. `lop model --pid {candidates[0].pid} {provider}/{model_id}`", file=sys.stderr
+        )
+        return 1
+    if record is None:
+        _peer_red(error or "no target resolved")
+        return 1
+    sender = _cli_switch_sender()
+    if record.pid == sender.get("pid"):
+        _peer_red("that target is this session; use /model in it")
+        return 1
+    try:
+        detail = asyncio.run(
+            switch_peer_model(record, provider=provider, model_id=model_id, sender=sender)
+        )
+    except (PeerModelUnconfirmed, RuntimeError) as exc:
+        _peer_red(switch_receipt(record, str(exc)))
+        return 1
+    print(switch_receipt(record, detail))
+    return 0
+
+
+def _cli_switch_sender() -> "dict[str, Any]":
+    """Who the target's audit card should name for a ``lop model`` run.
+
+    Inside a lop session (its `bash` tool, a shell under it) the ancestry walk
+    finds that session and the card names it. From a plain terminal it finds
+    nothing, and the bare pid it falls back to is this short-lived process —
+    gone before the owner reads the card, and a different number every run
+    (UX round 1, U2). That case is labelled as what it is.
+
+    SHORT, because the label is the card's header and the new model follows it
+    on the same clipped row (design round 2, D7; UX U9; QA Q5): the header says
+    ``terminal``, and WHERE rides in ``cwd``, which the card body appends after
+    the models and the expansion shows. The cwd is best effort: ``/`` has no
+    basename and a deleted working directory raises, and neither may cost the
+    switch its sender (review round 2, NIT-4).
+    """
+    from local_operator.mobile.peer_model import TERMINAL_SENDER
+
+    sender = _peer_sender_identity()
+    if str(sender.get("session_id") or "").strip():
+        return sender
+    sender["conversation_name"] = TERMINAL_SENDER
+    sender["via"] = TERMINAL_SENDER
+    try:
+        sender["cwd"] = os.getcwd()
+    except OSError:
+        sender.pop("cwd", None)
+    return sender
 
 
 def _non_negative_int(text: str) -> int:
@@ -9139,6 +9350,18 @@ def main() -> int:
                 print(f"\n\033[1;31mError: {str(e)}\033[0m", file=sys.stderr)
                 return 1
         elif args.subcommand == "serve":
+            # The desktop daemon engages a runtime for every conversation the app
+            # opens cold, so it keeps ONE pre-imported standby for its root (see
+            # ``session/runtime/standby.py`` for the cost it removes and the
+            # guards). ``daemon=True`` puts it in the root's singleton slot: the
+            # count of spares per root is capped, and the app's surface must not
+            # lose its spare to whichever TUI happened to start first. Here, at the
+            # CLI dispatch, rather than in ``serve_command`` or the app's lifespan:
+            # those are what the suite drives in-process, and a test must never
+            # leave a warmed interpreter behind.
+            from local_operator.session.runtime import standby
+
+            standby.enable_warming(daemon=True)
             # Use the provided host, port, and reload options for serving the API.
             return serve_command(args.host, args.port, args.reload, listener_fd=args.listener_fd)
         elif args.subcommand == "mobile":
@@ -9169,6 +9392,8 @@ def main() -> int:
             return browser_command(args)
         elif args.subcommand == "send":
             return send_command(args)
+        elif args.subcommand == "model":
+            return model_command(args)
         elif args.subcommand == "sessions":
             return sessions_command(args)
         elif args.subcommand == "stop":
@@ -9216,6 +9441,7 @@ def main() -> int:
             return update_command(
                 check=bool(getattr(args, "check", False)),
                 refresh_daemons=bool(getattr(args, "refresh_daemons", False)),
+                services_only=bool(getattr(args, "services_only", False)),
                 from_snapshot=getattr(args, "from_snapshot", None),
                 services=not bool(getattr(args, "no_services", False)),
             )
@@ -9247,7 +9473,17 @@ def main() -> int:
             # for the same situation: 2 is argparse's own usage code and the one this
             # path already exited with through `parser.error`, so nothing that scripts
             # the exit status sees a change (round 11 R11-4).
-            print("usage: lop services {status, restart}", file=sys.stderr)
+            if command == "reclaim":
+                from local_operator.services import reclaim_serve_daemon
+
+                reclaim = reclaim_serve_daemon(getattr(args, "pid"))
+                for line in reclaim.lines:
+                    print(line)
+                # A REFUSAL IS A COMPLETED DECISION, and it exits non-zero so a
+                # script can tell it from a reclaim that ran — the same shape
+                # `lop stop`'s "turn is in flight" refusal has.
+                return 1 if reclaim.refused else 0
+            print("usage: lop services {status, restart, reclaim}", file=sys.stderr)
             return 2
         elif args.subcommand == "install":
             # Same lazy import, same reason. The generation layout's own verbs:
@@ -9911,6 +10147,21 @@ def main() -> int:
                     return await viewer_factory(resume_id)
 
                 tui_entry = functools.partial(tui_entry, resume_factory=resume_factory)
+                # Every /new and every cold sidebar switch engages a runtime; a
+                # pre-imported standby takes the import cost off that path (see
+                # ``session/runtime/standby.py``). One spare per root per slot, for
+                # the whole machine: every TUI on this root shares the TUI slot and
+                # a TUI that cannot take it spawns cold, so ~20 TUIs hold ONE spare
+                # (~145 MB) rather than ~20 (measured with three consoles on one
+                # root before the cap). The slot is an ``flock`` rather than a
+                # shared spare because a spare is a private descriptor to a child
+                # of one console — sharing it across consoles needs a rendezvous
+                # path, which is exactly the escalation agent review round 1
+                # proved. Enabled at the CLI's launch point, never in ``run_tui``
+                # or the app, which the suite drives.
+                from local_operator.session.runtime import standby
+
+                standby.enable_warming(config_manager.config_dir)
                 # The silence starts HERE, not inside ``run_tui``. The
                 # scheduler is started by the wrapper below and logs
                 # "Scheduler started" at INFO before the app has painted a

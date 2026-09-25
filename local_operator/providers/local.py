@@ -93,6 +93,46 @@ def config_values() -> Mapping[str, Any]:
     return ConfigManager(config_dir()).get_config().values
 
 
+def configured_local_providers(values: Mapping[str, Any] | None = None) -> frozenset[str]:
+    """The local server ids the user has POINTED somewhere — config alone.
+
+    A ``local_setup`` provider ships with a preset port (``LOCAL_PRESETS``), so
+    its *presence* in the registry says nothing about whether anyone is listening:
+    ``ollama`` listing nothing means "no Ollama app is running on this machine",
+    which is the normal state of every install that has never used it. The one
+    key that records a deliberate choice is ``providers.<id>.base_url``, and
+    ``ProviderController._configure_local`` writes exactly that key
+    (``manager.update_config({"providers": providers, ...})``) after the user
+    confirms an endpoint — so this is the app's own record of "the user opted
+    in", not a second opinion about it.
+
+    The generic ``openai-compatible`` gateway has NO preset (its registry
+    ``base_url`` is empty), so it can only ever appear here by being configured —
+    which is the same fact the caller wants, reached the same way.
+
+    ``values`` is an optional config snapshot, in the same shape and for the same
+    reason as :func:`config_values`: a caller resolving several local providers in
+    one pass reads the config ONCE. Passing ``None`` keeps the per-call read.
+    """
+    if values is None:
+        values = config_values()
+    providers = values.get("providers", {})
+    if not isinstance(providers, Mapping):
+        return frozenset()
+    configured: set[str] = set()
+    for provider in LOCAL_PROVIDER_IDS:
+        settings = providers.get(provider)
+        if not isinstance(settings, Mapping):
+            continue
+        base_url = settings.get("base_url")
+        # Whitespace-only is not an engagement: ``validate_endpoint_setting``
+        # normalizes that to "" (reset to preset), so treating it as configured
+        # would contradict the app's own write path.
+        if isinstance(base_url, str) and base_url.strip():
+            configured.add(provider)
+    return frozenset(configured)
+
+
 def resolve_base_url(
     provider: str, *, override: str | None = None, values: Mapping[str, Any] | None = None
 ) -> str:

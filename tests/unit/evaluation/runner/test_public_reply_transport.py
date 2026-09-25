@@ -130,7 +130,11 @@ async def test_loopback_sse_factory_public_memory_and_secret_retention(
     monkeypatch.setenv("no_proxy", "127.0.0.1")
     store = AuthStore(tmp_path / "fixture-auth.db")
     store.upsert_credential("openai", {"key": "fixture-local-only", "source": "login"})
-    config = fixtures.build_config(tmp_path, max_steps=13)
+    # Control arm: the subject here is the transport, the secret discipline
+    # and which public facts are REPLAYED, all of which are asserted per
+    # request below; the completion gate's own extra call is covered by
+    # tests/unit/evaluation/runner/test_completion_gate.py.
+    config = fixtures.build_config(tmp_path, max_steps=13, completion_gate=False)
     route = RouteIdentity(provider_id="openai", route_id="loopback", model_id="fixture-model")
     spec = replace(fixtures.build_spec(episode_id), requested_route=route)
     model = ModelSpec(

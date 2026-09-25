@@ -13565,8 +13565,9 @@ async def test_a_desktop_pin_shows_in_the_tui_and_a_tui_pin_shows_on_the_desktop
 async def test_a_pinned_run_the_desktop_cannot_list_produces_no_row(tmp_path, monkeypatch) -> None:
     """The §9.2 limitation, PINNED rather than latent.
 
-    ``DesktopSessions.list`` calls ``load_catalog`` with ``include_subagents``
-    defaulting to False, so a delegated run the TUI pins has no desktop row at
+    ``DesktopSessions.list`` lists the visible population (``catalogue_page``,
+    which shares ``load_catalog``'s scan and ranks the same candidates with the
+    subagent layer off), so a delegated run the TUI pins has no desktop row at
     all. The pin is real and the route accepts it (see ``test_desktop_pins.py``);
     what this asserts is that the desktop's LIST does not silently claim the
     pinned set is complete. Documented, not fixed, per the design: the union

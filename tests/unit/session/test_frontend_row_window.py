@@ -1630,3 +1630,70 @@ def test_a_released_row_holds_only_frozen_containers() -> None:
     again = store._state.jobs[0]
     assert isinstance(again.launch_prompts, module._FrozenMapping)
     assert isinstance(again.attempt_aliases, module._FrozenSequence)
+
+
+# -- the tick is spaced by its own cost ----------------------------------------
+#
+# A fixed 50 ms tick that costs ~25-60 ms (12 stepping lanes, a 240-record
+# roster; ``scripts/bench_send_admission.py``) takes the whole loop. The spacing
+# rule is a pure function of the last tick's cost, so it is pinned as one.
+
+
+def test_a_cheap_roster_tick_keeps_the_fifty_millisecond_floor() -> None:
+    from local_operator.session import session as session_module
+
+    assert session_module._frontend_jobs_delay(0.0) == session_module._FRONTEND_JOBS_FLOOR_S
+    assert session_module._frontend_jobs_delay(0.002) == session_module._FRONTEND_JOBS_FLOOR_S
+
+
+def test_an_expensive_roster_tick_is_held_to_its_loop_share() -> None:
+    from local_operator.session import session as session_module
+
+    cost = 0.06
+    delay = session_module._frontend_jobs_delay(cost)
+    share = cost / (cost + delay)
+    assert share == pytest.approx(session_module._FRONTEND_JOBS_MAX_SHARE)
+    # And a pathological tick still repaints at least once a second.
+    assert session_module._frontend_jobs_delay(5.0) == session_module._FRONTEND_JOBS_CEILING_S
+
+
+@pytest.mark.asyncio
+async def test_the_flush_records_the_cost_the_next_schedule_reads(tmp_path: Path) -> None:
+    session = _real_session(tmp_path)
+    store = session._frontend_state_store
+    store.subscribe(lambda _update: None)
+    assert getattr(session, "_frontend_jobs_last_cost_s", 0.0) == 0.0
+    session._flush_frontend_jobs()
+    assert session._frontend_jobs_last_cost_s > 0.0
+
+
+@pytest.mark.asyncio
+async def test_the_schedule_spaces_the_next_tick_by_the_recorded_cost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The WIRING, not the formula: ``_schedule_frontend_jobs`` must hand
+    ``call_later`` the delay the last tick's cost earns. Review round 1 (F1)
+    replaced that argument with a fixed ``0.05`` and the suite stayed green,
+    because the two tests above pin the pure function and the recorder but
+    nothing read the value back at the one call site that spends it."""
+    from local_operator.session import session as session_module
+
+    session = _real_session(tmp_path)
+    session._frontend_state_store.subscribe(lambda _update: None)
+    loop = asyncio.get_running_loop()
+    delays: list[float] = []
+    real_call_later = loop.call_later
+
+    def spy(delay: float, callback: Any, *args: Any, **kwargs: Any) -> asyncio.TimerHandle:
+        if getattr(callback, "__func__", None) is type(session)._flush_frontend_jobs:
+            delays.append(delay)
+        return real_call_later(delay, callback, *args, **kwargs)
+
+    monkeypatch.setattr(loop, "call_later", spy)
+    session._frontend_jobs_last_cost_s = 0.06
+    session._schedule_frontend_jobs()
+    session._frontend_jobs_refresh_scheduled = False  # the tick is not what is under test
+
+    expected = session_module._frontend_jobs_delay(0.06)
+    assert expected > session_module._FRONTEND_JOBS_FLOOR_S, "the fixture must earn a longer gap"
+    assert delays == [pytest.approx(expected)]

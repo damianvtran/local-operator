@@ -534,14 +534,15 @@ def _write_bytes_atomic(path: Path, payload: bytes) -> None:
     """Temp file + ``os.replace``, for a payload that is already final bytes.
 
     Split out of :func:`_write_json_atomic` so a rollback can put a file's
-    ORIGINAL bytes back rather than a re-serialisation of them. It is a second
-    destructive call site in this module for exactly that reason, and its
-    callers are the two ``add_key`` config writes below: both are the scope file
-    :func:`_scope_path` resolved for a server this module owns, and
-    ``os.replace`` here lands on that FILE — the temp is its sibling and the
-    target was just read — so no path through this function removes, renames or
-    replaces a session DIRECTORY (``tests/unit/session/test_no_session_deletion.py``
-    carries the allow-list row and this reason).
+    ORIGINAL bytes back rather than a re-serialisation of them. That makes it
+    the ONE destructive call site behind every mcp.json write in this module:
+    :func:`_write_json_atomic` (add, OAuth set, remove, and the unbind fallback),
+    the ``add_key`` header bind, and the rollback of a refused bind. Every caller
+    passes the scope file :func:`_scope_path` resolved, and ``os.replace`` here
+    lands on that FILE — the temp is its sibling — so no path through this
+    function removes, renames or replaces a session DIRECTORY
+    (``tests/unit/session/test_no_session_deletion.py`` carries the allow-list
+    row and this reason; a caller with any other path is outside it).
     """
     import tempfile
 

@@ -58,6 +58,124 @@ def _version_tuple(raw: str) -> tuple[int, ...]:
     return tuple(parts) or (0,)
 
 
+#: ``(the resolver it was read through, its answer)``. See :func:`_package_version`.
+_PACKAGE_VERSION: "tuple[Any, str] | None" = None
+
+
+def _package_version() -> str:
+    """``version("local-operator")``, read once per process instead of per manager.
+
+    WHY. ``importlib.metadata.version`` locates the distribution and parses its
+    ``METADATA`` file through ``email.parser`` on EVERY call, and each manager
+    asked for it twice. A runtime child builds five managers before it can
+    publish (``spawn_owned_session``, ``Session._configured_max_running``, two
+    ``read_model_choice`` calls, ``read_effort_tier_selectors``), so one session
+    construction paid ten lookups: 76-82 ms of CPU of a ~440 ms construction
+    (CPU-clock cProfile), on a host at load 100+ where one CPU millisecond costs
+    10-17 ms of wall time.
+
+    NOT STALE IN ANY WAY THAT MATTERS: the answer is the version of the code
+    this process imported, which cannot change without a new process. An
+    install that moves under a live process is a different question with its
+    own detector (``session._process_boot_build``); this value feeds only the
+    config file's advisory version stamp and the "your config is newer" warning.
+
+    KEYED ON THE RESOLVER'S IDENTITY so a test that patches
+    ``local_operator.config.version`` is answered by its patch rather than by a
+    value an earlier test cached — the cache then behaves like the direct call.
+    """
+    global _PACKAGE_VERSION
+    cached = _PACKAGE_VERSION
+    if cached is not None and cached[0] is version:
+        return cached[1]
+    answer = version("local-operator")
+    _PACKAGE_VERSION = (version, answer)
+    return answer
+
+
+#: One parsed ``config.yml`` per path, keyed by what ``fstat`` said about the
+#: bytes it was parsed from. See :func:`_parse_config_stream`.
+_PARSED: dict[str, tuple[tuple[int, ...], Any]] = {}
+
+#: The C scanner when libyaml is compiled in (it is in the wheels we ship), else
+#: the pure-Python one. Both construct from the same SAFE tag set and raise the
+#: same ``yaml.YAMLError`` subclasses, so the caller's error path is unchanged;
+#: equal output was checked on the operator's real config.yml.
+_SAFE_LOADER: Any = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+
+def _stat_key(st: os.stat_result) -> tuple[int, ...]:
+    return (st.st_ino, st.st_dev, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def config_file_key(path: Path) -> "tuple[int, ...] | None":
+    """The identity :func:`_parse_config_stream` caches a parse under, or ``None``.
+
+    Public because a pre-imported standby runtime records it when it warms and
+    compares it before adopting a session (``session.runtime.standby``): a standby
+    whose config moved since it warmed is discarded rather than served.
+    """
+    try:
+        return _stat_key(os.stat(path))
+    except OSError:
+        return None
+
+
+def _parse_config_stream(path: Path, stream: Any) -> Any:
+    """``config.yml`` parsed — at most once per version of the file, per process.
+
+    WHY. Every ``ConfigManager`` re-read and re-parsed the file, and a session's
+    construction path builds five of them (see :func:`_package_version`). The
+    pure-Python ``SafeLoader`` costs ~2 ms of CPU per parse on the operator's
+    1.6 KB file and ~8 ms on a seeded one, and YAML was the largest single item
+    in a runtime child's pre-publication CPU after imports: 185 of ~440 ms,
+    measured. At this host's load (100 ms of CPU = 1.0-1.7 s of wall) that is
+    seconds of "starting…" on every cold engage.
+
+    THE INVALIDATION STORY. The key is ``(inode, device, size, mtime_ns,
+    ctime_ns)`` from ``fstat`` on the OPEN descriptor, taken on every call, and
+    a hit needs all five to match:
+
+    * every writer in this codebase replaces the file atomically
+      (``_write_config``: temp file + ``os.replace``), which gives the path a NEW
+      inode, so a replaced file can never match the old key;
+    * an in-place rewrite (an editor, ``>>``) moves ``mtime_ns`` and
+      ``ctime_ns``; ``ctime`` cannot be set back by any process, even with
+      ``os.utime``;
+    * ``fstat`` on the descriptor we read from, not ``stat`` on the path, so the
+      key always describes the file the bytes come from, even if the path is
+      swapped between the open and the read.
+
+    So the memo only ever answers for bytes the open file still holds: it
+    removes the PARSE, never the freshness check. A second ``fstat`` after the
+    read gates the store, so a write that lands DURING the read is not cached
+    under the key of the bytes it replaced. A parse error propagates uncached:
+    the caller moves a bad file aside and the next read must see what replaced it.
+
+    CALLERS GET A DEEP COPY, because a manager merges defaults into the dict it
+    loads, in place, and managers must never share state — see
+    :func:`_fresh_default_config` for the incident behind that rule.
+    """
+    name = str(path)
+    try:
+        key: "tuple[int, ...] | None" = _stat_key(os.fstat(stream.fileno()))
+    except (OSError, AttributeError, ValueError):
+        key = None
+    if key is not None:
+        hit = _PARSED.get(name)
+        if hit is not None and hit[0] == key:
+            return deepcopy(hit[1])
+    loaded = yaml.load(stream, Loader=_SAFE_LOADER)  # noqa: S506 — a SAFE loader
+    if key is not None:
+        try:
+            unchanged = _stat_key(os.fstat(stream.fileno())) == key
+        except (OSError, ValueError):
+            unchanged = False
+        if unchanged:
+            _PARSED[name] = (key, deepcopy(loaded))
+    return loaded
+
+
 class Config:
     """Configuration settings for Local Operator.
 
@@ -90,7 +208,7 @@ class Config:
         If a config file exists at the specified path, loads settings from it.
         """
         # Set version and metadata first
-        self.version = config_dict.get("version", version("local-operator"))
+        self.version = config_dict.get("version", _package_version())
         self.metadata = config_dict.get(
             "metadata",
             {
@@ -432,7 +550,7 @@ class ConfigManager:
             # because ConfigManager is built on the `exec --json` path, whose
             # stdout is the event stream.
             try:
-                loaded = yaml.safe_load(f)
+                loaded = _parse_config_stream(self.config_file, f)
             except yaml.YAMLError as exc:
                 self._handle_bad_config(f"could not parse {self.config_file}: {exc}")
                 return _fresh_default_config()
@@ -446,7 +564,7 @@ class ConfigManager:
 
             # Check if config version is older than current version
             config_version = config_dict.get("version", "0.0.0")
-            current_version = version("local-operator")
+            current_version = _package_version()
             # Compare as version TUPLES, not strings: "1.10.0" > "1.9.0" is
             # False lexicographically, so the warning fired on the wrong set of
             # versions entirely. stderr because ConfigManager is constructed on

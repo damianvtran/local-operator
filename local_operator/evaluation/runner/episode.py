@@ -84,6 +84,7 @@ from local_operator.evaluation.evidence.models import (
     OutcomeDraft,
     PreflightPayload,
     ReconciliationPayload,
+    ReplyTolerancePayload,
     RouteIdentity,
     ScoreArtifact,
     ScoringResultPayload,
@@ -120,6 +121,7 @@ from local_operator.evaluation.receipts import (
     commit_budget,
     reconcile_budget,
 )
+from local_operator.evaluation.runner.completion import CompletionGate, finish_claim
 from local_operator.evaluation.runner.guards import (
     RECENT_TURNS_WINDOW,
     EpisodeGuard,
@@ -295,6 +297,19 @@ class EpisodeConfig:
     ``0`` attempts restores the previous behaviour, where any such failure
     destroyed the episode.
 
+    ``completion_gate``/``completion_challenges`` bound the ONE challenge the
+    runner makes to a ``finish`` whose ``status`` is ``done``: the model is
+    asked to check that claim against the observation it is bound to before the
+    episode is allowed to end (see ``runner.completion`` for the measurement
+    that motivated it, and for the two mechanisms measurement ruled out). The
+    gate is ON by default because what it corrects is the episode's own
+    terminal action; ``completion_challenges`` defaults to 1 so the SECOND
+    declaration is always accepted and the gate can never drive an episode to a
+    model failure. Turning the gate off is a campaign's control arm rather than
+    an operator preference -- it changes what the model is asked, so a run has
+    to record which arm produced it -- and a non-``done`` finish is never
+    challenged, because there is no completion in it to confirm.
+
     They are ON by default rather than opt-in because the path is unreachable
     unless an adapter explicitly raises ``ObservationPhaseError``: an adapter
     that says nothing is bit-for-bit unaffected. The conservatism therefore
@@ -340,6 +355,8 @@ class EpisodeConfig:
     observation_retry_attempts: int = 3
     observation_retry_delay: float = 5.0
     execution_overhead_seconds_per_action: float = 0.0
+    completion_gate: bool = True
+    completion_challenges: int = 1
 
     def __post_init__(self) -> None:
         rate = self.execution_overhead_seconds_per_action
@@ -350,6 +367,13 @@ class EpisodeConfig:
             or rate < 0.0
         ):
             raise ValueError("execution_overhead_seconds_per_action must be finite and nonnegative")
+        # A float or a ``bool`` here would silently mean something else: the
+        # bound is compared with ``>=`` against a count of challenges made, so
+        # ``True`` would read as a budget of 1 and a negative value as a gate
+        # that is off for a reason nobody can see in the config.
+        challenges = self.completion_challenges
+        if isinstance(challenges, bool) or not isinstance(challenges, int) or challenges < 0:
+            raise ValueError("completion_challenges must be a non-negative integer")
 
 
 @dataclass(frozen=True)
@@ -455,6 +479,14 @@ class EpisodeRunner:
         self._config = config
         self._selector = selector
         self._model = model
+        # The completion gate is the RUNNER's, built here rather than handed in
+        # so a second model client (the scripted one, CI's fake, a future API
+        # stack) cannot decline to enforce it: see ``runner.completion``.
+        self._completion_gate = CompletionGate(
+            client=model,
+            enabled=config.completion_gate,
+            challenges=config.completion_challenges,
+        )
         self._responder = responder if responder is not None else NullUserResponder()
         self._responder_override = responder is not None
         self._answer_owner = "host"
@@ -870,6 +902,14 @@ class EpisodeRunner:
                 )
             terminal = _terminal_kind(batch)
             if terminal == "finish":
+                # A ``done`` declaration is refused-as-a-claim ONCE (see
+                # ``runner.completion``). The second one is always accepted, so
+                # the branch below is reached for the answer that ends the
+                # episode -- the identical first claim, or an action that
+                # closes the gap the model found when it looked again.
+                if self._completion_gate.should_challenge(finish_claim(batch)):
+                    await self._challenge_completion(batch)
+                    continue
                 self._append_batch(batch, terminal="finish")
                 return
             if terminal == "ask_user":
@@ -878,6 +918,25 @@ class EpisodeRunner:
             await self._execute_batch(batch)
             if self._last_step_terminated:
                 return
+
+    async def _challenge_completion(self, batch: ActionBatch) -> None:
+        """Refuse this turn's end, and ask the model to check its own claim.
+
+        NOTHING MOVES. The observation is unchanged and the turn does not close,
+        so the re-prompt that follows is a decision about the same screen, the
+        same way a rejected reply's is: the pending-observation token stays
+        armed, no ``action_batch`` is written (an ``action_batch`` with
+        ``terminal="finish"`` is the marker of the batch the episode ENDED on,
+        and a bundle carrying two of them did not end once), and
+        ``_turns[-1].batch`` stays ``None``.
+
+        Evidence first, re-prompt second: the challenge is a conversation turn
+        the model was shown, so a bundle sealed by a failure during the next
+        call still says what was asked of it.
+        """
+
+        text = await self._completion_gate.challenge(batch, self._turns)
+        self._append_model_error("completion-challenged", text)
 
     async def _decide(self, observation: Observation) -> Any:
         """Ask the model until it returns a usable batch, within the retry bounds.
@@ -1156,6 +1215,27 @@ class EpisodeRunner:
                 redacted_response=response_artifact,
             ),
         )
+        # The two reply tolerances are recorded on their OWN kind rather than as
+        # fields of the response above, and that is a compatibility constraint:
+        # ``event_id`` is a digest over the payload as the current model
+        # canonicalizes it, so a field added to ``ModelResponsePayload``
+        # re-baselines every ``model_response`` event ever sealed -- making every
+        # pre-change bundle fail ``verify_bundle`` and un-recoverable. See
+        # ``ReplyTolerancePayload`` for the measurement. Written only when a
+        # tolerance FIRED, so its absence reads as zero and an ordinary reply
+        # costs no journal line; the recovered rate is this kind's count over
+        # ``model_response``.
+        tolerated_action_fields = getattr(decision, "tolerated_action_fields", 0)
+        leading_framing_bytes = getattr(decision, "leading_framing_bytes", 0)
+        if tolerated_action_fields or leading_framing_bytes:
+            self._append(
+                "reply_tolerance",
+                ReplyTolerancePayload(
+                    request_id=request_id,
+                    tolerated_action_fields=tolerated_action_fields,
+                    leading_framing_bytes=leading_framing_bytes,
+                ),
+            )
         self._append(
             "usage_cost",
             UsageCostPayload(
@@ -1237,6 +1317,36 @@ class EpisodeRunner:
             )
             raise _DecisionRejection(rejected.diagnostic, rejection=rejected) from rejected
         return decision
+
+    def _append_model_error(self, diagnostic_code: str, detail_text: str) -> None:
+        """Journal one corrective turn the runner bought, with its own words.
+
+        ``detail_text`` is what the MODEL was shown -- a rejection's diagnostic,
+        or a completion challenge -- published as an artifact rather than
+        squeezed into the identifier-shaped ``diagnostic_code``, so the exact
+        correction stays auditable.
+
+        The code is a PARAMETER because a second correction now rides this same
+        kind: the completion gate needed an ``error`` event distinguishable from
+        a rejection, and an added payload field would re-baseline every sealed
+        ``model_response`` digest while a new event kind would be a schema
+        conversation with the verifier. The kind, the category, the
+        retryability and the payload SHAPE are deliberately unchanged; only the
+        code, which was always a free-form ``StrictIdentifier``, carries the
+        difference.
+        """
+
+        detail = self._publish(detail_text.encode("utf-8"), media_type="text/plain")
+        self._append(
+            "error",
+            ErrorPayload(
+                error_id=f"err-{uuid.uuid4().hex[:12]}",
+                category="model",
+                diagnostic_code=diagnostic_code,
+                detail_artifact=detail,
+                retryable=True,
+            ),
+        )
 
     def _append_batch(
         self, batch: ActionBatch, *, terminal: Literal["finish", "ask_user"] | None
@@ -2574,6 +2684,16 @@ def _rejection_detail(rejected: Any, redactions: RedactionSet | None) -> str:
         sections.append(f"class: {_header_value(class_key)}")
     shape = getattr(rejected, "stream_shape", None)
     if shape is not None:
+        channel = "read" if getattr(rejected, "channel_read", False) else "prose"
+        if channel == "read":
+            # Rendered only when the client RECORDED the count. ``prose=0`` is a
+            # reading -- a genuinely silent turn, the class the widening exists
+            # for -- so a ``DecisionRejected`` built without the field (a test
+            # double, or a future second model client) omits the clause rather
+            # than claiming that reading.
+            prose_chars = getattr(rejected, "channel_prose_chars", None)
+            if prose_chars is not None:
+                channel += f"(prose={prose_chars})"
         # ``stripped_reply_markers`` is not a provider event count, and it rides
         # on this line anyway: the line is the artifact's one per-ATTEMPT record,
         # and the reader needs it beside the counts because it explains them.
@@ -2588,6 +2708,32 @@ def _rejection_detail(rejected: Any, redactions: RedactionSet | None) -> str:
             f"reasoning_deltas={shape.reasoning_deltas} "
             f"tool_call_deltas={shape.tool_call_deltas} "
             f"stop={_header_value(shape.stop)} "
+            # WHICH channel was judged and what arrived on it, beside the counts
+            # that say how much arrived. The counts alone cannot separate the two
+            # refusals that look identical in a bundle and are not: the model's
+            # PROSE not beginning with '{', and a complete decision arriving as a
+            # tool call under a name the harness did not read. The second was 178
+            # of this arm's 204 ``leading-delimiter`` refusals (recounted
+            # 2026-09-25 over ``~/worktrees/osworld/runs``), and nothing in the
+            # artifact named the channel or the call, so the class was
+            # undiagnosable without paying for the run again. ``channel=read``
+            # states the harness read the tool-call channel; ``tool_calls=[...]``
+            # is what the stream called its calls, empty when it carried none.
+            # Both are model-authored text and go through ``_header_value`` for
+            # the reason ``stop`` does: a name is not a line of its own.
+            #
+            # ``prose=<n>`` rides on the ``read`` branch and is the count of
+            # CHARACTERS of prose that branch set aside (see
+            # ``channel_prose_chars``). It is what makes the widening's collateral
+            # countable: ``read(prose=0)`` is the silent reply the widening exists
+            # for, while a later arm can ask how often a turn answered on BOTH
+            # channels and had its prose dropped -- a fact a sealed bundle could
+            # not show at all while ``content_deltas`` was the only count beside
+            # it, because that counts stream events, not the text judged. The
+            # clause is OMITTED when the client recorded no count, so an
+            # unrecorded refusal cannot read as ``prose=0``.
+            f"channel={channel} "
+            f"tool_calls=[{_header_value(shape.tool_call_names)}] "
             f"stripped_reply_markers={getattr(rejected, 'stripped_reply_markers', 0)}"
         )
     # ``evidence_reply`` is the boundary that may carry the reply into evidence;

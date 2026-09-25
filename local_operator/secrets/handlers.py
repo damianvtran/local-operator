@@ -326,30 +326,63 @@ def _reveal(args: argparse.Namespace) -> int:
     buys nothing (same bytes, same key) and costs exactly the property that
     matters. Where no broker or session is reachable the seam degrades to the
     local decrypt, UNNOTIFIED, exactly as ``$(lop secret get NAME)`` does —
-    documented in ``access.py``, and visible in the trail as the retrieval row
-    with no session id.
+    documented in ``access.py``. **Neither signal is the one an earlier version
+    of this docstring named.** It pointed at "the retrieval row with no session
+    id", which identifies neither case: the `get` row reproduces whatever
+    ``LOCAL_OPERATOR_SESSION_ID`` its caller set (nothing verifies it, so an
+    unannounced read can carry a forged id, and one was measured doing it),
+    while a session registered without an id — how ``tui/__init__.py``
+    registers — makes an ANNOUNCED read write ``session=None`` from the
+    broker. What does discriminate is the PID: the unannounced read's `get` row
+    carries the reveal process's own pid, the announced one carries the
+    broker's, and a broker that was reachable enough to refuse the caller
+    leaves its ``deny:retrieve``/``deny:key`` rows from that same pid first.
+    The operator-facing version of this, which is the one to keep in step with
+    this paragraph, is the credentials guide's "What is recorded".
 
     Ordering, which is the point of the three steps: retrieve (announce), then
     record the reveal, then print. A failure in either store step prints nothing
     at all — an unaudited reveal is worse than a refused one.
     """
-    if not (sys.stdin and sys.stdin.isatty() and sys.stdout.isatty()):
-        return _refuse_reveal(
-            args.name,
-            outcome="refused",
-            reason="stdin and stdout are not both a terminal, so there is nobody to ask",
-        )
+    # WHICH half failed is the actionable part of the refusal, and the three
+    # cases invite three different fixes. One reason for all three also said
+    # something false about one of them: "there is nobody to ask" is not true
+    # when stdin IS a terminal — there the prompt would be answered and the
+    # value would go into a pipe instead of being read, which is a different
+    # hazard and reads differently.
+    stdin_tty = bool(sys.stdin and sys.stdin.isatty())
+    stdout_tty = bool(sys.stdout and sys.stdout.isatty())
+    if not (stdin_tty and stdout_tty):
+        if not stdin_tty and not stdout_tty:
+            reason = "stdin and stdout are not terminals, so there is nobody to ask"
+        elif not stdin_tty:
+            reason = "stdin is not a terminal, so there is nobody to ask"
+        else:
+            reason = (
+                "stdout is not a terminal, so anything printed could be captured instead of read"
+            )
+        return _refuse_reveal(args.name, outcome="refused", reason=reason)
 
     _err(f"Reveal {args.name} to this terminal, in plain text? [y/N] ")
+    no_answer = False
     try:
         answer = input()
     except EOFError:
         # A terminal that went away is not consent. `_remove` reads its prompt
         # unguarded; here the failure would be a traceback on the one path whose
         # subject is a value, so it fails closed instead.
+        #
+        # EOF (Ctrl-D, or stdin closed) is the one case this code tells apart
+        # from a declined prompt, and the flag is what tells them apart: before
+        # it, both fell through on the same `answer = ""` and said "cancelled".
+        # The distinction is copy only — both refuse, and both still record
+        # `cancelled`, which is `store.py`'s word for a human declining and what
+        # every reader of the trail branches on — but nobody ANSWERED here, and
+        # "cancelled" reports a decision no one made.
         answer = ""
+        no_answer = True
     if answer.strip().lower() not in ("y", "yes"):
-        _err("cancelled")
+        _err("no answer, so nothing was revealed" if no_answer else "cancelled")
         _note_reveal_refusal(args.name, outcome="cancelled")
         # REVEAL_REFUSED, not `_remove`'s 1: this file reserves 1 for "the audit
         # chain is broken", and a script branching on the documented taxonomy
@@ -370,7 +403,7 @@ def _refuse_reveal(name: str, *, outcome: str, reason: str) -> int:
     is consumed by ``$( )`` in exactly the same way a successful one is, and a
     diagnostic on stdout would be handed to the consumer as the credential.
     """
-    _err(f"lop secret get --reveal: refusing to reveal {name} — {reason}.")
+    _err(f"lop secret get --reveal: refusing to reveal {name}: {reason}.")
     _err("  To USE it without printing it:")
     _err(f"      lop secret run --secret {name} -- <command…>")
     _err(f"      lop secret file {name} -- <command…>          (file-shaped secrets)")
@@ -961,11 +994,31 @@ def _audit(args: argparse.Namespace) -> int:
             )
         )
         return 0
+    # The human view spells `tty` out and carries the legend that says what it
+    # does and does not mean; `--json` keeps the enum, because a machine
+    # contract is not where a presentation gap gets fixed. The column widens to
+    # whatever the spelled-out labels need, so the rows stay aligned.
+    labels = {"tty": "at a terminal"}
+    width = max([5, *(len(labels.get(row.outcome, row.outcome)) for row in records)])
     for entry in records:
         print(
-            f"{_format_time(entry.ts)}  {entry.event:<7} {entry.outcome:<5} "
+            f"{_format_time(entry.ts)}  {entry.event:<7} "
+            f"{labels.get(entry.outcome, entry.outcome):<{width}} "
             f"pid={entry.pid or '-':<7} {entry.secret_id or ''}"
         )
+    # Scoped to a row that actually renders the state this legend explains, not
+    # to "there are rows": a store whose audit holds no reveal still renders
+    # `ok`/`refused` rows, and a legend for a state absent from the output it
+    # closes explains nothing while looking like it does. The gate compares the
+    # RENDERED label rather than the enum, so it cannot drift from the phrase the
+    # legend keys on; `--json` is what keeps the enum alive.
+    #
+    # The blank line is what makes the caveat read as a footer. Flush against the
+    # last data row it reads as that row's tail, which is how a caveat gets
+    # skipped by the reader it exists for.
+    if any(labels.get(row.outcome, row.outcome) == labels["tty"] for row in records):
+        print()
+        print("  at a terminal: not proof a person agreed.")
     return 0
 
 
