@@ -2481,7 +2481,17 @@ def browser_command(args: argparse.Namespace) -> int:
                 print("Invalid session id; no action taken.")
                 return 1
             try:
-                result = asyncio.run(cleanup_exact(sessions / args.session_id, args.generation))
+                # THE CONFIG ROOT TRAVELS WITH THE CALL (review round 3, NIT 1): the
+                # cleanup path takes the execution lease directly, and the move guard it
+                # consults must be asked about the store THIS session belongs to rather
+                # than one derived from the path shape.
+                result = asyncio.run(
+                    cleanup_exact(
+                        sessions / args.session_id,
+                        args.generation,
+                        config_dir=sessions.parent,
+                    )
+                )
             except Exception as exc:
                 # The bridge and lease errors already carry operator-grade
                 # sentences naming the command that fixes them; printing the

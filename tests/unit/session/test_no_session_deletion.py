@@ -1793,6 +1793,14 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Removes the move's own ready.json boot marker from an already-promoted "
         "session: a bookkeeping FILE the move wrote, never session content",
     ),
+    (
+        "local_operator/network/mobility.py::settle_promoted_handoff",
+        "<path>.unlink",
+        "Removes the SAME marker from the same place, in the other recovery path: a "
+        "destination whose promote landed and then failed before it deleted its own boot "
+        "marker. Only reached when the session directory exists with a transcript, i.e. "
+        "the move already finished (review round 2, the p1c probe)",
+    ),
     # A replica lives at network/replicas/<id>/ — outside the session store, so it
     # can never be a second directory for an id the owner holds (INV-1). Its cursor
     # is written through a temp in that same directory.
@@ -1822,6 +1830,22 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/network/sync.py::write_replica_cursor",
         "os.replace",
         "Atomic tmp -> sync.json inside one network/replicas/<id>/ directory",
+    ),
+    # A CARRIED SYMLINK, staged beside its own target and renamed over it (review round 2's
+    # real-store finding). The targets are a move's staging directory or a replica's own
+    # tree — never a path under sessions/ except through ``_promote`` above — and the two
+    # unlinks are that attempt's own staging LINK.
+    (
+        "local_operator/network/sync.py::_write_link",
+        "os.replace",
+        "Adopts a staged symlink over its destination inside a staging or replica tree",
+    ),
+    (
+        "local_operator/network/sync.py::_write_link",
+        "<path>.unlink",
+        "Removes this attempt's own .<name>.<pid>.link staging file, beside its target "
+        "rather than inside a session",
+        2,
     ),
     # The handoff journal's own atomic writer (see the module's fail-closed rule):
     # both the replacement and the temp cleanup are under <config>/network/.
