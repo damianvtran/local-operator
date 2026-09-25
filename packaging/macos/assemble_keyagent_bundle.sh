@@ -29,7 +29,14 @@
 # options:
 #   --binary FILE      prebuilt universal binary (default: compile from source)
 #   --source FILE      the C source (default: lop-keyagent/se-keyagent.c)
-#   --keychain FILE    a throwaway keychain holding the identity (CI)
+#   --keychain FILE    a throwaway keychain holding the identity (CI). WHAT IT
+#                      DOES AND DOES NOT DO, because assuming it is sufficient is
+#                      what broke the v0.62.39 release: it narrows the IDENTITY
+#                      (certificate) lookup to FILE. The signing KEY is resolved
+#                      through the user keychain SEARCH LIST, so FILE must ALSO be
+#                      listed there (`security list-keychains -d user -s FILE …`).
+#                      Passing --keychain alone fails at the codesign step below
+#                      with errSecInternalComponent — see the failure help there.
 #   --timestamp MODE   ``secure`` (default) or ``none``. ``none`` is NOT for a
 #                      release: it is for a local build on a host whose timestamp
 #                      authority cannot be reached. It REFUSES unless the caller
@@ -240,12 +247,52 @@ if [ "$TIMESTAMP_MODE" = "secure" ]; then
 else
   TS_KW=(--timestamp=none)
 fi
+
+# WHY THIS FAILURE GETS ITS OWN HELP TEXT. The v0.62.39 release died here with
+# `error: The specified item could not be found in the keychain.` and NOTHING in the
+# log named the command or the prerequisite, so the same non-obvious cause cost a
+# second investigation. The command is named, and the measured cause is stated —
+# with the four alternatives that were TESTED AND RULED OUT rather than assumed
+# (the default-keychain route and the chain-to-self-signed-root warning are the two
+# a reader reaches for first). The full measurement table lives at the fix site,
+# the `Import the Developer ID identity into a throwaway keychain` step in
+# `.github/workflows/publish.yml`.
+key_unreachable_help() {
+  cat >&2 <<'EOM'
+assemble_keyagent_bundle.sh: THE STEP THAT FAILED IS THE `codesign` CALL ABOVE.
+If its output was `errSecInternalComponent`, or `The specified item could not be
+found in the keychain`, the signing KEY could not be reached. The cause is almost
+always this, and it is not visible anywhere earlier in the build:
+
+  `codesign --keychain FILE` narrows ONLY the IDENTITY (certificate) lookup.
+  The PRIVATE KEY is resolved through the user keychain SEARCH LIST, so a
+  keychain holding the key but not listed there cannot be signed with — while
+  `security find-identity -v -p codesigning "$KEYCHAIN"` still reports the
+  identity VALID.
+
+Fix, in the shell that created the keychain (and restore the list afterwards):
+
+  security list-keychains -d user -s "$KEYCHAIN" \
+    $(security list-keychains -d user | tr -d '"')
+
+Making it the DEFAULT keychain instead is NOT a substitute, and neither is
+importing the Apple root certificate to silence the chain-to-self-signed-root
+warning: both were measured to still fail (2026-09-25).
+EOM
+}
+
 if [ "$ASAN" = "1" ]; then
   codesign --force ${CODE_KW[@]+"${CODE_KW[@]}"} ${TS_KW[@]+"${TS_KW[@]}"} \
-    --entitlements "$HERE/keyagent.entitlements" --sign "$IDENTITY" "$APP"
+    --entitlements "$HERE/keyagent.entitlements" --sign "$IDENTITY" "$APP" || {
+      key_unreachable_help
+      exit 1
+    }
 else
   codesign --force --options runtime ${CODE_KW[@]+"${CODE_KW[@]}"} ${TS_KW[@]+"${TS_KW[@]}"} \
-    --entitlements "$HERE/keyagent.entitlements" --sign "$IDENTITY" "$APP"
+    --entitlements "$HERE/keyagent.entitlements" --sign "$IDENTITY" "$APP" || {
+      key_unreachable_help
+      exit 1
+    }
 fi
 
 # --- 5. verify -------------------------------------------------------------
