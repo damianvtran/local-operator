@@ -836,6 +836,8 @@ class RecordPublisher:
         record: DiscoveryRecord,
         root: Path | None = None,
         dirname: str = RUN_DIRNAME,
+        *,
+        defer_publish: bool = False,
     ) -> None:
         self.record = record
         self._dirname = dirname
@@ -857,7 +859,41 @@ class RecordPublisher:
         # Pin the CONFIG dir rather than the run dir so ``root`` keeps meaning
         # what every caller already passes.
         self._root = root if root is not None else config_dir()
-        self.path = publish(record, self._root, self._dirname)
+        # The path is named whether or not the write happens here, so a
+        # deferred publisher still hands callers that print or dial it
+        # (``RuntimeServer.record_path``) the file it will own.
+        self.path = record_path(record.pid, self._root, self._dirname)
+        # ``defer_publish`` is for the caller that must INSTALL this instance
+        # before the record may become readable; publishing from here would
+        # put a readable file on disk ahead of that installation. See
+        # :meth:`publish` for the window that ordering closes.
+        if not defer_publish:
+            publish(record, self._root, self._dirname)
+
+    def publish(self) -> None:
+        """Write this publisher's record NOW — first time or again.
+
+        The deferred half of the constructor, for the caller that must not let
+        the record become READABLE before it can install this instance. The
+        session runtime writes through its publisher from other threads
+        (``note_leaving``, ``set_record_started`` — via ``RuntimeServer.
+        _republish``), and a write-through that lands while ``_republish``
+        still sees no publisher is applied to the record object and then lost
+        to every reader: the file on disk keeps its earlier state until the
+        next 15 s heartbeat. The constructor's own publish made that window
+        real — the file was readable BEFORE the installer's assignment — so
+        the record could be read (and a write-through silently no-op behind
+        it) with a pre-write file in hand; that is the intermittent CI failure
+        this deferral removes — the cold-join arm
+        (``test_a_draining_session_hands_a_cold_facade_its_canonical_sync``)
+        read ``leaving == ''``, and ``test_started_survives_the_republish``
+        read ``started`` False.
+
+        With the write owned by the caller, the invariant is total: a readable
+        record implies the publisher is installed, so a write-through can
+        never no-op against a record that has already been read.
+        """
+        publish(self.record, self._root, self._dirname)
 
     def heartbeat(self, **updates: object) -> None:
         """Rewrite the record with fresh liveness plus any changed fields
