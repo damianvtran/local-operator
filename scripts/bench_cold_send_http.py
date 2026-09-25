@@ -342,6 +342,21 @@ def main() -> int:
             "that as the steady state"
         ),
     )
+    parser.add_argument(
+        "--warm-wait",
+        type=float,
+        default=0.0,
+        help=(
+            "seconds to wait after the daemon starts, before the first timed send "
+            "(default 0: no wait). The standby's readiness is not observable from "
+            "another process by design, so this is the only honest way to ask for "
+            "the steady state, and the number is only meaningful when it exceeds "
+            "the warm measured on this host (51.4 s at load ~120, and "
+            "bench_standby_engage.py reports it per pass). With 0 the timed sends "
+            "race the warm and the first one is the cold send the operator gets "
+            "after a boot"
+        ),
+    )
     args = parser.parse_args()
     # Refuse BEFORE measuring (and the fields are re-derived at the end, so a
     # subtree that moved under the run is caught too): a campaign that records a
@@ -404,6 +419,13 @@ def main() -> int:
             with httpx.Client(base_url=base, headers=headers, timeout=300.0) as client:
                 _wait_for_health(client, base, proc)
                 print(f"  server up on {base} (pid {proc.pid})", flush=True)
+                if args.warm_wait:
+                    print(
+                        f"  waiting {args.warm_wait:.0f} s for the daemon's standby "
+                        f"to warm (children now: {_standby_children(proc.pid)})",
+                        flush=True,
+                    )
+                    time.sleep(args.warm_wait)
                 for index in range(args.runs):
                     row = _one_run(client, base, workspace, config_dir, index, args.mcp_variant)
                     row["standby_children"] = _standby_children(proc.pid)
