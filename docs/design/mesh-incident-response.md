@@ -197,7 +197,7 @@ should record this as a deliberate reduction, not an omission.
 | Local sessions | **Untouched and unaffected** |
 | Remote sessions | Unreachable; not deleted, not stopped, placements not rewritten |
 | Audit (us) | `panic_raised` **before** the fan-out, then one `panic_delivered` / `panic_undelivered` per peer, then `panic_broadcast_result` |
-| Audit (peers) | `panic_received` with `{from_device, epoch_before, epoch_after, reason}` |
+| Audit (peers) | `panic_received` with `{from_device, epoch_before, epoch_after, reason, rotation}`. `epoch_before`/`epoch_after` are the RECEIVER's own epochs, and `rotation` is which rule the frame's rotation half met (`applied`, or the reason it was not adopted — a valid alarm from a threadbare frame still goes untrusted) |
 
 **What panic deliberately is not.** It is not a remote kill switch, and the copy
 must say so in as many words, because that is what a person will assume:
@@ -838,7 +838,7 @@ cost:
 few semantic events, and the log barely moves:
 
 ```sh
-cd ~/local-operator-worktrees/mesh-network
+cd ~/local-operator
 env -i HOME="$(mktemp -d)" LOCAL_OPERATOR_CONFIG_DIR="$(mktemp -d)/.local-operator" \
   PATH="$PATH" TERM=xterm-256color .venv/bin/python -m pytest \
   tests/unit/network/test_audit_io.py -q
@@ -848,25 +848,42 @@ env -i HOME="$(mktemp -d)" LOCAL_OPERATOR_CONFIG_DIR="$(mktemp -d)/.local-operat
 drives 10,000 frames over a live link with 12 deliberately triggered semantic
 events and asserts `records_after - records_before <= 30`. That ratio (≈833
 frames per record) is A7's structural claim and it fails loudly if anyone ever
-adds an `audit.append` inside a frame path.
+adds an `audit.append` inside a frame path — measured with the fix neutralised
+for one run, the same cell reported **10,013 records for 10,000 frames**.
+
+The same file holds the BOUNDED-IDLE cell that Q-R1-3's class needs
+(`test_an_idle_network_writes_no_rows_for_a_member_that_cannot_hold_the_op`: an
+injected hour of the definitions cadence writes **zero** rows on the peer, against
+the 20-in-300-seconds it wrote when a `drive` member kept asking for an op it can
+never hold) and the cell that pins the probe's own instrument
+(`test_the_writer_counts_the_calls_the_probe_reports`), because a bound read off a
+counter that never increments passes forever.
 
 **2. The probe, which is the authority on the numbers.**
-`scripts/mesh_audit_probe.py` (new), following the repository's precedent of
-naming a script as the authority rather than quoting a constant
+`scripts/mesh_audit_probe.py`, following the repository's precedent of naming a
+script as the authority rather than quoting a constant
 (`scripts/spend_ledger_probe.py` is the model):
 
 ```sh
 .venv/bin/python scripts/mesh_audit_probe.py --frames 10000 --duration 60 --json
 ```
 
-It stands up the two-device local harness (§6.1), exercises a real session plus
-the credential broker, and prints:
+It stands up two relays on loopback in an isolated root, completes a REAL member
+handshake between them, drives the frames down that link, triggers a deliberate few
+semantic events, and prints:
 
 ```json
-{"frames": 10241, "records": 31, "frames_per_record": 330.4, "bytes_per_record": 461.9,
- "bytes_written": 14320, "write_calls": 62, "fsyncs": 7, "rotations": 0,
- "write_calls_per_minute": 62, "events_by_type": {"link_opened": 2, "credential_grant": 4}}
+{"frames": 10000, "records": 13, "frames_per_record": 769.2, "bytes_per_record": 416.5,
+ "bytes_written": 5414, "write_calls": 12, "write_calls_per_minute": 12.0,
+ "fsyncs": 12, "durable_events": 12, "rotations": 0,
+ "events_by_type": {"authorisation_refused": 12, "link_opened": 1}}
 ```
+
+**What the probe deliberately does NOT drive: a session turn and a credential
+grant.** Both need a provider login, which a probe on a laptop or in a CI container
+does not have, and a fabricated one would put an invented number behind a bound.
+That half of the matrix is measured by the QA runs that have a provider; this
+probe's run is the frame-rate half (A7) and the writer's syscall behaviour.
 
 Bounds asserted **by the probe itself**, so a regression fails CI rather than
 needing a human to read a number:
@@ -874,7 +891,11 @@ needing a human to read a number:
 - `frames_per_record >= 100` — the structural property;
 - `bytes_per_record <= 700` — the record has not grown an unbounded field;
 - `write_calls_per_minute <= 90` — the tick plus buffer fills plus durable
-  events; anything above ~90 means something is flushing per event;
+  events; anything above ~90 means something is flushing per event. A run shorter
+than a minute is judged instead by the same property in its structural form
+(`write_calls <= durable_events + one-per-second of run time`), because the rate
+over five seconds is dominated by the durable events a correct writer DOES write
+through — and the report names which form was applied;
 - `fsyncs <= durable_events + rotations` — nothing syncs per record.
 
 **3. The live rate check, on the real topology.** With a two-peer session
@@ -1115,20 +1136,35 @@ env -i HOME="$(mktemp -d)" LOCAL_OPERATOR_CONFIG_DIR="$(mktemp -d)/.local-operat
 
 with §4.8's four bounds asserted by the probe, plus:
 
+- `test_a_partial_final_line_is_dropped_not_fatal` — append a truncated line, then
+  require the reader to serve every earlier record. **SHIPPED**, in
+  ``tests/unit/network/test_audit_io.py``; the `--verify` half of this bullet is NOT,
+  because there is no `lop network log --verify` in this build (see the note below).
 - `test_only_the_relay_opens_the_audit_log_for_append` — an AST/`strace`-free
   check over `local_operator/network/**` that no module other than the relay
   calls `AuditWriter.append`, plus a runtime assertion that a second `AuditWriter`
-  on the same path refuses to construct.
-- `test_a_partial_final_line_is_dropped_not_fatal` — append a truncated line, then
-  require the reader to serve every earlier record and `--verify` to report the
-  tail as incomplete rather than as a chain break.
-- the tamper check:
+  on the same path refuses to construct. **NOT SHIPPED, AND THE FIRST CLAUSE IS NOT
+  TRUE OF THE SHIPPED DESIGN:** the CLI appends its own local acts (a panic raised
+  with no relay running writes `panic_raised` itself), so "only the relay opens it"
+  is not the property this build has. What IS true is what the writer enforces: one
+  `AuditLog` per process, every append through it, `O_APPEND` on the shared file, and
+  a per-process write lock. There is no cross-process writer test.
+- the tamper check below, which requires a `--verify` that does not exist in this
+  build (`lop network log` has no such flag) — **NOT SHIPPED**:
 
 ```sh
 runA LOP network log --verify --json      # ok, N records, no break
 # edit one byte mid-file
 runA LOP network log --verify --json      # not ok: (seq, expected, found)
 ```
+
+**THE CLASS THIS SECTION KEEPS GETTING WRONG, stated once so it is not repeated:**
+the names above were written as a SPEC (§6 opens by listing the tests that must
+exist), and a spec read later as a description of the tree is how §4.8 came to cite
+`tests/unit/network/test_audit_io.py` and `scripts/mesh_audit_probe.py` for a
+document nobody could run them against (perf-lane P-2). Both of those now exist and
+are exercised; the two bullets marked NOT SHIPPED above are real gaps, recorded as
+such here and on the PR rather than implied to be covered.
 
 ### 6.7 The prohibition, as an executable assertion
 

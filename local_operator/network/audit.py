@@ -131,6 +131,13 @@ EVENT_KINDS: frozenset[str] = frozenset(
         "pairing_confirmed",
         "panic_raised",
         "panic_received",
+        # THE FAN-OUT'S OWN RECORD (mesh-incident-response.md §1.5). Three names, and
+        # the third is the summary the operator's `lop network log` is read for:
+        # "which peers got it" is a question about the PEERS, and `broadcast_to` — a
+        # count of links written to — could not answer it (QA round 1, Q-R1-2).
+        "panic_delivered",
+        "panic_undelivered",
+        "panic_broadcast_result",
         "trust_changed",
         "reconcile_granted",
         "reconcile_refused",
@@ -234,7 +241,23 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "device_rotated": frozenset({"old_device", "new_device"}),
     "epoch_rotated": frozenset({"epoch_before", "epoch_after", "rotation_id", "removed"}),
     "epoch_conflict": frozenset({"epoch", "rotation_id", "winner"}),
-    "handshake_refused": frozenset({"cause", "their_epoch", "their_device", "mode"}),
+    "handshake_refused": frozenset(
+        {
+            "cause",
+            "their_epoch",
+            "their_device",
+            "mode",
+            # WHERE IT CAME FROM, AND WHY IT IS NOT NAMED (Q-R1-4). `their_device` is
+            # written only when the peer PROVED that id; `declared_device` is what it
+            # claimed, `expected_device` is who this device dialled, and
+            # `unidentified` is the reason the actor is unknown — because a bare
+            # `actor: unknown` beside an ephemeral socket port is unreadable.
+            "their_addr",
+            "declared_device",
+            "expected_device",
+            "unidentified",
+        }
+    ),
     "authorisation_refused": frozenset({"op", "capability", "phase", "link_epoch"}),
     "link_opened": frozenset({"role", "epoch", "phase"}),
     # A VIEWER'S PIPE, BOTH HALVES. `session_stream_opened` is emitted by whichever
@@ -250,7 +273,15 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "duplicate_identity": frozenset({"instance_id", "duplicate_count"}),
     "self_link": frozenset({"instance_id"}),
     "panic_raised": frozenset({"epoch_before", "epoch_after", "reachable_peers"}),
-    "panic_received": frozenset({"from_device", "epoch_before", "epoch_after", "reason"}),
+    "panic_received": frozenset(
+        {"from_device", "epoch_before", "epoch_after", "reason", "rotation"}
+    ),
+    # One row per peer, and the OUTCOME is the point: `acked` means the peer applied
+    # it, `unacked` means it still holds the old epoch, `refused` means it answered
+    # and said no. The `reason` is the peer's own sentence, never re-derived here.
+    "panic_delivered": frozenset({"outcome", "reason"}),
+    "panic_undelivered": frozenset({"outcome", "reason"}),
+    "panic_broadcast_result": frozenset({"sent", "acked", "unacked", "failed"}),
     "trust_changed": frozenset({"from", "to", "reason"}),
     "reconcile_granted": frozenset({"epoch_from", "epoch_to", "grants_used"}),
     "reconcile_refused": frozenset({"cause", "grants_used"}),
@@ -460,6 +491,15 @@ class AuditLog:
         self._buffered_bytes = 0
         self._seq = _last_sequence(self._path)
         self._last_flush = time.monotonic()
+        #: Two MEASURED counters, because §4.8's bounds are asserted against them
+        #: rather than estimated: ``write_calls`` counts the ``write(2)``s this writer
+        #: made (its whole point is that they are bounded by the 1 Hz tick plus the
+        #: buffer filling plus durable events, NOT by the frame rate), and ``syncs``
+        #: counts ``os.fsync`` calls, which happen for ``DURABLE_EVENTS`` and on
+        #: rotation and for nothing else. ``scripts/mesh_audit_probe.py`` reads both; a
+        #: bound with no instrument behind it is a claim nobody can check.
+        self.write_calls = 0
+        self.syncs = 0
         #: Set when a write fails. A failed AUDIT write must not stop the relay; it
         #: is reported by `lop network status` instead, so the operator learns the
         #: trail has a hole rather than discovering it during an incident.
@@ -504,7 +544,17 @@ class AuditLog:
             self._buffered_bytes += len(line)
             self.records_written += 1
             if event.event in self.DURABLE_EVENTS:
+                # A DURABLE EVENT IS WRITTEN THROUGH **AND FSYNCED** (§4.7): the
+                # record whose loss to a power cut is unrecoverable must be on the
+                # platter before the act it describes can be reported as done. The
+                # reasoning the design gives is the one this code had drifted from —
+                # it flushed (a ``write(2)`` into the page cache) and never synced, so
+                # "the latch is written and fsynced before the broadcast" was true of
+                # the buffer and false of the disk. Only these events pay it: a
+                # per-record fsync on ordinary traffic is exactly the disk I/O the
+                # operator asked to be bounded.
                 self.flush()
+                self.sync()
                 return
             elapsed = time.monotonic() - self._last_flush
             if self._buffered_bytes >= self.BUFFER_BYTES or elapsed >= self.TICK_S:
@@ -540,6 +590,7 @@ class AuditLog:
                     os.close(descriptor)
                 with self._path.open("a", encoding="utf-8") as handle:
                     handle.write(payload)
+                self.write_calls += 1
                 self._last_flush = time.monotonic()
                 # Checked AGAIN after the write: a single flush can carry many records
                 # (that is the point of batching), so checking only beforehand would
@@ -555,6 +606,30 @@ class AuditLog:
 
     def close(self) -> None:
         self.flush()
+
+    def sync(self) -> None:
+        """``fsync`` the live file — durable events and rotation, nothing else.
+
+        Called after :meth:`flush`, so the buffer is already on the descriptor; a
+        failure is reported the same way a failed write is (``degraded`` plus a line
+        on stderr) rather than raised, for the reason :meth:`record` gives: a log that
+        cannot be synced must not kill the relay that is trying to record an incident.
+        """
+        with self._write_lock:
+            try:
+                descriptor = os.open(self._path, os.O_WRONLY | os.O_APPEND)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                self.syncs += 1
+            except OSError as exc:
+                self.degraded = True
+                self.degraded_reason = str(exc)
+                print(
+                    f"warning: the network audit log could not be synced: {exc}",
+                    file=sys.stderr,
+                )
 
     def __enter__(self) -> AuditLog:
         return self
@@ -664,6 +739,11 @@ class AuditLog:
             self.degraded_reason = str(exc)
             return
         self._write_rotation_record(generation, size)
+        # THE ROTATION RECORD IS SYNCED TOO (§4.7): "fsync is called for DURABLE_EVENTS
+        # and on rotation". A rotation that only reached the page cache, after the
+        # generation it describes was moved and the live file replaced, is the one
+        # edit an attacker with root would most like to make disappear.
+        self.sync()
         self._prune_generations()
 
     def _next_generation(self) -> int:
