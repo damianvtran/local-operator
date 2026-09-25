@@ -16,13 +16,17 @@ across turns.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any, AsyncIterator
 
 import pytest
 
 from local_operator.evaluation.protocol import ActionBatch
 from local_operator.evaluation.runner.model import DecisionRejected
+from local_operator.evaluation.runner.provider_client import parse_decision
 from local_operator.evaluation.runner.public_reply import (
+    _LeadingObjectDecline,
+    _locate_leading_object,
     decode_public_reply,
     public_reply_contract,
     public_reply_schema,
@@ -65,12 +69,19 @@ class ChannelStream:
         text: str = "",
         chunk: int = 5,
         stop_reason: str = "toolUse",
+        calls: Sequence[tuple[str, str]] | None = None,
     ) -> None:
         self.arguments = arguments
         self.name = name
         self.text = text
         self.chunk = chunk
         self.stop_reason = stop_reason
+        # More than one call in one stream, as ``(name, arguments)`` pairs. A
+        # second call is how the ambiguity refusals are exercised (two batches in
+        # one reply), and it is deliberately a SEPARATE field rather than a
+        # `name` list: the single-call shape stays the one every other test in
+        # this file uses, unchanged.
+        self.calls = calls
         self.requests: list[Any] = []
 
     def __call__(self, request: Any, signal: Any) -> AsyncIterator[Any]:
@@ -80,11 +91,19 @@ class ChannelStream:
     async def _events(self) -> AsyncIterator[Any]:
         if self.text:
             yield StreamTextDelta(delta=self.text)
-        yield StreamToolCallDelta(index=0, id="call-1", name=self.name)
-        for start in range(0, len(self.arguments), self.chunk):
-            yield StreamToolCallDelta(
-                index=0, argument_delta=self.arguments[start : start + self.chunk]
-            )
+        if self.calls is None:
+            yield StreamToolCallDelta(index=0, id="call-1", name=self.name)
+            for start in range(0, len(self.arguments), self.chunk):
+                yield StreamToolCallDelta(
+                    index=0, argument_delta=self.arguments[start : start + self.chunk]
+                )
+        else:
+            for index, (name, arguments) in enumerate(self.calls):
+                yield StreamToolCallDelta(index=index, id=f"call-{index}", name=name)
+                for start in range(0, len(arguments), self.chunk):
+                    yield StreamToolCallDelta(
+                        index=index, argument_delta=arguments[start : start + self.chunk]
+                    )
         yield StreamEndEvent(stop_reason=self.stop_reason)
 
 
@@ -320,17 +339,334 @@ async def test_native_tool_syntax_in_prose_is_still_rejected() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_call_to_a_name_we_never_offered_is_not_read_as_a_reply() -> None:
-    """Only THE channel is a reply. Any other call is counted for the evidence
-    bundle and otherwise ignored, so the prose path still decides."""
+async def test_a_call_named_anything_is_the_reply_when_it_is_the_only_tool_offered() -> None:
+    """The sole offered name IS the reply channel, so a call under any other name
+    is still the model answering -- and 178 of the arm's 204 ``leading-delimiter``
+    refusal artifacts were exactly this (recounted 2026-09-25 over
+    ``~/worktrees/osworld/runs``; see ``harness/reply_channel``), refused with no
+    reply text published at all.
+
+    The widening rests on what the REQUEST advertised, which is why the reason
+    the empty prose was refused before is now the reason the call is read: the
+    request put one function on the wire and that function's parameters ARE the
+    decision envelope, so there is nothing else a call could be.
+    """
 
     current = observation()
-    stream = ChannelStream(finish_payload(current), name="terminal", text="")
+    body = envelope(finish_payload(current), "Visible status: ready")
+    stream = ChannelStream(body, name="submit_action_batch", text="")
+
+    decision = await _client(stream, model_spec=_spec(supports_tools=True)).decide(
+        current, _turns(current)
+    )
+
+    # The decoded decision IS the reply's own batch, read from the same bytes by
+    # the one canonical decoder -- not a reconstruction and not a second
+    # parser's opinion of them.
+    from tests.unit.evaluation.runner.test_provider_client import ROUTE
+
+    direct = parse_decision(body, current, route=ROUTE)
+    assert isinstance(decision.action_batch, ActionBatch)
+    assert decision.action_batch.to_canonical_json() == direct.action_batch.to_canonical_json()
+    assert decision.public_reply == body
+    decision.action_batch.validate_for(current)
+    # And the same bytes under the name we offered reach the same decision, so
+    # the name changes nothing about what is executed.
+    offered = await _client(ChannelStream(body), model_spec=_spec(supports_tools=True)).decide(
+        current, _turns(current)
+    )
+    assert decision.action_batch.to_canonical_json() == offered.action_batch.to_canonical_json()
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_named_call_is_not_a_reply_when_other_tools_were_offered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The widening is gated on the OFFER, not on a name blacklist.
+
+    A request that put a real capability on the wire is one where a call under a
+    name we did not choose may be that capability being invoked, so the strict
+    name test stays. This is the arm's own defect in reverse: the reason 178
+    refusals were misread is that nobody recorded what had been offered, so this
+    pins the reading to the offer rather than to a guess about intent.
+    """
+
+    from local_operator.evaluation.runner import provider_client as client_module
+    from local_operator.harness.types import AgentTool
+
+    current = observation()
+    body = envelope(finish_payload(current), "")
+
+    def with_a_second_tool(spec: Any, schema: Any, *, description: str) -> list[AgentTool]:
+        # A second tool built from the SAME builder, so the test cannot pass by
+        # handing the client a shape it would not accept from a real caller.
+        return [
+            *reply_channel_tools(spec, schema, description=description),
+            build_reply_channel_tool(schema, description=description, name="terminal"),
+        ]
+
+    monkeypatch.setattr(client_module, "reply_channel_tools", with_a_second_tool)
+    stream = ChannelStream(body, name="terminal", text="")
 
     with pytest.raises(DecisionRejected):
         await _client(stream, model_spec=_spec(supports_tools=True)).decide(
             current, _turns(current)
         )
+
+    assert [tool.name for tool in stream.requests[0].tools] == [
+        REPLY_CHANNEL_TOOL_NAME,
+        "terminal",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_older_name_test_still_holds_when_the_offer_is_not_passed() -> None:
+    """``envelope_from_tool_call`` without ``offered_names`` is byte-for-byte the
+    reader it was, so a caller that has not adopted the sole-offer rule cannot be
+    changed by it."""
+
+    call = ToolCall(name="submit_action_batch", raw_arguments='{"actions": []}')
+
+    assert envelope_from_tool_call([call], name=REPLY_CHANNEL_TOOL_NAME) is None
+    assert (
+        envelope_from_tool_call(
+            [call],
+            name=REPLY_CHANNEL_TOOL_NAME,
+            offered_names=[REPLY_CHANNEL_TOOL_NAME],
+        )
+        == '{"actions": []}'
+    )
+    assert (
+        envelope_from_tool_call(
+            [call],
+            name=REPLY_CHANNEL_TOOL_NAME,
+            offered_names=[REPLY_CHANNEL_TOOL_NAME, "terminal"],
+        )
+        is None
+    )
+
+
+# ---------------------------------------------------------------------------
+# The widening is bounded: every refusal the channel could already earn, it
+# still earns. Each case is its own test so a future widening has to break one
+# of them by name rather than slip through a shared assertion.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_two_foreign_named_calls_for_one_observation_still_refuse() -> None:
+    """Widening WHICH calls are the channel must not widen how many may execute.
+
+    Two calls carrying two complete batches are the ambiguity the prose decoder
+    refuses, and the channel may not resolve by order what prose refuses.
+    """
+
+    current = observation()
+    first = envelope(finish_payload(current), "first")
+    second = envelope(finish_payload(current), "second")
+    stream = ChannelStream("", calls=[("apply", first), ("apply", second)], text="")
+
+    with pytest.raises(DecisionRejected):
+        await _client(stream, model_spec=_spec(supports_tools=True)).decide(
+            current, _turns(current)
+        )
+
+
+@pytest.mark.asyncio
+async def test_duplicate_keys_in_a_foreign_named_call_still_refuse() -> None:
+    """The channel hands back RAW bytes precisely so this cannot be repaired."""
+
+    current = observation()
+    duplicated = (
+        '{"reply_version": "1.0", "reply_version": "1.0", "action_batch": '
+        + json.dumps(json.loads(finish_payload(current)))
+        + "}"
+    )
+
+    from tests.unit.evaluation.runner.test_provider_client import ScriptedStream
+
+    with pytest.raises(DecisionRejected) as on_channel:
+        await _client(
+            ChannelStream(duplicated, name="apply", text=""),
+            model_spec=_spec(supports_tools=True),
+        ).decide(current, _turns(current))
+    with pytest.raises(DecisionRejected) as in_prose:
+        await _client(ScriptedStream(duplicated), model_spec=_spec(supports_tools=True)).decide(
+            current, _turns(current)
+        )
+
+    # PARITY is the property, not any particular message: the raw bytes reach the
+    # decoder UNREPAIRED on both channels, so the same text fails identically
+    # whether it arrived as prose or as a call. A re-serialized object would have
+    # deduplicated these keys on the channel and this reply would have executed.
+    assert on_channel.value.class_key == in_prose.value.class_key == "incomplete-json"
+
+
+@pytest.mark.asyncio
+async def test_a_call_carrying_no_decision_still_refuses() -> None:
+    """A call to the channel whose arguments are not a decision is not one."""
+
+    current = observation()
+    stream = ChannelStream('{"action": "search"}', name="search", text="")
+
+    with pytest.raises(DecisionRejected):
+        await _client(stream, model_spec=_spec(supports_tools=True)).decide(
+            current, _turns(current)
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_named_call_that_fails_validation_still_refuses() -> None:
+    """A located-but-invalid batch keeps the class its own defect earns: the
+    channel moves where the bytes came from, never what counts as valid."""
+
+    current = observation()
+    # A field NO kind declares. #1554's tolerance drops a field that belongs to a
+    # sibling KIND -- the kind tag is explicit, so the action chosen is not in
+    # doubt -- and deliberately does not reach this: nothing states what the model
+    # meant by a name no kind has.
+    bad = json.dumps(
+        {
+            "actions": [
+                {
+                    "kind": "key",
+                    "observation_id": current.observation_id,
+                    "keys": ["enter"],
+                    "bogus": 1,
+                }
+            ]
+        }
+    )
+    stream = ChannelStream(bad, name="apply", text="")
+
+    with pytest.raises(DecisionRejected) as raised:
+        await _client(stream, model_spec=_spec(supports_tools=True)).decide(
+            current, _turns(current)
+        )
+
+    assert raised.value.class_key == "extra-action-key"
+
+
+@pytest.mark.asyncio
+async def test_no_call_and_no_text_still_refuses() -> None:
+    """The one shape that never reaches the decoder at all: a turn that said
+    nothing on either channel is refused before parsing, so no widening here can
+    turn silence into a decision."""
+
+    from tests.unit.evaluation.runner.test_provider_client import ScriptedStream
+
+    current = observation()
+    stream = ScriptedStream("", stop_reason="toolUse")
+
+    with pytest.raises(DecisionRejected) as raised:
+        await _client(stream, model_spec=_spec(supports_tools=True)).decide(
+            current, _turns(current)
+        )
+
+    assert raised.value.class_key == "empty-reply"
+
+
+# ---------------------------------------------------------------------------
+# The refusal names its channel and its call, so a sealed bundle is diagnosable
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_refused_call_records_which_channel_was_read_and_what_it_was_called() -> None:
+    """The one thing the sealed corpus could not answer, recorded from now on.
+
+    178 of the arm's 204 ``leading-delimiter`` refusal artifacts published no
+    reply text AND recorded no call name (recounted 2026-09-25 over
+    ``~/worktrees/osworld/runs``), so nothing in the bundle said the model had
+    answered on the tool channel at all -- every reader was sent down the
+    framing path, and the class could not be diagnosed without paying for the
+    run again. This pins that a refusal now states both.
+    """
+
+    from local_operator.evaluation.receipts import RedactionSet
+    from local_operator.evaluation.runner.episode import _rejection_detail
+
+    current = observation()
+    # A real sealed reply: the model called with another tool's parameters.
+    stream = ChannelStream('{"action": "search"}', name="search", text="")
+
+    with pytest.raises(DecisionRejected) as info:
+        await _client(stream, model_spec=_spec(supports_tools=True)).decide(
+            current, _turns(current)
+        )
+
+    rejected = info.value
+    # The count was a 0 default on this path, so a bundle read as "the model
+    # called nothing" on the very refusals where it called something.
+    assert rejected.tool_call_count == 1
+    assert rejected.channel_read is True
+
+    artifact = _rejection_detail(rejected, RedactionSet.from_resolved_values([]))
+    assert "channel=read(prose=0)" in artifact
+    # Quoted, so a name carrying the separator (``apply,apply``) cannot read as
+    # two calls -- see ``_bounded_call_names``.
+    assert 'tool_calls=["search"]' in artifact
+    assert "class: leading-delimiter" in artifact
+    # The call's own arguments are what was judged, and they are in the artifact:
+    # the diagnostic alone could never say that.
+    assert '{"action": "search"}' in artifact
+
+
+@pytest.mark.asyncio
+async def test_a_call_name_cannot_forge_an_artifact_header_or_grow_it() -> None:
+    """The name is model-authored text on a line a script parses field by field.
+
+    The artifact's reader relies on a fixed section order, so a name carrying a
+    newline must not be able to open a line that reads like another header — the
+    same reason ``stop`` is escaped, one field over.
+    """
+
+    from local_operator.evaluation.receipts import RedactionSet
+    from local_operator.evaluation.runner.episode import (
+        _header_value,
+        _rejection_detail,
+    )
+    from local_operator.evaluation.runner.model import StreamShape
+    from local_operator.evaluation.runner.provider_client import _bounded_call_names
+
+    class _Call:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    current = observation()
+    stream = ChannelStream('{"action": "search"}', name="x\nclass: second-batch", text="")
+    with pytest.raises(DecisionRejected) as info:
+        await _client(stream, model_spec=_spec(supports_tools=True)).decide(
+            current, _turns(current)
+        )
+
+    artifact = _rejection_detail(info.value, RedactionSet.from_resolved_values([]))
+    stream_lines = [line for line in artifact.splitlines() if line.startswith("stream: ")]
+    # One line: the forged newline opened nothing, and the name is not lost either
+    # -- the field carries it through the same escape every other model-authored
+    # value takes, so the assertion is against the rendered field rather than a
+    # fragment of it.
+    assert len(stream_lines) == 1
+    rendered = _header_value(_bounded_call_names([_Call("x\nclass: second-batch")]))
+    assert f"tool_calls=[{rendered}]" in stream_lines[0]
+    assert sum(1 for line in artifact.splitlines() if line.startswith("class: ")) == 1
+
+    # Quoting is what makes the field readable as NAMES: one name carrying the
+    # separator renders as ONE token, and two names render as two.
+    assert _bounded_call_names([_Call("apply,apply")]) == '"apply,apply"'
+    assert _bounded_call_names([_Call("a"), _Call("b")]) == '"a","b"'
+
+    # Bounded: a model that names its call a kilobyte of prose cannot grow the
+    # record, and an empty stream stays a reading rather than an absence. The
+    # bound is on the raw NAME (64 characters) and the quoting around it is not
+    # part of it -- the long-name case is asserted as the quoted whole so the two
+    # are not confused.
+    many = _bounded_call_names([_Call(f"call-{n}") for n in range(20)])
+    assert len(many.split(",")) <= 10
+    assert "+12 more" in many
+    assert _bounded_call_names([_Call("n" * 5000)]) == '"' + "n" * 64 + '"'
+    assert _bounded_call_names([]) == ""
+    assert StreamShape().tool_call_names == ""
 
 
 # ---------------------------------------------------------------------------
@@ -462,6 +798,311 @@ async def test_an_empty_channel_call_leaves_a_valid_prose_reply_standing() -> No
 
     assert isinstance(decision.action_batch, ActionBatch)
     decision.action_batch.validate_for(current)
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_named_call_does_not_override_a_prose_decision() -> None:
+    """A turn that answered on BOTH channels is judged on the prose it wrote.
+
+    This is the widening's bound rather than a preference: reading the call as
+    the channel DISCARDS a complete decision the model wrote and refuses the
+    turn on the call's bytes instead -- measured on this branch, a foreign-named
+    call carrying ``{"query": "weather"}`` turned an ACCEPTED reply into a
+    ``batch-shape`` refusal. The widening is a recovery of a decision that would
+    otherwise be lost, so it applies only where there was none to lose.
+    """
+
+    current = observation()
+    body = envelope(finish_payload(current), "Visible status: ready")
+    stream = ChannelStream('{"query": "weather"}', name="web_search", text=body)
+
+    decision = await _client(stream, model_spec=_spec(supports_tools=True)).decide(
+        current, _turns(current)
+    )
+
+    # The PROSE is what was judged: neither the call's bytes nor a repair of them
+    # may reach the decision.
+    assert decision.public_reply == body
+    decision.action_batch.validate_for(current)
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_named_call_is_still_read_when_the_prose_states_no_decision() -> None:
+    """The gate is "the prose stated a decision", not "the prose was empty".
+
+    A chatty prose reply carries no decision to lose, so the measured class
+    stays fixed: 178 of the arm's 204 ``leading-delimiter`` refusal artifacts
+    published no reply text at all (recounted 2026-09-25 over
+    ``~/worktrees/osworld/runs``), but the question the gate asks is whether a
+    decision would be LOST, and prose that states none loses none.
+    """
+
+    current = observation()
+    body = envelope(finish_payload(current), "Visible status: ready")
+    stream = ChannelStream(body, name="web_search", text="Let me look at the screen first.")
+
+    decision = await _client(stream, model_spec=_spec(supports_tools=True)).decide(
+        current, _turns(current)
+    )
+
+    assert decision.public_reply == body
+    decision.action_batch.validate_for(current)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_prose_decision_withholds_the_widening() -> None:
+    """A prose decision the decoder REFUSES still owns the turn.
+
+    The gate asks whether a decision is THERE, not whether it is usable:
+    deciding this on the call's valid envelope would swap the model's answer for
+    one the harness has no reason to prefer, and would erase the refusal the
+    model needs to see.
+
+    This payload is the DUPLICATE-KEY sub-class; the truncation sub-class of the
+    same refusal is pinned by
+    :func:`test_a_truncated_prose_decision_withholds_the_widening`, because the
+    decoder's shared sentence cannot tell the two apart and the first revision
+    of this gate put the second one on the widening side.
+    """
+
+    current = observation()
+    body = envelope(finish_payload(current), "Visible status: ready")
+    duplicated = (
+        '{"reply_version": "1.0", "reply_version": "1.0", "action_batch": '
+        + json.dumps(json.loads(finish_payload(current)))
+        + "}"
+    )
+    stream = ChannelStream(body, name="web_search", text=duplicated)
+
+    with pytest.raises(DecisionRejected) as raised:
+        await _client(stream, model_spec=_spec(supports_tools=True)).decide(
+            current, _turns(current)
+        )
+
+    assert raised.value.class_key == "incomplete-json"
+    assert raised.value.channel_read is False
+
+
+@pytest.mark.asyncio
+async def test_a_truncated_prose_decision_withholds_the_widening() -> None:
+    """A prose decision CUT OFF mid-object still owns the turn.
+
+    The other sub-class of the refusal above, and the one the first revision of
+    the gate got wrong: the decoder composes ONE sentence for both parse-failure
+    classes -- a reply that never started a value, and a reply that started one
+    and then broke -- so only its typed marker can tell them apart. A truncated
+    decision is a decision the model was WRITING, so the conservative direction
+    is the pre-widening one: refuse on the prose and re-prompt, rather than
+    execute the call's envelope and never tell the model its object was cut off
+    (26 prose-bearing refusal artifacts in the arm's corpus at 2026-09-25 are
+    this shape, 16 of them beside a call, so the widening fired on them).
+    """
+
+    current = observation()
+    body = envelope(finish_payload(current), "Visible status: ready")
+    # The object's own closing brace is gone, so the decoder reads a value that
+    # STARTED and then broke -- the parser reports a position past offset 0.
+    truncated = body[:-1]
+    stream = ChannelStream(body, name="web_search", text=truncated)
+
+    with pytest.raises(DecisionRejected) as raised:
+        await _client(stream, model_spec=_spec(supports_tools=True)).decide(
+            current, _turns(current)
+        )
+
+    # The class and the channel of the PRE-widening client: refused on the prose,
+    # not judged on the call's bytes.
+    assert raised.value.class_key == "incomplete-json"
+    assert raised.value.channel_read is False
+
+
+def test_the_leading_tolerance_names_the_reason_it_declined() -> None:
+    """A bare ``None`` cannot say WHY, which is how three rounds went wrong.
+
+    The reply-channel gate asks this helper ONE question -- does the payload
+    state no decision? -- and the helper declines for four different reasons,
+    only the first of which answers yes. Reconstructing that answer from the
+    parser's offset is what put a truncation, a non-decision example and a
+    discarded complete decision each on the widening side, one framing boundary
+    at a time, so the classification is pinned here on the reason itself: a new
+    reason must default to the conservative side, not to whichever side the
+    caller's test for ``None`` happened to land on.
+    """
+
+    decoder = json.JSONDecoder()
+    located = _locate_leading_object('{"actions": [], "public_observations": ""}', decoder)
+    assert not isinstance(located, _LeadingObjectDecline)
+
+    declines = {
+        _LeadingObjectDecline.NOTHING_TO_READ: "no decision here at all",
+        _LeadingObjectDecline.BEGINS_NOTHING: 'Sure: {"actions": [',
+        _LeadingObjectDecline.NOT_DECISION_SHAPED: 'Sure: {"example": true}',
+        _LeadingObjectDecline.DOES_NOT_END_AT_IT: (
+            'Sure: {"actions": [], "public_observations": ""} Hope that helps!'
+        ),
+    }
+    for expected, payload in declines.items():
+        assert _locate_leading_object(payload, decoder) is expected
+
+    assert {reason for reason in _LeadingObjectDecline if reason.states_no_decision} == {
+        _LeadingObjectDecline.NOTHING_TO_READ
+    }
+
+
+@pytest.mark.parametrize(
+    ("prefix", "suffix"),
+    [
+        ("Sure, here is my decision: ", ""),
+        ("```json\n", ""),
+        ('input" string="true">', ""),
+    ],
+    ids=["preamble", "fence", "native-call-syntax"],
+)
+@pytest.mark.asyncio
+async def test_a_framed_truncated_prose_decision_withholds_the_widening(
+    prefix: str, suffix: str
+) -> None:
+    """Framing is not a decision, so it cannot turn a truncated one into silence.
+
+    Round 2's class arriving in the framing it actually arrives in: a preamble,
+    a code fence or native call syntax in front of an object that started and
+    was cut off. The gate reads the DECISION, never the offset the parser
+    reports, because the offset is a property of the framing -- the offset-keyed
+    marker read these as decisionless and executed the call's envelope where
+    base refused and re-prompted. The native-call form is live in the corpus
+    (``cohort8-20260925-002620``, 1044 chars, ends mid-object), and the framed
+    shape is the majority among the prose-bearing ``leading-delimiter`` replies.
+    """
+
+    current = observation()
+    body = envelope(finish_payload(current), "Visible status: ready")
+    # The object's own closing brace is gone, so the prose holds a value that
+    # STARTED and then broke -- behind framing that hides it from offset 0.
+    text = prefix + body[:-1] + suffix
+    stream = ChannelStream(body, name="web_search", text=text)
+
+    with pytest.raises(DecisionRejected) as raised:
+        await _client(stream, model_spec=_spec(supports_tools=True)).decide(
+            current, _turns(current)
+        )
+
+    assert raised.value.class_key == "leading-delimiter"
+    assert raised.value.channel_read is False
+
+
+@pytest.mark.parametrize(
+    ("prefix", "suffix"),
+    [
+        ("Sure, here is my decision: ", "\nLet me know if you need anything else."),
+        ("```json\n", "\n```\nLet me know if you need anything else."),
+        ('input" string="true">', "\nHope that helps!"),
+    ],
+    ids=["preamble", "fence", "native-call-syntax"],
+)
+@pytest.mark.asyncio
+async def test_a_framed_complete_decision_with_trailing_text_withholds_the_widening(
+    prefix: str, suffix: str
+) -> None:
+    """A decision the model wrote and then talked past is still its decision.
+
+    The located path reads a decision behind framing only when the reply ENDS at
+    it -- a bare fence marker is the one exception -- because everything after is
+    the context a quoted decision arrives with. So this decline is a COMPLETE
+    decision declining on framing, and under the offset-keyed marker it was
+    indistinguishable from "no ``{`` at all": the call's envelope was executed
+    in place of a decision the model had already stated in full, which is
+    exactly what the widening's own bound forbids.
+    """
+
+    current = observation()
+    body = envelope(finish_payload(current), "Visible status: ready")
+    stream = ChannelStream(body, name="web_search", text=prefix + body + suffix)
+
+    with pytest.raises(DecisionRejected) as raised:
+        await _client(stream, model_spec=_spec(supports_tools=True)).decide(
+            current, _turns(current)
+        )
+
+    assert raised.value.class_key == "leading-delimiter"
+    assert raised.value.channel_read is False
+
+
+@pytest.mark.asyncio
+async def test_prose_that_is_json_but_not_a_decision_still_withholds_the_widening() -> None:
+    """The gate is about a decision being THERE, not about what it decodes to.
+
+    A prose reply that opens a JSON value the decoder reads and refuses (a
+    non-object, here) is a decision the model wrote; widening over it would
+    replace a refusal the model needs to see with an acceptance it never asked
+    for. This is the boundary of ``_states_a_decision``: only "nothing could be
+    read at all" counts as decisionless.
+    """
+
+    current = observation()
+    body = envelope(finish_payload(current), "Visible status: ready")
+    stream = ChannelStream(body, name="web_search", text="[1, 2, 3]")
+
+    with pytest.raises(DecisionRejected) as raised:
+        await _client(stream, model_spec=_spec(supports_tools=True)).decide(
+            current, _turns(current)
+        )
+
+    assert raised.value.class_key == "batch-shape"
+    assert raised.value.channel_read is False
+
+
+@pytest.mark.asyncio
+async def test_a_read_channel_publishes_how_much_prose_it_set_aside() -> None:
+    """The refusal artifact carries the prose count, so the collateral is countable.
+
+    A sealed refusal showed ``channel=read`` and nothing about what the channel
+    decision was made OVER, so how often prose and a call co-occur was
+    unmeasurable from a bundle. The count rides on the READ branch only: on the
+    prose branch the reply section already IS that prose.
+    """
+
+    from local_operator.evaluation.receipts import RedactionSet
+    from local_operator.evaluation.runner.episode import _rejection_detail
+
+    current = observation()
+    prose = "Let me look at the screen first."
+    stream = ChannelStream('{"query": "weather"}', name="web_search", text=prose)
+
+    with pytest.raises(DecisionRejected) as raised:
+        await _client(stream, model_spec=_spec(supports_tools=True)).decide(
+            current, _turns(current)
+        )
+
+    artifact = _rejection_detail(raised.value, RedactionSet.from_resolved_values([]))
+    assert raised.value.channel_read is True
+    assert f"channel=read(prose={len(prose)})" in artifact
+
+
+def test_an_unrecorded_prose_count_is_not_rendered_as_silence() -> None:
+    """A refusal that recorded no count must not claim ``prose=0``.
+
+    ``prose=0`` is a READING of a genuinely silent turn -- the class the widening
+    exists for -- so rendering it for a ``DecisionRejected`` built without the
+    field (a test double, or a future second model client) would make an
+    unrecorded refusal indistinguishable from that class in a sealed bundle. The
+    shipped client always passes the count, so a real refusal is unchanged.
+    """
+
+    from local_operator.evaluation.receipts import RedactionSet
+    from local_operator.evaluation.runner.episode import _rejection_detail
+    from local_operator.evaluation.runner.model import StreamShape
+
+    artifact = _rejection_detail(
+        DecisionRejected(
+            "boom",
+            channel_read=True,
+            stream_shape=StreamShape(tool_call_names='["search"]'),
+        ),
+        RedactionSet.from_resolved_values([]),
+    )
+
+    assert "channel=read" in artifact
+    assert "prose=" not in artifact
 
 
 def test_the_offered_schema_avoids_constructs_providers_reject() -> None:

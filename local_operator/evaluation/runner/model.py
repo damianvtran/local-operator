@@ -186,6 +186,25 @@ class StreamShape(ProtocolModel):
     content_deltas: SafeCount = 0
     reasoning_deltas: SafeCount = 0
     tool_call_deltas: SafeCount = 0
+    #: The NAMES of the tool calls this attempt's stream carried, JSON-quoted in
+    #: stream order and bounded by the builder. Empty when the stream carried
+    #: none, which is a real reading and not an absence: a reply with
+    #: ``content_deltas=0`` and this empty said nothing on either channel.
+    #:
+    #: It exists because the name was the ONE thing a refusal could not be
+    #: diagnosed from. 178 of the arm's 204 ``leading-delimiter`` refusal
+    #: artifacts were a decision that arrived as a tool call the harness did not
+    #: read, recounted 2026-09-25 over ``~/worktrees/osworld/runs`` (see
+    #: ``harness/reply_channel.envelope_from_tool_call``); the bundle kept the
+    #: delta count and nothing else, so whether the model invented a name, called
+    #: a real tool of its own, or reused the offered one with different casing was
+    #: unknowable after the fact — and unanswerable without paying for the run
+    #: again. The count says a call happened; this says what it was called.
+    #:
+    #: Model-controlled text, so it is escaped by the renderer exactly as ``stop``
+    #: is: a name carrying a newline would otherwise open a line that reads like
+    #: another artifact header.
+    tool_call_names: str = ""
     #: The provider's raw terminal marker, recorded VERBATIM and deliberately a
     #: plain ``str`` rather than a ``StrictIdentifier``. The vocabulary here
     #: belongs to the provider: a marker our identifier pattern would reject
@@ -239,6 +258,8 @@ class DecisionRejected(Exception):
         class_key: str | None = None,
         evidence_reply: str | None = None,
         stream_shape: StreamShape | None = None,
+        channel_read: bool = False,
+        channel_prose_chars: int | None = None,
         stripped_reply_markers: int = 0,
         reasoning_effort: str | None = None,
         empty_length_truncation: bool = False,
@@ -280,6 +301,37 @@ class DecisionRejected(Exception):
         # reply can be told apart from a discarded one.
         self.class_key = class_key
         self.stream_shape = stream_shape
+        # WHICH channel this refusal was judged on, carried as a fact rather than
+        # left for a reader to infer. The class key alone cannot say it: a
+        # ``leading-delimiter`` refusal is the bytes not starting with ``{``, and
+        # whether those bytes came from the model's prose or from the arguments
+        # of a call it made is the difference between a model that framed its
+        # reply badly and a harness that read the wrong channel -- the exact
+        # misdiagnosis that let 178 of the arm's 204 refusals sit undiagnosed
+        # (see ``harness/reply_channel.envelope_from_tool_call``; recounted
+        # 2026-09-25 over ``~/worktrees/osworld/runs``). ``True`` means
+        # the tool-call channel was read and its bytes are what was judged;
+        # ``False`` means the prose was judged (or there was none).
+        #
+        # A harness fact beside the shape, not a property of the provider's
+        # stream, which is the same reason ``stripped_reply_markers`` rides
+        # here: reading a channel is something the harness did to the reply.
+        self.channel_read = channel_read
+        # How much prose the judged-vs-published question had to choose over, in
+        # CHARACTERS of the text the decoder would have been handed. Together with
+        # ``channel_read`` this is what makes the widening's collateral
+        # countable from a sealed bundle: ``channel=read(prose=0)`` is the silent
+        # reply the widening exists for, ``channel=read(prose=26)`` is a turn that
+        # also wrote prose the channel reader set aside -- a combination no
+        # artifact could show before, because a ``content_deltas`` count is
+        # events rather than the bytes judged.
+        #
+        # ``None`` means the client did not RECORD the count, and the renderer
+        # omits the clause rather than printing ``prose=0``: zero is a READING
+        # of a genuinely silent turn, which is the class the widening exists
+        # for, so guessing it would make an unrecorded refusal indistinguishable
+        # from that class in a sealed bundle.
+        self.channel_prose_chars = channel_prose_chars
         # The reply-assembly tally, for the same reason the class key is here:
         # a refusal whose reply LOST a provider boundary token explains itself
         # differently from one that arrived already broken, and only the count
