@@ -186,14 +186,15 @@ class StreamShape(ProtocolModel):
     content_deltas: SafeCount = 0
     reasoning_deltas: SafeCount = 0
     tool_call_deltas: SafeCount = 0
-    #: The NAMES of the tool calls this attempt's stream carried, comma-joined in
+    #: The NAMES of the tool calls this attempt's stream carried, JSON-quoted in
     #: stream order and bounded by the builder. Empty when the stream carried
     #: none, which is a real reading and not an absence: a reply with
     #: ``content_deltas=0`` and this empty said nothing on either channel.
     #:
     #: It exists because the name was the ONE thing a refusal could not be
-    #: diagnosed from. 174 of the arm's 199 ``leading-delimiter`` refusals were a
-    #: decision that arrived as a tool call the harness did not read (see
+    #: diagnosed from. 178 of the arm's 204 ``leading-delimiter`` refusal
+    #: artifacts were a decision that arrived as a tool call the harness did not
+    #: read, recounted 2026-09-25 over ``~/worktrees/osworld/runs`` (see
     #: ``harness/reply_channel.envelope_from_tool_call``); the bundle kept the
     #: delta count and nothing else, so whether the model invented a name, called
     #: a real tool of its own, or reused the offered one with different casing was
@@ -258,6 +259,7 @@ class DecisionRejected(Exception):
         evidence_reply: str | None = None,
         stream_shape: StreamShape | None = None,
         channel_read: bool = False,
+        channel_prose_chars: int = 0,
         stripped_reply_markers: int = 0,
         reasoning_effort: str | None = None,
         empty_length_truncation: bool = False,
@@ -305,8 +307,9 @@ class DecisionRejected(Exception):
         # whether those bytes came from the model's prose or from the arguments
         # of a call it made is the difference between a model that framed its
         # reply badly and a harness that read the wrong channel -- the exact
-        # misdiagnosis that let 174 of the arm's 199 refusals sit undiagnosed
-        # (see ``harness/reply_channel.envelope_from_tool_call``). ``True`` means
+        # misdiagnosis that let 178 of the arm's 204 refusals sit undiagnosed
+        # (see ``harness/reply_channel.envelope_from_tool_call``; recounted
+        # 2026-09-25 over ``~/worktrees/osworld/runs``). ``True`` means
         # the tool-call channel was read and its bytes are what was judged;
         # ``False`` means the prose was judged (or there was none).
         #
@@ -314,6 +317,15 @@ class DecisionRejected(Exception):
         # stream, which is the same reason ``stripped_reply_markers`` rides
         # here: reading a channel is something the harness did to the reply.
         self.channel_read = channel_read
+        # How much prose the judged-vs-published question had to choose over, in
+        # CHARACTERS of the text the decoder would have been handed. Together with
+        # ``channel_read`` this is what makes the widening's collateral
+        # countable from a sealed bundle: ``channel=read(prose=0)`` is the silent
+        # reply the widening exists for, ``channel=read(prose=26)`` is a turn that
+        # also wrote prose the channel reader set aside -- a combination no
+        # artifact could show before, because a ``content_deltas`` count is
+        # events rather than the bytes judged.
+        self.channel_prose_chars = channel_prose_chars
         # The reply-assembly tally, for the same reason the class key is here:
         # a refusal whose reply LOST a provider boundary token explains itself
         # differently from one that arrived already broken, and only the count
