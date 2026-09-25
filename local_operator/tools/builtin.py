@@ -1046,6 +1046,31 @@ def normalise_path_argument(raw: str) -> str:
     return raw.strip()
 
 
+def _record_resolved_path(
+    context: ToolContext | None, tool_call_id: str, path: Path, resolvable: bool
+) -> None:
+    """Report the path a READER resolved, at the instant it resolved it.
+
+    The credential guard exempts a reading call whose ``path`` resolves to one of
+    the guard's own files, and the ONE place that resolution legitimately exists
+    is here -- inside the reader that is about to open the file. Every other place
+    it has been computed (at the redaction, then at dispatch) was a second MOMENT
+    as well as a second input: a symlink moved between that moment and this one
+    handed the redaction an exemption for bytes taken from a file the exemption
+    does not cover. Rounds 3-5 of PR #1502 are that sentence, three times, each
+    time with a smaller window; this seam is what removes the window rather than
+    narrowing it.
+
+    Absent hook -- a unit call, a host that builds its own ``ToolContext`` -- is a
+    no-op, and the guard then falls back to resolving, which ESCALATES. Nothing
+    here decides anything: the membership test lives with the exemption, in
+    ``harness/guard_area.py``, reached through the loop's recorder.
+    """
+    record = getattr(context, "record_resolved_path", None) if context is not None else None
+    if record is not None:
+        record(tool_call_id, str(path), resolvable)
+
+
 def _resolve_workspace_path(raw: str, cwd: str) -> tuple[Path, bool, bool]:
     """Resolve a tool-supplied path to an absolute ``Path``.
 
@@ -5967,6 +5992,10 @@ async def execute_read(
 
     cwd = _safe_cwd(context)
     path, inside, resolvable = _resolve_workspace_path(target, cwd)
+    # The reader's OWN resolution, published where it happened: this is the only
+    # answer the guard-area exemption may consume (see
+    # ``_record_resolved_path``). Before ``_read_path``, which opens ``path``.
+    _record_resolved_path(context, tool_call_id, path, resolvable)
     return await _read_path(
         tool_call_id, params, context, path=path, inside=inside, resolvable=resolvable
     )
@@ -10590,6 +10619,10 @@ async def execute_grep(
     # place: an agent-authored file, rotation demand suppressed. Measured, PR
     # #1502 review round 2 (R2-1).
     target, inside, resolvable = _resolve_workspace_path(normalise_path_argument(params.path), cwd)
+    # The reader's own resolution, published where it happened -- the same seam
+    # ``execute_read`` uses, so the guard-area verdict is the reader's at both
+    # readers and never a second resolution at a second moment.
+    _record_resolved_path(context, tool_call_id, target, resolvable)
     if not target.exists():
         # Deliberately NOT a model fault: a well-formed path that does not
         # exist is unsatisfiable, not malformed, and the file may have vanished

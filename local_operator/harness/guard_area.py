@@ -167,6 +167,28 @@ def reads_exempt_source(
     return resolvable and resolved in EXEMPT_SOURCES
 
 
+def resolves_to_exempt_source(resolved: str | Path, resolvable: bool) -> bool:
+    """Is THIS already-resolved path one of the guard's own files?
+
+    The READER's answer, for the caller that has just resolved the argument and is
+    about to open it: no re-resolution, no second moment, no argument string. That
+    is the whole point of the seam -- a resolver called anywhere else answers about
+    a filesystem the reader may not have seen (a symlink moved between the two
+    moments decided the verdict for bytes the reader had already taken, PR #1502
+    rounds 3-5), and the only place the reader's own resolution exists is here.
+
+    ``resolvable=False`` -- the reader's own verdict on an argument it could not
+    resolve at all -- answers False for the same reason
+    :func:`reads_exempt_source` does: an unresolvable path is not an exempt one.
+    """
+    if not resolvable:
+        return False
+    try:
+        return Path(resolved) in EXEMPT_SOURCES
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
 #: Whether the call whose bytes are being redacted is itself a read of the guard's
 #: own area. A ContextVar for the same reason the tool-source carrier is one: it
 #: is PER TASK, so two calls in flight cannot confer each other's exemption, and
