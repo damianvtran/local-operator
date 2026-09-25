@@ -18,6 +18,7 @@ covers the boot).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from collections import deque
 from pathlib import Path
@@ -1384,3 +1385,67 @@ async def test_an_abandoned_drain_gives_deliveries_back(tmp_path: Path) -> None:
 
     assert len(stream.requests) == 1, "exactly one batched turn, as before the latch"
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_run_whose_start_row_landed_is_the_turn_the_disposal_cuts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DURABLE means COUNTABLE (R2): the liveness predicate has no hole the width
+    of the start-row write.
+
+    Measured on the incident: the run's durable ``attention_started`` row landed
+    at 22:22:28.604 and the run was aborted at 28.867, yet in between the exit's
+    own note sampled ``disposal_cuts_a_turn()`` FALSE — ``_disposal_turn`` requires
+    an armed ``_signal``, and ``_signal`` is armed inside ``_run_turn`` AFTER the
+    durable append. Two consequences, and the cell pins both: the exit does not
+    even try to abort a run it is about to destroy, and the cut it does make is
+    attributed to the generic ``disposed`` rather than to the rung that committed
+    to leaving — the lost attribution that made this investigation cost a day.
+
+    The window is constructed exactly: the run is parked INSIDE the start row's
+    write, so the row is on disk and nothing has armed a signal yet. With R2 the
+    same park is a run the disposal counts and can name.
+    """
+    handle, session, stream = _delivery_host(tmp_path)
+    assert handle.begin_retire("runtime-retired", " (a → b)") is True
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    real_append = session._transcript.append_custom
+
+    async def parked_append(custom_type: str, details: dict[str, Any], **kwargs: Any) -> Any:
+        entry = await real_append(custom_type, details, **kwargs)
+        if custom_type == "attention_started":
+            # THE WINDOW: the run's start row is durable and the run has not armed
+            # its signal. A disposal landing here is what the incident's ordering
+            # did.
+            entered.set()
+            await release.wait()
+        return entry
+
+    monkeypatch.setattr(session._transcript, "append_custom", parked_append)
+    # Bypasses the handle's admission gate deliberately: the incident's delivery
+    # turn opened through the session's own path while the runtime had latched, and
+    # that is the only way to construct this state at all.
+    task = asyncio.ensure_future(session.prompt("a turn whose start row lands first"))
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        assert not session.is_streaming, "precondition: the run has not reached the provider"
+        assert _run_rows(session), "precondition: the run's start row is durable"
+        # THE DECISION THIS CELL EXISTS TO MAKE. Before R2 both terms read empty
+        # here — the task was not yet set and no signal was armed — so an exit
+        # sampling now wrote NOTHING and left the cut to be attributed by the
+        # session's own later sample as the generic ``disposed``.
+        assert (
+            session.disposal_cuts_a_turn() is True
+        ), "a run whose start row is durable must be the turn this disposal cuts"
+        # ...and the exit's note therefore names the rung it committed to, rather
+        # than leaving the session's own later sample to write the generic
+        # ``disposed`` (the token the incident's card carried).
+        handle._note_retirement_cut_off()
+        assert session._cut_off_cause == "runtime-retired", session._cut_off_cause
+    finally:
+        release.set()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(task, timeout=10)
+        await session.dispose()
