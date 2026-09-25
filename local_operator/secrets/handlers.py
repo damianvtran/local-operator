@@ -344,23 +344,45 @@ def _reveal(args: argparse.Namespace) -> int:
     record the reveal, then print. A failure in either store step prints nothing
     at all — an unaudited reveal is worse than a refused one.
     """
-    if not (sys.stdin and sys.stdin.isatty() and sys.stdout.isatty()):
-        return _refuse_reveal(
-            args.name,
-            outcome="refused",
-            reason="stdin and stdout are not both a terminal, so there is nobody to ask",
-        )
+    # WHICH half failed is the actionable part of the refusal, and the three
+    # cases invite three different fixes. One reason for all three also said
+    # something false about one of them: "there is nobody to ask" is not true
+    # when stdin IS a terminal — there the prompt would be answered and the
+    # value would go into a pipe instead of being read, which is a different
+    # hazard and reads differently.
+    stdin_tty = bool(sys.stdin and sys.stdin.isatty())
+    stdout_tty = bool(sys.stdout and sys.stdout.isatty())
+    if not (stdin_tty and stdout_tty):
+        if not stdin_tty and not stdout_tty:
+            reason = "stdin and stdout are not terminals, so there is nobody to ask"
+        elif not stdin_tty:
+            reason = "stdin is not a terminal, so there is nobody to ask"
+        else:
+            reason = (
+                "stdout is not a terminal, so anything printed could be captured instead of read"
+            )
+        return _refuse_reveal(args.name, outcome="refused", reason=reason)
 
     _err(f"Reveal {args.name} to this terminal, in plain text? [y/N] ")
+    no_answer = False
     try:
         answer = input()
     except EOFError:
         # A terminal that went away is not consent. `_remove` reads its prompt
         # unguarded; here the failure would be a traceback on the one path whose
         # subject is a value, so it fails closed instead.
+        #
+        # EOF (Ctrl-D, or stdin closed) is the one case this code tells apart
+        # from a declined prompt, and the flag is what tells them apart: before
+        # it, both fell through on the same `answer = ""` and said "cancelled".
+        # The distinction is copy only — both refuse, and both still record
+        # `cancelled`, which is `store.py`'s word for a human declining and what
+        # every reader of the trail branches on — but nobody ANSWERED here, and
+        # "cancelled" reports a decision no one made.
         answer = ""
+        no_answer = True
     if answer.strip().lower() not in ("y", "yes"):
-        _err("cancelled")
+        _err("no answer, so nothing was revealed" if no_answer else "cancelled")
         _note_reveal_refusal(args.name, outcome="cancelled")
         # REVEAL_REFUSED, not `_remove`'s 1: this file reserves 1 for "the audit
         # chain is broken", and a script branching on the documented taxonomy
@@ -381,7 +403,7 @@ def _refuse_reveal(name: str, *, outcome: str, reason: str) -> int:
     is consumed by ``$( )`` in exactly the same way a successful one is, and a
     diagnostic on stdout would be handed to the consumer as the credential.
     """
-    _err(f"lop secret get --reveal: refusing to reveal {name} — {reason}.")
+    _err(f"lop secret get --reveal: refusing to reveal {name}: {reason}.")
     _err("  To USE it without printing it:")
     _err(f"      lop secret run --secret {name} -- <command…>")
     _err(f"      lop secret file {name} -- <command…>          (file-shaped secrets)")
@@ -972,11 +994,20 @@ def _audit(args: argparse.Namespace) -> int:
             )
         )
         return 0
+    # The human view spells `tty` out and carries the legend that says what it
+    # does and does not mean; `--json` keeps the enum, because a machine
+    # contract is not where a presentation gap gets fixed. The column widens to
+    # whatever the spelled-out labels need, so the rows stay aligned.
+    labels = {"tty": "at a terminal"}
+    width = max([5, *(len(labels.get(row.outcome, row.outcome)) for row in records)])
     for entry in records:
         print(
-            f"{_format_time(entry.ts)}  {entry.event:<7} {entry.outcome:<5} "
+            f"{_format_time(entry.ts)}  {entry.event:<7} "
+            f"{labels.get(entry.outcome, entry.outcome):<{width}} "
             f"pid={entry.pid or '-':<7} {entry.secret_id or ''}"
         )
+    if records:
+        print("  tty: a terminal was attached, not proof a person agreed.")
     return 0
 
 

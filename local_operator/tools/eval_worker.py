@@ -712,9 +712,21 @@ def _ledger_values() -> tuple[str, ...]:
 
 #: What a streamed frame carries when the withheld flag is set, so the operator
 #: reading the job tail can tell "this cell prints nothing" from "this cell's
-#: output could not be vouched for". The final response is unaffected: it goes
-#: through :func:`_scrub_secrets`, which has its own fail-closed path.
-_WITHHELD_FRAME_TEXT = "[streamed output withheld: the secret redaction ledger could not be read]"
+#: output could not be vouched for". The settled result is unaffected: it goes
+#: through :func:`_scrub_secrets`, which has its own fail-closed path. The text
+#: says so anyway, because the reader is a model polling ``jobs(op='peek')``:
+#: one that reads this as a lost result cancels a job that would have
+#: delivered, and the live view is the only thing this costs.
+#:
+#: The trailing newline is load-bearing. Frames are appended to a job's shared
+#: tail as raw text (``JobManager.append_output``), so a stdout notice and a
+#: stderr notice would otherwise run together into one unreadable line. The
+#: notice is 128 characters before that newline, inside the 200-character
+#: progress-line cut in :mod:`local_operator.tools.eval`.
+_WITHHELD_FRAME_TEXT = (
+    "[live output withheld: the secret redaction filter failed. The result is "
+    "filtered separately and arrives when the run finishes.]\n"
+)
 
 
 class _StreamingTextIO(_CappedTextIO):

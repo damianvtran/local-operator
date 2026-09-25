@@ -1195,6 +1195,17 @@ def test_streamed_frames_fail_closed_when_the_ledger_is_unreadable(
     assert "would-be-secret" not in joined
     assert "a later write too" not in joined, "the withhold must be sticky"
     assert "withheld" in joined, "and it must say so rather than look empty"
+    # The copy is pinned, because both halves of it are load-bearing rather than
+    # decorative. A reader here is a model polling the job tail, and one that
+    # reads this as a lost result cancels a job whose result was never in
+    # question; the notice therefore says the result still arrives. And it ends
+    # on a newline, because frames are appended to ONE shared tail as raw text
+    # (`JobManager.append_output`), so a faulted stdout and a faulted stderr
+    # would otherwise run together into a single unreadable line.
+    assert joined == eval_worker._WITHHELD_FRAME_TEXT * 2
+    assert "arrives when the run finishes" in joined
+    assert eval_worker._WITHHELD_FRAME_TEXT.endswith("\n")
+    assert len(eval_worker._WITHHELD_FRAME_TEXT.rstrip("\n")) <= 200, "outside the peek cut"
 
 
 def test_worker_response_scrubs_every_model_visible_channel(isolated: Path) -> None:
