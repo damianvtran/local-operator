@@ -459,3 +459,94 @@ async def test_a_peer_attachment_this_device_holds_is_still_served(
     response = await client.get(f"/v1/desktop/sessions/{OTHER}/attachments/{ref.digest}")
     assert response.status_code == 200, response.text
     assert response.headers["content-type"].startswith("image/png")
+
+
+# ---------------------------------------------------------------------------
+# The bytes a peer-bound prompt sends must stay resolvable on THIS device
+# ---------------------------------------------------------------------------
+
+
+def _wire_image(size_b64: int = 4096, mime: str = "image/png") -> dict[str, str]:
+    """One wire image block of a chosen base64 length, decoded as valid bytes.
+
+    A block's length is the only thing the store's floor reads, so a padded
+    valid base64 payload is enough to sit on either side of it without dragging
+    a real codec into the unit path.
+    """
+    import base64
+
+    raw = b"\x89PNG\r\n\x1a\n" + bytes(size_b64 * 3 // 4)
+    return {"data_b64": base64.b64encode(raw).decode("ascii"), "mime_type": mime}
+
+
+@pytest.mark.asyncio
+async def test_a_peer_bound_prompt_stages_its_images_here_and_a_local_one_does_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mirror that makes a peer's row readable here — and its three gates.
+
+    WHY IT MUST EXIST. The owner's journal row references ``{"attachment":
+    <digest>}`` and the owner's runtime is another process with its own config
+    dir, so the bytes land in the PEER's store. This device's only read
+    (``DesktopSessionBridge.attachment``) resolves ``<root>/attachments``, so
+    without the mirror a picture the user had just sent answered ``409
+    attachment_on_peer`` while the prompt reported ``admitted`` — the drop the
+    transport cell in ``tests/unit/network/test_remote_viewer.py`` reproduces
+    over two real relays.
+
+    THE THREE GATES, each because it is a way to pay for nothing: a LOCAL
+    conversation stages nothing, because this device's own runtime externalises
+    into that very store (a second write of the same bytes); an image UNDER the
+    transcript's externalise floor stages nothing, because such a row keeps its
+    payload inline and no reader needs the blob; and an unusable payload is
+    skipped rather than raised, because ``AttachmentStore.put`` answers ``None``
+    for undecodable input by contract and a mirror that failed must never refuse
+    a prompt the owner would have admitted.
+    """
+    import base64
+    import hashlib
+
+    from local_operator.server.utils.desktop_sessions import (
+        DesktopSessionBridge,
+        DesktopSessions,
+    )
+
+    root = tmp_path.resolve()
+    row = _peer_row(id=OTHER)
+    remote = DesktopSessionBridge(root, OTHER, "", remote_row=row)
+    local = DesktopSessionBridge(root, MINE, "")
+    store = root / ATTACHMENTS_DIRNAME
+
+    big = _wire_image()
+    raw = base64.b64decode(big["data_b64"])
+    digest = hashlib.sha256(raw).hexdigest()[:32]
+
+    await local.stage_peer_images([big])
+    assert not store.exists(), "a LOCAL conversation staged an image it already owns"
+
+    await remote.stage_peer_images([])
+    assert not store.exists(), "an image-less prompt wrote a store"
+
+    await remote.stage_peer_images([big, {"data_b64": "!!!!", "mime_type": "image/png"}])
+    assert sorted(p.name for p in store.glob("*.bin")) == [f"{digest}.bin"]
+
+    # THE READ THIS EXISTS FOR, through the pool's own door (the one the route
+    # opens): the peer's id resolves to the exact bytes with no peer consulted,
+    # because the local store is the first branch ``attachment`` takes — which is
+    # what the digest being the content key buys.
+    # The pool reaches this id through the peer projection (the row the sidebar
+    # poll fills), exactly as it does in production; the bytes it then serves
+    # come out of this device's own store.
+    _answer_rows(monkeypatch, row)
+    pool = DesktopSessions(root)
+    served, served_mime = await pool.attachment(OTHER, digest)
+    assert served == raw
+    assert served_mime == "image/png"
+
+    # AND THE FLOOR: a block the owner would leave INLINE is not staged, because
+    # nothing would ever reference the blob.
+    small = _wire_image(size_b64=600)
+    small_digest = hashlib.sha256(base64.b64decode(small["data_b64"])).hexdigest()[:32]
+    await remote.stage_peer_images([small])
+    assert not (store / f"{small_digest}.bin").exists()
+    assert sorted(p.name for p in store.glob("*.bin")) == [f"{digest}.bin"]

@@ -1462,6 +1462,43 @@ class DesktopSessionBridge:
             ]
         return self.remote
 
+    async def stage_peer_images(self, images: list[dict[str, str]]) -> None:
+        """Put a PEER-bound prompt's images in THIS device's store, before admitting it.
+
+        WHY THE DEVICE THAT SENDS MUST ALSO HOLD. A turn's images are
+        content-addressed: the row the OWNER journals references
+        ``{"attachment": <digest>}`` (``transcript._externalize_attachments``),
+        and the only store ``attachment()`` reads on this side is this device's
+        own. A peer-bound prompt's bytes therefore existed nowhere this device
+        can reach — the peer's runtime is another process on another machine and
+        externalises into ITS config dir (``attachments.store_for_transcript_dir``
+        states that rule) — so the conversation the user is LOOKING AT painted a
+        placeholder over the picture they had just sent, one 200 saying
+        ``prompt admitted`` later. Mirroring here is what makes the reference
+        the owner writes resolvable on both ends.
+
+        THE INVARIANT THIS RESTS ON: the digest IS the content key, so the name
+        this writes and the name the owner's row carries are the same name for
+        the same bytes. What would break it: a reference that is not the content
+        key (a per-install id, a path), or a store rooted somewhere
+        :meth:`attachment` does not consult — both of which would turn this
+        mirror into bytes nobody reads.
+
+        NOTHING IS STAGED FOR A LOCAL SESSION: this device's runtime externalises
+        into this very store, so the write would be a second one of the same
+        bytes (deduped, but paid). Best effort by contract, like every other
+        writer of this store: ``AttachmentStore.put`` answers ``None`` rather
+        than raising for undecodable input or an unwritable home, and a mirror
+        that failed must never be the reason a prompt the owner would have
+        admitted was refused — the read then degrades to the refusal it answers
+        with today.
+
+        Runs off the loop: it decodes, hashes and writes one file per image.
+        """
+        if self.remote_row is None or not images:
+            return
+        await asyncio.to_thread(stage_images_in_store, self.root, images)
+
     async def release(self) -> None:
         async with self.lock:
             self.users -= 1
@@ -3093,6 +3130,56 @@ class PeerAttachmentUnavailable(Exception):
         )
         self.session_id = session_id
         self.row = row
+
+
+def stage_images_in_store(root: Path | None, images: list[dict[str, str]]) -> None:
+    """Mirror wire images into ``root``'s content-addressed attachment store.
+
+    THE TWO READERS THIS IS FOR are :meth:`DesktopSessionBridge.attachment` and
+    its per-child twin, and neither is a decoration: they are how a transcript
+    row that carries ``{"attachment": <digest>}`` becomes pixels on this device.
+    A row written on a PEER carries a digest whose bytes live in the peer's store
+    (its runtime externalised them into its own config dir — see
+    ``attachments.store_for_transcript_dir``), so a prompt this device SENT is a
+    picture this device could no longer show. Staging the bytes here at the
+    moment of sending is what closes that gap, and it closes it for the row the
+    owner writes rather than for a copy of our own: the digest is the content
+    key, so both machines name the same bytes the same way.
+
+    ONLY WHAT THE OWNER WILL EXTERNALIZE, gated by the same floor the transcript's
+    writer uses (``transcript._ATTACHMENT_FLOOR_BYTES``) rather than by a second
+    copy of the number. Under the floor the payload stays INLINE in the row and
+    every reader already has it; staging it would be a blob nothing references —
+    exactly the churn that floor exists to prevent.
+
+    Best effort, and silent: ``AttachmentStore.put`` is documented to answer
+    ``None`` instead of raising for undecodable input, a read-only home or a full
+    disk, and a mirror that could not be written must not fail a prompt the owner
+    would have admitted. The consequence of a miss is the refusal this device
+    answers with today (``PeerAttachmentUn``), never a lost turn.
+
+    THE WIRE KEEPS ITS INLINE PAYLOAD, deliberately, and so does NOT reuse
+    ``runtime.server._reference_image_payloads``: that helper is the same store
+    primitive but it rewrites the frame to carry ``{"attachment": <digest>}``,
+    which is right for a frame bound to a viewer that shares this store and wrong
+    for one bound to a peer — the owner's runtime would journal a reference
+    naming a blob only the SENDER holds. ``put`` plus the shared floor constant
+    is the whole mechanism; the reference rewrite is not part of it.
+    """
+    from local_operator.session.transcript import _ATTACHMENT_FLOOR_BYTES
+
+    store = AttachmentStore(Path(root) / ATTACHMENTS_DIRNAME if root is not None else None)
+    for image in images:
+        if not isinstance(image, dict):
+            continue
+        # Both spellings the wire uses, in the order ``image_blocks`` reads them.
+        data = image.get("data_b64") or image.get("data") or ""
+        if not isinstance(data, str) or len(data) < _ATTACHMENT_FLOOR_BYTES:
+            continue
+        try:
+            store.put(data, str(image.get("mime_type") or "image/png"))
+        except OSError as exc:  # noqa: PERF203 — one bad image costs that image
+            logger.debug("peer image could not be staged locally: %s", exc)
 
 
 class SessionDeletionRefused(ValueError):
