@@ -217,24 +217,29 @@ def _read(
     if not peers:
         return (), ()
     rows: list[SessionRow] = []
-    # Keyed by id, and the FIRST row for an id wins: the duplicates this collapses
-    # are one device's own answer repeated per shared network, so they are the same
-    # row and the order decides nothing. A row from a DIFFERENT device claiming an
-    # id already taken is the routing ambiguity the mesh exists to prevent
-    # (``relay._op_session_create``), not a case this function can resolve — the
-    # first one the projection named wins, and the id stays one row.
-    seen: set[str] = set()
+    # KEYED BY ``(owner_device, session_id)``, AND THE FIRST ROW FOR A KEY WINS (review
+    # round 1, MINOR 2). The duplicates this collapses are one device's own answer
+    # repeated per shared network, so they are the same row and the order decides
+    # nothing. Keying on the id ALONE was global across devices: two devices reporting
+    # one id — which is the permanent routing ambiguity the mesh exists to prevent
+    # (``relay._op_session_create``) — collapsed to a single row silently, filed under
+    # the first device's heading, and a user's two conversations looked like one. With
+    # the device in the key every case this function is FOR still collapses (same
+    # device, same id, one row per membership) and the cross-device collision stays
+    # two rows, which is the routing ambiguity being visible rather than hidden.
+    seen: set[tuple[str, str]] = set()
     for peer_row in raw:
         session_id = str(getattr(peer_row, "session_id", "") or "")
-        if not session_id or session_id in seen:
+        device_id = str(getattr(peer_row, "device_id", "") or "")
+        if not session_id or (device_id, session_id) in seen:
             continue
-        facts = peers.get(str(getattr(peer_row, "device_id", "") or ""))
+        facts = peers.get(device_id)
         if facts is None:
             # A row from a device the peers answer did not include: the two
             # halves of one projection disagree, so this device cannot say where
             # the session lives and must not guess a heading for it.
             continue
-        seen.add(session_id)
+        seen.add((device_id, session_id))
         rows.append(
             SessionRow(
                 session_id,

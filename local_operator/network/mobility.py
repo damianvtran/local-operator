@@ -86,12 +86,30 @@ MOVE_MAX_WAIT_S = 1800.0
 #: How long the requester waits for a ``--keep`` copy to land at the destination
 #: before answering "still copying". Generous: this covers a full transcript on a
 #: slow link, and nothing on the SOURCE has changed while it runs.
+#:
+#: IT IS ALSO A RECALL'S COPY BUDGET (``move_hold_s``): a recall copies the same
+#: transcript over the same link, and the destination is simply the device that asked
+#: for it — so both directions share one number rather than two that can drift.
 KEEP_COPY_WAIT_S = 300.0
 
 #: How long an offload waits for the destination to confirm the promote. The
 #: commit itself is local and fast (the copy happened before it); this only covers
 #: the peer's promote and its ``done`` frame.
 OFFLOAD_CONFIRM_WAIT_S = 30.0
+
+#: The round trip a caller adds around a move's own work before it stops waiting: the
+#: relay's answer has to travel back over the control socket after the work is done,
+#: and a caller that cut it too fine would report its own timeout for a move the relay
+#: was about to answer (the whole of QA round 1, Q4a).
+MOVE_CONTROL_SLACK_S = 10.0
+
+#: The margin a CLIENT adds to a published bound before its own deadline. It has to
+#: exceed the round trip that carries the answer back — the link has just been busy
+#: for the whole bound — so a client may not simply EQUAL the bound it is given. 15 s
+#: is the desktop's own margin, and the number it was measured with: it gave up at
+#: ``wait_s + 15`` against a route answering at ``wait_s + 30``, so the timeout's
+#: vaguer sentence always won (QA round 1, Q4a).
+MOVE_CLIENT_MARGIN_S = 15.0
 
 
 #: How long the destination waits to hand a refusal back to the inviter. A
@@ -102,27 +120,114 @@ REFUSAL_REPORT_TIMEOUT_S = 10.0
 
 
 def move_bound_s(wait_s: float, *, keep: bool = False) -> float:
-    """The longest a move can be held before it answers. THE CLIENT'S FORMULA.
+    """How long an OFFLOAD — a move this device INVITED a peer to pull — is held.
 
-    A MOVE IS BOUNDED, AND THE BOUND IS DERIVABLE (QA round 1, Q4a). The relay holds
+    ONE OF THE SHAPES, NOT THE FORMULA FOR ALL OF THEM. ``move_hold_s`` is the one
+    place that names every shape the transfer route accepts and ``move_client_bound_s``
+    is the published client bound derived from it; this function is the offload's term
+    alone, and publishing it as if it were the whole contract is exactly what review
+    round 1 caught (the ``keep`` copy's 300 s term and a recall's retire deadline were
+    both missing from the advice the client lane was implementing).
+
+    A MOVE IS BOUNDED, AND THE BOUND IS DERIVABLE (QA round 1, Q4a). The inviter holds
     a ``session_move`` request for at most
 
         ``wait_s + (KEEP_COPY_WAIT_S if keep else OFFLOAD_CONFIRM_WAIT_S)``
 
-    seconds — 60 s at the default ``wait_s`` of 30 — and a front end whose own
+    seconds — 30 s at ``wait_s=0``, which is the default on BOTH routes that take it
+    (``TransferSession.wait_s`` and the CLI's ``--wait``) — and a front end whose own
     deadline is SHORTER never sees that answer. Measured: the desktop gave up at
     ``wait_s + 15`` s, so the user was told "the move may have happened, check the
     other device" while this device was about to answer "nothing was deleted" — the
-    timeout's vaguer sentence always won. A client's own deadline must therefore be
-    this bound PLUS a margin (the desktop uses 15 s), and the margin has to exceed
-    the round trip that carries the answer back, which is why a client must not
-    simply equal it.
+    timeout's vaguer sentence always won.
 
     The bound is what an UNANSWERED request costs, not what a move costs: the route
     returns as soon as it has a definite outcome — the commit, or the destination's
     refusal, which ``_source_refused`` propagates the moment it arrives.
     """
     return (KEEP_COPY_WAIT_S if keep else OFFLOAD_CONFIRM_WAIT_S) + max(0.0, float(wait_s or 0.0))
+
+
+def move_hold_s(wait_s: float, *, keep: bool = False, to: str = "") -> float:
+    """How long THIS DEVICE'S RELAY holds a move before it answers. THE SHAPES, ONCE.
+
+    Every number a client is handed and every deadline this side waits on is taken
+    from here, so a shape cannot be corrected in one place and left wrong in another —
+    which is what happened on review round 1, when the offload's formula was published
+    as if it covered the route.
+
+    * **OFFLOAD** (``to`` names a peer): ``move_bound_s``. This device invited the peer
+      to pull, so what it waits for is its OWN durable progress — and the ``keep`` term
+      is the DESTINATION's copy, which is why the copy's budget (not this device's
+      confirm window) is what bounds it.
+    * **RECALL** (``to="local"``): the copy THIS device runs, i.e. ``wait_s`` of busy
+      re-polls plus ``KEEP_COPY_WAIT_S``. It is NOT ``move_bound_s``, and nothing in
+      that formula bounds it: the direction is reversed (``_recall`` →
+      ``_destination_move`` makes this device the DESTINATION), so there is no invite
+      and no settle window in it at all. The owner's retire-plus-record deadline
+      (``MOVE_OP_DEADLINE_S``) is charged by ``move_client_bound_s``, which counts it
+      for every shape.
+
+    A ``--from-replica`` RECOVERY is neither and is not covered here: it promotes bytes
+    already on THIS disk with no peer in the loop (``_recover_from_replica``), so it
+    keeps the confirm-sized term its caller has always given it rather than borrowing a
+    copy's.
+    """
+    if to == "local":
+        # A COPY, NOT A CONFIRMATION: nothing is confirmed over the link, and the work
+        # is transcript-sized, so the offload's 30 s window is the wrong term by two
+        # orders of magnitude.
+        return KEEP_COPY_WAIT_S + max(0.0, float(wait_s or 0.0))
+    return move_bound_s(wait_s, keep=keep)
+
+
+def move_client_bound_s(wait_s: float, *, keep: bool = False, to: str = "") -> float:
+    """THE PUBLISHED BOUND: the deadline a CLIENT's own request must not be shorter than.
+
+    Derived, never restated, and published with its terms so a front end can check its
+    own arithmetic against this side's:
+
+    ======================  =====================================================
+    shape                   the bound (seconds)
+    ======================  =====================================================
+    offload (``to`` a peer) ``wait_s + 30 + MOVE_OP_DEADLINE_S + 10 + MOVE_CLIENT_MARGIN_S``
+    ``keep`` copy           ``wait_s + 300 + MOVE_OP_DEADLINE_S + 10 + MOVE_CLIENT_MARGIN_S``
+    recall (``to="local"``) ``wait_s + 300 + MOVE_OP_DEADLINE_S + 10 + MOVE_CLIENT_MARGIN_S``
+    ======================  =====================================================
+
+    Concretely, at the ``wait_s=0`` both routes default to: **145 s** for an offload,
+    **415 s** for a ``keep`` copy (``keep`` costs its copy either way), and **415 s**
+    for a recall. A front end that gives up sooner than these reports its own timeout
+    for a move this side was about to answer, which is QA round 1's Q4a symptom — the
+    desktop gave up at ``wait_s + 15`` against a route answering at ``wait_s + 30``, so
+    the user read "the move may have happened, check the other device" instead of this
+    device's own answer.
+
+    THE TERMS, because which one a client is waiting on is the whole question:
+
+    * ``move_hold_s`` — the relay's own held time for that shape (30 s for an offload's
+      confirmation, 300 s for a copy, either way).
+    * ``MOVE_OP_DEADLINE_S`` — the PEER's slow-op budget. It bounds the frame the
+      inviter sent (an offload's prepare/commit) or the owner's retire-plus-record
+      deadline (a recall's prepare), so it is added to EVERY shape rather than folded
+      into one of them.
+    * ``MOVE_CONTROL_SLACK_S`` — the control socket's answer travelling back.
+    * ``MOVE_CLIENT_MARGIN_S`` — the client's own margin over the route's answer, which
+      has to exceed the round trip on a link that has just been busy for the bound.
+
+    A RECALL IS BOUNDED BY A BUDGET, NOT BY A PROMISE, and the difference is what a
+    client must act on: the copy above ``move_hold_s`` is transcript-sized and nothing
+    here caps it, so the route may answer 503 "unconfirmed" — the request WAS sent —
+    with the copy still running past every number above. A client whose own deadline
+    fires on a recall therefore knows NOTHING about the outcome: it must report it as
+    unknown, never as a refusal, and never retry into a second move.
+    """
+    return (
+        MOVE_OP_DEADLINE_S
+        + move_hold_s(wait_s, keep=keep, to=to)
+        + MOVE_CONTROL_SLACK_S
+        + MOVE_CLIENT_MARGIN_S
+    )
 
 
 #: Age after which an abandoned staging directory is swept. `ready.json` marks one
@@ -2627,16 +2732,22 @@ def request_move(
     if record is None:
         return _relay_refusal(session_id, "relay_unavailable", _relay_message())
     action = "recover" if from_replica else ("recall" if to == "local" else "offload")
-    # THE CLIENT'S OWN DEADLINE IS THE RELAY'S BOUND PLUS A MARGIN, and it is taken
-    # from ``move_bound_s`` so the two cannot drift: a caller that gives up FIRST does
-    # not report a slow move, it reports ``relay_unavailable`` — "this device's relay
-    # could not be asked" — while the relay is still working. With ``keep`` the relay's
-    # own budget is ``KEEP_COPY_WAIT_S`` (300 s) rather than the offload's 30, so the
-    # old flat ``OFFLOAD_CONFIRM_WAIT_S`` term made every long copy unanswerable.
-    timeout = max(
-        60.0,
-        MOVE_OP_DEADLINE_S + move_bound_s(wait_s, keep=bool(keep)) + 10.0,
-    )
+    # THE CALLER'S OWN ENVELOPE IS THE RELAY'S BOUND PLUS ITS MARGIN, and both terms
+    # come from ``move_hold_s`` so the two cannot drift: a caller that gives up FIRST
+    # does not report a slow move, it reports ``relay_unavailable`` — "this device's
+    # relay could not be asked" — while the relay is still working.
+    #
+    # THE TERM IS PER SHAPE, and the recall is why: a recall copies the transcript with
+    # the DESTINATION running the copy, so it is bounded by ``KEEP_COPY_WAIT_S`` (300 s)
+    # rather than the offload's 30 s confirmation window. Charging every shape the
+    # offload's term made this caller give up at 130 s on a recall that was still
+    # copying, and report ``relay_unavailable`` about work in flight.
+    #
+    # A RECOVERY (``from_replica``) IS NEITHER SHAPE and passes ``to=""``: it promotes
+    # bytes already on this disk with no peer in the loop, so it keeps the confirm-sized
+    # term it has always had rather than borrowing a copy's.
+    hold = move_hold_s(wait_s, keep=bool(keep), to="" if from_replica else str(to))
+    timeout = max(60.0, MOVE_OP_DEADLINE_S + hold + MOVE_CONTROL_SLACK_S)
     reply = relay.control_request(
         record,
         "session_move",
