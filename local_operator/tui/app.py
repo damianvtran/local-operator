@@ -99,7 +99,11 @@ from local_operator.harness.intent import (
 # `_subagent_roster`), rather than re-deriving one that could drift from it.
 from local_operator.harness.jobs import roster_expired
 from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
-from local_operator.harness.rows import is_harness_notice_row, output_limit_call_receipt
+from local_operator.harness.rows import (
+    is_harness_chrome,
+    is_harness_notice_row,
+    output_limit_call_receipt,
+)
 
 # Free at runtime: `session.protocol` below already imports `harness.types` at
 # module level, so this adds no work to the boot path the lazy-import
@@ -173,6 +177,7 @@ from local_operator.session.runtime.types import (
 )
 from local_operator.slash_commands import (
     PERSIST_HINT,
+    SESSION_COPY_FLAG,
     SLASH_COMMANDS,
     primary_slash_name,
     slash_command_for,
@@ -301,6 +306,12 @@ from local_operator.tui.widgets.editor import (
     expand_pastes,
     resolve_markers,
     substitute_credentials,
+)
+from local_operator.tui.widgets.goal_panel import (
+    GoalDelete,
+    GoalDismissed,
+    GoalMarkDone,
+    GoalPanel,
 )
 from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.link_picker import LinkPickerScreen
@@ -891,6 +902,65 @@ _SUBAGENT_DOCK_ROWS = 10
 #: number.
 _BAND_SETTLE_PASSES = 3
 
+#: Canonical-state paint spacing (``OperatorApp._on_frontend_update``): the
+#: floor between two paints, the share of the UI loop they may take, and the
+#: longest a non-urgent field may wait. The same shape and numbers #1528 gave the
+#: runtime's own roster tick (``session._frontend_jobs_delay``), for the same
+#: reason one process over: this loop is the one that turns Enter into a bubble.
+_FRONTEND_APPLY_FLOOR_S = 0.05
+_FRONTEND_APPLY_MAX_SHARE = 0.25
+_FRONTEND_APPLY_CEILING_S = 1.0
+
+#: Canonical fields whose change is painted on the NEXT loop turn, never spaced.
+#: Each is something the user is waiting on or must act on: the working signal,
+#: an approval or ask card, and the completion receipt. A child starting,
+#: settling or leaving is the fourth exemption and is read off the store's
+#: ``lifecycle`` revision rather than a field name, because it rides ``jobs``
+#: beside the per-token progress churn that IS worth spacing.
+#: ``test_frontend_apply_spacing.py`` pins each entry with its own test.
+_URGENT_FRONTEND_FIELDS = frozenset({"streaming", "pending_gate", "attention"})
+
+
+def _frontend_apply_delay(last_cost_s: float) -> float:
+    """How long after a canonical paint the next non-urgent one may start.
+
+    WHY IT ADAPTS. Every canonical delta used to schedule a paint on the next
+    loop turn, and on a viewer of a loaded parent (12 stepping lanes, 240
+    settled children) one paint cost 40-60 ms of CPU -- status band, roster
+    projection, three panel passes -- so a stream of deltas held this loop most
+    of the time and an Enter waited 2-4 s p50 to be handled at all. Spacing the
+    next paint by ``cost / share`` caps this work at
+    ``_FRONTEND_APPLY_MAX_SHARE`` of the loop whatever the roster's size; a
+    cheap paint keeps the 50 ms floor, i.e. at most 20 paints a second.
+
+    NOTHING GOES STALE BY THIS: the paint reads the session's live state when it
+    fires, so it shows everything the skipped ones would have; only the number
+    of intermediate frames drops.
+    """
+    if last_cost_s <= 0.0:
+        return _FRONTEND_APPLY_FLOOR_S
+    return min(
+        _FRONTEND_APPLY_CEILING_S,
+        max(_FRONTEND_APPLY_FLOOR_S, last_cost_s / _FRONTEND_APPLY_MAX_SHARE - last_cost_s),
+    )
+
+
+def _frontend_revision(session: Any) -> Any:
+    """The session's canonical collection revision, or ``None`` if it has none.
+
+    ``None`` is every host that cannot say (the in-process owner, the test
+    fakes), and callers treat it as "assume everything moved" -- the behaviour
+    those hosts had before the revision existed.
+    """
+    reader = getattr(session, "frontend_revision", None)
+    if not callable(reader):
+        return None
+    try:
+        return reader()
+    except Exception:  # noqa: BLE001 -- not synchronized yet reads as "unknown"
+        return None
+
+
 #: Background-completion banners one observer tick may SPAWN. Everything past
 #: the cap is still claimed — the arbitration is unchanged — and collapsed into
 #: a single "N sessions finished" digest carrying the tick's ABSOLUTE total.
@@ -1069,6 +1139,41 @@ _BACKGROUND_NOTIFY_ANNOUNCEABLE_STATES = frozenset({"", "idle"})
 #: stay readable. The FULL goal still drives the loop and the judge; only the
 #: on-screen label is clipped.
 _LOOP_GOAL_LABEL_CHARS = 120
+
+
+#: How long the judge's continuation waits for the turn that just ENDED to
+#: release the session before the admission is given up on, and how often it
+#: asks again while it waits.
+#:
+#: WHY THE WAIT EXISTS AT ALL, because "the continuation is admitted from the
+#: turn-end handler" is the whole defect it repairs (QA round 1, Q1). The app's
+#: ``TurnEnded`` is posted from the session's HELD end event, which the turn's
+#: own pipeline flushes from its ``finally`` with ``_turn_lock`` still held
+#: (``Session._run_turn_pipeline`` documents that ordering, and
+#: ``on_turn_settled`` is the hook that fires after it). So the one edge this
+#: driver hangs on is the one moment the session cannot take a prompt: measured
+#: on the real app, ``Session.prompt`` raised ``TurnInFlight: session is already
+#: streaming`` with the lock held and ``is_streaming`` already False, the driver
+#: parked the record at ``waiting``, and the goal sat inert with a CONTINUE
+#: verdict in hand and no continuation turn ever run — deterministically, in the
+#: app and in ``tests/e2e/test_goal_submission.py``.
+#:
+#: The runtime host never meets this, and that is the shape being mirrored: its
+#: continuation goes through the handle's prompt QUEUE and is drained by the
+#: session itself (``serving.py``'s ``_drain_prompt_queue``), so it cannot
+#: arrive mid-turn at all. The TUI host owns its session in process and admits
+#: directly, so this host needs the deferral the queue provides there.
+#:
+#: BOUNDED, because "the lock is free in a few loop turns" is a fact about the
+#: ORDINARY teardown, not about every holder: an on-demand compaction holds the
+#: same lock for the length of a rewrite. Giving up parks the goal at
+#: ``waiting``, which is honest — nothing is being spent on it — and the next
+#: turn end re-arms the judge. The retry gap is not politeness: the teardown
+#: between the end event and the release can include a thread-backed transcript
+#: flush, which resolves in wall-clock time and not in a fixed number of loop
+#: turns.
+_GOAL_CONTINUATION_ADMISSION_S = 5.0
+_GOAL_CONTINUATION_ADMISSION_RETRY_S = 0.02
 
 
 def _loop_goal_label(goal: str) -> str:
@@ -1730,6 +1835,20 @@ class _PagingLease:
         return getattr(view, "parent", object()) is not None
 
 
+def _viewport_message_budget(height: int) -> int:
+    """Messages that fill one screen of a ``height``-row app: ``max(12, height // 2)``.
+
+    ONE SPELLING for one question — "enough messages for a screenful" — which
+    the sidebar's prepared window, its re-projection, the pending-tail pages and
+    the viewport-first resume all ask. It was written out as a literal at each
+    of them, so a change to one silently disagreed with the others (review
+    round 1, F4). A message averages about two rows at the widths this app is
+    measured at, hence half the height, floored so a short terminal still paints
+    a real turn or two.
+    """
+    return max(12, height // 2)
+
+
 def _resume_tail_start(history: list[Any], bound: int) -> int:
     """Index of the first message the initial resume frame should paint.
 
@@ -2387,6 +2506,54 @@ RESUME_CONNECT_WALL_S, RESUME_CONNECT_BOUND_S = _resume_connect_limits()
 #: have to survive — the transient it must survive is `COLD_FALLBACK_S`.
 RESUME_CONNECT_ATTEMPTS = _attempts_outlasting(RESUME_CONNECT_WALL_S)
 
+#: When a paint-first open's ATTACH is narrated, and when it is judged.
+#:
+#: Paint-first (`/resume` and `lop --resume` onto a live owner with the
+#: conversation on disk) opens a cold viewer and lets the ordinary background
+#: engage bind it behind the paint. That engage is silent until it FAILS, and
+#: against a frozen owner it fails only when the registry ages the heartbeat out
+#: (~45 s): measured in UX round 1 (U1), the band read `starting…` alone for
+#: 42.2 s and the first account of why nothing was arriving came at ~45 s, where
+#: the dialling arm this replaced had explained itself at ~18 s. The redial loop's
+#: own narration and 27 s budget were unreachable on this path, because the
+#: paint-first branch leaves that loop before it narrates.
+#:
+#: So the attach gets the redial's schedule back, on the engage it now rides:
+#: the redial's own "still trying, about N s in total" row once the wait is long
+#: enough to be watched (the same 10 s `START_ENGAGE_PATIENCE_S` calls watched;
+#: every healthy attach measured here lands in well under a second, so a merely
+#: slow one stays quiet), and a verdict at the redial's wall clock. Separate
+#: names rather than reuses because the tests that shorten the patience filter
+#: must not arm this narration as a side effect.
+ATTACH_BEHIND_NARRATE_S = 10.0
+ATTACH_BEHIND_BOUND_S = RESUME_CONNECT_WALL_S
+#: The verdict, and its restatement once the owner answers after all. "session",
+#: never "runtime": it is the user's word for what they opened (UX round 1, U5).
+#:
+#: The next step is its OWN authored row, the pattern the redial's give-up
+#: sentence already uses (design D2 there): as one flowing sentence an 80-column
+#: pane split "send a message to retry" across two rows (UX round 2, U9), and the
+#: half that splits is the half the user acts on.
+ATTACH_BEHIND_VERDICT = (
+    "session {session_id} is not answering — the conversation is here.\n" "Send a message to retry."
+)
+ATTACH_BEHIND_RECOVERED = "session {session_id} is answering again"
+#: A message sent while the paint-first attach was still pending, whose bind
+#: then failed: it NEVER reached the owner, so it comes back to the composer and
+#: its echo row comes down (UX round 2, U6). The transport's own reason ("owner
+#: did not send its state") is logged, not shown — it names an owner and a
+#: protocol step, and says nothing about the one thing the user needs to know,
+#: which is where their text went (U8).
+#:
+#: Two authored rows for the same reason as the verdict (U9), and the first is
+#: the SHORTER one now: "…is back in the composer." wrapped at 80 columns (UX
+#: round 3, U13), so where the text went moves into the actionable row, which
+#: is the one the user acts on and the one that has to stay whole.
+ATTACH_BEHIND_UNSENT = (
+    "session {session_id} did not answer — your message was not sent.\n"
+    "It is back in the composer: send it again to retry."
+)
+
 
 def _resume_redial_clock() -> float:
     """The redial's clock reading, as a SEAM rather than a direct call.
@@ -2729,6 +2896,422 @@ class _HeldAnswerKey:
     def still_aimed_at(self, live: "AskPickerScreen | None") -> bool:
         """Whether the question this key was meant for is still the live one."""
         return live is self.prompt and self.prompt.question_index == self.question_index
+
+
+class _AttachBehindAttempt:
+    """ONE conversation's paint-first attach: its narration, its bound, its carriers.
+
+    KEYED ON THE CONVERSATION IT WAS STARTED FOR, NEVER ON WHAT IS ON SCREEN.
+    The watch this replaced asked "is the app still bound to my token?" before
+    every step and built its tokens from the app's CURRENT binding, so the
+    moment the user switched conversations each step either bailed or acted on
+    the wrong one (UX round 3 on #1474: U10 an echo row left standing for a
+    message that came back, U11 the "back in the composer" row painted into the
+    conversation switched TO, U12 a re-narrated row that never reached its
+    verdict; agent review round 3: a verdict token rebuilt from current state).
+    Four symptoms, one defect. So identity is CAPTURED — the conversation's
+    ``SessionInteraction`` and its session facade — and every later step keys
+    on those: which row to restate, which band cue to silence, which composer
+    gets the text back.
+
+    The ROW is not held here. What the attempt says goes into the
+    conversation's :class:`_AttachBehindAccount`, which lives on the source and
+    outlives both this attempt (it ends when a carrier binds) and the view the
+    row was painted into (a re-commit replaces it) — agent review round 4, F-1.
+
+    CARRIERS. The attach is carried by the background engage and by every
+    message sent while it is pending (each message's send runs its own
+    foreground bind, which preempts the engage). The attempt ends when a carrier
+    binds (:meth:`landed`), and it is judged when the last carrier fails, so a
+    preempted engage cannot silence the wait while a message is still binding
+    (round 2, U6). The bound is the attempt's, not a carrier's: a carrier that
+    joins an attempt already running — the engage a switch back starts — rides
+    the same narrate/verdict schedule instead of restarting it (U12).
+    """
+
+    def __init__(self, app: "OperatorApp", source: SessionInteraction, session: Any) -> None:
+        self._app = app
+        self.source = source
+        self.session = session
+        self._session_id = str(getattr(session, "session_id", "") or "")
+        #: "pending" (nothing said yet), "narrated", "judged", "unsent" (a
+        #: message came back), "landed" (a carrier bound).
+        self.phase = "pending"
+        self._carriers = 0
+        self._timers: list[Any] = []
+        self._arm()
+
+    @property
+    def _account(self) -> "_AttachBehindAccount":
+        """The conversation's account of this attach, held on its SOURCE.
+
+        Not on the attempt: the attempt ends when a carrier binds, and what it
+        said must outlive it (agent review round 4, F-1; UX round 4, U14).
+        """
+        return _AttachBehindAccount.of(self._app, self.source)
+
+    # -- schedule --------------------------------------------------------
+
+    def _arm(self) -> None:
+        self._stop_timers()
+        app = self._app
+        self._timers = [
+            app.set_timer(ATTACH_BEHIND_NARRATE_S, self._narrate),
+            app.set_timer(ATTACH_BEHIND_BOUND_S, self._judge),
+        ]
+
+    def _stop_timers(self) -> None:
+        for timer in self._timers:
+            timer.stop()
+        self._timers = []
+
+    def _registered(self) -> bool:
+        return self._app._attach_behind_attempts.get(self.source.token) is self
+
+    def _alive(self) -> bool:
+        """Still the attempt for a live conversation holding the same facade."""
+        if self.source.retired or self.source.session is not self.session:
+            self.close()
+            return False
+        return self._registered()
+
+    @property
+    def silences_cue(self) -> bool:
+        """The row states an outcome, so `starting…` beside it would contradict it."""
+        return self.phase in ("judged", "unsent")
+
+    def _narration(self) -> str:
+        # The dialling arm's own sentence, with THIS path's bound: the redial's
+        # "about 42 s" is its wall plus one dial envelope, while this row is
+        # judged at `ATTACH_BEHIND_BOUND_S` (UX round 2, U7; design D5).
+        return (
+            f"reconnecting to session {self._session_id} — still trying, about "
+            f"{ATTACH_BEHIND_BOUND_S:g}\u00a0s in total"
+        )
+
+    def _bound_elsewhere(self) -> bool:
+        """The facade bound on a path that is not one of this attempt's carriers.
+
+        The sidebar's own connect (a switch back) binds through ``bind_runtime``
+        and never reports here, so a timer firing after it must end the wait as
+        a landing rather than narrate or judge an owner that IS answering (UX
+        round 5, U15).
+        """
+        if getattr(self.session, "is_cold", True):
+            return False
+        self.landed()
+        return True
+
+    def _narrate(self) -> None:
+        if not self._alive() or self.phase != "pending" or self._bound_elsewhere():
+            return
+        self.phase = "narrated"
+        self._account.say(self._narration(), "warning")
+
+    def _judge(self) -> None:
+        if (
+            not self._alive()
+            or self.phase not in ("pending", "narrated")
+            or self._bound_elsewhere()
+        ):
+            return
+        # `not answering`, never `no runtime yet`: an owner exists, holds a live
+        # record and was dialled (UX round 1, U2); "session" is the user's word
+        # for what they opened (U5).
+        self.phase = "judged"
+        self._stop_timers()
+        self._account.say(
+            ATTACH_BEHIND_VERDICT.format(session_id=self._session_id), "warning", outcome=True
+        )
+        # The pending cue ends WITH the verdict — for THIS conversation's band
+        # only, read through `silences_cue`, never by clearing an app-wide flag
+        # the conversation on screen may own.
+        self._app._push_starting_band()
+
+    # -- carriers ---------------------------------------------------------
+
+    def join(self) -> None:
+        """A carrier (the engage, or a message's own bind) starts on this attempt.
+
+        Joining an attempt that already ENDED in a verdict or a returned message
+        is a new try: the schedule re-arms and the SAME row says so at once, so
+        a resend never sits under "is not answering" with `starting…` beside it.
+        """
+        if self._carriers == 0 and self.phase in ("judged", "unsent"):
+            self.phase = "narrated"
+            self._arm()
+            self._account.say(self._narration(), "warning")
+            self._app._push_starting_band()
+        self._carriers += 1
+
+    def carrier_failed(self) -> bool:
+        """A carrier ended without binding; ``True`` when this attempt owns the account.
+
+        ``False`` only when nothing has been said yet and nothing else is
+        carrying the attach: a failure faster than the narration is the
+        ordinary report path's business (the patience filter decides), and the
+        attempt closes so it cannot speak later.
+        """
+        self._carriers = max(0, self._carriers - 1)
+        if not self._alive():
+            return True
+        if self._carriers:
+            # A message is still binding: the attach is pending, now carried by
+            # it (round 2, U6). Nothing to report and the schedule stays armed.
+            return True
+        if self.phase == "pending":
+            self.close()
+            return False
+        if self.phase == "narrated":
+            self._judge()
+        return True
+
+    def carrier_left(self) -> None:
+        """A carrier stepped off WITHOUT a verdict on the attach (cancelled, swapped).
+
+        Not a failure: the schedule stays armed, so the verdict still lands on
+        the attempt's own bound, and the engage a switch back starts joins the
+        same attempt rather than a fresh one (UX round 3, U12).
+        """
+        self._carriers = max(0, self._carriers - 1)
+
+    def returned(self) -> None:
+        """A message sent on this attempt came back unsent: say so in ITS conversation.
+
+        OWED EVEN WHEN THIS ATTEMPT IS OVER. Another carrier can bind the attach
+        (``landed`` closes the attempt) and the facade go cold again before this
+        message's own bind fails — ``is_cold``'s third disjunct,
+        ``not _ready_for_events``, is exactly that window. The text has already
+        gone back to the composer by then, so an attempt that answered "not
+        alive" with silence handed it back with no account at all (agent review
+        round 4, F-1a; a regression against ``3424719f``, which painted it). The
+        account lives on the source, so the row is painted whether or not the
+        attempt can still speak; only a conversation that no longer exists is
+        owed nothing.
+        """
+        self._carriers = max(0, self._carriers - 1)
+        if self.source.retired:
+            return
+        if self._alive():
+            # One row per state: a second return restates the same row,
+            # whichever conversation is on screen when it lands (review round 3).
+            self.phase = "unsent"
+            self._stop_timers()
+        self._account.say(
+            ATTACH_BEHIND_UNSENT.format(session_id=self._session_id), "warning", outcome=True
+        )
+        self._app._push_starting_band()
+
+    def landed(self) -> None:
+        """A carrier BOUND: retire the narration, or restate an outcome as recovered."""
+        if not self._alive() or self.phase == "landed":
+            return
+        self.phase = "landed"
+        self._account.settle()
+        # Always closed: the row no longer needs the attempt to outlive the bind
+        # in order to be re-posted, so nothing lingers in the table (round 4, m-1).
+        self.close()
+        self._app._push_starting_band()
+
+    def close(self) -> None:
+        self._stop_timers()
+        if self._registered():
+            del self._app._attach_behind_attempts[self.source.token]
+
+
+class _AttachBehindAccount:
+    """What a paint-first attach has told ONE conversation: its row and last words.
+
+    Held on the conversation's ``SessionInteraction`` (``attach_behind_account``),
+    never on the attempt, because two things end sooner than the account may
+    (agent review round 4 on #1474, F-1; UX round 4, U14; QA round 4, Q-1):
+
+    * the ATTEMPT ends when a carrier binds, while a message sent on it can still
+      come back afterwards and is still owed its "did not answer" row (F-1a);
+    * the VIEW the row was painted into is replaced whenever the conversation is
+      re-committed — the switch back's own connect worker swaps in a fresh
+      replay as soon as the bind lands, and a frontend row is part of no replay —
+      so a row that lived only in a widget left with that widget, the "is
+      answering again" restatement U3 forbids removing included (F-1b).
+
+    So the account remembers what was said, and :meth:`resurface` re-posts it
+    into whatever view the conversation has in front. It never decides WHOSE row
+    it is; that was captured when the attempt was made (UX round 3, U10-U12).
+    """
+
+    def __init__(self, app: "OperatorApp", source: SessionInteraction) -> None:
+        self._app = app
+        self.source = source
+        self.session_id = str(getattr(source.session, "session_id", "") or "")
+        self.row: NoticeBlock | None = None
+        #: The transcript ``row`` was mounted into. Kept beside the row because
+        #: a row's own ancestry is no answer once it is detached, and "take it
+        #: down" must still find it there (QA round 5, Q-2).
+        self._row_view: TranscriptView | None = None
+        #: What the row says now, so a view that replaced the one holding it can
+        #: be given the same one row.
+        self.said: tuple[str, NoticeKind] | None = None
+        #: The row has stated an OUTCOME (a verdict, a returned message). Kept
+        #: across a re-armed retry, so the bind that finally lands restates the
+        #: row as recovered instead of removing what the user read (U3).
+        self.outcome = False
+
+    @classmethod
+    def of(cls, app: "OperatorApp", source: SessionInteraction) -> "_AttachBehindAccount":
+        account = source.attach_behind_account
+        if not isinstance(account, cls):
+            account = cls(app, source)
+            source.attach_behind_account = account
+        return account
+
+    def say(self, text: str, kind: NoticeKind, *, outcome: bool = False) -> None:
+        self.said = (text, kind)
+        self.outcome = self.outcome or outcome
+        row = self.row
+        if row is not None and row.is_attached:
+            # Where it stands — the transcript in front, or the conversation's
+            # parked view, whose widgets outlive the switch.
+            row.restate(text, kind)
+            return
+        self.row = None
+        if self._app._is_current(self.source):
+            self._paint(text, kind)
+        # Otherwise OWED: `said` is kept and `resurface` paints it on return.
+
+    def _paint(self, text: str, kind: NoticeKind) -> None:
+        self._row_view = self._app._transcript_view()
+        self.row = self._app._system_notice_block(text, kind)
+
+    def settle(self) -> None:
+        """A bind LANDED, on whatever path bound it: the wait is over.
+
+        The ONE place the account learns the owner answered, and deliberately
+        not gated on an attempt being alive: the attempt's death is exactly the
+        case that needs it (UX round 5, U15; QA round 5, Q-1). A bind carried
+        by the attempt's own engage or a message's own send reaches here through
+        ``landed``; the sidebar's connect on a switch back and a message that
+        went out over an already-bound facade reach it through
+        ``OperatorApp._settle_attach_behind``. Before this, only the first kind
+        did, so an owner answering after a switch back left "did not answer —
+        send it again" standing above the reply the resend produced.
+
+        An OUTCOME is restated as recovered, never removed — the reader may have
+        read it (UX round 1, U3). Narration alone was never an outcome, and a
+        bind makes it false, so nothing is owed and it comes down. Idempotent.
+        """
+        if self.said is None:
+            return
+        if not self.outcome:
+            self.retire()
+            return
+        recovered = (ATTACH_BEHIND_RECOVERED.format(session_id=self.session_id), "info")
+        if self.said != recovered:
+            self.say(*recovered)
+
+    def resurface(self) -> None:
+        """The conversation is in front again: make sure the view in front says it.
+
+        "Has its row" means a row IN THE VIEW NOW IN FRONT. A row still attached
+        to the outgoing view — the one a re-commit is replacing — counts as
+        missing (the old guard saw it attached and returned, QA round 4, Q-1),
+        so it is taken down there and painted here, once. When the conversation
+        is not in front nothing is painted and nothing is spent: the claim stays
+        owed for the adopt that does bring it in front (review round 4, n-1).
+        """
+        said = self.said
+        if said is None or not self._app._is_current(self.source):
+            return
+        row = self.row
+        stale = _owning_transcript(row)
+        if stale is not None and stale is self._app._transcript_view():
+            return
+        if row is not None and stale is not None:
+            stale.remove_block(row)
+        self._paint(*said)
+
+    def retire(self) -> None:
+        """Nothing is owed any more: take the row down from ITS transcript.
+
+        From the view it was painted into as well as from its current ancestry:
+        a row whose ancestry no longer answers was otherwise left painted on a
+        view the conversation had stopped owning (QA round 5, Q-2).
+        """
+        row, self.row = self.row, None
+        painted_into, self._row_view = self._row_view, None
+        self.said = None
+        self.outcome = False
+        if row is not None:
+            for view in {_owning_transcript(row), painted_into}:
+                if view is not None and row in view.blocks():
+                    view.remove_block(row)
+        if self.source.attach_behind_account is self:
+            self.source.attach_behind_account = None
+
+
+def _owning_transcript(block: Any) -> "TranscriptView | None":
+    """The transcript a mounted block lives in, whichever conversation owns it."""
+    if block is None or not getattr(block, "is_attached", False):
+        return None
+    for node in block.ancestors_with_self:
+        if isinstance(node, TranscriptView):
+            return node
+    return None
+
+
+class _AttachBehindSend:
+    """One message sent while its conversation's paint-first attach was pending.
+
+    CAPTURED AT SEND TIME, which is the whole point: the conversation, its
+    attempt, and the echo rows the submit painted together with the view that
+    holds them. A return then withdraws THIS message's rows from THAT view —
+    on screen or parked — instead of the newest submit's rows from whatever
+    view is in front, which is how a returned message stayed drawn as sent
+    while its text sat in the composer (UX round 3, U10; QA round 3, Q-2).
+    """
+
+    def __init__(
+        self,
+        attempt: _AttachBehindAttempt,
+        blocks: tuple[Any, list[Any]] | None,
+        view: TranscriptView | None,
+    ) -> None:
+        self.attempt = attempt
+        #: The echo rows as captured; public so the worker can tell whether the
+        #: interaction's single ``submitted_blocks`` slot still names them.
+        self.blocks = blocks
+        self._blocks = blocks
+        self._view = view
+        self._done = False
+        attempt.join()
+
+    def landed(self) -> None:
+        if not self._done:
+            self._done = True
+            self.attempt.landed()
+
+    def returned(self) -> None:
+        if self._done:
+            return
+        self._done = True
+        held, self._blocks = self._blocks, None
+        view = self._view
+        if held is not None and view is not None and view.is_attached:
+            # THIS message's rows, from the view the submit painted them into —
+            # never "the newest submit" and never "the view in front".
+            user_block, image_blocks = held
+            for block in (*image_blocks, user_block):
+                view.remove_block(block)
+        self.attempt.returned()
+
+    def ended(self, *, bound: bool) -> None:
+        """Any other way the send ended (cancelled, oversize, stopped); idempotent."""
+        if self._done:
+            return
+        self._done = True
+        if bound:
+            self.attempt.landed()
+        else:
+            self.attempt.carrier_left()
 
 
 RESIZE_REFIT_DELAY_S = 0.05
@@ -4130,6 +4713,9 @@ class OperatorApp(App[None]):
         # the user to the composer they were typing in rather than to nothing.
         # The approval card follows the same discipline for the same reason.
         self._usage_focus_restore: Any | None = None
+        #: What had focus when the goal overlay opened, so Esc puts it back —
+        #: the same restore the usage card keeps for the same reason.
+        self._goal_focus_restore: Any | None = None
         self._working_block: WorkingBlock | None = None
         #: What the working line says when nothing narrower is running. Set by
         #: the events that describe the whole turn rather than one row of it
@@ -4611,6 +5197,37 @@ class OperatorApp(App[None]):
         #: ``_request_login_key``). Distinct from ``_key_prompt``, which is
         #: cleared the moment the prompt is answered.
         self._last_login_prompt: Any = None
+        #: The receipt block the last answered APPROVAL appended to the
+        #: transcript, WITH that card's gate identity — retained after it settles
+        #: so an answer that never reached the owner can have its claim taken back
+        #: (see ``_note_gate_reply_undelivered_on_app_loop``). The transcript block
+        #: is the record of the decision, and nothing downstream of the keypress
+        #: can know the post failed, so the correction has to reach back to it.
+        #:
+        #: THE IDENTITY IS PART OF THE SLOT, not decoration (agent review round 3,
+        #: A12 = QA Q5). The reply whose delivery failed is not always the one that
+        #: wrote the retained block — an approval answered with no card at all (the
+        #: allow-all latch, a background approval) writes none — so a slot that
+        #: held "the last receipt" let a later undelivered post remove a DELIVERED
+        #: row belonging to an unrelated gate. Matching the identity the session
+        #: reports is what makes the retraction the right row's.
+        self._last_gate_receipt: tuple[Any, Any] | None = None
+        #: The transcript notices that said a gate reply never reached its owner,
+        #: retained so they can be RETIRED when the link comes back. They are
+        #: present-progressive about a state the app owns ("not connected"), so
+        #: they may not outlive that state: measured still up 45 s later with the
+        #: card back, answerable, and a message sent successfully beneath them (UX
+        #: round 2, U5). A LIST because a second failed answer is a second event
+        #: and gets its own row (design round 2 verified that), while the state
+        #: they all report ends at once. The mechanism is the one
+        #: `_composer_refusal_notice` already uses — a slot plus a retire call from
+        #: the states that end it.
+        #:
+        #: KEYED BY THE SOURCE THAT WROTE THEM (its ``token``), because the state
+        #: they report is ONE session's link: a card coming back on session A is
+        #: no evidence that session B's owner is reachable, and a flat list would
+        #: let A's re-mount retire B's still-true sentence from B's retained view.
+        self._gate_reply_notices: list[tuple[str, Any]] = []
         self._approve_all = False
         #: The phone-facing bridge: registrant (discovery record + control
         #: socket) and the handle adapting this app to it. None until the
@@ -4764,6 +5381,16 @@ class OperatorApp(App[None]):
         #: True while a runtime is being started for a cold viewer; the band
         #: says "starting…" for exactly this interval.
         self._starting_runtime = False
+        #: Each conversation's paint-first attach, keyed by its
+        #: ``SessionInteraction.token`` — the conversation, never the screen
+        #: (see :class:`_AttachBehindAttempt`).
+        self._attach_behind_attempts: dict[str, _AttachBehindAttempt] = {}
+        #: Prompts sent while their viewer was cold, keyed by a per-send marker,
+        #: valued by the ``SessionInteraction.token`` of the conversation they
+        #: were sent from; see :meth:`_push_starting_band`.
+        self._prompts_awaiting_bind: dict[object, str] = {}
+        #: What the band was last told, so a re-push is free.
+        self._starting_shown = False
         self._subagent_focus_restore: Any | None = None
         # The org-chart mode (``/team chart``), a sibling of the subagent view
         # with its own open/close and the same MODE contract: it hides the
@@ -6274,7 +6901,7 @@ class OperatorApp(App[None]):
             # `running`.
             replay.prepare(
                 history,
-                bound=max(12, self.size.height // 2),
+                bound=_viewport_message_budget(self.size.height),
                 anchor_id=source.draft.scroll_anchor_id if not source.draft.following_tail else "",
                 live_call_ids=live_projection_call_ids(session),
             )
@@ -6499,8 +7126,64 @@ class OperatorApp(App[None]):
             source
         ):
             source.gate_draft = None
+        self._reconcile_gate_surface(source)
         if self._sidebar_source_releasable(source) and self.is_running:
             self.run_worker(self._release_sidebar_source(source))
+
+    def _reconcile_gate_surface(self, source: SessionInteraction) -> None:
+        """Re-arm the gate bridge when the visible session owes a card it lacks.
+
+        LEVEL-TRIGGERED, deliberately. Every edge that re-arms the bridge is a
+        navigation event, so a gate whose edge was missed \u2014 or whose only edges
+        were spent while the bridge was detached \u2014 has no further edge coming
+        and stays invisible with its turn blocked. This hook already fires for
+        the current source on the very delta that carries the gate, so it is the
+        one place that can notice \"pending gate, no card\" as a STATE rather than
+        as a transition.
+
+        `_is_current` FIRST: this runs on every frontend delta of every leased
+        source, and the N-1 hidden ones must pay one identity compare and
+        nothing more. A hidden source re-arming here would also break the rule
+        that a late gate from A must never mount while B is displayed.
+
+        `requested_id` excludes a navigation in flight, whose commit does its
+        own re-arm; re-arming underneath it would race the suspend it is about
+        to run.
+
+        `_session_transition_pending` and `_restart_plan` exclude the windows in
+        which `detach_viewer_gates` runs. That call is a DEPARTURE, not a
+        suspension: the session is about to be disposed (`/resume` onto a live
+        owner) or the process is relaunching. A delta that lands inside the
+        detach's await would otherwise read "pending gate, no card" and re-arm a
+        bridge for a conversation that is being torn down. A detach and a
+        suspend set the same `_gates_detached` latch, so the reconcile tells
+        them apart by the window it runs in, not by the latch. (`/reload`, the
+        third caller, retires the source first, and `_source_frontend_changed`
+        never calls this for a retired source.)
+
+        The answered-gate fence (`_gate_answered_key`, G3 in
+        `_maybe_start_gate`) still decides whether an ALREADY ANSWERED question
+        may re-mount \u2014 this raises how often that guard is consulted, it does
+        not weaken it.
+        """
+        if not self._is_current(source):
+            return
+        session = source.session
+        if not _is_viewer(session):
+            return
+        # The narrow accessor, never `frontend_state`: its clone was measured at
+        # ~30 ms of a 135 ms cold frame, and this runs on every delta.
+        if getattr(session, "pending_gate", None) is None:
+            return
+        if (
+            self._sidebar_navigation.requested_id
+            or self._session_transition_pending
+            or self._restart_plan is not None
+        ):
+            return
+        if self._sidebar_gate_card_ready(source, require_paint=False):
+            return
+        session.resume_viewer_gates()
 
     def _restore_gate_draft(self, source: SessionInteraction, card: AskPickerScreen) -> None:
         saved = source.gate_draft
@@ -6618,12 +7301,69 @@ class OperatorApp(App[None]):
                 offset = min(source.draft.scroll_offset, max(0, anchor_region.height - 1))
                 if anchor_region.y + offset != content.y and 0 < view.scroll_y < view.max_scroll_y:
                     return False
+        # A `display_only` frame is a PREVIEW, and a preview owes no gate card.
+        # With no card on screen it is correct as painted, so it is ready. This
+        # cannot wait for a card to arrive. The bridge that mounts one refuses
+        # while the viewer is not ready for events (G1 in `_maybe_start_gate`),
+        # and that is one of the states that latch `display_only` in the first
+        # place. The connect that would end it is `connect_after_paint` in
+        # `_commit_sidebar_session`, which starts only once THIS frame resolves.
+        # So a card-less preview that waited for its card would be waiting on
+        # itself. It would sit out `_await_sidebar_frame`'s 15 s timer and
+        # raise the terminal `SurfaceNotReady` over a frame that was painted
+        # correctly.
+        #
+        # The card still comes back: the escape is here, in the FRAME verdict,
+        # and deliberately not in `_sidebar_gate_card_ready`, which the
+        # level-triggered `_reconcile_gate_surface` also asks. Out there it would
+        # tell the reconcile that a card-less preview is fine, and the re-arm
+        # that brings the card back once the viewer is ready would never run.
+        #
+        # A preview WITH a card mounted runs the same check as a live frame: a
+        # card bound to this source's current gate is ready, and one bound to
+        # anything else (a superseded gate view, another session) is refused.
+        # The `is_cold`/`display_history_current` preconditions stay excluded
+        # for `display_only` (see the guard at the top of this method).
+        if source.display_only and self._ask_screen is None and self._approval is None:
+            return True
+        return self._sidebar_gate_card_ready(source, region)
+
+    def _sidebar_gate_card_ready(
+        self,
+        source: SessionInteraction,
+        region: Callable[[Widget], Any] | None = None,
+        *,
+        require_paint: bool = True,
+        require_mount: bool = True,
+    ) -> bool:
+        """Whether this source's pending gate (if any) is correctly on screen.
+
+        THE ONE SPELLING of "the mounted card belongs to this source's current
+        gate". `_sidebar_gate_surface_ready` asks it of a painted frame and
+        `_source_frontend_changed` asks it of the live widget tree; a second
+        copy of the identity comparison is exactly the class of defect that
+        stranded the gate card in the first place, so both go through here.
+
+        ``region`` reports where a widget was actually painted: the frame check
+        passes the compositor map of the display being judged. A caller that
+        only needs binding identity has no such map and has to say so with
+        ``require_paint=False``. That opt-out is a keyword and not an
+        always-truthy ``region``, so that dropping the paint assertion is
+        visible at the call site. With ``require_paint`` left on and no
+        ``region`` supplied, the check fails closed.
+
+        ``require_mount=False`` is the second, narrower opt-out, for the one
+        caller that decides something ABOUT the mount rather than FROM it: the
+        band's own sentence (see `_gate_card_is_answerable`). `host.mount` is
+        applied by the pump, so a card that was just handed over is composed,
+        bound and answerable while reporting `is_mounted` False — and a band that
+        withheld its sentence until the next pump is a band that keeps telling
+        the user to reselect over a question that is already there.
+        """
         # `pending_gate`, not `frontend_state.pending_gate`: the latter clones
         # the entire state (jobs, usage, trajectories) on every display, which
         # profiling measured as the largest single cost of the cold frame. A
         # reduced facade without the narrow accessor still falls back below.
-        if source.display_only:
-            return self._ask_screen is None and self._approval is None
         session = source.session
         gate = getattr(session, "pending_gate", None)
         if gate is None and not hasattr(session, "pending_gate"):
@@ -6637,8 +7377,8 @@ class OperatorApp(App[None]):
             card is not None
             and card.source_binding
             == (source.token, self._sidebar_gate_identity(source), source.gate_view_generation)
-            and card.is_mounted
-            and region(card) is not None
+            and (not require_mount or card.is_mounted)
+            and (not require_paint or (region is not None and region(card) is not None))
             and not card.disabled
             and not card.settled
         )
@@ -6955,7 +7695,16 @@ class OperatorApp(App[None]):
         if _is_viewer(current):
             if session_id:
                 self._suspend_sidebar_gates(self._interaction)
-            elif not self._interaction.display_only:
+            else:
+                # The SECOND re-arm, reached from `_prepare_and_commit`'s
+                # `finally` (session_navigation.py:184-187) on every settled
+                # navigation — including a failed or superseded one. It is what
+                # heals a detached bridge after a burst of switches, and it was
+                # gated on `not display_only` for the same #808 reason as the
+                # commit site. Re-arming a gate bridge is not a submission (see
+                # `_commit_sidebar_session`), so the latch must not suppress it:
+                # while it did, a `display_only` source lost both of its routes
+                # back at once.
                 current.resume_viewer_gates()
         if session_id:
             self._begin_sidebar_transition()
@@ -7315,6 +8064,7 @@ class OperatorApp(App[None]):
         if not self._sidebar_source_releasable(source, reason=reason):
             return
         source.retired = True
+        self._retire_attach_behind(source)
         if source.unsubscribe_frontend is not None:
             source.unsubscribe_frontend()
             source.unsubscribe_frontend = None
@@ -7805,7 +8555,9 @@ class OperatorApp(App[None]):
                 self._resume_mounted_ids.clear()
                 self._resume_head_notice = None
                 self._resume_tail_notice = None
-                self._project_settled_rows(history, bound=max(12, self.size.height // 2))
+                self._project_settled_rows(
+                    history, bound=_viewport_message_budget(self.size.height)
+                )
             if incoming.needs_live_projection and self._controller is not None:
                 self._controller.restore_live_projection(
                     session.frontend_state, self._resume_mounted_ids, set(self._resume_results)
@@ -7847,9 +8599,34 @@ class OperatorApp(App[None]):
             for text, kind in source.notices:
                 self._system_notice(text, kind)
             source.notices.clear()
+            self._resurface_attach_behind(source)
+            # These two were fused behind `not source.display_only` by
+            # e1f1603c3 (#808). They are not the same kind of act and must not
+            # share a condition. `_submit_boot_prompt` SUBMITS — it starts a
+            # turn — and firing it on a saved preview is what #808 correctly
+            # prevented, so it keeps the guard. `resume_viewer_gates` submits
+            # nothing: it clears the `_gates_detached` latch and re-runs the
+            # `_maybe_start_gate` ladder, which is idempotent (it returns early
+            # when `_gate_task is not None`) and has no answer path.
+            #
+            # AND THE LADDER IS WHERE THE DECISION BELONGS, so this call is
+            # unconditional rather than gated on a second copy of the question
+            # here. A `display_only` source is cold for four different reasons
+            # and only one of them is terminal: a socket blip, a recovery loop
+            # mid-flight and a live owner whose display history is refreshing are
+            # all cold, all lift on their own, and all hold a gate the user must
+            # be able to answer. Leaving the call fused behind the latch meant
+            # those three kept `display_only` latched forever and the ONLY route
+            # back on screen for their pending gate was never taken — the card
+            # was lost permanently (the defect this PR fixes). The fourth reason
+            # — a facade that can never bind — is refused one level down, by the
+            # ladder's G6 on `can_ever_bind`, because a card there could only
+            # take an answer no owner would receive (UX round 1, U1). Splitting
+            # the fuse is what makes that distinction expressible at all; this
+            # line does not have to make it.
             if not source.display_only:
                 self._submit_boot_prompt(session)
-                session.resume_viewer_gates()
+            session.resume_viewer_gates()
             self._session_sidebar.current_id = session_id
             self._session_sidebar.refresh()
             if refreshing and focused_before_refresh is not None:
@@ -7998,8 +8775,23 @@ class OperatorApp(App[None]):
     def _show_sidebar_connection(self, source: SessionInteraction) -> None:
         if not self._is_current(source):
             return
+        # IS THERE AN ANSWERABLE CARD ON SCREEN FOR THIS SOURCE? Asked once, here,
+        # because two of the band's sentences and the undelivered-reply rows all
+        # turn on it: a card the operator can answer is the proof that the link is
+        # back, so the sentence saying it was gone has to end with it (UX round 2,
+        # U5 — measured still up 45 s later with the card re-mounted and a message
+        # sent under it). Retiring on the card (rather than only on the connect's
+        # own exit) is what covers the route those frames took: a re-arm that
+        # never left the session. Each block is removed from its OWN parent, for
+        # `_retire_composer_refusal`'s reason.
+        answerable = self._gate_card_is_answerable(source)
+        if answerable:
+            self._retire_gate_reply_notice(source)
         status = ""
         connecting = False
+        #: Whether the sentence above is an INSTRUCTION rather than a verdict, and
+        #: therefore takes the muted ink instead of `danger` (design round 2, D7).
+        instruction = False
         if source.display_only or source.can_never_bind:
             saved = (
                 "Saved excerpt"
@@ -8033,9 +8825,25 @@ class OperatorApp(App[None]):
                 verdict = self._stopped_session_notice(source)
                 status = f"{saved} · {verdict}" if source.display_only else verdict
             else:
-                status = f"{saved} · Reconnect failed · Select again to retry"
+                # OR THE QUESTION ITSELF IS ALREADY ON SCREEN, in which case
+                # neither sentence above is the useful one: the retry advice
+                # offers a navigation the user does not need (the card came back
+                # on its own, which is this PR's whole subject) and the
+                # stopped-session verdict would deny a question that is right
+                # there and answerable. The band and the card are two surfaces
+                # making one claim about the same session, so the band yields to
+                # the card (design round 1, D1).
+                #
+                # AND THE CARD'S RETURN RETIRES THE OTHER SURFACE'S CLAIM, which
+                # `answerable` above has already done — this branch only names the
+                # sentence that follows from it.
+                if answerable:
+                    instruction = True
+                    status = f"{saved} · Answer the question above"
+                else:
+                    status = f"{saved} · Reconnect failed · Select again to retry"
         if self._status is not None:
-            self._status.update(connection=status)
+            self._status.update(connection=status, connection_muted=instruction)
             # The glyph is what tells the user the app is working rather than
             # wedged; see `StatusLine.set_connecting`.
             self._status.set_connecting(connecting)
@@ -8048,6 +8856,30 @@ class OperatorApp(App[None]):
             editor.placeholder = SHELL_PLACEHOLDER
         else:
             editor.placeholder = "Draft a message…" if status else editor.resting_placeholder
+
+    def _gate_card_is_answerable(self, source: SessionInteraction) -> bool:
+        """Whether an ANSWERABLE card is on screen for ``source``'s live gate.
+
+        The band's question, and not ``_sidebar_gate_card_ready``'s: that
+        predicate answers "the mounted card belongs to this source's current
+        gate" and reports True when there is nothing to present at all (no
+        pending gate, no card), which is the opposite of what a band asking
+        "should I mention a question?" wants. The widget test in front of it is
+        the cheap half of that difference, and the identity comparison is left
+        to the one place that owns it — a second copy is the class of defect
+        that stranded the gate card in the first place.
+
+        ``require_mount=False`` because one of this predicate's callers IS the
+        mount: both card paths ask it in the pump that hands the card over, when
+        the card is bound and answerable but not yet in the tree. The alternative
+        — asking again from a deferred callback — was measured and does not
+        work: `call_after_refresh` fires BEFORE the mount is applied, so the band
+        kept the connect's "Select again to retry" over a question that was on
+        screen, which is the whole of design round 1's D1.
+        """
+        if self._ask_screen is None and self._approval is None:
+            return False
+        return self._sidebar_gate_card_ready(source, require_paint=False, require_mount=False)
 
     def _start_sidebar_connection(
         self, source: SessionInteraction, *, continues_retry: bool = False
@@ -8348,6 +9180,12 @@ class OperatorApp(App[None]):
             # from `_transcript_view()`, because the row was written into the
             # INCOMING session's view and this commit is what made that view
             # current.
+            #
+            # The undelivered-reply rows describe the same state and end with it,
+            # from the same event: a connect that COMPLETED is the proof that the
+            # link is back, which is what makes "not connected" false (UX round 2,
+            # U5).
+            self._retire_gate_reply_notice(source)
             self._retire_composer_refusal()
         except asyncio.CancelledError:
             cancelled = True
@@ -9215,6 +10053,12 @@ class OperatorApp(App[None]):
         # it can show its loading state.
         with Container(id="usage-host"):
             yield UsagePanel()
+        # The goal overlay is on the same layer, mounted once and hidden, for the
+        # same reasons: `/goal` with no argument is a READ of standing state the
+        # user acts on in the same breath, so the card must appear on the
+        # keystroke and must not take a row from the conversation it describes.
+        with Container(id="goal-host"):
+            yield GoalPanel()
         # The aside card, on the same layer and mounted once for the same
         # reasons — with one of its own. `/btw` can be typed while the agent is
         # mid-turn, which is when the question is most likely ("what are you
@@ -9664,6 +10508,15 @@ class OperatorApp(App[None]):
         _watch_refusals = getattr(session, "set_gate_refusal_handler", None)
         if callable(_watch_refusals):
             _watch_refusals(partial(self._note_gate_refusal_on_app_loop, source=source))
+        # The other half of that sentence, for the ordinary case rather than the
+        # refused one: the pane pressed the key, the card resolved, and the
+        # post to the owner did not land. Without this the transcript keeps a
+        # `✓ allowed` claim over a decision nobody received (UX round 1, U1).
+        _watch_undelivered = getattr(session, "set_gate_undelivered_handler", None)
+        if callable(_watch_undelivered):
+            _watch_undelivered(
+                partial(self._note_gate_reply_undelivered_on_app_loop, source=source)
+            )
         if reuse_controller and source.controller is not None:
             self._controller = source.controller
         else:
@@ -9761,6 +10614,44 @@ class OperatorApp(App[None]):
         # The old callback remains queued in Textual, but it carries the retired
         # generation and returns without clearing a newer session's scheduled bit.
         self._frontend_apply_scheduled = False
+        self._frontend_apply_spaced = False
+        self._cancel_frontend_apply_timer()
+        # The SPACING state is retired with them, not kept across the switch. The
+        # cost describes the roster that was just left, and the first paint after
+        # a switch is the cold one whose latency the user actually sees: spacing
+        # it by up to a stale second would delay exactly the frame this app is
+        # judged on. `_band_painted_revision` goes too -- it names the departed
+        # session, and the new session's first paint must establish its own.
+        self._frontend_paint_cost_s = 0.0
+        self._frontend_painted_at = None
+        self._frontend_painted_lifecycle = None
+        self._band_painted_revision = None
+
+    def _cancel_frontend_apply_timer(self) -> None:
+        timer = getattr(self, "_frontend_apply_timer", None)
+        self._frontend_apply_timer = None
+        if timer is not None:
+            timer.stop()
+
+    def _frontend_update_is_urgent(self, session: Any, update: Any) -> bool:
+        """Whether this delta must be painted now rather than on the spaced cadence.
+
+        Anything this cannot classify is urgent, so a caller that hands in no
+        typed update keeps the paint-next-turn behaviour every caller had.
+        """
+        changes = getattr(update, "changes", None)
+        if not isinstance(changes, Mapping):
+            return True
+        if not _URGENT_FRONTEND_FIELDS.isdisjoint(changes):
+            return True
+        if "jobs" in changes:
+            revision = _frontend_revision(session)
+            if revision is None:
+                return True
+            return (session, revision.epoch, revision.lifecycle) != getattr(
+                self, "_frontend_painted_lifecycle", None
+            )
+        return False
 
     def _on_frontend_update(self, update: Any) -> None:
         session = self._session
@@ -9773,10 +10664,50 @@ class OperatorApp(App[None]):
         # child row shells; reading it before the scheduled-bit guard repeated
         # that O(children) work for EVERY update in a coalesced burst.
         self._pending_frontend_session = session
+        urgent = self._frontend_update_is_urgent(session, update)
         if getattr(self, "_frontend_apply_scheduled", False):
+            # Already owed. An urgent delta behind a SPACED paint pulls it
+            # forward: an approval card must not wait out a roster's spacing.
+            if urgent and getattr(self, "_frontend_apply_spaced", False):
+                self._frontend_apply_spaced = False
+                self.call_later(self._pull_frontend_apply_forward, generation)
             return
         self._frontend_apply_scheduled = True
-        self.call_later(self._apply_pending_frontend_state, generation)
+        done_at = getattr(self, "_frontend_painted_at", None)
+        wait = (
+            0.0
+            if urgent or done_at is None
+            else done_at
+            + _frontend_apply_delay(getattr(self, "_frontend_paint_cost_s", 0.0))
+            - time.perf_counter()
+        )
+        if wait <= 0.0:
+            self.call_later(self._apply_pending_frontend_state, generation)
+        else:
+            # ARMED ON THE APP, not here: this callback runs on whatever task
+            # delivered the delta -- the attach client's socket pump on a viewer
+            # -- and a Textual timer created outside the app's context fails at
+            # shutdown (``LookupError: active_app``). ``call_later`` is the one
+            # scheduling call that is safe from anywhere.
+            self._frontend_apply_spaced = True
+            self.call_later(self._arm_frontend_apply_timer, generation, wait)
+
+    def _arm_frontend_apply_timer(self, generation: int, wait: float) -> None:
+        if generation != getattr(self, "_frontend_session_generation", 0):
+            return
+        if not getattr(self, "_frontend_apply_spaced", False):
+            # Pulled forward by an urgent delta before this hop ran.
+            return
+        self._frontend_apply_timer = self.set_timer(
+            wait, partial(self._apply_pending_frontend_state, generation)
+        )
+
+    def _pull_frontend_apply_forward(self, generation: int) -> None:
+        if not getattr(self, "_frontend_apply_scheduled", False):
+            # The spaced paint already fired between the delta and this hop.
+            return
+        self._cancel_frontend_apply_timer()
+        self._apply_pending_frontend_state(generation)
 
     def _apply_pending_frontend_state(self, generation: int) -> None:
         if self._restart_plan is not None:
@@ -9784,8 +10715,26 @@ class OperatorApp(App[None]):
         if generation != getattr(self, "_frontend_session_generation", 0):
             return
         self._frontend_apply_scheduled = False
+        self._frontend_apply_spaced = False
+        self._cancel_frontend_apply_timer()
         session = getattr(self, "_pending_frontend_session", None)
         self._pending_frontend_session = None
+        # Wall, not CPU, as #1528's runtime tick measures it: what the loop could
+        # not do while this ran -- handle a key -- is wall time.
+        started = time.perf_counter()
+        try:
+            self._paint_frontend_session(session)
+        finally:
+            finished = time.perf_counter()
+            self._frontend_paint_cost_s = finished - started
+            self._frontend_painted_at = finished
+
+    def _paint_frontend_session(self, session: Any) -> None:
+        revision = _frontend_revision(session)
+        if revision is not None:
+            # Read BEFORE the paint: a delta landing during it is a later
+            # revision and must still be judged against this one.
+            self._frontend_painted_lifecycle = (session, revision.epoch, revision.lifecycle)
         state = getattr(session, "frontend_state", None) if session is not None else None
         # ONLY on an ordered update, never on the adoption snapshot painted by
         # `_adopt_session`. That snapshot is taken BEFORE the remembered choice
@@ -9952,7 +10901,30 @@ class OperatorApp(App[None]):
             active_seconds=float(getattr(state, "active_duration_s", 0.0) or 0.0),
             activity_started_at=getattr(state, "activity_started_at", None),
         )
-        self._refresh_band()
+        # BEFORE the gate, and deliberately: the live prompt's backstop is the
+        # second caller below, so gating this whole block with the band would
+        # leave a card whose trigger emits nothing to be re-checked only by the
+        # 1 Hz poll -- up to a second of a footer naming keys that no longer
+        # apply (review round 1, F2). It runs twice on a delta that does move the
+        # roster (here and at the tail of `_refresh_band`); that is a no-op the
+        # second time, by that method's own contract.
+        self._repaint_live_prompt_if_stale()
+        # The band is painted from the roster, todos and wakes alone, so a delta
+        # that moved none of them (a token count, a phase, a title) has nothing
+        # to show there -- and on a 252-child roster the band cost 35-50 ms a
+        # pass. Its time-driven and viewport-driven changes have their own
+        # callers (the 1 Hz poll, resize, density), which are not gated.
+        session = self._session
+        revision = _frontend_revision(session)
+        painted = getattr(self, "_band_painted_revision", None)
+        if (
+            revision is None
+            or painted is None
+            or painted[0] is not session
+            or painted[1] != revision
+        ):
+            self._band_painted_revision = (session, revision)
+            self._refresh_band()
 
     def _on_watched_session_stopped(self, source: SessionInteraction | None = None) -> None:
         """A viewer's session was ended deliberately by whoever owns it.
@@ -10055,6 +11027,11 @@ class OperatorApp(App[None]):
         _watch_refusals = getattr(session, "set_gate_refusal_handler", None)
         if callable(_watch_refusals):
             _watch_refusals(partial(self._note_gate_refusal_on_app_loop, source=source))
+        _watch_undelivered = getattr(session, "set_gate_undelivered_handler", None)
+        if callable(_watch_undelivered):
+            _watch_undelivered(
+                partial(self._note_gate_reply_undelivered_on_app_loop, source=source)
+            )
         source.controller = EventController(session, self)
         self._event_sources[source.controller] = source
         source.controller.subscribe()
@@ -10225,6 +11202,148 @@ class OperatorApp(App[None]):
             # No running app (a pilot's shutdown, an embed). The refusal is
             # already logged by the session, which is the fallback channel.
             logger.debug("gate refusal notice could not be scheduled", exc_info=True)
+
+    def _note_gate_reply_undelivered_on_app_loop(
+        self,
+        kind: str,
+        identity: tuple[str, str, int] | None = None,
+        *,
+        source: SessionInteraction | None = None,
+    ) -> None:
+        """Say that an answer the operator gave never reached its session (U1).
+
+        The sibling of ``_note_gate_refusal_on_app_loop``, one fact over, and it
+        exists because the door that finding named is not the only one an answer
+        can leave by: a stop landing under a live card is not a REFUSAL (nothing
+        answered), and the swallow arms in the session treat it as an ordinary
+        race. So the keypress produced a settled card, a receipt and no delivery,
+        which leaves exactly two things to put right here, and both are done in
+        this one place because only the host owns either surface:
+
+        * THE RECEIPT IS LIFTED OFF THE TRANSCRIPT, and only the one THIS reply's
+          gate wrote. ``ApprovalBlock.receipt`` was appended by the keypress, and
+          a `✓ allowed` over a decision that reached no owner is a false record
+          of an authorisation — the strongest "it worked" affordance the
+          transcript has. REMOVED rather than rewritten: the row records a
+          decision that was never taken, so there is no true version of it to
+          paint, and ``TranscriptView.remove_block`` is the established way to
+          take back a block that should not be on screen (``/clear``, the boot
+          hint). The refusal beside this one cannot do the same: it fires while
+          the operator is watching a card do nothing, and the words that explain
+          it have to be the notice's own (see U13 there). An ask writes no
+          receipt, so that half is approval-only by construction.
+
+          ``identity`` is what keeps that removal honest (agent review round 3,
+          A12 = QA Q5): the reply that failed is not always the one that wrote the
+          retained row — an approval answered with NO card (the allow-all latch,
+          a background approval) writes none — so "the last receipt" is not the
+          same fact as "this reply's receipt", and retracting on the kind alone
+          deleted a DELIVERED row belonging to another gate. The slot is matched
+          by identity and never touched on a mismatch.
+
+        * IT SPEAKS ONCE PER EVENT, in a sentence that fits the one-row viewport
+          a card leaves behind. ``_unavailable_notice`` used to supply the tail,
+          but at 60 columns under a mounted card the transcript has a single
+          visible row and that whole sentence wrapped to two, so the only text on
+          screen was its last fragment — ``connected.`` (design round 2, D6).
+          The outcome now leads and the clause survives the truncation, and the
+          runnable next step is not lost with it: the band and the composer's
+          refusal row both name it (``Select again to retry``, or the stopped
+          session's ``/resume``).
+
+        RETIRED WHEN THE LINK IS BACK, by ``_retire_gate_reply_notice`` — the
+        sentence describes a connection state, so it may not outlive it (UX round
+        2, U5).
+
+        ``call_later`` for the same reason as the refusal beside it: the notice
+        is composed inside Textual's active-app context rather than from the
+        socket task that carried the failure.
+        """
+        source = source or self._interaction
+
+        def show() -> None:
+            if not self._is_current(source):
+                return
+            # BEFORE the notice: the correction has to be on the same frame as
+            # the sentence explaining it, or the operator reads a receipt that
+            # says the call was allowed and a line about something else.
+            slot, self._last_gate_receipt = self._last_gate_receipt, None
+            if kind == "approval" and slot is not None and identity is not None:
+                retained, receipt = slot
+                if retained == identity:
+                    try:
+                        # A no-op when the block is not in this view — the row
+                        # belongs to the conversation that raised the gate, and
+                        # the transcript may have been swapped or cleared while
+                        # the reply was in flight.
+                        self._transcript_view().remove_block(receipt)
+                    except Exception:
+                        logger.debug("no transcript to retract the approval from", exc_info=True)
+            self._gate_reply_notices.append(
+                (
+                    source.token,
+                    self._system_notice_block(self._gate_reply_undelivered_text(source), "warning"),
+                )
+            )
+
+        try:
+            self.call_later(show)
+        except RuntimeError:
+            # No running app (a pilot's shutdown, an embed). The session has
+            # already logged the drop, which is the fallback channel.
+            logger.debug("undelivered gate reply notice could not be scheduled", exc_info=True)
+
+    def _gate_reply_undelivered_text(self, source: SessionInteraction) -> str:
+        """The one-row sentence for an answer that never reached its owner.
+
+        Two arms, and the discrimination is `_unavailable_notice`'s — the app's
+        single reading of "this session cannot take what you gave it and none is
+        coming" (a verdict that HAS no retry behind it). Only the tail differs,
+        deliberately: a sentence that wraps out of a one-row viewport says
+        nothing at all (design round 2, D6), and the remedy each arm would have
+        named is already on screen in the band directly below and in the
+        composer's refusal row.
+        """
+        if source.connection_error and source.can_never_bind:
+            return "Answer not delivered — this session was stopped."
+        return "Answer not delivered — not connected."
+
+    def _retire_gate_reply_notice(self, source: SessionInteraction) -> None:
+        """Take the undelivered-reply rows down once the link is back (U5).
+
+        "Send unavailable until connected" is present-progressive about a state
+        the app OWNS, so it may not outlive that state the way a chat message
+        can: UX round 2 measured it still on screen at t=33 s with the card back
+        and answerable, at t=37.6 s after a message had been accepted and sent
+        (so Send was demonstrably available), and idle at t=44.9 s. The states
+        that end it are the two this is called from — the gate becoming
+        answerable again, which the band already reads as
+        `_gate_card_is_answerable`, and a sidebar connect that COMPLETED (the
+        same pair of ends `_retire_composer_refusal` fires from, for the same
+        reason).
+
+        EVERY row this channel wrote goes, not just the newest: a second failed
+        answer is worth a second row while the state lasts, but the state is one
+        fact and all of the rows asserting it are false together once it ends.
+        Retired from each block's OWN parent, for `_retire_composer_refusal`'s
+        reason — the row was written into the view that was current when it was
+        composed, and a later switch makes that view a different widget.
+
+        ONLY ``source``'s rows: the link that came back is that session's, so
+        another session's undelivered sentence is still true and stays. Nothing
+        but ``_note_gate_reply_undelivered_on_app_loop`` writes to this slot, so
+        no other notice — a refusal, a composer row, a chat line — can be taken
+        down from here.
+        """
+        kept: list[tuple[str, Any]] = []
+        for token, notice in self._gate_reply_notices:
+            if token != source.token:
+                kept.append((token, notice))
+                continue
+            parent = notice.parent
+            if isinstance(parent, TranscriptView):
+                parent.remove_block(notice)
+        self._gate_reply_notices = kept
 
     async def _request_user_choice_on_app_loop(
         self, questions: list[AskQuestion], *, source: SessionInteraction | None = None
@@ -10413,6 +11532,28 @@ class OperatorApp(App[None]):
         self._adopt_session(session)
         self._report_degraded_attach(session)
         self._submit_boot_prompt(session)
+        # TRIGGER 3, on the other owning host: a goal whose continuation was in
+        # flight when this terminal closed is re-engaged ONCE, here, where the
+        # restored record is readable and the session is current.
+        #
+        # Why this host needed its own wiring rather than inheriting the
+        # runtime's: `GoalJudge.rearm_on_resume` was called from exactly one
+        # place (`ServingSessionHandle.rearm_goal_judge`, wired once per boot in
+        # `server.py`), and the TUI builds its own driver whose ONLY caller was
+        # the turn-end hook. So a local session killed mid-continuation reopened
+        # with the goal reading `active` and the judge reading `continuing` and
+        # nothing to re-engage it until the user happened to type — the
+        # "silently sitting inert" case, in exactly the app-reopened shape the
+        # operator named (agent review round 1, MAJOR-1; reproduced: `judge_calls
+        # after boot = 0`, no prompt admitted).
+        #
+        # Once per BOOT and not per adoption: a sidebar switch re-adopts, and the
+        # record's state has moved on by then in every settled case — this is the
+        # restart prologue the runtime runs, not a rule about focus. The driver's
+        # own guard (RULINGS R3) refuses anything but `continuing`/`judging`, and
+        # its in-flight claim refuses a second run, so a re-arm that lands on a
+        # goal nothing was spending on is a no-op by construction.
+        self._rearm_goal_judge_on_boot(session)
         # Bring the runtime up NOW rather than on the first keystroke. A cold
         # viewer can only paint what it reads off disk — the cwd and the
         # configured model name — so the band opened without the MCP roster,
@@ -10896,17 +12037,155 @@ class OperatorApp(App[None]):
         # Re-armed with the rest of the resume state: a new conversation's
         # first arrival at the top owes a page (see `_resume_in_zone`).
         self._resume_in_zone = False
-        self._project_settled_rows(history, bound=RESUME_RENDER_MESSAGES)
-        # A message budget is a PROXY for height, and a poor one. Whether the
-        # first frame can be scrolled is a question about ROWS, and only the
-        # laid-out widgets can answer it — so ask them, once the mount has
-        # settled, and top up if the answer is "no".
+        # VIEWPORT FIRST, THEN THE REST OF THE SAME WINDOW (B-F3). The 80-message
+        # frame is ~85 blocks, and building + mounting them before the first
+        # paint was the whole of a 0.6-1.3 s open: measured on the real app over
+        # a 2,000-message session, render CPU 93-147 ms at 80 messages against
+        # 34 ms at 20, first paint 386-478 ms against 91-133 ms. So the first
+        # paint carries only what one screen shows, and the remainder of the
+        # window mounts as ONE page after that paint.
         #
-        # Marked active BEFORE the first attempt is scheduled, not inside it:
-        # the frames between this mount and that callback are the earliest
-        # ones a reader sees, and they are exactly as provisional as the ones
-        # between attempts.
-        self._start_resume_fill()
+        # Both cuts come from the SAME snapping rule (`_resume_tail_start`), and
+        # the remainder is exactly `history[full_cut:first_cut]`, so once it has
+        # mounted the transcript holds the identical block list, the identical
+        # `_resume_pending_head`, and the identical head notice the one-shot
+        # projection produced — and the ordinary fill then runs from the state it
+        # always ran from. That identity is what makes the settled frame the
+        # frame main paints, rather than a lookalike built by a second rule.
+        #
+        # `_viewport_message_budget` is the budget the sidebar's prepared window
+        # already uses for the same question ("enough messages for one
+        # screen"). The split is skipped when it would not paint less than the
+        # full window — a short conversation, or a terminal tall enough that one
+        # screen IS the window.
+        full_cut = (
+            _resume_tail_start(history, RESUME_RENDER_MESSAGES)
+            if len(history) > RESUME_RENDER_MESSAGES
+            else 0
+        )
+        screenful = _viewport_message_budget(self.size.height)
+        first_cut = _resume_tail_start(history, screenful) if len(history) > screenful else 0
+        if first_cut <= full_cut:
+            self._project_settled_rows(history, bound=RESUME_RENDER_MESSAGES)
+            # A message budget is a PROXY for height, and a poor one. Whether the
+            # first frame can be scrolled is a question about ROWS, and only the
+            # laid-out widgets can answer it — so ask them, once the mount has
+            # settled, and top up if the answer is "no".
+            #
+            # Marked active BEFORE the first attempt is scheduled, not inside it:
+            # the frames between this mount and that callback are the earliest
+            # ones a reader sees, and they are exactly as provisional as the ones
+            # between attempts.
+            self._start_resume_fill()
+            return
+        # The rows the backfill will add must not widen the ledger's shared name
+        # column AFTER the first paint (see `TranscriptView.reserve_name_col`).
+        # Every call in the window counts, painted or not: a reserve wider than
+        # the rows need can only come from a name the finished frame shows.
+        view = self._transcript_view()
+        view.reserve_name_col(
+            str(getattr(call, "name", "") or "")
+            for message in history[full_cut:first_cut]
+            for call in (getattr(message, "tool_calls", None) or ())
+        )
+        # Held until the backfill settles, so no layout pass between the first
+        # paint and the finished window puts a following reader off the tail
+        # (`TranscriptView.hold_tail_through_layout`).
+        view.hold_tail_through_layout(True)
+        self._project_settled_rows(history, start=first_cut)
+        self._backfill_resume_window(first_cut - full_cut, drop_notice=full_cut == 0)
+
+    def _backfill_resume_window(self, count: int, *, drop_notice: bool) -> None:
+        """Mount the newest ``count`` held messages as one page, after the paint.
+
+        The second half of the viewport-first resume (see
+        :meth:`_render_resumed_history`). The page goes through
+        :meth:`_mount_older_resume_page` — the one seam that inserts older rows
+        beneath the head notice with the anchor held — so the reader following
+        the tail stays on the tail across the insert, exactly as they do when
+        the ordinary fill mounts a page.
+
+        THE PAGING LEASE IS TAKEN NOW, before the paint, and handed to that
+        mount. Between this call and the page landing, a wheel notch or a click
+        on the head notice would otherwise page the held head by
+        :data:`RESUME_PAGE_MESSAGES` cuts, and the window would end on different
+        boundaries than the one-shot frame — still correct, but no longer the
+        same frame. With the lease held those gestures stand down against
+        ``_resume_paging`` for the one refresh this waits, and the head notice
+        reads its loading copy rather than an instruction nobody can carry out.
+
+        ``drop_notice`` is the case where the one-shot frame had NO head notice
+        (the whole conversation fit in :data:`RESUME_RENDER_MESSAGES`): the
+        first paint needed one because it held messages back, and once they
+        are mounted there is nothing above them to announce. Removing the row
+        — rather than letting it restate itself as "start of conversation" — is
+        what keeps that frame identical to main's.
+
+        Fenced to this exact source and view: a switch or a re-render between
+        the paint and the callback owns the transcript now, and the lease this
+        took is released rather than stranded.
+        """
+        view = self._transcript_view()
+        source = self._interaction
+        lease = self._acquire_paging_lease(source)
+        if lease is None:
+            # Unreachable today (`_render_resumed_history` pops this source's
+            # lease first); degrade to the ordinary fill rather than mounting
+            # a page against a gate someone else holds.
+            self._start_resume_fill()
+            return
+        self._resume_fill_active = True
+
+        def settled() -> None:
+            view.release_name_col_reserve()
+            if drop_notice and not self._resume_pending_head:
+                notice = self._resume_head_notice
+                if notice is not None:
+                    self._resume_head_notice = None
+                    view.remove_block(notice)
+            # Released only after the layout the removal above causes: that
+            # removal SHRINKS the extent by the notice's rows, and without the
+            # hold its first frame paints two rows off the tail (measured on
+            # the 50-message fixture). The hold is cleared on the refresh after.
+            if not view.call_after_refresh(view.hold_tail_through_layout, False):
+                view.hold_tail_through_layout(False)
+            # Handed back BEFORE the ordinary fill starts, which re-raises it:
+            # the flag is `_start_resume_fill`'s to own from here, and leaving
+            # it set would claim a fill in flight on any path where that start
+            # declines to run one.
+            self._resume_fill_active = False
+            self._start_resume_fill()
+
+        def mount() -> None:
+            if (
+                not self._is_current(source)
+                or self._transcript is not view
+                or self._paging_leases.get(source.token) is not lease
+            ):
+                self._release_paging_lease(lease)
+                view.release_name_col_reserve()
+                view.hold_tail_through_layout(False)
+                return
+            try:
+                self._mount_older_resume_page(
+                    on_settled=settled,
+                    lease=lease,
+                    start=max(0, len(self._resume_pending_head) - count),
+                )
+            except BaseException:
+                # The mount has already restored the head and released the
+                # lease (it re-raises by design); only this caller's two holds
+                # are left to drop, or the tail hold would outlive the resume.
+                view.release_name_col_reserve()
+                view.hold_tail_through_layout(False)
+                raise
+
+        # AFTER the refresh, which is the paint: `call_after_refresh` runs once
+        # the screen has composited the frame this projection produced. A pump
+        # that refuses the post (closing) will not paint either, so the page is
+        # mounted inline and the frame simply arrives whole.
+        if not view.call_after_refresh(mount):
+            mount()
 
     def _prefill_resume_before_reveal(self) -> None:
         """Fill the incoming projection to its goal INSIDE the commit.
@@ -11602,7 +12881,9 @@ class OperatorApp(App[None]):
                     # when the turn dies instead of returning a result.
                     live_cards[block.tool_call_id] = block
 
-    def _project_settled_rows(self, history: list[Any], *, bound: int | None = None) -> bool:
+    def _project_settled_rows(
+        self, history: list[Any], *, bound: int | None = None, start: int | None = None
+    ) -> bool:
         from local_operator.tui.session_presentation import project_settled_rows
 
         session = self._session
@@ -11682,7 +12963,9 @@ class OperatorApp(App[None]):
             # `_stop_multiplexer_broadcast` instead. A line number in a comment
             # survives only until the next edit above it.
             fold_width = self._transcript_view().scrollable_content_region.width
-            projected = project_settled_rows(self, history, bound=bound, fold_width=fold_width)
+            projected = project_settled_rows(
+                self, history, bound=bound, start=start, fold_width=fold_width
+            )
             # The visible transcript, so the app's own registry is the right
             # owner: a row this repaints live is one `_retire_live_tool_cards`
             # must be able to settle when the turn dies.
@@ -11880,7 +13163,9 @@ class OperatorApp(App[None]):
             # Live output (or an earlier End) already supplies the true tail.
             # The middle gap stays reachable without moving it after that tail.
             return
-        start = _resume_tail_start(self._resume_pending_tail, max(12, self.size.height // 2))
+        start = _resume_tail_start(
+            self._resume_pending_tail, _viewport_message_budget(self.size.height)
+        )
         page, self._resume_pending_tail = (
             self._resume_pending_tail[start:],
             self._resume_pending_tail[:start],
@@ -11912,7 +13197,7 @@ class OperatorApp(App[None]):
             view.restore_navigation_anchor(
                 anchor.navigation_anchor_id, anchor.navigation_anchor_part, top - anchor.region.y
             )
-        count = min(len(self._resume_pending_tail), max(12, self.size.height // 2))
+        count = min(len(self._resume_pending_tail), _viewport_message_budget(self.size.height))
         page, self._resume_pending_tail = (
             self._resume_pending_tail[:count],
             self._resume_pending_tail[count:],
@@ -12408,7 +13693,11 @@ class OperatorApp(App[None]):
             self._fill_resume_until_scrollable(target=view.scroll_y + viewport)
 
     def _mount_older_resume_page(
-        self, on_settled: Callable[[], None] | None = None, *, lease: _PagingLease | None = None
+        self,
+        on_settled: Callable[[], None] | None = None,
+        *,
+        lease: _PagingLease | None = None,
+        start: int | None = None,
     ) -> None:
         """Mount the next older page of a bounded resume, at the top.
 
@@ -12457,7 +13746,11 @@ class OperatorApp(App[None]):
         # a tool result whose call is still in the remaining head would
         # paint a reply with no question at the top of the newly revealed
         # history.
-        start = _resume_tail_start(head, RESUME_PAGE_MESSAGES)
+        # ``start`` is a cut the CALLER already snapped: the viewport-first
+        # resume's backfill mounts the rest of the initial window at the exact
+        # boundary the one-shot frame would have used (`_backfill_resume_window`).
+        if start is None:
+            start = _resume_tail_start(head, RESUME_PAGE_MESSAGES)
         page, self._resume_pending_head = head[start:], head[:start]
         # Dedupe by stable ID, never by position: the tail was sliced off
         # the same list, so an overlap should be impossible — but a message
@@ -12918,6 +14211,7 @@ class OperatorApp(App[None]):
         # never calls this path and therefore never retires its loops.
         navigation_generation = self._sidebar_navigation.generation
         self._interaction.retired = True
+        self._retire_attach_behind(self._interaction)
         previous_id = self._conversation_id()
         previous_len = self._history_length()
         preserve_outgoing = preserve_outgoing or (
@@ -14724,6 +16018,7 @@ class OperatorApp(App[None]):
 
         attempt = 0
         remote: Any = None
+        attach_behind = False
         # TAKEN ONCE, AND CHARGED FOR EVERYTHING THE LOOP SPENDS. Each attempt's
         # own duration comes off this deadline as it is spent and each backoff
         # is clamped to what is left, so a silent owner cannot buy more dials by
@@ -14816,6 +16111,48 @@ class OperatorApp(App[None]):
                             "warning",
                         )
                         return
+                    if (
+                        record is not None
+                        and frontend_attach_refusal(record) is None
+                        and (config_root / "sessions" / concrete / "transcript.jsonl").is_file()
+                    ):
+                        # PAINT FIRST, ATTACH BEHIND. A blocking `connect` held
+                        # the screen for the owner's whole canonical sync —
+                        # 15 s and then a refusal against a busy owner, and
+                        # every redial another 15 s — before a single row was
+                        # drawn. The conversation is on disk, so the cold
+                        # facade paints it now, and the eager engage after the
+                        # adopt binds it to this same owner behind the paint:
+                        # the band says `starting…` meanwhile, the composer
+                        # stays usable (a prompt takes the foreground bind and
+                        # the background one yields to it), and
+                        # `AttachedSession._replay_cold_gap` paints whatever
+                        # the owner wrote after the read. A cold open that
+                        # fails falls through to the dial below unchanged.
+                        #
+                        # FIRST ATTEMPT ONLY, and only with a transcript and a
+                        # dialable record: a paint-first open with nothing to
+                        # paint buys nothing (an owner that defers its journal
+                        # until the first write keeps the dial), a static
+                        # refusal keeps its own sentence below, and a redial
+                        # already under way keeps the loop it was narrating.
+                        try:
+                            remote = await AttachedSession.cold(
+                                concrete,
+                                config_dir=config_root,
+                                cwd=str(record.cwd or os.getcwd()),
+                                takeover_factory=takeover_factory,
+                            )
+                            # Read by the engage that binds behind this paint,
+                            # so the wait is narrated and bounded on the redial's
+                            # own schedule (`_AttachBehindAttempt`) rather than
+                            # left as a bare `starting…` (UX round 1, U1).
+                            remote.attach_behind = True
+                            attach_behind = True
+                            settled = True
+                            break
+                        except Exception:  # noqa: BLE001 — the dial is the fallback
+                            logger.debug("paint-first resume unavailable", exc_info=True)
                 if record is None:
                     # An owner that is not there THIS MOMENT: paced and retried,
                     # never reported (see the first-attempt block above).
@@ -14949,6 +16286,11 @@ class OperatorApp(App[None]):
         try:
             self._reset_ledger_for_swap()
             self._adopt_session(remote)
+            if attach_behind:
+                # The bind behind the paint: the same engage a cold boot runs,
+                # which finds this owner's record and attaches to it rather
+                # than starting anything (see the paint-first branch above).
+                self._engage_runtime_eagerly()
             await self._preflight_usage(remote)
         finally:
             self._swapping_session = False
@@ -18879,8 +20221,18 @@ class OperatorApp(App[None]):
         # "whose" survive a re-bind of the SAME conversation.
         binding_token = (self._binding_epoch, str(getattr(session, "session_id", "") or ""))
         self._set_starting(True)
+        # Captured with the binding: the conversation this engage carries the
+        # attach FOR. Its failure and its bind report to that attempt whatever
+        # is on screen by the time they land.
+        attempt = self._attach_behind_attempt_for(self._interaction, session)
+        if attempt is not None:
+            attempt.join()
 
         async def run() -> None:
+            # This carrier reports to its attempt exactly once: the failure arm
+            # below, or the `finally` (bound, or cancelled by a swap).
+            reported = False
+            cancelled = False
             try:
                 # BACKGROUND envelope. Nobody is waiting on this engage and it
                 # is silent on failure, so it can afford to outlast an owner
@@ -18888,6 +20240,9 @@ class OperatorApp(App[None]):
                 # condition that used to leave the session cold and make the
                 # user's first command pay for a fresh bind.
                 await cast(Callable[..., Awaitable[None]], ensure)(foreground=False)
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
             except Exception as error:  # noqa: BLE001 — the real prompt reports the failure
                 # A speculative warm-up that fails must stay silent WHILE the
                 # failure is too quick to have been watched: the user has not
@@ -18906,6 +20261,15 @@ class OperatorApp(App[None]):
                 # Same reason as the skip above: nothing bound, so there is no
                 # change to name and the pending stamp must not outlive it.
                 self._refreshed_from = None
+                # A paint-first attach that has already told the user something
+                # restates THAT row with its verdict rather than adding a second
+                # sentence under it (UX round 1, U2/U3) — and says nothing at all
+                # while a message is still carrying the attach (round 2, U6).
+                if attempt is not None:
+                    reported = True
+                    if attempt.carrier_failed():
+                        self._start_engage_reported_for = binding_token
+                        return
                 self._report_start_engage_failure(
                     reason=reason,
                     error=error,
@@ -18915,6 +20279,16 @@ class OperatorApp(App[None]):
                 return
             finally:
                 self._set_starting(False)
+                if attempt is not None and not reported:
+                    # Bound, or cancelled by a swap. A cancelled carrier is not a
+                    # failure of the attach: it steps off, and the engage a switch
+                    # back starts re-joins the same attempt on its schedule.
+                    if not getattr(session, "is_cold", True):
+                        attempt.landed()
+                    elif cancelled:
+                        attempt.carrier_left()
+                    else:
+                        attempt.carrier_failed()
             # AFTER a successful bind, which is the only moment the OWNER's
             # build is knowable: the pre-spawn check above runs while the
             # facade is still cold, so its C branch always returns at the
@@ -18944,6 +20318,95 @@ class OperatorApp(App[None]):
                 self._settle_handed_over_queues(interaction)
 
         self.run_worker(run(), group="warm-engage", exclusive=False)
+
+    def _attach_behind_attempt_for(
+        self, source: SessionInteraction, session: Any
+    ) -> "_AttachBehindAttempt | None":
+        """The paint-first attach attempt of ``source``'s conversation (UX round 1, U1).
+
+        Only for a viewer opened cold IN FRONT OF a live owner
+        (``session.attach_behind``) and still cold: an ordinary cold open waits
+        on nothing that exists yet. A paint-first attach waits on an owner that
+        DOES exist, and the engage carrying it is silent until it fails, so the
+        attempt posts the redial's own row on the redial's own schedule —
+        narrated at :data:`ATTACH_BEHIND_NARRATE_S`, judged "not answering" at
+        :data:`ATTACH_BEHIND_BOUND_S`, removed or restated when a carrier binds.
+
+        REUSED for as long as the conversation holds the same facade, so a
+        second carrier — a message, or the engage a switch back starts — joins
+        the attempt already running and keeps its schedule and its one row
+        (UX round 3, U12). A new facade (a reload, a fresh `/resume`) is a new
+        attach and gets a new attempt.
+        """
+        if source is None or not getattr(session, "attach_behind", False):
+            return None
+        attempt = self._attach_behind_attempts.get(source.token)
+        if attempt is not None and attempt.session is session and not source.retired:
+            return attempt
+        if attempt is not None:
+            attempt.close()
+        if not getattr(session, "is_cold", False):
+            return None
+        attempt = _AttachBehindAttempt(self, source, session)
+        self._attach_behind_attempts[source.token] = attempt
+        return attempt
+
+    def _resurface_attach_behind(self, source: SessionInteraction) -> None:
+        """A conversation came back in front: repaint its attach row if it has none.
+
+        Read from the SOURCE, not from the attempt table: the attempt may be long
+        over (a carrier bound it) while its row is still owed (review round 4,
+        F-1 / U14).
+        """
+        self._settle_attach_behind(source)
+        account = source.attach_behind_account
+        if isinstance(account, _AttachBehindAccount):
+            account.resurface()
+        self._push_starting_band()
+
+    def _settle_attach_behind(self, source: SessionInteraction) -> None:
+        """Settle ``source``'s account when its facade is bound, whoever bound it.
+
+        The attempt's carriers report their own binds (``landed``); this is for
+        the binds that are NOT carriers — the sidebar's connect worker, which
+        binds through ``bind_runtime`` and re-commits the conversation (so this
+        runs from the adopt, via ``_resurface_attach_behind``), and a message
+        delivered over a facade that was already bound, which is never an
+        ``_AttachBehindSend`` (UX round 5, U15 and its item 4; QA round 5, Q-1).
+        Keyed on the SOURCE's own facade, never the one on screen.
+        """
+        account = source.attach_behind_account
+        session = source.session
+        if not isinstance(account, _AttachBehindAccount) or session is None:
+            return
+        if getattr(session, "is_cold", True):
+            return
+        attempt = self._attach_behind_attempts.get(source.token)
+        if attempt is not None:
+            # Ends the schedule too, so no timer judges an owner that answered.
+            attempt.landed()
+            attempt.close()
+        account = source.attach_behind_account
+        if isinstance(account, _AttachBehindAccount):
+            account.settle()
+        self._push_starting_band()
+
+    def _retire_attach_behind(self, source: SessionInteraction) -> None:
+        """The conversation is gone: drop its attempt and its account (review round 4, m-1).
+
+        Without this a judged or returned attempt — timers stopped, never
+        revisited — kept its ``SessionInteraction``, facade and detached row in
+        ``_attach_behind_attempts`` for the life of the app.
+        """
+        attempt = self._attach_behind_attempts.get(source.token)
+        if attempt is not None:
+            attempt.close()
+        account = source.attach_behind_account
+        if isinstance(account, _AttachBehindAccount):
+            # Taken down, not just forgotten: dropping the reference left the
+            # row painted with nothing left to remove it (QA round 5, Q-2).
+            account.retire()
+        source.attach_behind_account = None
 
     def _report_start_engage_failure(
         self, *, reason: str, error: Exception, elapsed: float, binding_token: tuple[int, str]
@@ -19052,9 +20515,9 @@ class OperatorApp(App[None]):
             # ``HEARTBEAT_TIMEOUT_S``. "not answering" is the honest register
             # for it, and it is the one verb that stays true of the no-record
             # ceiling too.
-            body = "the runtime is not answering yet — send a message to retry"
+            body = "the session is not answering yet — send a message to retry"
         else:
-            body = "no runtime yet — it may still be starting; send a message to retry"
+            body = "the session may still be starting — send a message to retry"
         self._start_engage_reported_for = binding_token
         # INFO, not DEBUG: this line is the one record that the user was told
         # something, and the two ceilings it covers are exactly what an operator
@@ -19401,13 +20864,41 @@ class OperatorApp(App[None]):
         engage runs at mount, and again on the first keystroke after a failed
         one), and a band that said nothing would read as half-loaded.
         """
-        if self._starting_runtime == starting:
-            return
         self._starting_runtime = starting
+        self._push_starting_band()
+
+    def _push_starting_band(self) -> None:
+        """Show ``starting…`` while the engage runs OR a prompt waits on the bind.
+
+        Two sources, one cue (UX round 1, U4). The engage alone ended it too
+        early: the moment a prompt is accepted the background engage SURRENDERS
+        its place to the prompt's foreground bind (``_BACKGROUND_YIELD_BUDGET_S``)
+        and clears its flag, and the band read ``working`` for the whole frozen
+        window while nothing had reached the owner — the not-attached cue gone at
+        exactly the moment the user acted on it. A prompt dispatched against a
+        cold viewer therefore holds the cue until its own send returns, which is
+        the bind landing (or the send failing and reporting itself).
+
+        Counted per BINDING, so a prompt left in flight by a swap cannot hold
+        the cue up over the conversation that replaced it.
+        """
+        source = self._interaction
+        attempt = self._attach_behind_attempts.get(source.token) if source else None
+        if attempt is not None and attempt.silences_cue:
+            # THIS conversation's attach ended in an outcome its row states; an
+            # optimistic `starting…` beside it would contradict it.
+            shown = False
+        else:
+            shown = self._starting_runtime or (
+                source is not None and source.token in self._prompts_awaiting_bind.values()
+            )
+        if shown == self._starting_shown:
+            return
+        self._starting_shown = shown
         if self._status is not None:
             setter = getattr(self._status, "set_starting", None)
             if callable(setter):
-                setter(starting)
+                setter(shown)
         self._refresh_band()
 
     def on_editor_draft_started(self, message: EditorDraftStarted) -> None:
@@ -21284,6 +22775,9 @@ class OperatorApp(App[None]):
         # transcript block that changes after later blocks were appended is the
         # one thing the transcript's finalize discipline forbids.
         self._mount_prompt(prompt)
+        # Same rewrite as the ask card's mount: the band must not offer a retry
+        # while the question it is about is answerable above it (D1).
+        self._show_sidebar_connection(source)
         self._notify_mobile_approval_pending(prompt)
         # The turn is now parked on the user, and the working line says so —
         # this is the one wait in a turn that the agent is not responsible for.
@@ -21303,6 +22797,16 @@ class OperatorApp(App[None]):
             self._unmount_prompt(prompt)
             if self._is_current(source):
                 self._notify_mobile_approval_settled(prompt)
+                # THE BAND SAID WHICH SENTENCE THE CARD OWED; the card is gone
+                # now, so it has to be asked again. Without this the band kept
+                # `Saved · Answer the question above` over an empty dock for as
+                # long as the operator looked at it — measured at +20 s, with
+                # nothing above it to answer, while the composer's own verdict
+                # said `Send unavailable until connected` (design round 2, D5 =
+                # QA Q6). Re-evaluated through the same predicate the band uses,
+                # so it falls back to the card-less sentence on every route out
+                # of the gate: answered, skipped, cancelled or unmounted.
+                self._show_sidebar_connection(source)
             # The decision belongs in the conversation: what was asked, and what
             # was answered. Appended after the fact so the transcript records a
             # settled fact rather than a question it would then have to revise.
@@ -21315,9 +22819,21 @@ class OperatorApp(App[None]):
             # of the approval gate and fail the tool call itself.
             if self._is_current(source) and prompt.answered:
                 try:
-                    self._append_block(
-                        ApprovalBlock.receipt(tool_name, description, prompt.answer or "n")
-                    )
+                    block = ApprovalBlock.receipt(tool_name, description, prompt.answer or "n")
+                    self._append_block(block)
+                    # RETAINED AFTER IT SETTLES, WITH THE GATE IT SPEAKS FOR. An
+                    # approval receipt is appended on the KEYPRESS, and whether
+                    # the answer reached the owner is only known one await later;
+                    # `mark_undelivered` is the way back to this row when it did
+                    # not. The identity is stored in the shape the SESSION reports
+                    # it (`set_gate_undelivered_handler`), which is this app's own
+                    # key one element in: `_sidebar_gate_identity` prefixes the
+                    # epoch, and the rest IS `(kind, request_id, question_index)`
+                    # — the tuple the viewer ladder keys bridges on. Matching that
+                    # is what keeps a later undelivered post from retracting an
+                    # unrelated, delivered row (agent review round 3, A12).
+                    identity = None if gate_key is None else tuple(gate_key[1:])
+                    self._last_gate_receipt = (identity, block)
                 except Exception:  # pragma: no cover - teardown races only
                     logger.debug("no transcript to record the approval in", exc_info=True)
             if self._approval is prompt:
@@ -21406,6 +22922,12 @@ class OperatorApp(App[None]):
         self._ask_screen = card
         self._ask_pending = future
         self._mount_prompt(card)
+        # The band may still be carrying the connect's own sentence — "Select
+        # again to retry" over a question that is now on screen. Rewritten here,
+        # the moment that becomes false, rather than left to the connect's next
+        # tick, which may already be its last (design round 1, D1). A no-op when
+        # this source is not the one in front.
+        self._show_sidebar_connection(source)
         # Project the question to the phone as an ANSWERABLE card. Guarded and
         # best-effort, exactly like _mobile_adopted/_mobile_teardown: a phone
         # bridge that is absent or throwing must never break the terminal ask.
@@ -21443,6 +22965,10 @@ class OperatorApp(App[None]):
             # a later ask already mounted.
             if self._is_current(source):
                 self._notify_mobile_ask_settled(card)
+                # The approval settle's twin, for the ask card: the band stops
+                # offering "Answer the question above" the moment there is no
+                # question above (design round 2, D5 = QA Q6).
+                self._show_sidebar_connection(source)
                 self._refresh_working_activity()
 
     def _notify_mobile_ask_pending(self, card: AskPickerScreen) -> None:
@@ -25465,6 +26991,22 @@ class OperatorApp(App[None]):
         # subject. Reload still cancels: see `_cancel_naming_attempt`.
         if self._is_current(source):
             self._status.update(streaming=True)
+        # NOT YET ATTACHED: the send below binds first, and until it returns the
+        # band keeps saying so rather than `working` (UX round 1, U4).
+        awaiting_bind: object | None = None
+        attach_send: _AttachBehindSend | None = None
+        if self._is_current(source) and getattr(session, "is_cold", False):
+            awaiting_bind = object()
+            self._prompts_awaiting_bind[awaiting_bind] = source.token
+            # EVERYTHING the return path needs, captured NOW: which attempt,
+            # which rows, which view holds them. Nothing later may re-derive
+            # them from the screen (UX round 3, U10/U11).
+            attempt = self._attach_behind_attempt_for(source, session)
+            if attempt is not None:
+                attach_send = _AttachBehindSend(
+                    attempt, source.turn.submitted_blocks, self._transcript_view()
+                )
+            self._push_starting_band()
 
         source.active_workers += 1
 
@@ -25474,6 +27016,18 @@ class OperatorApp(App[None]):
             try:
                 async with source.turn.provider_lock:
                     receipt = await session.prompt(text, images, **echo.prompt_kwargs())
+                # A prompt that went through is a BIND that landed, so a
+                # paint-first verdict still claiming the owner is not answering
+                # is now false (UX round 1, U3).
+                if attach_send is not None:
+                    attach_send.landed()
+                # DELIVERED, so the owner answered whether or not this send was
+                # a carrier: a "did not answer — send it again" row must not
+                # stand above the message it asked for (UX round 5, item 4).
+                self._settle_attach_behind(source)
+                if awaiting_bind is not None:
+                    self._prompts_awaiting_bind.pop(awaiting_bind, None)
+                    self._push_starting_band()
                 # DELIVERED — so if the transport had to shrink an attachment to
                 # get it here, this is the moment the user can be told. See
                 # `_report_wire_refit_for`.
@@ -25632,6 +27186,45 @@ class OperatorApp(App[None]):
                     # a live owner, and each append made the screen longer
                     # without making it truer (QA round 2, U6).
                     self._notice_unsent_runtime(source)
+                elif (
+                    attach_send is not None
+                    and getattr(session, "is_cold", False)
+                    and isinstance(error, (ConnectionError, TimeoutError))
+                    and not getattr(error, "actionable", False)
+                ):
+                    # SENT DURING A PAINT-FIRST ATTACH, AND NEVER DELIVERED
+                    # (UX round 2, U6). The prompt was dispatched against a cold
+                    # viewer and its own bind failed — the owner is alive but
+                    # silent, so the welcome read timed out ("owner did not send
+                    # its state") or the sync did. Still cold means the bind
+                    # never landed, so `send_command` never ran: the message is
+                    # certainly unsent. The generic branch below printed the
+                    # transport's sentence and left the echo standing with the
+                    # composer empty — the user's text gone, under a row that
+                    # looked sent, 4/4 in UX round 2's runs.
+                    #
+                    # So it gets the in-pattern refusal the siblings above give
+                    # an undelivered message: echo down, draft back, and one row
+                    # in the product's words. Scoped to `attach_behind` because
+                    # this arm's verdict is what invites the send ("send a
+                    # message to retry"); an ordinary cold open's failures keep
+                    # the copy their own tests pin.
+                    #
+                    # EVERY step keys on what the send captured: `attach_send`
+                    # withdraws THIS message's rows from the view that holds
+                    # them (on screen or parked), and its attempt restates the
+                    # ONE row of the conversation the message was sent from.
+                    # `_restore_unsent_for(source, …)` routes the text to that
+                    # conversation's composer or its stored draft. Nothing here
+                    # asks which conversation is in front (UX round 3, U10/U11).
+                    logger.info("prompt bind failed during a paint-first attach: %s", error)
+                    # The shared slot is cleared only while it still names THIS
+                    # message: a second send may have overwritten it, and its
+                    # own refusal must still find its rows.
+                    if source.turn.submitted_blocks is attach_send.blocks:
+                        source.turn.submitted_blocks = None
+                    attach_send.returned()
+                    self._restore_unsent_for(source, text, images, accepted=accepted, seam=True)
                 else:
                     # THROUGH the same helper the `agent_end` path uses. This
                     # branch printed a bare `str(error)` while the event path
@@ -25647,6 +27240,14 @@ class OperatorApp(App[None]):
                 # the entry.
                 self._discard_user_echo_for(source, echo)
             finally:
+                if awaiting_bind is not None and awaiting_bind in self._prompts_awaiting_bind:
+                    self._prompts_awaiting_bind.pop(awaiting_bind, None)
+                    self._push_starting_band()
+                if attach_send is not None:
+                    # Every other way the send can end (cancelled, oversize,
+                    # stopped): this carrier is off the attempt. A no-op when a
+                    # branch above already landed or returned it.
+                    attach_send.ended(bound=not getattr(session, "is_cold", True))
                 if source.turn.submitted_draft is accepted:
                     source.turn.submitted_draft = None
                 # The echo is only withdrawable while the send's outcome is
@@ -27177,11 +28778,40 @@ class OperatorApp(App[None]):
         convenience, not the only route back into the registry: ``read.children``
         and ``read.nodes`` on a class without them still reach
         ``comms.children``/``comms.nodes``, whose own ``roster_pass()`` may raise
-        outside this guard. Both callers wrap their whole resolver work, so a
-        raising reader blanks the dock rather than escaping into a Textual handler;
-        ``paused_child_ids`` separately guards its own node read and degrades to an
-        empty set. That is the behavior this must keep, and why the capability
-        check is a ``getattr`` rather than a cast.
+        outside this guard. Every step in either caller that CAN raise is inside a
+        guard, so a raising reader blanks the dock rather than escaping into a
+        Textual handler. What each caller leaves outside one is ENUMERATED rather
+        than generalised, because the general form was wrong three times: "both
+        callers wrap their whole body" held for the outcome and not the syntax
+        (review round 3, N3-1), and so did "``getattr``/attribute reads, which
+        cannot raise" (review round 1 on this PR, R1-2) and then the same claim
+        one read over, about the SESSION reads (review round 2 on this PR, R2-1).
+
+        * :meth:`_subagent_roster` leaves, before its ``try``, ``self._session``
+          and the ``_subagent_view`` read. Both are plain attributes of the APP,
+          declared on it and never delegated, so neither can raise.
+        * :meth:`_subagent_child_counts` leaves, before its ``try``, only
+          ``self._session``; and after it, ``paused``, ``counts = {}`` and the
+          loop header ``for job in jobs:``.
+        * The session capability reads (``_subagent_comms``, then ``jobs``) are
+          INSIDE the guard in both callers, as is the ``callable`` test on
+          ``nodes`` and the row identity read. What is true of all of them is not
+          that they are total READS but that a guard bounds them: ``getattr``
+          swallows only the ``AttributeError`` it would have raised itself and
+          propagates whatever a property or an ``__getattr__`` raises, which is
+          how the identity read escaped first (round 1, R1-2) and how the two
+          session reads escaped one read over (round 2, R2-1). Each guard
+          degrades to what its own column needs: no marks at all, no roster, and
+          no mark for the row that cannot name itself.
+        * The ``for job in jobs:`` header is left outside deliberately: it walks
+          the roster the caller just built, and a guard there could only convert a
+          caller's own type error into a silently blank band. Its residual risk is
+          that the argument is not a sequence at all, which is the caller's type
+          to get right.
+        * ``paused_child_ids`` guards its own body and degrades to an empty set.
+
+        That is the behavior this must keep, and why the capability check is a
+        ``getattr`` rather than a cast.
 
         The follower's ``SnapshotSubagentComms`` is the case that has no
         ``roster_pass``: its ``job`` is a documented stub returning ``None``, and
@@ -27293,10 +28923,16 @@ class OperatorApp(App[None]):
         resumed session's rehydrated children are untouched.
         """
         session = self._session
-        comms = getattr(session, "_subagent_comms", None)
-        manager = getattr(session, "jobs", None)
         view = self._subagent_view
         try:
+            # The two capability reads are INSIDE the guard, not before it.
+            # ``getattr`` is not a guarantee — it propagates whatever a property
+            # or an ``__getattr__`` raises — so out here either one escaped into
+            # the Textual handler that called this (``RuntimeError: comms
+            # exploded`` / ``RuntimeError: jobs exploded``) instead of resolving
+            # to the empty roster below (review round 2 on this PR, R2-1).
+            comms = getattr(session, "_subagent_comms", None)
+            manager = getattr(session, "jobs", None)
             # This resolver's own pass: the child list, every node's job row and
             # the ``children()`` scan below all come off it. ``paused_child_ids``
             # builds one of its own (through ``comms.nodes()``), so the tick pays
@@ -27373,28 +29009,51 @@ class OperatorApp(App[None]):
         a leaf does. The alternative here is not a better mark but an exception
         in a Textual message handler, for a decoration.
         """
-        comms = getattr(self._session, "_subagent_comms", None)
-        nodes = getattr(comms, "nodes", None)
-        if not callable(nodes):
-            return {}
         try:
             # Built INSIDE the try, like the roster resolver's: ``_roster_read``
-            # cannot raise today, but this method's totality claim is about its
-            # whole body, and a build moved back out would escape it into a
-            # Textual message handler instead of blanking the marks.
+            # cannot raise today, but a build moved back out would be a raising
+            # step outside the guard, and it would escape into a Textual message
+            # handler instead of blanking the marks. The guard covers every step
+            # that CAN raise; what sits outside it is enumerated in
+            # ``_roster_read``'s docstring, which is the single place that list
+            # lives (review round 3, N3-1; review round 1 on this PR, R1-2).
+            #
+            # The two SESSION reads belong in here with it, and for the same
+            # reason: they are ``getattr``, which propagates whatever a property
+            # or an ``__getattr__`` raises, so outside the guard both escaped
+            # into the handler as ``RuntimeError: comms exploded`` / ``RuntimeError:
+            # jobs exploded`` rather than blanking the marks (review round 2 on
+            # this PR, R2-1). Nothing here is total because of how it is READ;
+            # it is total because every step that can raise is inside a guard.
+            comms = getattr(self._session, "_subagent_comms", None)
+            nodes = getattr(comms, "nodes", None)
+            if not callable(nodes):
+                return {}
             read = self._roster_read(comms)
             buckets: dict[str, list[Any]] = {}
             for node in cast(Sequence[Any], read.nodes()):
                 parent_id = str(getattr(node, "parent_job_id", "") or "")
                 if parent_id:
                     buckets.setdefault(parent_id, []).append(node)
+            manager = getattr(self._session, "jobs", None)
         except Exception:  # noqa: BLE001 — a mark may not cost the band
             return {}
-        manager = getattr(self._session, "jobs", None)
         paused = paused_child_ids(comms)
         counts: dict[str, int] = {}
         for job in jobs:
-            job_id = str(getattr(job, "id", "") or "")
+            try:
+                # Identified INSIDE a guard of its own: ``getattr`` is not a
+                # guarantee — it swallows the ``AttributeError`` it would have
+                # raised itself and propagates whatever a property or an
+                # ``__getattr__`` raises. Executed against an ``id`` that raises,
+                # the unguarded form escaped this method's totality contract into
+                # a Textual message handler (``RuntimeError: id exploded``; review
+                # round 1 on this PR, R1-2). A row that cannot name itself cannot
+                # be counted, so it earns the same mark a row outside the window
+                # does: none.
+                job_id = str(getattr(job, "id", "") or "")
+            except Exception:  # noqa: BLE001 — a mark may not cost the band
+                continue
             if not job_id:
                 continue
             try:
@@ -27515,15 +29174,30 @@ class OperatorApp(App[None]):
         # moved.
         self.call_after_refresh(self._sync_overlay_layout)
         # A live prompt rides it too, as a BACKSTOP rather than as its primary
-        # trigger. The card's footer is derived from state the card does not
-        # own — whether it holds focus, and whether the composer holds a draft —
-        # and neither emits anything the card hears, so "correct in the model,
-        # stale on screen" arrived three review rounds running on three
-        # different inputs. Each was fixed by adding one more explicit trigger,
-        # which is a fix per input and leaves the next one to be found by a
-        # reviewer. This asks the card whether what it is showing is still what
-        # it would draw, so a missed trigger is a frame late instead of
-        # permanently wrong. It is a no-op on every tick where nothing moved.
+        # trigger -- see :meth:`_repaint_live_prompt_if_stale`.
+        self._repaint_live_prompt_if_stale()
+
+    def _repaint_live_prompt_if_stale(self) -> None:
+        """Ask the live prompt card whether what it shows is still what it would draw.
+
+        The card's footer is derived from state the card does not own — whether it
+        holds focus, and whether the composer holds a draft — and neither emits
+        anything the card hears, so "correct in the model, stale on screen"
+        arrived three review rounds running on three different inputs. Each was
+        fixed by adding one more explicit trigger, which is a fix per input and
+        leaves the next one to be found by a reviewer. This asks the card
+        directly, so a missed trigger is a frame late instead of permanently
+        wrong. A no-op on every call where nothing moved.
+
+        Called from TWO places, and the second is load-bearing: ``_refresh_band``
+        (whose other callers are the 1 Hz poll, a resize and the density toggles)
+        and ``_apply_frontend_state`` BEFORE its collection-revision gate. The
+        gate skips the band for a delta that moved no roster row -- the routine
+        token/phase delta -- and without this the card's only remaining trigger
+        there would be the 1 Hz poll, i.e. up to a second of a footer naming keys
+        that no longer apply (review round 1, F2). Cheap enough to run on both
+        paths for the same reason it is safe on either.
+        """
         prompt = self._live_prompt()
         repaint_if_stale = getattr(prompt, "repaint_if_stale", None)
         if callable(repaint_if_stale):
@@ -29825,6 +31499,15 @@ class OperatorApp(App[None]):
                     "info",
                 )
                 return
+            if block_type == "goal_history":
+                # The owner's answer is rows in `data`, and its `text` is the
+                # one-line count beside them: a viewer that paints only `text`
+                # would otherwise say nothing at all. Same shape as `team_list`,
+                # which is why it needed no new renderer.
+                self._append_block(self._goal_history_block(data.get("items") or []))
+                if text:
+                    self._notice(text, "info")
+                return
             if block_type == "loop":
                 self._notice(_loop_status_line(data), "info")
                 return
@@ -29867,6 +31550,27 @@ class OperatorApp(App[None]):
                 if data.get("type") == "goal_set":
                     request = arg
                 self._submit_command_prompt(request, attachments)
+
+    def _goal_history_block(self, items: list[Any]) -> RichBlock:
+        """Render ``/goal --history``'s wire rows: the objective, then its facts.
+
+        The same row layout as ``_team_listing_block``, because it is the same
+        shape of answer — a titled list of ``(subject, facts)`` rows — and a
+        second layout for it would be a second thing to keep in step. The rows
+        are CLIPPED by the owner (``goal_history_items``), not here: this half
+        paints what it was sent, so both hosts show the same bytes.
+        """
+        section = Style(color=theme_mod.semantic_color("fg"), bold=True)
+        heading = Style(color=theme_mod.semantic_color("muted"))
+        body = Style(color=theme_mod.semantic_color("dim"))
+        rows: list[Any] = [Text("settled goals", style=section)]
+        for item in items:
+            subject, facts = (list(item) + ["", ""])[:2]
+            rows.append(Padding(Text(str(subject), style=heading), (0, 0, 0, 2)))
+            if facts:
+                rows.append(Padding(Text(str(facts), style=body), (0, 0, 0, 4)))
+        rows.append(Text())
+        return RichBlock(Group(*rows))
 
     def _team_listing_block(self, items: list[Any]) -> RichBlock:
         """Rebuild the bare ``/team`` roster block from wire rows.
@@ -31048,7 +32752,21 @@ class OperatorApp(App[None]):
             self._stop_all_armed_at = None
             self._system_notice("no sessions to stop")
             return
-        drained = frozenset(rec.pid for rec in targets if (getattr(rec, "leaving", "") or ""))
+        leaving = [rec for rec in targets if (getattr(rec, "leaving", "") or "")]
+        # A DRAIN THE LADDER NO LONGER BELIEVES IS NOT LEFT ALONE (agent review round 1,
+        # m2): ``control._drain_stalled`` is the exact predicate the second press applies,
+        # so the listing asks it too rather than promising "left alone" for a runtime the
+        # press will then stop. Off the loop, because it reads dumps and may fork ``ps``.
+        stalled = {
+            rec.pid: control.stall_tag(why)
+            for rec, why in zip(
+                leaving,
+                await asyncio.to_thread(lambda: [control._drain_stalled(r) for r in leaving]),
+            )
+            if why
+        }
+        stalled_pids = frozenset(stalled)
+        drained = frozenset(rec.pid for rec in leaving) - stalled_pids
         rows: list[tuple[int, str, str]] = [
             (
                 rec.pid,
@@ -31060,8 +32778,14 @@ class OperatorApp(App[None]):
                 # more session to stop promises a stop that will not happen. The
                 # outcome line already reconciles the count afterwards; this is
                 # the same fact one step earlier, where it can still change the
-                # decision (UX round 2, NIT-1).
-                " (already leaving)" if rec.pid in drained else "",
+                # decision (UX round 2, NIT-1). A STALLED drain is marked apart, because
+                # the press does stop it (agent review round 1, m2), and with its reason
+                # in the words ``lop sessions`` and ``lop stop`` use (design round 1, D1).
+                (
+                    " (already leaving)"
+                    if rec.pid in drained
+                    else f" ({stalled[rec.pid]})" if rec.pid in stalled else ""
+                ),
             )
             for rec in targets
         ]
@@ -31077,14 +32801,29 @@ class OperatorApp(App[None]):
         # off the painted block (D2-1).
         budget = NoticeBlock.body_budget(max(0, self._transcript_view().size.width - 1))
         lines = [f"will stop {total} session{'s' if total != 1 else ''}:"]
+        qualifiers = []
         if drained:
             # Named once, above the rows: every marked row below is a session the
             # press ASKS again and then leaves alone — the plain count would read
             # as "these will all be stopped".
-            lines[0] = (
-                f"will stop {total} session{'s' if total != 1 else ''} "
-                f"({len(drained)} already leaving — asked again, then left alone):"
+            qualifiers.append(f"{len(drained)} already leaving — asked again, then left alone")
+        if stalled_pids:
+            # The other half: these are leaving too, but the press does NOT leave them
+            # alone. CAUSE-NEUTRAL (design round 1 on #1541 D1, QA Q-1): the row tag
+            # already names each one's cause, and the two arms differ — a held runtime
+            # IS reporting — so a shared line naming one cause is false for the other.
+            # FUTURE TENSE, because the identity gate can still refuse (QA Q-5 on #1527).
+            n = len(stalled_pids)
+            qualifiers.append(
+                f"{n} leaving, but {'it' if n == 1 else 'they'} will be stopped, "
+                "not left to finish"
             )
+        # ONE LAYOUT, ONE QUALIFIER PER LINE, whenever any exists (design D2 on #1527 and
+        # #1541, QA Q-2): folded into the header, the drained-only form alone was 72 cells
+        # against the 70-cell notice body at 80 columns and wrapped, and a header wrap
+        # sharing an indent with a qualifier line read as one paragraph. The longest
+        # qualifier is 58 cells at two-digit counts, 12 inside that 70-cell budget.
+        lines.extend(f"({q})" for q in qualifiers)
         for pid, name, tag in rows:
             lead = f"  pid {pid:>{pid_w}}  "
             # The qualifier rides inside the truncation budget so it can
@@ -33890,12 +35629,18 @@ class OperatorApp(App[None]):
         never be stored as the literal goal ``--clear`` and never starts a turn.
         """
         from local_operator.session.goal import (
-            GOAL_CLEAR_ARGS,
+            GOAL_RECORD_OWNER_REFUSAL,
             MAX_GOAL_CHARS,
             cleared_goal_receipt,
+            goal_dismissed_receipt,
+            goal_done_answer,
+            goal_flag_form,
+            goal_history_items,
+            goal_history_notice,
         )
 
         session = self._session
+        record = self._goal_record()
         if session is None or not hasattr(session, "set_goal"):
             # A rejected command changed nothing, so the conversation has not
             # started: `_system_notice` keeps the boot composition intact where
@@ -33904,18 +35649,48 @@ class OperatorApp(App[None]):
             return
         request = expand_pastes(arg, attachments or {}).strip()
         if not request:
-            current = session.goal
-            notice(f"goal: {current}" if current else "no goal set — /goal <text> to set one")
+            self._open_goal_panel()
             return
-        if request.lower() in GOAL_CLEAR_ARGS:
+        # A FLAG is the WHOLE argument (`goal_flag_form`), in the same order and
+        # with the same rule the `--clear` branch has always used: `/goal --done
+        # the report` keeps its tail and stays an objective.
+        form = goal_flag_form(request)
+        if form and record is None:
+            # Every FLAG form WRITES the judged-goal record, and the record is
+            # the session OWNER's (`_goal_record_for`): a follower reaches these
+            # by the ROUTED `/goal`, which runs them on the owner and comes back
+            # as the owner's own receipt. A viewer that cannot route — a cold
+            # one, which advertises no capabilities — has no record here to
+            # write, so it says where the act lives rather than reporting one it
+            # did not perform. ``form`` is "" for an OBJECTIVE (`goal_flag_form`),
+            # which is why the test is truthiness and not ``is not None``.
+            self._system_notice(
+                GOAL_RECORD_OWNER_REFUSAL,
+                "warning",
+            )
+            return
+        if form == "clear":
             # Name what went. A standing goal is deliberately invisible in the UI
             # — the band does not carry it and the only echo is the one-time
             # `goal restored` notice on adopt — and there is no undo, so this
             # receipt is the user's whole chance to see what a mistaken clear
-            # took away and retype it (round 1: design D4, UX U3).
+            # took away and retype it (round 1: design D4, UX U3). A DELETE
+            # records nothing, which is the whole difference from mark-done.
             receipt = cleared_goal_receipt(session.goal)
-            session.set_goal("")
+            record.delete_goal()
             notice(receipt)
+            return
+        if form == "done":
+            entry = record.mark_goal_done()
+            notice(goal_done_answer(session.goal, entry))
+            return
+        if form == "dismiss":
+            notice(goal_dismissed_receipt(record.dismiss_goal()))
+            return
+        if form == "history":
+            rows = goal_history_items(record.history_view())
+            self._append_block(self._goal_history_block(rows))
+            notice(goal_history_notice(len(rows)))
             return
         # A bare `--token` that names no flag of THIS command. The app now teaches
         # two flag vocabularies (`--clear` for the goal, `--stop` for the loop),
@@ -33929,7 +35704,23 @@ class OperatorApp(App[None]):
         if refusal is not None:
             notice(refusal, "warning")
             return
-        stored = session.set_goal(request)
+        # `arm_goal` rather than `set_goal`: the same text write plus the record's
+        # supersede/arm ordering, which is what makes `/goal B` non-destructive
+        # to `/goal A` and what arms the judge.
+        #
+        # A session that is NOT the record's owner may still SET its goal locally,
+        # and must: `/loop` runs on THIS terminal for a cold capabilityless viewer,
+        # and its numeric branch iterates toward `session.goal`, so refusing the
+        # set refused the loop with it (pinned by
+        # `test_a_followers_loop_turn_holds_working_between_iterations`). The
+        # record's own `arm_goal` is used where this session IS the owner;
+        # otherwise the session's `arm_goal` where it holds one, else `set_goal`,
+        # which on an attached facade is the ROUTING setter rather than a local
+        # write (`AttachedSession.set_goal` asks the owner). What stays owner-only
+        # is the four FLAG forms above — those are acts on the OWNER's record.
+        holder = record if record is not None else session
+        arm = getattr(holder, "arm_goal", None)
+        stored = arm(request) if arm is not None else session.set_goal(request)
         # Only the standing objective is capped. The ordinary user message
         # retains the full request, and the normal submit path owns its ONE
         # transcript row, busy steering, compaction hold and attachment order.
@@ -33942,6 +35733,199 @@ class OperatorApp(App[None]):
         else:
             notice("goal set")
         self._submit_command_prompt(arg, attachments)
+
+    def _goal_argument_choices(self) -> list[ArgumentChoice]:
+        """The ``/goal`` argument rows the LIVE state allows, in a safe order.
+
+        Read off the session rather than off the command, because every one of
+        these flags is a no-op outside its own state — a row the state cannot
+        honour is a dead end taught by the palette. Gated on the RECORD's status
+        (``active``/``done``) exactly as the flag forms are specified: a goal
+        with no record (a pre-lifecycle restore, or one set through the mobile
+        relay's plain ``set_goal``) is still ACTIVE to the fold and still
+        markable by typing ``--done`` — the palette just does not advertise an
+        action whose record it cannot see. ``--clear`` is authoritatively LAST so
+        that a single pre-selected match on the bare command is never the
+        destructive row (see the caller's note); it is also the only row carrying
+        ``alert=True``, since it is the one acceptance that cannot be undone.
+        """
+        session = self._session
+        record = self._goal_record()
+        goal = getattr(session, "goal", "") or ""
+        status = getattr(record, "goal_status", "") or ""
+        history = getattr(record, "goal_history", None) or []
+        choices: list[ArgumentChoice] = []
+        if history:
+            choices.append(ArgumentChoice("--history", "List the settled goals"))
+        if goal and status == "active":
+            choices.append(ArgumentChoice("--done", "Mark the standing goal done"))
+        if status == "done":
+            choices.append(ArgumentChoice("--dismiss", "Clear the done goal chip"))
+        if goal:
+            choices.append(ArgumentChoice("--clear", "Clear the standing goal", alert=True))
+        return choices
+
+    def _goal_record_for(self, session: Any) -> Any:
+        """``session`` as the judged-goal record's OWNER, or ``None``.
+
+        The record — its status, its judge, its settled history and the four acts
+        that write it — belongs to the process that owns the session's loop, and
+        that is a fact about the SESSION rather than about this terminal. So the
+        question is asked of the object, with the one predicate that already
+        answers it everywhere else (``goal_judge.owns_the_session``), and the
+        answer is then narrowed to ``GoalRecordProtocol`` so pyright checks every
+        use against the real surface.
+
+        Why the narrowing matters twice over. Statically: the five record members
+        the TUI calls directly were undeclared on ``SessionProtocol``, which is
+        what the twelve attribute errors in the type gate were about, and the
+        reads it makes through ``getattr`` were invisible to pyright entirely
+        (``tests/unit/session/test_viewer_protocol.py`` derives them by AST). At
+        runtime: a follower holds a ``SessionProtocol`` too, and the four
+        mutators are NOT on it — deliberately, because a follower's route to
+        those acts is the ROUTED slash command (``/goal`` is not in
+        ``_FRONTEND_LOCAL_SLASHES``), which runs them on the owner and returns
+        the owner's own receipt. Declaring them shared would have promised a
+        capability a follower must not have.
+
+        ``None`` is therefore the honest answer on a viewer, and every caller
+        already has a fallback for it: a surface paints an empty record, and an
+        act reports that there is nothing to act on.
+        """
+        from local_operator.session.goal_judge import owns_the_session
+        from local_operator.session.protocol import GoalRecordProtocol
+
+        if session is None or not owns_the_session(session):
+            return None
+        return session if isinstance(session, GoalRecordProtocol) else None
+
+    def _goal_record(self) -> Any:
+        """This terminal's OWN session as the judged-goal record, or ``None``."""
+        return self._goal_record_for(self._session)
+
+    def _goal_panel(self) -> Any:
+        """The mounted overlay, or None before compose (or in a stripped harness)."""
+        try:
+            return self.query_one(GoalPanel)
+        except Exception:  # noqa: BLE001 — the card is optional chrome
+            return None
+
+    def _open_goal_panel(self) -> None:
+        """Show the goal overlay for the CURRENT session's record.
+
+        The typed forms keep their one-line receipts (`/goal --done` prints the
+        same sentence this panel's key does), because a receipt is the record of
+        an ACT and the panel is the state it left behind; this panel is the
+        surface for the no-argument form, which is a READ.
+
+        A FOLLOWER terminal keeps the owner's one-line receipt instead (the
+        routed path answers `/goal` before this runs). That is deliberate rather
+        than an oversight: the card's two keys WRITE the record, and a follower
+        that could act on the owner's goal would be the second writer the
+        ownership rule exists to prevent — so it is not offered a surface whose
+        keys it must refuse.
+        """
+        panel = self._goal_panel()
+        if panel is None:
+            self._system_notice("goal panel unavailable", "warning")
+            return
+        self._goal_focus_restore = self.focused
+        self._refresh_goal_panel()
+        panel.focus()
+
+    def _refresh_goal_panel(self) -> None:
+        """Repaint the card from the session — the record is the ONE source.
+
+        Called on open and after each action, always from the session, so the
+        card cannot show a copy of a record that has since moved (the desktop
+        chip's lesson: the goal repaints from the stream, never from local UI
+        state).
+        """
+        from local_operator.session.goal_judge import (
+            MAX_GOAL_CONTINUATIONS,
+            owns_the_session,
+        )
+
+        panel = self._goal_panel()
+        session = self._session
+        record = self._goal_record()
+        if panel is None or session is None:
+            return
+        # The WIRE's own truncation flag, read the way the footer reads the
+        # catalogue's sibling clause: a clipped record must not render like a
+        # complete one, and the flag is absent on a facade with no frontend state
+        # (a `getattr` default), which is the overwhelmingly common case. Without
+        # this the flag had no consumer anywhere under ``local_operator/tui/``
+        # (design D1 / UX U1).
+        state = getattr(session, "frontend_state", None)
+        # The OWNER reads its own record; anything else reads the WIRE. A
+        # viewer's `record` is None by design (`_goal_record_for`: the four acts
+        # that write the record are the owner's), but the record's READ half —
+        # status, judge, settled history — rides every frame, so a viewer that
+        # read it off `record` painted `judge: —` and `settled none yet` beside a
+        # record its own frame held (agent review round 2, MINOR-6). The wire is
+        # also where the truncation flag above comes from, so a viewer's card is
+        # now drawn from ONE source rather than three fields from nothing and a
+        # fourth from the frame.
+        source = record if record is not None else state
+        panel.show(
+            goal=getattr(session, "goal", "") or "",
+            status=getattr(source, "goal_status", "") or "",
+            judge=getattr(source, "goal_judge", None),
+            history=list(getattr(source, "goal_history", []) or []),
+            cap=MAX_GOAL_CONTINUATIONS,
+            actions=owns_the_session(session),
+            history_truncated=bool(getattr(state, "goal_history_truncated", False)),
+        )
+
+    def on_goal_dismissed(self, message: GoalDismissed) -> None:
+        """Esc/q in the card — give focus back to whatever had it."""
+        message.stop()
+        restore = self._goal_focus_restore
+        self._goal_focus_restore = None
+        if restore is not None and getattr(restore, "is_mounted", False):
+            restore.focus()  # type: ignore[union-attr]
+        else:
+            self._editor().focus()
+
+    def on_goal_mark_done(self, message: GoalMarkDone) -> None:
+        """`d` in the card — the same call `/goal --done` makes, same receipt."""
+        from local_operator.session.goal import goal_done_answer
+
+        message.stop()
+        record = self._goal_record()
+        if record is None:
+            return
+        entry = record.mark_goal_done()
+        self._system_notice(goal_done_answer(getattr(self._session, "goal", ""), entry))
+        self._refresh_goal_panel()
+
+    def on_goal_delete(self, message: GoalDelete) -> None:
+        """`c` in the card — the ERASE, or the done chip's dismissal.
+
+        One key, two acts, told apart by the record's own status (design D8/U4):
+        on a live goal it erases (the panel armed it, and this is the second
+        press), and on a DONE card it drops the chip — the act the palette
+        already names `--dismiss`, which is the benign one and needs no arming.
+        """
+        from local_operator.session.goal import (
+            cleared_goal_receipt,
+            goal_dismissed_receipt,
+        )
+
+        message.stop()
+        record = self._goal_record()
+        if record is None:
+            return
+        if record.goal_status == "done":
+            self._system_notice(goal_dismissed_receipt(record.dismiss_goal()))
+        else:
+            receipt = cleared_goal_receipt(getattr(self._session, "goal", ""))
+            record.delete_goal()
+            # The receipt names what went, and it is the user's whole chance to
+            # see it: a delete has no undo and records no history entry.
+            self._system_notice(receipt)
+        self._refresh_goal_panel()
 
     def _cmd_loop(self, arg: str, notice: NoticeFn) -> None:
         """``/loop [n]`` — iterate toward the goal; ``/loop --stop`` cancels.
@@ -34106,11 +36090,78 @@ class OperatorApp(App[None]):
             group=self._interaction.worker_group("loop"),
         )
 
+    async def _admit_goal_continuation(self, session: Any, text: str, echo: Any) -> None:
+        """Admit ONE judge continuation, deferred until the session can take it.
+
+        See :data:`_GOAL_CONTINUATION_ADMISSION_S` for why the wait is here at
+        all. Two things this method owns beyond the retry loop:
+
+        * The admission goes through ``_prompt_loop_turn``, i.e. the same route
+          the ``/loop`` worker uses, so this host has ONE admission path.
+        * The row carries the STRUCTURAL marker. ``harness_injected`` is what
+          tells every front end that a durable user-role row was authored by the
+          harness rather than typed, and this host was the one host that never
+          stamped it: the TUI's own paint and its replay are covered by the text
+          recogniser (``is_harness_chrome``), but the DESKTOP is marker-only by
+          contract (``docs/DESKTOP_API.md``), so a continuation written by a
+          local TUI replayed there as the user's own words — the operator's
+          invisibility requirement failing on a real cross-host path (agent
+          review round 1, MAJOR-2). The stamp itself now comes from
+          ``_prompt_loop_turn``, the route this method shares with the two
+          ``/loop`` workers: a caller-side stamp is how the goal-mode loop's own
+          turn went without one (see that method), and one route is what keeps a
+          fourth chrome row from repeating it.
+        """
+        from local_operator.session.errors import TurnInFlight
+
+        fields: dict[str, Any] = dict(echo.prompt_kwargs())
+
+        deadline = time.monotonic() + _GOAL_CONTINUATION_ADMISSION_S
+        while True:
+            try:
+                await self._prompt_loop_turn(session, text, **fields)
+                return
+            except TurnInFlight:
+                # The typed refusal, and the ONLY one worth waiting out: a
+                # session that is closing a turn accepts this the moment that
+                # turn's lock is released. Reaching the deadline raises, and the
+                # driver turns it into a `waiting` — never a retry of the judge.
+                if time.monotonic() >= deadline:
+                    raise
+                await asyncio.sleep(_GOAL_CONTINUATION_ADMISSION_RETRY_S)
+
     @staticmethod
     async def _prompt_loop_turn(session: SessionProtocol, prompt: str, **kwargs: Any) -> None:
+        """Admit ONE harness-authored turn — the ONE route all three of them use.
+
+        ``/loop``'s next iteration, the goal-mode loop's working turn and the goal
+        judge's continuation all come through here, and every one of them is
+        chrome: this host paints a NOTICE for the loops and a stamped row for the
+        continuation, and the durable row exists only so the transcript can say
+        why the conversation continued.
+
+        So the STRUCTURAL marker is stamped HERE, by the route, rather than by
+        each caller — which is how two of the three came to be missing it. The
+        goal-mode loop's own turn reached the transcript with no marker at all,
+        and ``LOOP_GOAL_PROMPT`` is in neither ``harness_chrome_prompts()`` nor
+        any producer-side recogniser (measured on a real session over the desktop
+        route: the persisted row reads ``stamp=no, chrome-recognised=False``).
+        The desktop is marker-only by contract (``docs/DESKTOP_API.md`` names
+        "the goal loop's own prompt" as a row that must carry it), so a goal loop
+        run from a terminal replayed there as the USER's own words — the
+        operator's invisibility requirement failing on the same cross-host path
+        the judge's continuation was fixed on.
+
+        Probed for the keyword the way ``serving.py`` probes it: a reduced or
+        third-party session that predates it must not raise, and the keyword's
+        job is to stamp a marker those hosts never read. ``setdefault``, so a
+        caller that states the stamp itself is not second-guessed.
+        """
         # Local Session.prompt already awaits the pipeline. Remote interactive
         # prompt only admits it; a loop needs its explicit terminal-outcome API.
         complete = getattr(session, "prompt_and_wait", session.prompt)
+        if "harness_injected" in inspect.signature(complete).parameters:
+            kwargs.setdefault("harness_injected", True)
         await cast(Callable[..., Awaitable[None]], complete)(prompt, **kwargs)
 
     async def _loop_worker(self, iterations: int, source: SessionInteraction | None = None) -> None:
@@ -34220,6 +36271,42 @@ class OperatorApp(App[None]):
         else:
             notice(f"loop finished after {completed} iteration(s)")
 
+    async def _ask_judge(self, session: Any, question: str) -> str | None:
+        """The app's ONE `complete_aside` judge call, returning the RAW answer.
+
+        Split out of `_judge_goal` rather than duplicated, because the judged
+        goal needs a different HALF of the same call: the `/loop` worker wants a
+        parsed verdict, while the goal judge's driver owns the parse
+        (`_parse_loop_verdict` is the one parser in this codebase and forking it
+        is how the CONTINUE-before-ACHIEVED rule gets lost). Both still make
+        exactly ONE provider call, from ONE place, billed through `_charge_aside`.
+
+        `None` means there was no answer at all — no judge primitive on this
+        session, or a provider failure, which is reported here so the caller
+        cannot forget to. `CancelledError` is a `BaseException`, so an Esc
+        mid-judge is NOT swallowed and the worker unwinds through its `finally`.
+        """
+        source = self._interactions.get(id(session), self._interaction)
+        if not hasattr(session, "complete_aside"):
+            return None
+        turns = [Message.user(question)]
+        try:
+            # ``aside_instruction=False``: this request is a JUDGE, not an aside,
+            # and its turn already carries the only instruction it may receive.
+            # Without it the remote seam framed the judge as an off-record side
+            # question ("no work is being asked for … answer briefly") on a TUI
+            # viewing another owner — the one request ``session/aside.py`` says
+            # must never receive that wrapper. Both callers (the `/loop` verdict
+            # and the standing-goal driver) are judges, so it lives here once.
+            return await session.complete_aside(
+                turns,
+                aside_instruction=False,
+                on_usage=lambda usage: self._charge_aside_for(source, usage),
+            )
+        except Exception as error:  # noqa: BLE001 — any provider failure is a judge failure
+            self._notice_for(source, f"judge unavailable, continuing: {error}", "warning")
+            return None
+
     async def _judge_goal(self, session: Any, goal: str) -> tuple[bool | None, str]:
         """Ask the off-the-record judge whether ``goal`` is achieved.
 
@@ -34231,30 +36318,239 @@ class OperatorApp(App[None]):
 
         Returns `(achieved, reason)` where `achieved is None` means the verdict
         was unreadable — the caller's fail-safe CONTINUE plus a failure strike.
-        A provider error is caught and reported the same way: `CancelledError`
-        is a `BaseException`, so an Esc mid-judge is NOT swallowed here and the
-        worker unwinds cleanly through its `finally` (same reasoning as the
-        aside worker). We do not pass `on_delta`: the judge answer must not
-        stream to any visible surface.
+        The call itself (and its one notice for a provider failure) lives in
+        `_ask_judge`, which the goal judge's driver also uses.
         """
-        # The local scheduler passes the captured source facade. Modern remotes
-        # route complete_aside to that owner; an older source without the
-        # primitive is a judge failure, not a reason to affect the current view.
         source = self._interactions.get(id(session), self._interaction)
-        if not hasattr(session, "complete_aside"):
-            return None, ""
-        turns = [Message.user(LOOP_JUDGE_PROMPT.format(goal=goal))]
-        try:
-            answer = await session.complete_aside(
-                turns, on_usage=lambda usage: self._charge_aside_for(source, usage)
-            )
-        except Exception as error:  # noqa: BLE001 — any provider failure is a judge failure
-            self._notice_for(source, f"judge unavailable, continuing: {error}", "warning")
+        answer = await self._ask_judge(session, LOOP_JUDGE_PROMPT.format(goal=goal))
+        if answer is None:
             return None, ""
         achieved, reason = _parse_loop_verdict(answer)
         if achieved is None:
             self._notice_for(source, "judge returned no verdict, continuing", "warning")
         return achieved, reason
+
+    def _goal_judge_driver(self, session: Any, source: SessionInteraction) -> Any:
+        """The standing goal's judge for THIS terminal — the runtime's sibling.
+
+        The POLICY (the continuation cap, the failure breaker, the staleness
+        guard, when a verdict is re-judged) lives in
+        `session.goal_judge.GoalJudge`, the same object the runtime drives: what
+        is TUI-local here is only the three things that differ by host — how a
+        continuation is admitted, how the verdict is asked for, and how the goal
+        is settled. A host that re-implemented the policy would be the second
+        implementation the module docstring argues against.
+
+        Built per trigger rather than cached, because this app's session can be
+        REPLACED under it (`/reload`), and a cached driver would go on judging
+        the disposed session it was built for.
+        """
+        from local_operator.session.goal_judge import GoalJudge, goal_stalled_notice
+
+        # THE RECORD IS THE OWNER'S, and a session that does not implement it is
+        # not judged here at all. Four of the five members reached through this
+        # binding MUTATE the record (arm, mark done, delete, dismiss), it is read
+        # off the concrete session rather than off the shared viewer protocol
+        # (see ``_goal_record_for``), and an unguarded read of it off a
+        # duck-typed session is the crash class the protocol guards exist to
+        # close: the runtime's ``rearm_on_resume`` raised
+        # ``AttributeError: 'Slow' object has no attribute 'goal_judge_state'``
+        # inside a task nobody awaits when a scripted ``SessionProtocol`` double
+        # was on the other side (QA round 1, Q3).
+        record = self._goal_record_for(session)
+        if record is None:
+            return None
+
+        async def judge(question: str) -> str:
+            answer = await self._ask_judge(session, question)
+            # `""` rather than `None`: an unavailable judge is an UNREADABLE
+            # verdict, which the driver already handles as a strike (the same
+            # fail-safe CONTINUE the `/loop` worker takes).
+            return answer or ""
+
+        async def prompt(text: str) -> None:
+            source.turn.operation += 1
+            if self._is_current(source) and self._status is not None:
+                self._status.update(streaming=True)
+            echo = self._register_user_echo_for(
+                source, text, message_id=self._echo_message_id(session.prompt)
+            )
+            try:
+                # `_admit_goal_continuation` is this host's admission route: it
+                # DEFERS the continuation until the turn that just ended has
+                # released the session, then admits it through
+                # `_prompt_loop_turn` — which prefers `prompt_and_wait`, so the
+                # driver AWAITS the terminal outcome and judges the turn it just
+                # admitted instead of correlating an event.
+                await self._admit_goal_continuation(session, text, echo)
+            except BaseException:
+                # A refused admission (a retiring session) never announces, so
+                # take the echo entry back out — otherwise it would swallow the
+                # NEXT row carrying the same words. The exception is re-raised:
+                # the driver turns it into a `waiting`, and retrying here is
+                # exactly the spin it must not do.
+                self._discard_user_echo_for(source, echo)
+                if self._is_current(source):
+                    self._retire_turn_band(session)
+                raise
+            if self._is_current(source):
+                self._retire_turn_band(session)
+
+        def changed(fields: dict[str, Any]) -> None:
+            # The record is the SESSION's, not this terminal's: the goal rides the
+            # frame and the sidecar, so a phone watching the same session sees the
+            # same judge state. A host-local dict would leave every other surface
+            # reporting a goal nothing is acting on.
+            record.note_goal_judge(**fields)
+            self.call_later(self._source_frontend_changed, source)
+            # The TUI's HALF OF THE STALL RECEIPT, in the same register and off
+            # the same edge as the runtime's (design round 1, D2): a goal that
+            # has stopped being auto-continued is indistinguishable from one
+            # that is quietly waiting unless the transition says WHICH bound
+            # fired. `warning` matches the sibling notice this app already
+            # paints when the judge cannot answer. Scheduled through
+            # `call_later` like the row above, so this callback never mutates
+            # the UI from inside the judge's own task, and emitted once because
+            # the helper answers only on the transition into `stalled`.
+            notice = goal_stalled_notice(fields)
+            if notice is not None:
+                self.call_later(self._notice_for, source, notice, "warning")
+
+        def settled(reason: str) -> None:
+            # The same call `/goal --done` makes, so a verdict and a typed
+            # mark-done produce one record and the surfaces cannot tell them
+            # apart except by whose words the reason carries.
+            record.mark_goal_done(reason)
+            self.call_later(self._source_frontend_changed, source)
+
+        return GoalJudge(
+            judge=judge,
+            prompt=prompt,
+            changed=changed,
+            settled=settled,
+            goal=lambda: getattr(session, "goal", ""),
+            status=lambda: record.goal_status,
+            token=lambda: record.goal_token,
+            serial=lambda: record.goal_turn_serial,
+            judge_state=lambda: session.goal_judge_state,
+            # The loop check is a CALLBACK over the interaction's own flag, so a
+            # loop that ends re-enables this judge with no bookkeeping.
+            loop_running=lambda: source.loop.running,
+        )
+
+    def _rearm_goal_judge_on_boot(self, session: SessionProtocol) -> None:
+        """Trigger 3 on this host: re-engage a judge that was in flight at close.
+
+        Called once per boot, after adoption, for the reasons stated at the call
+        site. Deferred to a worker rather than awaited: boot must not wait on a
+        provider call, and nothing here is the session's boot outcome.
+        """
+        from local_operator.session.goal_judge import owns_the_session
+
+        source = self._interaction
+        if session is None or not owns_the_session(session) or source.goal.judge_in_flight:
+            return
+        source.goal.judge_in_flight = True
+        try:
+            self.run_worker(
+                self._rearm_goal_judge_worker(session, source),
+                thread=False,
+                group=source.worker_group("goal_judge"),
+            )
+        except Exception:  # noqa: BLE001 — an additive worker must not fail boot
+            source.goal.judge_in_flight = False
+            logger.debug("goal judge re-arm could not be started", exc_info=True)
+
+    async def _rearm_goal_judge_worker(self, session: Any, source: SessionInteraction) -> None:
+        """Run ONE trigger-3 re-arm and release the in-flight flag.
+
+        The flag is cleared unconditionally, for the same reason the turn-end
+        worker's is: a re-arm that raised must not leave this terminal convinced
+        a judge is running, or the goal would go unjudged for the app's life.
+        """
+        try:
+            driver = self._goal_judge_driver(session, source)
+            if driver is None:
+                return
+            await driver.rearm_on_resume()
+        except Exception:  # noqa: BLE001 — the judge is additive, never boot's fate
+            logger.debug("goal judge re-arm failed", exc_info=True)
+        finally:
+            source.goal.judge_in_flight = False
+
+    def _maybe_judge_goal_turn(self, message: TurnEnded) -> None:
+        """React to a LOCAL turn's end by judging the standing goal (§3.3).
+
+        Called at the foot of `on_turn_ended`, AFTER `_finalize_turn`: that is
+        what clears `_turn_open`/`_turn_notified`, and a judge started against a
+        half-retired turn would race the app's own turn bookkeeping.
+
+        Only two things are checked here rather than in the driver, and both are
+        about THIS host: whether the session is ours to spend in (a follower
+        never judges — §3.2), and whether our own judge is already running (the
+        continuation's turn end lands here, and the driver's chain is what judges
+        it). Everything else — no goal, a `/loop` running, an error turn — is the
+        driver's single decision, so it cannot be applied on one host and
+        forgotten on the other.
+        """
+        from local_operator.session.goal_judge import owns_the_session
+
+        source = self._interaction
+        session: Any = self._session
+        if session is None or not owns_the_session(session):
+            return
+        if source.goal.judge_in_flight:
+            return
+        source.goal.judge_in_flight = True
+        try:
+            self.run_worker(
+                self._goal_judge_worker(
+                    session,
+                    source,
+                    aborted=bool(message.aborted),
+                    error=message.error,
+                ),
+                thread=False,
+                group=source.worker_group("goal_judge"),
+            )
+        except Exception:  # noqa: BLE001 — an additive worker must not fail the turn
+            # The flag is released HERE because the worker never ran, so its own
+            # `finally` will not: a terminal that believed a judge was in flight
+            # would never judge this session again.
+            source.goal.judge_in_flight = False
+            logger.debug("goal judge worker could not be started", exc_info=True)
+
+    async def _goal_judge_worker(
+        self,
+        session: Any,
+        source: SessionInteraction,
+        *,
+        aborted: bool = False,
+        error: str | None = None,
+    ) -> None:
+        """Run ONE trigger of the judge and release the in-flight flag.
+
+        The flag is cleared UNCONDITIONALLY: a judge that raised must not leave
+        this terminal convinced one is still running, or the goal would sit
+        unjudged for the life of the app.
+        """
+        try:
+            driver = self._goal_judge_driver(session, source)
+            record = self._goal_record_for(session)
+            # ``None`` on a session that does not implement the judged-goal
+            # record: there is nothing here to judge, and the driver refuses to
+            # read the record off a duck-typed binding (see ``_goal_record_for``).
+            if driver is None or record is None:
+                return
+            await driver.on_turn_end(
+                error=bool(error),
+                aborted=aborted,
+                serial=int(record.goal_turn_serial or 0),
+            )
+        except Exception:  # noqa: BLE001 — the judge is additive, never a turn's fate
+            logger.debug("goal judge worker failed", exc_info=True)
+        finally:
+            source.goal.judge_in_flight = False
 
     async def _loop_goal_worker(self, goal: str, source: SessionInteraction | None = None) -> None:
         """Run goal mode: loop turns toward ``goal`` until the judge releases.
@@ -35349,7 +37645,27 @@ class OperatorApp(App[None]):
         )
 
     def _cmd_session(self, arg: str, notice: NoticeFn) -> None:
-        """Read only this session's ledger; never interpret arguments as a prompt."""
+        """Read only this session's ledger, or copy its ID; never treat text as a prompt."""
+
+        if arg.strip() == SESSION_COPY_FLAG:
+            # The ID onto the clipboard and nothing else (decision D2). No
+            # SessionScreen and no ledger read: the pushed screen would take focus
+            # from the composer the user is about to paste into. The write goes
+            # through `_put_on_clipboard` so this gesture cannot drift from the
+            # others, and its courtesy toast stays. "sent to", because OSC 52 is
+            # unacknowledged; the ID is printed so a terminal that ignored the
+            # write still leaves something selectable in the transcript.
+            session = self._session
+            session_id = session.session_id if session is not None else ""
+            if not session_id:
+                # Not "not ready yet": `_session is None` is also the state after
+                # a failed start, and this branch cannot tell the two apart. A
+                # failed start has its own error notice above (design DR2).
+                self._system_notice("no session ID to copy", "warning")
+                return
+            self._put_on_clipboard(session_id)
+            self._system_notice(f"session ID {session_id} sent to the clipboard", "info")
+            return
 
         from local_operator.tui.widgets.session_panel import (
             SessionDiagnostics,
@@ -35357,9 +37673,9 @@ class OperatorApp(App[None]):
         )
 
         if arg.strip():
-            self._system_notice(
-                "/session takes no arguments; it reports the current session", "warning"
-            )
+            # Names the one exception and leaves what it does to the description,
+            # so the sentence does not contradict itself (design DR1).
+            self._system_notice(f"/session takes no text except {SESSION_COPY_FLAG}", "warning")
             return
         session = self._session
         if session is None:
@@ -36271,8 +38587,17 @@ class OperatorApp(App[None]):
         source.active_workers += 1
         try:
             try:
+                # ``aside_instruction=False`` because THIS call site just built the
+                # instruction (the line above). The session here is the viewer's:
+                # the local ``Session`` (which never wraps) or an
+                # ``AttachedSession`` when another process owns the conversation —
+                # and on that hop the owner's seam would wrap the already-wrapped
+                # turn a second time. The flag is how this call site states its
+                # intent without branching on which hop it holds; the wrap is
+                # idempotent underneath as the belt.
                 answer = await session.complete_aside(
                     turns,
+                    aside_instruction=False,
                     on_delta=delta,
                     on_usage=lambda usage: self._charge_aside_for(source, usage),
                 )
@@ -36618,38 +38943,28 @@ class OperatorApp(App[None]):
             picker.set_notice("")
             return
         if message.command == "goal":
-            # ONE row, and only while there is a goal to unset. `/goal`'s
+            # A GATED ROW SET, one row per act the LIVE state allows: `/goal`'s
             # argument is free text (the objective the model is given), so this
             # list is an OFFER beside it — the shape `/rename`'s `--refresh` row
             # has: nothing here filters or constrains what may be submitted, and
-            # a typed `/goal ship it` simply does not match the row, which closes
+            # a typed `/goal ship it` simply does not match a row, which closes
             # the list and submits the goal unchanged.
             #
-            # Gated on the LIVE state, not on the command: `--clear` is a no-op
-            # with nothing to clear, and a palette that taught it anyway would be
-            # advertising a dead end. Empty rows with no notice close the list,
-            # so the ungated case shows the user nothing at all.
+            # Gated on the LIVE state, not on the command: each flag is a no-op in
+            # the state its row is missing from, and a palette that taught it
+            # anyway would be advertising a dead end. Empty rows with no notice
+            # close the list, so the ungated case shows the user nothing at all.
             #
-            # `alert=True` is the app's own gate for "accepting this row removes
-            # something" (`/logout`, `/mcp remove`, `/stop`'s targets), and it is
-            # load-bearing HERE rather than decorative: the row is pre-selected
-            # and is the only match, so without it the editor's
-            # `_picker_choice_is_unambiguous` RUNS it on one Enter — which turned
-            # `/goal ` + Enter, the keystroke that used to report the standing
-            # goal, into a clear (round 1: design D1, UX U1, reviewer MAJOR-1).
-            # With the flag set the first Enter FILLS the buffer with
-            # `/goal --clear` and the second runs it; an explicit down-arrow onto
-            # the row keeps its one press, because the editor already treats a
-            # deliberate move as unambiguous.
-            # The tint it normally paints never lands here: the row is always
-            # `selected`, and `command_picker._argument_row` skips the danger
-            # colour on the selected row by design — so this changes the gate and
-            # not one pixel.
-            picker.set_choices(
-                [ArgumentChoice("--clear", "Clear the standing goal", alert=True)]
-                if getattr(self._session, "goal", "")
-                else []
-            )
+            # ORDER: `--history` first, `--clear` last. The editor's
+            # `_picker_choice_is_unambiguous` RUNS a pre-selected single match on
+            # one Enter, so the row that removes something must never be the only
+            # offer — `/goal ` + Enter, the keystroke that reports the standing
+            # goal, turned into a clear that way (round 1: design D1, UX U1,
+            # reviewer MAJOR-1). The rows are authored so a single match is the
+            # harmless row; `alert=True` stays on `--clear` alone, the one row
+            # whose acceptance cannot be undone (the record is kept by --done and
+            # --dismiss only drops the chip).
+            picker.set_choices(self._goal_argument_choices())
             picker.set_notice("")
             return
         if message.command == "notifications":
@@ -38143,7 +40458,10 @@ class OperatorApp(App[None]):
         try:
             from local_operator.config import ConfigManager
             from local_operator.paths import config_dir
-            from local_operator.providers.login_defaults import plan_login_defaults
+            from local_operator.providers.login_defaults import (
+                apply_login_defaults,
+                plan_login_defaults,
+            )
 
             manager = ConfigManager(config_dir())
             # The POLICY is shared with `local-operator login` (see
@@ -38161,19 +40479,13 @@ class OperatorApp(App[None]):
                 manager.get_config_value("hosting"),
                 manager.get_config_value("model_name"),
             )
-            if plan.hosting is None:
-                # Nothing to write, but there can still be something to SAY: a
-                # decision-only provider (TypeSafe's Jev) leaves the routing
-                # exactly as it was and says so in ``receipt``. Returning None
-                # here — as this did — swallowed that line and made the login
-                # look like it had silently done nothing.
-                return plan.receipt
-            manager.set_config_value("hosting", plan.hosting)
-            # ``None`` = leave it; ``""`` = clear a model belonging to the
-            # provider just replaced. The explicit None test is what keeps the
-            # clearing case from being swallowed by a falsy check.
-            if plan.model_name is not None:
-                manager.set_config_value("model_name", plan.model_name)
+            # A plan with nothing to write can still have something to SAY: a
+            # decision-only provider (TypeSafe's Jev) leaves the routing exactly
+            # as it was and says so in ``receipt``, so the receipt is returned
+            # whether or not anything was written. The write itself is the shared
+            # ``apply_login_defaults``, which also covers a plan that fills only
+            # an empty model beside an already-right hosting.
+            apply_login_defaults(manager, plan)
             return plan.receipt
         except Exception as error:  # noqa: BLE001 — never fail a completed login
             return f"logged in, but could not save default hosting/model: {error}"
@@ -39349,26 +41661,77 @@ class OperatorApp(App[None]):
 
     def _goal_slash_result(self, arg: str, SlashResult: Any) -> Any:
         from local_operator.session.goal import (
-            GOAL_CLEAR_ARGS,
+            GOAL_RECORD_OWNER_REFUSAL,
             MAX_GOAL_CHARS,
             cleared_goal_receipt,
+            goal_dismissed_receipt,
+            goal_done_answer,
+            goal_flag_form,
+            goal_history_items,
+            goal_history_notice,
+            goal_report,
         )
 
         arg = arg.strip()
         session = self._session
-        if session is None or not hasattr(session, "set_goal"):
+        record = self._goal_record()
+        if session is None:
             return SlashResult(kind="notice", text="session is still starting…", style="warning")
+        if record is None and not arg:
+            # The bare form is a READ, and the record's read half rides the wire
+            # (`_refresh_goal_panel` sources a viewer's card the same way), so
+            # it is answered rather than refused.
+            state = getattr(session, "frontend_state", None)
+            return SlashResult(
+                kind="notice",
+                text=goal_report(session.goal, getattr(state, "goal_status", "") or ""),
+                style="info",
+            )
+        if record is None:
+            # A session that EXISTS but whose record is not this host's: the
+            # same condition `_cmd_goal` refuses, so the same sentence — telling
+            # a started session it is "still starting" was the misleading answer
+            # the local handler's refusal was written to delete (agent review
+            # round 2, MINOR-7).
+            return SlashResult(kind="notice", text=GOAL_RECORD_OWNER_REFUSAL, style="warning")
         if not arg:
-            current = session.goal
-            text = f"goal: {current}" if current else "no goal set — /goal <text> to set one"
-            return SlashResult(kind="notice", text=text, style="info")
-        if arg.lower() in GOAL_CLEAR_ARGS:
+            return SlashResult(
+                kind="notice",
+                text=goal_report(session.goal, record.goal_status),
+                style="info",
+            )
+        form = goal_flag_form(arg)
+        if form == "clear":
             # The receipt names what went, on this host too: a follower's
             # `/goal --clear` is rendered by ITS terminal, so a receipt that named
             # nothing would be the same silent loss one hop out (design D4/U3).
             receipt = cleared_goal_receipt(session.goal)
-            session.set_goal("")
+            record.delete_goal()
             return SlashResult(kind="notice", text=receipt, style="info")
+        if form == "done":
+            entry = record.mark_goal_done()
+            return SlashResult(
+                kind="notice",
+                text=goal_done_answer(session.goal, entry),
+                style="info",
+            )
+        if form == "dismiss":
+            return SlashResult(
+                kind="notice",
+                text=goal_dismissed_receipt(record.dismiss_goal()),
+                style="info",
+            )
+        if form == "history":
+            rows = goal_history_items(record.history_view())
+            # Byte-for-byte the owner's answer (`serving.py::_goal_slash`): this is
+            # the product a follower paints, so the two must not differ by a row
+            # shape or a word (the host-disagreement rule at this function's
+            # refusal branch).
+            return SlashResult(
+                kind="block",
+                text=goal_history_notice(len(rows)),
+                data={"type": "goal_history", "items": rows},
+            )
         refusal = unknown_flag_refusal("goal", arg)
         if refusal is not None:
             # Same refusal, same words as the local handler: this is the bytes a
@@ -39376,7 +41739,7 @@ class OperatorApp(App[None]):
             # one that refused it is the host-disagreement class the shared
             # vocabularies in `session/goal.py` exist to remove (UX U6).
             return SlashResult(kind="notice", text=refusal, style="warning")
-        stored = session.set_goal(arg)
+        stored = record.arm_goal(arg)
         if len(stored) == MAX_GOAL_CHARS and len(arg.strip()) > MAX_GOAL_CHARS:
             return SlashResult(
                 kind="notice",
@@ -41080,6 +43443,12 @@ class OperatorApp(App[None]):
             # every cut-off as a completion (design review round 1, D2).
             cut_off=message.cut_off,
         )
+        # LAST, and after `_finalize_turn` on purpose (see
+        # `_maybe_judge_goal_turn`): the standing goal is judged off THIS turn's
+        # end, which is the LOCAL half of the edge trigger the runtime installs
+        # on its own session subscription. A follower terminal declines here —
+        # the owner in the other process is the one that judges.
+        self._maybe_judge_goal_turn(message)
 
     def on_turn_abandoned(self, message: TurnAbandoned) -> None:
         """Retire a turn whose worker returned without a terminal ``agent_end``.
@@ -42163,6 +44532,24 @@ class OperatorApp(App[None]):
             # end of the state the marker asserted (design round 1, D2).
             self._settle_queued_prompt(message.message_id)
             return  # our own echo — the row is already painted
+        # HARNESS CHROME — the harness minted this row, no person typed it, and
+        # the transcript records it while NO surface paints it. Placed after the
+        # echo check because an echo this app registered is by definition a row
+        # the user's own send produced.
+        #
+        # TWO LEGS, ONE DECISION, and both are needed. ``injected`` is the
+        # STRUCTURAL stamp on the announced message, exact wherever it exists;
+        # ``is_harness_chrome`` is the shared recogniser, which also covers rows
+        # written by a build that predates the stamp and every continuation
+        # prompt whose text is interpolated per goal. This leg closes the SLOW
+        # half of the gap the transcript has always had on a follower: a
+        # runtime-hosted owner admits a continuation, this terminal is attached,
+        # and before this the harness's own sentence appeared as the user's
+        # words. The owner's own announce site withholds the event now, so this
+        # fires for an owner on an older build (or a differently-shaped host),
+        # which is exactly the case a per-surface decision exists to survive.
+        if message.injected or is_harness_chrome(message.prompt):
+            return
         block = UserBlock(message.prompt, message.image_count)
         block.navigation_anchor_id = message.message_id
         self._append_block(block)
@@ -43950,7 +46337,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 126
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 129
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own

@@ -28,7 +28,11 @@ endpoint's admission rule and the composer's planner both read:
 * `argument_shape` / `argument_words` — the third source, for text the desktop
   VALIDATES or FORWARDS rather than completes. `argument_words` is the vocabulary
   the first token must come from, empty meaning any word:
-  - `word` — one whitespace-free selector token (`/usage on`, `/stop now`);
+  - `word` — one whitespace-free selector token (`/usage on`, `/stop now`).
+    `/session --copy` is a `word` row with a one-word vocabulary
+    (`argument_words: ["--copy"]`): the copy is terminal-only, so the command
+    route refuses it with "--copy works only in the terminal; the /session view
+    shows the ID" rather than opening the view and dropping the flag;
   - `provider` — one token naming a provider this install knows, so `/login
     openai` is the command and `/login zzz` is a message;
   - `subcommand` — `<subcommand> [name]`, the MCP shape, at most two tokens, so
@@ -249,10 +253,43 @@ the one the desktop client reads): nothing is rolled back, the
   at a safe boundary, not an arbitrary transcript rewrite. The parent is unchanged.
   The child gets a new canonical ID; optional message is admitted once using the
   same UUID, never both a boot-prompt sidecar and a renderer re-submit.
-- `POST /asides`: request_id, text, optional previous aside_id. Completion runs
-  on the runtime but does not enter conversation history. GET `/asides/{aside_id}`
-  recovers a response after HTTP loss; DELETE closes a settled panel. A continuation
-  temporarily owns its prefix so two panels cannot adopt it twice.
+- `POST /asides`: request_id, text, optional previous aside_id, optional
+  `subscription_id`. Completion runs on the runtime but does not enter
+  conversation history. The model is told the request is off the record and that
+  tools are unavailable; an aside answered by a bare tool call is retried ONCE
+  with the call handed back to the model as an error, and a second such answer —
+  or a retry that answers nothing at all — returns **409** `aside_unanswered`
+  rather than an empty string. A settled answer with no text at all is refused
+  the same way as **409** `aside_empty_answer` instead of being stored as a
+  finished exchange, because an empty assistant turn is complete, adoptable and
+  paints as no answer and no error. Either refusal DROPS the refused request's
+  own entry: a question with no answer is neither continuable nor adoptable, so
+  the readback stays clean. What the retry then does depends on which ask
+  failed — a fresh ask (a new `request_id`, no `aside_id`) starts a clean entry,
+  while a refused CONTINUATION releases its panel's prefix, so retrying with
+  that panel's `aside_id` resumes it. A retry that instead names the dropped
+  entry's own id as `aside_id` is refused **409**: the store no longer holds it.
+  The answer is also streamed to the caller as live-only `aside_delta` frames
+  (`{"aside_id",
+  "delta"}`, `replay: false` — never replayed, and never entering the
+  transcript); those frames are PROGRESS, and the POST response's `text` stays
+  authoritative. `subscription_id` is the id the session's `open` frame handed
+  the viewer, and the frames go to THAT subscription ONLY — an aside is off the
+  record, so another window on the same session sees nothing of it. Omitting it
+  streams nothing (never a broadcast): a caller that named no subscription keeps
+  today's request/response behaviour and reads the answer from `text`. RELEASE
+  SKEW IS THE CLIENT'S TO HANDLE: `subscription_id` is accepted only by a daemon
+  from the change that added it, and a daemon older than that answers **422** for
+  any body carrying it — extra keys are forbidden repo-wide by the CRUD `Input`
+  model, so the old daemon refuses the whole request rather than degrading the
+  stream. A client must therefore send the field only to a daemon that knows it;
+  the companion app change does that with a retry that drops it. A body with NO
+  `subscription_id` is unaffected by the field's existence: the aside runs, the
+  POST returns `text`, nothing is published (see
+  `test_an_ask_that_names_no_subscription_publishes_nothing`). GET
+  `/asides/{aside_id}` recovers a response after HTTP loss; DELETE closes a settled
+  panel. A continuation temporarily owns its prefix so two panels cannot adopt it
+  twice.
 - `POST /asides/{aside_id}/adopt`: request_id and confirmed=true. Runtime adoption
   enforces its idle guard and durable-first ordering. A latch before any await
   prevents distinct request IDs from duplicating adoption. An ambiguous failure
@@ -346,6 +383,50 @@ flaky job` remains an ordinary objective. A bare `--token` that names no flag of
 command is refused rather than stored (`/goal --stop` used to become the standing
 objective), which is the one deliberate behaviour change: a goal whose text is a
 single `--word` is no longer accepted.
+
+### The judged goal: what ships
+
+This is the shipped behaviour of the judged-goal record, stated here because the
+design notes it was built from are not in this repository and parts of them were
+superseded during review. The code is the authority. The strings below are
+constants in `session/goal.py` and `session/goal_judge.py`.
+
+* **Bare `/goal` has two shapes, one per kind of host.** A terminal that OWNS the
+  session opens the goal card (`tui/widgets/goal_panel.py`) and prints nothing. The
+  card shows the objective, the judge line (`judge: <state> · run <n>/12`) and the
+  settled list. Its two keys are `d` (done) and `c` (clear, which takes two presses
+  because there is no undo). A follower, the runtime and the desktop print
+  `goal_report`'s one line instead: `goal: <text> — active`,
+  `goal: <text> — done; /goal --dismiss clears it`, or
+  `no goal set — /goal <text> to set one`. An attached terminal's card draws its
+  status, judge and history from the frame, and hides the two keys, because they
+  write the owner's record.
+* **The flag forms** are `--done` (settle it and record it), `--dismiss` (clear the
+  text of a goal that is already done; the history keeps it), `--history` (the
+  settled list, newest first) and `--clear` (delete it and record nothing). A flag
+  must be the WHOLE argument. None of them starts a turn. A host that neither owns
+  the record nor can route the command says
+  `the goal record belongs to the session's owner — /goal --clear, --done, --dismiss and --history run there`.
+* **Setting a goal starts a new life for it.** `/goal <text>`, `lop --goal` and the
+  mobile relay all mark the goal `active`, give it a fresh judge token, and record a
+  still-active predecessor as `superseded`. A goal that was already done stays in
+  history. A goal set over a settled one is therefore judged and injected again,
+  and it is not shown as done.
+* **The `<goal>` prompt block is withheld once the goal is `done`.** The text stays
+  for the surfaces to show, but it is not presented to the model as work to pursue.
+* **A stall is announced once, on entry to `stalled`**, as a transcript notice on
+  every host that runs the judge. There is one sentence for each bound:
+
+  | bound | notice |
+  |---|---|
+  | three consecutive unreadable verdicts | `goal stalled: judge could not decide — send a message to continue` |
+  | 12 continuations in one streak | `goal stalled: stopped after 12 continuations — send a message to continue` |
+  | a reason this build cannot name | `goal stalled: auto-continuation stopped — send a message to continue` |
+
+  The cap's wording is the canonical one. The judge publishes it as the record's
+  `reason` (`STALLED_CAP_REASON`), so it is part of the wire contract, and every
+  surface prints the same sentence. The earlier design draft's
+  `reached the continuation limit` wording was not shipped.
 
 The terminal's argument picker offers `--clear` on an empty `/goal `
 argument while a goal is set, and `--stop` on an empty `/loop ` argument while that
@@ -463,6 +544,168 @@ Rows also supply a session-prompt setup action to inspect server-supported setup
 when downstream account authorization is server-specific. It is an offer for the
 user to submit normally with ordinary gates, not an automatic setup-tool call.
 Legacy Google token values are deliberately retained for user scripts.
+
+### Settings without a conversation: `GET|POST /v1/desktop/mcp`
+
+Everything above needs a session, and a session needs a configured model — so on a
+fresh install the Settings page could not list a single server, and on a configured
+one, editing a JSON file started a runtime and spawned every server in it. The
+sessionless surface answers the same questions from the files on disk, gated on
+`features.mcp_catalog`:
+
+| Route | Body / query | Answer |
+| --- | --- | --- |
+| `GET /v1/desktop/mcp` | `cwd?` (absolute existing dir, default the user's home), `session_id?` | `CRUDResponse{result:{data:<catalog>, replayed:false}}` |
+| `POST /v1/desktop/mcp` | `MCPControl` plus `cwd?` | the FULL catalog again, plus `operation: <McpOperation>\|null` — the op this request started or named. A REFUSAL is `409 {code, message}` and carries NO document, so a client that needs rows after one re-reads the GET |
+| `POST /v1/desktop/mcp/credentials` | `MCPCredentials` plus `cwd?` and `header?` (the `add_key` form, below) | `{name, saved_ids, failed_ids, code, catalog:<catalog>}` |
+
+The `code` vocabulary of that credentials route is the write's own, not the
+control route's `409` set above: `saved`, `invalid_target` (an unknown server or id,
+a key id no reference could name, a header the row may not take, more than one id
+with `header`), `replace_confirmation_required` (an id already held and not listed
+in `confirmed_replace`), `store_unavailable` (the encrypted store refused) and
+`write_failed` (the CONFIG write was refused — the `add_key` bind could not be
+written, so nothing was stored). All of them answer `200` with the rows to repaint,
+because a refused write is a result the page renders rather than a transport
+error.
+
+`add`, `remove`, `test`, `login`, `reauth`, `logout`, `status` and `cancel` are the
+sessionless actions. `connect`, `disconnect` and `reload` stay on the session route:
+they are about ONE runtime's live connections, which a sessionless request has none
+of. An invalid `cwd` is `422`; a refusal is `409 {code, message}` with a bounded
+`code` and fixed copy per code, never exception text (a config error can quote a
+credential). The codes are `exists`, `not_owned`, `project_scope_unavailable`,
+`unknown_server`, `oauth_unsupported`, `grant_running`, `too_many_operations`,
+`write_failed`, `mcp_starting`, plus `invalid_config` (the config layer refused the
+SHAPE of a definition) and `operation_unavailable`, whose ONE sentence has to read
+for two situations: a stale `operation_id`, and a live-only action on this route
+(`connect`/`disconnect`/`reload`/`probe`) — hence "a refusal is `409 {code,
+message}`" rather than "no longer available", which was only true of the first. An
+owner from before this change answers the single
+code `mcp_control_refused`, which renders the same generic sentence it always did.
+
+**The catalog document** is one payload: `cwd`, `project_scope_available`,
+`global_path`, `project_path` (null when the folder has no separate project file),
+`status_source` (`config` or `live`), `session_id`, `servers[]` and `operations[]`.
+The TWO fields that carry a project path mean different things, and are named
+accordingly: the catalog-level `project_path` is the project's mcp.json FILE (what a
+user can open), the row's `project_cwd` is the DIRECTORY that row's project scope
+applies to.
+
+`status_source` is `live` only when the overlay reached at least one row, and
+`session_id` is echoed on the same condition, so the two never claim a live fact
+that no row carries: it is "the session whose live facts were applied, `null` when
+none were" — a cold, foreign or unloaded session, or a GET with no `session_id`,
+all answer `config` + `null` rather than a failure or a dangling id.
+
+A row carries the server's identity and where it came from (`source.kind`,
+`source.path`, `editable`, `owned_scope` — `remove` is offered only when it is ours),
+its `scope` (`global`/`project`, where it APPLIES) with `project_cwd` set iff
+`project`, a `transport`/`endpoint` pair with a redacted URL when the URL carried
+user-info, a query or a fragment, `status`/`status_reason`/`status_observed_at`/
+`status_basis`, an `auth` block (`kind`, `signed_in`, and the state of each
+`secret_refs` id), a `tool_count` with its basis and `last_seen_at`, and the closed
+`actions` list — `test`, `sign_in`, `set_key`, `add_key`, `reauth`, `sign_out`,
+`remove`, `connect`, `disconnect`. It is generated in `mcp/catalog.py` — the ONE row builder behind this route — so no
+client derives any of it; `docs/fixtures/mcp-catalog.json` is a pinned sample of the
+shape (with one row per status, one project row, one foreign-import row and a
+running operation) for the UI's own parity tests, and a unit test fails if the
+builder's fields and the fixture's drift apart. The legacy session route keeps its
+own frozen row shape (`stdio`/`http`, the manager's status words) for desktop builds
+that predate `features.mcp_catalog`; the only thing that crosses between the two is
+the live overlay, translated by `live_facts_from_snapshot`.
+
+Status is `connected`, `needs_sign_in`, `not_started`, `connecting` or `error`, and
+`status_basis` says how it is known: `live` (a warm runtime), `probe` (an explicit
+Test or sign-in ANSWERED it), `operation` (one is running right now, so nothing has
+measured this server yet — `status_observed_at` is null), or `stored` (config, the
+grant store, the encrypted store). The bases are kept apart so a client never draws
+a settled result for an operation still in flight.
+
+**Both timestamps are epoch SECONDS (a float), never milliseconds** — a client that
+multiplies by nothing and hands one to a millisecond clock renders a date in 1970,
+which is how "Worked 20700 d ago" happened. `status_observed_at` is set on `live` and
+`probe` rows only: a `stored` status is not an observation, so it stays null there.
+`last_seen_at` is the other time, and it dates the COUNT, not the status: it is set
+exactly when `tool_count_basis` is `last_seen`, to the moment this machine last
+listed that server's tools under its current config (the tool cache's save time — a
+successful connect or refresh, in any process). It survives a daemon restart, which
+is the point: after a reload it is the only honest answer to "when did this last
+work?", and it is null whenever the count came from a live runtime or a probe
+(whose time is `status_observed_at`) or when nothing was ever listed. A config edit
+changes the digest the cache is keyed on, so an edited server has no `last_seen_at`
+until it is reached again.
+
+**Keys: `set_key` vs `add_key`.** `set_key` appears when the config declares
+`${ID}` references (`auth.secret_refs` non-empty): the client asks for each listed
+id and posts `{name, values:{<id>: <value>}, confirmed_replace?}`. `add_key`
+appears INSTEAD of `sign_in` for a REMOTE server we own (`source.editable`) that
+declares no reference, SENDS no credential of its own (no header that could CARRY
+one, and no user-info or query in its URL) and is known to need a key: its config
+says `auth.type: apikey`, or a Test in this daemon watched it answer 401/403 while
+discovery found no OAuth authorization server. Such a row reads `auth.kind:
+api_key`, `signed_in: false`, `needs_sign_in`, and never offers `sign_in` (which
+could only fail with "No OAuth authorization server was discovered"). A server that
+already sends a literal key header is never this row: it has somewhere its key
+already travels, so it reads `not_started` (or whatever its probe measured) rather
+than `needs_sign_in`, and its fix is the header it already has — `add_key` could
+only bind a second one. A header counts as a place a key travels only when its NAME
+can be one and the transport does not own it (it contains `key`, `token`, `secret`,
+`credential`, `password`, `cookie`, `bearer`, `session` or `signature`, or `auth`
+as a word — `Authorization` and `X-Auth-Token` count, `X-Author` does not):
+`Accept` is invented by the protocol (every streamable HTTP client sends it) and
+`X-Tenant-Id` says nothing about a credential, so a keyless server sending either
+is still this row — it keeps `add_key`, and `status_reason` says why it needs a key
+despite sending headers. The client asks for the header name (e.g. `Authorization`
+or `X-Api-Key`), a key id (a `[A-Za-z_][A-Za-z0-9_]*` name) and the value, and
+posts `{name, header, values:{<id>: <value>}}` — exactly one id. The server binds
+`headers[<header>] = "${<id>}"` into the file that defines the server (only a
+reference ever enters config), then stores the value; a refused store rolls the
+binding back — including the FILE's own bytes, so a hand-formatted `mcp.json` comes
+back exactly as it was. It refuses a header the server already sets (in ANY case,
+since HTTP header names are case-insensitive), a transport-owned header, a foreign
+row, and a row the catalog would not offer `add_key` on at all (an explicit OAuth
+server, a server that already sends a credential header, a stdio server), with
+`code: invalid_target` and nothing written. `add_key` is refused for the last of
+those on purpose: a second credential header bound beside the one the server
+already sends would look like a saved key while the server kept failing. After it
+the row carries the new reference and offers `set_key`. The challenge observation
+lives in this daemon's memory, so after a restart such a row reads `unknown` +
+`sign_in` again until the next Test — and a connect that SUCCEEDS forgets the
+observation, so a transient 403 that later cleared cannot leave the row claiming
+`signed_in: false` + `add_key`.
+
+**A key write or a grant action forgets EVERY cached probe**, not only its own row's:
+a grant is keyed by the server URL (every folder) and a key by its id (every server
+that names it), so a per-row drop left the same stale answer one folder or one
+sibling server away. An operation already running when that happens settles
+normally but records no probe, since it measured the facts that were just replaced.
+A refused key write changes nothing and forgets nothing.
+
+**A stored fact never claims `connected`** — a grant revoked upstream still reads as
+signed in, so stored state is shown as "Ready". Precedence, first match wins: a
+config that fails validation is `error`; a running operation on that server is
+`connecting`; a live overlay; a probe within its 300 s TTL that still matches the
+server's config digest; then the stored facts. A `test` is an OPERATION, never a
+synchronous answer: it spawns one short-lived manager, connects NON-interactively
+(a Test never opens a browser), records `tool_count`, and settles to `connected`,
+`needs_sign_in` or `error`. One operation runs at a time (a second loopback OAuth
+listener would fight for the callback port), each is bounded and cancellable, and
+every spawned child is torn down inside the operation's own task — including on
+server shutdown, which cancels and JOINS the operation, so the child is reaped
+through the app's own teardown wherever the lifespan's shutdown runs (`SIGTERM`,
+`SIGINT`, a programmatic uvicorn shutdown), and not under `SIGKILL`. Two limits, measured rather than assumed: a
+`SIGKILL` runs no teardown at all, so a child that ignores its stdin stays until it
+reads EOF and exits on its own (an ordinary stdio server does exactly that within
+seconds), and a second cancel landing during teardown interrupts `disconnect_all`
+before it closes the transports.
+
+The list never starts anything. `session_id` overlays a runtime's live statuses
+ONLY when that runtime is already bound and its folder is the requested one, inside
+a 2 s bound; a cold, silent or foreign session degrades to the config answer with
+`status_source: "config"` and `session_id: null` rather than a 503. That is why the
+Settings page passes the active conversation's id when it has one (the run panel and
+the list must agree) and nothing when it does not.
 
 ## Radient: narrow proxy, not another authentication authority
 

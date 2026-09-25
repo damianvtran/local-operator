@@ -723,8 +723,23 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.rename",
         "temp FILE -> state, dir_fd-bound to an evidence root",
     ),
-    ("local_operator/mcp/config.py::_write_json_atomic", "os.replace", "temp FILE -> mcp json"),
-    ("local_operator/mcp/config.py::_write_json_atomic", "os.unlink", "temp FILE -> mcp json"),
+    # The mcp config writer: a temp file BESIDE its target and ``os.replace`` onto
+    # it. It is EVERY mcp.json write in ``mcp/config.py``: its callers are
+    # ``_write_json_atomic`` (add, OAuth set, remove, and the unbind fallback), the
+    # ``add_key`` header bind, and the byte-exact rollback of a refused bind. Every
+    # one passes the scope FILE ``_scope_path`` resolved — the replaced path is an
+    # mcp.json, never a directory, so no session DIRECTORY is removed, renamed or
+    # replaced. A new caller with any other path is what this row does not cover.
+    (
+        "local_operator/mcp/config.py::_write_bytes_atomic",
+        "os.replace",
+        "temp FILE -> the mcp.json scope file this module resolved",
+    ),
+    (
+        "local_operator/mcp/config.py::_write_bytes_atomic",
+        "os.unlink",
+        "that temp FILE, only while the write above is failing",
+    ),
     ("local_operator/mobile/seen.py::SeenStore._persist_locked", "os.replace", "temp FILE"),
     ("local_operator/mobile/seen.py::SeenStore._persist_locked", "os.unlink", "temp FILE"),
     (
@@ -1047,6 +1062,11 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/resume.py::write_session_attachment",
         "<path>.replace",
         "temp FILE -> attachment.json",
+    ),
+    (
+        "local_operator/resume.py::write_goal_record",
+        "<path>.replace",
+        "temp FILE -> goal.json",
     ),
     (
         "local_operator/resume.py::write_session_title",
@@ -1712,6 +1732,7 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
     {
         "local_operator/resume.py::write_session_title",  # tmp -> title.json
         "local_operator/resume.py::write_session_attachment",  # tmp -> attachment.json
+        "local_operator/resume.py::write_goal_record",  # tmp -> goal.json
         "local_operator/resume.py::_write_origin_scan_sentinel",  # tmp -> origin-scan.json
         "local_operator/resume.py::_write_title_scan_sentinel",  # tmp -> title-scan.json
         "local_operator/resume.py::_save_origin_cache",  # tmp -> origin cache FILE

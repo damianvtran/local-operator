@@ -93,6 +93,7 @@ from local_operator.session.frontend_state import (
     FRONTEND_CAPABILITY,
     FRONTEND_CHECKPOINT_CUSTOM_TYPE,
     FrontendModelSpec,
+    FrontendRevision,
     FrontendSessionState,
     FrontendStateStore,
     FrontendSync,
@@ -104,12 +105,14 @@ from local_operator.session.frontend_state import (
     SnapshotSubagentComms,
     SnapshotWakeScheduler,
     WakeState,
+    _fold_goal_status,
 )
 from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.session.model_selection import StoredModelSelection
 from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import (
     CompactionOutcome,
+    GateUndeliveredHandler,
     RuntimeLocality,
     unanswered_tail_call_ids,
 )
@@ -828,12 +831,18 @@ def frontend_attach_refusal(record: SessionRecord) -> str | None:
     mirrors — and the disagreement would be silent, since both spellings would
     keep compiling.
     """
-    if (
-        record.protocol < FRONTEND_ATTACH_MIN_PROTOCOL
-        or FRONTEND_CAPABILITY not in record.capabilities
-    ):
+    if FRONTEND_CAPABILITY not in record.capabilities:
         return (
             f"owner lacks {FRONTEND_CAPABILITY}; canonical full-TUI attach needs "
+            f"protocol >= {FRONTEND_ATTACH_MIN_PROTOCOL}"
+        )
+    if record.protocol < FRONTEND_ATTACH_MIN_PROTOCOL:
+        # Its own clause, because "lacks <capability>" is FALSE here: the owner
+        # announces the capability and is merely too old a protocol to attach
+        # canonically. `lop --resume` prints this sentence to the user (#1474,
+        # review round 2, N1), so it has to name the gap that actually exists.
+        return (
+            f"owner runs protocol v{record.protocol}; canonical full-TUI attach needs "
             f"protocol >= {FRONTEND_ATTACH_MIN_PROTOCOL}"
         )
     return None
@@ -961,6 +970,13 @@ class AttachedSession:
     asking. See :class:`SessionProtocol`'s runtime-role block.
     """
 
+    #: Paint-first marker (``ViewerSessionProtocol.attach_behind``). A CLASS
+    #: default, not only the ``__init__`` assignment below: ``False`` is the
+    #: right answer for every facade nobody chose paint-first for, and a class
+    #: attribute keeps a hand-built instance (``__new__`` in the protocol
+    #: conformance test) a viewer without reciting it.
+    attach_behind: bool = False
+
     def __init__(
         self,
         *,
@@ -1031,6 +1047,13 @@ class AttachedSession:
         #: prints it once on adoption so the user is told why the session came
         #: up bare instead of being left to guess (UX round 1, U2).
         self.degraded_reason: str = ""
+        #: The launcher opened this viewer cold IN FRONT OF a live owner it will
+        #: bind to behind the paint (``lop --resume`` / ``/resume`` onto a live
+        #: owner whose conversation is on disk). The TUI reads it to narrate and
+        #: bound that attach, which the ordinary cold open does not need: there
+        #: nothing is waiting on an owner that exists. Set by the caller that
+        #: chose paint-first, never inferred here.
+        self.attach_behind: bool = False
         #: Told when the runtime vanished for good; see ``_go_cold``.
         self._went_cold_callback: Callable[[], Any] | None = None
         #: Told when the runtime retired ITSELF for a newer build (the
@@ -1134,6 +1157,12 @@ class AttachedSession:
         self._degraded_resync_retry_task: asyncio.Task[None] | None = None
         self._frontend_refresh_cut: tuple[str, int] | None = None
         self._hydrated_once = False
+        #: The rows a COLD facade painted from disk before it ever bound, by id.
+        #: Set by :meth:`cold` / :meth:`saved_preview` and consumed by the first
+        #: :meth:`_load_frontend_history`, the one place that can see what the
+        #: owner wrote between that read and the bind (see
+        #: :meth:`_replay_cold_gap`).
+        self._cold_painted_ids: set[str] | None = None
         self._display_history: DisplayHistoryWindow | None = None
         self._history_hydrated = True
         #: Whether the PRE-COMPACTION rows behind the context replay are
@@ -1205,6 +1234,12 @@ class AttachedSession:
         #: Where a REFUSED gate reply goes when the host has a surface for it
         #: (see ``set_gate_refusal_handler``): unset means "log it".
         self._gate_refusal_handler: Callable[[BaseException], None] | None = None
+        #: Where an answer that was ACCEPTED here and never REACHED the owner
+        #: goes (see ``set_gate_undelivered_handler``): unset means "log it".
+        #: A separate channel from the refusal above because it is a separate
+        #: fact — nothing refused this reply, nothing received it — and the two
+        #: need different words on screen.
+        self._gate_undelivered_handler: GateUndeliveredHandler | None = None
         self._ask_handler: AskUserFn | None = None
         self._gate_task: asyncio.Task[None] | None = None
         self._gates_detached = False
@@ -1550,6 +1585,7 @@ class AttachedSession:
         self._can_go_cold = True
         self._display_window_requested = True
         self._bind_history(preview.messages, None, drop_history_duplicates=True)
+        self._cold_painted_ids = set(self._history_ids)
         model = FrontendModelSpec(provider="", model_id="")
         self._install_frontend(
             FrontendSessionState(
@@ -1614,6 +1650,7 @@ class AttachedSession:
             # title are present in the FIRST state the widgets ever see —
             # installing twice would paint an empty panel and then repaint it,
             # which is the visible flicker this whole change exists to remove.
+        self._cold_painted_ids = set(self._history_ids)
         # Children can persist a roster before the parent's first transcript
         # row. Absence of that file must not hide independently durable spend.
         state = self._restore_cold_details(state)
@@ -1639,8 +1676,9 @@ class AttachedSession:
         ask — but "no owner" is not "nothing is known". The session's last
         runtime wrote a full ``FrontendSessionState`` to the transcript at every
         turn end (``FrontendStateStore.checkpoint``), and that row already holds
-        the subagent roster, the todo list, the conversation title, the goal and
-        the accumulated spend.
+        the subagent roster, the todo list, the conversation title, the goal WITH
+        its judged record (status, live judge, settled history) and the
+        accumulated spend.
 
         Before this, none of it was read: a resumed session opened with an empty
         subagent panel and no todos, and stayed that way until the user sent a
@@ -1653,10 +1691,10 @@ class AttachedSession:
         state is authoritative for the rest, so the two are merged rather than
         one replacing the other: ``cwd`` and the model come from THIS process
         (using the shared conversation-selection reader, not mutable defaults),
-        while the roster, todos, title and costs come from disk. ``jobs`` are
-        stamped ``restored`` for the same reason the session's own restore does
-        — a restored row has no in-process trajectory, and the panel says so
-        rather than rendering a busy child as empty.
+        while the roster, todos, title, goal record and costs come from disk.
+        ``jobs`` are stamped ``restored`` for the same reason the session's own
+        restore does — a restored row has no in-process trajectory, and the panel
+        says so rather than rendering a busy child as empty.
 
         Best-effort by construction: an unreadable, absent or malformed
         checkpoint leaves the synthesised state untouched. Opening a
@@ -1706,6 +1744,34 @@ class AttachedSession:
                 "conversation_title_user_set": durable.conversation_title_user_set,
                 "conversation_title_forked": durable.conversation_title_forked,
                 "goal": durable.goal,
+                # The judged-goal record rides the SAME checkpoint as the text
+                # above, and it has to be folded by name for the same reason
+                # everything else here is: this dict is an explicit whitelist
+                # over ``durable``, so a field left out is a field the cold
+                # frame silently drops. Carrying ``goal`` without the record
+                # left a cold pane showing an objective it could not strike
+                # (no status) and a history reading as "no completed goals".
+                #
+                # ``goal_status`` goes through ``_fold_goal_status`` rather
+                # than being copied raw, because that helper is THE one place
+                # the pre-lifecycle migration default lives, and a cold open is
+                # exactly where a session from such a build is first looked at:
+                # read raw, a restored "pursue this" goal would show as no goal
+                # status at all until a runtime engaged and refreshed it.
+                #
+                # NOT gated on ``inherited`` (unlike ``jobs`` above): the
+                # runtime keeps the goal record across a fork —
+                # ``_inherited_identity_fixups`` re-stamps only ``session_id``,
+                # ``checkpoint_id`` and ``jobs`` — so zeroing it here would be
+                # the cold frame and the attached frame disagreeing about what
+                # the fork has.
+                "goal_status": _fold_goal_status(durable),
+                "goal_judge": durable.goal_judge,
+                "goal_history": list(durable.goal_history),
+                # The flag that says the list above was dropped by the WIRE
+                # bound rather than empty: restoring the list without it would
+                # re-create the lie it exists to prevent.
+                "goal_history_truncated": durable.goal_history_truncated,
                 "active_agent": durable.active_agent,
                 "active_team": durable.active_team,
                 # Spend and occupancy are the conversation's history, not this
@@ -2389,6 +2455,48 @@ class AttachedSession:
         if not self.is_cold:
             return None
         return self._read_cold_reason or "no-runtime"
+
+    @property
+    def _deliberately_stopped_cold(self) -> bool:
+        """A stop this viewer was TOLD about, while it has nowhere to deliver.
+
+        The stop-credible half of G6's predicate (``_maybe_start_gate``), and the
+        term that makes the guard reachable on the sidebar's own facades: every
+        one of them is built with ``_can_go_cold = True``, so ``can_ever_bind`` is
+        True for the whole of their lives and could never refuse a card on the
+        path this PR is about (agent review round 3, A9 = QA Q2).
+
+        ``_deliberate_stop`` is the viewer's own record that the session ended on
+        purpose rather than that its owner was lost: set by the ``stopping``
+        frame a runtime writes before it closes (``_on_disconnected``'s
+        ``STOPPED_REASON`` arm), by this viewer's own ``request_stop`` before the
+        op goes out, and by ``_recover_runtime``'s inference from the
+        transcript's ``stopped_at`` marker for a stop someone else issued.
+        ``is_cold`` is the other half and is NOT the same fact: while a client is
+        connected and synced this pane can still POST the answer, so a stop it
+        has merely been told about must not cost it the card.
+
+        WHY IT CANNOT REFUSE A SESSION THAT CAN STILL RECOVER. ``_deliberate_stop``
+        is cleared by every successful sync — ``_finish_sync`` on the bound path
+        (``_sync_frontend``) and on the degraded-delta resync that follows one —
+        so a session that is stopped and later restarted or resumed by ANYONE,
+        and which this viewer then binds to, has the term false again before its
+        next card is offered. A stop ends the TURN, and the parked gate with it
+        (which is why refusing is honest); it does not end the session. The
+        reconcile that re-arms is level-triggered off the successor's own
+        frontend delta, so nothing has to remember to lift this by hand.
+
+        WHAT IT CANNOT SEE, because the absence is not evidence: an owner killed
+        WITHOUT an announcement (kill -9, OOM) leaves no ``stopping`` frame and —
+        for a session with no wake schedules — no ``stopped_at`` marker either
+        (``session_was_stopped`` documents both limits). Such a pane is
+        indistinguishable here from one whose LIVE owner is simply stalled, and
+        the second kind can still deliver its answer, so both keep the card.
+        Closing that arm needs a fact this predicate cannot read synchronously:
+        that no pid holds the lease at all (``cold_reason == "no-runtime"``,
+        classified only by a read).
+        """
+        return self._deliberate_stop and self.is_cold
 
     @property
     def can_ever_bind(self) -> bool:
@@ -4318,6 +4426,7 @@ class AttachedSession:
         )
         self._display_revision += 1
         previous = self._display_history
+        cold_painted, self._cold_painted_ids = self._cold_painted_ids, None
         if window is None or window.status != "ok":
             # Legacy owners and oversized prose keep the honest full replay.
             self._display_history = None
@@ -4330,6 +4439,8 @@ class AttachedSession:
                 self._buffered_events.insert(
                     0, HistoryDeltaEvent(messages=list(self._history), reset=True)
                 )
+            elif cold_painted is not None:
+                self._replay_cold_gap(cold_painted)
             return
         self._validate_display_window(window, frontend.epoch, frontend.live_cursor)
         rows = list(window.messages)
@@ -4371,6 +4482,8 @@ class AttachedSession:
             self._buffered_events.insert(0, HistoryDeltaEvent(messages=rows, reset=True))
         elif self._hydrated_once and previous is not None:
             self._replay_durable_suffix(rows[max(0, previous.total_message_count - page.start) :])
+        elif cold_painted is not None:
+            self._replay_cold_gap(cold_painted)
         # Loaded rows suppress duplicate relay, but are not all painted: the
         # TUI mounts only its viewport and pages older rows later.
         self._live_message_phase.clear()
@@ -5213,6 +5326,45 @@ class AttachedSession:
         self._drain_buffered_events()
         self._maybe_start_gate()
 
+    def _replay_cold_gap(self, cold_painted: set[str]) -> None:
+        """Paint the rows a cold facade's owner wrote after the cold read.
+
+        A COLD facade's FIRST bind. Its frontend painted the transcript it read
+        off disk, and the owner may have written rows since — a turn that
+        finished between the read and the bind, or the one it is still in.
+        :meth:`_replay_durable_suffix` never ran for that gap, because a
+        facade that has never hydrated has no ``previous`` window to measure
+        it against; and the bind has just folded those rows' ids into
+        ``_history_ids`` and ``_message_events``, so ``_is_duplicate`` swallows
+        their live ``message_end`` too. Neither route painted them: messages
+        silently missing from the screen on every paint-first attach, which
+        is the TUI's ``/resume`` and ``lop --resume`` onto a live owner.
+
+        The fix is to un-claim exactly the ids the cold read did NOT paint and
+        run the ordinary durable replay over the bound history, which claims
+        them again and emits them as ONE typed delta ahead of the buffered live
+        events — so they land in transcript order, once, before anything the
+        relay adds. Rows the cold read painted stay claimed and are not
+        repainted.
+
+        AN ID-LESS ROW IS DROPPED FROM THE UN-CLAIM ON PURPOSE (review round 1,
+        F3). Nothing can claim or dedupe a row without an id —
+        :meth:`_replay_durable_suffix` skips it for the same reason — so
+        releasing "" would release nothing. It is not lost: the TUI projects its
+        transcript from this facade's ``history()`` on the bind's rollover, and
+        that list carries the row whatever its id.
+        """
+        gap = {
+            str(getattr(message, "id", "") or "")
+            for message in self._history
+            if str(getattr(message, "id", "") or "") not in cold_painted
+        }
+        gap.discard("")
+        if not gap:
+            return
+        self._message_events -= gap
+        self._replay_durable_suffix(self._history)
+
     def _replay_durable_suffix(self, history: list[Any]) -> None:
         """Emit ONE typed history delta for durable rows nothing ever painted.
 
@@ -5729,23 +5881,112 @@ class AttachedSession:
             self._maybe_start_gate(pending)
 
     def _maybe_start_gate(self, pending: PendingRequest | None = None) -> None:
+        # Every early return below drops a pending gate SILENTLY: no card, no
+        # notice, nothing on screen saying the turn is still blocked. Diagnosing
+        # the lost-gate-card bug needed a monkeypatched probe to learn which
+        # guard had returned, which is a fact the code should carry itself.
+        # Each drop names its guard (G1-G6) so the next reader reads a log line
+        # instead of re-deriving the ladder.
         if self._disposed or not self._ready_for_events:
+            logger.debug(
+                "gate ladder G1: dropped (disposed=%s, ready_for_events=%s)",
+                self._disposed,
+                self._ready_for_events,
+            )
             return
         if pending is None:
             pending = _pending_request(self.pending_gate)
-        if pending is None or self._gate_task is not None:
+        if pending is None:
+            logger.debug("gate ladder G2a: no pending gate")
+            return
+        if self._gate_task is not None:
+            logger.debug(
+                "gate ladder G2b: a bridge is already running for %s/%s",
+                pending.kind,
+                pending.request_id,
+            )
             return
         if self._gate_identity(pending) == self._gate_answered_key:
+            logger.debug(
+                "gate ladder G3: %s/%s was already answered",
+                pending.kind,
+                pending.request_id,
+            )
             return
         background = (
             self._gates_detached and self._background_approval and pending.kind == "approval"
         )
         if self._gates_detached and not background:
+            logger.debug(
+                "gate ladder G4: gates are detached, dropping %s/%s",
+                pending.kind,
+                pending.request_id,
+            )
+            return
+        # G6: NO OWNER ON THE OTHER END CAN EVER TAKE AN ANSWER FROM THIS
+        # VIEWER, so the question must not be offered. `can_ever_bind` is the
+        # one predicate that separates this from every recoverable cold
+        # state — a socket blip, a recovery loop mid-flight, a live owner
+        # whose display history is refreshing all answer it True and all of
+        # them heal on their own, while a facade closed to dialling by
+        # construction (the deliberate stop on the legacy attach contract,
+        # `can_ever_bind`'s own reachable False) answers False for the life
+        # of the process.
+        #
+        # CHECKED HERE, immediately before the arm that would start a
+        # bridge, and NOT at the top: this is the one place every route to a
+        # card converges — the commit site, the settled-navigation re-arm,
+        # `_reconcile_gate_surface`, and `set_ask_handler`/`set_ask`'s own
+        # re-arm — so one guard covers all of them, and it only ever
+        # refuses when there is BOTH a gate to present AND no bridge already
+        # running for it.
+        #
+        # WHY IT IS THE LADDER AND NOT A REFUSAL TO MOUNT IN THE HOST. The
+        # host's own verdict (`SessionInteraction.can_never_bind`, proven by
+        # the durable stop record as well as by this predicate) is published
+        # by the connect that the PAINT arms, so on the return leg it does
+        # not exist yet when the card would mount. The viewer's predicate
+        # does: the stop happened while the user was away. Refusing here is
+        # therefore the only shape that can precede the card, and a card that
+        # mounts and takes keystrokes is a question the app cannot honour —
+        # measured as a silently discarded answer for an ask and a FALSE
+        # `✓ allowed` receipt for an approval (UX round 1, U1). Not
+        # starting the bridge at all is what makes both unreachable rather
+        # than merely apologised for.
+        #
+        # THE SECOND TERM, and why it is not redundant with the first
+        # (agent review round 3, A9 = QA Q2): `can_ever_bind` is True for
+        # EVERY sidebar lease, because `_lease_sidebar_source` builds only
+        # `_can_go_cold` facades and that flag is one of `can_ever_bind`'s own
+        # disjuncts. So on the very path this guard was written for — the
+        # multi-session flow, where every session you switch TO is a viewer
+        # facade — the predicate had no false term at all and G6 could never
+        # fire: measured with the owner stopped while the user was away, the
+        # card was mounted AND focused over `Saved · This session was stopped;
+        # …`, re-offered on every visit, and every answer it took produced an
+        # "undelivered" notice for a question no owner could ever receive.
+        # `_deliberately_stopped_cold` is the stop fact a viewer DOES have on
+        # the return leg, so one term covers both contracts.
+        if not self.can_ever_bind or self._deliberately_stopped_cold:
+            logger.debug(
+                "gate ladder G6: no owner can take an answer for %s/%s "
+                "(can_ever_bind=%s, deliberately_stopped_cold=%s)",
+                pending.kind,
+                pending.request_id,
+                self.can_ever_bind,
+                self._deliberately_stopped_cold,
+            )
             return
         if pending.kind == "approval" and (self._approval_handler is not None or background):
             self._gate_task = asyncio.create_task(self._run_approval(pending))
         elif pending.kind == "ask" and self._ask_handler is not None:
             self._gate_task = asyncio.create_task(self._run_ask(pending))
+        else:
+            logger.debug(
+                "gate ladder G5: no handler attached for %s/%s",
+                pending.kind,
+                pending.request_id,
+            )
 
     def _gate_reply_is_current(self, pending: PendingRequest, client: Any) -> bool:
         # Cancelling a bridge requests cooperation; even a handler that swallows
@@ -5783,7 +6024,40 @@ class AttachedSession:
             if not self._gate_reply_is_current(pending, client):
                 return
             self.preserve_viewer_gate_reply()
-            await client.approval_answer(pending.request_id, approved)
+            try:
+                await client.approval_answer(pending.request_id, approved)
+            except OperatorAuthorityRequired:
+                # NOT A DELIVERY FAILURE, and it must not be reported as one
+                # (agent review round 3, A10 = QA Q3 = design D4).
+                # ``OperatorAuthorityRequired`` is a ``RuntimeError`` (see
+                # ``session.errors``), so without this arm it matches the clause
+                # BELOW and the pane is told "Answer not delivered" for an
+                # answer the owner RECEIVED and REFUSED: the session is
+                # connected, the card is still parked, and the one thing that
+                # fixes it -- the operator key -- is named by the refusal arm's
+                # own notice, which lands anyway. Worse, the transport clause
+                # retracts the pane's receipt, and retracting it is exactly what
+                # that ``not applied —`` prefix exists to avoid: the row has to
+                # RECORD that the answer was given here, corrected in its first
+                # words, not disappear. Ordered FIRST, so it is decided before
+                # the exception's class can be read as a transport fact.
+                raise
+            except (RuntimeError, ConnectionError) as error:
+                # ACCEPTED HERE, NEVER DELIVERED THERE, but only in ONE of the
+                # two states this clause covers — see
+                # ``_gate_reply_reached_the_owner``, which tells them apart on
+                # the transport rather than on the exception's class. The other
+                # arm below swallows both by design (a stale-request race, and
+                # the stop path's dead-owner post), and both are ordinary ends —
+                # but the operator who pressed the key is looking at a card that
+                # resolved, and their answer went nowhere. The host is the only
+                # party that can take the `✓ allowed` receipt back and say so,
+                # so it is told here, on the ONE branch that means "the reply
+                # did not land" (UX round 1, U1). Re-raised unchanged: the
+                # swallow stays exactly where it was.
+                if not self._gate_reply_reached_the_owner(client, error):
+                    self._note_gate_reply_undelivered(pending, error)
+                raise
             self._gate_answered_key = self._gate_identity(pending)
         except OperatorAuthorityRequired as error:
             # THE THIRD DOOR (design round 2, D9). This is NOT the
@@ -5856,6 +6130,70 @@ class AttachedSession:
             ):
                 self._gate_task = None
 
+    def _gate_reply_reached_the_owner(self, client: Any, error: BaseException) -> bool:
+        """Whether a FAILED gate post had nonetheless reached the owner.
+
+        THE RULE (agent review round 3, A11 = QA Q4), and it is about the WIRE,
+        not about the exception's class: the undelivered channel exists to say
+        "this pane could not hand your answer over", so it may speak only when
+        the transport is what failed. That clause in ``_run_approval`` catches a
+        ``RuntimeError`` too, because one of the two arms it feeds is a race the
+        owner adjudicated — "that approval is no longer waiting", from the
+        ``error`` frame the runtime sends when a FIRST answer already won. In
+        that case the owner READ this pane's reply and ruled on it: the answer
+        was delivered, and telling a connected operator that Send is unavailable
+        until connected is false in both clauses and points them at the wrong
+        repair entirely.
+
+        So the discrimination is on the transport's own state, which is the only
+        fact that separates the two: nothing provably crossed if the connection
+        is down at the failure or if the post raised a ``ConnectionError``;
+        everything provably crossed if a live connection came back with the
+        owner's own verdict. The retraction the race still owes its row is
+        unaffected — the pane's decision genuinely did not take effect — but it
+        is not this method's business.
+        """
+        return bool(getattr(client, "connected", False)) and not isinstance(error, ConnectionError)
+
+    def _note_gate_reply_undelivered(self, pending: PendingRequest, error: BaseException) -> None:
+        """Tell the host that an answer this pane accepted never reached the owner.
+
+        A THIRD fact, and not a spelling of either one above. The refusal
+        channel (``set_gate_refusal_handler``) carries an owner that answered and
+        said no; the swallow arms in ``_run_approval``/``_run_ask`` carry the
+        ordinary races. Neither leaves the app able to tell the operator that
+        the key they just pressed did nothing — which is exactly the state a stop
+        landing under a live card produces, and it is met with a receipt claiming
+        the call was allowed (``ApprovalBlock.receipt``), because the card
+        resolves on the KEYPRESS and the post happens one await later.
+
+        It cannot be answered by a pre-check on the delivery path: at the moment
+        the widget settles, whether the owner is still there is not yet known.
+        Hence an after-the-fact channel, the same shape as the refusal one, and
+        the host decides what its own surfaces owe.
+        """
+        logger.warning(
+            "gate reply for %s/%s was not delivered: %s",
+            pending.kind,
+            pending.request_id,
+            error,
+        )
+        notify = self._gate_undelivered_handler
+        if notify is None:
+            return
+        with contextlib.suppress(Exception):
+            # THE GATE'S OWN IDENTITY RIDES ALONG, not just its kind. The host
+            # keeps a settled APPROVAL receipt so it can take back a claim the
+            # owner never got, and a kind alone cannot tell it WHICH gate that
+            # receipt belongs to: an approval answered with no card at all (an
+            # allow-all latch, a background approval) writes no receipt, so a
+            # later undelivered post would reach back and remove the previous,
+            # DELIVERED row instead (agent review round 3, A12 = QA Q5). The
+            # tuple is the same one the ladder keys bridges on
+            # (``_gate_identity``), so a host that stored it beside the block it
+            # wrote can match exactly.
+            notify(pending.kind, self._gate_identity(pending))
+
     async def _run_ask(self, pending: PendingRequest) -> None:
         try:
             handler = self._ask_handler
@@ -5871,11 +6209,32 @@ class AttachedSession:
             values = answer.get(pending.request_id) or []
             if values:
                 self.preserve_viewer_gate_reply()
-                await client.ask_answer(
-                    pending.request_id,
-                    values[0],
-                    question_index=pending.question_index,
-                )
+                try:
+                    await client.ask_answer(
+                        pending.request_id,
+                        values[0],
+                        question_index=pending.question_index,
+                    )
+                except OperatorAuthorityRequired:
+                    # The approval arm's first clause, one kind over: a refusal is
+                    # the owner ANSWERING us, so it must not be read as a
+                    # transport failure and must not retract anything. It
+                    # continues unclaimed here, exactly as it did before the
+                    # undelivered channel existed.
+                    raise
+                except (RuntimeError, ConnectionError) as error:
+                    # The approval gate's branch, one kind over: an ask the
+                    # operator answered on a viewer whose owner is gone was
+                    # discarded in silence (UX round 1, U1). No transcript
+                    # receipt is written for an ask, so the host's half here is
+                    # the sentence, not a correction. Only the wire's own
+                    # failures: a post the owner RECEIVED and ruled on (the
+                    # first-answer-wins race) is not an undelivered reply, and
+                    # saying so on a live pane sends the operator to fix a
+                    # connection that is up (agent review round 3, A11).
+                    if not self._gate_reply_reached_the_owner(client, error):
+                        self._note_gate_reply_undelivered(pending, error)
+                    raise
                 self._gate_answered_key = self._gate_identity(pending)
         except (asyncio.CancelledError, RuntimeError, ConnectionError):
             # Same three outcomes as the approval gate above, including the
@@ -7285,6 +7644,17 @@ class AttachedSession:
         """
         return self._read_state_field("epoch")
 
+    def frontend_revision(self) -> FrontendRevision:
+        """A token that moves whenever the roster, todos or wakes move.
+
+        For per-frame readers that re-derive a view from those collections and
+        want to skip the work when nothing moved -- see
+        :meth:`FrontendStateStore.revision`, which defines what it covers.
+        """
+        if self._frontend_store is None:
+            raise RuntimeError("frontend state has not synchronized")
+        return self._frontend_store.revision()
+
     def subscribe_frontend(self, handler):  # type: ignore[no-untyped-def]
         if self._frontend_store is None:
             raise RuntimeError("frontend state has not synchronized")
@@ -7489,19 +7859,53 @@ class AttachedSession:
         self,
         turns: list[Any],
         *,
+        aside_instruction: bool = True,
         on_delta: Callable[[str], None] | None = None,
         on_usage: Callable[[Usage], None] | None = None,
     ) -> str:
+        """Ask the owner for the off-record answer, STREAMING it as it arrives.
+
+        ``aside_instruction`` rides the wire with the request and the owner acts
+        on it: it is the caller's declaration that its turns still need the
+        off-record wrapper (see ``SessionProtocol.complete_aside``). False is what
+        a viewer that wrapped its own question sends — the TUI's ``/btw`` overlay
+        and its goal-loop judge — and sending it is what keeps the owner from
+        wrapping a request that already carries its own instruction.
+
+        ``on_delta`` is fed each chunk the owner streams while this request is
+        in flight — the same connection carries them, tagged with this request's
+        id — so the card paints the answer as the model writes it rather than
+        after the receipt. The RETURNED string is still the authoritative answer
+        (the receipt's ``detail``); a chunk that never arrived is cosmetic, a
+        receipt that never arrived is a failure.
+
+        THE FALLBACK IS THE OLD BEHAVIOUR, and it is deliberately kept: an owner
+        that sent NO deltas at all (one built before the stream existed, which
+        simply ignores the callback) gets its settled answer fed through the same
+        callback ONCE at the end. ``streamed`` is what stops a streaming owner
+        from being charged twice — the single post-hoc call fires only when
+        nothing was streamed, never as well as it.
+        """
         client = self._client
         if client is None:
             raise ConnectionError(self._unavailable_reason())
-        # The authoritative request currently returns a settled answer. Feed it
-        # through the normal delta callback once so the existing aside widget
-        # uses the same rendering path without inventing remote-only UI state.
+        payload = [turn.model_dump(mode="json") for turn in turns if hasattr(turn, "model_dump")]
+        if on_delta is None:
+            # No sink to feed, so nothing to fall back to: the settled answer is
+            # the whole reply, exactly as this method behaved before the stream.
+            return await client.complete_aside(payload, aside_instruction=aside_instruction)
+        streamed = False
+
+        def relay(text: str) -> None:
+            nonlocal streamed
+            streamed = True
+            if text:
+                on_delta(text)
+
         answer = await client.complete_aside(
-            [turn.model_dump(mode="json") for turn in turns if hasattr(turn, "model_dump")]
+            payload, aside_instruction=aside_instruction, on_delta=relay
         )
-        if answer and on_delta is not None:
+        if answer and not streamed:
             on_delta(answer)
         return answer
 
@@ -7557,7 +7961,12 @@ class AttachedSession:
             logger.debug("event mute send failed", exc_info=True)
 
     async def refresh_attention(self) -> dict[str, Any]:
-        return dict(self.frontend_state.attention)
+        # Polled about once a second by the TUI's completion-receipt check. The
+        # whole-state clone it used to read through cost as much as the rest of
+        # that poll put together on a large roster; copy the one field instead.
+        if self._frontend_store is None:
+            raise RuntimeError("frontend state has not synchronized")
+        return self._frontend_store.attention_copy()
 
     async def acknowledge_attention(self, token: str) -> dict[str, Any]:
         # Capture this binding; a takeover cannot redirect an old render callback.
@@ -8360,11 +8769,12 @@ class AttachedSession:
         return ()
 
     def running_subagents(self) -> int:
-        return sum(
-            1
-            for row in self.frontend_state.jobs
-            if row.type == "task" and row.status == "running" and not row.queued
-        )
+        # Clone-free: `frontend_state` deep-copies every job for this one integer,
+        # and the TUI asks it per retention check and per stop ladder -- ~2.5 ms
+        # of the viewer's loop each time at a 252-row roster.
+        if self._frontend_store is None:
+            raise RuntimeError("frontend state has not synchronized")
+        return self._frontend_store.running_task_count()
 
     def runtime_model_catalogue(self) -> list[dict[str, Any]]:
         """The owner's offerable model rows, as published canonical state.
@@ -8387,6 +8797,20 @@ class AttachedSession:
         and the refusal is logged.
         """
         self._gate_refusal_handler = handler
+
+    def set_gate_undelivered_handler(self, handler: GateUndeliveredHandler | None) -> None:
+        """Where an answer that never reached the owner goes, for a host with a voice.
+
+        ``handler`` receives the gate's KIND (``"ask"`` or ``"approval"``) and
+        its IDENTITY — the same ``(kind, request_id, question_index)`` tuple the
+        ladder keys bridges on — so a host that keeps a setted receipt for one
+        card can retract THAT row and no other (agent review round 3, A12 = QA
+        Q5: a kind alone let an undelivered approval that wrote no receipt of its
+        own remove the previous, DELIVERED one). Optional in the same way
+        ``set_gate_refusal_handler`` is: a host with no surface for it leaves this
+        unset and the drop stays in the log.
+        """
+        self._gate_undelivered_handler = handler
 
     def set_approval_handler(self, handler: ApprovalGate | None) -> None:
         self._approval_handler = handler

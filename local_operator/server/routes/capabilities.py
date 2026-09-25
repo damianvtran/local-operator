@@ -59,6 +59,37 @@ async def capabilities():
                 # and pays the cold engage on its first send, exactly as
                 # before. Gating nothing, it needs no key of its own.
                 "session_catalogue": 3,
+                # A catalogue that can be asked for ONE scope at a time, resumed
+                # by an opaque cursor, and counted per group: the
+                # `scope_kind`/`scope_name`/`cursor`/`with_counts` parameters on
+                # GET /v1/desktop/sessions, and `next_cursor`/`cursor_missing`/
+                # `scope`/`counts` on its answer.
+                #
+                # ITS OWN KEY, not a bump of `session_catalogue`, by the rule
+                # `session_pins` states below: a key exists so an EXISTING surface
+                # keeps working against a backend that lacks the new one, and the
+                # existing surface here is the whole chats list. The failure mode
+                # a bump would not fix is why this is not cosmetic: FastAPI
+                # SILENTLY IGNORES unknown query parameters, so an un-gated client
+                # that sent `scope_kind=team&scope_name=lopdev` to an older daemon
+                # would receive the UNSCOPED page and draw other teams'
+                # conversations under that team, and an un-gated `cursor` would
+                # receive page one again and duplicate it. The client must be able
+                # to ASK whether the daemon understands the parameters, before it
+                # sends them — which is the one thing a capability key can answer
+                # and a version bump of a working surface cannot.
+                #
+                # ONE KEY FOR THREE PROMISES (scoping, paging, the census),
+                # because they are one contract revision: a client that had the
+                # counts without the scope could not draw a group's count
+                # consistently with that group's paged rows.
+                #
+                # Absent ⇒ the client makes ONE unscoped request exactly as today
+                # (`limit=500`, no scope, no cursor, no counts) and renders exactly
+                # as today, with today's latency. `session_catalogue` and
+                # `session_pins` are untouched: no row changes shape, and the
+                # pin's own promise is unchanged.
+                "session_catalogue_page": 1,
                 # Searching past conversations by their CONTENT (name, id, exact
                 # body, bounded soft match) rather than by the page a client
                 # already holds. Its own key rather than a bump of
@@ -115,6 +146,14 @@ async def capabilities():
                 "notification_contract": 1,
                 "mcp": 1,
                 "mcp_auth": 1,
+                # Sessionless MCP management: `GET/POST /v1/desktop/mcp` and
+                # `POST /v1/desktop/mcp/credentials`, answering with no session
+                # and no model configured, in the catalog vocabulary
+                # (connected / needs_sign_in / not_started / connecting / error,
+                # plus per-row `actions`). Its own key because a renderer that
+                # does not see it must keep using the session route, which still
+                # works — "update the backend" would be false there.
+                "mcp_catalog": 1,
                 "radient": 1,
                 # Session code memory: GET/POST/PATCH/DELETE on
                 # `/v1/desktop/sessions/{id}/variables`, reading and writing a
@@ -137,6 +176,22 @@ async def capabilities():
                 # serve a child transcript", not "this renderer cannot show a
                 # roster".
                 "subagent_transcript": 1,
+                # The child reader's LIVE half, and a NEW KEY rather than a bump
+                # of `subagent_transcript` above (design § 1, D3.4).
+                #
+                # The reader's admission gate asks for `subagent_transcript` with
+                # no minimum version, so bumping it would leave an older backend
+                # still passing that gate — the gate could not tell "the reader
+                # may open" apart from "the live part exists" without asking a
+                # second question of a key that already answered one. A separate
+                # key keeps the reader's floor exactly where it is and makes the
+                # live question its own: absent ⇒ the reader is today's pager,
+                # issues no watch, and looks exactly as it does now. That is the
+                # POST/DELETE pair on
+                # `/v1/desktop/sessions/{id}/children/{job}/trajectory` plus the
+                # `job_trajectory_appends`/`job_trajectory_replacements` field
+                # pair those ops turn on for that job.
+                "subagent_trajectory": 1,
                 # Moving a live session's working directory
                 # (POST /v1/desktop/sessions/{id}/working-directory).
                 #

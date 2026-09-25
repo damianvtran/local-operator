@@ -59,7 +59,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import yaml
 
 from local_operator import keymap as _keymap
-from local_operator.model.effort import EFFORT_ORDER
+from local_operator.model.effort import EFFORT_ORDER, SUPPORTED_EFFORTS
 from local_operator.providers.local import (
     DEFAULT_MODEL_OVERRIDES,
     LOCAL_PRESETS,
@@ -3250,6 +3250,23 @@ def coerce(setting: Setting, text: str) -> Any:
         # verbatim). Rejection happens in `validate`, so the message is the
         # same whichever writer arrives.
         return _keymap.normalize_key(text)
+    if setting.kind is Kind.CASCADE:
+        # JSON, because the value is a two-level structure and the page's own
+        # chain editor is the only other way to build one. Without this arm
+        # the kind fell through to ``return text``, so the two writers that do
+        # not go through that editor — ``lop config edit`` and a hand-edited
+        # ``config.yml`` — put a STRING where a mapping belongs. ``validate``
+        # had no ``CASCADE`` arm either, so the write was accepted and
+        # reported as a success, while ``resolve_chain`` and ``read_chains``
+        # both require a ``Mapping`` and silently read a string as "no cascade
+        # configured". The failover the user had just asked for never ran, and
+        # nothing on any surface said so.
+        try:
+            return json.loads(text)
+        except ValueError:
+            raise ValueError(
+                'expected JSON, e.g. {"default": ["anthropic/claude-opus-5"]}'
+            ) from None
     return text
 
 
@@ -3360,6 +3377,63 @@ def validate(setting: Setting, value: Any, values: Mapping[str, Any] | None = No
         # pre-2.1.246 silent-disable bug, live in Textual today). The capture
         # widget calls the same predicate, so the two cannot disagree.
         return _keymap.validate_key(value)
+    if setting.kind is Kind.CASCADE:
+        # Same rule the HOTKEY arm above states, for the same reason: `lop
+        # config edit` and a hand-edited config.yml both reach this value
+        # without passing the page's chain editor. A shape the failover layer
+        # cannot read is not a cascade that merely looks odd —
+        # `resolve_chain` returns ``None`` for it and routing continues as
+        # though nothing were configured, which is the one outcome the user
+        # cannot see. Refusing names the problem while the user is still
+        # looking at the command that caused it.
+        if not isinstance(value, Mapping):
+            return 'expected a JSON object of chains, e.g. {"default": ["anthropic/claude-opus-5"]}'
+        for key, hops in value.items():
+            if not isinstance(key, str) or not key.strip():
+                return 'every chain needs a name, e.g. "default"'
+            # A bare string is the plausible near-miss ({"default": "a/b"}):
+            # it is a Sequence, so an isinstance check alone would admit it
+            # and then iterate it one character at a time.
+            if isinstance(hops, str) or not isinstance(hops, Sequence):
+                return f"chain {key!r} must be a list of provider/model hops"
+            for hop in hops:
+                # `_hop_label` is the DISPLAY formatter and answers a weaker
+                # question — it returns any non-empty string unchanged, so it
+                # accepts `gpt-4o`, which `expand_fallback_targets` then drops
+                # for having no provider. That is this bug wearing a different
+                # hat: stored, confirmed, and routing nothing. It still gates
+                # the mapping form's provider/model presence, whose label
+                # carries the effort a string hop may not; `validate_hop` —
+                # the predicate the page's hop editor and the server's
+                # `_write_cascade` already share — is what a string hop is
+                # held to. The mapping arm's `effort` value below is the rest
+                # of that shape's contract.
+                if not _hop_label(hop):
+                    return f"chain {key!r} has a hop that is not provider/model: {hop!r}"
+                if isinstance(hop, str):
+                    problem = validate_hop(hop)
+                    if problem is not None:
+                        return f"chain {key!r}: {problem}"
+                elif isinstance(hop, Mapping):
+                    # `_hop_label` above only checks provider/model are
+                    # non-empty; it does not read `effort` at all, so a
+                    # mapping hop with an unsupported effort passed it,
+                    # was stored, and reported as success — the same
+                    # silent-drop this whole setting exists to refuse, one
+                    # shape over. `_normalize_chain_entry` (the runtime's
+                    # own reader) already rejects the same value with a
+                    # warning at materialization; holding it here instead
+                    # of there is what makes the refusal visible to the
+                    # user who typed it, at the command that caused it.
+                    raw_effort = hop.get("effort")
+                    if raw_effort is not None and str(raw_effort).strip().lower() not in (
+                        SUPPORTED_EFFORTS
+                    ):
+                        return (
+                            f"chain {key!r}: effort {raw_effort!r} is not one of "
+                            f"{', '.join(sorted(SUPPORTED_EFFORTS))}"
+                        )
+        return None
     return None
 
 

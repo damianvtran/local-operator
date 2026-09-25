@@ -20,8 +20,11 @@ four times (#576, #609, #624, #625) with a fifth guarded in
 Site-local fixes do not close a class of bug. This does: it derives the member
 set from the SOURCE — the session-valued attribute accesses and literal-string
 duck-probes in the files listed in ``_SCANNED`` — and fails when one of them is
-not declared on ``SessionProtocol`` or ``ViewerSessionProtocol``. Adding a new
-undeclared duck-typed member therefore fails here rather than in a user's
+not declared on a protocol: ``SessionProtocol``, ``ViewerSessionProtocol``, or
+the owner-side ``GoalRecordProtocol`` (which exists because the judged-goal
+record is the SESSION OWNER's surface and the shared protocol must not promise a
+follower the right to settle somebody else's goal; see its docstring). Adding a
+new undeclared duck-typed member therefore fails here rather than in a user's
 terminal.
 
 The derivation is deliberately syntactic rather than type-inferred: pyright
@@ -87,7 +90,11 @@ from pathlib import Path
 
 import local_operator
 from local_operator.session.attached import AttachedSession
-from local_operator.session.protocol import SessionProtocol, ViewerSessionProtocol
+from local_operator.session.protocol import (
+    GoalRecordProtocol,
+    SessionProtocol,
+    ViewerSessionProtocol,
+)
 from local_operator.session.session import Session
 
 _ROOT = Path(local_operator.__file__).resolve().parent
@@ -778,7 +785,11 @@ def _declared() -> set[str]:
     the protocol.
     """
     names: set[str] = set()
-    for proto in (SessionProtocol, ViewerSessionProtocol):
+    # The OWNER-side protocol is in this tuple for the same reason the other two
+    # are: it is a declaration, and a declaration no reader consults is not one.
+    # ``GoalRecordProtocol`` is where the judged-goal record's members live, so a
+    # host that reads them (through its own narrowed binding) is declaring them.
+    for proto in (SessionProtocol, ViewerSessionProtocol, GoalRecordProtocol):
         names.update(n for n in dir(proto) if not n.startswith("_"))
         # ``__mro__`` via getattr: pyright models it as a descriptor on the
         # metaclass and rejects the direct access on a Protocol class object.
@@ -1215,9 +1226,27 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # authenticated dial is retained and its state has not arrived. Both are on
     # the wire, both are read off a duck-typed bound facade by the bridge, and
     # neither exists for an owner ``Session`` — it has no dial to be silent on.
-    assert len(viewer_only) == 63, (
+    #
+    # 63 → 64 is the paint-first attach flag (PR #1474, UX round 1, U1).
+    # ``attach_behind`` marks a cold viewer opened IN FRONT of a live owner it
+    # binds to behind the paint, which is what the TUI narrates and bounds. An
+    # owner ``Session`` has no owner to attach to, so the flag has no meaning
+    # there. Declared in ``ViewerSessionProtocol`` in the same commit.
+    #
+    # 64 → 65 is the undelivered-reply hook (PR #1315, UX round 1, U1).
+    # ``set_gate_undelivered_handler`` reports an answer that was accepted at this
+    # pane and never reached the owner — a distinction only a facade has, because
+    # an owner ``Session`` answers its own gates with no wire to cross. Declared
+    # in ``ViewerSessionProtocol`` in the same commit.
+    #
+    # 65 → 66 is the canonical collection revision (the TUI roster-coalescing
+    # change). ``frontend_revision`` lets the dock band and todo panel skip a
+    # re-derivation nothing moved under; an owner ``Session`` publishes through
+    # its own store and has no follower copy to diff. Declared in
+    # ``ViewerSessionProtocol`` in the same commit.
+    assert len(viewer_only) == 66, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 63, and the aggregate floor is set at 40 against that number. A "
+        "says 66, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )
@@ -1416,7 +1445,12 @@ def _static_conformance_is_checked_by_pyright() -> None:
     viewer: ViewerSessionProtocol = AttachedSession.__new__(AttachedSession)
     owner: SessionProtocol = Session.__new__(Session)
     attached: SessionProtocol = AttachedSession.__new__(AttachedSession)
-    _ = (viewer, owner, attached)
+    # The OWNER-ONLY judged-goal record: assigned to the concrete ``Session``
+    # and to NOTHING else, which is the whole claim — a follower must not be
+    # able to arm, settle or delete somebody else's goal, so an assignment to
+    # ``AttachedSession`` here would be a promise the design refuses.
+    record: GoalRecordProtocol = Session.__new__(Session)
+    _ = (viewer, owner, attached, record)
 
 
 def test_the_static_conformance_anchor_still_exists() -> None:

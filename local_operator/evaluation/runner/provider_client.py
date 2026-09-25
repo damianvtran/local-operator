@@ -61,7 +61,11 @@ from local_operator.evaluation.runner.model import (
 from local_operator.evaluation.runner.public_reply import (
     _MISPLACED_REPLY_VERSION as _MISPLACED_REPLY_VERSION_MARKER,
 )
-from local_operator.evaluation.runner.public_reply import MAX_PUBLIC_OBSERVATIONS_CHARS
+from local_operator.evaluation.runner.public_reply import (
+    COMPACT_ACTION_BINDING,
+    LEGACY_ACTION_BINDING,
+    MAX_PUBLIC_OBSERVATIONS_CHARS,
+)
 from local_operator.evaluation.runner.public_reply import (
     MAX_REJECTED_REPLY_CHARS as _MAX_REJECTED_REPLY_CHARS,
 )
@@ -70,6 +74,7 @@ from local_operator.evaluation.runner.public_reply import (
     REJECTED_PUBLIC_REPLY,
     DecisionParseError,
     _decode_leading_json,
+    bind_compact_actions,
     is_public_reply,
     is_quotable_key,
     looks_like_public_reply,
@@ -379,8 +384,7 @@ def classify_rejection(reason: str) -> str:
         # failures that used to share one key and one hint (see
         # ``_LEADING_DELIMITER_RULE``). The offset is the discriminator: a
         # decode that cannot start is a reply whose FIRST byte is not a JSON
-        # value -- a preamble, a code fence, or a provider reasoning boundary
-        # token -- while a decode that starts and then breaks is a reply whose
+        # value, while a decode that starts and then breaks is a reply whose
         # object was cut off or double-escaped. Keyed on the parser's own
         # reported position and not on the reply text, because this classifier
         # must run over sealed artifacts too, 271 of whose 311 reply sections
@@ -390,6 +394,17 @@ def classify_rejection(reason: str) -> str:
         # also how trailing text and duplicate keys fail -- so it lands in the
         # residual, which is why that half's hint names text outside the object
         # as one of its causes.
+        #
+        # What the leading key MEANS moved when the decoder learned to read a
+        # decision behind leading junk (``_locate_leading_object``): the shapes
+        # this comment used to name as its causes -- a preamble, a code fence, a
+        # provider reasoning boundary token, a native call-syntax wrapper -- are
+        # now absorbed when the reply carries exactly one decision. What is still
+        # recorded under this key is a reply whose offset 0 could not start a
+        # value AND whose body holds no single readable decision: prose only, a
+        # fragment of a call's own markup, two objects that could each be the
+        # decision. The key and its trigger are unchanged, so the class table
+        # stays comparable across the change; only the population shrank.
         if _LEADING_DELIMITER_RULE.search(reason):
             return "leading-delimiter"
         return "incomplete-json"
@@ -751,22 +766,25 @@ def rejection_hint(
         )
     if class_key == "leading-delimiter":
         # The half of the old ``malformed-json`` class whose reply could not be
-        # READ AT ALL: the first byte is not the start of a JSON value, so the
-        # decoder had nothing to start from. The named causes are the shapes
-        # that put something else in front of the object -- a preamble, a code
-        # fence, a native tool-call syntax wrapper -- because those three are
-        # what the old hint named and none of them is absorbed. The fourth,
-        # a provider reasoning delimiter, IS absorbed before this point when the
-        # model declares one (``strip_reasoning_boundary_markers``), and naming
-        # a defect the harness has already absorbed would spend the model's one
-        # correction on a rule it is not breaking. The accepted-shape example is
-        # what actually corrects all four.
+        # READ AT ALL: nothing at the head of the reply started a JSON value, so
+        # the offset-0 decode had nothing to read. The class is NOT a statement
+        # that something sat in front of the object: a preamble, a code fence and
+        # a native tool-call syntax wrapper are all absorbed now, when the reply
+        # still carries exactly one decision (``_locate_leading_object``), and a
+        # provider reasoning delimiter is removed before this point when the
+        # model declares one (``strip_reasoning_boundary_markers``). What is left
+        # under this key is a reply with no readable decision in it at all, or
+        # with more than one: so the hint must not send the model after a
+        # preamble it may not have written -- that would spend its one correction
+        # on a rule it is not breaking. It states the accepted shape and the
+        # uniqueness rule, which is the one instruction that repairs every
+        # remaining cause.
         return (
-            "the reply did not begin with the JSON object -- its first character "
-            "was not '{', so no decision could be read from it. A preamble, a "
-            "code fence or a native tool-call syntax wrapper before the object "
-            "is not skipped. Reply with exactly one JSON object, beginning with "
-            "'{', and nothing else: "
+            "the reply did not begin with the JSON object, and no single complete "
+            "decision could be read from it: either nothing in the reply is a "
+            "readable action batch, or more than one object in it could have been "
+            "the decision and which one you meant has to be unambiguous. Reply "
+            "with exactly one JSON object, beginning with '{', and nothing else: "
             f"{_example_json(surface, observation, shape)}"
         )
     if class_key == "incomplete-json":
@@ -1056,13 +1074,20 @@ def _extra_action_key_hint(
     observation: Observation,
     shape: HintShape = HintShape(),
 ) -> str:
-    """Name the field that is not accepted, and where it IS accepted.
+    """Name the field that is not accepted, and the fields the kind does take.
 
     The useful half is not "extra inputs are not permitted" -- the model knows
-    something was refused -- but WHICH key, and which action kind the field it
-    sent actually belongs to. The common real case is a field borrowed from a
-    neighbouring kind (``frame_id`` on a ``wait``), so naming the kinds that
-    take it turns an opaque refusal into a one-line correction.
+    something was refused -- but WHICH key, followed by the shape the kind it
+    named actually accepts.
+
+    It used to have a second half: naming the kinds that DO take a borrowed
+    field, because the common real case was a field from a neighbouring kind
+    (``frame_id`` on a ``wait``). That case is no longer refused at all -- it is
+    dropped and reported by ``public_reply.drop_sibling_action_fields``, which
+    reads the model's required ``kind`` tag as the statement of what it chose --
+    so the clause could never print again and is gone rather than kept as a
+    paragraph no payload can reach. What reaches this hint is a name NO kind
+    declares, and for that there are no owners to name.
 
     The path is taken from the ``extra_forbidden`` ENTRY rather than from the
     first location in the rendering, because one payload can break two rules at
@@ -1078,19 +1103,10 @@ def _extra_action_key_hint(
     if len(path) < 4 or path[0] != "actions":
         return _example_json_hint(surface, observation, "an extra field in an action", shape)
     kind, name = path[2], path[3]
-    owners = sorted(
-        _action_kind_of(model)
-        for model in surface.models
-        if name in model.model_fields and _action_kind_of(model) != kind
+    return (
+        f'"{name}" is not a field of a "{kind}" action'
+        f'. a "{kind}" action takes exactly {_action_line(surface, kind, shape)}'
     )
-    parts = [f'"{name}" is not a field of a "{kind}" action']
-    if owners:
-        parts.append(
-            f"it belongs to the {', '.join(json.dumps(owner) for owner in owners)} "
-            f'action kind(s) -- check that "{kind}" is the kind you meant'
-        )
-    parts.append(f'a "{kind}" action takes exactly {_action_line(surface, kind, shape)}')
-    return ". ".join(parts)
 
 
 def _action_line(surface: ActionSurface, kind: str, shape: HintShape = HintShape()) -> str:
@@ -1279,8 +1295,11 @@ def _paste_instructions(surface: ActionSurface) -> str:
 """
 
 
-def build_system_prompt(surface: ActionSurface = LEGACY_ACTION_SURFACE) -> str:
-    """Compose the episode system prompt around the live protocol schema."""
+def build_system_prompt(
+    surface: ActionSurface = LEGACY_ACTION_SURFACE,
+    action_binding: str = LEGACY_ACTION_BINDING,
+) -> str:
+    """Compose the evaluation episode prompt for its selected wire contract."""
 
     native_text = (
         "Only ASCII text is supported by this adapter; "
@@ -1315,6 +1334,32 @@ def build_system_prompt(surface: ActionSurface = LEGACY_ACTION_SURFACE) -> str:
         "Do not ask a question you can resolve by acting."
         if surface.ask_user
         else ""
+    )
+    compact = action_binding == COMPACT_ACTION_BINDING
+    if action_binding not in (LEGACY_ACTION_BINDING, COMPACT_ACTION_BINDING):
+        raise ValueError("action_binding must be 'legacy' or 'compact'")
+    action_binding_instructions = (
+        'Every action is an object whose type is given by the key "kind" (NOT "type").\n'
+        'The single required top-level "observation_id" must exactly match the '
+        "current observation. Omit observation_id from individual actions; if you "
+        "include legacy per-action IDs, every one must match the top-level ID."
+        if compact
+        else 'Every action is an object whose type is given by the key "kind" (NOT "type"),\n'
+        'and every action must carry the "observation_id" of the observation you are\n'
+        "looking at right now: that echo is what binds a decision to the screen it was\n"
+        "made about, and a batch naming any other observation is refused. These are the"
+    )
+    shape_intro = (
+        "\nThese are the only permitted shapes:" if compact else "\nonly permitted shapes:"
+    )
+    action_lines = _action_schema_lines(surface)
+    if compact:
+        action_lines = [line.replace(', "observation_id": "<id>", ', ", ") for line in action_lines]
+    reply_example = (
+        '{"observation_id": "<current observation id>", "actions": [ ... ], '
+        '"public_observations": ""}'
+        if compact
+        else '{"actions": [ ... ], "public_observations": ""}'
     )
     return f"""You are operating a computer to complete one task.
 
@@ -1352,7 +1397,7 @@ observation with a corrected batch; nothing was executed.
 Reply with a single JSON object and nothing else, with no prose and no code
 fence:
 
-  {{"actions": [ ... ], "public_observations": ""}}
+  {reply_example}
 
 This is a MODEL-REPLY object, not the adapter protocol. "public_observations"
 is optional -- a string of at most {MAX_PUBLIC_OBSERVATIONS_CHARS} characters,
@@ -1363,13 +1408,9 @@ prior notes, invent facts, record credentials/secrets, or provide deliberation,
 plans, explanations of your decision, or private reasoning. Do not claim the
 chosen actions succeeded until a later observation shows their result.
 
-Every action is an object whose type is given by the key "kind" (NOT "type"),
-and every action must carry the "observation_id" of the observation you are
-looking at right now: that echo is what binds a decision to the screen it was
-made about, and a batch naming any other observation is refused. These are the
-only permitted shapes:
+{action_binding_instructions}{shape_intro}
 
-{chr(10).join(_action_schema_lines(surface))}
+{chr(10).join(action_lines)}
 
 Field names are JSON keys spelled exactly as quoted above -- "keys" is not
 "key", "text" is not "value". Where a field lists alternatives separated by
@@ -1435,11 +1476,17 @@ def strip_reasoning_boundary_markers(
     own text: a provider template emits the closing half of its reasoning
     boundary token at the joint between the reasoning channel and the content
     channel, so the assembled reply starts with ``</mm:think>`` welded to a
-    byte-perfect action batch. The strict decoder refuses a reply that does not
-    START with a JSON value -- by design, because hunting forward for the first
-    ``{`` can silently execute a batch the model never sent -- so the whole
-    billed turn was discarded as ``malformed-json``. The token is DECLARED per
-    model (``ModelSpec.reasoning_boundary_markers``), never recognised here.
+    byte-perfect action batch. When this strip was added the decoder refused a
+    reply that did not START with a JSON value, so the whole billed turn was
+    discarded as ``malformed-json``. The decoder now reads a decision behind
+    leading junk too, whenever it is the reply's ONLY decision
+    (``public_reply._locate_leading_object``), which covers these replies without
+    the declaration -- so the strip's remaining licence is the byte-precise half
+    of the job rather than the readability half: it removes DECLARED template
+    bytes, so the ``public_reply`` text the next turn carries is the model's own
+    reply instead of that reply with a provider token welded to its head. The
+    token is DECLARED per model (``ModelSpec.reasoning_boundary_markers``), never
+    recognised here.
 
     Returns the text to judge and the markers actually removed, in order. Two
     properties the caller depends on:
@@ -1449,9 +1496,9 @@ def strip_reasoning_boundary_markers(
       leading whitespace, which the decoder lstrips anyway, so the whitespace is
       not part of the decision either way). A token inside a string value, or
       behind a character of prose, is not touched and the reply is judged on its
-      original bytes. No ``find``, no substring surgery, and no balanced-object
-      extraction from prose -- the last is the salvage operation this module's
-      strictness exists to refuse.
+      original bytes. No ``find``, no substring surgery: which bytes in front of
+      the object are framing is the DECODER's question, and this function answers
+      only the narrower one about a declared head.
     * **An undeclared marker is not a marker.** ``markers`` empty -- every
       model the table does not list -- returns the input unchanged and nothing
       removed, so this is a declaration-driven tolerance and not a global
@@ -1500,6 +1547,7 @@ def parse_decision(
     context_tokens: int | None = None,
     compaction: CompactionRecord | None = None,
     action_surface: ActionSurface = LEGACY_ACTION_SURFACE,
+    action_binding: str = LEGACY_ACTION_BINDING,
 ) -> ModelDecision:
     """Parse the reply's ACTIONS strictly and bind them to the current observation.
 
@@ -1522,10 +1570,34 @@ def parse_decision(
     meant.
     """
 
-    decoded, trailing = _decode_leading_json(payload)
+    decoded, trailing, leading_framing_bytes = _decode_leading_json(payload)
     if not isinstance(decoded, Mapping):
         raise DecisionParseError("decision must be a JSON object")
-    actions, note = normalise_public_reply(decoded)
+    actions, note, tolerated_action_fields = normalise_public_reply(
+        decoded, action_binding=action_binding
+    )
+    if action_binding == COMPACT_ACTION_BINDING:
+        try:
+            actions = bind_compact_actions(decoded, actions, observation.observation_id)
+        except ValueError as error:
+            raise ActionBatchRefused(
+                "decision does not bind to the current observation_id",
+                class_key="observation-binding",
+            ) from error
+    elif action_binding == LEGACY_ACTION_BINDING:
+        # Legacy schemas still require every per-action ID. Check those values
+        # against the pending observation before ActionBatch can normalize them.
+        for action in actions:
+            if (
+                isinstance(action, Mapping)
+                and action.get("observation_id") != observation.observation_id
+            ):
+                raise ActionBatchRefused(
+                    "actions at indexes [0] bind to a different observation_id",
+                    class_key="observation-binding",
+                )
+    else:
+        raise ValueError("action_binding must be 'legacy' or 'compact'")
     # Keep the visible response, not a reconstruction from its actions, whenever
     # the model wrote one -- that is the only part of a reply the next turn's
     # context carries verbatim. It is redacted at the runner's resolved-secret
@@ -1601,6 +1673,13 @@ def parse_decision(
         prompt_cache_key=prompt_cache_key,
         context_tokens=context_tokens,
         compaction=compaction,
+        # The decoder's own counts, set here rather than attached afterwards:
+        # they are facts about the REPLY's bytes -- how much framing preceded
+        # the decision, how many action fields the kind mismatch cost -- while
+        # the provenance ``decide`` attaches (``stripped_reply_markers``) is
+        # about how the reply was assembled before this function saw it.
+        tolerated_action_fields=tolerated_action_fields,
+        leading_framing_bytes=leading_framing_bytes,
     )
 
 
@@ -2006,6 +2085,7 @@ class ProviderModelClient:
         model_spec: Any,
         artifact_root: Path,
         system_prompt: str = _SYSTEM_PROMPT,
+        action_binding: str = LEGACY_ACTION_BINDING,
         compaction: "CompactionSettings | None" = None,
         keep_recent_frames: int = DEFAULT_KEEP_RECENT_FRAMES,
         rebuild_every_frames: int = DEFAULT_REBUILD_EVERY_FRAMES,
@@ -2016,6 +2096,11 @@ class ProviderModelClient:
         self._stream_fn = stream_fn
         self._route = route
         self._model_spec = model_spec
+        if action_binding not in (LEGACY_ACTION_BINDING, COMPACT_ACTION_BINDING):
+            raise ValueError("action_binding must be 'legacy' or 'compact'")
+        self._action_binding = action_binding
+        # ``decide`` composes the capability-filtered prompt from this stable
+        # base; compact mode must not accidentally reuse the legacy instructions.
         self._system_prompt = system_prompt
         self._prompt_cache_key = prompt_cache_key
         base = compaction or CompactionSettings()
@@ -2090,7 +2175,7 @@ class ProviderModelClient:
     def model_reply_metadata(self) -> dict[str, Any]:
         # Optional client capability: scripted/historic clients must not claim
         # a prompt contract they never used. The runner stays provider-free.
-        return public_reply_contract()
+        return public_reply_contract(action_binding=self._action_binding)
 
     async def decide(
         self,
@@ -2138,9 +2223,11 @@ class ProviderModelClient:
             model=request_model,
             system_blocks=[
                 (
-                    build_system_prompt(action_surface)
+                    build_system_prompt(action_surface, self._action_binding)
                     if self._system_prompt == _SYSTEM_PROMPT
-                    else self._system_prompt + "\n\n" + build_system_prompt(action_surface)
+                    else self._system_prompt
+                    + "\n\n"
+                    + build_system_prompt(action_surface, self._action_binding)
                 )
             ],
             messages=list(messages),
@@ -2164,7 +2251,7 @@ class ProviderModelClient:
             # across steps and the cache prefix is unaffected.
             tools=reply_channel_tools(
                 self._model_spec,
-                public_reply_schema(action_surface),
+                public_reply_schema(action_surface, self._action_binding),
                 description=PUBLIC_REPLY_TOOL_DESCRIPTION,
             ),
             # Still "none" in intent for every OTHER tool: the episode drives
@@ -2383,6 +2470,7 @@ class ProviderModelClient:
                 context_tokens=_estimate_context(messages),
                 compaction=compaction,
                 action_surface=action_surface,
+                action_binding=self._action_binding,
                 # Was hardcoded to 0 while the runner sent no tools and read no
                 # call. Now that the reply channel exists, the bundle records
                 # how the model actually answered — which is the measurement
@@ -3128,6 +3216,7 @@ def create_provider_model_client(
     keep_recent_frames: int = DEFAULT_KEEP_RECENT_FRAMES,
     rebuild_every_frames: int = DEFAULT_REBUILD_EVERY_FRAMES,
     compaction: "CompactionSettings | None" = None,
+    action_binding: str = LEGACY_ACTION_BINDING,
 ) -> ProviderModelClient:
     """Build a provider-backed client from the harness's own stream function.
 
@@ -3186,6 +3275,7 @@ def create_provider_model_client(
         keep_recent_frames=keep_recent_frames,
         rebuild_every_frames=rebuild_every_frames,
         prompt_cache_key=session_id,
+        action_binding=action_binding,
     )
 
 

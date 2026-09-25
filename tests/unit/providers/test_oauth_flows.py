@@ -2890,3 +2890,76 @@ async def test_anthropic_pins_its_callback_port() -> None:
     assert flow.options.allow_port_fallback is False
     assert flow.options.candidate_ports == (54545,)
     assert flow.options.redirect_uri is None  # built from the bound port
+
+
+async def test_a_cancel_at_any_point_of_the_bind_never_leaves_a_listener() -> None:
+    """QA round 2, Q1: ``asyncio.start_server`` binds and listens, then yields
+    once before returning the server. A flow cancelled on THAT yield (a desktop
+    sign-in superseded inside its first steps) never recorded the server, so
+    ``run``'s ``_stop_server`` had nothing to close and the port stayed bound for
+    the life of the process -- on a fixed port, every later login then fell back
+    to an ephemeral redirect.
+
+    Cancelled after 0, 1, 2 ... N event-loop turns, so every yield inside the
+    bind is hit rather than whichever one a scheduler happens to produce; the
+    unfixed bind leaked at exactly one of them. The port must be bindable again
+    after every cancel."""
+
+    def _bindable(port: int) -> bool:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            try:
+                probe.bind(("127.0.0.1", port))
+            except OSError:
+                return False
+            return True
+
+    leaked: list[int] = []
+    for turns in range(24):
+        port = _free_port()
+        flow = _EchoFlow(
+            CallbackFlowOptions(preferred_port=port, timeout_seconds=30.0), LoginCallbacks()
+        )
+        task = asyncio.create_task(flow.run())
+        for _ in range(turns):
+            await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        if not _bindable(port):
+            leaked.append(turns)
+    assert leaked == [], f"a listener survived a cancel after {leaked} loop turns"
+
+
+async def test_a_listen_failure_closes_the_bound_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review round 3, NIT 1: ``_listen`` records the server and then awaits
+    ``start_serving()``, which is where ``listen()`` runs. When that raised
+    ``OSError`` the caller retried or fell back to ``_listen(0)`` and overwrote
+    ``self._server`` without closing it, so the bound socket leaked. The failed
+    server must be closed, and the fallback must still produce a working one."""
+    closed: list[asyncio.Server] = []
+    real_start_serving = asyncio.Server.start_serving
+    real_close = asyncio.Server.close
+    failures = iter([True])
+
+    async def flaky_start_serving(self: asyncio.Server) -> None:
+        if next(failures, False):
+            raise OSError("listen failed")
+        await real_start_serving(self)
+
+    def recording_close(self: asyncio.Server) -> None:
+        closed.append(self)
+        real_close(self)
+
+    monkeypatch.setattr(asyncio.Server, "start_serving", flaky_start_serving)
+    monkeypatch.setattr(asyncio.Server, "close", recording_close)
+    port = _free_port()
+    flow = _EchoFlow(
+        CallbackFlowOptions(preferred_port=port, timeout_seconds=30.0), LoginCallbacks()
+    )
+    await flow._start_server()
+    try:
+        assert len(closed) == 1, "the server whose listen() failed was never closed"
+        assert closed[0] is not flow._server
+        assert closed[0].sockets == (), "the failed server still holds its socket"
+        assert flow._server is not None and flow._server.is_serving()
+    finally:
+        await flow._stop_server()

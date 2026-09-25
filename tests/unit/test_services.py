@@ -46,6 +46,23 @@ def _record(**over: Any) -> serve_registry.ServeRecord:
     return serve_registry.ServeRecord(**fields)
 
 
+def _fleet(records: list[Any]):
+    """The fleet as ``status_lines`` reads it: ONE composed report per record.
+
+    ``status_lines`` reads ``serve_daemon_reports()`` and decides each row from the
+    composed verdict (services.py, review round 1, R1-6), so a test that wants the
+    ordinary ``serve daemon`` row has to say the thing that row claims: an address
+    that answered as this record. The probe is what makes it SERVING; ``state`` is
+    what the classifier said, and "live" is the ordinary case.
+    """
+    return lambda **_kwargs: [
+        services.ServeDaemonReport(
+            record=record, state="live", probe=services.AddressProbe(services.SERVING)
+        )
+        for record in records
+    ]
+
+
 @pytest.fixture
 def pointer(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """What the install pointer names. The SUBJECT of every comparison below."""
@@ -342,11 +359,13 @@ def test_status_lines_name_the_drift_and_the_capability(
     pointer["stamp"] = BuildStamp(version="0.59.0", source_ref="4d3ce1d")
     monkeypatch.setattr(
         services,
-        "live_serve_daemons",
-        lambda: [
-            _record(source_ref="9f2c1ab"),
-            _record(pid=9, version="0.59.0", source_ref="4d3ce1d", reloadable=False),
-        ],
+        "serve_daemon_reports",
+        _fleet(
+            [
+                _record(source_ref="9f2c1ab"),
+                _record(pid=9, version="0.59.0", source_ref="4d3ce1d", reloadable=False),
+            ]
+        ),
     )
     monkeypatch.setattr(
         services,
@@ -380,7 +399,7 @@ def test_status_lines_name_the_true_reason_a_daemon_cannot_move(
     pointer: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A daemon that cannot be asked is told apart from one that can (D1)."""
-    monkeypatch.setattr(services, "live_serve_daemons", lambda: [_record(reloadable=False)])
+    monkeypatch.setattr(services, "serve_daemon_reports", _fleet([_record(reloadable=False)]))
     monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
     lines = services.status_lines()
     assert "  cannot move itself; restart it by hand" in lines
@@ -390,7 +409,7 @@ def test_status_lines_bracket_an_ipv6_authority(
     pointer: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``::1:56569`` is ambiguous, and past the point the eye finds the boundary (D4)."""
-    monkeypatch.setattr(services, "live_serve_daemons", lambda: [_record(host="::1")])
+    monkeypatch.setattr(services, "serve_daemon_reports", _fleet([_record(host="::1")]))
     monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
     line = next(line for line in services.status_lines() if line.startswith("serve daemon"))
     assert "on [::1]:1111" in line
@@ -410,7 +429,7 @@ def test_status_lines_says_it_cannot_compare_when_the_stamp_is_unreadable(
     install on disk is its working tree and ``disk_build()`` is None there by design.
     """
     monkeypatch.setattr("local_operator.update.disk_build", lambda *a, **k: None)
-    monkeypatch.setattr(services, "live_serve_daemons", lambda: [_record()])
+    monkeypatch.setattr(services, "serve_daemon_reports", _fleet([_record()]))
     monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
     lines = services.status_lines()
     assert lines[0] == "install: no build the pointer can name, so nothing can be compared"
@@ -463,7 +482,7 @@ def test_the_fleet_advice_is_not_printed_when_restart_would_skip_them(
     than an edge one (design review D11, round 11 R11-2 — the same defect D7 fixed one
     line over).
     """
-    monkeypatch.setattr(services, "live_serve_daemons", lambda: [_record(reloadable=False)])
+    monkeypatch.setattr(services, "serve_daemon_reports", _fleet([_record(reloadable=False)]))
     monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
     monkeypatch.setattr(services, "_install_may_repoint_daemons", lambda: True)
     lines = services.status_lines()
@@ -477,8 +496,8 @@ def test_the_fleet_advice_counts_the_two_kinds_apart(
     """A mixed fleet is told which half the verb will move and which it will not."""
     monkeypatch.setattr(
         services,
-        "live_serve_daemons",
-        lambda: [_record(source_ref="a"), _record(pid=3, source_ref="b", reloadable=False)],
+        "serve_daemon_reports",
+        _fleet([_record(source_ref="a"), _record(pid=3, source_ref="b", reloadable=False)]),
     )
     monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
     monkeypatch.setattr(services, "_install_may_repoint_daemons", lambda: True)
@@ -495,7 +514,7 @@ def test_a_guard_that_refuses_silences_every_promise(
     install that is not the one the plists run is refused by the second question, and
     both sentences were still printed there.
     """
-    monkeypatch.setattr(services, "live_serve_daemons", lambda: [_record()])
+    monkeypatch.setattr(services, "serve_daemon_reports", _fleet([_record()]))
     monkeypatch.setattr(
         services,
         "_supervised_daemon_plists",
@@ -553,11 +572,13 @@ def test_no_line_exceeds_the_budget_with_a_long_authority(
     for host in ("127.0.0.1", "::1", "fe80::1c2d:3e4f:5a6b:7c8d", "2001:db8:85a3::8a2e:370:7334"):
         monkeypatch.setattr(
             services,
-            "live_serve_daemons",
-            lambda host=host: [
-                _record(host=host, version="0.59.0", source_ref="4d3ce1d"),
-                _record(pid=5, host=host, version="0.56.14", source_ref="9f2c1ab"),
-            ],
+            "serve_daemon_reports",
+            _fleet(
+                [
+                    _record(host=host, version="0.59.0", source_ref="4d3ce1d"),
+                    _record(pid=5, host=host, version="0.56.14", source_ref="9f2c1ab"),
+                ]
+            ),
         )
         monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
         monkeypatch.setattr(services, "_install_may_repoint_daemons", lambda: True)
@@ -607,7 +628,7 @@ def test_no_pointer_never_calls_the_fleet_stale(
     restart drops the runtimes the in-place reload exists to keep.
     """
     monkeypatch.setattr("local_operator.update.disk_build", lambda *a, **k: None)
-    monkeypatch.setattr(services, "live_serve_daemons", lambda: [_record()])
+    monkeypatch.setattr(services, "serve_daemon_reports", _fleet([_record()]))
     monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
     lines = services.status_lines()
     assert "no build to compare against, so no serve daemon can be moved automatically" in lines
@@ -623,11 +644,13 @@ def test_the_hand_restart_count_agrees_with_itself(
     pointer["stamp"] = BuildStamp(version="0.59.0", source_ref="4d3ce1d")
     monkeypatch.setattr(
         services,
-        "live_serve_daemons",
-        lambda: [
-            _record(source_ref="a"),
-            _record(pid=4, source_ref="b", reloadable=False),
-        ],
+        "serve_daemon_reports",
+        _fleet(
+            [
+                _record(source_ref="a"),
+                _record(pid=4, source_ref="b", reloadable=False),
+            ]
+        ),
     )
     monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
     assert (
@@ -639,7 +662,7 @@ def test_the_hand_restart_count_agrees_with_itself(
 def test_status_lines_says_so_when_there_are_no_daemons(
     pointer: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(services, "live_serve_daemons", lambda: [])
+    monkeypatch.setattr(services, "serve_daemon_reports", _fleet([]))
     monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
     assert services.status_lines() == ["install: 0.59.0", "serve daemons: none running"]
 

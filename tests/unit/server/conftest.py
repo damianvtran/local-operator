@@ -151,6 +151,27 @@ class DummyOperator:
         return dummy_response, "dummy operator response"
 
 
+@pytest.fixture(autouse=True)
+def _no_live_api_key_check(monkeypatch):
+    """Keep ``PUT /v1/auth/providers/{id}/key`` off the network in unit tests.
+
+    The route asks the provider whether a key is valid before storing it
+    (``providers.key_check``). Server tests save fabricated keys to exercise the
+    STORE and the defaults policy, and a live check would turn every one of them
+    into a real request that the provider rightly answers 401 (-> 422 here), and
+    into a test that depends on the network. The verdict is stubbed to "could not
+    check", which is the path that stores the key; the check's own behaviour is
+    pinned in ``tests/unit/providers/test_key_check.py`` against a mock transport,
+    and the route's reaction to each verdict in ``test_desktop_controls.py``.
+    """
+    from local_operator.providers import key_check
+
+    async def _unchecked(_provider_id, _key, **_kwargs):
+        return key_check.KeyCheck(None, None)
+
+    monkeypatch.setattr(key_check, "check_api_key", _unchecked)
+
+
 # Fixture for overriding the executor dependency for successful chat requests.
 @pytest.fixture
 def dummy_executor():

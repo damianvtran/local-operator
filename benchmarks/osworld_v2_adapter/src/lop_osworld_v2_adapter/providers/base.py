@@ -28,6 +28,18 @@ from lop_osworld_v2_adapter.taskfile import TaskDescriptor
 # drifting apart is precisely the defect that cost two episodes.
 GUEST_COMMAND_TIMEOUT_S = 90.0
 
+# The apparatus pause the provider applies after a batch that settles: upstream
+# OSWorld's own ``step(pause=...)``, and the delay the paper settle policy makes
+# per semantic action. It lives HERE, at the provider seam, because it is the
+# provider that sleeps it and the value has to be single: the harness funds an
+# ``execute`` for exactly this long per action under the paper policy and seals
+# the same number in the episode manifest, and a second literal anywhere would
+# let the manifest claim a settle nobody slept. The harness script cannot import
+# it (it runs without this distribution installed), so ``scripts/
+# run_episode.py._ACTION_SETTLE_SECONDS`` mirrors it and
+# ``tests/unit/evaluation/runner/test_run_episode_infra.py`` binds the pair.
+DEFAULT_ACTION_DELAY_S = 3.0
+
 # Transport margin between OUR socket deadline and the GUEST's own subprocess
 # deadline, and the reason the two must be ordered rather than merely close.
 #

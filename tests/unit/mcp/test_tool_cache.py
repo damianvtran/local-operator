@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 from local_operator.mcp.config import MCPStdioServerConfig
@@ -48,6 +49,30 @@ def test_name_only_get_is_a_miss_and_drops_rows(tmp_path: Path) -> None:
     cache.put("echo", _TOOLS, digest)
     assert cache.get("echo") is None
     assert cache.get("echo", digest) is None
+
+
+def test_get_entry_returns_the_save_time_in_epoch_seconds(tmp_path: Path) -> None:
+    """The catalog's ``last_seen_at`` is this value, so its unit is pinned here.
+
+    Seconds, from ``time.time()`` at the ``put``: a client that read it as
+    milliseconds rendered "20700 d ago", so the bound is on the real clock.
+    The stale-row rules are :meth:`get`'s, since ``get`` is built on this.
+    """
+    cache = McpToolCache(tmp_path / "mcp_cache.db")
+    digest = config_digest(MCPStdioServerConfig(command="echo"))
+    before = time.time()
+    cache.put("echo", _TOOLS, digest)
+    after = time.time()
+
+    entry = cache.get_entry("echo", digest)
+
+    assert entry is not None
+    tools, saved_at = entry
+    assert tools == _TOOLS
+    assert before <= saved_at <= after
+    other = config_digest(MCPStdioServerConfig(command="other"))
+    assert cache.get_entry("echo", other) is None
+    assert cache.get_entry("echo", digest) is None, "a mismatch drops the row for both readers"
 
 
 def test_put_without_digest_is_a_noop(tmp_path: Path) -> None:

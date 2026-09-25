@@ -83,6 +83,8 @@ from local_operator.agent_shell import AGENT_SHELL_ENV, MAY_DELEGATE_ENV
 from local_operator.config import CONFIG_FILE_NAME, ConfigManager
 from local_operator.harness.approval import ask_approval
 from local_operator.harness.redaction import report_shape_hits
+from local_operator.harness.secret_sinks import refusal_text as _secret_sink_refusal
+from local_operator.harness.secret_sinks import scan_command as _scan_secret_sinks
 from local_operator.harness.subagent import (
     configured_effort_tiers,
     describe_effort_tiers,
@@ -138,12 +140,15 @@ from local_operator.redaction_shapes import (
     ShapeHit,
     ShapeReport,
     credential_dump_notice,
+    credential_forms,
     has_shape_anchor,
     pem_body_line,
     pem_end_line,
     pem_header_line_end,
     scrub_secrets_with_hits,
     shape_report,
+    straddling_form_start,
+    stream_hold_window,
 )
 from local_operator.scratchpad import (
     SCRATCHPAD_NAMESPACE,
@@ -158,7 +163,8 @@ from local_operator.scratchpad import (
     scratchpad_dir_of,
     scratchpad_env_injection,
 )
-from local_operator.tools import group_reaper, search_guard, shell_env
+from local_operator.text_bounds import OUTPUT_TRUNCATION_MARKER, clip_head_tail
+from local_operator.tools import group_reaper, search_guard, shell_env, sleep_guard
 from local_operator.tools.spill import (
     SPILL_ENTRY_LIMIT_BYTES,
     SPILL_SCHEME,
@@ -482,10 +488,12 @@ NON_INTERACTIVE_ENV: dict[str, str] = {
 }
 
 
-#: Marker written where the middle of an output was removed. Kept as a public
-#: name because tests and the browser paths reference it; the text now names
-#: the recovery route instead of just announcing a loss.
-BASH_TRUNCATION_MARKER = "\n\n... [output truncated] ...\n\n"
+#: Marker written where the middle of an output was removed. Now a re-export of
+#: the shared text bound (``local_operator.text_bounds``) rather than a literal,
+#: because the harness imposes the same elision on replay and two literals are
+#: two ways to spell one scar. The name stays: tests and the browser paths
+#: reference it.
+BASH_TRUNCATION_MARKER = OUTPUT_TRUNCATION_MARKER
 
 # The key the harness marks elided content with, inside a JSON payload. It is
 # deliberately NOT `_truncated`: that key belongs to the Minerva toolproxy, whose
@@ -497,30 +505,11 @@ BASH_TRUNCATION_MARKER = "\n\n... [output truncated] ...\n\n"
 ELISION_MARKER_KEY = "_elided"
 
 
-def _clip_head_tail(text: str, limit: int) -> tuple[str, str]:
-    """``(head, tail)`` slices of ``text`` totalling at most ``limit`` chars.
-
-    Both cuts snap INWARD to a line boundary, so neither end shows half a
-    line. Half a line is not a cosmetic problem: a truncated ``File "x.py",
-    line 12`` reads as a different path, and a model that acts on it edits the
-    wrong file. When snapping would empty a side — one enormous line with no
-    newline to snap to — the raw character slice is kept, because a fragment
-    of the answer still beats none of it.
-    """
-    head_budget = limit // 2
-    tail_budget = limit - head_budget
-
-    head = text[:head_budget]
-    cut = head.rfind("\n")
-    if cut > 0:
-        head = head[: cut + 1]
-
-    tail = text[len(text) - tail_budget :]
-    cut = tail.find("\n")
-    if 0 <= cut < len(tail) - 1:
-        tail = tail[cut + 1 :]
-
-    return head, tail
+#: The tools layer's name for the shared clipper. Aliased rather than imported
+#: at the call sites so every existing caller — and the tests that reach for the
+#: private name — keeps working, while the harness gets the same implementation
+#: instead of a second copy of it.
+_clip_head_tail = clip_head_tail
 
 
 def truncate_output(text: str, limit: int = TOOL_OUTPUT_LIMIT_CHARS) -> str:
@@ -1979,8 +1968,11 @@ async def _run_with_abort(
     abandoned. A signal already aborted at entry STILL runs ``on_abort`` and
     closes the pending coroutine — the old early return skipped both, which
     leaked the spawned child and raised "coroutine was never awaited"
-    (RT-01). Callers that must not spawn at all should check
-    ``signal.aborted`` before creating the coroutine.
+    (RT-01). The same check runs again when the worker wins the race, for the
+    one-pass tie review round 2 (R2-1) reproduced: a worker that finishes on the
+    abort flag completes in the same pass the waiter wakes in, so the signal — not
+    the completion order — decides. Callers that must not spawn at all should
+    check ``signal.aborted`` before creating the coroutine.
     """
     if signal is not None and signal.aborted:
         on_abort()
@@ -1993,6 +1985,25 @@ async def _run_with_abort(
     work = asyncio.ensure_future(coro)
     done, _pending = await asyncio.wait({waiter, work}, return_when=asyncio.FIRST_COMPLETED)
     if work in done:
+        # The worker finishing and the signal firing land in the SAME loop pass
+        # once the worker is willing to stop early — which is exactly what the
+        # walkers' ``stop_requested`` made possible — and ``if work in done`` then
+        # reports a search the operator CANCELLED as one that completed. So the
+        # signal is consulted again here: a cancelled search must never be
+        # rendered as a finished one, and above all must not be rendered as a
+        # BUDGET stop ("the walk stopped at 30 s after N files"), which is the
+        # false reason review round 2 reproduced in 9 of 20 aborts (R2-1).
+        if signal.aborted:
+            on_abort()
+            # ``work`` is already done, so this only retrieves (or discards) its
+            # result and any exception — the cancellation the other branch sends
+            # has nothing left to cancel.
+            with contextlib.suppress(BaseException):
+                await work
+            waiter.cancel()
+            with contextlib.suppress(BaseException):
+                await waiter
+            return None, True
         waiter.cancel()
         with contextlib.suppress(BaseException):
             await waiter
@@ -2512,14 +2523,45 @@ class _PipeRedactor:
     inside the window is not split.
 
     **The hold is the max of two rules, and this is the honest one.** ``pending``
-    is bounded by ``max(_PIPE_HOLD_LIMIT, longest registered value + one window)``:
-    the KNOWN-value rule below is older, is not a window rule at all, and holds
-    whatever a registered value needs — measured, a 24,576-byte registered value
-    peaks at 31,072 bytes held at 64 KiB reads, where the same input under this
-    limit alone peaks at 8,192. That is bounded by what the SESSION knows rather
-    than by what the child prints, which is the property the cap exists for, and
-    it is the same in kind as the shape rule: a value too long to be complete in
-    the buffer is split here too, registered or not.
+    is bounded by ``max(_PIPE_HOLD_LIMIT, self.hold + longest spelling)``: the
+    KNOWN-value rule below is older, is not a window rule at all, and holds
+    whatever a registered value needs. ``self.hold`` is a WINDOW and not a
+    whole-buffer bound — the tail this filter keeps is that window plus the
+    spelling it is holding off, so a value of N characters whose widest spelling
+    is the escaped one (4N) can hold up to ``min(4N, 64 KiB) + 4N`` characters.
+    That is bounded by what the SESSION knows rather than by what the child
+    prints, which is the property the cap exists for, and it is the same in kind
+    as the shape rule: a value too long to be complete in the buffer is split
+    here too, registered or not (round-1 review, F4/Q2 — the residual is stated
+    there rather than implied here).
+
+    **Both of those rules run over the SPELLINGS of a value, not its bytes.**
+    A value the mask catches reversed, in hex or base64 is also a value the cut
+    must not halve, and its spellings are longer than it is: the escaped form is
+    four characters per byte, so a 32-character secret is a 128-character needle
+    and can straddle a cut its verbatim form would never reach. So the release
+    point's KNOWN-value rule and the hold both take ``self.forms``
+    (:func:`~local_operator.redaction_shapes.credential_forms`), which is the
+    same spelling list the mask below uses — one policy, so "the mask would have
+    caught it" and "the cut was moved off it" cannot disagree about what a value
+    looks like. The cost is one ``str.find`` per spelling per feed, confined to a
+    window around the cut rather than scanning the buffer to its end.
+
+    **A WINDOW FLOOR is what makes the line rule safe, and it is not optional.**
+    The line rule releases every complete line, which is decidable only for a
+    spelling that cannot CONTAIN a line terminator. A registered multi-line value
+    (a pretty-printed service-account JSON, a multi-line ``.env`` blob) and the
+    ``\n``-joined spelling both carry one, so a line-aligned writer made each of
+    its lines look like a decidable prefix and the value was published line by
+    line — into the live card and the peekable job tail, the one surface nothing
+    re-reads. Nothing downstream could repair it: a line is not one of the
+    enumerated spellings, so the settle-time pass had nothing to match either.
+    So the cut is floored by ``self.hold`` as well as ruled by the line rule: the
+    last ``hold`` characters are never published, which means a spelling that
+    spans lines is not released until it is whole. ``self.hold`` is
+    :func:`~local_operator.redaction_shapes.stream_hold_window` — the same window
+    ``StreamMasker`` uses, from the one function that computes it, so the two
+    chunked surfaces cannot disagree about what is held.
 
     Trailing partial lines are therefore withheld until they complete. That is
     a real trade for a line-oriented surface, taken deliberately: a credential
@@ -2568,7 +2610,28 @@ class _PipeRedactor:
 
     def _set(self, values: Iterable[str]) -> None:
         self.secrets = sorted({value for value in values if value}, key=len, reverse=True)
-        self.lookbehind = max((len(value) for value in self.secrets), default=1) - 1
+        # EVERY SPELLING, not just the verbatim one, and that is why the list is
+        # kept separate from ``self.secrets``: the MASK derives the same spellings
+        # for itself (``scrub_secrets_with_hits`` takes the raw values), and the CUT
+        # RULE below needs them as needles — because a value printed reversed or in
+        # hex is a value the mask must catch AND a value the release point must not
+        # cut in half. ``self.secrets`` stays raw because that is what the mask takes.
+        self.forms = sorted(
+            {form for value in self.secrets for form in credential_forms(value)},
+            key=len,
+            reverse=True,
+        )
+        #: How many characters this filter never publishes from the end of its
+        #: buffer — the SAME window ``StreamMasker`` uses (one function, so the
+        #: two chunked surfaces cannot disagree about what is held).
+        #:
+        #: This replaces ``self.lookbehind``, which was computed as exactly this
+        #: number and then read nowhere (round-1 review, F7): the release point
+        #: did not hold a window at all, so a registered value containing a line
+        #: terminator — a pretty-printed service-account JSON, a multi-line
+        #: ``.env`` — was published one LINE at a time, and a line is not one of
+        #: the enumerated spellings, so no later pass could repair it (F1/Q1).
+        self.hold = stream_hold_window(self.secrets)
 
     def refresh(self, values: Sequence[str]) -> None:
         """Adopt a newly-widened value set mid-stream.
@@ -2578,10 +2641,20 @@ class _PipeRedactor:
         Re-read per chunk, which is what makes a value that arrives at the same
         moment as the bytes it must scrub still get scrubbed.
 
-        The lookbehind can only GROW here, never shrink below what is already
-        held back: ``pending`` is untouched, so a longer new secret straddling
-        this chunk boundary is still resolved on the next feed.
+        The hold can only GROW here, never shrink below what is already held
+        back: ``pending`` is untouched, so a longer new secret straddling this
+        chunk boundary is still resolved on the next feed.
+
+        **Unchanged sets return immediately.** This is called once per read (a
+        64 KiB chunk), and rebuilding every value's spelling list is real work —
+        measured at 68 µs for five ordinary secrets and 61 ms for one oversized
+        value, per read, for as long as the value stays registered (round-1
+        review, F5). The list is a pure function of the value set, so the same
+        set cannot produce a different answer.
         """
+        current = sorted({value for value in values if value}, key=len, reverse=True)
+        if current == self.secrets:
+            return
         self._set(values)
 
     def feed(self, chunk: bytes, *, final: bool = False) -> bytes:
@@ -2814,16 +2887,72 @@ class _PipeRedactor:
         cap_forced = len(text) - cut > _PIPE_DEFERRAL_LIMIT
         if cap_forced:
             cut = self._cut_past_a_split_header(text, len(text) - _PIPE_DEFERRAL_LIMIT)
-        # Never cut through a KNOWN value. The newline rule above already
-        # prevents that for any value without a newline in it, which is every
-        # credential in practice; this keeps the guarantee for the ones with
-        # one, and for the cap-forced cut above.
+        # Never cut through a KNOWN value, in ANY of its spellings. The newline
+        # rule above already prevents that for a spelling without a newline in
+        # it, which is every verbatim credential in practice; this keeps the
+        # guarantee for the ones with one (and for the newline-joined spelling),
+        # for the cap-forced cut above, and — the case this was widened for — for
+        # a TRANSFORMED spelling, which is longer than the value and therefore
+        # straddles a cut the value itself would not.
         #
         # A SHAPE gets the same rule, for the same reason and by a stricter
         # mechanism — see _shape_safe_spans / _cut_outside: the cap is the one
         # release the line rule does not cover, and it is the one that used to
         # publish a credential in two unmasked halves.
         spans = self._shape_safe_spans(text) if cap_forced else []
+        # THE WINDOW FLOOR, and it is what closes the line-terminator leak: the
+        # newline rule above releases every complete line, which is decidable for
+        # a spelling that cannot contain a newline and is exactly wrong for one
+        # that does — the value's own line terminator made each line look like a
+        # decidable prefix, so a multi-line registered value was published line by
+        # line into the live card and the peekable job tail, the one surface
+        # nothing re-reads (round-1 review F1 / QA Q1). Holding the last `hold`
+        # characters back means a spelling that spans lines is never released
+        # until it is whole, which is when the mask below can match it.
+        #
+        # `min` against the cap-forced cut above, so the two rules compose the way
+        # they are documented: the cap bounds the buffer in the ordinary case
+        # (hold is small), and a registered value larger than the cap wins, which
+        # is the pre-existing posture for a known value (see the class docstring).
+        # It sits BEFORE the fixed point below, and that placement is what lets it
+        # compose with the three rules there: every one of them only ever moves the
+        # cut LEFT, so none can undo the floor, and the floor can land inside a value
+        # or a short line fragment that those rules then get the last word on.
+        #
+        # THE FLOOR RETREATS TO A LINE BOUNDARY, and that is what keeps it from
+        # undoing the PEM line loop. `len(text) - hold` is an arbitrary offset, so
+        # taken as-is it lands mid-line in the ordinary (non-cap) case — the one case
+        # where, before the floor, every release ended on a line. The fragment rule in
+        # the loop below only guards a short fragment at the END of a release; a
+        # floor cut a few bytes before a terminator leaves the short fragment at the
+        # START of the next one instead (`+Q\n`), which `_mask_open_key_block` reads as
+        # PROSE and CLOSES the block on — measured on the fold of this change onto
+        # #1427/#1445, with one 26-char value registered: 8 of 34 PEM streams
+        # published body lines raw, up to 1,873 of 2,000, against 0 on main and 0
+        # with the floor removed. Moving back to the line start keeps the floor's own
+        # guarantee (it only moves the cut further LEFT, so the last `hold`
+        # characters are still never published) and restores the line-aligned
+        # release the PEM classifiers were written against, including a header line
+        # the floor would otherwise have split.
+        #
+        # BOUNDED by `_PIPE_DEFERRAL_LIMIT`, and the bound is about MEMORY, not about
+        # what a PEM body looks like: an unwrapped body line longer than the cap IS a
+        # body line to `pem_body_line` (round-2 review, R2-2). The bound is what stops
+        # this hold becoming the unbounded one. Once `hold` exceeds the cap (a value of
+        # ~2 KiB, whose escaped spelling is 4x) the floor lands before the cap-forced
+        # cut, and in a line with no terminator yet the unbounded retreat would answer
+        # every release with the line's start — cut 0, forever, while `pending` grows
+        # with the child's output. So a line longer than the cap keeps its mid-line cut
+        # here, and the START-side fragment rule in the fixed point below is what
+        # stops that cut from closing an open block (round-2 review, R2-1).
+        #
+        # AND IT NEVER CUTS INTO A WHOLE BLOCK THAT FITS THE CAP (round-3 review R3-1 /
+        # QA Q2-1) — see `_cut_before_a_whole_block`.
+        floor = max(len(text) - self.hold, 0)
+        if floor < cut:
+            line_start = max(text.rfind("\n", 0, floor), text.rfind("\r", 0, floor)) + 1
+            cut = line_start if floor - line_start <= _PIPE_DEFERRAL_LIMIT else floor
+            cut = self._cut_before_a_whole_block(text, cut)
         # ONE fixed point over ALL THREE rules, not a sequence of them: moving the cut
         # for a shape can put it inside a value, a value move can put it inside a line,
         # and the line hold can expose a value — so each is re-checked against the
@@ -2854,21 +2983,120 @@ class _PipeRedactor:
         # and holding bytes back at that point would DROP them, because ``pending`` is
         # never flushed again. The invariant this hold exists for is not "no fragment is
         # ever released"; it is "no fragment a LATER release will classify".
+        #
+        # AND THE SAME HOLD FOR THE FRAGMENT A CUT LEAVES AT THE START OF THE NEXT
+        # RELEASE (`_short_line_start`), because a mid-line cut has two ends and the
+        # rule above guards one. Every rule that can cut inside a line — the cap, the
+        # window floor past its line bound, `_cut_outside`, the known-value rule — hands
+        # the rest of that line to the next release, whose line loop reads it as a
+        # LINE: `5\n` is prose to it, so the block closed and the rest of the body went
+        # out raw. Measured (round-2 review, R2-1) with one registered value on an
+        # unwrapped body line longer than the cap: 200 of 200 body lines published,
+        # against 0 with no value; the same class published a CRLF body when a cut
+        # fell between `\r` and `\n` (a lone `\n` is prose too). A release is not made
+        # to start ON a line — a line longer than the cap cannot be, while memory stays
+        # bounded — it is made to start with at least `PEM_BODY_FLOOR` characters of
+        # its line, which the body grammar classifies exactly as it classifies the
+        # whole line. Moves the cut LEFT by at most `PEM_BODY_FLOOR` characters, so it
+        # composes with the other rules like the end-side hold does.
         while True:
             previous_cut = cut
             if spans:
                 cut = self._cut_outside(cut, spans)
-            for secret in self.secrets:
-                start = text.find(secret, max(cut - len(secret) + 1, 0))
-                if 0 <= start < cut < start + len(secret):
-                    cut = start
+            start = straddling_form_start(text, cut, self.forms)
+            if start >= 0:
+                cut = start
             if cut and (self._in_key_block or block_open):
                 break_at = max(text.rfind("\n", 0, cut), text.rfind("\r", 0, cut)) + 1
                 if 0 < cut - break_at < PEM_BODY_FLOOR:
                     cut = break_at
+                else:
+                    cut = self._short_line_start(text, cut, break_at)
             if cut == previous_cut:
                 break
         return cut
+
+    @staticmethod
+    def _cut_before_a_whole_block(text: str, cut: int) -> int:
+        """Move a floor cut that lands inside a complete, cap-sized key block to its BEGIN.
+
+        WHY: the hold above treats a block as one unit — it is deferred until its
+        END arrives and then released whole, which is the unit the shape table's
+        ``pem-private-key`` masks (it spans BEGIN to END). The window floor is an
+        offset counted back from the buffer's end, so once END is in hand it lands
+        INSIDE that unit and splits it into two releases. The first carries the
+        header, which opens `_mask_open_key_block`'s line state; any non-body line in
+        the block then CLOSES that state by the prose rule — a legacy-encrypted PEM's
+        ``Proc-Type:``/``DEK-Info:`` lines and blank separator (``ssh-keygen -m PEM
+        -N …``, ``openssl … -traditional``), or a body line carrying a ``-`` value —
+        and the second release (the held tail: body lines + END, no header in front of
+        it for the table to match) goes out raw on the live card and the peek tail,
+        which nothing re-reads. Measured on the head before this rule: a 26-line
+        legacy-encrypted block published 1/2/5 body lines for a 14/26/88-char
+        unrelated registered value at every read size, at 1,839 of 1,839 two-chunk
+        split offsets, and 17 of 26 through a real background ``cat``; main published
+        0, because without the floor it never cut there.
+
+        WHY THE CUT AND NOT THE BLOCK RULE: main's "prose closes the block" rule is
+        the over-mask guard for a stray header, and changing it needs its own round of
+        over-mask evidence. Restoring main's unit is the smaller fix, and it only moves
+        the cut further LEFT, so the floor's guarantee (the last ``hold`` characters
+        are never published) still holds.
+
+        BOUNDED BY THE CAP: only a block whose BEGIN-to-END-line span fits
+        :data:`_PIPE_DEFERRAL_LIMIT` is treated as a unit — that is the size main can
+        hold whole, and a larger one is split by the cap on main too, where the open
+        block's line state is what masks it. The extra hold is therefore at most one
+        cap. The same raw ``-----BEGIN``/``-----END`` literals as the hold above, so
+        the two rules cannot disagree about where a block starts.
+        """
+        begin = text.rfind("-----BEGIN", 0, cut)
+        if begin < 0:
+            return cut
+        end = text.find("-----END", begin)
+        if end < 0:
+            # No END yet: the hold above (or the cap) already decided this cut.
+            return cut
+        break_match = _PEM_LINE_BREAK.search(text, end)
+        block_end = break_match.end() if break_match else len(text)
+        if block_end <= cut or block_end - begin > _PIPE_DEFERRAL_LIMIT:
+            # The block, END line included, is released whole before the cut; or it
+            # is larger than main could ever hold whole.
+            return cut
+        return begin
+
+    @staticmethod
+    def _short_line_start(text: str, cut: int, line_start: int) -> int:
+        """Move ``cut`` left so the next release does not START with a sub-floor fragment.
+
+        Only called while a key block is open (see the fixed point in
+        :meth:`_release_point`). ``line_start`` is where the line holding ``cut``
+        begins. Returns ``cut`` unchanged when it is already a line boundary, or when
+        the rest of its line — up to that line's terminator, or to the end of the
+        buffer when the terminator has not arrived (the line can only grow, so the
+        fragment can only get LONGER) — is at least ``PEM_BODY_FLOOR`` characters.
+
+        A cut between ``\\r`` and ``\\n`` counts as mid-line: the next release would
+        start with a lone ``\\n``, an empty line the loop reads as prose. So does a cut
+        right after a ``\\r`` that ends the buffer, because the ``\\n`` may be the next
+        read's first byte; that holds a CR-terminated line one read longer, and only
+        while a block is open.
+        """
+        if cut >= len(text) and not text.endswith("\r"):
+            return cut  # nothing is left for a next release to start with
+        if text[cut - 1] == "\r" and text[cut : cut + 1] in ("\n", ""):
+            # Inside a CRLF pair: the line ends at that `\r`, so its start is the one
+            # before it — `line_start` was computed from the `\r` itself.
+            line_end = cut - 1
+            line_start = max(text.rfind("\n", 0, line_end), text.rfind("\r", 0, line_end)) + 1
+        elif line_start == cut:
+            return cut  # already a line boundary
+        else:
+            ends = [i for i in (text.find("\n", cut), text.find("\r", cut)) if i >= 0]
+            line_end = min(ends) if ends else len(text)
+        if line_end - cut >= PEM_BODY_FLOOR:
+            return cut
+        return max(line_start, line_end - PEM_BODY_FLOOR)
 
     def _cut_past_a_split_header(self, text: str, cut: int) -> int:
         """Extend a cap-forced cut to the end of a header LINE it would otherwise split.
@@ -3374,6 +3602,24 @@ async def execute_bash(
         if _si_block:
             return _error(tool_call_id, "bash", interception)
         logger.warning("bash: %s", interception)
+    # Long-sleep refusal: a FOREGROUND call that is mostly `sleep 1500; tail
+    # log` holds the session where a hub note cannot reach it (notes are
+    # delivered at tool boundaries, and a running bash is not one) — measured
+    # on child f7318cc06bdd, whose parent's three notes each waited out a
+    # 15-30 min sleep. A background call is exempt by construction: its sleep
+    # holds no turn. Blocks with the replacement (background + `wait`), never
+    # rewrites; see tools/sleep_guard.py for the predicate and the escape hatch.
+    if not params.background:
+        long_sleep = sleep_guard.check_long_sleep(params.command)
+        if long_sleep is not None:
+            # The SAME fault marker the plan-time hook reports, so the two paths
+            # of one guard cannot land the same call in two different buckets —
+            # ``invalid_arguments`` is a MODEL fault and this path used to be an
+            # unmarked ``execution`` one (review A2 on #1546). Reachable with
+            # direct ``execute`` callers, where no planning hook runs.
+            return _error(
+                tool_call_id, "bash", long_sleep, details={FAULT_KEY: FAULT_INVALID_ARGUMENTS}
+            )
     # Approval for write/exec tiers is the LOOP's gate (it fires after
     # tool_execution_start so the UI shows the pending call). A second gate
     # here made the user answer twice per action, with the tier name rendered
@@ -3396,6 +3642,30 @@ async def execute_bash(
     store = context.variables if context is not None else None
     credential_env = getattr(store, "credential_env", None)
     extra = credential_env() if callable(credential_env) else None
+
+    # Refuse a call in which a stored secret would be PRINTED, before any child
+    # exists. The control this replaces is an output filter (the redaction
+    # ledger's `str.replace`), and a filter decides after the decision to print
+    # has been made and only for the spellings it holds — a Minerva QA session
+    # lost a credential to `v=$(lop secret get "$k") && echo "$k = $v"`, whose
+    # value was in the transcript, and then printed a masked hostname reversed
+    # to read it. The rule keys on the DATA FLOW (a value source reaching a
+    # printing sink), so a re-spelling is refused too.
+    #
+    # `_error`, not `_invalid_arguments`: a printing construct is a policy
+    # refusal, not a malformed argument, and not a prompt — `execute_bash`
+    # deliberately has no second approval gate (the loop's gate already ran), so
+    # asking here would be the double-answer that comment exists to prevent.
+    # The source is the store: a command that never names `lop secret` is
+    # untouched, so ordinary work — and the session-credential flow, which rides
+    # the child's environment and is the mask's business — is unaffected.
+    scan = _scan_secret_sinks(params.command)
+    if scan.refused:
+        return _error(
+            tool_call_id,
+            "bash",
+            _secret_sink_refusal(scan, text=params.command, tool_name="bash"),
+        )
     injections: dict[str, str] = dict(NON_INTERACTIVE_ENV)
     # The DELEGATION ALLOWANCE rides the child environment for the same reason
     # the marker in ``NON_INTERACTIVE_ENV`` does: a `lop exec` run by a session
@@ -4457,8 +4727,41 @@ def build_bash_tool() -> AgentTool:
         # commands, and exclusive would serialize the common case.
         concurrency="shared",
         interruptible=True,
+        # Plan-time refusal for the long-sleep shape, so an interactive operator
+        # is never asked to approve a call the tool then refuses (review Q-2 on
+        # #1546). The execute-time check below stays as the backstop for the
+        # direct ``execute`` callers no hook reaches.
+        refuse_args=_long_foreground_sleep_refusal,
         execute=execute_bash,
     )
+
+
+def _long_foreground_sleep_refusal(args: dict[str, Any], offered: frozenset[str]) -> str | None:
+    """The plan-time half of the long-sleep guard (see ``tools/sleep_guard``).
+
+    Reads the COERCED params, not the raw arguments, because the raw dict is
+    what the model wrote and a JSON ``false`` is not the only spelling of an
+    absent background flag: ``"false"``, ``"no"``, ``"0"``, ``"off"``, ``"n"``,
+    ``"f"``, ``"FALSE"`` all pass ``validate_tool_arguments`` and are TRUTHY as
+    strings — so reading ``args.get("background")`` let a foreground call through
+    the hook to the approval gate, which then asked the operator to approve work
+    ``execute_bash`` refuses (review A1 on #1546). ``BashParams`` is the same
+    coercion the body uses, so the two halves of this guard cannot disagree
+    about what ``background`` means.
+
+    Never raises: the loop skips a hook that throws, and a skipped hook means
+    the call reaches the gate this exists to pre-empt. A shape ``BashParams``
+    rejects is left to the body's own validation error.
+    """
+    try:
+        params = BashParams(**args)
+    except ValidationError:
+        return None
+    if params.background:
+        return None
+    # ``offered`` is the calling session's live inventory (the loop passes it),
+    # so the refusal names only replacements this reader actually holds.
+    return sleep_guard.check_long_sleep(params.command, offered=offered)
 
 
 # ---------------------------------------------------------------------------
@@ -9000,17 +9303,241 @@ def _ignored(rel: str, rules: list[tuple[str, list[_IgnoreRule]]]) -> bool:
     return ignored
 
 
-def _walk_entries(root: Path, *, respect_ignore: bool = True) -> list[Path]:
+#: Wall-clock cap for ONE search WALK — the tree traversal behind ``grep`` and
+#: ``glob`` — measured from the moment the walk starts.
+#:
+#: IT IS A PER-STAGE BUDGET, NOT A PER-SEARCH ONE, and the difference is the
+#: honest number to quote: a Python-engine grep can spend 30 s walking and then
+#: 30 s scanning, an rg-engine grep 30 s scanning and then 30 s on the
+#: oversized-file count walk. One live-store grep measured 41.4 s with a 5 s
+#: walk budget (QA round 1, Q-3), so the worst case for ONE call is ~60-70 s.
+#: That is a bounded stall rather than the measured 2315.8 s below, and saying
+#: "30 s" for the whole call would be a claim this code does not keep.
+#:
+#: WHY, MEASURED. A delegated child walked the session store
+#: (``~/.local-operator/sessions``) inside ONE ``grep`` call and spent
+#: **2315.8 s** (38.6 min) there — 39.2 of that job's 40.1 min was tool time
+#: against 0.8 min of model time, with nothing emitted until the call returned,
+#: which is exactly what the operator saw as "subagents stuck between turns".
+#: The cost was the walk, not the regex: on that store (10,120 dirs / 43,553
+#: files, disk at 94% with ~25 sessions live) a scandir-only pass measured
+#: **110.7 s** and a stat-per-file pass **207.7 s**, and the ripgrep path paid
+#: the tree TWICE (a second walk merely to count oversized files) before its
+#: 30 s scan. Minutes of wall clock therefore pass before any regex runs, so
+#: the walk needs its own budget — 30 s mirrors ``GREP_SCAN_DEADLINE_S``
+#: deliberately: one number for "how long one stage's filesystem work may take"
+#: is easier to reason about than two.
+#:
+#: A walk that hits it returns what it has, and the caller MUST render that as
+#: partial (see the search tools' honesty contract): a truncated walk can never
+#: be reported as "no matches", because the matches may be in the part of the
+#: tree that was never read.
+SEARCH_WALK_DEADLINE_S = 30.0
+
+#: How many walk ENTRIES may pass between two reads of the clock. The deadline
+#: is also consulted at every directory boundary; inside one directory the check
+#: is amortized this way because a ``time.monotonic()`` per entry is real cost
+#: on the hottest loop of these tools (60k-entry trees are normal here, and the
+#: walk runs in a worker thread precisely because it is syscall-bound), while
+#: 256 entries of slack cannot re-introduce the stall this bounds.
+_WALK_DEADLINE_CHECK_EVERY = 256
+
+
+class _WalkOutcome(NamedTuple):
+    """One walk's files, whether its budget stopped it, and its stat total.
+
+    ``files`` is what the walk REACHED — a prefix of what an unbounded walk
+    would have returned, never an estimate of the whole tree. ``truncated``
+    means the walk stopped before finishing, so the caller owes the reader a
+    partial-result clause instead of an answer.
+    """
+
+    files: list[Path]
+    truncated: bool = False
+    #: Files above ``GREP_FILE_LIMIT_BYTES``, counted during the SAME pass and
+    #: only when the caller asked (``count_oversized``): that stat per file is
+    #: exactly what the removed second walk paid, so it is opt-in for the
+    #: callers that need the number (``_count_oversized_files`` discards
+    #: ``files`` — the ripgrep engine never needs the list — and one walk
+    #: implementation is worth the few hundred bytes per file it holds).
+    oversized: int = 0
+    #: Files whose size could not be read, so they are missing from
+    #: ``oversized``. A count with one of these is a LOWER BOUND and the caller
+    #: must not print it as a total (review N-3) — the file was listed a moment
+    #: ago, so this is rare, which is exactly why an undisclosed gap in a
+    #: number would survive.
+    unsized: int = 0
+
+
+class _SearchStop(NamedTuple):
+    """One stop that made a search partial, in operator words.
+
+    A RECORD rather than a rendered sentence, because the same stop has two
+    audiences with different needs: the operator reads the clause
+    (:func:`_stop_clause`), while ``details`` carries ``constant`` — a code
+    identifier that names nothing a person can act on (design review D5).
+
+    ``stage`` names what stopped ("the walk", "the scan", "ripgrep");
+    ``seconds`` is the wall-clock budget that stopped it, or None when a
+    collector cap did; ``reached`` is how far that stage got, in the unit that
+    stage actually counts — files for a filesystem walk or scan, matches for
+    ripgrep's stream. One noun per stage, and each stage's count appears once,
+    labelled by the stage it came from, which is what makes the two-number
+    sentence of design review D8 impossible rather than merely fixed.
+
+    It is not the ONLY number in the answer, and the docstring should not pretend
+    otherwise (design review round 2, D2-4): a header states its own totals, and
+    on the ripgrep engine the stop's ``reached`` and the header's record total
+    ARE the same measure — both count the records rg produced — so they agree by
+    construction, which is what the design round verified in every frame.
+    """
+
+    stage: str
+    reached: str
+    seconds: float | None = None
+    constant: str = ""
+
+
+def _count_noun(count: int, noun: str) -> str:
+    """``<count> <noun>``, pluralised — the ONE spelling of a stop's unit.
+
+    Every stage that can stop names how far it got, and each names it in the
+    unit that stage counts: files for a filesystem walk or scan, paths for a
+    glob traversal, matches for ripgrep's stream (design review D10). One
+    spelling here is what keeps that from drifting per site, and the sibilant
+    rule is spelled out because the alternatives are both wrong: ``1 paths`` and
+    ``4761 matchs`` — the second measured on a rendered frame, which is how it
+    was caught.
+    """
+    if count == 1:
+        return f"{count} {noun}"
+    return f"{count} {noun}{'es' if noun.endswith(('ch', 'sh', 's', 'x', 'z')) else 's'}"
+
+
+def _stop_clause(stops: Sequence[_SearchStop]) -> str:
+    """The ONE clause naming every stop that made a search partial.
+
+    The claim leads the answer (``Partial results: …``) and this clause says
+    why, each stage named once — a predicate per stage rather than a whole
+    sentence repeated per stage, which is the stammer design review D4
+    measured. It carries no constant name (D5) and no count the answer states
+    elsewhere (D8).
+    """
+    parts = [
+        (
+            f"{stop.stage} stopped at its output cap after {stop.reached}"
+            if stop.seconds is None
+            else f"{stop.stage} stopped at {stop.seconds:g} s after {stop.reached}"
+        )
+        for stop in stops
+    ]
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return parts[0]
+    return f"{', '.join(parts[:-1])} and {parts[-1]}"
+
+
+def _partial_details(
+    stops: Sequence[_SearchStop], spill_details: dict[str, Any] | None
+) -> dict[str, Any]:
+    """``details`` for a result a stop made partial.
+
+    ``partial_result`` is what the TUI card reads to mark the COLLAPSED row
+    (design review D1): that row takes its structure from ``details`` and never
+    from the result text, so a disclosure the text leads with is still unreachable
+    from the state an operator scans unless the flag rides here. ``partial_stops``
+    carries the budget constant names for the transcript, the log and any agent
+    reading the payload — the reader's clause keeps the plain words (D5).
+
+    The KEY is named for the payload rather than for the state on purpose: the
+    mobile projection writes a string under a bare ``partial``
+    (``mobile/projection.py``, a ToolRow expand payload's tail), which is truthy,
+    so a future path that forwarded those details into a card would paint ``◐`` on
+    an unrelated tool (review round 2, R2-5). A name nothing else writes removes
+    the collision instead of relying on the whitelist that happens to separate
+    them today.
+    """
+    return {
+        **(spill_details or {}),
+        "partial_result": True,
+        "partial_stops": [
+            {
+                "stage": stop.stage,
+                "reached": stop.reached,
+                "seconds": stop.seconds,
+                "constant": stop.constant,
+            }
+            for stop in stops
+        ],
+    }
+
+
+def _walk_entries(
+    root: Path,
+    *,
+    respect_ignore: bool = True,
+    deadline: float | None = None,
+    count_oversized: bool = False,
+    stop_requested: Callable[[], bool] | None = None,
+) -> _WalkOutcome:
     """Depth-first walk pruning VCS/vendor/build trees, dotdirs, symlinks and
     (when ``respect_ignore``) gitignore-declared paths. Files only.
 
     Git semantics for directories are honored structurally: an ignored
     directory's subtree is skipped outright, so a ``!`` rule cannot re-include
     inside it — exactly git's own behaviour.
+
+    BOUNDED, at three checkpoints: ``deadline`` (a ``time.monotonic()`` instant;
+    None means "no budget", which only tests and the evidence probe use) is
+    consulted at every directory boundary, again on the far side of that
+    directory's LISTING, and every ``_WALK_DEADLINE_CHECK_EVERY`` entries inside
+    one. The listing is the term a per-entry check cannot bound: a single
+    directory whose ``scandir``+``sorted`` alone outruns the budget (measured
+    at 2.401 s for 40,000 entries, and it overshot a 0.001 s budget by its whole
+    duration) would otherwise do all of that work before the first per-entry
+    check ran (review R-2). ``stop_requested`` is a second, independent stop
+    consulted on every entry and at every boundary — the caller's abort signal —
+    so a Ctrl+C ends the filesystem I/O instead of leaving this thread walking a
+    large tree to its budget while the tool has already returned (QA round 1,
+    Q-4).
+
+    Either stop sets ``_WalkOutcome.truncated``: the caller renders a stopped
+    walk as partial, and for an abort the caller discards the result anyway. See
+    ``SEARCH_WALK_DEADLINE_S`` for the measurement that made the budget
+    necessary.
     """
     files: list[Path] = []
+    oversized = 0
+    unsized = 0
+    truncated = False
+    seen = 0
+
+    def _stop_now() -> bool:
+        """Stop before doing any more work: budget spent, or a stop requested.
+
+        The budget is read UNCONDITIONALLY here, so this is for the coarse
+        checkpoints only; the per-entry caller gates the clock read itself and
+        pays a plain flag read in between.
+        """
+        nonlocal truncated
+        if truncated:
+            return True
+        if deadline is not None and time.monotonic() > deadline:
+            truncated = True
+            return True
+        if stop_requested is not None and stop_requested():
+            truncated = True
+            return True
+        return False
 
     def _walk(directory: Path, rel_dir: str, rules: list[tuple[str, list[_IgnoreRule]]]) -> None:
+        nonlocal oversized, seen, truncated, unsized
+        # The directory boundary is the coarsest and cheapest checkpoint, and it
+        # is the one that makes an ALREADY-EXPIRED deadline stop the walk before
+        # the first scandir rather than after the first directory.
+        if _stop_now():
+            return
         local_rules = rules
         if respect_ignore:
             found = _load_ignore_rules(directory, rel_dir)
@@ -9032,7 +9559,29 @@ def _walk_entries(root: Path, *, respect_ignore: bool = True) -> list[Path]:
                 entries = sorted(scan, key=lambda e: e.name)
         except OSError:
             return
+        # The LISTING is the one term a per-entry check cannot bound (review
+        # R-2), so the clock is consulted again here: what this walk just spent
+        # is whatever the directory's own scandir+sort cost, and on a 40,000-entry
+        # directory that alone is seconds.
+        if _stop_now():
+            return
         for entry in entries:
+            seen += 1
+            # A requested stop is a plain flag read, so it is checked on EVERY
+            # entry; the CLOCK is read every ``_WALK_DEADLINE_CHECK_EVERY``
+            # entries instead, because a monotonic() per entry is real cost on the
+            # walk's hottest loop while 256 entries of slack cannot re-introduce
+            # the stall this bounds.
+            if truncated or (stop_requested is not None and stop_requested()):
+                truncated = True
+                return
+            if (
+                deadline is not None
+                and seen % _WALK_DEADLINE_CHECK_EVERY == 0
+                and time.monotonic() > deadline
+            ):
+                truncated = True
+                return
             try:
                 if entry.is_symlink():
                     continue  # never follow links: cycles and out-of-tree escapes
@@ -9050,22 +9599,44 @@ def _walk_entries(root: Path, *, respect_ignore: bool = True) -> list[Path]:
                 if respect_ignore and _ignored(rel, local_rules):
                     continue
                 _walk(Path(entry.path), rel, local_rules)
+                if truncated:
+                    return
             elif is_file:
                 if respect_ignore and _ignored(rel, local_rules):
                     continue
                 files.append(Path(entry.path))
+                if count_oversized:
+                    try:
+                        # The stat happens on the entry THIS pass is already
+                        # holding, which is the whole point: the count used to
+                        # be recovered by a second traversal of the same tree
+                        # whose only job was to stat these files.
+                        if entry.stat(follow_symlinks=False).st_size > GREP_FILE_LIMIT_BYTES:
+                            oversized += 1
+                    except OSError:
+                        # Counted, not silently dropped: the file was listed a
+                        # moment ago, so a failed stat means the count the caller
+                        # prints is missing an entry, and a number that is only a
+                        # LOWER BOUND has to say so (review N-3).
+                        unsized += 1
 
     _walk(root, "", [])
-    return files
+    return _WalkOutcome(files=files, truncated=truncated, oversized=oversized, unsized=unsized)
 
 
-def _walk_files(root: Path) -> list[Path]:
-    """The grep file set: the ignore-aware walk."""
-    return _walk_entries(root)
+def _walk_files(root: Path, *, stop_requested: Callable[[], bool] | None = None) -> _WalkOutcome:
+    """The grep file set: the ignore-aware walk under the shipped walk budget."""
+    return _walk_entries(
+        root,
+        deadline=time.monotonic() + SEARCH_WALK_DEADLINE_S,
+        stop_requested=stop_requested,
+    )
 
 
-def _grep_file_set(target: Path) -> tuple[list[Path], Path]:
-    """``(files, base)`` for one grep target, file or directory.
+def _grep_file_set(
+    target: Path, *, stop_requested: Callable[[], bool] | None = None
+) -> tuple[_WalkOutcome, Path]:
+    """``(walk, base)`` for one grep target, file or directory.
 
     Synchronous by design: the walk is tens of thousands of scandir/stat
     calls on a large tree, so every caller reaches this through
@@ -9076,30 +9647,52 @@ def _grep_file_set(target: Path) -> tuple[list[Path], Path]:
     greps put every tree walk back-to-back on the render loop before the
     first frame of the batch could paint (sampled live: 100% of main-thread
     samples inside os_lstat/os_scandir/os_stat under task_eager_start).
+
+    ``stop_requested`` is the caller's abort signal, read from this worker
+    thread so an interrupted search stops doing filesystem I/O instead of
+    walking a large tree to its budget while the tool has already answered
+    (QA round 1, Q-4).
+
+    A single NAMED file is its own file set and cannot be truncated: there is
+    no tree to walk, so the budget does not apply.
     """
     if target.is_file():
-        return [target], target.parent
-    return _walk_files(target), target
+        return _WalkOutcome(files=[target]), target.parent
+    return _walk_files(target, stop_requested=stop_requested), target
 
 
-def _count_oversized_files(target: Path) -> int:
-    """How many files in the grep set exceed ``GREP_FILE_LIMIT_BYTES``.
+def _count_oversized_files(
+    target: Path, *, stop_requested: Callable[[], bool] | None = None
+) -> tuple[int, bool]:
+    """``(skipped, incomplete)`` for the files over ``GREP_FILE_LIMIT_BYTES``
+    under a DIRECTORY ``target``.
 
     The ripgrep engine applies ``--max-filesize`` silently, and the footer
-    contract promises the skipped count either way — this recovers it. It
-    re-walks the tree, which is exactly the filesystem load described on
-    ``_grep_file_set``, so it is synchronous and thread-hosted for the same
-    reason.
+    contract promises the skipped count either way — this recovers it. ONE
+    PASS, and that is the fix rather than a detail: the ripgrep engine needs
+    only the COUNT, never the file list, so this walk stats each file as it
+    reaches it (``count_oversized``) instead of walking the tree once for a
+    file list it discards and then stat-ing every one of those files in a
+    second full traversal. On the measured store that second traversal was
+    another 110.7 s of scandir before the stats even started.
+
+    ``incomplete`` means the count is a LOWER BOUND, for either reason it can
+    be one: the walk ran out of ``SEARCH_WALK_DEADLINE_S``, or a file it listed
+    could not be sized. The caller must say so rather than print the number as
+    the total (review N-3).
+
+    A FILE ``target`` yields ``(0, False)`` — ``_walk_entries`` has no tree to
+    descend — which is why ``execute_grep`` does not call this for one: the
+    engine gate above only keeps ripgrep for a file already under the cap, so
+    the count is definitionally zero there (review N-4).
     """
-    files, _base = _grep_file_set(target)
-    skipped = 0
-    for file_path in files:
-        try:
-            if file_path.stat().st_size > GREP_FILE_LIMIT_BYTES:
-                skipped += 1
-        except OSError:
-            continue
-    return skipped
+    walked = _walk_entries(
+        target,
+        deadline=time.monotonic() + SEARCH_WALK_DEADLINE_S,
+        count_oversized=True,
+        stop_requested=stop_requested,
+    )
+    return walked.oversized, walked.truncated or bool(walked.unsized)
 
 
 class GlobParams(BaseModel):
@@ -9221,23 +9814,158 @@ class _IgnoreWalk:
         return _ignored(rel, self._stack(parent))
 
 
-def _glob_walk(root: Path, pattern: str) -> list[str]:
+class _GlobWalk(NamedTuple):
+    """One glob walk: the paths it collected, whether the budget stopped it,
+    and how many candidates pathlib handed it (the number the stop clause
+    reports, since a glob's own match count says nothing about how far the walk
+    got).
+
+    ``paths`` is a partial list when ``truncated`` — a SUBSET of the sorted
+    result an unbounded walk would have produced, never the whole answer. A
+    subset and not a prefix, deliberately: the matches are collected into a set
+    and sorted at the end, so a stopped walk can hold ``z.py`` and lack
+    ``a.py`` (review R-5).
+    """
+
+    paths: list[str]
+    truncated: bool = False
+    examined: int = 0
+
+
+class _WalkBudgetExceeded(Exception):
+    """Internal signal: a supervised walk's budget is spent.
+
+    Never escapes ``_glob_walk``. It exists because the stop has to unwind
+    through pathlib's own generator frames, which a flag cannot reach.
+    """
+
+
+class _GlobBudget:
+    """The deadline supervisor for a walk that ``Path.glob`` drives.
+
+    ``_walk_entries`` checks the clock inline because it owns its loop.
+    ``Path.glob`` does not hand us one, and a ``**`` pattern is precisely the
+    shape whose traversal must be bounded: measured on CPython 3.12,
+    ``Path.glob("**/*.py")`` over a tree with no ``.py`` file in it yields
+    **zero** items while still scanning every directory under the root. So a
+    stop condition written as "stop consuming the iterator" never fires for it,
+    which is why the checkpoint sits instead on the items pathlib DOES hand
+    back (one per directory scan in a ``**`` enumeration — see
+    ``_bounded_glob``) and why the stop is an exception.
+    """
+
+    def __init__(self, deadline: float, stop_requested: Callable[[], bool] | None = None) -> None:
+        self.deadline = deadline
+        #: The caller's abort signal, read here for the same reason
+        #: ``_walk_entries`` reads it: an interrupted search must not keep
+        #: enumerating a tree while the tool has already returned (QA Q-4).
+        self.stop_requested = stop_requested
+        #: Items pathlib has handed back, reported in the truncation note: a
+        #: glob's own match count says nothing about how far the walk got, and
+        #: the walk is what the budget stopped.
+        self.examined = 0
+        self.truncated = False
+
+    def consume(self, iterator: Iterator[Path]) -> Iterator[Path]:
+        for item in iterator:
+            self.examined += 1
+            # First item and every ``_WALK_DEADLINE_CHECK_EVERY`` after it: an
+            # already-expired budget stops before the second scan, and a long
+            # walk pays one ``monotonic()`` per 256 items rather than per item.
+            # A requested stop is a plain flag read, so it is checked every item.
+            if self.stop_requested is not None and self.stop_requested():
+                self.truncated = True
+                raise _WalkBudgetExceeded
+            if self.examined == 1 or self.examined % _WALK_DEADLINE_CHECK_EVERY == 0:
+                if time.monotonic() > self.deadline:
+                    self.truncated = True
+                    raise _WalkBudgetExceeded
+            yield item
+
+
+def _bounded_glob(root: Path, pattern: str, budget: _GlobBudget) -> Iterator[Path]:
+    """pathlib's glob, with its traversal supervised by ``budget``.
+
+    WHY A DECOMPOSITION rather than a plain ``root.glob(pattern)`` call: the
+    budget has to be consulted *inside* pathlib's traversal (see
+    ``_GlobBudget``), and the one moment pathlib hands control back per
+    directory is a ``**`` component's enumeration, which yields exactly one
+    item per scandir. So a pattern containing a ``**`` component is split at
+    its FIRST one: the head enumerates candidate DIRECTORIES through pathlib
+    itself (``<head>/**``), and each of those directories is matched against the
+    tail — again through pathlib. Every matching rule therefore stays pathlib's
+    (case sensitivity from the platform flavour, hidden names, symlinks, ``**``
+    depth) instead of becoming a second glob implementation to keep in sync.
+
+    Equivalence with the plain call was checked over a tree carrying wildcards,
+    a nested ``docs``, a hidden directory and multi-``**`` patterns: identical
+    output on CPython 3.12 and 3.14 — which disagree with EACH OTHER about
+    ``src/**`` (3.14 yields the files below it, 3.12 only the directories) and
+    both behaviours are preserved here, because pathlib still does the matching.
+    """
+    parts = pattern.split("/")
+    if "**" not in parts:
+        # Non-recursive: pathlib walks at most one level per pattern component, so
+        # this call cannot descend an unbounded tree — its work at each level is
+        # bounded by that level's ENTRY COUNT, not by anything the pattern says
+        # (a wildcard level matching nothing still scans the whole level between
+        # yields, so no checkpoint fires — review N-1). What that buys is that the
+        # total cannot grow with DEPTH, which is exactly the property the ``**``
+        # case below lacks and why it needs the decomposition.
+        yield from budget.consume(root.glob(pattern))
+        return
+    head_end = parts.index("**")
+    head = "/".join(parts[:head_end])
+    tail = parts[head_end + 1 :]
+    for directory in budget.consume(root.glob(f"{head}/**" if head else "**")):
+        if not tail:
+            yield directory
+        elif "**" in tail:
+            # A second ``**`` (e.g. '**/x/**'): recurse so the supervision is
+            # re-established inside it rather than handing pathlib an unbounded
+            # sub-pattern. The tail shrinks every time, so this terminates.
+            yield from _bounded_glob(directory, "/".join(tail), budget)
+        else:
+            yield from budget.consume(directory.glob("/".join(tail)))
+
+
+def _glob_walk(
+    root: Path, pattern: str, *, stop_requested: Callable[[], bool] | None = None
+) -> _GlobWalk:
     """The walk half of execute_glob, run in a worker thread.
 
     Matching still uses pathlib (so explicit hidden/vendor components in the
     pattern work), then gitignore-declared paths are filtered out — unless
     the pattern's literal prefix names them, because an author who writes
-    'dist/index.html' into a repo that ignores dist/ means that file."""
+    'dist/index.html' into a repo that ignores dist/ means that file.
+
+    BOUNDED: a ``**`` pattern used to walk everything below the working
+    directory with no budget at all, and the same stall this PR fixes for grep
+    was measured on this tool too — the delegated child whose 2315.8 s ``grep``
+    this change is named for also spent 15.7 s in one ``glob``, and ``glob`` was
+    the larger share of that job's tool time. The deadline is consulted as
+    ``_bounded_glob`` walks (see ``_GlobBudget`` for why an exception is what
+    stops it), ``stop_requested`` lets an abort end the enumeration instead of
+    leaving this thread walking while the tool has answered (QA Q-4), and a
+    stopped walk reports itself through ``_GlobWalk.truncated`` so the caller
+    can never render a partial listing as "no paths matched".
+    """
     prefix = _literal_prefix(pattern)
     cache = _IgnoreWalk(root)
-    out = []
-    for p in root.glob(pattern):
-        rel = p.relative_to(root).as_posix()
-        explicitly_named = bool(prefix) and (rel == prefix or rel.startswith(prefix + "/"))
-        if not explicitly_named and cache.ignores(p):
-            continue
-        out.append(rel + ("/" if p.is_dir() else ""))
-    return sorted(out)
+    budget = _GlobBudget(time.monotonic() + SEARCH_WALK_DEADLINE_S, stop_requested=stop_requested)
+    out: set[str] = set()
+    try:
+        for path in _bounded_glob(root, pattern, budget):
+            rel = path.relative_to(root).as_posix()
+            explicitly_named = bool(prefix) and (rel == prefix or rel.startswith(prefix + "/"))
+            if not explicitly_named and cache.ignores(path):
+                continue
+            out.add(rel + ("/" if path.is_dir() else ""))
+    except _WalkBudgetExceeded:
+        # The partial set is the answer we have; ``budget.truncated`` carries the
+        # rest of what the caller must say about it.
+        pass
+    return _GlobWalk(paths=sorted(out), truncated=budget.truncated, examined=budget.examined)
 
 
 @_guard("glob")
@@ -9306,15 +10034,67 @@ async def execute_glob(
 
     root = Path(_safe_cwd(context))
     # An unbounded ``**`` walk is filesystem work that can freeze the session;
-    # off the event loop and raced against abort like the grep scan.
-    matches, aborted = await _run_with_abort(
-        asyncio.to_thread(_glob_walk, root, pattern),
+    # off the event loop and raced against abort like the grep scan, and under
+    # the same wall-clock budget as every other search walk. ``stop_requested``
+    # is the second half of that: the thread cannot be cancelled, so it reads the
+    # signal itself instead of walking to its budget after the tool has answered.
+    walked, aborted = await _run_with_abort(
+        asyncio.to_thread(
+            _glob_walk,
+            root,
+            pattern,
+            stop_requested=lambda: signal is not None and signal.aborted,
+        ),
         signal,
         lambda: None,
     )
     if aborted:
         return _error(tool_call_id, "glob", "Glob aborted.")
+    # ``None`` only on abort, which already returned; the assert documents it
+    # for the type checker the same way the grep path does.
+    assert walked is not None
+    matches = walked.paths
+    # The stop clause, built once and rendered by both glob answers below. It
+    # reports the paths the walk EXAMINED rather than the matches it kept: a
+    # glob's own match count says nothing about how far the walk got, and the
+    # walk is what the budget stopped.
+    stops = (
+        [
+            _SearchStop(
+                stage="the walk",
+                reached=_count_noun(walked.examined, "path"),
+                seconds=SEARCH_WALK_DEADLINE_S,
+                constant="SEARCH_WALK_DEADLINE_S",
+            )
+        ]
+        if walked.truncated
+        else []
+    )
     if not matches:
+        if stops:
+            # The claim leads (design review D2): the card crops the first output
+            # row (94 / 73 / 54 cells at 100 / 80 / 60 columns), so "Partial
+            # search:" has to be in the first cells rather than after the
+            # bookkeeping, and it is the card's promoted-lead line that wraps the
+            # rest (D1's half of the same finding).
+            return _text(
+                tool_call_id,
+                "glob",
+                f"Partial search: {_stop_clause(stops)}. No path matched pattern "
+                f"'{params.pattern}' in the part of the tree that was read, and the "
+                "rest was not — so this is not an absence of matches. Narrow the "
+                # Compact on purpose: this block is the longest of the four shipped
+                # disclosures (389 cells at an 11-cell pattern) and the promoted
+                # block's wrap budget is REASON_MAX_ROWS = 8, so a 60-column pane
+                # was dropping the closing clause of every other shorter wording
+                # (design review round 2, D2-1 measured a 411-cell one at 9 rows).
+                # The example keeps its agent, its `whereas` and its contrast; what
+                # it gives up is four words of prose the reader does not need.
+                "pattern and re-run: a literal directory prefix (for example "
+                "'src/*.py') makes the walk descend only that subtree, whereas a "
+                "leading '**' walks the whole tree.",
+                details=_partial_details(stops, None),
+            )
         return _text(
             tool_call_id,
             "glob",
@@ -9335,6 +10115,20 @@ async def execute_glob(
     header = f"{len(shown)} match(es) for '{params.pattern}'"
     if total > len(shown):
         header += f" of {total} (capped at {GLOB_RESULT_LIMIT})"
+    if stops:
+        # Additive to the header contract above, never a replacement for it: the
+        # non-truncated spellings ('N match(es)', 'of T (capped at 500)') are
+        # unchanged, and the claim only ever appears when a budget actually
+        # stopped something. It LEADS so the card's 54-cell narrow frame still
+        # carries it (design review D2).
+        return _text(
+            tool_call_id,
+            "glob",
+            f"Partial results: {header} — {_stop_clause(stops)}; narrow the pattern "
+            "to a subtree (a literal prefix such as 'src/*.py') to search the "
+            "rest:\n" + body,
+            details=_partial_details(stops, spill_details),
+        )
     return _text(tool_call_id, "glob", header + ":\n" + body, details=spill_details)
 
 
@@ -9446,28 +10240,82 @@ def _match_record(rel: str, lineno: int, line: str, kind: str) -> tuple[str, int
     return (rel, lineno, line, kind)
 
 
+def _walk_stop(files_walked: int) -> _SearchStop:
+    """The walk stop, in the shared vocabulary.
+
+    Every walker in this module (grep's file set, the oversized-file count,
+    glob's traversal) reports a spent ``SEARCH_WALK_DEADLINE_S`` through this
+    record, so one condition cannot be described three ways.
+    """
+    return _SearchStop(
+        stage="the walk",
+        reached=_count_noun(files_walked, "file"),
+        seconds=SEARCH_WALK_DEADLINE_S,
+        constant="SEARCH_WALK_DEADLINE_S",
+    )
+
+
+class _GrepScan(NamedTuple):
+    """One grep engine's scan: the records it collected, and any early stop.
+
+    ``stops`` is EMPTY only when the engine scanned everything it was handed.
+    Both engines stop early for two reasons: their wall-clock deadline, which
+    nothing else discloses, and the match cap feeding the spill, which the
+    header's ``N+`` already discloses. ``files_searched``/``files_skipped`` are
+    the Python engine's counters; the ripgrep engine leaves them at 0 because rg
+    reports neither — its skipped count is recovered separately by
+    ``_count_oversized_files``.
+    """
+
+    records: list[tuple[str, int, str, str]]
+    stops: tuple[_SearchStop, ...] = ()
+    files_searched: int = 0
+    files_skipped: int = 0
+
+
 def _python_grep_scan(
     files: list[Path],
     base: Path,
     regex: re.Pattern[str],
     include: str | None,
     context_lines: int,
-) -> tuple[list[tuple[str, int, str, str]], int, int]:
+    stop_requested: Callable[[], bool] | None = None,
+) -> _GrepScan:
     """The pure-Python scan, run in a worker thread.
 
-    Returns ``(records, files_searched, files_skipped)`` where a record is
-    ``(rel, lineno, text, kind)`` and kind is ``'m'`` (match) or ``'c'``
-    (context). Context records are only produced when ``context_lines`` > 0.
+    Returns ``_GrepScan``, whose records are ``(rel, lineno, text, kind)`` with
+    kind ``'m'`` (match) or ``'c'`` (context; only when ``context_lines`` > 0).
     Kept synchronous and self-contained so ``asyncio.to_thread`` can carry it
     off the event loop; the deadline bounds a backtracking pattern without
-    touching the loop.
+    touching the loop, and because it can stop the scan mid-list it reports a
+    stop record rather than letting a partial record set be rendered as an
+    absence of matches.
+
+    ``stop_requested`` is the caller's abort flag, read here for the same reason
+    the walkers read it — this hop cannot be cancelled either, so without it an
+    aborted grep spent up to ``GREP_SCAN_DEADLINE_S`` scanning a file list whose
+    answer had already been decided (review round 2, R2-2: the walk got this in
+    round 1 and the scan did not). It records NO stop on that path: the caller
+    has already returned "Search aborted.", and a stop record here would be the
+    same false budget reason R2-1 removed from the walk.
     """
     deadline = time.monotonic() + GREP_SCAN_DEADLINE_S
     records: list[tuple[str, int, str, str]] = []
     files_searched = 0
     files_skipped = 0
+    stops: tuple[_SearchStop, ...] = ()
     for file_path in files:
+        if stop_requested is not None and stop_requested():
+            break
         if time.monotonic() > deadline:
+            stops = (
+                _SearchStop(
+                    stage="the scan",
+                    reached=_count_noun(files_searched, "file"),
+                    seconds=GREP_SCAN_DEADLINE_S,
+                    constant="GREP_SCAN_DEADLINE_S",
+                ),
+            )
             break
         rel = (
             file_path.relative_to(base).as_posix()
@@ -9505,8 +10353,16 @@ def _python_grep_scan(
             kind = "m" if n in hit_lines else "c"
             records.append(_match_record(rel, n, lines[n - 1], kind))
         if sum(1 for r in records if r[3] == "m") >= GREP_SPILL_MATCH_LIMIT:
+            # A deliberate collector cap, not a budget stop: the header renders
+            # it as ``N+`` (see the ``GREP_SPILL_MATCH_LIMIT`` comment), so it
+            # needs no note of its own.
             break
-    return records, files_searched, files_skipped
+    return _GrepScan(
+        records=records,
+        stops=stops,
+        files_searched=files_searched,
+        files_skipped=files_skipped,
+    )
 
 
 _RG_LINE_RE = re.compile(r"^(?P<path>.+?):(?P<line>\d+):(?P<text>.*)$")
@@ -9521,7 +10377,7 @@ async def _ripgrep_scan(
     case: bool,
     context_lines: int,
     signal: AbortSignal | None,
-) -> tuple[list[tuple[str, int, str, str]], int] | None:
+) -> _GrepScan | None:
     """Native ripgrep scan; None means "fall back to the Python engine".
 
     rg's defaults already match this tool's contract — hidden files skipped,
@@ -9529,7 +10385,17 @@ async def _ripgrep_scan(
     fixed vendor prune list the Python walker enforces. The subprocess is
     raced against the abort signal and the same 30s wall clock; output is
     capped well past the spill limit so a pathological tree cannot stream
-    forever."""
+    forever.
+
+    The two stops this function performs ITSELF — the deadline and the output
+    cap — return the records rg had already produced, flagged as stop records,
+    because they are not rg-side failures. ``None`` is reserved for what the
+    docstring has always claimed: rg missing, or rg erroring out. Conflating
+    the two is what made a 30 s bound cost 2315.8 s (see
+    ``SEARCH_WALK_DEADLINE_S``): the killed rg exited non-0/1, the caller read
+    that as "rg errored", discarded every record, and walked the store in
+    Python instead.
+    """
     rg = _rg_binary()
     if rg is None:
         return None
@@ -9561,6 +10427,7 @@ async def _ripgrep_scan(
     records: list[tuple[str, int, str, str]] = []
     deadline = time.monotonic() + GREP_SCAN_DEADLINE_S
     output_cap = (GREP_SPILL_MATCH_LIMIT + 1) * 3 + 1000
+    stops: tuple[_SearchStop, ...] = ()
     try:
         assert proc.stdout is not None
         while len(records) < output_cap:
@@ -9569,6 +10436,14 @@ async def _ripgrep_scan(
                 return None
             if time.monotonic() > deadline:
                 proc.kill()
+                stops = (
+                    _SearchStop(
+                        stage="ripgrep",
+                        reached=_count_noun(len(records), "match"),
+                        seconds=GREP_SCAN_DEADLINE_S,
+                        constant="GREP_SCAN_DEADLINE_S",
+                    ),
+                )
                 break
             try:
                 raw = await asyncio.wait_for(proc.stdout.readline(), timeout=1.0)
@@ -9596,6 +10471,13 @@ async def _ripgrep_scan(
                 records.append(
                     _match_record(path, int(context.group("line")), context.group("text"), "c")
                 )
+        if len(records) >= output_cap:
+            # The collector cap, not a budget stop — hence a stop record with no
+            # seconds to name. It is disclosed in the header as ``N+``, but it
+            # still has to mark the result as stopped: otherwise the non-0/1 exit
+            # check below reads rg's kill as an rg-side failure and the caller
+            # throws these records away.
+            stops = (_SearchStop(stage="ripgrep", reached=_count_noun(len(records), "match")),)
         try:
             await asyncio.wait_for(proc.wait(), timeout=5.0)
         except (TimeoutError, asyncio.TimeoutError):
@@ -9604,12 +10486,19 @@ async def _ripgrep_scan(
         if proc.returncode is None:
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
-    # exit 0 = matches, 1 = none; anything else is an rg-side error (bad
-    # flag, unreadable cwd) the caller should not inherit.
-    if proc.returncode not in (0, 1):
+    # exit 0 = matches, 1 = none. Anything else is an rg-side error (bad flag,
+    # unreadable cwd) the caller should not inherit — EXCEPT a stop THIS function
+    # performed, whose records are a partial answer rather than a fault. The guard
+    # is the stop itself, NOT the returncode: ``stops`` is only ever set by our
+    # own deadline kill or our own collector cap, while ``returncode`` can still
+    # be None here (the wait above can time out and the reap is best-effort), and
+    # ``None not in (0, 1)`` would then discard the records and re-enter the
+    # unbounded Python walk — the exact bug this change closes, reopened through
+    # a narrower window (review R-3).
+    returncode = proc.returncode
+    if returncode not in (0, 1) and not stops:
         return None
-    match_count = sum(1 for r in records if r[3] == "m")
-    return records, match_count
+    return _GrepScan(records=records, stops=stops)
 
 
 def _render_grep_body(
@@ -9718,6 +10607,15 @@ async def execute_grep(
     files_searched = 0
     files_skipped = 0
     engine_note = ""
+    # Stop records for every stop that makes the RECORDS partial — an engine's
+    # own scan budget, the file-set walk, ripgrep's output cap. An EMPTY list is
+    # the only state in which "no matches" is an answer, and that is the entire
+    # reason they are carried to the render sites below.
+    stops: list[_SearchStop] = []
+    # The oversized-file count's own incompleteness, kept separate on purpose: a
+    # count the walk did not finish does not make the RECORDS partial, it makes
+    # the count a lower bound.
+    count_incomplete = False
 
     # Engine choice needs only a stat of an explicitly named file, never the
     # tree walk: the walk is deferred into the worker threads below so the
@@ -9737,7 +10635,19 @@ async def execute_grep(
         except OSError:
             use_rg = False
 
-    scan_result = None
+    scan_result: _GrepScan | None = None
+
+    def _stop_requested() -> bool:
+        """Whether the caller has aborted — asked from the WORKER thread.
+
+        ``AbortSignal.aborted`` is a plain flag read, so a walk consulted from
+        another thread gets the same answer the loop has. This is what keeps an
+        interrupted search from walking a large tree to its budget after the tool
+        has already answered (QA round 1, Q-4): the to_thread hop cannot be
+        cancelled, so the work itself has to notice the signal.
+        """
+        return signal is not None and signal.aborted
+
     if use_rg:
         scan_result = await _ripgrep_scan(
             params.pattern,
@@ -9749,18 +10659,20 @@ async def execute_grep(
             signal,
         )
     if scan_result is not None:
-        records, _count = scan_result
+        records = scan_result.records
         engine_note = " (ripgrep)"
+        stops.extend(scan_result.stops)
         # rg applies --max-filesize silently; recover the count the footer
-        # contract promises. The walk+stat pass is the same filesystem load
-        # as the scan itself, so it rides a thread raced against abort.
-        # Skipped for a single named file: the engine gate above only keeps
-        # rg when that file is already under the cap, so the count is
-        # definitionally zero and a worker-thread hop to confirm it would be
-        # pure overhead on the most common grep shape (review F2).
+        # contract promises. ONE bounded walk+stat pass, not the two passes
+        # this used to cost (a full walk for a file list nothing else wanted,
+        # then a stat of every file in it). Skipped for a single named file:
+        # the engine gate above only keeps rg when that file is already under
+        # the cap, so the count is definitionally zero and a worker-thread hop
+        # to confirm it would be pure overhead on the most common grep shape
+        # (review F2).
         if not target_is_file:
-            skipped_count, aborted = await _run_with_abort(
-                asyncio.to_thread(_count_oversized_files, target),
+            counted, aborted = await _run_with_abort(
+                asyncio.to_thread(_count_oversized_files, target, stop_requested=_stop_requested),
                 signal,
                 lambda: None,
             )
@@ -9768,11 +10680,11 @@ async def execute_grep(
                 return _error(tool_call_id, "grep", "Search aborted.")
             # Non-None whenever aborted is False: _run_with_abort returns the
             # coroutine's result on the non-abort arms, and the counter always
-            # returns an int. The assert states that contract for the type
+            # returns a tuple. The assert states that contract for the type
             # checker instead of an `or 0` that would silently launder a
             # future internal failure into a zero (review N1).
-            assert skipped_count is not None
-            files_skipped = skipped_count
+            assert counted is not None
+            files_skipped, count_incomplete = counted
     else:
         if signal and signal.aborted:
             return _error(tool_call_id, "grep", "Search aborted.")
@@ -9783,9 +10695,22 @@ async def execute_grep(
         # unprocessable. Both run in one worker-thread hop raced against the
         # abort signal, with a wall-clock cap bounding the
         # pathological-regex case (regexes are not classified).
-        def _walk_and_scan() -> tuple[list[tuple[str, int, str, str]], int, int]:
-            files, scan_base = _grep_file_set(target)
-            return _python_grep_scan(files, scan_base, regex, params.include, params.context_lines)
+        def _walk_and_scan() -> _GrepScan:
+            file_set, scan_base = _grep_file_set(target, stop_requested=_stop_requested)
+            scanned = _python_grep_scan(
+                file_set.files,
+                scan_base,
+                regex,
+                params.include,
+                params.context_lines,
+                stop_requested=_stop_requested,
+            )
+            # One stop list, both hops: a file set the walk budget cut short makes
+            # the scan's own completeness claim false, so the two stops are
+            # gathered here rather than letting the scan render as if it had
+            # decided the answer on its own.
+            walked = (_walk_stop(len(file_set.files)),) if file_set.truncated else ()
+            return scanned._replace(stops=walked + scanned.stops)
 
         py_result, aborted = await _run_with_abort(
             asyncio.to_thread(_walk_and_scan),
@@ -9800,18 +10725,64 @@ async def execute_grep(
         # _run_with_abort — assert, never mislabel it "Search aborted."
         # (review F1).
         assert py_result is not None
-        records, files_searched, files_skipped = py_result
+        records = py_result.records
+        files_searched = py_result.files_searched
+        files_skipped = py_result.files_skipped
+        stops.extend(py_result.stops)
 
     matches = [r for r in records if r[3] == "m"]
+
+    def _skipped_clause() -> str:
+        """The footer's ``file(s) skipped`` suffix, or "" when there is none.
+
+        Byte-identical to the inline string it replaces whenever the count is
+        complete. A count produced by a truncated walk is a LOWER BOUND, so it
+        says so: printing it bare would claim a total the walk never took.
+        """
+        if count_incomplete:
+            # A lower bound ABOVE zero is information the operator can use, and
+            # `at least N` cannot be read as a total — which `0 … a lower bound`
+            # could (design review round 1, Q-2), while dropping the number for
+            # every incomplete count threw away what the walk HAD established
+            # (review round 2, R2-4). Zero keeps the bare form: a count that only
+            # knows "none so far" has nothing to report as a floor.
+            if files_skipped:
+                return f" (at least {files_skipped} file(s) skipped over the 1MB cap)"
+            return " (files over the 1MB cap not fully counted)"
+        if not files_skipped:
+            return ""
+        return f" ({files_skipped} file(s) skipped over the 1MB cap)"
+
     if not matches:
-        skipped_note = (
-            f" ({files_skipped} file(s) skipped over the 1MB cap)" if files_skipped else ""
-        )
-        where = f"in {files_searched} file(s)" if not engine_note else ""
+        if stops:
+            # The honesty contract, and the reason this change exists: "no
+            # matches" is only true of what was READ, and a stop means the rest
+            # of the tree was never read. The claim LEADS the line because the
+            # card crops the first output row to the measure — 94 / 73 / 54 cells
+            # at 100 / 80 / 60 columns (design review D2) — so "Partial search:"
+            # sits in the cells that survive every width, and the one clause
+            # names every stage that stopped (D4) with no constant name (D5) and
+            # no second file count to disagree with the first (D8). The count
+            # clause rides directly after the stop clause because that clause is
+            # this sentence's only number — trailing the remedy put it with the
+            # ADVICE instead, the shape D2-2 fixed on the matches path (review
+            # round 3, R3-2). ``useless`` stays unset: this is not an answer, so a
+            # caller must not treat it as one that closes the question.
+            return _text(
+                tool_call_id,
+                "grep",
+                f"Partial search: {_stop_clause(stops)}{_skipped_clause()}. No match "
+                f"for '{params.pattern}' was found in the part of the tree that "
+                "was read, and the rest was not — so this is not an absence of "
+                "matches. Narrow the search with path=<subdirectory> or "
+                f"include=<glob> and re-run{engine_note}.",
+                details=_partial_details(stops, None),
+            )
+        where = f" in {files_searched} file(s)" if not engine_note else ""
         return _text(
             tool_call_id,
             "grep",
-            f"No matches for '{params.pattern}'{where}{skipped_note}{engine_note}.",
+            f"No matches for '{params.pattern}'{where}{_skipped_clause()}{engine_note}.",
             useless=True,
             details={"useless": True},
         )
@@ -9833,11 +10804,27 @@ async def execute_grep(
         header += f" (use skip={params.skip + shown} for the next page)"
     if params.skip:
         header += f" (skipped {params.skip})"
-    if files_skipped:
-        header += f" ({files_skipped} file(s) skipped over the 1MB cap)"
-    return _text(
-        tool_call_id, "grep", header + ":\n" + body_text + engine_note, details=spill_details
-    )
+    count_clause = _skipped_clause()
+    text = header + count_clause
+    details = spill_details
+    if stops:
+        # Additive to the header contract above, never a replacement for it: the
+        # non-truncated spellings ('N match(es)', 'of M', '(use skip=…)',
+        # '(skipped N)', '(capped at 500)', '(ripgrep)') are unchanged, and this
+        # clause only ever appears when a stop actually happened. Three positions
+        # are load-bearing and each has been measured on a frame: the claim LEADS
+        # (design review round 1, D2 — the card crops the leading cells), the
+        # skipped-count clause stays WITH THE COUNT it qualifies instead of
+        # trailing the advice, which read as a caveat on the advice (round 2,
+        # D2-2), and the disclosure keeps the cells before the remedy that the
+        # ripgrep header needed (round 1, D3: 329 cells, truncation first visible
+        # at cell 99).
+        text = (
+            f"Partial results: {header}{count_clause} — {_stop_clause(stops)}; narrow "
+            "path=<subdirectory> or include=<glob> to search further"
+        )
+        details = _partial_details(stops, spill_details)
+    return _text(tool_call_id, "grep", text + ":\n" + body_text + engine_note, details=details)
 
 
 def build_grep_tool() -> AgentTool:

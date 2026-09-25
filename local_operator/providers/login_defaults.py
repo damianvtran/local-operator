@@ -27,12 +27,16 @@ TUI), which is the only thing that legitimately differs between them.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from local_operator.model.defaults import default_model_for
+from local_operator.model.defaults import suggested_model_for
 from local_operator.providers.registry import (
     credential_provider_id,
     get_provider_definition,
 )
+
+if TYPE_CHECKING:
+    from local_operator.config import ConfigManager
 
 
 @dataclass(frozen=True)
@@ -54,6 +58,11 @@ class LoginDefaults:
     #: True when this replaces a hosting the registry does not own, as opposed
     #: to filling in an empty one. Callers use it only for wording.
     repairing: bool
+    #: The display name of ``model_name`` when it is the provider's suggestion
+    #: ("Claude Opus 5.5"), so a surface that renders names rather than ids -- the
+    #: desktop's "Default model set to ..." -- need not look one up. ``None``
+    #: whenever no model is written, or it is cleared.
+    model_label: str | None = None
 
 
 def is_unusable_hosting(hosting: str | None) -> bool:
@@ -70,7 +79,11 @@ def is_unusable_hosting(hosting: str | None) -> bool:
 
 
 def plan_login_defaults(
-    provider_id: str, hosting: str | None, model_name: str | None
+    provider_id: str,
+    hosting: str | None,
+    model_name: str | None,
+    *,
+    oauth: bool | None = None,
 ) -> LoginDefaults:
     """Decide what a just-completed login for ``provider_id`` should write.
 
@@ -108,6 +121,25 @@ def plan_login_defaults(
     later branch could produce. Behind it, the note was unreachable exactly when
     it was most needed (review round 1, Q4).
 
+    A fourth, narrower write sits inside case 1: hosting set and usable, naming
+    THIS provider, with ``model_name`` empty. The runtime would already boot on
+    the provider's suggestion there (``session_factory`` falls back to it), so
+    writing it only makes the choice visible and stable -- the desktop's model
+    picker reads the config, not the resolver, and showed nothing selected. It is
+    deliberately limited to the SAME provider: a user logging into Y while
+    configured on X with an empty model is still running X's default, and
+    writing Y's model beside X's hosting would produce a pair that fails at
+    stream time.
+
+    ``oauth`` names the credential the login produced, because one provider id
+    can reach two hosts that spell the suggestion differently (Kimi: ``kimi-k3``
+    for an API key, ``k3`` on the coding-plan host an OAuth grant reaches; see
+    ``model.defaults.OAUTH_SUGGESTED_MODELS``). ``None`` derives it from the
+    login the provider id runs -- an API-key login is not OAuth, anything else
+    is -- which is what the CLI and TUI mean. The desktop's key-save route passes
+    ``False`` explicitly, because it stores a key under a provider whose own
+    login may be OAuth.
+
     The credential is never in question here: storing it is the caller's step
     and it has already happened by the time this runs.
 
@@ -123,8 +155,9 @@ def plan_login_defaults(
       never heard of. Trading a boot failure the app explains for a runtime
       failure it cannot is strictly worse than the bug being repaired.
     - Clearing (rather than keeping) a model with no known default is what
-      makes the repair safe for ``alibaba-token-plan``, which resolves to no
-      default at all. A model belonging to a provider that never existed is
+      makes the repair safe for a provider that resolves to no default at all
+      (the local runtimes -- ``ollama``, ``vllm`` -- whose models are whatever
+      the user pulled). A model belonging to a provider that never existed is
       strictly worse: it boots and then fails at stream time, where the app
       cannot explain it.
 
@@ -198,13 +231,33 @@ def plan_login_defaults(
             repairing=False,
         )
 
+    if oauth is None:
+        flavour = get_provider_definition(provider_id)
+        oauth = flavour is not None and flavour.login_kind not in (None, "api_key")
+    suggestion = suggested_model_for(resolved, oauth=oauth) if definition is not None else None
+    default_model = suggestion.id if suggestion is not None else ""
+
     if hosting and not is_unusable_hosting(hosting):
+        if (
+            definition is not None
+            and not model_name
+            and default_model
+            and credential_provider_id(str(hosting)) == resolved
+        ):
+            # Case 1's one write: see the docstring. Hosting is left as it is
+            # (`None`), because it is already right.
+            return LoginDefaults(
+                hosting=None,
+                model_name=default_model,
+                receipt=f"Set default model to '{default_model}'.",
+                repairing=False,
+                model_label=suggestion.name if suggestion is not None else None,
+            )
         return LoginDefaults(hosting=None, model_name=None, receipt=None, repairing=False)
 
     repairing = is_unusable_hosting(hosting)
     if definition is None:
         return LoginDefaults(hosting=None, model_name=None, receipt=None, repairing=False)
-    default_model = default_model_for(resolved) or ""
 
     if repairing:
         # Always overwrite: the stored model belonged to the provider being
@@ -237,4 +290,26 @@ def plan_login_defaults(
         model_name=model_to_write,
         receipt=receipt,
         repairing=repairing,
+        model_label=suggestion.name if (suggestion is not None and model_to_write) else None,
     )
+
+
+def apply_login_defaults(manager: "ConfigManager", plan: LoginDefaults) -> bool:
+    """Write ``plan`` to ``manager``; True when anything was written.
+
+    The WRITE half of the policy, shared by every front end for the same reason
+    the plan is: the callers each used to spell "write hosting, then the model
+    unless it is ``None``" themselves, and a plan that sets ONLY the model (the
+    same-provider empty-model fill) was invisible to all three, because each one
+    gated the model write on a hosting write. ``None`` leaves a field alone and
+    ``""`` clears it; the explicit ``is not None`` tests are what keep the
+    clearing case from being swallowed by a falsy check.
+    """
+    wrote = False
+    if plan.hosting is not None:
+        manager.set_config_value("hosting", plan.hosting)
+        wrote = True
+    if plan.model_name is not None:
+        manager.set_config_value("model_name", plan.model_name)
+        wrote = True
+    return wrote

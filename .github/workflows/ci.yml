@@ -726,13 +726,15 @@ jobs:
         # everything that ran, which is a run whose weights want correcting.
         #
         # It does NOT cover the case this job actually cares about: a shard
-        # killed by the `faulthandler` watchdog (tests/e2e/watchdog.py exits
-        # with `os._exit(1)`) never reaches pytest's `sessionfinish`, and that
-        # is where the JUnit file is written -- so there is no file to upload,
-        # and `if-no-files-found: ignore` means the step reports success with
-        # an empty artifact. Measured both ways on 2026-09-19: a failing test
-        # leaves `failures="1"` in the XML, while a test that calls
-        # `os._exit(1)` (what the watchdog does) leaves no XML at all.
+        # that HANGS. A `faulthandler` bound is diagnostic (`exit=False`) and a
+        # process wedged with the GIL held cannot be reached from Python, so
+        # such a shard is ended from outside the interpreter and never reaches
+        # pytest's `sessionfinish`, where the JUnit file is written -- there is
+        # then no file to upload, and `if-no-files-found: ignore` means the
+        # step reports success with an empty artifact. Measured both ways on
+        # 2026-09-19: a failing test leaves `failures="1"` in the XML, while a
+        # process ended from outside leaves no XML at all (the shape measured
+        # was `os._exit(1)`, which skips `sessionfinish` the same way).
         #
         # Cancellation is deliberately NOT claimed either way. It is a third
         # exit path this change did not measure, and the two signals differ: a
@@ -1035,8 +1037,9 @@ jobs:
     # dropping the leg disarms the stage. Both OSes run every shard.
     #
     # `shard` is how this stage stopped being the longest job in the run. The
-    # whole tree ran serially on each leg — `-n0` is required (a fired watchdog
-    # kills the process, which under xdist takes unrelated tests with it) — and
+    # whole tree ran serially on each leg — `-n0` is required (a hang cannot be
+    # interrupted in-process, so a wedged xdist worker strands the whole run and
+    # reports a freeze as an infrastructure error) — and
     # measured `184 passed, 7 skipped ... in 1111.95s` on run 35414372114: 19.1
     # and 19.8 min, the critical path of the entire workflow. Splitting the
     # TREE across RUNNERS is the one axis that leaves the `-n0` requirement
@@ -1111,18 +1114,21 @@ jobs:
       needs.type-check.result == 'success'
     # Generous relative to the ~11 s the stage takes when healthy (~14 s on a
     # macOS runner, which is slower and queues longer). The failure mode under
-    # test is a hang, and each test carries its own tighter `faulthandler`
-    # bound (see tests/e2e/watchdog.py) that fires first with a full thread
-    # dump — a pre-fix red lands in ~63 s. This ceiling is only the backstop
-    # for a hang that escapes those, so it should never be what reports a
-    # freeze; it is sized to absorb macOS install and queue time instead.
+    # test is a hang, and each test carries its own tighter bound (see
+    # tests/e2e/watchdog.py): the C timer dumps every thread's stacks with
+    # `exit=False`, and a kernel-level SIGALRM ends the process a 5 s grace
+    # later if the step is still wedged — a pre-fix red lands at bound + 5 s.
+    # This ceiling is only the backstop for a hang that escapes both arms, so it
+    # should never be what reports a freeze; it is sized to absorb macOS install
+    # and queue time instead.
     #
     # NOT tightened now that the tree is sharded, deliberately. The split cut
     # the measured wall to a fraction of it, so this ceiling is now several
     # times the healthy cost — but the thing it exists to leave room for is NOT
     # the healthy cost: it is install + queue on a slow macOS runner, and a
-    # genuine freeze is reported by the per-test `faulthandler` bound (see
-    # tests/e2e/watchdog.py) long before this fires. Tightening it toward the
+    # genuine freeze is reported by the per-test bound (see
+    # tests/e2e/watchdog.py, whose SIGALRM arm ends a run at that bound) long
+    # before this fires. Tightening it toward the
     # measured wall would turn runner slowness into red shards without making a
     # real hang report any sooner. `tests/unit/test_ci_hygiene.py` pins the
     # relationship in the direction that matters: the ceiling must exceed every
@@ -1163,10 +1169,11 @@ jobs:
         run: cat e2e_tests.txt
       - name: Run headless TUI end-to-end tests
         # `-m e2e` overrides the `-m "not e2e"` in pyproject's addopts, which
-        # keeps this stage out of the unit run (a fired watchdog exits the
-        # process, which under xdist would kill a worker carrying unrelated
-        # tests). `-n0`: these contend real flock lock files and drive whole
-        # app lifecycles, so they run serially rather than under xdist.
+        # keeps this stage out of the unit run: `faulthandler`'s timer is
+        # process-global, so under xdist a `bounded` block would take a worker's
+        # stacks with it for the rest of the item. `-n0`: these contend real
+        # flock lock files and drive whole app lifecycles, so they run serially
+        # rather than under xdist.
         # `env -u NO_COLOR TERM=xterm-256color` is what the TUI suite needs to
         # compose a real frame, same as the documented local invocation.
         #
@@ -1187,12 +1194,13 @@ jobs:
         # `if: always()` for the FAILING case: a shard that fails an assertion
         # exits 1 and still writes the XML, with times for every test that ran.
         #
-        # NOT for a hang. A tripped watchdog calls `os._exit(1)`, so pytest
-        # never reaches `sessionfinish` and writes nothing -- and
-        # `if-no-files-found: ignore` then reports this step as a success with
-        # no artifact, which is how that limit would otherwise go unnoticed.
-        # Measured both ways on 2026-09-19 (see the sibling note on the unit
-        # job's upload step).
+        # `bounded` fails a hang on its own, in two steps: the C timer dumps
+        # every thread's stacks (diagnostic only, `exit=False`), and a
+        # kernel-level SIGALRM ends the process a 5 s grace later if the step is
+        # still wedged. If instead the step returns after its dump, `bounded`
+        # raises a regular TimeoutError and pytest writes this failure report.
+        # The upload remains `always()` so ordinary assertion failures retain the
+        # per-test timings used to correct shard weights.
         if: always()
         uses: actions/upload-artifact@v7
         with:
@@ -1201,16 +1209,14 @@ jobs:
           retention-days: 1
           if-no-files-found: ignore
       - name: Report a hang's thread dump
-        # A tripped watchdog kills the process, so pytest never gets to print
-        # anything: the stacks of the parked threads live only in a dump file,
-        # and without this step a freeze reports as a bare non-zero exit.
-        #
-        # Safe to run after ANY failure. A dump file survives only when a bound
-        # actually fired (every ordinary exit path removes its own), and only
-        # files carrying faulthandler's `Timeout (` marker are printed — so an
-        # ordinary assertion failure gets an explicit "not a hang" line rather
-        # than a fabricated timeout claim for a test that failed in seconds.
-        if: failure()
+        # The dump this step prints is the DIAGNOSTIC half. A process still
+        # wedged when its grace expired was ended by `bounded`'s own SIGALRM arm,
+        # which is why this step is `always()` rather than `failure()`: for a
+        # killed run the retained C-thread dump is the only report of the hang.
+        # The job ceiling stays the backstop for anything that escapes both arms.
+        # Safe after any failure: only files with faulthandler's `Timeout (` marker
+        # are printed, so an ordinary assertion failure is never called a hang.
+        if: always()
         run: python -m tests.e2e.watchdog
 
   server-sanity:

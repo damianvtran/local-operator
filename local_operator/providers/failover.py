@@ -49,7 +49,11 @@ from local_operator.harness.types import (
     StreamStartEvent,
     StreamUsageEvent,
 )
-from local_operator.model.effort import EFFORT_ORDER, resolve_effort_in
+from local_operator.model.effort import (
+    EFFORT_ORDER,
+    SUPPORTED_EFFORTS,
+    resolve_effort_in,
+)
 
 if TYPE_CHECKING:  # import cycle: both modules import this one at runtime
     from local_operator.providers.auth_store import OAuthAccess, StoredCredential
@@ -1774,7 +1778,11 @@ async def resolve_next_key(
 logger = logging.getLogger("local_operator.providers.failover")
 
 DEFAULT_CHAIN_KEY = "default"
-SUPPORTED_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max"})
+#: Re-exported from ``model.effort`` (a leaf module) rather than defined here:
+#: ``settings_io`` validates a chain hop's effort at config-write time and
+#: must not pull this module's module-level ``httpx`` import onto the TUI
+#: startup path to do it (F9 — ``test_import_graph.py`` pins that path).
+#: Every caller in THIS module still reads it as ``SUPPORTED_EFFORTS``.
 
 #: The same vocabulary as an ordinal ladder, for anything a person READS.
 #: ``sorted()`` puts ``max`` between ``low`` and ``medium`` and sits ``minimal``

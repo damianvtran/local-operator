@@ -1,7 +1,12 @@
 # Bounding a runtime's own stall
 
-Status: implemented (the instrument). The bound on the scan's cost is a separate
-change — see "PR-B" at the end, which this note exists to inform.
+Status: implemented (the instrument). Production watchdog expiry is diagnostic-only:
+no Python idle sample is atomic with all work-admission paths, so the C timer must not
+terminate the runtime. Until a shared native admission/retirement barrier exists, a
+fired dump requires operator inspection and explicit stop of a runtime that remains
+wedged; stale-idle automatic termination is intentionally unavailable. Cooperative
+update retirement keeps its independent work-aware gate. The bound on the scan's cost
+is a separate change — see "PR-B" at the end, which this note exists to inform.
 
 ## The failure, measured
 
@@ -25,7 +30,7 @@ over those exact transcripts costs 1.75-2.07 s for 1.16-1.45 MB. The scan was
 not converging, and **nothing in the process could say which line it was on**,
 because the one instrument that would have answered (`LOP_RUNTIME_DEBUG_STACKS`,
 the SIGUSR1 asyncio dump) was not set on the launcher. That is the defect this
-change fixes first: a wedged runtime now names itself, and then it leaves.
+change fixes first: a wedged runtime now records its stacks for operator investigation.
 
 ## No caller is named, and this note does not pretend otherwise
 
@@ -67,7 +72,9 @@ signal handler all fail here: a hung thread never releases the GIL, a Python
 signal handler only runs between bytecodes, and a loop parked in a C call never
 schedules the coroutine that would report the sample. `faulthandler`'s timer
 runs in a dedicated **C** thread, needs no GIL and no interpreter state, writes
-every thread's stack to a file descriptor and then `_exit`s.
+every thread's stack to a file descriptor. Production uses `exit=False`, so the
+runtime continues after the diagnostic until its own work returns or an operator
+explicitly stops it.
 
 **What the bound measures: no progress on a plane, not slow work.** Each plane
 carries its own last-seen stamp — the workload tick (`process._beat_stall_watchdog`)
@@ -88,13 +95,16 @@ usually not the whole process, and the serving plane's healthy heartbeat kept th
 timer fresh for hours. Measured on the committed head (`15ec2c63`) with a
 one-second bound: a rig with the workload plane 100% busy in the matcher and the
 serving plane beating every 0.2 s ran **8 s — 8x the bound — and was killed by an
-external timeout, with ZERO fired markers and a header-only dump**. After the fix
-the same rig leaves at the bound (`rc=1`) with every thread's stack.
+external timeout, with ZERO fired markers and a header-only dump**. The
+dump-only implementation records a fired dump at the bound while the native C
+call remains parked; the fixture's bounded sleep returns later, and the test then
+observes a normal child exit. Timer expiry itself does not exit it.
 
 **What it is stricter than, stated plainly.** A synchronous step is
 indistinguishable from a wedge from outside the process, so the bound is also a
-ceiling on ONE SILENT SYNCHRONOUS STEP: a step that takes tens of seconds passes,
-one that never returns is cut. What the bound measures is the
+diagnostic ceiling on ONE SILENT SYNCHRONOUS STEP: a step that takes tens of
+seconds may produce a dump; one that never returns remains for operator action.
+What the bound measures is the
 loops RUNNING, never the work advancing — a plane that keeps ticking while its
 work stands still is outside this design (nothing here can see that; inventing a
 second, footprint-based clock is what `process._work_motion` already does for the
@@ -106,121 +116,85 @@ freezes actually suffered (1.5-7.2 h, four of five with zero writes). A single
 synchronous step that holds the GIL for five unbroken minutes is not slow work.
 `LOP_RUNTIME_STALL_SECONDS` overrides it; `0` disables it.
 
-**The bound during BOOT: 900 s, and 300 s starts at engagement.** The steady bound
-is measured from the last sign of life, so it can only be honest once something is
-in a position to write one — and nothing in the boot path can. `arm` runs from the
-`__main__` guard, before `main()`, and seeds both planes to that instant; the
-workload beat's only driver starts after publication and sleeps a heartbeat before
-its first stamp, and the serving beat starts with the serving thread. So from the
-arm to the first post-publication beat, every second of a legitimate boot
-(session construction, lease arbitration, MCP bring-up, the inbox drain, socket
-bind, publication) was spent against a clock no boot code could re-arm, and the
-only possible deadline was `arm + 300 s`. Measured over 68 retained dumps on the
-build carrying the observation header: 17 fires, 10 of them at the full
-`Timeout (0:05:00)` value, i.e. no beat ever re-armed the timer at all — the
-never-engaged class, and the plurality. (An UPPER bound on that class, not an exact
-count: a failed re-arm is indistinguishable from it by the armed value alone; see the
-exception below.) `DEFAULT_BOOT_STALL_S`
-(`LOP_RUNTIME_BOOT_STALL_SECONDS`, same spellings and floor/ceiling as the steady
-knob, `off` meaning "no boot phase") is what `arm` arms with; the runtime's first
-ENGAGEMENT — the publication boundary in `process.amain`, where `_live_handle` is
-set — calls `stall_watchdog.engage()`, which moves the bound down to the steady one
-and stamps BOTH planes, so the steady bound is measured from engagement rather than
-from boot. That is also what makes the never-engaged class NAMEABLE: a fire that
-RE-ARMED has the deadline sibling `engage` writes, and one that never did has
-none. Engagement never widens the bound.
+**The bound during BOOT: 900 s, and 300 s starts at engagement.** The steady
+bound is measured from the last sign of life, so it can only be honest once a loop
+can write one. `arm` runs from the `__main__` guard before `main()` and seeds both
+planes to that instant; the workload beat starts after publication and sleeps a
+heartbeat before its first stamp, and the serving beat starts with its serving
+thread. Thus the boot path has no clock that can re-arm the timer, and the earliest
+deadline is `arm + boot_bound`. Across 68 retained dumps on the build carrying the
+observation header, 17 fired and 10 carried the full five-minute value, an upper
+bound on the never-engaged class because a failed timer replacement can leave the
+original value in force.
 
-*Exception, measured (design review round 1, D1):* engagement is not atomic. `engage()`
-moves the bound in memory and stamps both planes, THEN replaces the C timer, so a
-replacement that FAILS leaves the original boot-bound timer in force while the bound
-reads steady. A single fire can therefore carry the boot value on a runtime that DID
-engage. The dump names this (`[stall watchdog] re-arm failed: the engage could not
-re-arm the timer, ...`). This is why the never-engaged reading is qualified on the
-re-arm having SUCCEEDED wherever the file states it as a reading of a fire — the boot
-note, the comment above it, and `HOW_TO_READ_THE_FIRED_VALUE` — and not at every site
-that merely describes the class: statements of its *identity* (a runtime whose main
-thread never reported) stay as they are.
+`DEFAULT_BOOT_STALL_S` (overridden by `LOP_RUNTIME_BOOT_STALL_SECONDS`) is the
+separate boot bound; `0`/`off` means no boot phase. At the publication boundary in
+`process.amain`, where `_live_handle` is set, `stall_watchdog.engage()` moves the
+bound down to the steady value and stamps both planes. The steady deadline is
+therefore measured from engagement, not process start. Engagement never widens
+the bound. A failed replacement is recorded as
+`[stall watchdog] re-arm failed: the engage could not re-arm the timer`; in that
+case the original boot timer may still fire even though the in-memory bound has
+moved to steady. A missing deadline sibling identifies a never-engaged runtime
+only when no re-arm-failed marker is present.
 
-`engage()` relies on its early return for its “idempotent” contract (see the
-function's own docstring). It returns before moving anything when the bound is
-already at steady, so a second call is a no-op. Measured against the real object with
-that early return bypassed, an unguarded second call does **not** fire early: it
-RE-stamps both planes to `now` and hands `_rearm` a **positive remainder — the full
-fresh steady bound** (+9.9999… s of a 10 s steady bound), and on a runtime already
-1 s from its deadline it **pushes the fire out by that whole bound** (+9.000 s
-measured). The hazard is a fire delayed past the moment a real participant went
-silent, not an early cut.
+`engage()` relies on its early return for idempotence: a second call while already
+at steady is a no-op. Without that guard, it re-stamps both planes and can push a
+pending fire out by a whole fresh steady bound. This delays evidence after a real
+participant goes silent; it does not make a fire early.
 
-**What that bound does with a hung boot: it DUMPS it and HOLDS it, it does not cut
-it.** The exit leg answers through `process._busy_probe`, which reports work in
-flight for the whole pre-publication window — `True` while `_live_handle` is `None`,
-because a runtime still constructing itself is not idle in any sense that bound may
-act on — so `arm` seeds `_Armed.held` true and every fire in this stretch is
-non-fatal: the fire writes its dump and its `bound held:` marker, and the process
-carries on. A boot that never reaches publication therefore keeps answering "in
-flight" for the rest of its life, and nothing in the module ends it. **What does end
-it, measured rather than assumed** (the first version of this paragraph named an
-escape that cannot reach this class — agent review round 2, Q-3): the boot's **own
-failure path** is the automatic exit (the construction error that ends the runtime
-child: `rc 2` with the cause on stderr, 1.4 s here); **`lop stop` is not one**, because
-it resolves its target through session records (`mobile.peer_send.resolve_peer_target`)
-and a boot that never published has none — `lop stop --pid <pid>` answers `no session
-found with pid <pid>` and the process goes on; and an operator ends it by signalling
-the pid the dump is named for, which its header carries (`kill -TERM <pid>`, not gated
-on any record). What the boot bound contributes in that window is the ATTRIBUTION — the
-fired value is the boot bound and the deadline sibling is absent, together the
-the never-engaged class — *provided the re-arm succeeded*; an engaged runtime whose
-timer replacement failed can fire at the boot value too (D1) — while the exit leg only becomes fatal once the runtime has
-published and its work has cleared (a property of the in-flight prohibition, #1439,
-not of the boot phase). Pinned as a pair, because the two arming shapes answer
-different questions:
-`test_a_hung_boot_with_the_production_probes_is_dumped_and_HELD` (the entry point's
-own arming, `busy=process._busy_probe`, held at `rc 0`) and
-`test_a_never_engaging_boot_with_NO_work_in_flight_is_still_cut` (a caller with no
-probe at all, armed fatally, `rc 1`).
+**A hung boot is dumped and survives the bound.** The dump attributes the fire to
+the boot deadline when the evidence permits that reading; it does not authorize a
+process exit. A pre-publication `_busy_probe` sample may be recorded as held, but
+that is diagnostic metadata only: the native timer always uses `exit=False`,
+regardless of the sample or whether a busy probe exists. A boot that never
+publishes can still leave an unpublished process behind; its own construction
+failure may end it, while `lop stop` cannot resolve an absent session record. An
+operator can signal the pid named in the dump. Do not mistake watchdog expiry for
+a recovery mechanism.
 
 **Still open in that window, and NOT closed here.** A tick that returns early
-without raising is never re-created by `_watch_stall_beats`, whose restart fires
-only on an exception (`_do_shutdown` is the same class: a plane is unreported
-because the runtime is ending). Both are real — dump 24646 (19 threads, main idle
-in `select`, no `tick died:` line) and 75019 (mid-shutdown) — and both need their
-own fix (a restart on early return, and a shutdown state the bound recognises).
+without raising is not re-created by `_watch_stall_beats`, whose restart handles
+exceptions only. Shutdown has the same unreported-plane shape. Both remain open:
+dump 24646 (19 threads, main idle in `select`, no `tick died:` line) and dump
+75019 (mid-shutdown) need their own fixes—a restart on early return and a shutdown
+state the bound recognizes. The watchdog does not solve either issue.
 
-**What the exit costs, beyond the turn.** A hard exit runs no Python, so the
-in-process kill of this turn's tool process groups cannot fire (`execute_bash`'s
-`_kill` chain) — which is exactly the "hard death of the owning `lop` process"
-class `tools/group_reaper.py` exists for. Each group is registered with a
-liveness marker at spawn and `sweep_orphan_groups` reaps the ones whose owner is
-provably dead at the **next `lop` startup**, so a child orphaned here is bounded
-by the next session start rather than by this process's death — the same
-guarantee today's only recovery (SIGKILL) already relies on.
+**Why native termination is disabled.** The C callback cannot participate in
+work admission, so it cannot safely decide that an apparently idle runtime may be
+terminated. Diagnostic expiry therefore leaves the process alive; a runtime that
+stays wedged needs operator inspection and an explicit stop. Cooperative update
+retirement remains a separate work-aware path.
 
-**Why the exit is the blunt one.** Past the bound the process must stop being a
-multi-hour freeze, and the graceful rungs cannot be reached from the state being
-detected: `_drain_for_signal` and `_commit_to_leaving` are coroutines on the loop
-that is blocked, and the `SIGTERM` handler that reaches them needs bytecodes the
-stuck thread never executes — the same fact that makes `lop stop` refuse a
-silent-socket runtime. The timer therefore dumps every thread from its own C
-thread, which is structural rather than sequenced, and THEN decides what to do
-with the process: `exit=not held` is re-decided at every re-arm from the same
-work probe the reaper's WORK signal reads, so a runtime with nothing in flight
-`_exit(1)`s exactly as before, while a runtime with a turn, a subagent or a job in
-flight keeps the dump, records the held state (``stall_watchdog.HELD_MARKER``) and
-stays ALIVE — stalled, marked, and ended by a person (`lop stop`, whose SIGKILL
-rung is the only one that reaches a wedge; see `control.py`). Evidence is never
-withheld either way: the bound still fires, still writes the dump and still records
-its class; only `_exit` is refused.
+The boot and steady bounds are pinned by `tests/unit/session/runtime/test_runtime_stall_watchdog.py`.
+The boot bound provides attribution and diagnostic evidence; neither it nor the
+steady bound retires a runtime.
 
-**What is lost, what survives.** On the fatal arm (nothing in flight) the
-in-flight turn's uncommitted step is lost — the same loss a SIGKILL inflicts,
-because a turn commits its transcript at each step and the step in flight has not
-committed. On the HELD arm nothing is lost and nothing is cut: the runtime keeps
-serving on the build it loaded, the turn inside it is still running, and the row
-plus the dump say so. Everything already committed survives on both arms, i.e. the
-conversation, which a successor can be engaged on. The record is left behind with
-a dead pid on the fatal arm, which `registry.classify` already reads as `stale`
-and `reclaim` already sweeps: no new vocabulary, and `live`/`wedged`/`stale` is
-untouched.
+**Production expiry is dump-only.** The previous implementation used
+`exit=not held` to let the native timer terminate a runtime after a Python sample
+said no work was in flight. That sample was outside the work-admission lock; a
+new turn, job or subagent could be admitted before the C timer expired. Since the
+native callback cannot re-check Python state or participate in every admission
+path, the sample was not a safe retirement barrier. The shared timer wrapper now
+always uses `exit=False`, including fires whose latest sample said idle.
+
+The watchdog still writes every thread's stack and a fired marker. The sampler
+may append `stall_watchdog.HELD_MARKER` after observing a surviving fire; it is
+additional evidence of survival, not a branch that can make native termination safe. If the runtime remains stuck, the operator must inspect the dump
+and explicitly stop it (`lop stop --force` when graceful stop cannot reach the
+blocked loop). Idle frozen runtimes no longer receive automatic stale-idle
+termination or successor/reclaim handling; that is the fail-closed cost until all
+admissions and retirement share a native linearization barrier.
+
+**Cooperative update retirement is unchanged.** The reaper/viewer update path
+still checks the runtime's work-aware idle predicate and latches retirement
+against new admission. Disabling the watchdog's native exit does not weaken that
+separate gate; it only removes the unsafe asynchronous C-timer kill decision.
+
+**What survives a watchdog fire.** Previously committed conversation state and
+in-flight work remain in the process because the watchdog cannot end it. An
+operator's later explicit stop can interrupt an uncommitted step. Until then, the
+fired dump remains the investigation record beside the live runtime.
 
 **The file's content is the evidence, not its existence.**
 `<log dir>/runtime-stall-<pid>.log`, beside `runtime.log`. Only a file carrying
@@ -239,9 +213,9 @@ file written into a log directory.
 (`stall_watchdog.announce`), and `lop sessions --json` carries a `stall_dump` key
 per row — the path when that pid's bound fired, `null` otherwise
 (`stall_watchdog.fired_pids`, read once per listing). That is the surface an
-operator or an agent lists a fleet on after something died, and the runtime that
-wrote the file is gone by definition, so the reader has to reach it from a
-listing rather than from the process.
+operator or an agent uses when investigating a watchdog fire. Because production
+expiry only writes a dump, the PID may still be alive; the listing exposes the
+dump path alongside that PID.
 
 **The interlock.** `faulthandler`'s timer is process-global and shared with
 `tests/e2e/watchdog.py` and `tests/shard_stall_watchdog.py`. The arming therefore
@@ -310,19 +284,17 @@ three text-preserving mutants (the publication inside `if False:`, an early
 module) left that pin green with the leg inert. The acceptance evidence is now a real
 `python -m …process` child spawned through `launch._spawn_runtime`, spinning because a
 `PYTHONPATH`-supplied `sitecustomize.py` starts a CPU-burning thread at interpreter
-start (no model, no turn), with `LOP_RUNTIME_STALL_SECONDS=45`: it exits `rc=1` with
-the progress line in its dump and `fired_leg → "progress"`. The same rig with `probe=`
+start (no model, no turn), with `LOP_RUNTIME_STALL_SECONDS=45`: it records the progress line in its dump,
+then the test reaps the still-live runtime. The same rig with `probe=`
 dropped inside the child does not fire. A predicate that ships silently disabled
 with green tests would make the fleet *look* protected, which is the failure this
 whole design exists to avoid.
 
 **The firing path names its class.** `faulthandler` reaches its timer from a C thread
-and calls `_exit(1)` there, so no exit hook, no journal row and no reaper runs after a
-fire — the dump is the only place a class can be written, which is why the header and
-the progress line carry `incidents.STALL_BOUND_CAUSE` and `fired_leg()` reads the leg
-back out of the file. Without that token the loudest ending in the fleet — a runtime
-that dumped every thread and killed itself — was narrated as `unattributed`, i.e. "no
-act was recorded", which is the one reading that is worse than not knowing.
+and writes the fired marker and stacks without the GIL. Production configures it with
+`exit=False`, so the marker proves timer expiry but not process death. `fired_leg()`
+reads the diagnostic leg from the file, while pid liveness remains a separate fact;
+no journal or reaper is assumed to have run at the instant of a watchdog fire.
 
 ## Not in this change
 

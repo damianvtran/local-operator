@@ -61,13 +61,76 @@ def normalize_base_url(value: str) -> str:
 
 def provider_settings(provider: str, values: Mapping[str, Any] | None = None) -> Mapping[str, Any]:
     if values is None:
-        from local_operator.config import ConfigManager
-        from local_operator.paths import config_dir
-
-        values = ConfigManager(config_dir()).get_config().values
+        values = config_values()
     providers = values.get("providers", {})
     entry = providers.get(provider, {}) if isinstance(providers, Mapping) else {}
     return entry if isinstance(entry, Mapping) else {}
+
+
+def config_values() -> Mapping[str, Any]:
+    """The config VALUES mapping ``provider_settings`` reads when none is handed in.
+
+    Public because a caller that resolves SEVERAL local providers in one pass has
+    to read the config ONCE: every read constructs a ``ConfigManager`` and parses
+    config.yml, and the catalogue's first frame is painted on the keystroke that
+    opens a picker and, on the desktop, on the keystroke that types a ``/model ``
+    argument -- so one read per provider is one read per provider per keystroke.
+
+    The size of that, MEASURED RATHER THAN ASSUMED, and re-derivable: on the
+    fleet host on 2026-09-24, isolated ``HOME``/config, 25-call median after a
+    warm-up, one read is 0.6-1.0 ms and the whole frame with one read is
+    1.3-2.0 ms -- against ~8-13 ms with the five reads a frame left to itself
+    pays. Agent review round 2 measured the same shape on its own rig (14.51 ms
+    with five reads against 0.24 ms with none). The MAGNITUDE is rig-dependent;
+    the read COUNT is not, which is why that is what the accompanying test pins.
+
+    The frame hands its snapshot down instead, and a caller with no snapshot to
+    hand over keeps the per-call read this function still performs.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.paths import config_dir
+
+    return ConfigManager(config_dir()).get_config().values
+
+
+def configured_local_providers(values: Mapping[str, Any] | None = None) -> frozenset[str]:
+    """The local server ids the user has POINTED somewhere — config alone.
+
+    A ``local_setup`` provider ships with a preset port (``LOCAL_PRESETS``), so
+    its *presence* in the registry says nothing about whether anyone is listening:
+    ``ollama`` listing nothing means "no Ollama app is running on this machine",
+    which is the normal state of every install that has never used it. The one
+    key that records a deliberate choice is ``providers.<id>.base_url``, and
+    ``ProviderController._configure_local`` writes exactly that key
+    (``manager.update_config({"providers": providers, ...})``) after the user
+    confirms an endpoint — so this is the app's own record of "the user opted
+    in", not a second opinion about it.
+
+    The generic ``openai-compatible`` gateway has NO preset (its registry
+    ``base_url`` is empty), so it can only ever appear here by being configured —
+    which is the same fact the caller wants, reached the same way.
+
+    ``values`` is an optional config snapshot, in the same shape and for the same
+    reason as :func:`config_values`: a caller resolving several local providers in
+    one pass reads the config ONCE. Passing ``None`` keeps the per-call read.
+    """
+    if values is None:
+        values = config_values()
+    providers = values.get("providers", {})
+    if not isinstance(providers, Mapping):
+        return frozenset()
+    configured: set[str] = set()
+    for provider in LOCAL_PROVIDER_IDS:
+        settings = providers.get(provider)
+        if not isinstance(settings, Mapping):
+            continue
+        base_url = settings.get("base_url")
+        # Whitespace-only is not an engagement: ``validate_endpoint_setting``
+        # normalizes that to "" (reset to preset), so treating it as configured
+        # would contradict the app's own write path.
+        if isinstance(base_url, str) and base_url.strip():
+            configured.add(provider)
+    return frozenset(configured)
 
 
 def resolve_base_url(

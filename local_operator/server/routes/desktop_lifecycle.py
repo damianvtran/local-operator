@@ -10,8 +10,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, SecretStr, StrictBool, model_validator
 
 from local_operator.harness.types import Message
+from local_operator.mcp.catalog import public_server_config
 from local_operator.mcp.credentials import MCPCredentials
-from local_operator.mcp.desktop import MCPControl, public_server_config
+from local_operator.mcp.desktop import MCPControl, refusal_detail
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import (
@@ -22,6 +23,7 @@ from local_operator.server.routes.desktop_sessions import (
     receipts,
     reply,
 )
+from local_operator.session.errors import AsideEmptyAnswer, AsideUnanswered
 from local_operator.session.variable_ops import RefusalCode, VariableType, refusal_for
 
 router = APIRouter(tags=["Desktop lifecycle"], dependencies=[Depends(require_desktop)])
@@ -77,6 +79,30 @@ class AsideInput(Input):
     request_id: RequestID
     text: str = Field(min_length=1, max_length=32768)
     aside_id: str | None = Field(default=None, pattern=r"^[a-f0-9-]{36}$")
+    #: The events-stream subscription this ask is made from, so its streamed
+    #: answer is delivered to THAT viewer and to nobody else. Optional, and its
+    #: ABSENCE MEANS NOTHING IS STREAMED (see the route below), never "stream to
+    #: everyone": an off-record aside broadcast to the session's other windows
+    #: is the leak this field exists to close, and the POST's ``text`` already
+    #: settles the answer for a caller that named no subscription. The pattern
+    #: is the one the ``open`` frame mints and the events route validates
+    #: (``^[a-f0-9]{32}$``, ``desktop_sessions.py``), so a malformed id is a 422
+    #: from this body rather than a silent no-op.
+    #:
+    #: RELEASE SKEW, and it points the OPPOSITE way from ``aside_instruction``
+    #: one hop over: this field is accepted only by a daemon built from the
+    #: change that added it. ``Input`` (``extra="forbid"``,
+    #: ``desktop_sessions.py``) is repo-wide, so an OLDER daemon answers **422**
+    #: to any body carrying the key — a refused request, not a degraded stream —
+    #: and the CLIENT is therefore what must not send it there. The companion
+    #: app change does that with a retry that drops the field, which is why the
+    #: field's ABSENCE has to keep working exactly as it did before the field
+    #: existed: the aside still runs, the POST still returns the answer, and no
+    #: frames are published (``test_an_ask_that_names_no_subscription_publishes_nothing``,
+    #: ``docs/DESKTOP_CONTROLS.md``). Do NOT relax the prohibition here: an
+    #: ``extra="ignore"`` on this model would trade the whole plane's unknown-key
+    #: detection for one route's compatibility, and the fix belongs on the client.
+    subscription_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
 
 
 class Adopt(Input):
@@ -251,12 +277,13 @@ async def mcp_control(session_id: str, body: MCPControl, request: Request):
         await bridge.remote.bind_runtime()
         result = await bridge.remote.route_shared_slash("desktop_mcp", body.model_dump_json())
         if result.get("kind") == "error":
+            # ``{code, message}`` rather than one fixed sentence: the owner now
+            # names WHICH refusal (exists, not_owned, mcp_starting, ...), and
+            # an owner from before that answers ``mcp_control_refused``, which
+            # maps to the old generic copy. Never the owner's exception text.
+            data = result.get("data")
             raise HTTPException(
-                409,
-                (
-                    "The MCP control was refused. Check server ownership, transport and "
-                    "current operation state."
-                ),
+                409, refusal_detail(data.get("code") if isinstance(data, dict) else None)
             )
         return reply({"data": result["data"]})
 
@@ -500,8 +527,56 @@ async def aside(session_id: str, body: AsideInput, request: Request):
             values[body.request_id] = entry
             assert bridge.remote is not None
             await bridge.remote.bind_runtime()
-            answer = await bridge.remote.complete_aside(turns)
-            turns.append(Message.assistant(answer))
+            # TARGETED, and the fallback is NOT a broadcast: a caller that named
+            # no subscription gets no frames AT ALL, which is the honest reading
+            # of a viewer that did not ask (see ``AsideInput.subscription_id``,
+            # which also states the release skew: an older daemon 422s a body
+            # carrying the field, so a client retrying without it lands HERE).
+            # ``publish`` here would have delivered a private question's answer
+            # to every other window on the session. A named function rather than
+            # a lambda because the publish reports whether the subscription was
+            # live and the sink is typed ``-> None``: the aside is answered by the
+            # POST either way, so the miss is not the sink's to report.
+            subscription_id = body.subscription_id
+            if subscription_id is not None:
+
+                def stream_delta(delta: str) -> None:
+                    bridge.publish_to_subscription(
+                        "aside_delta",
+                        {"aside_id": body.request_id, "delta": delta},
+                        subscription_id=subscription_id,
+                    )
+
+                sink = stream_delta
+            else:
+                sink = None
+            try:
+                answer = await bridge.remote.complete_aside(turns, on_delta=sink)
+                if not answer.strip():
+                    # A SETTLED ANSWER WITH NO TEXT IS NOT A FINISHED EXCHANGE,
+                    # and the refusal belongs here rather than in
+                    # ``Session.complete_aside``: the primitive's empty answer is
+                    # deliberate for the goal judge, but on this route an empty
+                    # answer would be STORED — an empty assistant turn marked
+                    # complete and adoptable, which the renderer paints as no
+                    # answer and no error, and which the panel's next "Ask again"
+                    # would then continue. Raised below the door (the runtime was
+                    # engaged and answered) and above the append, so the entry is
+                    # dropped by the same arm a tool-call refusal uses.
+                    raise AsideEmptyAnswer()
+                turns.append(Message.assistant(answer))
+            except AsideUnanswered:
+                # A HALF-EXCHANGE THAT CAN BE NEITHER CONTINUED NOR ADOPTED MUST
+                # NOT OUTLIVE THE ASK. ``turns`` is odd here (the question with no
+                # answer), and every surface that reads the store keys on an even
+                # length: ``GET`` reports ``complete: false``/``adoptable: false``
+                # and a continuation is refused with "This aside is no longer
+                # available" — while the refusal's own sentence tells the user to
+                # ask again. Left in place it also holds one of the 64 panel slots
+                # for the store's full hour. Dropped, the caller's retry starts a
+                # clean entry, which is what the copy promises.
+                values.pop(body.request_id, None)
+                raise
             return reply(
                 {"data": {"aside_id": body.request_id, "text": answer, "off_record": True}}
             )

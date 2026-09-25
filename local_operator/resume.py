@@ -98,6 +98,30 @@ ORIGIN_AGENT_SHELL = "agent-shell"
 #: and provenance is not a reason to hide a row.
 ORIGIN_FORK = "fork"
 
+#: ``origin`` value for a session an agent's shell opened as a WORKSTREAM: a
+#: long-lived parallel run the operator explicitly asked for, which is listed,
+#: labelled as agent-opened and steerable rather than hidden.
+#:
+#: WHY A NEW VALUE RATHER THAN :data:`ORIGIN_AGENT_SHELL`. Both are minted by
+#: the same guard and the same call site, so reusing the existing value would
+#: have been one line — and it is exactly the wrong line. ``agent-shell``
+#: answers ONE question, "did a command from an agent's shell open this?", and
+#: every listing filtering on it wants precisely that answer (see that
+#: constant's docstring). A workstream is the same provenance with the OPPOSITE
+#: disposition: the operator asked for it, so it belongs in the sidebar with
+#: attribution. Overloading ``agent-shell`` would make the hidden case
+#: UNHIDEABLE — the two populations would share a value, so listing the ones
+#: the operator asked for would list every throwaway review run beside them,
+#: and hiding those would hide the workstream. One value per ANSWER, and the
+#: answer here is "an agent opened this because the operator asked for a
+#: parallel workstream".
+#:
+#: The intent that mints it is carried explicitly (`lop exec --workstream`),
+#: never inferred: absent the flag an agent's run is stamped
+#: :data:`ORIGIN_AGENT_SHELL` and stays hidden, because that is the default and
+#: what every pre-existing caller gets.
+ORIGIN_AGENT_WORKSTREAM = "agent-workstream"
+
 #: Origins that are still the user's own conversation, so :func:`is_user_session`
 #: keeps listing them.
 #:
@@ -107,7 +131,15 @@ ORIGIN_FORK = "fork"
 #: origin value has to come here and say so deliberately. That is exactly the
 #: "has to say so here" the predicate's docstring already demanded — this makes
 #: the place to say it a named constant instead of an edit to a boolean.
-USER_ORIGINS: frozenset[str] = frozenset({ORIGIN_FORK})
+#:
+#: Registering :data:`ORIGIN_AGENT_WORKSTREAM` here is the WHOLE visibility
+#: change: every listing in the tree funnels through one scan plus this
+#: predicate (the desktop sidebar and the TUI's through ``session.catalog``,
+#: ``/resume`` through :func:`recent_session_rows`, the machine-wide desktop
+#: feed, the phone's history, ``lop sessions`` and search), so a second place
+#: saying "and workstreams too" would be the drift this constant exists to
+#: prevent.
+USER_ORIGINS: frozenset[str] = frozenset({ORIGIN_FORK, ORIGIN_AGENT_WORKSTREAM})
 
 #: Memoised ``origin.json`` verdicts for :func:`recent_sessions`, keyed on each
 #: marker's own ``(mtime, size)``.
@@ -299,6 +331,12 @@ ORIGIN_SCAN_SENTINEL_NAME = "origin-scan.json"
 #: runs during construction, before any replay, so a value it had to scan the
 #: JSONL for would arrive too late to reach the first prompt's tail.
 ATTACHMENT_SIDECAR_NAME = "attachment.json"
+
+#: The judged-goal record's own sidecar, beside the attachment rather than
+#: inside it (see :func:`write_goal_record`). New in the judged-goal feature:
+#: older builds neither read nor write it, which is what lets a record survive a
+#: downgrade round trip.
+GOAL_SIDECAR_NAME = "goal.json"
 
 #: The two openings only the subagent runner can produce, used ONLY by the
 #: one-time backfill for directories that predate the marker.
@@ -782,6 +820,71 @@ def write_session_attachment(session_dir: Path, *, team: str, agent: str, goal: 
             previous = None
         session_dir.mkdir(parents=True, exist_ok=True)
         sidecar = session_dir / ATTACHMENT_SIDECAR_NAME
+        tmp = sidecar.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(sidecar)
+        if previous is not None:
+            os.utime(session_dir, (previous, previous))
+    except (OSError, TypeError, ValueError):
+        return
+
+
+def read_goal_record(session_dir: Path) -> dict[str, Any] | None:
+    """Parse ``goal.json``, or ``None`` when absent or unusable.
+
+    Tolerant on exactly the same terms as :func:`read_session_attachment`, and
+    for the same load-bearing reason: a process killed mid-write can cut the
+    file inside a multi-byte character, and a strict decode raises
+    ``UnicodeDecodeError`` — a ``ValueError`` that would sail past an
+    ``except OSError`` and take down the whole RESUME. An unreadable record must
+    cost the record, never the conversation.
+
+    The caller (``Session._restore_goal_record``) treats ``None`` as the
+    pre-lifecycle state, which is exactly what a session whose record was never
+    written is: a goal text and nothing else.
+    """
+    try:
+        raw = (session_dir / GOAL_SIDECAR_NAME).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def write_goal_record(session_dir: Path, payload: dict[str, Any]) -> None:
+    """Journal the goal record beside the transcript.
+
+    A SIBLING of ``attachment.json`` rather than a key inside it, and the reason
+    is the writer, not the reader: ``write_session_attachment`` REBUILDS its
+    whole payload from its three arguments and replaces the file atomically, so
+    the moment an older ``lop`` build (or a different install on this machine)
+    touches that session's attachment for any reason, anything this build had
+    added to it would be destroyed. ``goal.json`` is invisible to every existing
+    writer, so the record survives a downgrade round trip. The cost is a file.
+
+    Called on TRANSITION only — a status change, a history append, a judge state
+    change — never on a tick: the judge moves on every turn end, and journalling
+    that would be pure I/O for a value that did not move (the rule
+    ``_persist_attachment`` states for the attachment, which binds harder here).
+
+    Best-effort and ATOMIC by the same contract as its sibling: never raises into
+    a turn, pid-named temp + ``replace`` (two processes can hold the same session
+    directory), and **the directory mtime is preserved**, because journalling a
+    goal transition is bookkeeping ABOUT a session and never activity IN it — a
+    mark-done must not reorder the ``/resume`` picker.
+    """
+    try:
+        try:
+            previous = session_dir.stat().st_mtime
+        except OSError:
+            previous = None
+        session_dir.mkdir(parents=True, exist_ok=True)
+        sidecar = session_dir / GOAL_SIDECAR_NAME
         tmp = sidecar.with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps(payload), encoding="utf-8")
         tmp.replace(sidecar)
@@ -2036,6 +2139,24 @@ class SessionRow(NamedTuple):
     #: ``forked`` above is: only the scan and the row builders set it.
     archived: bool = False
 
+    #: WHO opened this session, for an AGENT WORKSTREAM row only — the opener's
+    #: role, task label and session id, each ``str | None``
+    #: (:data:`OPENED_BY_KEYS`), and ``None`` on every other row.
+    #:
+    #: The 2026-09-18 incident was that a machine-started session was
+    #: INDISTINGUISHABLE from one the operator had opened, so a workstream row
+    #: being visible is only half the fix: without this the row reads as the
+    #: operator's own conversation, which is the confusion the marker exists to
+    #: resolve. Set from the marker the stamp wrote at creation, gated on the
+    #: origin the caller already parsed (:func:`workstream_opened_by`).
+    #:
+    #: Defaulted so every existing construction site keeps working, and a DICT
+    #: rather than three fields because it is one fact that travels to the
+    #: desktop wire as one frozen object (``opened_by``): the sidebar renders
+    #: all three or none, and three parallel nullable fields would let a future
+    #: reader publish a partial claim the renderer has no rule for.
+    opened_by: dict[str, str | None] | None = None
+
     # -- live state, supplied by the CALLER -------------------------------
     # This module stays stdlib-only and never scans the registry itself: it
     # sits on the CLI startup path, and `lop --resume` must not pay for a
@@ -2653,6 +2774,11 @@ def recent_session_rows(
                 # stamped rather than left to the field's default so a caller
                 # never has to ask which mode produced the list.
                 archived=archived,
+                # Gated on the origin the scan already parsed, exactly as the
+                # fork mark above is: only a workstream row pays the read.
+                opened_by=(
+                    workstream_opened_by(session_dir) if origin == ORIGIN_AGENT_WORKSTREAM else None
+                ),
             )
         )
     return rows
@@ -2692,6 +2818,66 @@ def wears_inherited_title(session_dir: Path) -> bool:
     # The sidecar is rewritten when this session names itself, so a stamp newer
     # than the fork means the title on show is its own.
     return stamped <= forked_at
+
+
+#: The three members the desktop wire publishes for a workstream row's opener.
+#:
+#: FROZEN, and the reason is a second repository: the sidebar that renders the
+#: attribution is written against exactly these names, so a rename here is a
+#: silent empty label there rather than an error anyone sees. Every member is
+#: ``str | None`` — a value the stamp could not read is published as ``null``
+#: and never invented (see :func:`local_operator.agent_shell._origin_attribution`).
+#:
+#: ``label`` is the REQUESTING session's task label and ``agent`` its role, the
+#: same pair the hidden subagent layer renders (``catalog._subagent_marker``
+#: reads it from the requester's own marker); ``session`` is the requesting
+#: session's id, which is what makes the supervising session reachable from the
+#: row.
+OPENED_BY_KEYS: tuple[str, ...] = ("agent", "label", "session")
+
+
+def workstream_opened_by(session_dir: Path) -> dict[str, str | None] | None:
+    """Who opened an AGENT WORKSTREAM session, or ``None`` for any other row.
+
+    The original 2026-09-18 incident was not only "a session was listed": it
+    was that a machine-started session was indistinguishable from one the
+    operator had opened. A visible workstream row therefore has to carry WHO
+    opened it and on whose behalf, which the stamp recorded in the marker at
+    creation time (:func:`local_operator.agent_shell.stamp_agent_shell_session`)
+    because that is the only moment the requesting session is knowable.
+
+    Read from the sidecar rather than kept in the scan, and GATED ON THE ORIGIN
+    the caller already has in hand: a workstream row pays one small read, and
+    every other row — the overwhelming majority, including every subagent
+    directory — pays a comparison. That is the same shape as
+    :func:`wears_inherited_title`'s fork probe, for the same reason (an
+    unconditional read here would be one extra open per row per poll on a
+    listing drawn on a UI thread).
+
+    Deliberately NOT in the scan's return tuple: that shape is pinned by six
+    callers, none of which has any use for this, and widening it would make the
+    CLI's recovery listing pay for a key it never renders.
+
+    Tolerant like every other reader of this file: a truncated, hand-edited or
+    non-object ``opened_by`` yields the three keys as ``None`` rather than a
+    raised error, because the row is still the operator's workstream and a
+    listing that hid it for a bookkeeping problem would be the worse failure.
+    """
+    try:
+        raw = (session_dir / ORIGIN_NAME).read_text(encoding="utf-8", errors="replace")
+        payload = json.loads(raw)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("origin") != ORIGIN_AGENT_WORKSTREAM:
+        return None
+    detail = payload.get("opened_by")
+    if not isinstance(detail, dict):
+        detail = {}
+    opened: dict[str, str | None] = {}
+    for key in OPENED_BY_KEYS:
+        value = detail.get(key)
+        opened[key] = value if isinstance(value, str) and value else None
+    return opened
 
 
 def _fork_instant(session_dir: Path) -> float | None:

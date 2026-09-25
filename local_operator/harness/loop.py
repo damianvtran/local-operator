@@ -48,6 +48,7 @@ from local_operator.harness.intent import (
     scan_streaming_intent,
 )
 from local_operator.harness.redaction import tool_source
+from local_operator.harness.replay_bound import bound_replay_payloads
 from local_operator.harness.types import (
     FAULT_INVALID_ARGUMENTS,
     FAULT_KEY,
@@ -2317,6 +2318,23 @@ class AgentLoop:
             converted = config.convert_to_llm(shaped)
             if inspect.isawaitable(converted):
                 converted = await converted
+            # Bound what one turn RE-SENDS, here rather than in the renderer, for
+            # two reasons that are both correctness rather than taste. The
+            # renderer hands out the transcript's own Message objects, so
+            # eliding there would edit the durable record (see
+            # ``harness/replay_bound.py``); and this is the main site that builds
+            # the conversation request for every channel — TUI, desktop, exec,
+            # mobile, SSE — so a bound placed here cannot be forgotten by a new
+            # front end. It is NOT the only such site, and the comment used to
+            # claim it was: a session's aside and its compaction advisor build
+            # their own ``ChatRequest`` from ``Session._read_only_prompt``, which
+            # applies the same bound for the same reason (see the note there —
+            # those two requests must stay byte-identical to this one so they
+            # read its provider cache). It deliberately does not touch
+            # compaction's own render
+            # or the token estimators, which must keep seeing the transcript as
+            # it is: the bound is a property of the request, not of the session.
+            converted = bound_replay_payloads(converted)
             if effort_ceiling is not None:
                 # A retreat is in force -- an empty-truncation step-down, or the
                 # reasoning-echo recovery's switch to thinking off. The host's
@@ -3063,6 +3081,37 @@ class AgentLoop:
                     call,
                     "Invalid arguments: " + "; ".join(errors),
                     details={FAULT_KEY: FAULT_INVALID_ARGUMENTS},
+                ),
+            )
+        # A tool's OWN plan-time refusal, after the schema check: the ordering
+        # above states why the gate is not here, and this is the other half of
+        # it — a call the tool will not run must not reach the gate either, or
+        # the operator approves work that then refuses itself (review Q-2 on
+        # #1546). The message is the tool's own, verbatim: it is written to tell
+        # the model what to do instead, and a prefix added here would only
+        # lengthen every refusal. Guarded like the other host hooks — a hook
+        # that raises never refuses the call it was asked about.
+        #
+        # The inventory rides along because a refusal that names a replacement
+        # the reader does not hold is worse than one that names none: this is
+        # the only place in the harness that holds BOTH the call and the live
+        # tool list at the moment a refusal is composed (design review D2).
+        refusal = None
+        if tool.refuse_args is not None:
+            offered = frozenset(candidate.name for candidate in context.tools)
+            try:
+                refusal = tool.refuse_args(args, offered)
+            except Exception:
+                logger.warning("plan-time refusal check failed for %s", call.name, exc_info=True)
+            else:
+                if not isinstance(refusal, str) or not refusal.strip():
+                    refusal = None
+        if refusal is not None:
+            return _PlannedCall(
+                call=call,
+                tool=tool,
+                failure=self._synthetic_result(
+                    call, refusal, details={FAULT_KEY: FAULT_INVALID_ARGUMENTS}
                 ),
             )
         resources: tuple[str, ...] | None = None

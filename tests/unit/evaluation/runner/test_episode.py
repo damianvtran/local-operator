@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import errno
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,7 @@ from local_operator.evaluation.receipts import RedactionSet
 from local_operator.evaluation.runner.episode import (
     DISCLOSED_INFRA_METADATA_KEYS,
     MAX_STDERR_TAIL_CHARS,
+    EpisodeConfig,
     EpisodeRunner,
 )
 from local_operator.evaluation.runner.provider_client import ProviderModelClient
@@ -80,10 +82,12 @@ def _runner(
     responder: Any = None,
     max_steps: int = 4,
     redactions: RedactionSet | None = None,
+    spec: Any = None,
+    config: Any = None,
 ) -> EpisodeRunner:
     return EpisodeRunner(
-        build_spec(episode_id),
-        build_config(tmp_path, max_steps=max_steps),
+        spec or build_spec(episode_id),
+        config or build_config(tmp_path, max_steps=max_steps),
         selector=selector(tmp_path),
         model=model,
         responder=responder,
@@ -95,6 +99,84 @@ def _runner(
 
 def _kinds(root: Path) -> list[str]:
     return [event.kind for event in verify_bundle(root).events]
+
+
+@pytest.mark.parametrize("rate", [float("nan"), float("inf"), -0.01, True])
+def test_episode_config_rejects_invalid_action_overhead(tmp_path: Path, rate: float) -> None:
+    roots = [tmp_path / name for name in ("evidence", "artifacts", "rescue")]
+    for root in roots:
+        root.mkdir()
+    with pytest.raises(ValueError, match="finite and nonnegative"):
+        EpisodeConfig(
+            evidence_root=roots[0],
+            artifact_root=roots[1],
+            rescue_root=roots[2],
+            max_steps=4,
+            execution_overhead_seconds_per_action=rate,
+        )
+
+
+@pytest.mark.asyncio
+async def test_default_settle_policy_is_sealed_in_verified_episode_bundle(
+    tmp_path: Path, episode_id: str
+) -> None:
+    from scripts.run_episode import (
+        _ensure_action_settle_policy,
+        _infra_disclosure_metadata,
+        _parse_infra,
+    )
+
+    infra = _ensure_action_settle_policy(_parse_infra([], "benchmark_compute"), "benchmark_compute")
+    spec = replace(
+        build_spec(episode_id),
+        infra_values=infra,
+        metadata=_infra_disclosure_metadata(infra),
+    )
+    adapter = FakeAdapter(
+        tmp_path,
+        episode_id,
+        declared_requirements=(
+            Requirement(
+                requirement_id="OSWORLD_ACTION_SETTLE_POLICY",
+                kind="infra",
+                name="OSWORLD_ACTION_SETTLE_POLICY",
+                required=False,
+            ),
+        ),
+    )
+    runner = _runner(
+        tmp_path, episode_id, adapter=adapter, model=ScriptedModel(["finish"]), spec=spec
+    )
+
+    outcome = await runner.run()
+    assert outcome.bundle_root is not None
+    report = verify_bundle(outcome.bundle_root)
+    assert report.valid, [issue.code for issue in report.issues]
+    assert report.manifest is not None
+    assert report.manifest.metadata["osworld_action_settle_policy"] == "throughput"
+    assert report.manifest.metadata["osworld_action_settle_seconds"] == 3
+
+
+@pytest.mark.asyncio
+async def test_paper_action_overhead_funds_actual_execute_timeout(
+    tmp_path: Path, episode_id: str
+) -> None:
+    adapter = FakeAdapter(tmp_path, episode_id)
+    runner = _runner(
+        tmp_path,
+        episode_id,
+        adapter=adapter,
+        model=ScriptedModel(["wait:2000", "finish"]),
+        config=build_config(
+            tmp_path,
+            execution_overhead_seconds_per_action=3.0,
+        ),
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status == "completed", outcome.diagnostic
+    assert adapter.timeouts["execute"] == [35.0]
 
 
 @pytest.mark.asyncio
@@ -2257,8 +2339,11 @@ def test_every_disclosed_infra_value_is_gated_and_stamped_from_one_table() -> No
     # And every gated name reaches the manifest under its declared key, which
     # is the half a reviewer cannot see from episode.py alone.
     for name, key in DISCLOSED_INFRA_METADATA_KEYS.items():
-        metadata = run_episode._infra_disclosure_metadata([f"{name}=some-value"])
-        assert metadata == {key: "some-value"}, name
+        value = "throughput" if name == "OSWORLD_ACTION_SETTLE_POLICY" else "some-value"
+        metadata = run_episode._infra_disclosure_metadata([f"{name}={value}"])
+        assert metadata[key] == value, name
+        assert metadata["osworld_action_settle_policy"] == "throughput"
+        assert metadata["osworld_action_settle_seconds"] == 3.0
 
     # The keys are distinct: two values sharing one key would have the second
     # silently overwrite the first's disclosure.
@@ -2272,14 +2357,25 @@ def test_an_undisclosed_infra_value_is_never_stamped() -> None:
 
     import scripts.run_episode as run_episode
 
-    assert run_episode._infra_disclosure_metadata(["OSWORLD_TTL_SECONDS=900"]) == {}
+    assert run_episode._infra_disclosure_metadata(["OSWORLD_TTL_SECONDS=900"]) == {
+        "osworld_action_settle_policy": "throughput",
+        "osworld_action_settle_seconds": 3.0,
+    }
     with pytest.raises(ValueError, match="--infra expects"):
         run_episode._infra_disclosure_metadata(["AWS_ROOT_VOLUME_SIZE"])
-    assert run_episode._infra_disclosure_metadata([]) == {}
+    assert run_episode._infra_disclosure_metadata([]) == {
+        "osworld_action_settle_policy": "throughput",
+        "osworld_action_settle_seconds": 3.0,
+    }
     # Both at once, each under its own key.
     assert run_episode._infra_disclosure_metadata(
         ["AWS_INSTANCE_TYPE=m5.xlarge", "AWS_ROOT_VOLUME_SIZE=120", "OSWORLD_TTL_SECONDS=900"]
-    ) == {"aws_instance_type_override": "m5.xlarge", "aws_root_volume_size_override": "120"}
+    ) == {
+        "aws_instance_type_override": "m5.xlarge",
+        "aws_root_volume_size_override": "120",
+        "osworld_action_settle_policy": "throughput",
+        "osworld_action_settle_seconds": 3.0,
+    }
 
 
 @pytest.mark.asyncio
@@ -2291,13 +2387,26 @@ async def test_host_refusal_does_not_publish_supplied_answer(
     adapter = FakeAdapter(tmp_path, episode_id)
     original = adapter._call_raw
 
-    async def refusing(method: Any, params: Any, result_type: Any, *, timeout: float) -> Any:
+    async def refusing(
+        method: Any,
+        params: Any,
+        result_type: Any,
+        *,
+        timeout: float,
+        execution_overhead_seconds_per_action: float = 0.0,
+    ) -> Any:
         if method == "ask_user_exchange":
             adapter.calls.append(method)
             return AskUserExchangeResult(
                 ask_id=params.ask_id, request_digest=params.request_digest, accepted=False
             )
-        return await original(method, params, result_type, timeout=timeout)
+        return await original(
+            method,
+            params,
+            result_type,
+            timeout=timeout,
+            execution_overhead_seconds_per_action=execution_overhead_seconds_per_action,
+        )
 
     adapter._call_raw = refusing
     model = ScriptedModel(["ask", "finish"])

@@ -21,7 +21,7 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, get_args
 
 import pytest
 
@@ -30,9 +30,11 @@ from local_operator.evaluation.adapters.api import observation_content_id
 from local_operator.evaluation.evidence.models import RouteIdentity
 from local_operator.evaluation.protocol import (
     ActionBatch,
+    ClickAction,
     FinishAction,
     Observation,
     TypeAction,
+    WaitAction,
 )
 from local_operator.evaluation.receipts import RedactionSet
 from local_operator.evaluation.runner.model import DecisionRejected, EpisodeTurn
@@ -43,6 +45,7 @@ from local_operator.evaluation.runner.provider_client import (
     ProviderModelClient,
     ProviderStreamAbortedError,
     build_system_prompt,
+    classify_rejection,
     parse_decision,
 )
 from local_operator.evaluation.runner.public_reply import decode_public_reply
@@ -405,15 +408,23 @@ def test_parse_decision_tolerates_prose_that_opens_like_json(junk: str) -> None:
     assert action.text == "hello"
 
 
-def test_parse_decision_rejects_leading_junk_before_the_value() -> None:
-    """Skipping forward to the first brace means guessing where the value
-    starts, and a preamble containing a brace makes that guess wrong silently
-    -- executing a DIFFERENT batch than was sent."""
+def test_parse_decision_reads_the_one_decision_behind_a_preamble() -> None:
+    """A preamble is framing; the object behind it is the decision.
+
+    It used to be refused, for a real reason: hunting forward to the first bald
+    ``{`` guesses where the value begins, and a preamble that itself carries a
+    brace makes that guess wrong SILENTLY. The rule that makes the hunt safe is
+    asserted in the section at the end of this module -- an object is read only
+    when it is the reply's ONLY decision, so a decoy batch in the preamble is an
+    ambiguity and still costs the turn."""
 
     current = observation()
+    payload = type_payload(current)
 
-    with pytest.raises(DecisionParseError, match="not valid JSON"):
-        parse_decision("Sure, here you go: " + type_payload(current), current, route=ROUTE)
+    decision = parse_decision("Sure, here you go: " + payload, current, route=ROUTE)
+
+    reference = parse_decision(payload, current, route=ROUTE)
+    assert decision.action_batch.to_canonical_json() == (reference.action_batch.to_canonical_json())
 
 
 def test_parse_decision_still_rejects_a_truncated_value() -> None:
@@ -1096,16 +1107,20 @@ async def test_client_still_treats_ordinary_malformed_json_as_correctable() -> N
 # channels -- ``reasoning_content`` for the thinking, ``content`` for the answer
 # -- and the closing half of the template's boundary token is emitted at the
 # joint, so the reply the harness assembles begins with ``</mm:think>`` welded
-# to an otherwise byte-perfect action batch. The strict decoder refuses a reply
-# that does not START with a JSON value (by design: hunting forward for the
-# first ``{`` can execute a batch the model never sent), so the whole billed
-# turn was discarded as ``malformed-json`` -- 15 of the sealed corpus's 40
-# published replies, all 15 recoverable.
+# to an otherwise byte-perfect action batch. At the time the strip was added the
+# strict decoder refused a reply that did not START with a JSON value (hunting
+# forward for the first ``{`` can execute a batch the model never sent), so the
+# whole billed turn was discarded as ``malformed-json`` -- 15 of the sealed
+# corpus's 40 published replies, all 15 recoverable.
 #
-# The tests below pin four things: the DECLARATION decides (never the reply's
-# text), only the HEAD is touched, a strip is counted and reported rather than
-# silent, and the decoder's own tolerances are unchanged on the path where
-# stripping is active.
+# The decoder now reads a decision behind leading junk too, whenever it is the
+# reply's ONLY decision (``public_reply._locate_leading_object``), so those 15
+# replies are read with or without the strip. What a declaration still decides
+# is whether the TOKEN IS REMOVED -- the byte-precise half, i.e. what the reply
+# the context carries reads like -- and that is what the tests below pin: the
+# strip is declaration-driven, only the head is touched, a strip is counted and
+# reported rather than silent, and the decoder's own tolerances are unchanged on
+# the path where stripping is active.
 
 #: The token as the provider emits it: the CLOSING half only. Zero opening tags
 #: appear anywhere in the sealed corpus, and that asymmetry is the authorship
@@ -1153,29 +1168,44 @@ async def test_a_declared_boundary_marker_is_absorbed_and_the_batch_is_byte_iden
     assert decision.action_batch.to_canonical_json() == (reference.action_batch.to_canonical_json())
     # And both are executable against the observation they answer.
     decision.action_batch.validate_for(current)
+    # The strip happened, and it is why the bytes the next turn carries are the
+    # model's own: the note is replayed verbatim, token included, only when a
+    # declaration did NOT license removing it (see the twin test below).
+    assert decision.stripped_reply_markers == 1
 
 
 @pytest.mark.asyncio
-async def test_a_spec_that_declares_no_marker_still_refuses_the_tagged_reply() -> None:
+async def test_a_spec_that_declares_no_marker_does_not_rewrite_the_reply(tmp_path: Path) -> None:
     """The strip is DECLARATION-driven, not a licence to rewrite any reply.
 
     The same bytes, the same model id, the same request -- only the spec's
-    declaration differs. A build that stripped this token unconditionally would
-    pass the test above and fail this one, and would silently mangle the first
-    model whose prose legitimately opens with that text.
+    declaration differs. The reply is READ either way, because the decoder now
+    locates a decision behind leading junk when it is the reply's only decision;
+    what a missing declaration buys is that NOTHING IS REMOVED. The token is
+    therefore still in the text the next turn carries, which is the assertion
+    that tells a strip apart from a decode. A build that stripped this token
+    unconditionally would pass the test above and fail this one, and would
+    silently mangle the first model whose prose legitimately opens with it.
     """
 
     current = observation()
-    stream = ScriptedStream(BOUNDARY_MARKER + finish_payload(current))
-    client = _client(stream, model_spec=_minimax_spec())
+    untagged = json.dumps(
+        {
+            "actions": json.loads(finish_payload(current))["actions"],
+            "public_observations": "the task is complete",
+        }
+    )
+    stream = ScriptedStream(BOUNDARY_MARKER + untagged)
+    client = _client(stream, tmp_path, model_spec=_minimax_spec())
 
-    with pytest.raises(DecisionRejected) as info:
-        await client.decide(current, _turns(current))
+    decision = await client.decide(current, _turns(current))
 
-    assert info.value.class_key == "leading-delimiter"
-    assert info.value.stripped_reply_markers == 0
-    # The reply is judged on its ORIGINAL bytes, and the evidence keeps them.
-    assert info.value.evidence_reply == BOUNDARY_MARKER + finish_payload(current)
+    assert decision.stripped_reply_markers == 0
+    reference = parse_decision(untagged, current, route=ROUTE)
+    assert decision.action_batch.to_canonical_json() == (reference.action_batch.to_canonical_json())
+    # Not one byte was removed: the replayed note is the reply exactly as it
+    # arrived, the token welded to its head.
+    assert decision.public_reply == BOUNDARY_MARKER + untagged
 
 
 @pytest.mark.asyncio
@@ -2672,16 +2702,15 @@ def _defective_reply(case: str, current: Observation) -> str:
 
     observation_id = current.observation_id
     if case == "leading-delimiter":
-        # A preamble before the object: the offset-0 half of the class, and the
-        # one shape of it the harness deliberately does NOT absorb (hunting
-        # forward for the first ``{`` can execute a batch the model never sent).
+        # A preamble and then NOTHING readable as a decision: the offset-0 half
+        # of the class, and the half that survives the leading-object tolerance
+        # (a preamble in front of a complete, unique batch is READ now -- see
+        # the section at the end of this module).
         return "Sure, here you go: {"
     if case == "incomplete-json":
         # The other half: the decode STARTED and the object broke inside. Verbatim
         # the shape of a sealed MiniMax reply whose action was cut mid-object.
         return '{"actions": [{"kind": "type", "text": "hello"'
-    if case == "fenced-json":
-        return '```json\n{"actions": [{"kind": "finish"}]}\n```'
     if case == "empty-actions":
         # The one batch-shape refusal left: an ``action_batch`` that carries no
         # usable actions array, so there is no decision in it. The version key
@@ -2701,14 +2730,18 @@ def _defective_reply(case: str, current: Observation) -> str:
             }
         )
     if case == "extra-action-key":
+        # A name NO action kind declares. The sibling case this case used to
+        # carry -- ``frame_id`` on a ``wait`` -- is no longer refused at all: it
+        # is dropped and reported by ``drop_sibling_action_fields``, because the
+        # required ``kind`` tag already states which action the model chose.
         return json.dumps(
             {
                 "actions": [
                     {
                         "kind": "wait",
                         "observation_id": observation_id,
-                        "frame_id": "screen",
                         "duration_ms": 1000,
+                        "pause_until": "the page settles",
                     }
                 ]
             }
@@ -2809,25 +2842,32 @@ def _defective_reply(case: str, current: Observation) -> str:
 _REJECTION_HINT_CASES = [
     # The two halves of the old ``malformed-json`` class, split so the offset-0
     # failures -- which is what a provider reasoning boundary token and a code
-    # fence both produce, and one of them is now absorbed before the decoder
-    # sees it -- are countable apart from the replies that broke mid-object.
+    # fence both produce -- are countable apart from the replies that broke
+    # mid-object. A preamble, a code fence and a call-syntax wrapper are no
+    # longer among the offset-0 causes (``_locate_leading_object`` reads a
+    # decision behind them when it is the reply's only one), so the row below is
+    # the residual: an offset-0 failure with NO readable decision in the body.
     (
         "leading-delimiter",
         "leading-delimiter",
-        ["did not begin with the JSON object", "beginning with '{'", '"actions"'],
+        [
+            "did not begin with the JSON object",
+            "beginning with '{'",
+            "no single complete decision could be read",
+            '"actions"',
+        ],
     ),
     (
         "incomplete-json",
         "incomplete-json",
         ['"actions"', '"public_observations"', "incomplete"],
     ),
-    ("fenced-json", "leading-delimiter", ["did not begin with the JSON object", "code fence"]),
+    ("extra-action-key", "extra-action-key", ['"pause_until"', '"wait"', '"duration_ms"']),
     (
         "empty-actions",
         "envelope-shape",
         ["action_batch requires exactly", '{"actions": [...]}'],
     ),
-    ("extra-action-key", "extra-action-key", ['"frame_id"', '"wait"', '"duration_ms"']),
     ("unknown-key", "unknown-key", ["not an accepted key name", '"enter"', "array of key names"]),
     ("keys-not-array", "keys-not-array", ['["ctrl", "alt", "t"]', "not an object"]),
     ("unknown-action-kind", "unknown-action-kind", ['"right_click"', 'Did you mean "click"?']),
@@ -3965,3 +4005,650 @@ async def test_an_empty_length_truncation_is_flagged_and_a_truncated_reply_is_no
     with pytest.raises(DecisionRejected) as stopped:
         await _client(quiet).decide(current, turns)
     assert stopped.value.empty_length_truncation is False
+
+
+# ---------------------------------------------------------------------------
+# The leading-object tolerance and the sibling-field tolerance
+# ---------------------------------------------------------------------------
+#
+# Two tolerance gaps measured on the arm-0625 OSWorld runs (deepseek-v4.1-flash
+# over OpenRouter, 2026-09-24, ``~/worktrees/osworld/runs/*/evidence/*``). Both
+# were counted by reading the rejection artifacts' own ``class:`` lines:
+# ``leading-delimiter`` (60 of 157 rejections across the current-code runs) and
+# a field of a SIBLING action kind (46 of the 145 rejections in the scored
+# episodes, 31.7%). Each rejection is a billed round trip carrying the whole
+# observation again, and in both shapes the model's decision was already
+# complete -- only its framing, or one stray field, was wrong.
+#
+# The payloads below are VERBATIM from those bundles, with the observation they
+# answered, so the two tolerances are measured against the bytes they exist for
+# rather than against invented edge cases.
+
+
+def _arm_observation(root: Path, observation_id: str) -> Observation:
+    """The observation a REAL arm reply answered: its id, one 1280x720 ``screen``.
+
+    Built on the frame bytes ``_framed_observation`` publishes (the observation
+    model requires a frame artifact) with the frame id and geometry the OSWorld
+    adapter publishes -- the rejection diagnostic names them for the episode --
+    and the observation id taken from the reply itself, so the batch is validated
+    against the binding it was written for.
+    """
+
+    from local_operator.evaluation.protocol import FrameGeometry, FrameSize
+
+    base = _framed_observation(root, 0)
+    frame = base.frames[0].model_copy(
+        update={
+            "frame_id": "screen",
+            "geometry": FrameGeometry(
+                native=FrameSize(width=1280, height=720),
+                model_visible=FrameSize(width=1280, height=720),
+            ),
+        }
+    )
+    return base.model_copy(update={"frames": (frame,), "observation_id": observation_id})
+
+
+#: The native call-syntax TAIL a DeepSeek reply opened with, verbatim from
+#: ``cohort3-20260924-181350/ep-aa87f4d89fd3`` (artifact sha256 ``20095829bf9c``).
+#: The DSML parameter tag's head was consumed by the wire client, so what the
+#: content channel carries is the tail of the model's OWN call markup welded to a
+#: complete envelope. Refused as ``leading-delimiter``; the decision is intact.
+_CALL_SYNTAX_TAIL_REPLY = (
+    'input" string="true">{"actions":[{"button":"left","frame_id":"screen",'
+    '"kind":"click","observation_id":'
+    '"a0a1d5575f87d2890a01175a85b84229065a2689d66b6e22022af767af507c8f","x":48,"y":687}],'
+    '"public_observations":"GNOME Calendar has fyp events imported 8h late (18:00 instead '
+    "of 10:00) - naive DTSTART treated as UTC while system TZ is UTC+8. Need to delete "
+    'wrong events and re-import with corrected times."}'
+)
+_CALL_SYNTAX_TAIL_OBSERVATION = "a0a1d5575f87d2890a01175a85b84229065a2689d66b6e22022af767af507c8f"
+
+#: A prose preamble and then the envelope, verbatim from
+#: ``cohort4-20260924-185947/ep-e1c26345658a`` (artifact sha256 ``3d9e8dc42e52``).
+#: Content-only reply (``tool_call_deltas=0``): the model narrated its click and
+#: then sent the batch, which is the shape the leading rule named first.
+_PROSE_PREAMBLE_REPLY = (
+    "The RIMS system is a local file at /home/user/Desktop/HKU-RIMS-System/index.html"
+    " \u2014 it's now open and I'm logged in at the Dashboard. Following the guidelines:"
+    ' click "Research Output".\n\n{"actions":[{"frame_id":"screen","kind":"click",'
+    '"observation_id":"d3699e971b30e168f2a28b4cfb8f70bca8cfe3ad69e9d62987f8e3f00e33ed1b",'
+    '"x":246,"y":233}],"public_observations":"Found RIMS: local file '
+    "/home/user/Desktop/HKU-RIMS-System/index.html, logged in as Researcher: Me (Research "
+    "Services). Dashboard with left nav: Dashboard, Proposal and Project, Research Output, "
+    'Work Affiliations, Notifications, Statistics. Clicking \\"Research Output\\" '
+    '(guideline step 2)."}'
+)
+_PROSE_PREAMBLE_OBSERVATION = "d3699e971b30e168f2a28b4cfb8f70bca8cfe3ad69e9d62987f8e3f00e33ed1b"
+
+
+@pytest.mark.parametrize(
+    ("reply", "observation_id", "expected"),
+    [
+        (_CALL_SYNTAX_TAIL_REPLY, _CALL_SYNTAX_TAIL_OBSERVATION, (48, 687)),
+        (_PROSE_PREAMBLE_REPLY, _PROSE_PREAMBLE_OBSERVATION, (246, 233)),
+    ],
+    ids=["native-call-syntax-tail", "prose-preamble"],
+)
+def test_a_decision_behind_leading_junk_is_read(
+    reply: str, observation_id: str, expected: tuple[int, int], tmp_path: Path
+) -> None:
+    """Junk in FRONT of the object is framing, exactly as junk behind it is.
+
+    Both replies are refused on the base tree as ``leading-delimiter`` -- the
+    first character is not ``{`` -- and both carry one complete, valid decision.
+    The assertion is on the CLICK that decision names, not merely on acceptance:
+    the located object goes through the same validation as any other reply, and
+    ``validate_for`` resolves its frame and its coordinates against the
+    observation it was written for.
+    """
+
+    current = _arm_observation(tmp_path, observation_id)
+
+    decision = parse_decision(reply, current, route=ROUTE)
+
+    action = decision.action_batch.actions[0]
+    assert isinstance(action, ClickAction)
+    assert (action.x, action.y) == expected
+    assert action.frame_id == "screen"
+    decision.action_batch.validate_for(current)
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "```json\n",
+        "Here is my decision.\n\n",
+        "<tool_call>\n",
+        "Thinking about it: ",
+        # Non-ASCII framing, which is what makes the count's UNIT observable:
+        # a code-point index reports 5 here where the reply carries 13 bytes.
+        # The three recoveries this tolerance exists for include exactly this
+        # shape (DeepSeek's ``思考``-prefixed preamble and its fullwidth-bar DSML
+        # wrapper), so this is the measured population rather than a curiosity.
+        "思考中：\n",
+        "原始内容：\n",
+    ],
+)
+def test_a_preamble_needs_no_particular_spelling(prefix: str) -> None:
+    """The tolerance is about the DECISION, not about recognising a template.
+
+    A code fence, a sentence and a call-syntax tag all leave exactly one decision
+    in the reply, and a rule that enumerated the shapes it knew would refuse the
+    next model's wording. What none of them carries is a ``{``: a brace is an
+    object, an object that is not a decision is an example the model is
+    demonstrating, and a reply holding one is refused (see
+    ``test_an_object_in_the_framing_that_is_not_a_decision_is_refused``).
+
+    ``leading_framing_bytes`` is asserted rather than ignored: it is the sealed
+    bundle's only record that this reply was read through the tolerance at all.
+    The assertion is written in BYTES because that is the field's unit and the
+    unit a consumer slicing the reply's prefix needs -- for the ASCII prefixes
+    above the two readings coincide, which is precisely why the non-ASCII ones
+    are in the list.
+    """
+
+    current = observation()
+    payload = type_payload(current)
+
+    decision = parse_decision(prefix + payload, current, route=ROUTE)
+
+    reference = parse_decision(payload, current, route=ROUTE)
+    assert decision.action_batch.to_canonical_json() == (reference.action_batch.to_canonical_json())
+    assert decision.leading_framing_bytes == len(prefix.encode("utf-8"))
+    assert reference.leading_framing_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        # A model that follows Markdown writes a CLOSED fence, and this is the
+        # shape the offset-0 path has always read (``{decision} and then text``
+        # is tolerated there). Only the located path refused it, because the
+        # closing marker is something after the object -- and the half-written,
+        # UNCLOSED spelling is the one the first form of this tolerance pinned.
+        "```json\n{decision}\n```",
+        "```json\n{decision}\n```\n",
+        "Here is my decision:\n```json\n{decision}\n```\n",
+    ],
+)
+def test_a_closed_code_fence_around_the_decision_is_read(reply: str) -> None:
+    """A fence marker is not a value, so it cannot hide a competing decision.
+
+    Condition 3 refuses a located object whose remainder could carry a statement
+    -- a second batch, an example, the context a quoted decision arrives with.
+    A remainder made only of fence markers and whitespace is the one case that
+    cannot: it holds no brace, so the located object stays the reply's only
+    readable decision, which is the property the condition exists to guarantee.
+    """
+
+    current = observation()
+    candidate = reply.replace("{decision}", type_payload(current))
+
+    decision = parse_decision(candidate, current, route=ROUTE)
+
+    assert decision.action_batch.to_canonical_json() == (
+        parse_decision(type_payload(current), current, route=ROUTE).action_batch.to_canonical_json()
+    )
+    assert decision.leading_framing_bytes > 0
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        # The marker, then text that is not a marker: prose a model wrote about
+        # its own reply is exactly the context the property refuses to guess at.
+        "```json\n{decision}\n``` and that is my final answer.",
+        "```json\n{decision}\n```\nNote: the fence is closed now.",
+        # A fence and then a courteous line: the line is prose, so the located
+        # object no longer ends the reply, which is the whole of condition 3.
+        "```\n{decision}\n```\nThank you.",
+        # A header line is not a marker either, and neither is a marker with
+        # something appended to it.
+        "```json\n{decision}\n```\n# Done",
+    ],
+)
+def test_text_after_a_closing_fence_is_still_refused(reply: str) -> None:
+    """The fence exception is marker-only, and this pins where it stops.
+
+    Without this case the exception could be widened by accident -- a ``startswith``
+    on the remainder would accept all three of these and swallow the prose the
+    quote rule exists to refuse.
+    """
+
+    current = observation()
+    candidate = reply.replace("{decision}", type_payload(current))
+
+    with pytest.raises(DecisionParseError) as info:
+        parse_decision(candidate, current, route=ROUTE)
+
+    assert classify_rejection(str(info.value)) == "leading-delimiter"
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        # An object that is not a decision: the model demonstrating the shape.
+        'The state was {"busy": true} so I will act: {decision}',
+        # ... and the same object on its own, which is all some replies carry.
+        'For reference: {"busy": true}',
+        # A brace that begins nothing readable, in front of a complete decision.
+        "I will use { as a delimiter. Here is the batch: {decision}",
+        # A second, unreadable object after a located decision.
+        'Working on it. {decision} (see the {"busy": true} field)',
+    ],
+)
+def test_an_object_in_the_framing_that_is_not_a_decision_is_refused(reply: str) -> None:
+    """A located decision must be the reply's only brace-bearing region.
+
+    Behind a preamble, an object that is not a decision cannot be told from an
+    example the model is showing or from the harness's own feedback quoted back,
+    and a brace that begins nothing readable is an object that did not survive.
+    Both are the same hazard the quote rule answers -- reading bytes that are not
+    this turn's decision -- so both refuse rather than being skipped, and the
+    reply keeps the class it had before the tolerance existed.
+    """
+
+    current = observation()
+    # ``replace`` rather than ``format``: every case carries a literal brace,
+    # which is the whole subject of the test.
+    candidate = reply.replace("{decision}", type_payload(current))
+
+    with pytest.raises(DecisionParseError) as info:
+        parse_decision(candidate, current, route=ROUTE)
+
+    assert classify_rejection(str(info.value)) == "leading-delimiter"
+
+
+def _two_batches(current: Observation, *, second: Observation | None = None) -> str:
+    return type_payload(current) + " " + type_payload(second or current)
+
+
+@pytest.mark.parametrize("second_is_current", [True, False])
+def test_two_decidable_objects_behind_a_preamble_still_cost_the_turn(
+    second_is_current: bool,
+) -> None:
+    """The hazard the leading rule was refused for, now answered by the rule.
+
+    A preamble that itself carries a batch makes the choice of object a question
+    about MEANING -- which one did the model mean? -- and a forward hunt that
+    answered it could execute a batch the model never sent. So the tolerance
+    requires the located object to be the reply's ONLY decision, and two
+    decision-shaped objects anywhere in the reply refuse it, whether or not they
+    bind the same observation. The competing-batch rule cannot cover the second
+    case (a batch for another observation is not competing), and it does not have
+    to: the ambiguity is about which object is the decision.
+    """
+
+    current = observation()
+    second = current if second_is_current else observation(1)
+
+    with pytest.raises(DecisionParseError, match="not valid JSON"):
+        parse_decision("commentary " + _two_batches(current, second=second), current, route=ROUTE)
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "Sure, here you go: {",
+        "I will look at the current screen and then decide.",
+        'keys" string="false">["ctrl", "Home"]',
+        "commentary " + '{"action": "search"}',
+    ],
+)
+def test_a_preamble_with_no_readable_decision_still_costs_the_turn(reply: str) -> None:
+    """The residual refusal, and it keeps its own class and message.
+
+    No decision-shaped object parses -- prose, a fragment of a call's own markup,
+    an object that is not a batch, a truncated one -- so the caller re-raises the
+    decoder's ORIGINAL offset-0 error and the reply is bucketed
+    ``leading-delimiter`` exactly as it was before the tolerance existed. A
+    recovery that reported itself as a different class for the same bytes would
+    move the arm's rejection histogram without recovering anything.
+    """
+
+    with pytest.raises(DecisionParseError, match="not valid JSON") as info:
+        parse_decision(reply, observation(), route=ROUTE)
+
+    assert classify_rejection(str(info.value)) == "leading-delimiter"
+
+
+def test_a_located_object_is_still_validated(tmp_path: Path) -> None:
+    """Locating an object is not accepting it.
+
+    A preamble in front of a batch whose coordinates name a pixel outside the
+    frame gets the class its OWN defect earns -- ``out-of-frame-coordinate``,
+    with the coordinate hint -- rather than the leading one. That is what makes
+    the tolerance a framing rule: it changes which object the reply is read from,
+    never whether the object is admissible. The coordinates are a real refusal
+    from the corpus (``17,803`` against a 1280x720 screen), and the frame is the
+    adapter's own, so the batch clears every rule except the coordinate bound.
+    """
+
+    current = _arm_observation(tmp_path, observation().observation_id)
+    far = _click_payload(current, "screen", x=17, y=803)
+
+    from local_operator.evaluation.runner.provider_client import ActionBatchRefused
+
+    with pytest.raises(ActionBatchRefused) as info:
+        parse_decision("Here is the batch: " + far, current, route=ROUTE)
+
+    assert info.value.class_key == "out-of-frame-coordinate"
+    assert "17,803" in info.value.diagnostic
+
+
+def test_the_repair_shape_without_a_quote_is_still_read() -> None:
+    """The strictness is about BYTES, not about prose.
+
+    A model that narrates its correction and then writes its decision is the
+    shape this tolerance was widened for and it is still read: nothing precedes
+    the decision but prose, and nothing follows it. The count is asserted
+    because it is what a bundle reader has to tell a recovery from a refusal.
+    """
+
+    current = observation()
+    prefix = "Here is my corrected decision:\n"
+
+    decision = parse_decision(prefix + type_payload(current), current, route=ROUTE)
+
+    assert decision.leading_framing_bytes == len(prefix)
+    decision.action_batch.validate_for(current)
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "\nand it was refused because the coordinates were wrong.",
+        "\nHere is my corrected decision: {truncated}",
+        "\nHere is my corrected decision: {decision}",
+    ],
+    ids=["quote-and-prose", "quote-then-truncated", "quote-then-decision"],
+)
+def test_a_superseded_decision_quoted_in_the_framing_is_never_executed(tail: str) -> None:
+    """A quote of an earlier decision is context, never this turn's answer.
+
+    Measured in review of the candidate-counting form of this tolerance: when
+    THIS turn's decision was unreadable -- a truncation, which is 12.7% of this
+    arm's refusals, or no decision at all -- the quoted envelope was the reply's
+    only complete decision-shaped object, so it was read and EXECUTED. That is
+    worse than the rejection the tolerance removed: a wrong click in a benchmark
+    is unrecoverable, silently scored, and, being an acceptance, leaves no
+    rejection artifact behind to notice it in. Every shape that carries its
+    context with it -- prose after the quote, an unreadable live decision, or a
+    readable one -- fails the rule's third condition.
+    """
+
+    current = observation()
+    quoted = type_payload(current)
+    live = type_payload(current)
+    reply = "My earlier reply was:\n" + quoted + tail
+    reply = reply.replace("{truncated}", live[:-8]).replace("{decision}", live)
+
+    with pytest.raises(DecisionParseError) as info:
+        parse_decision(reply, current, route=ROUTE)
+
+    assert classify_rejection(str(info.value)) == "leading-delimiter"
+
+
+def test_a_quote_with_nothing_else_is_indistinguishable_from_a_decision() -> None:
+    """The residue, pinned so it is visible rather than assumed away.
+
+    ``My earlier reply was:\n{envelope}`` carries no byte that separates it from
+    ``Here is my decision:\n{envelope}``: one complete envelope, framing before
+    it, nothing after it. A parser holding only the reply's bytes cannot tell a
+    quotation from a decision, and this module deliberately holds only those
+    bytes -- no history, no model knowledge (see the module docstring). What the
+    rule CAN refuse it does: the quote that arrives with its context, that
+    carries a second object, or whose live decision is unreadable. Closing this
+    last shape needs a different mechanism -- the previous attempt's bytes, kept
+    outside the decoder -- not a stricter spelling of this one.
+    """
+
+    current = observation()
+    quoted = type_payload(current)
+    reply = "My earlier reply was:\n" + quoted
+
+    decision = parse_decision(reply, current, route=ROUTE)
+
+    # Read as the decision the reply's own bytes state, and recorded as a reply
+    # that needed the leading tolerance, so a bundle can count it.
+    reference = parse_decision(quoted, current, route=ROUTE)
+    assert decision.action_batch.to_canonical_json() == reference.action_batch.to_canonical_json()
+    assert decision.leading_framing_bytes == len("My earlier reply was:\n")
+
+
+def test_the_located_read_has_no_unexamined_tail() -> None:
+    """Walking past a candidate budget with a candidate in hand is not proof.
+
+    Two shapes the candidate-counting form accepted while a tail it never read
+    held the live decision (the first) or a second complete batch (the second):
+    its loop returned the candidate it held when the attempt cap fired, and a
+    bound that silently converts "not checked" into "checked" is the opposite of
+    what the sibling trailing scan does. The structural rule refuses both without
+    scanning at all -- the located object must END the reply -- so there is no
+    budget to exhaust and no candidate to prefer over unread bytes.
+    """
+
+    current = observation()
+    shapes = {
+        # The decision is behind the padding, so a hunt that stopped early read
+        # the preamble's example instead.
+        "example-then-braces-then-the-decision": (
+            "Working... " + type_payload(current) + "{}" * 300 + type_payload(current)
+        ),
+        # A complete first batch, harmless objects, then a batch for the NEXT
+        # observation -- which the competing-batch rule cannot see, because a
+        # batch for another observation does not compete with anything.
+        "batch-then-objects-then-another-batch": (
+            "Working... "
+            + type_payload(current)
+            + " "
+            + " ".join(f'{{"j": {index}}}' for index in range(255))
+            + " "
+            + type_payload(observation(1))
+        ),
+    }
+
+    for label, candidate in shapes.items():
+        with pytest.raises(DecisionParseError) as info:
+            parse_decision(candidate, current, route=ROUTE)
+
+        assert classify_rejection(str(info.value)) == "leading-delimiter", label
+
+
+def test_the_located_read_ends_where_the_offset_zero_read_does_not() -> None:
+    """The trailing tolerance is for a reply that BEGINS with its decision.
+
+    ``{...} Hope that helps!`` is read -- that tolerance predates this change and
+    is untouched -- while the same text behind framing is refused, because behind
+    framing the bytes after the object are the context a quoted, superseded
+    decision arrives with, and nothing in the reply says which of the two it is.
+    The asymmetry is deliberate and is the price of reading the framing at all;
+    it costs a round trip only for a reply the prompt asks not to send.
+    """
+
+    current = observation()
+    payload = type_payload(current)
+    noise = " Hope that helps!"
+
+    accepted = parse_decision(payload + noise, current, route=ROUTE)
+
+    assert accepted.leading_framing_bytes == 0
+    with pytest.raises(DecisionParseError) as info:
+        parse_decision("Here you go: " + payload + noise, current, route=ROUTE)
+
+    assert classify_rejection(str(info.value)) == "leading-delimiter"
+
+
+#: ``frame_id`` on a ``wait`` inside a two-action batch, verbatim from
+#: ``judge5-20260921-231232`` (artifact sha256 ``679459938439``): the whole batch
+#: -- including the ``click`` that was perfectly well formed -- was refused for
+#: the stray field on its second action.
+_SIBLING_FIELD_REPLY = (
+    '{"actions": [{"frame_id": "screen", "kind": "click", "observation_id": '
+    '"84b97643dab3e645c382d5fb5eb6e475bfbb1120e997217ef36db5dfac751c10", "x": 486, "y": 102}, '
+    '{"frame_id": "screen", "kind": "wait", "observation_id": '
+    '"84b97643dab3e645c382d5fb5eb6e475bfbb1120e997217ef36db5dfac751c10", "duration_ms": 800}], '
+    '"public_observations": "Degree audit PDF opened in Document Viewer."}'
+)
+#: The id every action in that reply binds to. The real note is longer; it is not
+#: reproduced here because the tolerance is about the fields, and the reply text
+#: above is the artifact's own bytes up to that string.
+_SIBLING_FIELD_OBSERVATION = "84b97643dab3e645c382d5fb5eb6e475bfbb1120e997217ef36db5dfac751c10"
+
+
+def test_a_field_of_a_sibling_kind_is_dropped_and_reported(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The ``kind`` tag is the statement of what the model chose.
+
+    ``wait`` takes no ``frame_id``, and the required ``kind`` tag is explicit, so
+    the stray field cannot change which action the model chose -- the fields the
+    chosen kind takes are all still there to be validated. Refusing the batch for
+    it discarded a complete, executable decision and billed a corrective round
+    trip for it, so the field is dropped and reported instead, and the REPORT is
+    asserted: a tolerance nobody can observe is indistinguishable from the
+    harness quietly mangling a reply.
+    """
+
+    current = _arm_observation(tmp_path, _SIBLING_FIELD_OBSERVATION)
+
+    with caplog.at_level(logging.WARNING):
+        decision = parse_decision(_SIBLING_FIELD_REPLY, current, route=ROUTE)
+
+    click, wait = decision.action_batch.actions
+    assert isinstance(click, ClickAction) and (click.x, click.y) == (486, 102)
+    assert isinstance(wait, WaitAction) and wait.duration_ms == 800
+    # The declaration's own fields survive untouched -- only the sibling's go.
+    assert click.frame_id == "screen"
+    assert "wait.frame_id" in caplog.text
+    # Counted, not just logged: an accepted reply leaves no rejection artifact,
+    # so this number is the only way a sealed bundle can show the class at all.
+    assert decision.tolerated_action_fields == 1
+    assert decision.leading_framing_bytes == 0
+    decision.action_batch.validate_for(current)
+
+
+@pytest.mark.parametrize(
+    ("action", "expected_class"),
+    [
+        # A name no action kind declares.
+        ({"kind": "wait", "duration_ms": 1, "pause_until": "settled"}, "extra-action-key"),
+        # A near-miss of a field the kind DOES take.
+        ({"kind": "wait", "duration_ms": 1, "duration": 2}, "extra-action-key"),
+        # A required field of the declared kind, absent.
+        ({"kind": "wait"}, "field-invalid"),
+        # ... present with the wrong type.
+        ({"kind": "wait", "duration_ms": "500"}, "field-invalid"),
+        # A droppable sibling field BESIDE a mistyped required one. The drop must
+        # not turn a broken batch into an accepted one.
+        (
+            {"kind": "wait", "frame_id": "screen", "duration_ms": "500"},
+            "field-invalid",
+        ),
+    ],
+    ids=["unknown-name", "near-miss", "required-absent", "required-mistyped", "both"],
+)
+def test_the_field_tolerance_stops_at_the_vocabulary(
+    action: dict[str, Any], expected_class: str
+) -> None:
+    """Everything the drop does not reach keeps the refusal it always had.
+
+    Only a field that some OTHER kind declares is dropped -- an enumerable set the
+    vocabulary itself fixes. A name no kind declares, a near-miss field, and a
+    required field that is absent or mistyped are all still refused, and the last
+    row is the one that keeps the two rules from composing into an acceptance:
+    dropping the sibling field leaves the mistyped required one to fail exactly
+    as it did before.
+    """
+
+    current = observation()
+    reply = json.dumps({"actions": [{**action, "observation_id": current.observation_id}]})
+
+    with pytest.raises(DecisionParseError) as info:
+        parse_decision(reply, current, route=ROUTE)
+
+    assert classify_rejection(str(info.value)) == expected_class, str(info.value)
+
+
+def test_the_sibling_field_tolerance_is_shared_with_the_tool_channel(tmp_path: Path) -> None:
+    """Both reply channels converge on one validated structure.
+
+    The offered reply-channel call carries the same envelope as parameters, and
+    the runner assembles it through ``action_tool._build_batch``. A drop that ran
+    on only one of the two would refuse a decision the other accepts, which is
+    exactly the drift ``harness/reply_channel.py`` exists to prevent.
+
+    Scoped to the DROP on purpose: the prose channel also accepts an ``actions``
+    value that is a JSON-encoded string, and that tolerance is deliberately not
+    mirrored here -- a call whose argument contradicts the type the channel
+    offered it is refused, while the same bytes arriving as prose are read.
+    """
+
+    from local_operator.evaluation.runner.action_tool import _build_batch
+
+    current = _arm_observation(tmp_path, _SIBLING_FIELD_OBSERVATION)
+    arguments = json.loads(_SIBLING_FIELD_REPLY)
+
+    batch = _build_batch(arguments, current)
+
+    assert len(batch.actions) == 2
+    assert isinstance(batch.actions[1], WaitAction)
+    assert batch.actions[1].duration_ms == 800
+    batch.validate_for(current)
+
+
+def test_the_action_field_table_is_derived_from_every_kind() -> None:
+    """The table the drop measures against cannot drift from the vocabulary.
+
+    It is built from the action models rather than transcribed, and this pins
+    that both halves still hold: every kind the protocol declares is covered, and
+    every kind's own field set is stated. A kind added without a row would make
+    its fields invisible to the tolerance -- silently, because the drop would
+    simply stop recognising them.
+
+    The kinds are listed LITERALLY rather than recomputed, because recomputing
+    them moves both sides together: a kind whose ``kind`` annotation stopped
+    being a ``Literal`` would vanish from the table and from the expectation at
+    the same moment, and the assertion would pass over exactly the drift it
+    exists to catch.
+    """
+
+    from local_operator.evaluation.protocol import ComputerAction
+    from local_operator.evaluation.runner.public_reply import (
+        _ACTION_FIELD_NAMES,
+        _ACTION_KIND_FIELDS,
+    )
+
+    #: Every action kind the protocol declares, transcribed deliberately.
+    declared_kinds = {
+        "click",
+        "double_click",
+        "type",
+        "key",
+        "paste_text",
+        "scroll",
+        "wait",
+        "finish",
+        "ask_user",
+    }
+
+    assert set(_ACTION_KIND_FIELDS) == declared_kinds
+    for kind, fields in _ACTION_KIND_FIELDS.items():
+        assert "kind" in fields, kind
+        assert "observation_id" in fields, kind
+    # And the table is not merely complete: each kind name is declared by a model
+    # whose ``kind`` really is a ``Literal``, which is what makes the table
+    # derivable in the first place.
+    for model in get_args(get_args(ComputerAction)[0]):
+        annotation = model.model_fields["kind"].annotation
+        assert get_args(annotation), f"{model.__name__}.kind is not a Literal: {annotation!r}"
+        assert set(get_args(annotation)) <= declared_kinds
+    # The per-kind field sets are within the vocabulary the drop measures against,
+    # or a kind's own fields would be invisible to it.
+    for kind, fields in _ACTION_KIND_FIELDS.items():
+        assert fields <= _ACTION_FIELD_NAMES, kind
+    # The fields the measured corpus put on the wrong kinds, all present, or the
+    # tolerance would have been built for traffic it cannot see.
+    assert {"frame_id", "duration_ms", "delta_y", "text", "keys"} <= _ACTION_FIELD_NAMES

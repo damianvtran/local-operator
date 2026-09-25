@@ -15,7 +15,7 @@ from local_operator.model.defaults import DEFAULT_MODEL_NAMES, default_model_for
 
 
 def test_default_model_for_known_provider() -> None:
-    assert default_model_for("deepseek") == "deepseek-chat"
+    assert default_model_for("deepseek") == "deepseek-flash"
     assert default_model_for("zai") == "glm-5.3"
     # noop aliases to test, which has no default.
     assert default_model_for("noop") is None
@@ -44,7 +44,7 @@ def test_apply_login_defaults_sets_hosting_and_model_when_empty(
 
     manager = ConfigManager(tmp_path)
     assert manager.get_config_value("hosting") == "deepseek"
-    assert manager.get_config_value("model_name") == "deepseek-chat"
+    assert manager.get_config_value("model_name") == "deepseek-flash"
 
 
 def test_apply_login_defaults_leaves_existing_hosting_untouched(
@@ -72,16 +72,16 @@ def test_apply_login_defaults_leaves_existing_hosting_untouched(
         # Login FLAVOURS: authentication routes, not hosting ids. Each has no
         # default model of its own, which is what made the first version of the
         # repair leave the dead model in place beside the new hosting.
-        ("xai-oauth", "xai", "grok-3"),
-        ("openai-device", "openai", "gpt-4o"),
+        ("xai-oauth", "xai", "grok-4.7"),
+        ("openai-device", "openai", "gpt-6-astra"),
         ("zai-oauth", "zai", "glm-5.3"),
         # No default model even after alias resolution: the stale model must be
         # CLEARED, not kept. An empty model_name is a recoverable setup state
         # (ModelNotConfiguredError), not a fully-configured boot; a model from
         # a provider that never existed is worse (boots, then fails at stream).
-        ("alibaba-token-plan", "alibaba-token-plan", ""),
+        ("ollama", "ollama", ""),
         # Ordinary provider with a default: the baseline case.
-        ("deepseek", "deepseek", "deepseek-chat"),
+        ("deepseek", "deepseek", "deepseek-flash"),
     ],
 )
 def test_repair_never_leaves_a_model_from_the_replaced_provider(
@@ -196,7 +196,7 @@ def test_apply_login_defaults_repairs_an_unknown_hosting(
 
     reloaded = ConfigManager(tmp_path)
     assert reloaded.get_config_value("hosting") == "deepseek"
-    assert reloaded.get_config_value("model_name") == "deepseek-chat"
+    assert reloaded.get_config_value("model_name") == "deepseek-flash"
 
 
 def test_apply_login_defaults_leaves_a_legacy_alias_hosting_untouched(
@@ -238,7 +238,7 @@ def test_resolve_hosting_model_falls_back_to_default_model(
     args = argparse.Namespace(hosting=None, model=None)
     hosting, model = resolve_hosting_model(None, args, manager)
     assert hosting == "deepseek"
-    assert model == "deepseek-chat"
+    assert model == "deepseek-flash"
 
 
 def test_resolve_hosting_model_no_hosting_raises_hosting_error(
@@ -279,7 +279,7 @@ def test_resolve_hosting_model_no_hosting_raises_hosting_error(
 #: configured pair (63) — are asserted against it. The branches whose length is the IDS'
 #: are not, because no copy change can bound them: measured, `openrouter/anthropic/
 #: claude-opus-5-20260101` puts the sentence at 84 and the repairing sentence
-#: (`Replaced unusable hosting 'anthropicxyq' with 'deepseek', model to 'deepseek-chat'`)
+#: (`Replaced unusable hosting 'anthropicxyq' with 'deepseek', model to 'deepseek-flash'`)
 #: at 83, both of which wrap. That is a real, known wrap in a branch no alternative copy
 #: would fix, and it is recorded here rather than hidden by an assertion that would pass
 #: for the wrong reason.
@@ -360,7 +360,7 @@ def test_a_normal_provider_still_adopts_on_an_empty_hosting() -> None:
     plan = plan_login_defaults("xai", None, None)
 
     assert plan.hosting == "xai"
-    assert plan.model_name == "grok-3"
+    assert plan.model_name == "grok-4.7"
     assert plan.receipt is not None
 
 
@@ -424,5 +424,213 @@ def test_apply_login_defaults_writes_nothing_and_says_so_for_typesafe(
     # The WRITE branch too: literal, and inside the same row budget. This is the
     # receipt that would otherwise be the silent one — the round-4 NIT's point is that
     # every branch of this copy is asserted against the bytes a user sees.
-    assert write_receipt == "Set default hosting to 'deepseek', model to 'deepseek-chat'."
-    assert len(write_receipt) == 60 and len(write_receipt) <= RECEIPT_ROW_CELLS, len(write_receipt)
+    assert write_receipt == "Set default hosting to 'deepseek', model to 'deepseek-flash'."
+    assert len(write_receipt) == 61 and len(write_receipt) <= RECEIPT_ROW_CELLS, len(write_receipt)
+
+
+# ---------------------------------------------------------------------------
+# The suggested-model table (`model.defaults.SUGGESTED_MODELS`)
+# ---------------------------------------------------------------------------
+
+
+#: The operator's stated frontier picks (2026-09-24), each verified against the
+#: provider's own docs or live listing -- see the table's per-row comments.
+_OPERATOR_TARGETS = {
+    "anthropic": "claude-opus-5-5",
+    "openai": "gpt-6-astra",
+    # DeepSeek's direct wire id for V4.1 Flash (its /models lists exactly this).
+    "deepseek": "deepseek-flash",
+    "zai": "glm-5.3",
+    "alibaba": "qwen3.8-max",
+    "xai": "grok-4.7",
+    "google": "gemini-3.8-flash",
+}
+
+
+@pytest.mark.parametrize(("hosting", "model"), sorted(_OPERATOR_TARGETS.items()))
+def test_the_suggestions_are_the_frontier_picks(hosting: str, model: str) -> None:
+    from local_operator.model.defaults import suggested_model_for
+
+    suggestion = suggested_model_for(hosting)
+    assert suggestion is not None
+    assert suggestion.id == model
+    # The old table's ids must not creep back: each was two generations stale.
+    assert suggestion.id not in {
+        "gpt-4o",
+        "claude-3-5-sonnet-latest",
+        "grok-3",
+        "gemini-2.0-flash-001",
+        "deepseek-chat",
+    }
+
+
+def test_every_suggestion_names_a_model_the_registry_describes() -> None:
+    """A suggestion the registry answers "unknown" for would boot with a -1 window.
+
+    Aggregators are exempt by construction: their ids are the router's own and
+    carry no registry row (the listing is authoritative there).
+    """
+    from local_operator.model.defaults import OAUTH_SUGGESTED_MODELS, SUGGESTED_MODELS
+    from local_operator.model.registry import get_model_info
+
+    rows = list(SUGGESTED_MODELS.items()) + list(OAUTH_SUGGESTED_MODELS.items())
+    for hosting, suggestion in rows:
+        if hosting in ("openrouter",):
+            continue
+        info = get_model_info(hosting, suggestion.id)
+        assert info.id == suggestion.id, (hosting, suggestion.id, info.id)
+        assert (info.context_window or 0) > 0, (hosting, suggestion.id)
+
+
+def test_every_suggestion_is_named_as_the_model_picker_names_it() -> None:
+    """The desktop says "Default model set to <name>" and the model picker then
+    shows the registry row's name for the same selection. Two names for one
+    model read as two models (review round 1, #7), so wherever a shipped row
+    exists the suggestion carries that row's name verbatim. Rows without one
+    (OpenRouter's namespaced id, Radient's router) name themselves.
+    """
+    from local_operator.model.defaults import OAUTH_SUGGESTED_MODELS, SUGGESTED_MODELS
+    from local_operator.model.registry import static_models
+
+    rows = list(SUGGESTED_MODELS.items()) + list(OAUTH_SUGGESTED_MODELS.items())
+    mismatched = [
+        (hosting, suggestion.id, suggestion.name, row.name)
+        for hosting, suggestion in rows
+        if (row := static_models(hosting).get(suggestion.id)) is not None
+        and row.name != suggestion.name
+    ]
+    assert mismatched == []
+
+
+def test_every_hosted_cloud_provider_has_a_suggestion() -> None:
+    """The desktop shows "Suggested: ..." on every cloud provider card; a gap is a
+    blank card and a first sign-in that leaves the model empty."""
+    from local_operator.model.defaults import suggested_model_for
+    from local_operator.providers.registry import (
+        PROVIDER_REGISTRY,
+        credential_provider_id,
+    )
+
+    for provider in PROVIDER_REGISTRY:
+        storage = credential_provider_id(provider.id)
+        if provider.allows_missing_api_key or provider.decision_only or provider.wire == "mock":
+            continue
+        assert suggested_model_for(storage) is not None, storage
+
+
+def test_default_model_names_is_derived_from_the_suggestions() -> None:
+    from local_operator.model.defaults import SUGGESTED_MODELS
+
+    assert DEFAULT_MODEL_NAMES == {h: s.id for h, s in SUGGESTED_MODELS.items()}
+
+
+def test_the_route_decides_the_kimi_spelling() -> None:
+    """Kimi's OAuth grant reaches the coding-plan host (``k3``); a key reaches
+    api.moonshot.cn (``kimi-k3``). Each must get the id its host serves."""
+    from local_operator.providers.login_defaults import plan_login_defaults
+
+    assert plan_login_defaults("kimi", "", None).model_name == "k3"
+    assert plan_login_defaults("kimi", "", None, oauth=False).model_name == "kimi-k3"
+    # Every other OAuth flavour serves the API-key id.
+    assert plan_login_defaults("xai-oauth", "", None).model_name == "grok-4.7"
+    assert plan_login_defaults("zai-oauth", "", None).model_name == "glm-5.3"
+    assert plan_login_defaults("anthropic", "", None).model_name == "claude-opus-5-5"
+
+
+def test_the_cli_plans_with_the_flavour_that_ran_not_the_storage_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``radient-key`` stores under ``radient``, whose own login is OAuth, so a
+    storage-id derivation planned a pasted key as an OAuth grant (review round
+    1, #5). Kimi is where the flavour changes the model id, so it is the probe:
+    the CLI must hand the planner what the login actually returned.
+    """
+    from local_operator.paths import CONFIG_DIR_ENV
+    from local_operator.providers import auth_cli
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    auth_cli._apply_login_defaults("kimi", oauth=False)
+    assert ConfigManager(tmp_path).get_config_value("model_name") == "kimi-k3"
+
+    other = tmp_path / "oauth"
+    other.mkdir()
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(other))
+    auth_cli._apply_login_defaults("kimi", oauth=True)
+    assert ConfigManager(other).get_config_value("model_name") == "k3"
+
+
+@pytest.mark.parametrize(
+    ("result", "oauth"),
+    [("sk-pasted-key", False), ({"type": "oauth", "access": "a", "refresh": "r"}, True)],
+)
+def test_run_login_passes_the_result_shape_as_the_flavour(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, result: object, oauth: bool
+) -> None:
+    """``run_login`` decides the flavour from what the login RETURNED (a key
+    string or an OAuth dict), not from the storage id's own definition."""
+    import dataclasses
+
+    from local_operator.providers import auth_cli, registry
+    from local_operator.providers.auth_store import AuthStore
+
+    async def login(_callbacks, **_kwargs):
+        return result
+
+    definition = registry.get_provider_definition("radient")
+    assert definition is not None
+    monkeypatch.setitem(registry._BY_ID, "radient", dataclasses.replace(definition, login=login))
+    seen: list[tuple[str, bool | None]] = []
+    monkeypatch.setattr(
+        auth_cli, "_apply_login_defaults", lambda pid, *, oauth=None: seen.append((pid, oauth))
+    )
+    store = AuthStore(tmp_path / "auth.db", config_dir=tmp_path)
+    try:
+        assert auth_cli.run_login("radient", tmp_path, store) == 0
+    finally:
+        store.close()
+    assert seen == [("radient", oauth)]
+
+
+def test_an_empty_model_beside_the_same_provider_is_filled() -> None:
+    """Hosting already this provider, model empty: fill the suggestion, keep hosting."""
+    from local_operator.providers.login_defaults import plan_login_defaults
+
+    plan = plan_login_defaults("anthropic", "anthropic", "")
+    assert plan.hosting is None
+    assert plan.model_name == "claude-opus-5-5"
+    assert plan.model_label == "Claude Opus 5.5"
+    assert plan.receipt == "Set default model to 'claude-opus-5-5'."
+    # A flavour counts as the same provider.
+    assert plan_login_defaults("xai-oauth", "xai", None).model_name == "grok-4.7"
+
+
+def test_an_empty_model_beside_another_provider_is_left_alone() -> None:
+    """Writing Y's model beside X's hosting would boot and fail at stream time."""
+    from local_operator.providers.login_defaults import plan_login_defaults
+
+    plan = plan_login_defaults("xai", "anthropic", "")
+    assert (plan.hosting, plan.model_name, plan.receipt) == (None, None, None)
+
+
+def test_a_chosen_model_is_never_overridden() -> None:
+    from local_operator.providers.login_defaults import plan_login_defaults
+
+    plan = plan_login_defaults("anthropic", "anthropic", "claude-sonnet-5")
+    assert (plan.hosting, plan.model_name, plan.receipt) == (None, None, None)
+
+
+def test_apply_writes_a_model_only_plan(tmp_path: Path) -> None:
+    """The shared writer: a plan that sets only the model must still be written
+    (each front end used to gate the model write on a hosting write)."""
+    from local_operator.providers.login_defaults import (
+        apply_login_defaults,
+        plan_login_defaults,
+    )
+
+    manager = ConfigManager(tmp_path)
+    manager.set_config_value("hosting", "anthropic")
+    plan = plan_login_defaults("anthropic", "anthropic", "")
+    assert apply_login_defaults(manager, plan) is True
+    reloaded = ConfigManager(tmp_path)
+    assert reloaded.get_config_value("hosting") == "anthropic"
+    assert reloaded.get_config_value("model_name") == "claude-opus-5-5"
