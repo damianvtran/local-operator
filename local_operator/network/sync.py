@@ -53,7 +53,7 @@ import os
 import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -110,6 +110,14 @@ ATTACHMENT_PREFIX = "attachments/"
 
 TRANSCRIPT_NAME = "transcript.jsonl"
 
+#: ``attachments`` — the store's own directory name (``session/attachments.py``'s
+#: ``ATTACHMENTS_DIRNAME``), spelled here for the same import-weight reason the copy set
+#: is. ``content_trees`` needs it: inside a REPLICA the blob store sits under the copy,
+#: and a blob is a member of the copy set in its own right
+#: (``referenced_attachments_in``), so walking it as a tree would give one file a second
+#: name and a second digest.
+ATTACHMENTS_DIRNAME = "attachments"
+
 #: The session's birth-time sidecar's name (``session/creation.CREATED_AT_NAME``),
 #: spelled here for the same import-weight reason the rest of the copy set is: this
 #: module is imported at relay construction and ``session.creation`` is not lean.
@@ -138,6 +146,22 @@ COPY_SET_NAMES: tuple[str, ...] = (
     # round 1, B-M2). Copied rather than recomputed: a birth time is not derivable
     # from anything else on the destination.
     CREATED_AT_NAME,
+    # THE JUDGED-GOAL RECORD (``resume.GOAL_SIDECAR_NAME``). ``origin/main`` added
+    # it while this branch was open and it landed in NEITHER list, so a session with
+    # a judged goal REFUSED to move, ``--keep`` dropped the objective silently and a
+    # recovered replica came back with no goal at all — the exact failure B-M2's
+    # guard exists for, arriving through the guard (review round 2, MAJOR 1). A
+    # judged goal is work in progress that the user cannot get back, so it travels.
+    "goal.json",
+    # A FORK'S UNCONSUMED OPENING MESSAGE (``fork.BOOT_PROMPT_NAME``): ``/fork <msg>``
+    # parks the message here and the fork's first boot consumes it. If the fork is
+    # moved before it was ever opened, leaving this behind would silently discard the
+    # instruction the user typed. (Consequence, stated so the next reader does not
+    # have to derive it: a ``--keep`` copy of a never-opened fork also carries it, so
+    # that copy's first boot injects the parent's opening message. ``fork_session``
+    # deliberately does not — but ``--keep`` is a copy of a session, not a fork of a
+    # running one, and losing the message outright is the worse of the two.)
+    "boot-prompt.json",
 )
 
 #: Directories a session directory may hold whose FILES are the user's own
@@ -147,6 +171,29 @@ COPY_SET_NAMES: tuple[str, ...] = (
 #: directories hold one, so leaving it out of the copy set while the commit
 #: ``rmtree``d the source destroyed real work (review round 1, B-M2).
 COPY_SET_TREES: tuple[str, ...] = ("scratchpad",)
+
+#: Directories whose CONTENTS are re-creatable machinery rather than work: a python
+#: bytecode cache or a test runner's cache an agent's own command left behind. They
+#: are excluded rather than refused (their bytes are derivable, and a 300 MB
+#: ``.pytest_cache`` in a move is pure cost), and rather than copied (a cache is not
+#: content, and the destination's own tools rebuild theirs).
+CACHE_TREE_NAMES: tuple[str, ...] = (
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".ipynb_checkpoints",
+)
+
+#: The suffix EVERY atomic writer in this codebase puts on its temporary (see
+#: ``session/runtime/registry._staged_write`` and ``resume``'s sidecar writers): the
+#: temp sits in the same directory as its target and is renamed over it, so a writer
+#: killed mid-call leaves a ``<name>.<pid>.tmp`` sibling. Such a leftover is a crash
+#: artifact, not content, and before this it made a session PERMANENTLY unmovable
+#: (review round 2, MINOR 2: ``.subagent-roster.v1.json.<rand>.tmp`` and
+#: ``title-scan.<pid>.tmp`` in the real store). Matched by suffix at the session ROOT
+#: only: inside a copy-set tree a ``.tmp`` file is the user's own, and it travels.
+TRANSIENT_SUFFIX = ".tmp"
 
 #: The prefix a file inside a tree travels under, so both ends agree where it
 #: lands (``scratchpad/notes.md``) exactly as ``ATTACHMENT_PREFIX`` does for a
@@ -212,6 +259,17 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     # and that unlink can leave one behind, and ``mobility``'s recovery removes it
     # rather than treating it as content.
     "ready.json": "the move's own boot marker, not session content",
+    # An UPDATE WINDOW's marker (``session/runtime/inbox.UPDATE_WINDOW_NAME``): a live
+    # process's note to its successor that it is moving to a new build. On the
+    # destination it would tell an unrelated runtime that an update it never ran was
+    # applied. It is also transient by construction (the writer clears it), so
+    # copying it would be a claim about the wrong device.
+    "update-window.json": "an update window's own marker, meaningful only where it was opened",
+    # An EXIT REQUEST (``session/runtime/registry.EXIT_REQUEST_NAME``) is a control
+    # message ADDRESSED to a runtime, and the reader honours it only while it is fresh
+    # (``process._EXIT_REQUEST_FRESH_S``). Carried to the destination it would be an
+    # instruction from another device to stop a conversation that device does not own.
+    "runtime-exit-request.json": "an exit request addressed to the runtime that wrote it",
 }
 
 #: The tuple the code branches on. Kept as a tuple (rather than reading
@@ -334,88 +392,302 @@ def copy_set(root: Path, session_id: str) -> list[str]:
     return [name for name in COPY_SET_NAMES if (directory / name).is_file()]
 
 
-def tree_entry_names(directory: Path) -> list[str]:
-    """Every regular file under the copy-set trees, as ``<tree>/<relpath>``.
+#: ``b"\x00link\x00"`` / ``b"\x00file\x00"`` — what a member IS, fed into the content
+#: digest beside its name, so a link and a one-byte file with the same bytes cannot
+#: produce the same digest.
+_LINK_MARK = b"\x00link\x00"
+_FILE_MARK = b"\x00file\x00"
 
-    ONE FLAT NAMESPACE, sorted, POSIX separators. The wire carries a ``name`` and
-    both ends must derive the same list from the same directory, so the order and
-    the spelling are part of the format rather than an implementation detail:
-    ``_content_digest`` hashes this list on the owner and again on the copy.
 
-    ``followlinks=False`` and an explicit regular-file test, because a symlink is
-    NOT portable data: its target names a path on the source device, and writing
-    the same text on the destination would point an agent at a different file (or
-    at nothing). Those entries are reported by :func:`irregular_tree_entries` so a
-    DELETING move refuses rather than skipping them silently.
+def content_trees(directory: Path) -> list[str]:
+    """Every tree under ``directory`` whose contents travel, as flat names.
+
+    ``COPY_SET_TREES`` plus any OTHER directory at the session root. The second half
+    is review round 2's real-store finding: 17 of the operator's 11,115 sessions hold
+    a directory an agent or the user created at the root (``notes``, ``drafts``,
+    ``workspace``, ``qa-1443``, ``bench``, …), and refusing those made a move
+    impossible on exactly the sessions people work in. A directory at the session root
+    is CONTENT: an unknown FILE beside it is still refused, and the asymmetry is
+    deliberate and narrow — a file's meaning is keyed by its NAME (``resume`` reads
+    sidecars by name, so an unrecognised name may be read as something it is not, and
+    guessing about that is how the two entries B-M2 exists for were destroyed), while a
+    directory is a container whose contents can be copied byte for byte without
+    interpreting them. ``CACHE_TREE_NAMES`` are the exceptions, and they are excluded
+    by name with the reason attached.
+
+    ``attachments`` is never walked here even when it sits inside ``directory`` (it does
+    inside a REPLICA): a blob is a member of the copy set in its own right
+    (``referenced_attachments_in``), with the store-relative name both ends agree on, so
+    walking it a second time would be a second name for one file.
     """
-    names: list[str] = []
-    for tree in COPY_SET_TREES:
-        base = Path(directory) / tree
-        if base.is_symlink() or not base.is_dir():
-            continue
-        for parent, dirnames, filenames in os.walk(base, followlinks=False):
-            dirnames[:] = sorted(
-                name for name in dirnames if not (Path(parent) / name).is_symlink()
-            )
-            for filename in sorted(filenames):
-                path = Path(parent) / filename
-                if path.is_symlink() or not path.is_file():
-                    continue
-                names.append(f"{tree}/{path.relative_to(base).as_posix()}")
-    return sorted(names)
-
-
-def irregular_tree_entries(directory: Path) -> list[str]:
-    """Entries inside a copy-set tree that are NOT regular files.
-
-    Symlinks, fifos, sockets and device nodes. Reported rather than merely skipped
-    because a move DELETES the source, and "we did not copy this and then deleted
-    it" is data loss whatever the entry was. 100 of the operator's 3,019
-    scratchpads hold a symlink (measured 2026-09-24), so refusing that move with
-    the path named is the honest answer: nothing is lost, and the sentence says
-    which entry to remove first.
-    """
+    directory = Path(directory)
     found: list[str] = []
-    for tree in COPY_SET_TREES:
-        base = Path(directory) / tree
-        if base.is_symlink():
-            found.append(tree)
+    for name in COPY_SET_TREES:
+        path = directory / name
+        if path.is_dir() and not path.is_symlink():
+            found.append(name)
+    try:
+        children = sorted(directory.iterdir())
+    except OSError:
+        return found
+    for child in children:
+        if child.name in found or child.name in CACHE_TREE_NAMES or child.name in NEVER_COPIED:
             continue
-        if not base.is_dir():
-            if base.exists():
-                found.append(tree)
+        if child.name == ATTACHMENTS_DIRNAME:
             continue
+        if child.is_dir() and not child.is_symlink():
+            found.append(child.name)
+    return found
+
+
+def _inside_session(directory: Path, resolved: Path) -> bool:
+    """Is a symlink's resolved target inside the session directory ``directory``?"""
+    try:
+        base = Path(directory).resolve()
+        target = Path(resolved).resolve()
+    except OSError:
+        return False
+    return target == base or base in target.parents
+
+
+def _portable_link_target(directory: Path, link: Path) -> str:
+    """The target text to WRITE on the destination for the symlink ``link``, or ``""``.
+
+    ``""`` means the link points OUTSIDE the session, and that is the one shape a
+    deleting move refuses (see :func:`_tree_entries`). For a link that stays inside, the
+    text is rewritten to a RELATIVE path from the link's own directory, so the link
+    means the same thing after the session lands somewhere else — which an absolute path
+    spelling the source's store root would not (the destination's config root is a
+    different path, and on another device it is a different machine's home).
+
+    A relative path is computed LEXICALLY (``os.path.relpath``), deliberately: the target
+    may not exist (a dangling link inside the session is still carried, and stays exactly
+    as dangling as it was), and a resolved path would collapse the very component the
+    link exists to name.
+    """
+    try:
+        target = os.readlink(link)
+    except OSError:
+        return ""
+    resolved = Path(target) if os.path.isabs(target) else link.parent / target
+    if not _inside_session(directory, resolved):
+        return ""
+    return os.path.relpath(str(resolved), str(link.parent))
+
+
+def _tree_entries(
+    directory: Path,
+) -> tuple[list[str], list[tuple[str, str]], list[str], list[str]]:
+    """ONE walk of every content tree. Four answers, because they get four treatments.
+
+    * regular files, ``<tree>/<relpath>`` — they travel as bytes;
+    * symlinks whose target stays INSIDE this session, as ``(name, target)`` — carried,
+      with the target rewritten to a relative path (see :func:`_portable_link_target`);
+    * symlinks whose target is OUTSIDE the session — a device-local path, which on the
+      destination resolves to a DIFFERENT file or to nothing, so a deleting move refuses
+      and names it (this is the shape the module's own docstring has always argued
+      about, and it is now the only one);
+    * entries that are neither file nor symlink — a fifo, a socket, a device node. They
+      hold NO data: the payload lives in the process that created them, which the
+      destination cannot have. So nothing is lost by leaving one behind, and a tmux
+      socket left by a killed rig must not make a session permanently unmovable. They
+      are reported in the plan rather than refused.
+
+    136 of the operator's sessions were refused for a symlink in ``scratchpad/`` before
+    this: 6,629 of those links point INSIDE their own session (pytest's ``*-current``
+    links, a venv's ``python3``), so carrying those is what makes the feature usable on
+    this machine, and 341 point outside (a scratch checkout, ``/var/folders``), so those
+    still refuse with the link named.
+    """
+    directory = Path(directory)
+    files: list[str] = []
+    links: list[tuple[str, str]] = []
+    irregular: list[str] = []
+    unportable: list[str] = []
+    for tree in content_trees(directory):
+        base = directory / tree
         for parent, dirnames, filenames in os.walk(base, followlinks=False):
             keep: list[str] = []
             for name in sorted(dirnames):
                 path = Path(parent) / name
-                if path.is_symlink():
-                    found.append(f"{tree}/{path.relative_to(base).as_posix()}")
-                else:
+                if not path.is_symlink():
                     keep.append(name)
+                    continue
+                flat = f"{tree}/{path.relative_to(base).as_posix()}"
+                target = _portable_link_target(directory, path)
+                if target:
+                    links.append((flat, target))
+                else:
+                    irregular.append(flat)
             dirnames[:] = sorted(keep)
-            for filename in sorted(filenames):
-                path = Path(parent) / filename
-                if path.is_symlink() or not path.is_file():
-                    found.append(f"{tree}/{path.relative_to(base).as_posix()}")
-    return sorted(found)
+            for name in sorted(filenames):
+                path = Path(parent) / name
+                flat = f"{tree}/{path.relative_to(base).as_posix()}"
+                if path.is_symlink():
+                    target = _portable_link_target(directory, path)
+                    if target:
+                        links.append((flat, target))
+                    else:
+                        irregular.append(flat)
+                elif path.is_file():
+                    files.append(flat)
+                else:
+                    unportable.append(flat)
+    return sorted(files), sorted(links), sorted(irregular), sorted(unportable)
+
+
+def tree_entry_names(directory: Path) -> list[str]:
+    """Every regular file under the content trees, as ``<tree>/<relpath>``.
+
+    Sorted, and flat rather than nested, because this list is not only an iteration
+    order: the spelling is part of the format rather than an implementation detail:
+    ``_member_stamps`` hashes this list on the owner and again on the copy.
+    """
+    return _tree_entries(directory)[0]
+
+
+def tree_link_entries(directory: Path) -> list[tuple[str, str]]:
+    """Every carried symlink under the content trees, as ``(name, target)``.
+
+    ``target`` is what to WRITE, not what the source holds: a relative path, so the
+    link survives the session's location changing (see ``_portable_link_target``).
+    """
+    return _tree_entries(directory)[1]
+
+
+def unportable_tree_entries(directory: Path) -> list[str]:
+    """Fifos, sockets and device nodes inside a content tree. Reported, never carried.
+
+    They are not data (see :func:`_tree_entries`), so a move neither copies them — it
+    cannot — nor refuses for them.
+    """
+    return _tree_entries(directory)[3]
+
+
+def irregular_tree_entries(directory: Path) -> list[str]:
+    """Entries inside a content tree that a DELETING move must not walk past.
+
+    ONE shape remains: a symlink whose target is not inside this session. A
+    device-local target is not portable data — the same text on the destination names a
+    different file, or nothing — and since a move DELETES the source, "we did not carry
+    this and then deleted it" is data loss whatever the entry was. Refusing with the
+    path named is the honest answer: nothing is lost, and the sentence says what to do.
+    """
+    return _tree_entries(directory)[2]
 
 
 def unlisted_entries(directory: Path) -> list[str]:
-    """Top-level names in ``directory`` that NEITHER list accounts for.
+    """Top-level names in ``directory`` that NO list accounts for.
 
     A name here is an entry type the copy set has never been taught — which is
     exactly the state ``scratchpad/`` and ``created_at.json`` were in while a move
     deleted them (review round 1, B-M2). Adding a genuinely untravelling name to
     ``EXCLUDED_ENTRIES`` with its reason is the escape hatch; the point is that the
     decision be made on purpose rather than by omission.
+
+    Four shapes are NOT listed, and each is a fact about this directory rather than an
+    unclassified entry type:
+
+    * a DIRECTORY — carried by ``content_trees`` (or excluded there by name);
+    * a ``*.tmp`` leftover — the corpse of an atomic write, not content;
+    * a cache directory (``CACHE_TREE_NAMES``);
+    * a symlink — carried by the tree walk if it is inside a tree (its target rewritten
+      relative), and refused HERE if it sits at the root, whichever name it carries: the
+      root is the one place no product writer puts one, and a root link is a pointer to
+      something OUTSIDE the session that the destination would either lose or resolve
+      elsewhere.
+
+    THE SHAPE IS CHECKED BEFORE THE NAME LISTS, and that ordering is the fix for review
+    round 3's MAJOR. It used to be the other way round, on the reasoning that a classified
+    name needs no classification — and a session whose ``scratchpad`` was a SYMLINK then
+    fell through both the copy set (``content_trees`` does not walk a link, correctly) and
+    this function (the name was classified, so it was skipped). The plan reported
+    ``trees: []``, ``trees_skipped: []``, the move committed and the source directory was
+    removed WITH the link in it: the session's only pointer to the user's tree gone, and
+    nothing in the copy or the plan naming it. Names in ``NEVER_COPIED`` keep their
+    exclusion, because their reason is about whose state the file is rather than about its
+    shape.
     """
     listed = set(COPY_SET_NAMES) | set(NEVER_COPIED) | set(COPY_SET_TREES)
+    directory = Path(directory)
+    try:
+        children = sorted(directory.iterdir())
+    except OSError:
+        return []
+    found: list[str] = []
+    for child in children:
+        name = child.name
+        if child.is_symlink() and name in listed and name not in NEVER_COPIED:
+            found.append(name)
+            continue
+        if name in listed or name in CACHE_TREE_NAMES:
+            continue
+        if name.endswith(TRANSIENT_SUFFIX) and child.is_file() and not child.is_symlink():
+            continue
+        if child.is_dir() and not child.is_symlink():
+            # A DIRECTORY IS CONTENT, EXCEPT WHERE IT IS THE STORE'S OWN. ``attachments``
+            # at a session root is not a blob store (the store lives at the config root)
+            # and not a member of the copy set, so it is refused like any other name this
+            # build cannot account for: an adopter reads blobs through the store, and a
+            # copy that carried this directory would land content nothing looks at.
+            if name == ATTACHMENTS_DIRNAME:
+                found.append(name)
+            continue
+        found.append(name)
+    return found
+
+
+def excluded_cache_trees(directory: Path) -> list[str]:
+    """Directories at the session root whose contents are caches (reported, not copied).
+
+    Reported for the same reason ``transient_entries`` is: an entry a copy deliberately
+    leaves behind should be visible in the plan, so "why did my ``.pytest_cache`` not come
+    across?" has an answer in the document rather than in a comment.
+    """
     try:
         children = sorted(Path(directory).iterdir())
     except OSError:
         return []
-    return [child.name for child in children if child.name not in listed]
+    return [
+        child.name
+        for child in children
+        if child.name in CACHE_TREE_NAMES and child.is_dir() and not child.is_symlink()
+    ]
+
+
+def symlinked_tree_entries(directory: Path) -> list[str]:
+    """``COPY_SET_TREES`` names that exist at the root as a SYMLINK (reported, refused).
+
+    Reported for the same reason ``transient_entries`` is: an entry a copy will not carry
+    must be visible in the plan, so "why is this session not moving?" has an answer in the
+    document rather than in the sentence of whichever refusal a person happens to hit.
+    ``content_trees`` does not walk a symlinked tree (see it), so without this list a plan
+    showed ``trees: []`` and ``trees_skipped: []`` for a session whose ``scratchpad`` was
+    a link — the exact blindness that let review round 3's MAJOR through.
+    """
+    try:
+        children = sorted(Path(directory).iterdir())
+    except OSError:
+        return []
+    return [child.name for child in children if child.name in COPY_SET_TREES and child.is_symlink()]
+
+
+def transient_entries(directory: Path) -> list[str]:
+    """The ``*.tmp`` leftovers at the session root, for the plan to report.
+
+    Reported rather than silently ignored so a person reading a plan can see what a
+    move left behind, and so the rule is visible at the moment someone wonders why a
+    ``.tmp`` file did not travel. The rule itself is in ``unlisted_entries``.
+    """
+    try:
+        children = sorted(Path(directory).iterdir())
+    except OSError:
+        return []
+    return [
+        child.name
+        for child in children
+        if child.name.endswith(TRANSIENT_SUFFIX) and child.is_file() and not child.is_symlink()
+    ]
 
 
 def assert_complete(directory: Path) -> None:
@@ -427,17 +699,31 @@ def assert_complete(directory: Path) -> None:
     is still on disk for its owner.
 
     Fail-closed on purpose. The alternative — copy what we know and delete the
-    rest — is how the two entry types this guard exists for were destroyed.
+    rest — is how the two entry types this guard exists for were destroyed. The
+    sentence names every offending entry, because the person reading it is the one who
+    can move or remove it.
     """
     named = sorted(set(unlisted_entries(directory)) | set(irregular_tree_entries(directory)))
     if not named:
         return
+    # A ROOT-LEVEL SYMLINK NEEDS ITS OWN SENTENCE. "This build does not carry it" is true
+    # of an unknown name and misleading for a name the copy set DOES carry, so the shape is
+    # named and the remedy is the one that works: the link is not the tree.
+    links = symlinked_tree_entries(directory)
+    shape = (
+        f" {', '.join(links)} is a symlink rather than a directory: a copy carries a "
+        "session's own trees, and a link points at one that a copy on another device would "
+        "not have. Replace the link with the directory, or copy the tree in by hand, then "
+        "try again."
+        if links
+        else ""
+    )
     raise SyncRefused(
         "unlisted_content",
         f"{Path(directory).name} holds {', '.join(named)}, which this build's copy set "
-        "does not carry, so it was not moved. Moving it would delete that entry with "
-        "nothing to copy it from: remove or relocate it, or copy it across by hand, "
-        "then try again.",
+        "does not carry, so it was not moved. A symlink out of a session, or a file "
+        "named for something this build does not know, would be deleted with nothing to "
+        "copy it from: move or remove it, or copy it across by hand, then try again." + shape,
     )
 
 
@@ -450,6 +736,12 @@ def _safe_region(payload: bytes) -> bytes:
     exactly which bytes it already holds, and "everything up to the last newline"
     is the only boundary both sides can agree on without parsing. The tail row is
     not lost — the next sync carries it, whole.
+
+    A DELETING MOVE DOES NOT USE THIS. Nothing is writing that file (the runtime was
+    retired first), the source directory is about to be deleted, and there is no "next
+    sync" to carry the tail: cutting it deleted the user's bytes (review round 2, the
+    round-1 torn-tail finding, which reproduced as source 203 bytes / destination 150 /
+    source gone). ``whole_transcript=True`` is how a move says so.
     """
     cut = payload.rfind(b"\n")
     return payload if cut < 0 else payload[: cut + 1]
@@ -478,7 +770,7 @@ def referenced_attachments_in(directory: Path) -> list[str]:
 
     Takes the directory rather than a root plus an id because BOTH ends need it:
     the owner reads it from the session directory and a destination from its
-    staging or replica copy. ``_content_digest`` hashes the blob set this returns,
+    staging or replica copy. ``_member_stamps`` hashes the blob set this returns,
     so the two ends only agree if they derive the set the same way.
     """
     try:
@@ -493,12 +785,398 @@ def referenced_attachments(root: Path, session_id: str) -> list[str]:
     return referenced_attachments_in(session_dir(root, session_id))
 
 
+@dataclass(frozen=True)
+class _MemberStamp:
+    """One member of the copy set, as one pass over it saw it.
+
+    ``digest`` is over the bytes that are SERVED (the safe region for a transcript a
+    live runtime owns, every byte for a move), ``stat_bytes``/``mtime_ns`` are the real
+    file's, and they are what a fetch's cheap staleness check compares — one ``stat``
+    instead of re-hashing the copy set.
+    """
+
+    digest: str
+    served_bytes: int
+    stat_bytes: int
+    mtime_ns: int
+    link: str = ""
+
+
+def _stream_digest(path: Path) -> str:
+    """sha256 of a whole file, streamed in 1 MiB blocks.
+
+    STREAMED, not ``read_bytes``: the members this hashes are the user's own files, and
+    the real store holds scratchpad files in the hundreds of MB (the largest scratchpad
+    is 1.9 GB). Reading one whole to hash it is an allocation, and the copy used to make
+    that allocation once per 512 KiB chunk.
+    """
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            block = handle.read(1 << 20)
+            if not block:
+                break
+            digest.update(block)
+    return "sha256:" + digest.hexdigest()
+
+
+def _member_stamps(
+    directory: Path,
+    session_id: str,
+    attachments_dir: Path,
+    *,
+    whole_transcript: bool = False,
+) -> dict[str, _MemberStamp]:
+    """ONE pass over the copy set: every member's digest, size and stat.
+
+    THE PASS THAT REPLACED THE QUADRATIC COPY. It was ``_content_digest`` reading
+    everything on every 512 KiB chunk (review round 2, MAJOR 2: an 8 MB scratchpad cost
+    2.6 s, a 32 MB one 38.7 s, and the real store has 129 scratchpads over 32 MB) while
+    the same bytes were read AGAIN to serve the chunk. Now the digests are taken once,
+    here, and returned so the plan can hand each member's digest to the holder and the
+    fetch path can validate the member it is serving with a single ``stat``.
+
+    Members: every copy-set name present, every regular file and every CARRIED symlink
+    under the content trees, and every attachment blob and sidecar the transcript
+    references. Unreferenced blobs are deliberately out: they are store members this
+    session does not use.
+
+    A member that cannot be read is skipped, not refused: it can vanish between the walk
+    and the read (a session being written to), and the copy that follows either carries
+    what is there or fails its digests. Absent-on-one-side members make the two digests
+    disagree, which is the fail-closed direction.
+    """
+    directory = Path(directory)
+    stamps: dict[str, _MemberStamp] = {}
+    for name in COPY_SET_NAMES:
+        path = directory / name
+        try:
+            if name == TRANSCRIPT_NAME:
+                raw = path.read_bytes()
+                payload = raw if whole_transcript else _safe_region(raw)
+                stat = path.stat()
+                stamps[name] = _MemberStamp(
+                    sha256_bytes(payload), len(payload), len(raw), stat.st_mtime_ns
+                )
+                continue
+            stat = path.stat()
+            stamps[name] = _MemberStamp(
+                _stream_digest(path), stat.st_size, stat.st_size, stat.st_mtime_ns
+            )
+        except OSError:
+            continue
+    for name, target in tree_link_entries(directory):
+        try:
+            stat = (directory / name).lstat()
+        except OSError:
+            continue
+        payload = target.encode("utf-8")
+        stamps[name] = _MemberStamp(
+            sha256_bytes(payload), len(payload), len(payload), stat.st_mtime_ns, link=target
+        )
+    for name in tree_entry_names(directory):
+        path = directory / name
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        try:
+            digest = _stream_digest(path)
+        except OSError:
+            continue
+        stamps[name] = _MemberStamp(digest, stat.st_size, stat.st_size, stat.st_mtime_ns)
+    store = Path(attachments_dir)
+    for ref in referenced_attachments_in(directory):
+        for suffix in (".bin", ATTACHMENT_SIDECAR_SUFFIX):
+            wire = f"{ATTACHMENT_PREFIX}{ref}{suffix}"
+            path = store / f"{ref}{suffix}"
+            try:
+                stat = path.stat()
+                digest = _stream_digest(path)
+            except OSError:
+                continue
+            stamps[wire] = _MemberStamp(digest, stat.st_size, stat.st_size, stat.st_mtime_ns)
+    return stamps
+
+
+#: The wire value a destination sends when it is taking a session OVER rather than
+#: keeping a replica of it. It is a string on the plan request, so both sides have to
+#: agree on it; spelling it once is what ``whole_transcript_for`` is for.
+COPY_PURPOSE_MOVE = "move"
+
+
+def whole_transcript_for(purpose: str) -> bool:
+    """Does a copy made for ``purpose`` carry the transcript WHOLE?
+
+    ONE SPELLING OF THE TAIL PROPERTY, which is spread over two modules and four call
+    sites (review round 3, MINOR 2). ``_plan`` keys it on the wire string the destination
+    sends, and the SOURCE's own prepare/commit comparison passes it directly from
+    ``mobility`` — where three ``whole_transcript=True`` arguments sit in the file a
+    maintainer reads first, none of which changes what the destination receives. Reverting
+    those three leaves every torn-tail cell green; reverting this predicate fails them
+    with ``digest_mismatch``. Deriving all four from here means "fixing the wrong one" is
+    no longer possible: there is only one.
+
+    A MOVE deletes its source, so there is no next sync to carry a torn tail and the
+    transcript travels whole (review round 2). A replica of a live session keeps the safe
+    region: the next sync carries the rest (see ``_safe_region``).
+    """
+    return purpose == COPY_PURPOSE_MOVE
+
+
+#: The last few plans this process built, keyed ``(root, session_id, plan_id)``.
+#:
+#: WHY IT EXISTS. ``serve_fetch`` must answer "does this plan still describe the source?"
+#: and a full re-hash per chunk is the quadratic cost this round removes. A destination
+#: that sends ``expect_bytes``/``expect_mtime_ns`` (every destination built from here on)
+#: is answered from ITS OWN numbers, so the cache is not on that path at all. It serves
+#: the two cases where the frame carries none: an older peer, and the direct
+#: ``serve_fetch(plan=…)`` calls the tests make. Missing an entry degrades to the
+#: destination's own end-of-member digest check — one failed copy, never a bad one — which
+#: is stated rather than implied.
+#: The bound is small on purpose: a relay serves one move at a time, and an entry is a
+#: handful of strings per member.
+_PLAN_CACHE: dict[tuple[str, str, str], tuple[dict[str, _MemberStamp], bool]] = {}
+_PLAN_CACHE_MAX = 8
+_PLAN_CACHE_LOCK = threading.Lock()
+
+
+def _remember_plan(
+    root: Path,
+    session_id: str,
+    plan: str,
+    stamps: dict[str, _MemberStamp],
+    whole_transcript: bool,
+) -> None:
+    """Record the stamps behind one plan id, so a later fetch can validate cheaply.
+
+    ``whole_transcript`` is recorded WITH them because the served bytes have to be the bytes
+    the plan described: a move carries its transcript whole, a replica of a live session
+    carries the safe region, and a fetch that served the other variant would hand the holder
+    bytes whose digest is not the one it verified against.
+    """
+    key = (str(root), session_id, plan)
+    with _PLAN_CACHE_LOCK:
+        _PLAN_CACHE.pop(key, None)
+        _PLAN_CACHE[key] = (stamps, whole_transcript)
+        while len(_PLAN_CACHE) > _PLAN_CACHE_MAX:
+            _PLAN_CACHE.pop(next(iter(_PLAN_CACHE)))
+
+
+def _cached_stamp(root: Path, session_id: str, plan: str, name: str) -> _MemberStamp | None:
+    if not plan:
+        return None
+    with _PLAN_CACHE_LOCK:
+        record = _PLAN_CACHE.get((str(root), session_id, plan))
+    stamps = record[0] if record else None
+    return stamps.get(name) if stamps else None
+
+
+def member_stamps(
+    root: Path,
+    session_id: str,
+    *,
+    attachments_dir: Path | None = None,
+    whole_transcript: bool = False,
+) -> dict[str, _MemberStamp]:
+    """``_member_stamps`` for a session, for a caller that needs the plan and the digest.
+
+    The move's ``prepare`` keeps these across its retire (see ``stamps_valid``), so one
+    pass gives it the plan id, the manifest and the content digest it records in the
+    journal — where the previous shape read the whole copy set three times before the
+    destination had asked for a byte.
+    """
+    store = Path(attachments_dir) if attachments_dir is not None else Path(root) / "attachments"
+    return _member_stamps(
+        session_dir(root, session_id), session_id, store, whole_transcript=whole_transcript
+    )
+
+
+def stamps_valid(
+    directory: Path,
+    session_id: str,
+    attachments_dir: Path,
+    stamps: dict[str, _MemberStamp],
+) -> bool:
+    """Do these stamps still describe what is on disk? One ``stat`` per member.
+
+    THE CHEAP RE-CHECK, and the reason a move can hash BEFORE it stops the source's
+    runtime. It compares the size and ``mtime_ns`` each member had when it was digested
+    with the file's now. A member that vanished counts as changed. Two writes inside one
+    mtime tick could hide a change (the filesystem's mtime granularity is the limit, and
+    it is why the COMMIT still re-derives the digest from the bytes), so this answers
+    "nothing visible moved", never "the bytes are correct" — a caller that needs the
+    second answer re-digests, which is what ``_source_prepare`` does when this says no.
+    """
+    directory = Path(directory)
+    store = Path(attachments_dir)
+    for name, stamp in stamps.items():
+        # A blob lives in the store under its store-relative name; every other member is
+        # already relative to the session directory.
+        path = (
+            store / name[len(ATTACHMENT_PREFIX) :]
+            if name.startswith(ATTACHMENT_PREFIX)
+            else directory / name
+        )
+        try:
+            if stamp.link:
+                # A LINK's size is its target's text length, and ``lstat`` is the only
+                # stat that describes the link rather than what it points at.
+                if path.lstat().st_mtime_ns != stamp.mtime_ns:
+                    return False
+            else:
+                stat = path.stat()
+                if stat.st_size != stamp.stat_bytes or stat.st_mtime_ns != stamp.mtime_ns:
+                    return False
+        except OSError:
+            # GONE IS CHANGED. A member that has been removed cannot be served from a
+            # stale stamp, and skipping it silently would make the two ends' digests
+            # disagree somewhere the caller cannot see.
+            return False
+    return True
+
+
+def content_digest_from(
+    stamps: dict[str, _MemberStamp], session_id: str, *, skip: tuple[str, ...] = ()
+) -> str:
+    """The content digest of a stamp set (see ``_content_digest_from``)."""
+    return _content_digest_from(stamps, session_id, skip=skip)
+
+
+def _content_digest_from(
+    stamps: dict[str, _MemberStamp], session_id: str, *, skip: tuple[str, ...] = ()
+) -> str:
+    """The digest of what a directory holds, from stamps already taken.
+
+    THE SAME FUNCTION RUNS ON BOTH SIDES OF A MOVE: the owner digests its own
+    directory, the destination digests the copy it holds, and the owner COMMITS ONLY
+    WHEN THE TWO ARE EQUAL — the check review round 1 found missing (M-2). Feeding each
+    member's own digest rather than its bytes is what lets one pass serve both the plan
+    and this value; it is not a weaker claim, because the member digest is a sha256 of
+    exactly those bytes, and the SET of names is part of the digest in both directions
+    (a member present on one side and absent on the other changes the value).
+
+    Sorted by name, so the value cannot depend on walk order, and marked file-versus-link
+    so a link to ``x`` cannot collide with a file containing ``x``.
+    """
+    digest = hashlib.sha256()
+    digest.update(session_id.encode("utf-8"))
+    for name in sorted(stamps):
+        if name in skip:
+            continue
+        stamp = stamps[name]
+        digest.update(name.encode("utf-8"))
+        digest.update(_LINK_MARK if stamp.link else _FILE_MARK)
+        digest.update(stamp.digest.encode("ascii"))
+    return "sha256:" + digest.hexdigest()
+
+
+def _content_digest(
+    directory: Path,
+    session_id: str,
+    attachments_dir: Path,
+    *,
+    skip: tuple[str, ...] = (),
+    whole_transcript: bool = False,
+) -> str:
+    """A digest of the CONTENT a session directory holds: one value, both ends.
+
+    Covered: every copy-set name present, every regular file and carried symlink under
+    the content trees, and every attachment blob AND its sidecar that the transcript
+    references. ``skip`` exists for exactly one caller — the adopting device compares
+    against the source with ``ADOPTED_LOCALLY`` skipped, because it writes its own
+    lineage marker and fork boundary while it adopts.
+
+    Cost is O(bytes of the copy), paid once per plan, once per ``prepare``, once at the
+    commit and once on the destination before it adopts. It is NOT paid per chunk any
+    more: a chunk is validated against the plan's recorded stamp for the one member it
+    serves (review round 2, MAJOR 2).
+    """
+    return _content_digest_from(
+        _member_stamps(directory, session_id, attachments_dir, whole_transcript=whole_transcript),
+        session_id,
+        skip=skip,
+    )
+
+
+def plan_id(
+    root: Path,
+    session_id: str,
+    *,
+    attachments_dir: Path | None = None,
+    whole_transcript: bool = False,
+) -> str:
+    """A digest of the SOURCE's state, independent of what the holder has.
+
+    The commit re-derives it: a plan that no longer describes the source must not be
+    the basis for deleting the source's directory. ``whole_transcript`` is ``True`` for
+    a move, whose transcript is carried every byte (see ``_safe_region``).
+    """
+    store = Path(attachments_dir) if attachments_dir is not None else Path(root) / "attachments"
+    return _content_digest(
+        session_dir(root, session_id),
+        session_id,
+        store,
+        whole_transcript=whole_transcript,
+    )
+
+
+def copy_content_digest(directory: Path, session_id: str, attachments_dir: Path) -> str:
+    """``_content_digest`` for a MOVE: whole transcript, names an adopter writes skipped.
+
+    What a move compares across devices: the source's own directory against the copy the
+    destination holds, once each. ``ADOPTED_LOCALLY`` is the two names the adopting
+    device legitimately differs on — its own ``origin.json`` (whose parent names the
+    source) and the ``fork-boundary.json`` divergence marker it adds. The transcript is
+    taken whole because a move carries every byte of it (``_safe_region``'s cut is for a
+    live source, and cutting it here is what deleted a torn tail in review round 2).
+    """
+    return _content_digest(
+        directory,
+        session_id,
+        attachments_dir,
+        skip=ADOPTED_LOCALLY,
+        whole_transcript=True,
+    )
+
+
+def replica_content_digest(directory: Path, session_id: str, attachments_dir: Path) -> str:
+    """``_content_digest`` for a device's own REPLICA, as its cursor records it.
+
+    The replica's transcript is the source's safe region (a replica is pulled from a
+    live session), so it is digested the same way the owner digested it: ``whole_transcript``
+    stays off. This is the value ``_verify_replica_against_cursor`` re-derives before a
+    recovery promotes the bytes, which is what stops a corrupted sidecar being promoted
+    as a real session (review round 2, MINOR 3).
+    """
+    return _content_digest(directory, session_id, attachments_dir)
+
+
+def _attested_digest(files: dict[str, str], links: tuple[str, ...], session_id: str) -> str:
+    """The content digest of a member set a device can attest to by DIGEST alone.
+
+    Built from the same :func:`_content_digest_from` a full pass uses, so a recovery can
+    re-derive it from the replica on disk and compare: equal means every member is the one
+    that was verified when it was synced, and unequal means something has since changed
+    (a truncation, a rewrite, an edit). The digests here are the ones the owner published
+    in the plan and this device checked member by member, so this is a cheaper spelling of
+    the same claim rather than a second, weaker one.
+    """
+    stamps = {
+        name: _MemberStamp(digest, 0, 0, 0, link="carried" if name in set(links) else "")
+        for name, digest in files.items()
+    }
+    return _content_digest_from(stamps, session_id)
+
+
 def build_manifest(
     root: Path,
     session_id: str,
     *,
     have: dict[str, Any] | None = None,
     attachments_dir: Path | None = None,
+    whole_transcript: bool = False,
+    stamps: dict[str, _MemberStamp] | None = None,
 ) -> dict[str, Any]:
     """The plan a holder pulls: what to send, with the hashes that verify it.
 
@@ -506,6 +1184,13 @@ def build_manifest(
     and is used ONLY as a filter. The owner still digests everything it sends, so
     a holder that misreports what it holds gets a correct copy of the wrong size
     (a re-send), never a corrupt one.
+
+    ``whole_transcript`` carries every byte of the transcript, which a DELETING move
+    needs and nothing else does (see ``_safe_region``).
+
+    One ``_member_stamps`` pass produces the plan id and every item's digest at once:
+    the previous shape read the whole copy set twice for the same plan (once for the
+    id, once for the items) and then re-read it on every chunk.
     """
     have = have or {}
     directory = session_dir(root, session_id)
@@ -516,11 +1201,15 @@ def build_manifest(
         raise SyncRefused(
             "no_session", f"{session_id} has no transcript to sync on this device ({exc})"
         ) from exc
-    safe = _safe_region(raw)
+    safe = raw if whole_transcript else _safe_region(raw)
     total = len(safe)
     digest = sha256_bytes(safe)
+    store = Path(attachments_dir) if attachments_dir is not None else Path(root) / "attachments"
+    if stamps is None:
+        stamps = _member_stamps(directory, session_id, store, whole_transcript=whole_transcript)
+    content = _content_digest_from(stamps, session_id)
+    _remember_plan(Path(root), session_id, content, stamps, whole_transcript)
 
-    have = have or {}
     cursor_raw = have.get("cursor")
     cursor: dict[str, Any] = cursor_raw if isinstance(cursor_raw, dict) else {}
     prefix_bytes = int(cursor.get("prefix_bytes") or 0)
@@ -540,103 +1229,34 @@ def build_manifest(
     held_raw = have.get("files")
     held: dict[str, Any] = held_raw if isinstance(held_raw, dict) else {}
     items: list[dict[str, Any]] = []
-    for name in COPY_SET_NAMES:
-        if name == TRANSCRIPT_NAME:
+    for name, stamp in sorted(stamps.items()):
+        if name == TRANSCRIPT_NAME or name.startswith(ATTACHMENT_PREFIX):
             continue
-        path = directory / name
-        try:
-            payload = path.read_bytes()
-        except OSError:
-            continue
-        item_digest = sha256_bytes(payload)
-        if str(held.get(name) or "") == item_digest:
+        if str(held.get(name) or "") == stamp.digest:
             # The same bytes are already there. The design's mtime hint is
             # deliberately not consulted: two clocks disagree and a digest is a
             # fact.
             continue
-        items.append(
-            {
-                "name": name,
-                "bytes": len(payload),
-                "mtime_ns": int(path.stat().st_mtime_ns),
-                "digest": item_digest,
-            }
-        )
-    # THE COPY SET'S TREES, one item per regular file (review round 1, B-M2). The
-    # same item shape as everything else, deliberately: a scratchpad file is
-    # verified per byte like the transcript, so a tree needs no second code path
-    # and no second set of guarantees. A big scratchpad is slow, not unsafe.
-    for name in tree_entry_names(directory):
-        path = directory / name
-        try:
-            payload = path.read_bytes()
-        except OSError:
-            continue
-        item_digest = sha256_bytes(payload)
-        if str(held.get(name) or "") == item_digest:
-            continue
-        items.append(
-            {
-                "name": name,
-                "bytes": len(payload),
-                "mtime_ns": int(path.stat().st_mtime_ns),
-                "digest": item_digest,
-            }
-        )
+        items.append(_item_document(name, stamp))
 
     blobs: list[dict[str, Any]] = []
-    store_dir = Path(attachments_dir) if attachments_dir is not None else Path(root) / "attachments"
     held_blobs_raw = have.get("attachments")
     held_blobs: dict[str, Any] = held_blobs_raw if isinstance(held_blobs_raw, dict) else {}
-    for ref in referenced_attachments(root, session_id):
-        blob = store_dir / f"{ref}.bin"
-        try:
-            payload = blob.read_bytes()
-        except OSError:
-            # A transcript can reference a blob this install no longer has (the
-            # store is never pruned, but an install can be copied without it).
-            # Skipping is honest: the copy is complete for everything the owner
-            # holds, and the missing image renders here as broken too.
+    for name, stamp in sorted(stamps.items()):
+        if not name.startswith(ATTACHMENT_PREFIX):
             continue
-        blob_digest = sha256_bytes(payload)
-        if str(held_blobs.get(ref) or "") == blob_digest:
+        # THE HOLDER'S OWN KEY, which is what ``held_report`` writes and therefore what
+        # this filter has to look up: a blob under its ``<ref>`` and its sidecar under
+        # ``<ref>.json``. A mismatch here is not a correctness bug (the member is simply
+        # re-sent), but it is the difference between a resume that costs a delta and one
+        # that re-downloads every image in the conversation.
+        if str(held_blobs.get(_held_blob_key(name)) or "") == stamp.digest:
             continue
-        blobs.append(
-            {
-                "name": f"{ATTACHMENT_PREFIX}{ref}.bin",
-                "ref": ref,
-                "bytes": len(payload),
-                "mtime_ns": int(blob.stat().st_mtime_ns),
-                "digest": blob_digest,
-            }
-        )
-        # THE SIDECAR TRAVELS WITH THE BLOB. It carries the mime type the
-        # transcript's reference resolves through (``session/attachments.py``'s
-        # ``<digest>.json``), so a blob that arrives without one renders as a
-        # broken image or downloads as the wrong type. It was missing from every
-        # copy and every recovery before this (review round 1, M-1).
-        sidecar_name = f"{ref}{ATTACHMENT_SIDECAR_SUFFIX}"
-        sidecar = store_dir / sidecar_name
-        try:
-            sidecar_payload = sidecar.read_bytes()
-        except OSError:
-            continue
-        sidecar_digest = sha256_bytes(sidecar_payload)
-        if not sidecar_payload or str(held_blobs.get(sidecar_name) or "") == sidecar_digest:
-            continue
-        blobs.append(
-            {
-                "name": f"{ATTACHMENT_PREFIX}{sidecar_name}",
-                "ref": ref,
-                "bytes": len(sidecar_payload),
-                "mtime_ns": int(sidecar.stat().st_mtime_ns),
-                "digest": sidecar_digest,
-            }
-        )
+        blobs.append(_item_document(name, stamp, ref=_blob_ref(name)))
 
     return {
         "session_id": session_id,
-        "plan_id": plan_id(root, session_id),
+        "plan_id": content,
         "transcript": {
             "name": TRANSCRIPT_NAME,
             "mode": mode,
@@ -644,18 +1264,88 @@ def build_manifest(
             "total_bytes": total,
             "region_bytes": total - prefix_bytes if mode == "append" else total,
             "source_bytes": len(raw),
+            # THE REAL FILE'S SIZE, which is not the served length when the safe region
+            # cut a torn tail. It is what a fetch tells the owner to compare against, so
+            # a transcript that grew or was rewritten under the copy is refused.
+            "stat_bytes": len(raw),
             "digest": digest,
             "frontier": _frontier(safe),
         },
         "items": items,
         "attachments": blobs,
         "copy_set": copy_set(root, session_id),
-        # The trees this plan carries, as flat names, and the entries it refuses to
-        # carry. Reported rather than merely acted on: a plan is the one document a
-        # reviewer, a surface or a test can read to see what a copy will move.
+        # The trees this plan carries, as flat names, and the entries it deliberately
+        # does not: a symlink out of the session (refused by a deleting move) and a fifo
+        # or socket (reported, never carried). A plan is the one document a reviewer, a
+        # surface or a test can read to see what a copy will move.
         "trees": tree_entry_names(directory),
-        "trees_skipped": irregular_tree_entries(directory),
+        "links": tree_link_entries(directory),
+        # A symlinked content TREE is skipped by the walk rather than by `content_trees`,
+        # so it is reported here beside the links the walk did find: both are entries this
+        # copy will not carry, and a plan that stayed silent about the first was how the
+        # round-3 MAJOR escaped notice.
+        "trees_skipped": sorted(
+            set(irregular_tree_entries(directory)) | set(symlinked_tree_entries(directory))
+        ),
+        "trees_unportable": unportable_tree_entries(directory),
+        "transients": transient_entries(directory),
+        "trees_excluded": excluded_cache_trees(directory),
     }
+
+
+def _item_document(name: str, stamp: _MemberStamp, *, ref: str = "") -> dict[str, Any]:
+    """One manifest item: what to send, how big, and the digest that verifies it.
+
+    ``link`` distinguishes a carried symlink from a file (the holder writes a syMLINK,
+    not the bytes), which is why the target text travels as the item's payload with its
+    own length — the wire shape stays one kind of member, so a link needs no second code
+    path in the fetch, the digest or the resumption check.
+    """
+    document: dict[str, Any] = {
+        "name": name,
+        "bytes": stamp.served_bytes,
+        # The FILE's size, which differs from ``bytes`` only for a transcript whose torn
+        # tail was cut: the owner's staleness check stats the file, so the number it must
+        # compare is this one.
+        "stat_bytes": stamp.stat_bytes,
+        "mtime_ns": stamp.mtime_ns,
+        "digest": stamp.digest,
+    }
+    if stamp.link:
+        # A LINK TRAVELS AS ITS TARGET TEXT, in the plan rather than over the wire: it is
+        # ≤ a few hundred bytes, and the holder can write it the moment it reads the plan.
+        # The digest still gates it (``_write_link`` verifies it), so a target cannot be
+        # swapped in flight.
+        document["link"] = stamp.link
+    if ref:
+        document["ref"] = ref
+    return document
+
+
+def _blob_ref(name: str) -> str:
+    """The digest a blob item's ``name`` refers to, for the sidecar AND its blob.
+
+    ``attachments/<ref>.bin`` and ``attachments/<ref>.json`` are two members of ONE
+    attachment; ``ref`` is that attachment's digest, so a surface counting attachments
+    sees one thing rather than two files.
+    """
+    rest = name[len(ATTACHMENT_PREFIX) :]
+    for suffix in (".bin", ATTACHMENT_SIDECAR_SUFFIX):
+        if rest.endswith(suffix):
+            return rest[: -len(suffix)]
+    return rest
+
+
+def _held_blob_key(name: str) -> str:
+    """The key ``held_report`` uses for the blob member ``name``.
+
+    The holder keys a blob by ``<ref>`` and its sidecar by ``<ref>.json`` (the two
+    spellings that report has always used), so a plan's filter has to ask in the same
+    vocabularies. Kept beside :func:`_blob_ref` because the pair is the one place those
+    spellings are decided.
+    """
+    rest = name[len(ATTACHMENT_PREFIX) :]
+    return rest if rest.endswith(ATTACHMENT_SIDECAR_SUFFIX) else _blob_ref(name)
 
 
 def _blob_file_name(name: str) -> str | None:
@@ -685,23 +1375,34 @@ def _attachment_path(store_dir: Path, name: str) -> Path | None:
     return None if file_name is None else Path(store_dir) / file_name
 
 
-def _tree_entry_path(base: Path, name: str) -> Path | None:
-    """``name`` as a path inside a copy-set tree, or ``None`` if it is not one.
+def _tree_entry_path(base: Path, name: str, *, landed: bool = False) -> Path | None:
+    """``name`` as a path inside a content tree, or ``None`` if it is not one.
 
     The same guard as :func:`_attachment_path`, for the same reason: an absolute
     name, a ``..`` segment, a backslash or an empty segment is refused rather than
-    normalised, and the prefix has to match a tree in the copy set exactly.
+    normalised, and the prefix has to be a tree of this directory.
+
+    ``landed`` DECIDES WHICH QUESTION IS BEING ASKED, and the two are different:
+    ``landed=False`` (the owner SERVING a plan) requires the tree to exist in
+    ``content_trees(base)``, because a name for a tree this session does not have is a
+    request about nothing; ``landed=True`` (a destination WRITING what a plan it accepted
+    described) has to accept a tree that does not exist yet — the first member of a tree
+    is what creates its directory. The path cannot escape either way: ``head`` and the
+    remaining segments are checked to be single legal segments, so the result is always
+    inside ``base``.
     """
-    for tree in COPY_SET_TREES:
-        prefix = f"{tree}/"
-        if not name.startswith(prefix):
-            continue
-        rest = name[len(prefix) :]
-        parts = rest.split("/")
-        if not rest or "\\" in rest or any(part in ("", ".", "..") for part in parts):
-            return None
-        return Path(base) / tree / Path(*parts)
-    return None
+    head = name.split("/", 1)[0]
+    if not head or "\\" in head or head in (".", "..") or "/" in head:
+        return None
+    if not landed and head not in content_trees(base):
+        return None
+    rest = name[len(head) + 1 :]
+    if not rest or "\\" in rest:
+        return None
+    parts = rest.split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        return None
+    return Path(base) / head / Path(*parts)
 
 
 def _item_path(root: Path, session_id: str, name: str, attachments_dir: Path | None) -> Path | None:
@@ -723,94 +1424,160 @@ def _item_path(root: Path, session_id: str, name: str, attachments_dir: Path | N
     return session_dir(root, session_id) / name
 
 
-def _served_bytes(path: Path, name: str) -> bytes:
-    payload = path.read_bytes()
-    return _safe_region(payload) if name == TRANSCRIPT_NAME else payload
-
-
-def _content_digest(
-    directory: Path,
-    session_id: str,
-    attachments_dir: Path,
-    *,
-    skip: tuple[str, ...] = (),
+def _stamp_refusal(
+    root: Path, session_id: str, path: Path, name: str, frame: dict[str, Any]
 ) -> str:
-    """A digest of the CONTENT a session directory holds: one value, both ends.
+    """``""`` when the member being served is still the one the plan described.
 
-    THE SAME FUNCTION RUNS ON BOTH SIDES OF A MOVE, which is the whole point: the
-    owner digests its own directory, the destination digests the copy it holds, and
-    the owner COMMITS ONLY WHEN THE TWO ARE EQUAL. That is the check review round 1
-    found missing (M-2) — before it, a ``ready`` frame carrying ``sha256:000…`` or
-    describing a copy that had been truncated to 100 of 2,580 bytes committed and
-    deleted the source. Covered: every copy-set name present, every regular file
-    under the copy-set trees, and every attachment blob AND its sidecar that the
-    transcript references. Unreferenced blobs are deliberately out: they are store
-    members this session does not use.
+    THE CHEAP CHECK THAT REPLACED THE QUADRATIC ONE. It used to re-derive the whole
+    copy set's digest on every 512 KiB chunk — 129 of the operator's scratchpads are
+    over 32 MB and three are over 1 GB, so a move read the whole session once per chunk
+    (review round 2, MAJOR 2). The holder knows the member's size and mtime from the
+    plan, so one ``stat`` here answers "may I serve these bytes as the plan describes
+    them": a member that was rewritten under the copy refuses with ``stale_plan``, which
+    the holder answers by re-planning a full copy.
 
-    ``skip`` exists for exactly one caller — the adopting device compares against
-    the source with ``ADOPTED_LOCALLY`` skipped, because it writes its own lineage
-    marker and fork boundary while it adopts.
-
-    Cost is O(bytes of the copy), paid three times per move (plan, ready, commit).
-    Caching it was considered and rejected in this round: a digest that gates a
-    delete has to be derived from the bytes on disk at the moment it is asked, and
-    a stat-signature cache can serve a stale value when two writes land inside one
-    mtime tick.
+    WHAT THIS DOES NOT CATCH, stated rather than implied: a change that leaves both size
+    and mtime identical (two writes inside one filesystem timestamp tick). That cannot
+    corrupt a copy — the holder verifies the WHOLE member against the plan's digest when
+    the member completes (``_fetch_item``), and the owner compares the two ends' content
+    digests before it deletes anything — so it costs one failed copy, never a bad one.
     """
-    digest = hashlib.sha256()
-    digest.update(session_id.encode("utf-8"))
-    directory = Path(directory)
-    for name in COPY_SET_NAMES:
-        if name in skip:
-            continue
-        path = directory / name
-        try:
-            payload = _served_bytes(path, name)
-        except OSError:
-            continue
-        digest.update(name.encode("utf-8"))
-        digest.update(payload)
-    for name in tree_entry_names(directory):
-        try:
-            payload = (directory / name).read_bytes()
-        except OSError:
-            continue
-        digest.update(name.encode("utf-8"))
-        digest.update(payload)
-    store = Path(attachments_dir)
-    for ref in referenced_attachments_in(directory):
-        for suffix in (".bin", ATTACHMENT_SIDECAR_SUFFIX):
-            name = f"{ATTACHMENT_PREFIX}{ref}{suffix}"
-            try:
-                payload = (store / f"{ref}{suffix}").read_bytes()
-            except OSError:
-                continue
-            digest.update(name.encode("utf-8"))
-            digest.update(payload)
-    return "sha256:" + digest.hexdigest()
+    plan = str(frame.get("plan_id") or "")
+    expected_bytes = frame.get("expect_bytes")
+    expected_mtime = frame.get("expect_mtime_ns")
+    if expected_bytes is None or expected_mtime is None:
+        stamp = _cached_stamp(root, session_id, plan, name)
+        if stamp is None:
+            # NOTHING TO COMPARE AGAINST: this process neither built the plan nor was
+            # told its numbers (a peer from before this round, or a restart between the
+            # plan and the fetch). The destination still verifies the whole member
+            # against the plan's digest when the member completes, so the cost of
+            # answering "" here is one failed copy, never a corrupt one.
+            return ""
+        expected_bytes, expected_mtime = stamp.stat_bytes, stamp.mtime_ns
+    if path.is_symlink() and "/" not in name:
+        # A ROOT-LEVEL LINK IS REFUSED AS ONE (review round 3, NIT 2). The stamp above was
+        # taken through the link (a copy-set name is a FILE whose bytes travel), so the
+        # lstat comparison below reported a size mismatch as "the conversation changed
+        # while it was being copied" — a sentence that sends a person looking for a writer
+        # that does not exist. This shape is refused the same way `unlisted_entries`
+        # refuses it for a deleting move, so a `--keep` copy and a replica get the same
+        # answer as the move does.
+        return (
+            f"{name} is a symlink rather than a file, and this build carries a session's "
+            "own files, not a link: replace it with the file it points at, then try again"
+        )
+    try:
+        stat = path.lstat() if path.is_symlink() else path.stat()
+    except OSError:
+        return f"{name} is no longer on this device"
+    if int(expected_bytes) != stat.st_size:
+        return (
+            f"{name} changed while it was being copied ({stat.st_size} bytes where the plan "
+            f"described {expected_bytes})"
+        )
+    if int(expected_mtime) != stat.st_mtime_ns:
+        return f"{name} changed while it was being copied (rewritten on this device)"
+    return ""
 
 
-def plan_id(root: Path, session_id: str, *, attachments_dir: Path | None = None) -> str:
-    """A digest of the SOURCE's state, independent of what the holder has.
+def _served_bytes(path: Path, name: str, *, whole_transcript: bool) -> bytes:
+    payload = path.read_bytes()
+    if name == TRANSCRIPT_NAME and not whole_transcript:
+        return _safe_region(payload)
+    return payload
 
-    ``fetch`` and ``verify`` re-derive it and refuse work whose plan no longer
-    describes the source. Without it, a fetch issued against a stale plan would
-    append bytes from a rewritten file onto a holder's cursor — a transcript that
-    is internally inconsistent and that nothing downstream could detect.
+
+def _cached_served_bytes(root: Path, session_id: str, plan: str, name: str) -> int | None:
+    """The length of ``name``'s served bytes, from this process's plan record.
+
+    ``None`` when the plan is not this process's (a restart between the plan and the
+    fetch, or a peer from before this round): the caller then reads the member whole,
+    which is correct and only slower.
     """
-    store = Path(attachments_dir) if attachments_dir is not None else Path(root) / "attachments"
-    return _content_digest(session_dir(root, session_id), session_id, store)
+    stamp = _cached_stamp(Path(root), session_id, plan, name)
+    return stamp.served_bytes if stamp is not None else None
 
 
-def copy_content_digest(directory: Path, session_id: str, attachments_dir: Path) -> str:
-    """``_content_digest`` with the names an ADOPTING device writes itself skipped.
+def _served_span(
+    path: Path,
+    name: str,
+    *,
+    offset: int,
+    limit: int,
+    whole_transcript: bool,
+    served_len: int | None = None,
+) -> tuple[bytes, int, int]:
+    """The requested span of one member, WITHOUT reading the rest of it.
 
-    What a move compares across devices: the source's own directory against the
-    copy the destination holds, once each. ``ADOPTED_LOCALLY`` is the two names the
-    adopting device legitimately differs on — its own ``origin.json`` (whose parent
-    is the source) and the ``fork-boundary.json`` divergence marker it adds.
+    ``(span, file_bytes, eof)``. The whole-file read this replaces is the other half of
+    MAJOR 2: every chunk of every file read the entire file again, so serving an 8 MB
+    member in 512 KiB chunks read 128 MB. A regular file is read at its offset; a
+    transcript a live runtime owns still goes through ``_safe_region`` (its served length
+    is not the file's length), and a link is served from its target text.
     """
-    return _content_digest(directory, session_id, attachments_dir, skip=ADOPTED_LOCALLY)
+    if path.is_symlink():
+        payload = os.readlink(path).encode("utf-8")
+        return payload[offset : offset + limit], len(payload), offset + limit >= len(payload)
+    if name != TRANSCRIPT_NAME or whole_transcript:
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            span = handle.read(limit)
+        return span, size, offset + len(span) >= size
+    if served_len is not None:
+        # The safe region is a PREFIX of the file, so the region's bytes in
+        # ``[offset, offset + limit)`` are the file's — read at the offset, not by
+        # materialising the region.
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            span = handle.read(max(0, min(limit, served_len - offset)))
+        return span, served_len, offset + len(span) >= served_len
+    payload = _served_bytes(path, name, whole_transcript=whole_transcript)
+    span = payload[offset : offset + limit]
+    return span, len(payload), offset + len(span) >= len(payload)
+
+
+def _plan_whole_transcript(root: Path, session_id: str, plan: str) -> bool:
+    """Does the plan ``plan`` describe the transcript WHOLE, or as its safe region?
+
+    THE PLAN DECIDES WHAT IS SERVED, never a property of the session at fetch time. The two
+    variants produce different bytes for a torn tail, and the holder verifies what it
+    receives against the digest ITS plan carried: serving the other variant hands it bytes
+    that cannot verify. This matters in one real case — a replica pull that races a MOVE of
+    the same session: its plan is the safe-region variant, so it must be served that variant
+    even though the source's journal says a move is in flight. When this process no longer
+    remembers the plan (a relay restart between the plan and the fetch) the session's own
+    state is the only thing left to consult, which is the fallback here.
+    """
+    with _PLAN_CACHE_LOCK:
+        record = _PLAN_CACHE.get((str(root), session_id, plan))
+    if record is not None:
+        return record[1]
+    return _whole_transcript_for(root, session_id)
+
+
+def _whole_transcript_for(root: Path, session_id: str) -> bool:
+    """Is a DELETING move of ``session_id`` in flight on this device?
+
+    THE OWNER'S OWN FACT, never the peer's claim. A move carries the transcript whole
+    (``_safe_region``'s cut would delete a torn tail — review round 2), and the fact that
+    a move is in flight is exactly the handoff journal entry ``_source_prepare`` writes
+    before the destination can ask for a byte. ``--keep`` writes no entry and therefore
+    serves the safe region, which is what a copy out of a live runtime must do.
+    """
+    from local_operator.session.placement import handoff_in_flight
+
+    try:
+        entry = handoff_in_flight(root, session_id)
+    except Exception:  # noqa: BLE001 — an unreadable journal is the guard's refusal
+        return False
+    if not entry:
+        return False
+    return str(entry.get("mode") or "") == "move" and str(entry.get("role") or "source") == (
+        "source"
+    )
 
 
 def serve_fetch(
@@ -822,27 +1589,63 @@ def serve_fetch(
     offset: int,
     limit: int = SYNC_CHUNK_BYTES,
     attachments_dir: Path | None = None,
+    expect_bytes: int | None = None,
+    expect_mtime_ns: int | None = None,
 ) -> dict[str, Any]:
-    """One chunk of one file: the owner's ``net_sync {phase:"fetch"}`` answer."""
-    _require_current_plan(root, session_id, plan, attachments_dir=attachments_dir)
+    """One chunk of one file: the owner's ``net_sync {phase:"fetch"}`` answer.
+
+    ``expect_bytes``/``expect_mtime_ns`` are the holder's copy of the plan's own stamp
+    for this member; a mismatch is a ``stale_plan`` refusal (see ``_stamp_refusal``).
+    ``file_digest`` is deliberately NOT returned any more: computing it meant hashing the
+    whole file on every chunk, and the value the holder actually verifies is the plan's
+    digest for that member, which it already holds (review round 2, MAJOR 2).
+    """
     path = _item_path(root, session_id, name, attachments_dir)
     if path is None:
         raise SyncRefused("unknown_item", f"{name} is not part of a session copy")
+    whole = _plan_whole_transcript(Path(root), session_id, plan)
+    stale = _stamp_refusal(
+        Path(root),
+        session_id,
+        path,
+        name,
+        {"plan_id": plan, "expect_bytes": expect_bytes, "expect_mtime_ns": expect_mtime_ns},
+    )
+    if stale:
+        # THE REASON IS KEPT (review round 3, NIT 2). This raised with a fixed sentence,
+        # "the conversation changed while it was being copied", which is right for a rewrite
+        # and WRONG for the other shapes the same check answers — a member deleted mid-copy,
+        # or a copy-set FILE that is a symlink rather than a file. Both sent a person looking
+        # for a writer that does not exist; the sentence already computed names the member and
+        # the shape, so it is used, with the one piece of advice the fixed sentence added.
+        raise SyncRefused("stale_plan", f"{stale}; asking again picks up the new cut")
     try:
-        payload = _served_bytes(path, name)
+        span, file_bytes, eof = _served_span(
+            path,
+            name,
+            offset=max(0, int(offset)),
+            limit=max(0, int(limit)),
+            whole_transcript=whole,
+            # THE SERVED LENGTH, when this process still has the plan's stamp. For a
+            # transcript a live runtime owns, the bytes that travel are the safe region —
+            # not the file — so knowing its length is what lets the span be READ AT AN
+            # OFFSET instead of reading the whole transcript per chunk (which is what the
+            # replica path did, and is the same quadratic shape MAJOR 2 is about, one
+            # member further along).
+            served_len=_cached_served_bytes(root, session_id, plan, name),
+        )
     except OSError as exc:
         raise SyncRefused("missing", f"{name} is not readable on this device") from exc
     start = max(0, int(offset))
-    span = payload[start : start + max(0, int(limit))]
     return {
         "name": name,
         "offset": start,
         "bytes": len(span),
         "data": base64.b64encode(span).decode("ascii"),
-        "eof": start + len(span) >= len(payload),
+        "eof": eof,
         "chunk_digest": sha256_bytes(span),
-        "file_digest": sha256_bytes(payload),
-        "file_bytes": len(payload),
+        "file_bytes": file_bytes,
+        "plan_id": plan,
     }
 
 
@@ -855,6 +1658,8 @@ def serve_verify(
     prefix_bytes: int,
     prefix_digest: str,
     attachments_dir: Path | None = None,
+    expect_bytes: int | None = None,
+    expect_mtime_ns: int | None = None,
 ) -> dict[str, Any]:
     """Does the owner's first ``prefix_bytes`` of ``name`` hash to ``prefix_digest``?
 
@@ -863,30 +1668,37 @@ def serve_verify(
     them away (a re-send of up to 100 MB), it asks this: a matching digest means
     those bytes are the source's own prefix, so the copy can continue from there
     with the same guarantee a fresh copy has.
+
+    Called once per member, not once per chunk, so hashing the prefix here is not the
+    per-chunk cost MAJOR 2 was about — and the member's stamp is still checked first.
     """
-    _require_current_plan(root, session_id, plan, attachments_dir=attachments_dir)
     path = _item_path(root, session_id, name, attachments_dir)
     if path is None:
         raise SyncRefused("unknown_item", f"{name} is not part of a session copy")
+    stale = _stamp_refusal(
+        Path(root),
+        session_id,
+        path,
+        name,
+        {"plan_id": plan, "expect_bytes": expect_bytes, "expect_mtime_ns": expect_mtime_ns},
+    )
+    if stale:
+        # THE REASON IS KEPT (review round 3, NIT 2). This raised with a fixed sentence,
+        # "the conversation changed while it was being copied", which is right for a rewrite
+        # and WRONG for the other shapes the same check answers — a member deleted mid-copy,
+        # or a copy-set FILE that is a symlink rather than a file. Both sent a person looking
+        # for a writer that does not exist; the sentence already computed names the member and
+        # the shape, so it is used, with the one piece of advice the fixed sentence added.
+        raise SyncRefused("stale_plan", f"{stale}; asking again picks up the new cut")
+    whole = _plan_whole_transcript(Path(root), session_id, plan)
     try:
-        payload = _served_bytes(path, name)
+        payload = _served_bytes(path, name, whole_transcript=whole)
     except OSError as exc:
         raise SyncRefused("missing", f"{name} is not readable on this device") from exc
     if prefix_bytes > len(payload):
         return {"matches": False, "reason": "shorter"}
-    return {"matches": sha256_bytes(payload[:prefix_bytes]) == prefix_digest}
-
-
-def _require_current_plan(
-    root: Path, session_id: str, plan: str, *, attachments_dir: Path | None
-) -> None:
-    current = plan_id(root, session_id, attachments_dir=attachments_dir)
-    if not current or current != plan:
-        raise SyncRefused(
-            "stale_plan",
-            "the conversation changed while it was being copied, so this part was not "
-            "sent; asking again picks up the new cut",
-        )
+    digest = hashlib.sha256(payload[:prefix_bytes]).hexdigest()
+    return {"matches": "sha256:" + digest == prefix_digest}
 
 
 # ---------------------------------------------------------------------------
@@ -905,6 +1717,12 @@ class PullResult:
     items: int
     attachments: int
     resumed_bytes: int = 0
+    #: ``name -> the digest of the bytes this device now holds`` for every member the
+    #: pull accounted for, plus the names that are SYMLINKS. Together they are what a
+    #: replica's cursor records, so a recovery can re-derive the same digest and refuse
+    #: a copy something has since corrupted (review round 2, MINOR 3).
+    files: dict[str, str] = field(default_factory=dict)
+    links: tuple[str, ...] = ()
 
 
 def pull(
@@ -927,6 +1745,7 @@ def pull(
     second config root — which is what makes "every byte is verified" a claim that
     can be tested without two machines.
     """
+    have = have or {}
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
     # THE PLAN IS ASKED FOR AGAIN WHEN IT CANNOT DESCRIBE THIS DESTINATION. An
@@ -983,15 +1802,34 @@ def pull(
         whole_digest=digest,
         final_bytes=total,
         stop=stop,
+        expect_bytes=int(transcript.get("stat_bytes") or total),
+        expect_mtime_ns=_optional_int(transcript.get("mtime_ns")),
     )
     written += outcome.written
     resumed += outcome.resumed
 
     items = 0
     blobs = 0
+    links = 0
+    attested: dict[str, str] = {}
+    link_names: list[str] = []
     for item in list(plan.get("items") or []) + list(plan.get("attachments") or []):
         name = str(item.get("name") or "")
         if not name:
+            continue
+        # ``item_digest``, NOT ``digest``: the cursor below records the TRANSCRIPT's
+        # digest, and shadowing it here wrote the last member's digest into every
+        # replica cursor (found by the cursor test, which is what it is for).
+        item_digest = str(item.get("digest") or "")
+        if str(item.get("link") or ""):
+            # A SYMLINK: its target travelled in the plan, so there is nothing to fetch —
+            # and a link is written as a link, never as the bytes of whatever it points
+            # at. Still staged and replaced, so a reader of this directory sees the old
+            # link or the new one and never neither.
+            _write_link(dest_dir, name, str(item["link"]), item_digest)
+            attested[name] = item_digest
+            link_names.append(name)
+            links += 1
             continue
         target = _destination_for(dest_dir, Path(attachments_root), name)
         if target is None:
@@ -1005,17 +1843,39 @@ def pull(
             source_start=0,
             source_end=size,
             dest_path=target,
-            whole_digest=str(item.get("digest") or ""),
+            whole_digest=item_digest,
             final_bytes=size,
             stop=stop,
+            expect_bytes=_optional_int(item.get("stat_bytes")),
+            expect_mtime_ns=_optional_int(item.get("mtime_ns")),
         )
         written += outcome.written
         resumed += outcome.resumed
+        attested[name] = item_digest
         if name.startswith(ATTACHMENT_PREFIX):
             blobs += 1
         else:
             items += 1
 
+    # EVERY MEMBER THE HOLDER NOW HOLDS, whether this pull fetched it or it was already
+    # there (``have["files"]`` is the holder's own digest report, re-verified by the plan
+    # on the owner's side). This is the set a replica's cursor records.
+    held_raw = have.get("files")
+    held: dict[str, Any] = held_raw if isinstance(held_raw, dict) else {}
+    for name, value in held.items():
+        attested.setdefault(str(name), str(value))
+    held_blobs_raw = have.get("attachments")
+    held_blobs: dict[str, Any] = held_blobs_raw if isinstance(held_blobs_raw, dict) else {}
+    for name, value in held_blobs.items():
+        # The caller keys blobs the way ``held_report`` does (``<ref>`` for a blob,
+        # ``<ref>.json`` for its sidecar). A digest set is keyed by the WIRE name, so each
+        # is rebuilt from that key rather than concatenated onto it — appending a suffix to
+        # ``<ref>.json`` would invent a member no plan ever mentioned (``<ref>.json.bin``)
+        # and a recovery would then find the replica's digest disagreeing with its own
+        # cursor.
+        file_name = name if name.endswith(ATTACHMENT_SIDECAR_SUFFIX) else f"{name}.bin"
+        attested.setdefault(f"{ATTACHMENT_PREFIX}{file_name}", str(value))
+    attested[TRANSCRIPT_NAME] = digest
     return PullResult(
         session_id=session_id,
         bytes=written,
@@ -1028,6 +1888,8 @@ def pull(
         items=items,
         attachments=blobs,
         resumed_bytes=resumed,
+        files=attested,
+        links=tuple(link_names),
     )
 
 
@@ -1054,7 +1916,7 @@ def _destination_for(dest_dir: Path, attachments_root: Path, name: str) -> Path 
         if file_name is None:
             return None
         return Path(attachments_root) / ATTACHMENT_PREFIX / file_name
-    tree_path = _tree_entry_path(Path(dest_dir), name)
+    tree_path = _tree_entry_path(Path(dest_dir), name, landed=True)
     if tree_path is not None:
         return tree_path
     if name not in COPY_SET_NAMES or name in NEVER_COPIED:
@@ -1080,6 +1942,8 @@ def _fetch_item(
     whole_digest: str,
     final_bytes: int,
     stop: Callable[[], bool] | None,
+    expect_bytes: int | None = None,
+    expect_mtime_ns: int | None = None,
 ) -> _FetchOutcome:
     """Fetch ``[source_start, source_end)`` into ``dest_path`` and verify the whole.
 
@@ -1119,6 +1983,11 @@ def _fetch_item(
                         "name": name,
                         "prefix_bytes": existing,
                         "prefix_digest": _file_prefix_digest(dest_path, existing),
+                        # The holder's copy of the plan's stamp for this member, so the
+                        # owner answers "may I serve this?" with ONE stat instead of
+                        # re-hashing the copy set (review round 2, MAJOR 2).
+                        "expect_bytes": expect_bytes,
+                        "expect_mtime_ns": expect_mtime_ns,
                     }
                 )
             except SyncRefused:
@@ -1169,6 +2038,8 @@ def _fetch_item(
                         "name": name,
                         "offset": offset,
                         "limit": min(SYNC_CHUNK_BYTES, source_end - offset),
+                        "expect_bytes": expect_bytes,
+                        "expect_mtime_ns": expect_mtime_ns,
                     }
                 )
                 payload = base64.b64decode(str(chunk.get("data") or ""))
@@ -1204,6 +2075,40 @@ def _fetch_item(
         staged.unlink(missing_ok=True)
         raise
     return _FetchOutcome(written=written, resumed=resumed)
+
+
+def _write_link(dest_dir: Path, name: str, target: str, digest: str) -> None:
+    """Write the carried symlink ``name`` under ``dest_dir``, pointing at ``target``.
+
+    ``target`` is the RELATIVE text the owner computed (``_portable_link_target``), never
+    the source's absolute spelling, which is what makes the link mean the same thing on
+    this device. The digest is re-verified here rather than trusted: it arrives in the
+    same plan as every file's, and a link is a member like any other — checking it costs
+    one hash of a path string and closes the only hole a plan could open (a swapped
+    target, which would point an agent at a file the owner never named).
+
+    Staged and ``os.replace``d like every other member, so a reader of this directory sees
+    the previous link or the new one and never a half-written one.
+    """
+    path = _tree_entry_path(Path(dest_dir), name, landed=True)
+    if path is None:
+        raise SyncRefused("unknown_item", f"{name} is not part of a session copy")
+    if sha256_bytes(target.encode("utf-8")) != digest:
+        raise SyncRefused(
+            "digest_mismatch",
+            f"the link {name} did not arrive as the owner described it, so it was not " "written",
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staged = path.with_name(f".{path.name}.{os.getpid()}.link")
+    staged.unlink(missing_ok=True)
+    try:
+        os.symlink(target, staged)
+        os.replace(staged, path)
+    except OSError as exc:
+        staged.unlink(missing_ok=True)
+        raise SyncRefused(
+            "no_replica", f"the link {name} could not be written on this device ({exc})"
+        ) from exc
 
 
 def _copy_prefix(source: Path, handle: Any, count: int) -> None:
@@ -1262,6 +2167,11 @@ def held_report(dest_dir: Path, attachments_root: Path) -> dict[str, Any]:
             files[name] = sha256_bytes(path.read_bytes())
         except OSError:
             continue
+    # THE LINKS THIS DESTINATION ALREADY HOLDS, keyed and digested exactly as the plan
+    # spells them, so a resume does not re-send a link it has (and so a link whose target
+    # the SOURCE changed is not mistaken for one already carried).
+    for name, target in tree_link_entries(Path(dest_dir)):
+        files[name] = sha256_bytes(target.encode("utf-8"))
     blobs: dict[str, str] = {}
     store = Path(attachments_root) / ATTACHMENT_PREFIX
     for pattern, keyed_by_stem in (("*.bin", True), (f"*{ATTACHMENT_SIDECAR_SUFFIX}", False)):
@@ -1343,6 +2253,15 @@ def sync_from(
                     "attachments": result.attachments,
                     "transcript_mode": result.transcript_mode,
                     "last_synced_at": time.time(),
+                    # WHAT THIS DEVICE CAN ATTEST TO, member by member, and the digest of
+                    # that set. The cursor used to record the transcript alone, so a
+                    # recovery promoted a replica with a CORRUPTED ``title.json`` (review
+                    # round 2, MINOR 3): the promoted session came back wearing a title
+                    # its owner never wrote, and nothing had verified it. Recovery
+                    # re-derives this digest before it promotes a byte.
+                    "files": result.files,
+                    "links": list(result.links),
+                    "content_digest": _attested_digest(result.files, result.links, session_id),
                 },
             )
         return {
@@ -1380,7 +2299,12 @@ def _verify_replica_against_cursor(root: Path, session_id: str, source: Path) ->
     presenting an unverified directory as a conversation is the failure this whole
     span exists to prevent.
     """
-    cursor = (read_replica_cursor(root, session_id) or {}).get("cursor") or {}
+    record = read_replica_cursor(root, session_id) or {}
+    # THE INNER CURSOR is the transcript's position; the RECORD BESIDE IT holds what the
+    # rest of the copy set was verified to be (``files``, ``links`` and their digest).
+    # Reading both from one place put the full-set check in a dict that never carried it,
+    # which is how a corrupted ``title.json`` was promoted (review round 2, MINOR 3).
+    cursor = record.get("cursor") or {}
     expected = int(cursor.get("prefix_bytes") or 0)
     digest = str(cursor.get("prefix_digest") or "")
     transcript = source / TRANSCRIPT_NAME
@@ -1404,6 +2328,82 @@ def _verify_replica_against_cursor(root: Path, session_id: str, source: Path) ->
             "verified when it was synced, so it was not recovered as a session; syncing "
             "it again replaces it with a complete copy",
         )
+    # THE REST OF WHAT A RECOVERY PROMOTES (review round 2, MINOR 3). The sentences above
+    # check the transcript, and a recovery promotes the WHOLE copy set plus its trees —
+    # so a corrupted ``title.json`` used to be promoted as-is, because the cursor had no
+    # digest for it. Two checks, in order of what they can say:
+    #
+    # * per member, when the cursor names that member, so a failure names the FILE. A
+    #   member the cursor does not mention is one this build never verified (a cursor
+    #   written by an older build, or a file added since) and is left to the digest below;
+    # * over the whole attested set, which is the claim the cursor exists to make.
+    #
+    # WHAT IS TRUSTED, stated rather than implied: the CONTENT the last sync verified
+    # (every member's digest, and now its trees and links). What is NOT checked here is
+    # whether the OWNER still holds the same bytes — a replica is a snapshot, and the
+    # promoted session is stamped as a fork for exactly that reason. Nothing about the
+    # source's liveness or ownership is re-asked, and no member outside the copy set is
+    # promoted at all: ``_promote_replica`` copies the copy-set names, the content trees
+    # and the carried links, and nothing else.
+    recorded_raw = record.get("files")
+    recorded: dict[str, Any] = recorded_raw if isinstance(recorded_raw, dict) else {}
+    # WHERE EACH MEMBER'S BYTES LAND: a blob lives in this device's own attachments
+    # directory, never inside the session directory (``_member_stamps`` reads its store
+    # through ``attachments_dir``), so resolving the name per member is what keeps a blob's
+    # absence from being read as a missing session member.
+    store = replica_dir(root, session_id) / ATTACHMENTS_DIRNAME
+    for name, wanted in sorted(recorded.items()):
+        if name == TRANSCRIPT_NAME:
+            continue
+        landing = (
+            store / str(name)[len(ATTACHMENT_PREFIX) :]
+            if str(name).startswith(ATTACHMENT_PREFIX)
+            else source / str(name)
+        )
+        if not landing.is_symlink() and not landing.is_file():
+            # A MEMBER THE CURSOR ATTESTED AND THAT IS NO LONGER ON DISK IS A MISMATCH,
+            # NAMED (review round 3, MINOR 3). The whole-set digest below does refuse this
+            # recovery — the promoted copy is missing a member the sync verified — but it
+            # refuses it anonymously, and the sentence is what a person acts on: a
+            # rewritten ``title.json`` named its file, a deleted one did not.
+            raise SyncRefused(
+                "incomplete_replica",
+                f"this device's copy of {session_id} no longer matches the bytes that were "
+                f"verified when it was synced ({name} is missing), so it was not recovered "
+                "as a session; syncing it again replaces it with a complete copy",
+            )
+        got = (
+            sha256_bytes(os.readlink(landing).encode("utf-8"))
+            if landing.is_symlink()
+            else _stream_digest(landing)
+        )
+        if got != str(wanted):
+            raise SyncRefused(
+                "incomplete_replica",
+                f"this device's copy of {session_id} no longer matches the bytes that were "
+                f"verified when it was synced ({name} has changed), so it was not recovered "
+                "as a session; syncing it again replaces it with a complete copy",
+            )
+    attested = str(record.get("content_digest") or "")
+    if attested:
+        # RE-DERIVED FROM THE REPLICA ON DISK, over the same function and the same member
+        # set the cursor's digest was built from, so this compares a claim about THIS
+        # device's bytes with those bytes.
+        current = _content_digest_from(
+            _member_stamps(
+                source,
+                session_id,
+                replica_dir(root, session_id) / ATTACHMENTS_DIRNAME,
+            ),
+            session_id,
+        )
+        if current != attested:
+            raise SyncRefused(
+                "incomplete_replica",
+                f"this device's copy of {session_id} no longer matches the content verified "
+                "when it was synced, so it was not recovered as a session; syncing it again "
+                "replaces it with a complete copy",
+            )
 
 
 def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[str, Any]:
@@ -1481,6 +2481,24 @@ def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[st
             landing = target / name
             landing.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(candidate, landing)
+            copied.append(name)
+        # AND THE CARRIED LINKS, recreated as links rather than as copies of what they
+        # point at (review round 2's real-store finding: 6,629 of the operator's symlinks
+        # are inside their own session, and dropping them here would make a recovery lose
+        # a different thing from the move that filled the replica).
+        for name, link_target in tree_link_entries(source):
+            landing = target / name
+            landing.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.symlink(link_target, landing)
+            except FileExistsError as exc:
+                # The directory was claimed and created by this call, so a name already
+                # present is either a member copied a moment ago (impossible: one name, one
+                # kind) or somebody else writing into the target. Refusing beats removing a
+                # file this function did not create.
+                raise SyncRefused(
+                    "in_progress", f"{new_id} already holds {name}; nothing was recovered"
+                ) from exc
             copied.append(name)
         # The replica's blobs live inside it; the recovered session's transcripts
         # reference them by digest, so they have to reach the SHARED store or the
@@ -1924,8 +2942,20 @@ def _plan(server: "RelayServer", link: Any, frame: dict[str, Any]) -> dict[str, 
 
     session_id = str(frame["session_id"])
     have = frame.get("have") if isinstance(frame.get("have"), dict) else {}
+    purpose = str(frame.get("purpose") or "replica")
     try:
-        plan = build_manifest(server.root, session_id, have=have)
+        # A MOVE CARRIES THE TRANSCRIPT WHOLE. Its source is retired before the
+        # destination can ask for a byte, so there is no half-written row to cut and no
+        # next sync to carry the tail: ``_safe_region``'s boundary would DELETE it
+        # (review round 2's torn tail: 203 bytes on the source, 150 on the destination,
+        # source gone). A replica of a live session keeps the cut, which is what its
+        # cursor is built on.
+        plan = build_manifest(
+            server.root,
+            session_id,
+            have=have,
+            whole_transcript=whole_transcript_for(purpose),
+        )
     except SyncRefused as exc:
         raise _refusal(exc.code, exc.message) from exc
     if str(frame.get("purpose") or "replica") == "move":
@@ -1957,6 +2987,8 @@ def _fetch(server: "RelayServer", frame: dict[str, Any]) -> dict[str, Any]:
             name=str(frame.get("name") or ""),
             offset=int(frame.get("offset") or 0),
             limit=int(frame.get("limit") or SYNC_CHUNK_BYTES),
+            expect_bytes=_optional_int(frame.get("expect_bytes")),
+            expect_mtime_ns=_optional_int(frame.get("expect_mtime_ns")),
         )
     except SyncRefused as exc:
         raise _refusal(exc.code, exc.message) from exc
@@ -1973,11 +3005,27 @@ def _verify(server: "RelayServer", frame: dict[str, Any]) -> dict[str, Any]:
             name=str(frame.get("name") or ""),
             prefix_bytes=int(frame.get("prefix_bytes") or 0),
             prefix_digest=str(frame.get("prefix_digest") or ""),
+            expect_bytes=_optional_int(frame.get("expect_bytes")),
+            expect_mtime_ns=_optional_int(frame.get("expect_mtime_ns")),
         )
     except SyncRefused as exc:
         raise _refusal(exc.code, exc.message) from exc
     except (TypeError, ValueError) as exc:
         raise _refusal("bad_request", f"a verify needs a prefix length ({exc})") from exc
+
+
+def _optional_int(value: Any) -> int | None:
+    """``int(value)`` when the frame carried one, else ``None``.
+
+    ``None`` and ``0`` mean different things to the staleness check (0 is a real size), so
+    a missing field must not collapse into a zero.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _refusal(code: str, message: str) -> Exception:

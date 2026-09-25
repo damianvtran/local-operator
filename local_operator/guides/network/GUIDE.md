@@ -48,11 +48,16 @@ rendering is not a contract.
 4. On the other device, **the human** runs it in a terminal:
    `lop network join @<token-file>` (or with the token itself).
    The joining device prints the inviter, the network, the offered role, its
-   derived `code` (`481 926`) and a `fingerprint`, then asks for the code. The
-   inviter admits the device only if the typed value matches its **own**
-   derivation, and a mismatch burns the invite — so the human must check that
-   the network and role are the ones they asked for and that the code agrees on
-   both screens. `--verify` makes the 160-bit fingerprint the compared value
+   derived `code` (`481 926`) and a `fingerprint`, then asks for the code, and
+   says how long the person has (up to 180 s, and it reports the time **left** on
+   the invite rather than the duration it was minted with, so a token that has
+   been carried around for a while shows a smaller window). The inviter admits the device
+   only if the typed value matches its **own** derivation. A mismatch refuses the
+   join, and the human must check that the network and role are the ones they
+   asked for and that the code agrees on both screens: **a delay and a mistyped
+   digit do not spend the invite** — run `lop network join` again with the same
+   token — and it takes repeated failures (three) before one is burned, so read
+   the two screens carefully rather than assuming a retry will fail. `--verify` makes the 160-bit fingerprint the compared value
    instead of the six digits: use it when the two machines do not share a
    private path. `--name` sets the name this device will be known by, `--host
    host:port` overrides the endpoint to dial.
