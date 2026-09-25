@@ -869,10 +869,17 @@ _PERSISTABLE_CUSTOM_TYPES: frozenset[str] = frozenset(
         # ticket durable — the row survives the process so a resumed session
         # still shows what the guard masked and what to rotate — and the value
         # stays contained across that resume because the store re-registers it
-        # from the transcript's own redaction. Absence here would make the
-        # notice a live-only receipt and drop the replay half of the row the
-        # TUI fold paints; the MODEL is kept out of it by the RENDERER's
-        # allow-list, not by this one.
+        # from the redaction the transcript itself holds. Its writer
+        # (``journal_shape_incident``) appends through ``append_message``
+        # directly rather than routing through :func:`_is_persistable_message`,
+        # so membership is NOT what keeps the row persisted today, and its
+        # absence would not have made the notice live-only. The member line is
+        # kept for two reasons and only these: symmetry with its twin
+        # ``session_incident``, a member written by the same explicit-append
+        # shape, and so that a future path which DOES route through the
+        # predicate cannot silently drop the operator's ticket while every
+        # call site still looks right. The MODEL is kept out of this record by
+        # the RENDERER's allow-list, not by this one.
         SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
         # SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE IS persisted, unlike the
         # recovery record below: an MCP server going away is a historical fact
