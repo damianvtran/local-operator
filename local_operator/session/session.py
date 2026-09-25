@@ -9481,32 +9481,6 @@ class Session:
         self._deliberate_stop_noted = False
         from local_operator.session.attention import conversation_identity
 
-        # R2 — THE RUN IS MADE COUNTABLE BEFORE IT IS MADE DURABLE. The durable
-        # ``attention_started`` row below is what tells a reader this run exists,
-        # so every liveness reader a disposal has must already answer "yes, this
-        # run is live" by the time the row can be seen. Before this change it did
-        # not: ``_turn_task`` was assigned AFTER the append and ``_signal`` only
-        # inside ``_run_turn``, so there was an interval — the length of the
-        # append's own await, measured at ~200 ms on the reporting host at fleet
-        # load — in which the run was durable, held ``_turn_lock``, and was about
-        # to call the provider, yet ``_disposal_turn`` (and therefore
-        # ``disposal_cuts_a_turn``) answered "no turn here". Two things were lost
-        # in it, and only the second is cosmetic: the disposal did not even ABORT
-        # the run it was about to destroy, and the cut it did make downstream was
-        # attributed to the generic ``disposed`` instead of to the rung that
-        # committed to leaving (session a81ceec0982b, 2026-09-24).
-        #
-        # The invariant is DURABLE MEANS COUNTABLE, and it is asserted in
-        # ``tests/unit/session/runtime/test_serving_drain.py``'s
-        # ``test_a_run_whose_start_row_landed_is_the_turn_the_disposal_cuts`` by
-        # parking a run inside this very write. The signal therefore belongs to the
-        # RUN — one per pipeline, armed here and cleared in the ``finally`` beside
-        # ``_turn_task`` — rather than to one ``_run_turn`` call: a
-        # post-compaction continuation is the same logical run, and a signal
-        # re-armed after the first ``_run_turn`` returned would reopen the same
-        # hole for the width of a continuation.
-        self._turn_task = asyncio.current_task()
-        self._signal = AbortSignal()
         # A process dying after result persistence but before outcome publication
         # must recover an interrupted run, not misclassify it as legacy/read.
         await self._transcript.append_custom(
@@ -9516,6 +9490,7 @@ class Session:
                 "token": self._attention_run_token,
             },
         )
+        self._turn_task = asyncio.current_task()
         try:
             await self._run_turn(
                 initial,
@@ -9536,12 +9511,7 @@ class Session:
             self._note_import_failure(exc, "local_operator.session.session")
             raise
         finally:
-            # The RUN's liveness ends here, with the pipeline that owns it — see
-            # R2 at the head of this method. Clearing ``_signal`` is what makes
-            # ``_disposal_turn`` stop counting this run, so it goes with
-            # ``_turn_task`` and not with any single ``_run_turn``.
             self._turn_task = None
-            self._signal = None
             await self._flush_held_end()
             await self._publish_attention_outcome()
             # A bang-mode command may have completed while this turn owned the
@@ -9639,18 +9609,6 @@ class Session:
             # must never vanish silently — it either runs or is VISIBLY
             # interrupted — so that caller keeps the pre-armed-signal
             # behaviour below, which emits the ordinary aborted start/end pair.
-            #
-            # AND A HELD TURN IS NOT A CUT (R2). Arming the run's liveness before
-            # the durable start row (see ``_run_turn_pipeline``) makes every run
-            # in progress countable from the instant its row can be seen — this
-            # branch included, and that would be wrong here: an abort that landed
-            # before this turn could run has already ENDED it, and a disposal
-            # arriving during the holds below would otherwise note a cut-off
-            # against a turn that ends in the durable held path, with no model call
-            # ever made. Disarming restores the exact reading the three-term
-            # predicate is for: a live turn this exit is about to abort. The signal
-            # is this run's own and the pipeline clears it either way.
-            self._signal = None
             await self._drop_pre_aborted_turn(
                 initial,
                 admitted=admitted,
@@ -9670,17 +9628,8 @@ class Session:
         self._is_streaming = True
         self._generation += 1  # monotonic; stamped on start AND end events
         self._last_activity_ms = int(time.time() * 1000)
-        # The run's signal, armed by ``_run_turn_pipeline`` BEFORE the durable
-        # start row (R2) and reused here rather than replaced: a second signal
-        # would throw away an abort that landed in the interval between the two,
-        # and the ``_abort_requested`` re-check below exists for exactly that
-        # abort. The ``None`` arm is for the direct caller — ``_drain_continuation``
-        # reaches ``_run_turn`` for a post-compaction continuation of the same
-        # run, and a pre-abort drop clears the signal before returning.
-        signal = self._signal
-        if signal is None:
-            signal = AbortSignal()
-            self._signal = signal
+        signal = AbortSignal()
+        self._signal = signal
         if self._abort_requested:
             # An abort that landed between the drop check above and here — a
             # Ctrl+C in the microseconds this turn took to start. Honour it on
@@ -10026,12 +9975,8 @@ class Session:
             # misattributed to a message that delivered nothing (round 4, MINOR-2, for
             # the claim that all three cases are one).
             self._discard_queued_notices()
+            self._signal = None
             self._is_streaming = False
-            # ``_signal`` is NOT cleared here: it belongs to the RUN — armed in
-            # ``_run_turn_pipeline`` before the durable start row and cleared in
-            # that pipeline's ``finally`` — so that a post-compaction continuation,
-            # which runs ``_run_turn`` again inside the same hold, cannot reopen the
-            # interval in which a run is durable but uncountable (R2).
             # Awaited, and that is load-bearing on the leaving arm: the durability
             # write of a HELD batch has to land before the turn releases the lock and
             # this process can decide it is finished -- a spawned write is precisely
