@@ -855,6 +855,12 @@ async def test_a_refused_prose_decision_withholds_the_widening() -> None:
     deciding this on the call's valid envelope would swap the model's answer for
     one the harness has no reason to prefer, and would erase the refusal the
     model needs to see.
+
+    This payload is the DUPLICATE-KEY sub-class; the truncation sub-class of the
+    same refusal is pinned by
+    :func:`test_a_truncated_prose_decision_withholds_the_widening`, because the
+    decoder's shared sentence cannot tell the two apart and the first revision
+    of this gate put the second one on the widening side.
     """
 
     current = observation()
@@ -871,6 +877,39 @@ async def test_a_refused_prose_decision_withholds_the_widening() -> None:
             current, _turns(current)
         )
 
+    assert raised.value.class_key == "incomplete-json"
+    assert raised.value.channel_read is False
+
+
+@pytest.mark.asyncio
+async def test_a_truncated_prose_decision_withholds_the_widening() -> None:
+    """A prose decision CUT OFF mid-object still owns the turn.
+
+    The other sub-class of the refusal above, and the one the first revision of
+    the gate got wrong: the decoder composes ONE sentence for both parse-failure
+    classes -- a reply that never started a value, and a reply that started one
+    and then broke -- so only its typed marker can tell them apart. A truncated
+    decision is a decision the model was WRITING, so the conservative direction
+    is the pre-widening one: refuse on the prose and re-prompt, rather than
+    execute the call's envelope and never tell the model its object was cut off
+    (26 prose-bearing refusal artifacts in the arm's corpus at 2026-09-25 are
+    this shape, 16 of them beside a call, so the widening fired on them).
+    """
+
+    current = observation()
+    body = envelope(finish_payload(current), "Visible status: ready")
+    # The object's own closing brace is gone, so the decoder reads a value that
+    # STARTED and then broke -- the parser reports a position past offset 0.
+    truncated = body[:-1]
+    stream = ChannelStream(body, name="web_search", text=truncated)
+
+    with pytest.raises(DecisionRejected) as raised:
+        await _client(stream, model_spec=_spec(supports_tools=True)).decide(
+            current, _turns(current)
+        )
+
+    # The class and the channel of the PRE-widening client: refused on the prose,
+    # not judged on the call's bytes.
     assert raised.value.class_key == "incomplete-json"
     assert raised.value.channel_read is False
 
@@ -924,6 +963,33 @@ async def test_a_read_channel_publishes_how_much_prose_it_set_aside() -> None:
     artifact = _rejection_detail(raised.value, RedactionSet.from_resolved_values([]))
     assert raised.value.channel_read is True
     assert f"channel=read(prose={len(prose)})" in artifact
+
+
+def test_an_unrecorded_prose_count_is_not_rendered_as_silence() -> None:
+    """A refusal that recorded no count must not claim ``prose=0``.
+
+    ``prose=0`` is a READING of a genuinely silent turn -- the class the widening
+    exists for -- so rendering it for a ``DecisionRejected`` built without the
+    field (a test double, or a future second model client) would make an
+    unrecorded refusal indistinguishable from that class in a sealed bundle. The
+    shipped client always passes the count, so a real refusal is unchanged.
+    """
+
+    from local_operator.evaluation.receipts import RedactionSet
+    from local_operator.evaluation.runner.episode import _rejection_detail
+    from local_operator.evaluation.runner.model import StreamShape
+
+    artifact = _rejection_detail(
+        DecisionRejected(
+            "boom",
+            channel_read=True,
+            stream_shape=StreamShape(tool_call_names='["search"]'),
+        ),
+        RedactionSet.from_resolved_values([]),
+    )
+
+    assert "channel=read" in artifact
+    assert "prose=" not in artifact
 
 
 def test_the_offered_schema_avoids_constructs_providers_reject() -> None:

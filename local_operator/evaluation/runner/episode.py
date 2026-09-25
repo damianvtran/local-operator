@@ -2598,7 +2598,14 @@ def _rejection_detail(rejected: Any, redactions: RedactionSet | None) -> str:
     if shape is not None:
         channel = "read" if getattr(rejected, "channel_read", False) else "prose"
         if channel == "read":
-            channel += f"(prose={getattr(rejected, 'channel_prose_chars', 0)})"
+            # Rendered only when the client RECORDED the count. ``prose=0`` is a
+            # reading -- a genuinely silent turn, the class the widening exists
+            # for -- so a ``DecisionRejected`` built without the field (a test
+            # double, or a future second model client) omits the clause rather
+            # than claiming that reading.
+            prose_chars = getattr(rejected, "channel_prose_chars", None)
+            if prose_chars is not None:
+                channel += f"(prose={prose_chars})"
         # ``stripped_reply_markers`` is not a provider event count, and it rides
         # on this line anyway: the line is the artifact's one per-ATTEMPT record,
         # and the reader needs it beside the counts because it explains them.
@@ -2634,7 +2641,9 @@ def _rejection_detail(rejected: Any, redactions: RedactionSet | None) -> str:
             # for, while a later arm can ask how often a turn answered on BOTH
             # channels and had its prose dropped -- a fact a sealed bundle could
             # not show at all while ``content_deltas`` was the only count beside
-            # it, because that counts stream events, not the text judged.
+            # it, because that counts stream events, not the text judged. The
+            # clause is OMITTED when the client recorded no count, so an
+            # unrecorded refusal cannot read as ``prose=0``.
             f"channel={channel} "
             f"tool_calls=[{_header_value(shape.tool_call_names)}] "
             f"stripped_reply_markers={getattr(rejected, 'stripped_reply_markers', 0)}"

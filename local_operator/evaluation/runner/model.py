@@ -259,7 +259,7 @@ class DecisionRejected(Exception):
         evidence_reply: str | None = None,
         stream_shape: StreamShape | None = None,
         channel_read: bool = False,
-        channel_prose_chars: int = 0,
+        channel_prose_chars: int | None = None,
         stripped_reply_markers: int = 0,
         reasoning_effort: str | None = None,
         empty_length_truncation: bool = False,
@@ -325,6 +325,12 @@ class DecisionRejected(Exception):
         # also wrote prose the channel reader set aside -- a combination no
         # artifact could show before, because a ``content_deltas`` count is
         # events rather than the bytes judged.
+        #
+        # ``None`` means the client did not RECORD the count, and the renderer
+        # omits the clause rather than printing ``prose=0``: zero is a READING
+        # of a genuinely silent turn, which is the class the widening exists
+        # for, so guessing it would make an unrecorded refusal indistinguishable
+        # from that class in a sealed bundle.
         self.channel_prose_chars = channel_prose_chars
         # The reply-assembly tally, for the same reason the class key is here:
         # a refusal whose reply LOST a provider boundary token explains itself

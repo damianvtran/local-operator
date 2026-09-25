@@ -3177,7 +3177,9 @@ class ProviderModelClient:
         # rather than through harness tools, so a call cannot be an action
         # request. 178 of the arm's 204 ``leading-delimiter`` refusals were a
         # complete decision arriving on this channel under a name we did not
-        # read; see ``harness/reply_channel.envelope_from_tool_call``.
+        # read (counted 2026-09-25 over ``~/worktrees/osworld/runs``, when the
+        # corpus stood at 56 episodes in 29 runs; both figures move with it);
+        # see ``harness/reply_channel.envelope_from_tool_call``.
         #
         # WITHHELD when the prose already states a decision, and that condition
         # is the widening's own bound rather than a preference. The coercion is
@@ -3192,7 +3194,13 @@ class ProviderModelClient:
         # those 204 refusals, all ``content_deltas=0`` -- the widening applies
         # unchanged.
         offered_names = _offered_tool_names(request)
-        if _states_a_decision(text):
+        # ``calls`` is part of the condition rather than an optimisation: with no
+        # calls the widening cannot fire anyway (``envelope_from_tool_call``
+        # matches nothing and returns ``None`` for any ``offered_names``), so
+        # asking the decoder unconditionally would JSON-decode every prose-only
+        # reply a second time -- ``parse_decision`` decodes it again a few lines
+        # below -- and add a decoder call on the one path that never needed it.
+        if calls and _states_a_decision(text):
             offered_names = None
         channel_reply = envelope_from_tool_call(
             calls,

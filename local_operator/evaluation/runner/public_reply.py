@@ -387,7 +387,23 @@ class DecisionParseError(ValueError):
     Declared here, beside the decoders that raise it, because this module owns
     what counts as a reply; ``provider_client`` re-exports the name for callers
     that treat it as a client error.
+
+    ``no_value_at_all`` is the ONE discriminator over this family, and it is a
+    typed FIELD rather than a sentence because a sentence cannot carry it:
+    :func:`_decode_leading_json` composes ``decision is not valid JSON:
+    {error}`` for BOTH classes of parse failure -- the reply that never started
+    a value, and the reply that started one and then broke, whose class
+    ``classify_rejection`` splits on the parser's reported POSITION embedded in
+    that same sentence -- so no reader of the text can tell them apart without
+    re-parsing an offset out of a message. Only the first means "this payload
+    states no decision"; :func:`_states_a_decision` reads the marker, and it is
+    why the marker exists. Every other raiser, here and in ``provider_client``,
+    leaves it ``False``, which is the conservative side.
     """
+
+    def __init__(self, *args: object, no_value_at_all: bool = False) -> None:
+        super().__init__(*args)
+        self.no_value_at_all = no_value_at_all
 
 
 #: Distinguishes "the model wrote no ``public_observations`` key" from "the
@@ -531,7 +547,14 @@ def _decode_leading_json(payload: str) -> tuple[Any, str, int]:
         if isinstance(error, json.JSONDecodeError) and "line 1 column 1 (char 0)" in str(error):
             located = _locate_leading_object(payload, decoder)
             if located is None:
-                raise DecisionParseError(f"decision is not valid JSON: {error}") from error
+                # Nothing could start a value at offset 0 AND no single decision
+                # was readable behind the framing: this is the ONE failure that
+                # means the payload states no decision, and the only raiser that
+                # sets the marker ``_states_a_decision`` gates the
+                # reply-channel widening on.
+                raise DecisionParseError(
+                    f"decision is not valid JSON: {error}", no_value_at_all=True
+                ) from error
             decoded, end, value_start = located
             # Bytes, not code points. The located start is a character index
             # because that is what ``raw_decode`` takes, so the conversion
@@ -554,14 +577,6 @@ def _decode_leading_json(payload: str) -> tuple[Any, str, int]:
     return decoded, trailing, framing_bytes
 
 
-#: The decoder's own sentence for "no value could be read at the leading position
-#: at all", which is the ONE refusal that means a payload states no decision.
-#: Every other refusal :func:`_decode_leading_json` raises is about a decision it
-#: DID read -- a duplicate key inside one, a competing second batch after one --
-#: and must not be read as absence (see :func:`_states_a_decision`).
-_NO_DECISION_AT_ALL = "decision is not valid JSON"
-
-
 def _states_a_decision(payload: str) -> bool:
     """Whether the payload states a decision, readable or refused.
 
@@ -578,22 +593,36 @@ def _states_a_decision(payload: str) -> bool:
     Deliberately loose, and deliberately asked of the decoder rather than
     re-derived here: any payload ``_decode_leading_json`` reads a value out of,
     or refuses for a defect INSIDE a value it read, states one. Only "nothing
-    could be read at all" -- the decoder's own
-    :data:`_NO_DECISION_AT_ALL` sentence, which is also what an empty or
+    could be read at all" -- the failure the decoder marks with
+    :attr:`DecisionParseError.no_value_at_all`, which is also what an empty or
     non-JSON prose reply produces -- answers ``False``.
+
+    The answer comes from that TYPED MARKER and never from the message text,
+    because the text cannot carry it: the decoder composes one sentence for both
+    parse-failure classes, so a substring test over it puts a TRUNCATED decision
+    -- text that started a value and was cut off, which is a decision the model
+    was writing -- on the widening side, where the pre-widening client refused
+    the turn and re-prompted (26 prose-bearing refusal artifacts in the arm's
+    corpus on 2026-09-25 are that shape, 16 of them beside a call, so the
+    widening fired on them and the model was never told its object was cut off).
 
     The default is the conservative direction for the caller: a payload this
     cannot classify as decisionless WITHHOLDS the widening, so the prose is
     judged exactly as it was before the widening existed. A refusal reason added
-    to the decoder later is on that default side until it is named here.
+    to the decoder later is on that default side too, because a reason that does
+    not set the marker reads as a decision present.
     """
 
     if not payload.strip():
+        # The widening's own majority case -- 178 of the arm's 204
+        # ``leading-delimiter`` artifacts above published no reply text at all
+        # -- and an answer the marker below agrees with, so the exception is
+        # skipped rather than built and discarded on every prose-only turn.
         return False
     try:
         _decode_leading_json(payload)
     except DecisionParseError as error:
-        return _NO_DECISION_AT_ALL not in str(error)
+        return not error.no_value_at_all
     return True
 
 
