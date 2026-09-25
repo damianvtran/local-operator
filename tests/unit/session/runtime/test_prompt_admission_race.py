@@ -23,7 +23,8 @@ file owns, so the prompt provably arrives while that turn holds the lock.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Sequence
+import json
+from collections.abc import AsyncIterator, Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +33,7 @@ import pytest
 from local_operator.harness.types import StreamEvent
 from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.transcript import Transcript
-from tests.e2e.harness import ScriptedStream, build_session, text_turn
+from tests.e2e.harness import ScriptedStream, build_session, text_turn, tool_call_turn
 
 
 class _GatedStream(ScriptedStream):
@@ -43,19 +44,39 @@ class _GatedStream(ScriptedStream):
     that says the lock is held (a turn only calls the provider under it).
     """
 
-    def __init__(self, turns: Sequence[Sequence[StreamEvent]]) -> None:
+    def __init__(
+        self,
+        turns: Sequence[Sequence[StreamEvent]],
+        *,
+        gate_call: int = 1,
+        fail: Callable[[Any], bool] | None = None,
+        error: str = "probe boom",
+    ) -> None:
         super().__init__(turns)
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
+        #: The provider call the gate parks; call 1 is the delivery turn's first
+        #: request, and nothing else can be running then.
+        self.gate_call = gate_call
+        #: Which LATER request raises. A predicate rather than a call index
+        #: because calls interleave with the handle's conversation-naming call,
+        #: so an index pins the wrong request the moment naming moves; this
+        #: picks the request by what it carries.
+        self.fail = fail
+        self.error = error
 
     def __call__(self, request: Any, signal: Any = None) -> AsyncIterator[StreamEvent]:
         inner = super().__call__(request, signal)
-        first = len(self.requests) == 1
+        index = len(self.requests)
 
         async def gen() -> AsyncIterator[StreamEvent]:
-            if first:
+            if index == self.gate_call:
                 self.entered.set()
                 await self.release.wait()
+            if index != self.gate_call and self.fail is not None and self.fail(request):
+                # A provider failure, which ``Session`` reports as an EVENT
+                # rather than as an exception (``AgentEndEvent.error``).
+                raise RuntimeError(self.error)
             async for event in inner:
                 yield event
 
@@ -208,3 +229,209 @@ async def test_a_headless_exec_turn_waits_for_a_turn_it_did_not_open(tmp_path: P
     finally:
         stream.release.set()
         await handle.dispose()
+
+
+def _request_text(request: Any) -> str:
+    """Everything the provider was sent, as one string (for predicates)."""
+    parts: list[str] = []
+    for message in request.messages:
+        content = getattr(message, "content", None)
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            parts.extend(str(getattr(part, "text", part)) for part in content)
+    return "\n".join(parts)
+
+
+def _is_delivery_followup(request: Any) -> bool:
+    """The delivery turn's post-tool request, and not the queued command's.
+
+    Both are follow-ups whose last message is a tool result, so the id-bearing
+    text is what tells them apart: the queued command's own requests carry its
+    prompt text, the delivery turn's do not.
+    """
+    return getattr(request.messages[-1], "role", "") == "tool" and "exec hi" not in _request_text(
+        request
+    )
+
+
+async def _deliver_a_failing_job_result_and_hold_it(
+    tmp_path: Path,
+) -> tuple[Any, Any, _GatedStream, list[str]]:
+    """A delivery turn that holds the lock, completes a REAL tool, then FAILS.
+
+    The gate parks the delivery turn's first provider call; the turn is answered
+    with a ``todo`` call, completes that boundary, and then its follow-up
+    request raises — so the waited-out turn ends with ``AgentEndEvent(error=...)``
+    after a real ``ToolExecutionEndEvent``. That is the shape agent review round
+    1's MAJOR-1 probe exercised, and the tool is a REGISTERED one on purpose: a
+    planning failure ("tool not found") emits no end event at all
+    (``harness/loop.py`` withholds it for a call that never started), so an
+    invented tool name cannot reach the boundary note this cell measures.
+    """
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools.registry import create_tools
+
+    stream = _GatedStream(
+        [
+            tool_call_turn(
+                text="delivery",
+                tool_name="todo",
+                tool_call_id="call-delivery",
+                arguments={"op": "view"},
+            ),
+            text_turn("unused: the delivery follow-up raises"),
+            tool_call_turn(
+                text="exec",
+                tool_name="todo",
+                tool_call_id="call-exec",
+                arguments={"op": "view"},
+            ),
+            text_turn("exec reply"),
+            text_turn("named"),
+        ],
+        gate_call=1,
+        fail=_is_delivery_followup,
+    )
+    session = build_session(
+        tmp_path / "sess",
+        stream,
+        tools=create_tools(ToolContext(cwd=str(tmp_path)), enabled=["todo"]),
+    )
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    # Spy on the boundary note: the second half of the review's finding is WHICH
+    # turn's tool ends reach it, and a spy measures exactly that.
+    boundaries: list[str] = []
+    inner_boundary = handle._note_turn_boundary
+
+    def note(name: str) -> None:
+        boundaries.append(name)
+        inner_boundary(name)
+
+    handle._note_turn_boundary = note  # type: ignore[method-assign]
+    session._deliver_job_results([("job-1", "child 1 done", None)])
+    await asyncio.wait_for(stream.entered.wait(), 5)
+    assert session._turn_lock.locked(), "the delivery turn must hold the lock"
+    return session, handle, stream, boundaries
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_failed_during_the_wait_is_not_this_commands_failure(
+    tmp_path: Path,
+) -> None:
+    """Agent review round 1, MAJOR-1: the waited-out turn's end is not ours.
+
+    The drain waits out a turn it did not open, and its outcome probe was
+    installed before that wait — so the OTHER turn's terminal event set this
+    command's failure flag. A queued ``lop exec`` turn that ran, landed and
+    ended clean was reported failed (``run_headless_prompt`` -> False, with an
+    empty ``last_prompt_failure``, so nothing even named the cause), and the
+    same subscription fed the other turn's tool boundary into this command's
+    journal note.
+
+    Both halves are asserted, because both come from the one subscription: a fix
+    that only re-armed the failure flag would leave the boundary.
+    """
+    session, handle, stream, boundaries = await _deliver_a_failing_job_result_and_hold_it(tmp_path)
+    try:
+        run = asyncio.ensure_future(handle.run_headless_prompt("exec hi"))
+        # Let the drain reach the head while the delivery turn still runs: the
+        # forced interleaving, not a race.
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert not run.done(), "the exec turn must still be queued behind the delivery turn"
+        stream.release.set()
+        assert await asyncio.wait_for(run, 10) is True, (
+            "the delivery turn's failure was reported as this command's: "
+            f"last_prompt_failure={handle.last_prompt_failure!r}"
+        )
+        assert handle.last_prompt_failure == ""
+        assert _user_rows(tmp_path / "sess", "exec hi") == 1, "the exec row must land exactly once"
+        # NOTHING, because this command's own turn ran no tool. Measured on the
+        # unfixed head, the delivery turn's ``todo`` boundary was noted here at
+        # provider-call index 2 — after the waited-out turn's tool call and
+        # while this command was still waiting at the head of the queue.
+        assert (
+            boundaries == []
+        ), f"the waited-out turn's tool boundary was noted against this command: {boundaries}"
+    finally:
+        stream.release.set()
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_this_commands_own_failure_is_still_reported(tmp_path: Path) -> None:
+    """The other direction, so the gate above cannot be an over-correction.
+
+    The failure is moved onto the QUEUED command's own turn, and that turn is
+    deliberately MULTI-GENERATION — a tool call, then a failing follow-up — so
+    this covers the one way a per-turn attribution could swallow a real verdict:
+    the session stamps a run's ends with its LOGICAL generation, which is the
+    run's first, and a gate that compared against anything else (a later
+    generation, or the generation live when the turn ended) would report this
+    failed turn as clean. ``False`` is what the goal loop's continuation reads
+    before deciding whether to iterate again.
+    """
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools.registry import create_tools
+
+    stream = _GatedStream(
+        [
+            text_turn("delivery reply"),
+            tool_call_turn(
+                text="exec",
+                tool_name="todo",
+                tool_call_id="call-exec",
+                arguments={"op": "view"},
+            ),
+            text_turn("unused: this command's follow-up raises"),
+            text_turn("named"),
+        ],
+        gate_call=1,
+        fail=lambda request: "exec hi" in _request_text(request),
+    )
+    session = build_session(
+        tmp_path / "sess",
+        stream,
+        tools=create_tools(ToolContext(cwd=str(tmp_path)), enabled=["todo"]),
+    )
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    try:
+        session._deliver_job_results([("job-1", "child 1 done", None)])
+        await asyncio.wait_for(stream.entered.wait(), 5)
+        run = asyncio.ensure_future(handle.run_headless_prompt("exec hi"))
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert not run.done(), "the exec turn must still be queued behind the delivery turn"
+        stream.release.set()
+        assert (
+            await asyncio.wait_for(run, 10) is False
+        ), "this command's own failed turn was reported as a success"
+        # The row still lands: a failing turn is reported, never silently
+        # dropped. ``last_prompt_failure`` is deliberately NOT asserted — that
+        # string is only set on the RAISING path (the drain's ``except`` arm);
+        # an event-reported provider failure leaves it empty, which is
+        # pre-existing behaviour this PR does not change.
+        assert _user_rows(tmp_path / "sess", "exec hi") == 1
+    finally:
+        stream.release.set()
+        await handle.dispose()
+
+
+def _user_rows(directory: Path, text: str) -> int:
+    """How many durable USER rows carry ``text`` — the transcript, not a stub."""
+    rows = 0
+    for line in (directory / "transcript.jsonl").read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        payload = entry.get("payload") or {}
+        if payload.get("role") != "user":
+            continue
+        content = payload.get("content") or []
+        if any(isinstance(part, dict) and part.get("text") == text for part in content):
+            rows += 1
+    return rows
