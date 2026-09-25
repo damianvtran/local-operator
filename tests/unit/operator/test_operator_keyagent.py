@@ -27,9 +27,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import stat
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -51,7 +54,11 @@ _HELPER_C = (
 def _helper_body() -> str:
     """The C source with its comments removed, so a prose mention cannot pass a check."""
     source = _HELPER_C.read_text()
-    assert "se-keyagent.c" in source or source, "the helper source is empty"
+    # ``assert source.strip()``, and it used to be ``assert "se-keyagent.c" in source or
+    # source`` — a tautology for any non-empty source, because ``or source`` is truthy
+    # whenever the left side is false (agent review round 2, R2-3). Every check below
+    # splits this text, and an empty file would make all of them vacuously "pass".
+    assert source.strip(), "the helper source is empty"
     return re.sub(r"/\*.*?\*/", "", source, flags=re.S)
 
 
@@ -108,7 +115,7 @@ verb = argv[0] if argv else ""
 payload = sys.stdin.buffer.read() if verb == "sign" else b""
 if LOG:
     with open(LOG, "a") as fh:
-        fh.write(json.dumps({{"argv": argv, "payload": payload.hex()}}) + "\\n")
+        fh.write(json.dumps({{"argv": argv, "payload": payload.hex(), "pid": os.getpid()}}) + "\\n")
 
 if MODE == "killed":
     os.kill(os.getpid(), signal.SIGKILL)
@@ -165,6 +172,17 @@ if verb in ("public", "exists"):
     reply({{"ok": True, "protocol": 1, "present": True, "spki": b64(POINT)}})
 if verb == "sign":
     reply({{"ok": True, "protocol": 1, "signature": b64(DER)}})
+if MODE == "doctor-declined" and verb == "doctor":
+    # THE OTHER CAUSE OF ONE KIND (agent review round 2, R2-1). A helper that SPEAKS this
+    # protocol and declines the request ITSELF answers with a JSON body and EXIT_USAGE,
+    # which reaches the same `refused` kind as an entitlement the OS will not honour. The
+    # real helper's `doctor` does not decline, so this shape is a fake's job — and it is
+    # what makes "status must not name the entitlement for a decline" testable.
+    print(json.dumps({{
+        "ok": False, "protocol": 1, "site": "usage", "status": 5,
+        "detail": "the key agent declined this request",
+    }}))
+    sys.exit(5)
 if MODE == "doctor-refused":
     # DOCTOR AT THE GATED OPERATION (QA round 1, Q4): the query answers -25300, the
     # profile is there, and GENERATION is refused — which is what a bundle whose
@@ -553,6 +571,73 @@ def test_the_sign_timeout_kills_the_helper_and_reports_nothing_signed(fake_app: 
     assert raised.value.kind == "timeout"
 
 
+def test_a_sigint_during_sign_reaps_the_helper(fake_app: Any) -> None:
+    """The Ctrl-C path reaps the helper too — the regression test R1-1 never had.
+
+    The released shape reaped only from the ``TimeoutExpired`` arm, so a SIGINT during
+    ``sign`` left the helper running in its own session and, once the parent exited the
+    way ``cli.main`` does, re-parented to pid 1 with nothing left that could reap it —
+    on the real path a process blocked in ``SecKeyCreateSignature`` holding up a presence
+    prompt that had already been abandoned. ``except BaseException`` is the fix
+    (``KeyboardInterrupt`` is not an ``Exception``); until now a comment was its only
+    record, so a revert would have been silent (agent review round 2, R2-2).
+
+    TWO MEASURED DETAILS SHAPE THIS TEST, both from the round-2 review. The signal is
+    sent with ``os.kill(os.getpid(), SIGINT)`` from a thread, because
+    ``signal.raise_signal(SIGINT)`` from a non-main thread does NOT interrupt the parent
+    blocked in ``select()`` and the child survives even WITH the fix — a probe artefact.
+    And the thread waits for the fake's own pid to appear in its log rather than sleeping
+    a guessed interval, so "the helper is running" is observed rather than assumed: a
+    signal that arrived before the child existed would test nothing.
+    """
+    app = fake_app("slow")
+    log = _fake_log(app)
+    client = _client(app, mode="slow")
+    running = threading.Event()
+
+    def interrupt_once_the_helper_is_running() -> None:
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            entries = _read_log(log)
+            if entries and entries[0].get("pid"):
+                running.set()
+                break
+            time.sleep(0.005)
+        os.kill(os.getpid(), signal.SIGINT)
+
+    thread = threading.Thread(target=interrupt_once_the_helper_is_running, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            client.sign(_MESSAGE, timeout=60)
+    finally:
+        thread.join(timeout=10)
+    assert running.is_set(), "the fake helper never reached its sleeping sign call"
+
+    pid = _read_log(log)[0]["pid"]
+    gone = False
+    deadline = time.monotonic() + 10.0
+    try:
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                gone = True
+                break
+            time.sleep(0.05)
+        assert gone, (
+            f"the helper (pid {pid}) survived a SIGINT during sign: the reaper ran only on "
+            "the timeout path, which is the round-1 defect (agent review round 1, R1-1)"
+        )
+    finally:
+        # A REGRESSION MUST NOT LEAVE A SLEEPER BEHIND, and the fake sleeps 30 s. Kill by
+        # exact pid — the fleet rule forbids a match by program name.
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
 # ---------------------------------------------------------------------------
 # The pre-flight: before every exec, and never cached
 # ---------------------------------------------------------------------------
@@ -773,6 +858,48 @@ def test_the_reinstall_copy_names_the_remedy_and_the_alternative() -> None:
         assert "operator-file-only" in copy
 
 
+@pytest.mark.parametrize("platform", ["darwin", "linux", "win32"])
+def test_the_file_only_level_line_is_true_on_the_platform_that_prints_it(
+    platform: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D1: never promise a presence store this platform cannot have.
+
+    ``init --backend file-only`` is the ONLY store Linux and Windows can use, so this
+    line is those platforms' whole description of what they got. Round 1's wording
+    ("this host has no presence store") was false on macOS, where reaching that store is
+    exactly what the key agent exists for; round 1's REPLACEMENT ("Run `lop operator init`
+    after reinstalling for a presence-gated key") is true there and false everywhere
+    else, because a reinstall installs the same file-only wheel and ``lop operator init``
+    in that state is the idempotent report that replaces nothing — the reader is sent
+    around a loop that cannot end (design round 2, D1, rated MAJOR, and the gate for the
+    round).
+
+    The cost sentence is platform-independent and asserted on all three; the remedy is
+    what branches. This test is what stops a future rewording from reintroducing the
+    promise on a platform that cannot answer it, which is how the previous rewording got
+    in — the branch had no test at all.
+    """
+    from local_operator.operator.sign import describe_level
+
+    monkeypatch.setattr(sys, "platform", platform)
+    handle = keychain.KeyHandle(
+        backend=keychain.FILE_ONLY, key_id="a" * 32, spki=b"\x04" + b"b" * 64, presence=False
+    )
+    line = describe_level(handle)
+    assert "0600 file under your config dir" in line
+    assert "NOT a boundary" in line
+    assert "counted as protection" in line
+    if platform == "darwin":
+        assert "after reinstalling for a presence-gated key" in line
+    else:
+        assert "presence-gated" not in line, (
+            "no presence-gated key is reachable on this platform: reinstalling installs the "
+            "same file-only wheel and `lop operator init` replaces nothing"
+        )
+        assert "reinstall" not in line
+        assert "Pair a phone" in line
+
+
 def test_a_refusal_message_uses_the_one_diagnosis_vocabulary() -> None:
     """A ``refused`` error goes through the SAME builder the in-process ladder used.
 
@@ -889,7 +1016,13 @@ def test_status_names_the_key_agent_beside_the_authority_reason(
     assert "key agent              : the macOS key agent is not installed" in report
     assert "broken install" in report
     assert "fix                    : reinstall the macOS wheel" in report
-    assert "(or take a file-backed key now" in report, "nothing is staged, so file-only is offered"
+    assert (
+        "or                     : take a file-backed key now" in report
+    ), "nothing is staged, so file-only is offered"
+    # The alternative is on its OWN labelled line (design round 2, D6): trailing the
+    # `fix` field made that line 166 characters and pushed the immediately-actionable
+    # remedy to the third display line at 80 columns.
+    assert "`uv tool install local-operator --force` (or" not in report
     # The closed loop: the one command `status` used to name cannot work in this state.
     assert "`lop operator init` adds the operator key" not in report
     assert "loosening: no operator authority on this host." in report
@@ -911,7 +1044,7 @@ def test_status_does_not_contradict_the_file_only_init_that_just_succeeded(
     assert "reason                 : no anchor is installed" in report
     assert "key agent              : the macOS key agent is not installed" in report
     assert "fix                    : reinstall the macOS wheel — `uv tool install" in report
-    assert "(or take a file-backed key now" not in report
+    assert "take a file-backed key now" not in report
     assert "staged anchor" in report
 
 
@@ -972,6 +1105,35 @@ def _bundle_shaped(tmp_path: Path, *, executable: bytes | None = b"#!/bin/sh\n")
         exe.write_bytes(executable)
         exe.chmod(0o755)
     return app
+
+
+def test_status_prints_the_cause_beside_the_kind_of_a_refused_key_agent(
+    fake_app: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-1: one kind, several causes — ``status`` must say WHICH one happened.
+
+    ``refused`` covers an entitlement the OS will not honour AND a helper that declined the
+    request itself. A one-line field naming only the entitlement told an operator whose
+    keychain was locked — or whose helper had merely refused a flag — that their
+    entitlement was not in effect, and then offered the reinstall that follows from that
+    diagnosis. The helper's own sentence is now the cause, so the entitlement is still named
+    when it IS the cause and is absent when it is not.
+    """
+    refused = fake_app("doctor-refused")
+    entitlement = _run_status(monkeypatch, tmp_path)
+    assert "key agent              : the key agent refused its keychain call:" in entitlement
+    assert (
+        "entitlement is not in effect" in entitlement
+    ), "the entitlement cause must still be named when that IS the cause"
+
+    set_mode(refused, "doctor-declined")
+    declined = _run_status(monkeypatch, tmp_path)
+    assert "key agent              : the key agent refused its keychain call:" in declined
+    assert "the key agent declined this request" in declined
+    assert "entitlement is not in effect" not in declined, (
+        "a declined request was reported as a missing entitlement, which is the round-2 "
+        "R2-1 defect"
+    )
 
 
 def test_the_real_preflight_refuses_a_bundle_that_is_not_there(tmp_path: Path) -> None:

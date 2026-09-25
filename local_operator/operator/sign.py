@@ -29,6 +29,7 @@ can be spammed and misread, only a human can answer it.
 
 from __future__ import annotations
 
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -265,12 +266,33 @@ def describe_level(handle: KeyHandle) -> str:
         # names. "Pair a phone (stage D)" also leaked internal roadmap vocabulary into
         # user-facing output; "stage D" is how the design document numbers a milestone,
         # not something an operator can act on.
+        #
+        # AND WHERE THE REPLACEMENT MISDIRECTED EVERYWHERE ELSE (design round 2, D1).
+        # "Run `lop operator init` after reinstalling for a presence-gated key" is true
+        # on macOS and FALSE on the platform that prints this line most often: Linux has
+        # no OS-mediated per-signature presence store and the Windows CNG tier is
+        # unimplemented (§10), so there a reinstall installs the same file-only wheel and
+        # `lop operator init` is the idempotent report that replaces nothing — the reader
+        # is sent around a loop that cannot end. This is the failure class round 1 rated
+        # MAJOR in D2 and D3 (copy that misstates what the HOST can do, and a named
+        # remedy that cannot work); the platform split is what makes one line honest on
+        # both, rather than trading one platform's falsehood for the other's.
+        #
+        # The cost sentence above is platform-independent and stays as it is. The remedy
+        # is not: the reinstall route is named only where a presence store exists to
+        # reach, and everywhere else the reader gets the one lever that works from a
+        # file-only host — a paired phone authorises a session from another device, which
+        # is the authority this readable file does not confer.
+        remedy = (
+            "Run `lop operator init` after reinstalling for a presence-gated key, "
+            "or pair a phone."
+            if sys.platform == "darwin"
+            else "Pair a phone to authorise a session from another device."
+        )
         return (
             "file-only: the key is a 0600 file under your config dir, so ANY "
             "process running as you can sign for you. This is NOT a boundary — "
-            "it is reported as a lower level rather than counted as protection. "
-            "Run `lop operator init` after reinstalling for a presence-gated key, "
-            "or pair a phone."
+            "it is reported as a lower level rather than counted as protection. " + remedy
         )
     return f"{handle.backend}: reported as-is; this build makes no claim about it"
 

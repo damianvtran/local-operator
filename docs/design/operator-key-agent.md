@@ -176,7 +176,7 @@ different sites and the Python diagnosis table
 | helper absent | not installed: an sdist install, or a wheel for another platform — reinstall, or `--backend file-only` and here is what that costs | `key agent : the macOS key agent is not installed (broken install)`, plus `fix :` naming the reinstall; the `reason` line keeps the ANCHOR's own sentence |
 | verification failed | its signature does not verify as ours, or it carries no profile | `key agent : the key agent failed verification` + `fix :` |
 | killed by signal | the kernel refused its entitlement: the profile is missing, stale or does not authorize its application identifier | `key agent : the key agent was killed: bad or missing embedded profile` + `fix :` |
-| entitlement refused | the OS refused the keychain call: the profile's entitlement is not in effect | `key agent : the key agent's keychain call was refused: its entitlement is not in effect` + `fix :` |
+| keychain call refused | the key agent ran but the OS refused its keychain call, or the helper declined the request itself | `key agent : the key agent refused its keychain call: <the helper's own sentence naming the cause>` + `fix :` |
 | no key stored | no operator key on this host: run `lop operator init` | `reason : no key on this host` |
 | key stored | the level it achieved, with the protection class `[kSecAttrAccessible…]` | `private-half backend : operator-secure-enclave`, `presence per signature : True` |
 
@@ -199,6 +199,29 @@ docstring says so; `--backend file-only` remains the only route to the weaker le
 When the anchor names the presence backend and the helper cannot run, `status` prints a
 `key agent` line rather than letting the two fields above promise a gate that cannot be
 answered.
+
+**The file-only level line is split by platform, and that is a fix, not a regression**
+(design round 2, D1). Round 1 removed "this host has no presence store" because it is
+false on macOS, and replaced it with "Run `lop operator init` after reinstalling for a
+presence-gated key" — true on macOS and false on the platform that prints the line most
+often: Linux has no OS-mediated per-signature presence store and the Windows tier is
+unimplemented (§10), so there a reinstall installs the same file-only wheel and
+`lop operator init` is the idempotent report that replaces nothing. The reader is sent
+around a loop that cannot end, which is the same failure class round 1 rated MAJOR in D2
+and D3. `describe_level` therefore names the reinstall route only on darwin, and gives
+every other platform the one lever that works from a file-only host — a paired phone
+authorises a session from another device. The cost sentence ("ANY process running as you
+can sign for you … NOT a boundary") is platform-independent and unchanged.
+
+**The cause is printed beside the kind** (design round 2, R2-1). One kind, `refused`,
+covers an entitlement the OS will not honour, a helper that declined the request itself,
+and any failed generation. A one-line field that named only the entitlement told an
+operator whose keychain was locked — or whose helper had merely refused a flag — that
+their entitlement was not in effect, and offered the reinstall that follows that
+diagnosis. `SecureEnclaveBackend.health` prints the helper's own sentence as the cause for
+that kind, and for that kind only: the other kinds' copies already ARE their specific
+cause, and an `unverified` detail can be a tool's stderr tail, which must not be pasted
+into a one-line field.
 
 ## 6. Ownership, and what replaced the ASan pass
 
@@ -276,6 +299,22 @@ toolchain must not move under the artefact the entitlement depends on.
 8. the throwaway keychain and the decoded identity move are deleted in an `if:
    always()` step, and the p12 is never uploaded as an artefact.
 
+**The signature carries a secure timestamp, and the build READS IT BACK** — stated
+because the reason is not notarization. The entitlement is checked against the signature
+at run time, so a Developer ID signature with no secure timestamp stops validating when
+the certificate expires, for every wheel already installed; that is exactly what §8's
+rotation plan assumes does not happen. `assemble_keyagent_bundle.sh` therefore names the
+mode (`--timestamp`, default `secure`) instead of depending on `codesign`'s default for
+this certificate type, and step 5c FAILS the build if the signed result carries no
+`Timestamp=` line — an unreachable Apple timestamp authority fails the release rather
+than shipping an artefact that stops working in 2031. `--timestamp=none` exists for a
+local build on a host that cannot reach the TSA: it warns loudly, skips the assertion,
+and must never reach a release. QA round 2 reported that a universal2 binary could not
+obtain a timestamp on this host and signed its own artefact through a shim; that did not
+reproduce on 2026-09-25 (three fresh universal2 binaries and this very bundle all carried
+a real `Timestamp=`), so it is recorded as a transient TSA outage rather than a property
+of fat binaries — and either way the check is what makes shipping it silently impossible.
+
 **The two wheels are OFFERED, never passed as two paths** (QA round 1, Q5).
 `uv pip install --find-links <dir> local-operator==<v>` lets the resolver choose, and
 the choice is measured: it selects
@@ -349,6 +388,11 @@ guarantee.
   path for no functional gain. The signing semantics are kept such that adding it
   changes nothing else (`--options runtime` is already there, which is what
   notarization requires).
+* **The `keyagent-macos` job has never executed.** It first runs on the next release, so
+  §7's steps 1-8 — the identity import, the pinned G2 intermediate, the timestamp the
+  check reads back, the wheel retag and the `lipo` re-read on the extracted helper — are
+  designed and locally measured but unmeasured in CI. Stated so the release owner treats
+  that job's first run as the test of it.
 * An **Intel/T2 Mac**: that the universal2 slice runs, that the entitlement passes
   there, and that the ladder picks the passcode-set rung.
 * That `uv tool install` leaves `Contents/embedded.provisionprofile` in place — it is a
@@ -371,4 +415,6 @@ rather than written blind. On **Linux** there is no OS-mediated per-signature pr
 store: `fprintd` proves a finger touched a reader rather than that a human consented to
 *this* signature, `polkit` authenticates to the system with a password that can be
 prompt-spammed, and a TPM2 PIN is a secret rather than a gesture. `file-only` stays the
-honest Linux level, and the report keeps saying so.
+honest Linux level, and the report keeps saying so — with the level line's remedy split by
+platform (§5, design round 2 D1), because "reinstall for a presence-gated key" names a
+store neither of these platforms can reach.

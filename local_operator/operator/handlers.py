@@ -372,10 +372,23 @@ def _status() -> int:
             # remedy appeared only in the failure message of the command it sent the
             # reader to. The fix line names the reinstall, and the file-only alternative
             # only where there is nothing staged yet to fall back on.
-            fix = "reinstall the macOS wheel — `uv tool install local-operator --force`"
+            #
+            # AND THE ALTERNATIVE GETS ITS OWN LABEL (design round 2, D6). Appending it to
+            # this line made it 166 characters — the widest field on the surface, three
+            # display lines at 80 columns, with the remedy a reader can act on IMMEDIATELY
+            # arriving last. The `init` refusal block already carries one labelled field
+            # per remedy (`fix  :` / `or   :` / `note :`), so `status` uses the same shape
+            # and the alternative is reachable by label rather than by reading to the end
+            # of a wrapped line.
+            print(
+                "fix                    : reinstall the macOS wheel — "
+                "`uv tool install local-operator --force`"
+            )
             if not staged_here:
-                fix += " (or take a file-backed key now: `lop operator init --backend file-only`)"
-            print(f"fix                    : {fix}")
+                print(
+                    "or                     : take a file-backed key now: "
+                    "`lop operator init --backend file-only`"
+                )
     print(f"reason                 : {report['reason']}")
     # THE ONE STEP THAT IS STILL PENDING, named rather than left for the reader to
     # infer from a level that looks lower than what `init` just printed. The two

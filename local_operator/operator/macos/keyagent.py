@@ -753,7 +753,12 @@ def helper_health(*, bundle: Path | None = None, tag: str = HEALTH_TAG) -> Keyag
         KeyagentClient(tag=tag, bundle=app).doctor()
         return KeyagentHealth(True, described)
     except KeyagentError as exc:
-        return KeyagentHealth(False, f"{exc.kind}: {exc.detail}", exc.kind)
+        # THE KIND AND THE SENTENCE TRAVEL SEPARATELY (agent review round 2, R2-1). ``kind``
+        # is the machine-readable half — the reporter picks its own register from it — so
+        # prefixing it here made every consumer either print it twice or re-parse the very
+        # string the dataclass above says not to parse. ``detail`` is the helper's own
+        # sentence, and ``SecureEnclaveBackend.health`` prints it beside the kind's copy.
+        return KeyagentHealth(False, exc.detail or exc.kind, exc.kind)
     except OSError as exc:  # pragma: no cover — a filesystem in a bad state
         return KeyagentHealth(False, f"unreadable: {exc}", "absent")
 

@@ -11,7 +11,16 @@
 #   * a bundle with no embedded profile is likewise a kernel kill, so the profile
 #     is required, not optional;
 #   * a signature that does not verify is a plain runtime failure, so the whole
-#     thing is verified before it can ship.
+#     thing is verified before it can ship;
+#   * a Developer ID signature WITHOUT a secure timestamp stops validating the day
+#     the signing certificate expires, which the design document's rotation plan
+#     (§8) explicitly does not assume: an already-installed wheel would start being
+#     refused on that date. `codesign`'s own default already requests one for a
+#     Developer ID identity, and relying on that silently is exactly how the
+#     property goes unasserted — a TSA that is unreachable, or a default that
+#     changes, leaves an artefact that looks fine here and dies in 2031. So the mode
+#     is named (`--timestamp`, default `secure`) and the SIGNED RESULT is read back
+#     for the timestamp rather than trusted.
 #
 # usage:
 #   assemble_keyagent_bundle.sh --out APP --identity ID --profile FILE [options]
@@ -20,6 +29,10 @@
 #   --binary FILE      prebuilt universal binary (default: compile from source)
 #   --source FILE      the C source (default: lop-keyagent/se-keyagent.c)
 #   --keychain FILE    a throwaway keychain holding the identity (CI)
+#   --timestamp MODE   ``secure`` (default) or ``none``. ``none`` is NOT for a
+#                      release: it is for a local build on a host whose timestamp
+#                      authority cannot be reached, it is warned about loudly, and
+#                      the timestamp assertion below is skipped for it.
 #   --asan             build a sanitizer variant: -fsanitize=address, -O1 -g, and
 #                      NO hardened runtime. Hardened runtime blocks the sanitizer
 #                      runtime's library load, and the sanitizer variant is a QA
@@ -39,6 +52,7 @@ KEYCHAIN=""
 BINARY=""
 SOURCE="$HERE/lop-keyagent/se-keyagent.c"
 ASAN=0
+TIMESTAMP_MODE="secure"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -48,6 +62,7 @@ while [ $# -gt 0 ]; do
     --keychain) KEYCHAIN="$2"; shift 2 ;;
     --binary) BINARY="$2"; shift 2 ;;
     --source) SOURCE="$2"; shift 2 ;;
+    --timestamp) TIMESTAMP_MODE="$2"; shift 2 ;;
     --asan) ASAN=1; shift ;;
     *) echo "assemble_keyagent_bundle.sh: unknown argument $1" >&2; exit 2 ;;
   esac
@@ -58,6 +73,13 @@ if [ -z "$OUT" ] || [ -z "$IDENTITY" ] || [ -z "$PROFILE" ]; then
   exit 2
 fi
 [ -f "$PROFILE" ] || { echo "no provisioning profile at $PROFILE" >&2; exit 2; }
+case "$TIMESTAMP_MODE" in
+  secure|none) ;;
+  *)
+    echo "assemble_keyagent_bundle.sh: --timestamp takes 'secure' or 'none', not '$TIMESTAMP_MODE'" >&2
+    exit 2
+    ;;
+esac
 
 APP="$OUT"
 STAGE="$(mktemp -d "${TMPDIR:-/tmp}/lop-keyagent-stage.$$.XXXXXX")"
@@ -187,13 +209,19 @@ PY
 # not need it (measured shape S: bundle + profile, no hardened runtime, PASS).
 CODE_KW=()
 [ -n "$KEYCHAIN" ] && CODE_KW=(--keychain "$KEYCHAIN")
-# macOS ships bash 3.2, where "${arr[@]}" on an EMPTY array trips `set -u`; the
+# EXPLICIT, not left to codesign's default for the certificate type — see the header and
+# step 5c. macOS ships bash 3.2, where "${arr[@]}" on an EMPTY array trips `set -u`; the
 # ${arr[@]+"${arr[@]}"} idiom is the portable spelling (same as run_probe.sh).
+if [ "$TIMESTAMP_MODE" = "secure" ]; then
+  TS_KW=(--timestamp)
+else
+  TS_KW=(--timestamp=none)
+fi
 if [ "$ASAN" = "1" ]; then
-  codesign --force ${CODE_KW[@]+"${CODE_KW[@]}"} \
+  codesign --force ${CODE_KW[@]+"${CODE_KW[@]}"} ${TS_KW[@]+"${TS_KW[@]}"} \
     --entitlements "$HERE/keyagent.entitlements" --sign "$IDENTITY" "$APP"
 else
-  codesign --force --options runtime ${CODE_KW[@]+"${CODE_KW[@]}"} \
+  codesign --force --options runtime ${CODE_KW[@]+"${CODE_KW[@]}"} ${TS_KW[@]+"${TS_KW[@]}"} \
     --entitlements "$HERE/keyagent.entitlements" --sign "$IDENTITY" "$APP"
 fi
 
@@ -235,6 +263,35 @@ if leaf not in certificates:
     )
 print(f"profile names the signing certificate ({len(leaf)} DER bytes)")
 PY
+
+# --- 5c. THE TIMESTAMP MUST BE ON THE SIGNATURE, AND IS READ BACK ------------
+# WHY AN ASSERTION RATHER THAN AN ASSUMPTION (QA round 2). The entitlement is checked
+# against the signature at run time, so a Developer ID signature carrying no secure
+# timestamp stops validating when the certificate expires — for every wheel already
+# installed (design doc §8, which the rotation plan depends on). QA round 2 reported
+# that this host could not obtain a timestamp for a universal2 binary and signed its own
+# artefact with `--timestamp=none` through a shim. That does NOT reproduce here — three
+# fresh universal2 binaries and this very bundle all signed with a real `Timestamp=` at
+# 2026-09-25 08:43-08:44 — so the reported failure is a transient TSA outage, not a
+# property of fat binaries or of this identity; either way, "could not obtain one" must
+# never ship silently. This is the check that makes that true.
+if [ "$TIMESTAMP_MODE" = "none" ]; then
+  echo "  WARNING: signed WITHOUT a secure timestamp (--timestamp=none)." >&2
+  echo "  This signature stops validating when the Developer ID certificate expires, so" >&2
+  echo "  this artefact must NOT be released or published. It is for a local build on a" >&2
+  echo "  host whose timestamp authority cannot be reached." >&2
+else
+  SIGNED_TS="$(codesign -d --verbose=4 "$APP" 2>&1 | grep -c '^Timestamp=' || true)"
+  if [ "${SIGNED_TS:-0}" -lt 1 ]; then
+    echo "the signature on $APP carries NO secure timestamp, and one is required: a" >&2
+    echo "Developer ID signature without it stops validating when the certificate" >&2
+    echo "expires, for every wheel already installed. This is what an unreachable Apple" >&2
+    echo "timestamp authority looks like. Retry when it is reachable — do not release" >&2
+    echo "this artefact, and do not switch to --timestamp=none to get past this check." >&2
+    exit 1
+  fi
+  codesign -d --verbose=4 "$APP" 2>&1 | grep '^Timestamp=' | sed 's/^/  secure /'
+fi
 
 echo "assembled and signed $APP"
 codesign -d --entitlements - --verbose=2 "$APP" 2>&1 | sed 's/^/  /'
