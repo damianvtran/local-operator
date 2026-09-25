@@ -1629,6 +1629,25 @@ class TestOAuthEndpointDiscovery:
 
     URL = "https://mcp.example.com/v1/mcp"
 
+    def setup_method(self) -> None:
+        """Clear BOTH discovery caches before every cell in this class.
+
+        The negative cache is the one that matters and the one that bit: every
+        cell here reuses the same ``URL``, so a cell that answers "this server
+        publishes no metadata" (``test_discovery_returns_none_when_asm_missing``)
+        left a 300 s negative entry keyed on that URL, and the NEXT cell's
+        discovery returned from it without ever reaching its own mocked
+        transport — so ``test_discovery_caches_successes`` saw zero HTTP calls
+        and read as a product defect. Individual cells still clear the positive
+        cache where they always did; this is the class-wide reset the second
+        cache needs, because a per-cell clear is what a new cache silently
+        escapes.
+        """
+        from local_operator.mcp import auth as auth_mod
+
+        auth_mod._DISCOVERED_ENDPOINTS_CACHE.clear()
+        auth_mod._DISCOVERED_ENDPOINTS_NEGATIVE_CACHE.clear()
+
     @pytest.mark.asyncio
     async def test_discovery_resolves_token_endpoint_from_prm_and_asm(
         self, monkeypatch: pytest.MonkeyPatch
@@ -3579,10 +3598,19 @@ class TestProbeOauthCapability:
     async def test_a_public_server_is_refused_and_costs_one_probe(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Pre-fix this returned True for any remote config."""
+        """Pre-fix this returned True for any remote config.
+
+        The stub spells ``force`` because the login gate passes it: this is the
+        human's explicit "ask the network" action, so ``probe_oauth_capability``
+        calls ``discover_oauth_endpoints(url, force=True)`` to bypass the
+        process cache a connect attempt may have just written. A stub that
+        accepts only ``url`` raises ``TypeError`` inside the gate's
+        ``except Exception`` and reads as "refused" — which is why this test
+        asserts on the CALL rather than only on the False return.
+        """
         calls: list[str] = []
 
-        async def fake_discover(url: str) -> None:
+        async def fake_discover(url: str, *, force: bool = False) -> None:
             calls.append(url)
             return None  # no authorization server advertised
 
@@ -3596,9 +3624,14 @@ class TestProbeOauthCapability:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The first login on a fresh import must still work — and the result
-        is recorded so the next connect authenticates without re-probing."""
+        is recorded so the next connect authenticates without re-probing.
 
-        async def fake_discover(url: str) -> object:
+        Same ``force`` contract as the refusal cell above: a stub without it
+        raises into the gate's broad ``except``, so the gate answers False and
+        this test reads as a product failure rather than as a stale stub.
+        """
+
+        async def fake_discover(url: str, *, force: bool = False) -> object:
             return object()
 
         monkeypatch.setattr(auth_mod, "discover_oauth_endpoints", fake_discover)

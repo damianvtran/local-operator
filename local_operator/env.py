@@ -14,11 +14,38 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
 
-from dotenv import load_dotenv
-
-# Always load .env from the project root, regardless of working directory
+# Always load .env from the project root, regardless of working directory.
 dotenv_path = Path(__file__).parent.parent / ".env"
-load_dotenv(dotenv_path, override=True)
+
+# STILL AN IMPORT-TIME LOAD, AND STILL `override=True`; only the no-file case
+# became free.
+#
+# The precedence this encodes is a guarantee about WHEN the values land, not
+# which of two sources wins: `override=True` writes every key in `.env` into
+# ``os.environ`` at the moment this module is first imported, so a `.env` value
+# beats a variable that was already exported, and a write made AFTER the import
+# beats `.env`. Deferring the load to the first :func:`get_env_config` call
+# would move that window, and the window is observable: `providers/registry.py`
+# answers ``env_keys`` (``OPENROUTER_API_KEY`` and friends) straight out of
+# ``os.environ``, so a caller that reads a provider key without ever calling
+# ``get_env_config`` would stop seeing `.env` entirely, and a value set between
+# import and that first call would silently invert precedence. A correctness
+# regression there costs far more than the ~12 ms this saves, so the window does
+# NOT move.
+#
+# What the guard removes is the cost of asking about a file that is not there.
+# ``load_dotenv`` on a missing path is a no-op — measured: it returns ``False``
+# and touches no environment variable — but reaching it means importing the
+# ``dotenv`` package first, which is ~125 ms standalone and ~12.7 ms of marginal
+# CPU on this path (most of dotenv's own dependencies are already loaded by the
+# package ``__init__``). Importing it inside the branch keeps that import off
+# every run with no ``.env`` — every CI run, every isolated test run, and this
+# worktree — while a checkout that HAS a `.env` behaves exactly as before,
+# because then the import and the call both still happen, here, at import time.
+if dotenv_path.is_file():
+    from dotenv import load_dotenv
+
+    load_dotenv(dotenv_path, override=True)
 
 os.environ["ANONYMIZED_TELEMETRY"] = "false"
 

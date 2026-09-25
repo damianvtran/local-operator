@@ -3223,6 +3223,12 @@ class McpManager:
 
         oauth_available = False
         try:
+            # Deliberately NOT forced past the process cache, unlike the explicit
+            # ``/mcp login`` gate: this sits on the per-CONNECT path, so it is
+            # the caller the answered-negative cache exists for. A server that
+            # publishes no metadata reports the same ``oauth_available=False``
+            # either way — the value handed to ``record_oauth_challenge`` is
+            # unchanged, only the number of probes behind it is.
             oauth_available = await discover_oauth_endpoints(url) is not None
         except Exception:  # noqa: BLE001 — discovery is best-effort; wording degrades, not the flow
             logger.debug("challenge discovery failed for %s", url, exc_info=True)

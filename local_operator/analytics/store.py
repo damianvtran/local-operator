@@ -102,6 +102,76 @@ _WRITE_RETRY_BACKOFF_S = 0.05
 _WAL_RETRIES = 6
 _WAL_RETRY_BACKOFF_S = 0.05
 
+#: How long a lock wait on this store's connections may last, in milliseconds,
+#: as a PRAGMA. Named because TWO places now depend on the value agreeing: the
+#: connection setup, and ``bound_wal``'s truncate, which turns the handler OFF
+#: for one statement and has to restore exactly what it found. The 5000 here is
+#: the same patience ``_WRITE_RETRIES`` exists to work within, and it is what a
+#: blocked ``wal_checkpoint`` waits out (measured: 5.183 s) — see
+#: ``bound_wal``, whose whole shape is about never paying that on the writer
+#: thread.
+_BUSY_TIMEOUT_MS = 5000
+
+#: HOW BIG A WAL FILE MAY BE LEFT ON DISK. 16 MiB, and the reasoning is a
+#: measurement rather than a round number.
+#:
+#: WHAT IT BOUNDS, AND WHAT IT DOES NOT -- BOTH HALVES MATTER, because the
+#: obvious reading of this pragma is wrong. ``journal_size_limit`` is applied at
+#: a WAL RESTART: "each time a transaction is committed or a WAL file resets,
+#: SQLite compares the size of the ... WAL file left in the file-system to the
+#: size limit ... and if [it] is larger it is truncated to the limit" (SQLite
+#: pragma docs). Two consequences, both measured on sqlite 3.50.4 in
+#: ``.perf/bench/lane2``:
+#:
+#: * It does NOT shrink a WAL that is already large. A 24,781,832 byte file
+#:   stayed at 24,781,832 with this limit, with a 4 MiB limit and with the
+#:   default -1; a checkpoint that backfilled every frame left it at 24,781,832
+#:   too (a PASSIVE/FULL checkpoint reclaims space INSIDE the file, not the file
+#:   itself). Only a TRUNCATE checkpoint, or a restart AFTER a complete
+#:   checkpoint, takes the bytes back. So this pragma is not the fix for the
+#:   528 MB WAL measured below, and nothing here should claim it is:
+#:   :meth:`bound_wal` is the reclaim, and this is the bound on what grows back.
+#: * It DOES bound what a restart leaves behind. When the same oversized WAL was
+#:   restarted by a connection carrying the limit, the file became exactly
+#:   16,777,216 bytes with this value, 4,194,304 with a 4 MiB one, and 4,152
+#:   (one frame) with 0. The default -1 leaves the high-water mark forever, which
+#:   is precisely the live failure: 528,204,632 bytes -- 128,956 pages, 129x
+#:   SQLite's 1000-page auto-checkpoint threshold -- against a 659 MB database,
+#:   unchanged across two samples 20 s apart. A file that big is not a working
+#:   set; it is space nothing will ever give back.
+#:
+#: WHY 16 MiB. Three constraints, in order: it must be comfortably ABOVE the
+#: 1000-page auto-checkpoint threshold (4 MiB at the 4 KiB page size this
+#: database uses), because a limit below the working set turns every restart into
+#: a truncate-then-regrow cycle -- the limit=0 shape; it must be SMALL against
+#: the ledger it belongs to, so the retained file is a rounding error rather than
+#: a second copy of the data (16 MiB is 2.4% of the 659 MB database above); and
+#: it must hold several checkpoint cycles' frames, so a restart leaves a file the
+#: next writes REUSE instead of one they must extend. 16 MiB is 4 auto-checkpoint
+#: cycles, and the two bounds it sits between are 4 MiB and 659 MB.
+#:
+#: WHY NOT 0. Zero is the "always truncate to the minimum" setting: measured, the
+#: same 24.8 MB restart left 4,152 bytes instead of 4,194,304. It gives up the
+#: whole reuse window to save at most the 16 MiB this constant already caps --
+#: 2.4% of this ledger -- and pays for it on the write path, where each restart
+#: re-extends the file under the write lock instead of writing into space that is
+#: already there. That write-path cost was NOT measurable here (40 forced restart
+#: cycles, 156 MB written: 1.003 s of CPU at limit 0, 0.959 s at 16 MiB, 0.962 s
+#: at -1, with identical 3.96 MB peak WALs -- inside run-to-run noise), which is
+#: why the tie goes to the bound that keeps the reuse window: the headroom is
+#: free, and the space it costs is bounded by the constant itself. What is being
+#: bought is 528 MB of never-reclaimed file becoming at most 16 MB.
+#:
+#: PER CONNECTION, WHICH IS WHY IT IS SET IN TWO PLACES. The limit belongs to the
+#: connection that PERFORMS the restart, not to the database file: measured, a
+#: limit set on connection A did not truncate a WAL restarted by connection B
+#: (24,790,072 stayed 24,790,072), while the same 4 MiB limit truncated when A
+#: set it and A restarted. ``_connect`` therefore sets it on every connection
+#: this module opens -- every analytics process, whether or not it ever wins the
+#: maintenance election -- and ``bound_wal`` re-asserts it on the writer's
+#: connection at the sweep, immediately before the truncate that reclaims.
+_WAL_SIZE_LIMIT_BYTES = 16 * 1024 * 1024
+
 #: Precedence of a name written to ``session_names``, mirroring the rules
 #: ``session/naming.py`` documents for the live ``ConversationName`` holder.
 #: Higher wins; equal replaces (a re-title must be able to replace the title it
@@ -1207,6 +1277,19 @@ class AnalyticsStore:
         self._insert_indices: tuple[int, ...] = tuple(range(len(_CALL_COLUMNS)))
         self._insert_sql: str = _INSERT_SQL
 
+    @property
+    def db_path(self) -> Path:
+        """The database file this store resolved to, created or not.
+
+        Public because the RECORDER needs it: the host-wide maintenance
+        election is keyed on the store's own root so that a store pointed
+        somewhere else (a test's ``tmp_path``, an explicit ``db_path``) elects
+        there instead of in the operator's config root. Default resolution is
+        ``config_dir() / "analytics.db"``, so for a process's real store the
+        parent of this path IS the resolved config root.
+        """
+        return self._db_path
+
     # -- connection ----------------------------------------------------------
     @staticmethod
     def _set_wal(conn: sqlite3.Connection) -> None:
@@ -1259,9 +1342,19 @@ class AnalyticsStore:
             # that follows, including the schema script below. It is set before
             # the journal-mode switch rather than after it because the switch is
             # the single most lock-contended statement here (see ``_set_wal``).
-            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA busy_timeout=%d" % _BUSY_TIMEOUT_MS)
             self._set_wal(conn)
             conn.execute("PRAGMA synchronous=NORMAL")
+            # The retained-WAL bound, on EVERY connection rather than only on the
+            # one that wins the hourly maintenance election, because SQLite
+            # applies it on whichever connection performs the WAL restart and
+            # this file is written by every session on the host (28 processes
+            # held it open when the live WAL was measured). Set here it costs one
+            # statement per connection -- connections are per-thread and reused,
+            # so this is not on any hot path -- and it only ever acts when the
+            # file is already larger than the bound. _WAL_SIZE_LIMIT_BYTES has
+            # the measurement, and `bound_wal` has the reclaim.
+            conn.execute("PRAGMA journal_size_limit=%d" % _WAL_SIZE_LIMIT_BYTES)
             # Schema creation is idempotent (IF NOT EXISTS) but should run once,
             # under a lock, so two threads opening their first connections
             # simultaneously do not both executescript into the same file.
@@ -1974,6 +2067,80 @@ class AnalyticsStore:
             logger.debug("analytics: rollup prune failed", exc_info=True)
         return removed
 
+    def bound_wal(self) -> bool:
+        """Fold the WAL back into the database, then bound the file. Owned sweeps only.
+
+        Called by the recorder after an owned maintenance sweep (see
+        ``recorder._run_owned_maintenance``), on the writer thread's connection.
+        Returns True when the file was truncated.
+
+        WHY PASSIVE FIRST, AND WHY THE TRUNCATE IS GATED ON IT. A checkpoint
+        that has to wait for a reader is a stall on the analytics writer thread,
+        and the wait is the connection's ``busy_timeout``: measured in
+        ``.perf/bench/lane2``, a ``wal_checkpoint(TRUNCATE)`` behind a reader
+        pinning an old snapshot took **5.183 s** (the 5000 ms the connection
+        carries) and then gave up with ``(busy=1, log=3011, checkpointed=2)``;
+        with ``busy_timeout=0`` the same call was refused in **0.000 s** with the
+        same row. So the busy handler DOES apply to ``wal_checkpoint``, and the
+        worst case is a full busy timeout per attempt. This method therefore
+        never asks for a checkpoint that can wait:
+
+        * ``PASSIVE`` never blocks on readers — it checkpoints what it can and
+          returns. Measured behind the same pinning reader: ``(0, 3011, 2)`` in
+          **0.000 s**, i.e. it backfilled 2 of 3011 frames and reported it
+          without waiting. Its row is ``(busy, log, checkpointed)``, and the
+          important part is that a HALF-done checkpoint still reports
+          ``busy=0``: ``log == checkpointed`` is the completeness test, not the
+          busy flag alone.
+        * ``TRUNCATE`` runs ONLY when that passive pass was complete, and with
+          the busy handler off for the duration, so it can be refused but can
+          never wait. Measured on a WAL nothing was pinning: ``(0, 0, 0)`` in
+          0.001 s and the file went to 0 bytes.
+
+        A checkpoint that cannot make progress is SKIPPED rather than waited on.
+        Nothing is lost: the sweep is hourly and idempotent, the next owned
+        sweep retries, and ``journal_size_limit`` (see
+        ``_WAL_SIZE_LIMIT_BYTES``) still truncates the file at the WAL restart
+        that the completed passive pass has just made possible — so a WAL that
+        grew to the size of the database shrinks to the limit even in an hour
+        where the gated truncate could not run.
+
+        WHAT THIS DOES NOT DO. ``journal_size_limit`` alone does NOT shrink an
+        already-large WAL: measured, a 24,781,832 byte file stayed at
+        24,781,832 with the limit set to 4 MiB or 16 MiB, and only a truncate (or
+        a restart AFTER a complete checkpoint) took it down. The limit bounds
+        FUTURE growth; this method is what reclaims what is already there. Do not
+        read the pragma as the fix for a 528 MB WAL.
+        """
+        conn = self._connect()
+        if conn is None:
+            return False
+        try:
+            conn.execute("PRAGMA journal_size_limit=%d" % _WAL_SIZE_LIMIT_BYTES)
+            row = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+        except Exception:  # noqa: BLE001 — a checkpoint failure is non-fatal
+            logger.debug("analytics: WAL passive checkpoint failed", exc_info=True)
+            return False
+        if row is None or row[0] != 0 or row[1] != row[2]:
+            # Partial (a reader is pinning an old snapshot) or busy: leave it.
+            # Waiting for the reader is exactly the measured 5 s stall.
+            logger.debug("analytics: WAL checkpoint incomplete, left for the next sweep: %r", row)
+            return False
+        try:
+            # The busy handler is disabled for the truncate ONLY, and restored in
+            # the `finally` so the ordinary writes on this connection keep their
+            # 5 s of patience. With it off, a reader that arrives between the two
+            # calls costs a refusal instead of a wait.
+            conn.execute("PRAGMA busy_timeout=0")
+            try:
+                row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            finally:
+                conn.execute("PRAGMA busy_timeout=%d" % _BUSY_TIMEOUT_MS)
+        except Exception:  # noqa: BLE001 — a checkpoint failure is non-fatal
+            logger.debug("analytics: WAL truncate failed", exc_info=True)
+            return False
+        return row is not None and row[0] == 0
+
     def session_daily_state(self) -> dict[str, str]:
         """The rollup's meta map, or ``{}`` when it cannot be read.
 
@@ -2320,7 +2487,7 @@ class AnalyticsStore:
             return None
         try:
             conn = sqlite3.connect(str(self._db_path), timeout=5.0)
-            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA busy_timeout=%d" % _BUSY_TIMEOUT_MS)
             return conn
         except Exception:  # noqa: BLE001 — a read that cannot open is empty
             logger.debug("analytics: cannot open read connection", exc_info=True)

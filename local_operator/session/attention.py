@@ -79,6 +79,25 @@ _BUSY_TIMEOUT_MS = 5000
 #: has run, and the PRAGMA is what a reader of this file looks for.
 _CONNECT_TIMEOUT_S = 5.0
 
+#: Bounded retry for the DELETE->WAL journal-mode transition, which ``busy_timeout``
+#: does NOT cover: changing the journal mode needs an EXCLUSIVE lock, and SQLite
+#: fails that acquisition with ``SQLITE_BUSY`` immediately instead of invoking the
+#: busy handler, so the 5 s window set one statement earlier buys nothing at this
+#: statement. This is the same shape and budget as ``analytics/store.py``'s
+#: ``_WAL_RETRIES``/``_WAL_RETRY_BACKOFF_S``, deliberately reused rather than
+#: reinvented: the transition is a one-way conversion of a file several processes
+#: open at once, and two hand-written answers to it would be two chances to get it
+#: wrong. Measured there on a fresh database opened by 16 processes at once: 25/320
+#: opens raised ``database is locked`` at this statement, and setting
+#: ``busy_timeout`` first only brought that to 15/320 -- reordering alone is not a
+#: fix; this loop took the same probe to 0/320.
+#:
+#: Only the FIRST writer to reach a fresh file pays anything: once the file is in
+#: WAL the pragma is a no-op that cannot fail, so a connection to an established
+#: store runs one extra header-reading statement and no more.
+_WAL_RETRIES = 6
+_WAL_RETRY_BACKOFF_S = 0.05
+
 #: How many times a contended ACQUISITION is re-attempted, and how long to wait
 #: before the retry, in seconds -- ONE scalar, deliberately, not a tuple per
 #: attempt. The store owns the connection and the transaction, so it is where
@@ -1176,6 +1195,48 @@ class AttentionStore:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path if path is not None else config_dir() / "attention.db"
 
+    @staticmethod
+    def _set_wal(conn: sqlite3.Connection) -> None:
+        """Switch the journal to WAL, retrying the contended DELETE->WAL step.
+
+        WHY THE MODE MOVES HERE AT ALL. This is the last multi-writer store in
+        the config root still in SQLite's default rollback journal: ``analytics.db``
+        and ``auth.db`` are both WAL, and this one is the file the docstring above
+        names as reaching "~25 concurrent sessions, the mobile daemon, the tunnel
+        connector and the browser bridge". In rollback mode a writer takes an
+        EXCLUSIVE lock that blocks every reader for the length of its transaction,
+        so a publisher's ``BEGIN IMMEDIATE`` -- which also runs the additive schema
+        check -- stalls `revision` and `published_since` on every other process.
+        WAL removes that window: readers keep reading the last committed snapshot
+        while a writer appends. A forced-WAL A/B on a copy of the live-shaped file
+        measured 1,070 -> 926 ms CPU and 3.90 -> 3.01 s wall per 1,000 writes at
+        n=50, with ZERO ``database is locked`` errors in EITHER mode -- the 5 s
+        ``busy_timeout`` above already absorbs contention, so what WAL buys here is
+        wall time and the EXCLUSIVE-lock window over readers, not fewer errors.
+        Do not re-derive that as an error-rate fix.
+
+        WHY A RETRY AND NOT A PLAIN PRAGMA. ``busy_timeout`` does not cover this
+        statement: the conversion needs an exclusive lock and SQLite answers
+        ``SQLITE_BUSY`` immediately rather than invoking the busy handler. See
+        ``_WAL_RETRIES`` for the measurement. A database that stays un-WAL after
+        every attempt is STILL USABLE -- rollback mode serialises writers rather
+        than losing them -- so this returns quietly instead of raising and costing
+        the caller the whole operation, which is the same never-break-a-turn rule
+        the rest of this store follows.
+
+        Not called on the read path: ``_connect_read_only`` opens ``mode=ro``,
+        which cannot change a journal mode, and must not try.
+        """
+        for attempt in range(_WAL_RETRIES):
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                return
+            except sqlite3.OperationalError as exc:
+                if not _is_contention(exc) or attempt == _WAL_RETRIES - 1:
+                    logger.debug("attention: could not enable WAL", exc_info=True)
+                    return
+                time.sleep(_WAL_RETRY_BACKOFF_S * (attempt + 1))
+
     def _connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # A new placeholder must be private before SQLite writes any contents.
@@ -1199,6 +1260,20 @@ class AttentionStore:
             # Publish the complete schema in one transaction. Concurrent readers
             # can see the positively identified empty database or both tables,
             # never an intermediate schema with a missing receipt table.
+            #
+            # BEFORE THE JOURNAL-MODE CONVERSION, and that ordering is NOT
+            # cosmetic. ``PRAGMA journal_mode=WAL`` rewrites the database
+            # header's file-format byte (offset 18, ``\x01`` rollback ->
+            # ``\x02`` WAL) as its first act, before the schema has been read at
+            # all. On a DAMAGED file that turned a refused operation into a
+            # mutating one: the damage probe below is what raises, and with the
+            # pragma first the file had already been rewritten by the time it
+            # did, so ``AttentionStore`` repaired nothing and modified a store it
+            # could not read. `test_existing_database_damage_is_not_an_empty_read_state`
+            # pins byte-equality across a damaged open and is what caught it.
+            # Converting AFTER the probe means the mode moves only on a database
+            # this process has successfully read: a schema-shaped file, or one
+            # this connection just created.
             with conn:
                 conn.execute("BEGIN IMMEDIATE")
                 if self._uninitialized(conn):
@@ -1304,6 +1379,46 @@ class AttentionStore:
                         conn.execute(
                             "ALTER TABLE completions ADD COLUMN cause TEXT NOT NULL DEFAULT ''"
                         )
+            # JOURNAL MODE AFTER the schema probe, which is the ordering the
+            # comment above the ``with`` block explains: the conversion rewrites
+            # the header, so a file this process could not read must not reach it.
+            #
+            # OUTSIDE `with conn:` and that half is load-bearing too: SQLite
+            # refuses to change the journal mode inside a transaction, and the
+            # block above opens one. Same sequence as ``analytics/store.py``
+            # (`busy_timeout` -> probe -> `_set_wal` -> `synchronous`), for the
+            # same reason its comment gives: the busy handler is armed before the
+            # mode switch, which is the single most lock-contended statement here.
+            self._set_wal(conn)
+            # THE DURABILITY TRADE, STATED RATHER THAN IMPLIED. WAL +
+            # ``synchronous=NORMAL`` cannot lose a COMMITTED transaction when the
+            # PROCESS dies (SQLite checkpoints from the ``-wal`` on the next open,
+            # and the database cannot be corrupted by a crash); what it can lose is
+            # the most recent commits if the MACHINE loses power -- the WAL frames
+            # are not fsynced at every commit, where rollback mode's default
+            # ``synchronous=FULL`` is. The trade is taken, and what this store
+            # holds is why: it is a COORDINATION ledger between live processes on
+            # one host -- per-conversation read watermarks (`receipts`), a
+            # notification watermark (`deliveries`), an edge detector (`mutations`)
+            # and a correction log (`supersede_log`) -- not the authoritative record
+            # of anything. The transcript journal is the durable record and is
+            # written BEFORE the completion is published (see the module
+            # docstring), so a completion lost to power loss is re-derived by the
+            # next boot's journal import. The failure direction is also the safe
+            # one: losing a watermark re-ANNOUNCES a completion the operator may
+            # already have read, which is a duplicate banner rather than a
+            # silently dropped result -- the same asymmetry `_retry_read` relies on
+            # to justify re-running a read.
+            #
+            # One constraint this rests on, so it is not discovered later: WAL
+            # needs shared memory, so EVERY process opening this file must be on
+            # this host with a writable config root. That is the same assumption
+            # the ``_BUSY_TIMEOUT_MS`` comment above already makes about the ~25
+            # sessions, the daemon, the tunnel connector and the bridge, and the
+            # read path needs it too (a ``mode=ro`` reader must be able to read the
+            # ``-wal``/``-shm`` sidecars beside the file). It would NOT hold for a
+            # config root on a network filesystem.
+            conn.execute("PRAGMA synchronous=NORMAL")
             return conn
         except BaseException:
             conn.close()
@@ -1312,18 +1427,35 @@ class AttentionStore:
     def _connect_read_only(self) -> sqlite3.Connection:
         """A ``mode=ro`` connection that waits as long as the write path does.
 
-        READS CONTEND FOR THE SAME LOCK, and this store's reads are on the hot
-        paths: the mobile daemon's scan (``revision``), every frontend list
-        (``state_many``), and the sidebar's deltas. This store keeps SQLite's
-        default rollback journal, so a writer holding the lock blocks a reader
-        at ``BEGIN`` exactly as it blocks another writer -- and the operator's
-        log shows the daemon's own scan losing that race 36 times
+        READS CONTEND FOR THE SAME LOCK -- LESS OFTEN NOW, BUT STILL. This store
+        moved to WAL (see :meth:`_set_wal`), so a reader no longer blocks behind a
+        writer's EXCLUSIVE lock for the length of its transaction: it reads the
+        last committed snapshot and the two proceed together, which is the
+        ``revision``/``published_since`` window this lane set out to remove. What
+        WAL does NOT remove is a reader meeting the transitions that still need
+        exclusion -- a checkpoint, the one-time DELETE->WAL conversion, the
+        recovery of a ``-wal`` left by a killed writer -- nor, on an ESTABLISHED
+        database that has not converted yet, any of the old contention at all.
+        The operator's log shows the daemon's own scan losing that race 36 times
         (`AttentionStore().revision` raising `database is locked` out of
-        `_uninitialized`). A read that raises costs the caller its whole tick or
-        its whole response, so it gets the same 5 s window rather than 2 -- and
-        the same bounded retry (:meth:`_retry_read`), which is the other half of
-        that answer: widening the window alone only buys a longer wait before the
-        same failure.
+        `_uninitialized`), which is why this method keeps the same 5 s window
+        rather than 2 and the same bounded retry (:meth:`_retry_read`): widening
+        the window alone only buys a longer wait before the same failure, and the
+        historical failure it was measured against is still reachable.
+
+        A ``mode=ro`` READER NEEDS THE ``-wal``/``-shm`` SIDECARS READABLE, which
+        is the one thing WAL adds to this path's contract. Since SQLite 3.22 a
+        read-only connection can read a WAL database whose sidecars exist and are
+        readable, and it creates them when they do not and the DIRECTORY is
+        writable -- both true here, because every process opening this file runs
+        as the same uid against a config root it already writes (the assumption
+        :meth:`_set_wal` spells out). A reader that could do neither would need
+        ``immutable=1`` and would silently not see un-checkpointed commits, so
+        this is asserted rather than assumed:
+        ``test_a_read_only_reader_sees_a_converted_store``,
+        ``test_a_read_only_reader_sees_a_fresh_delete_mode_store`` and
+        ``test_a_read_only_reader_sees_a_store_with_a_wal_present`` cover the
+        converted-in-this-test, never-converted and mid-WAL shapes.
 
         Deliberately NOT ``_connect``: the read paths must stay unable to create
         the file or migrate the schema (``mode=ro`` is the mechanism, and

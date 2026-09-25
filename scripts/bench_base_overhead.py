@@ -117,7 +117,6 @@ async def build():
     session = await create_session(
         args,
         ConfigManager(Path(config_dir)),
-        Path(config_dir),
         AgentRegistry(Path(config_dir)),
     )
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss

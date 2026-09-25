@@ -611,8 +611,55 @@ class SessionTitle(NamedTuple):
     names: tuple[str, ...]
 
 
-def _read_title_sidecar(session_dir: Path) -> SessionTitle | None:
-    """Parse ``title.json``, or ``None`` when it is absent or unusable.
+#: ``title.json``'s stat key -> the value that file parsed to, ``None`` included.
+#:
+#: WHY A MEMO AT ALL. ``title.json`` is read once per row by two surfaces that
+#: answer the same question about the same rows in the same process — the
+#: sidebar's catalogue poll and the ``/resume`` picker — and TWICE for one row
+#: inside a single catalogue build, because a fork's mark asks for the sidecar
+#: that ``session_name`` has just read. Each read is an open, a read and a JSON
+#: parse for a sub-kilobyte document whose answer only changes when the file
+#: does; measured on the n=200 ladder, the memo turns the second surface's 200
+#: reads into 200 stats (``session/retention.py``'s "one stat instead of a read"
+#: trade, which is the same one ``catalog._BIRTH_MEMO`` makes).
+#:
+#: THE KEY IS THE FILE'S OWN STAT — inode, device, size, nanosecond mtime AND
+#: nanosecond ctime — taken by the lookup, never a time window and never the
+#: session directory's mtime (a directory mtime moves when ANY entry is added,
+#: so keying on it would serve a stale title after a rename and re-read after an
+#: unrelated write; the failure it must not have is the first one). Every writer
+#: that matters moves at least one component:
+#:
+#: * ``write_session_title`` publishes a fresh temp file with ``os.replace``, so
+#:   every rewrite is a NEW INODE (the same argument ``_BIRTH_MEMO`` makes);
+#: * a hand edit or a repair changes size and both timestamps;
+#: * a deleted-and-recreated directory gets a new inode; a renamed one is a
+#:   different session id and so a different file.
+#:
+#: ``ctime_ns`` is what makes this key STRONGER than the two memos beside it:
+#: ctime is updated by any inode change (write, chmod, link) and cannot be set
+#: from userland, so the ``touch -r`` blind spot ``_BIRTH_MEMO`` documents as
+#: accepted does not exist here. The remaining blind spot is a rewrite landing in
+#: the SAME NANOSECOND as the original with the same inode, size and mtime — a
+#: same-nanosecond in-place rewrite, which no writer in this codebase performs.
+#:
+#: A MISS costs one stat more than the bare read did (the lookup), which is why
+#: this is worth having only for sidecars that are read more than once; see the
+#: measured split in the lane's census. A HIT costs one stat instead of an open
+#: plus a read plus a parse.
+#:
+#: BOUNDED by :data:`_TITLE_SIDECAR_MEMO_MAX` with a clear on overflow rather
+#: than an LRU: this is an optimisation, never a source of truth, so a cleared
+#: map costs a re-read and nothing else. Dict access is atomic under the GIL and
+#: the desktop lists from worker threads, so a clear racing a lookup must not
+#: raise — hence the ``try``/``KeyError`` below rather than an ``in`` test
+#: followed by an index.
+_TITLE_SIDECAR_MEMO: dict[tuple[int, int, int, int, int], SessionTitle | None] = {}
+_TITLE_SIDECAR_MEMO_MAX = 4096
+
+
+def _parse_title_sidecar(path: Path) -> SessionTitle | None:
+    """Read and parse one ``title.json``, or ``None`` when it is unusable.
 
     Tolerant for the same reason :func:`session_origin` is, and with the same
     ``errors="replace"`` load-bearing detail: this runs over every session
@@ -625,7 +672,7 @@ def _read_title_sidecar(session_dir: Path) -> SessionTitle | None:
     the window scan, never an exception.
     """
     try:
-        raw = (session_dir / TITLE_SIDECAR_NAME).read_text(encoding="utf-8", errors="replace")
+        raw = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
     try:
@@ -648,6 +695,43 @@ def _read_title_sidecar(session_dir: Path) -> SessionTitle | None:
         user_set=bool(payload.get("user_set")),
         names=names,
     )
+
+
+def _title_sidecar_with_mtime(session_dir: Path) -> tuple[SessionTitle | None, float | None]:
+    """``(title, sidecar mtime)`` for one session, from the memo's own lookup stat.
+
+    The mtime rides out with the value because :func:`wears_inherited_title`
+    compares it against the fork instant and would otherwise stat the same file a
+    second time on the very path the memo exists to shorten. ``None`` for the
+    mtime means the sidecar is not there, which is the one case the memo cannot
+    answer from a key — and the same case the bare read answered with ``None``
+    after a failed open.
+    """
+    path = session_dir / TITLE_SIDECAR_NAME
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None, None
+    key = (info.st_ino, info.st_dev, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    try:
+        value = _TITLE_SIDECAR_MEMO[key]
+    except KeyError:
+        value = _parse_title_sidecar(path)
+        if len(_TITLE_SIDECAR_MEMO) >= _TITLE_SIDECAR_MEMO_MAX:
+            _TITLE_SIDECAR_MEMO.clear()
+        _TITLE_SIDECAR_MEMO[key] = value
+    return value, info.st_mtime
+
+
+def _read_title_sidecar(session_dir: Path) -> SessionTitle | None:
+    """``title.json``'s parsed value, served from the stat-keyed memo when warm.
+
+    The memo and its invalidation rule are on :data:`_TITLE_SIDECAR_MEMO`; the
+    tolerance contract is on :func:`_parse_title_sidecar`. This name is what the
+    row builders call, so the memo is reached by every surface that reads a
+    stored title without any of them knowing it exists.
+    """
+    return _title_sidecar_with_mtime(session_dir)[0]
 
 
 def read_title_names(session_dir: Path) -> list[str]:
@@ -1658,7 +1742,10 @@ def _recent_sessions_with_origin(
     Private because the public pair is what every other caller wants and the
     CLI's recovery listing pins its shape. Callers that also want the hidden
     names — only ``session.catalog.load_catalog``, to skip a second per-directory
-    stat — use :func:`_scan_sessions` directly.
+    stat — use :func:`_scan_sessions` directly, and so does the one caller that
+    wants the transcript stats (``hidden_names``' third neighbour); this shape
+    stays a two-tuple because nothing that comes through here has any use for
+    either.
 
     ``revalidate`` is forwarded verbatim; see :func:`_scan_sessions`.
     ``strict`` is forwarded the same way, and exists so a caller building a
@@ -1747,8 +1834,8 @@ def _scan_sessions(
     revalidate: bool = False,
     strict: bool = False,
     include_archived: bool = False,
-) -> tuple[list[tuple[str, float, str, bool]], set[str]]:
-    """The one store scan: ``(rows, hidden_names)``.
+) -> tuple[list[tuple[str, float, str, bool]], set[str], dict[str, os.stat_result]]:
+    """The one store scan: ``(rows, hidden_names, transcript_stats)``.
 
     ``revalidate=True`` forces this scan to re-read every marker instead of
     serving the armed fast path — the caller declaring that a stale verdict is
@@ -1782,6 +1869,37 @@ def _scan_sessions(
     mints a fresh ``uuid4`` directory and never writes an origin marker into it,
     so a directory carrying an origin marker cannot also carry a desktop one.
     Skipping the probe for these names is HALF the total saving of this design.
+
+    ``transcript_stats`` is the OTHER half of the same hand-over, and it exists
+    for the same one caller: ``session_id -> os.stat_result`` for the transcript
+    of every candidate this scan ranked. The clock below stats that file anyway
+    to decide whether a directory is a session at all, so this map carries a stat
+    that has ALREADY happened — ``session_activity_path(..., seen=...)`` is what
+    fills it, so the rule that produced the clock is still the only rule — and
+    ``session.catalog``'s row cache is keyed on exactly that file's ``(mtime,
+    size)``. Without it, a catalogue build re-stats every listed session's
+    transcript on every poll: 200 of the 1204 stats a cold build measured at n=200
+    (1 of the 3 stats per listed session above the scan). A candidate whose
+    activity is only an unread inbox has NO transcript and therefore no entry
+    here, which is the same answer ``session.catalog._row_stat_key`` reaches when
+    it stats and finds nothing: the row has no cache key and is rebuilt.
+
+    LIFETIME, because a carried stat is only as good as the window it is trusted
+    in: this map is filled by THIS scan and is consumed by the caller's immediate
+    work, in the same thread, before the next scan of this store can run. The
+    value is therefore never older than the reader's own scan — a later scan can
+    only replace it with a NEWER one, and a newer key costs a cache miss (a row
+    rebuilt from disk, which is correct by construction), never a stale hit.
+    Deliberately not retained in a module-level memo for that reason: a map that
+    outlived its scan would have to be invalidated, and this one needs no
+    invalidation because it cannot outlive it.
+
+    Cost, stated rather than elided: one dict entry per visible candidate — the
+    same population ``rows`` already holds (200 on a 200-visible store, and
+    bounded by the store, not by ``limit``: it describes candidates, and ``limit``
+    truncates the RESULT). Callers with no use for it ignore the third value; it
+    is a third return value rather than a fourth field on each row because every
+    other caller unpacks that row shape and none of them wants this.
 
     Split from :func:`_recent_sessions_with_origin` rather than widening its
     return type because that shape is pinned by the CLI's recovery listing and
@@ -1818,7 +1936,10 @@ def _scan_sessions(
     # Lazy and stdlib-only on the other side: ``retention`` imports nothing
     # heavier than ``logging``, and the CLI startup guard measures this
     # module's import, not this function's.
-    from local_operator.session.retention import session_activity_path
+    from local_operator.session.retention import (
+        TRANSCRIPT_FILENAME,
+        session_activity_path,
+    )
 
     # Which scan this is for this store, and therefore whether the fast path is
     # armed. Read BEFORE the scandir can fail so a store that is not there yet
@@ -1854,6 +1975,14 @@ def _scan_sessions(
     # the docstring: ``load_catalog`` uses it to skip a second per-directory
     # stat.
     hidden_names: set[str] = set()
+    # ``session_id -> transcript stat``, filled from the clock's own ``os.stat``
+    # by ``seen`` below. See the docstring for the lifetime this is trusted in.
+    transcript_stats: dict[str, os.stat_result] = {}
+    # ONE map for the whole scan, cleared per candidate, rather than a fresh one
+    # per candidate: this loop runs once per directory in the store (including
+    # the ones it discards), and an allocation there is the same class of cost
+    # the ``session_activity_path`` comment above exists to remove.
+    activity_seen: dict[str, os.stat_result] = {}
     try:
         scan = os.scandir(config_dir / "sessions")
     except FileNotFoundError:
@@ -1862,7 +1991,7 @@ def _scan_sessions(
         # config dir that does not exist all land here, and every one of them
         # must keep answering "no conversations" rather than an error. It stays
         # an empty answer under `strict` too, for that reason.
-        return [], set()
+        return [], set(), {}
     except OSError as error:
         # ANY OTHER `OSError` IS A BROKEN READ, NOT AN EMPTY STORE -- `EMFILE`
         # under descriptor exhaustion, `EACCES`, `EIO`, and `ENOTDIR` (a
@@ -1880,7 +2009,7 @@ def _scan_sessions(
         logger.warning("session store could not be read", exc_info=True)
         if strict:
             raise SessionStoreUnavailable(_store_error_detail(error)) from error
-        return [], set()
+        return [], set(), {}
     cache_path = origin_cache_path(config_dir)
     cached = _load_origin_cache(cache_path)
     fresh: dict[str, Any] = {}
@@ -2069,6 +2198,14 @@ def _scan_sessions(
             # ``session_activity_path`` over ``session_activity``: same clock,
             # same answer, without building a ``Path`` per candidate.
             #
+            # ``activity_seen`` is how the transcript's OWN stat travels out of
+            # the clock instead of being taken a second time by the catalogue's
+            # row cache; see the docstring's ``transcript_stats``. Cleared per
+            # candidate, so a directory that has no transcript of its own cannot
+            # inherit the previous one's. An archived directory returns above
+            # this line, so it contributes nothing either way — its stat is not
+            # needed, because an archived row is not offered here.
+            #
             # AN ARCHIVED DIRECTORY IS NOT OFFERED, and this is the one place
             # that decides it for every listing in this codebase (see the
             # docstring). Checked BEFORE the activity stat because the answer is
@@ -2080,10 +2217,14 @@ def _scan_sessions(
             is_archived = entry.name in archived
             if is_archived and not include_archived:
                 continue
-            activity = session_activity_path(entry.path)
+            activity_seen.clear()
+            activity = session_activity_path(entry.path, activity_seen)
             if activity is None:
                 continue
             rows.append((entry.name, activity, origin, is_archived))
+            transcript_stat = activity_seen.get(TRANSCRIPT_FILENAME)
+            if transcript_stat is not None:
+                transcript_stats[entry.name] = transcript_stat
     merged = {
         name: entry for name, entry in cached.items() if name in seen and isinstance(entry, dict)
     }
@@ -2106,8 +2247,11 @@ def _scan_sessions(
     #
     # ``hidden_names`` is NEVER truncated by ``limit``: it describes the store,
     # not the page, and ``load_catalog`` consults it for directories that by
-    # definition fell outside the listing.
-    return (rows if limit is None else rows[:limit]), hidden_names
+    # definition fell outside the listing. ``transcript_stats`` is not truncated
+    # either, and for the same reason: it describes the CANDIDATES the scan
+    # established, which is the population a caller hydrates from -- a caller
+    # asking for ten rows still had to visit every directory to rank them.
+    return (rows if limit is None else rows[:limit]), hidden_names, transcript_stats
 
 
 def format_age(seconds: float) -> str:
@@ -2858,7 +3002,12 @@ def wears_inherited_title(session_dir: Path) -> bool:
     forked_at = _fork_instant(session_dir)
     if forked_at is None:
         return False
-    sidecar = _read_title_sidecar(session_dir)
+    # ONE lookup for the value AND the stamp it must be compared against. The
+    # sidecar used to be read here and then stat-ed separately, on the same row,
+    # in the same build that `session_name` had already read it for -- the repeat
+    # `_TITLE_SIDECAR_MEMO` exists to collapse. The stamp is the memo's own
+    # lookup stat, so a hit costs one stat and no read.
+    sidecar, stamped = _title_sidecar_with_mtime(session_dir)
     if sidecar is None or not sidecar.text:
         # A fork of a NEVER-NAMED parent is still ambiguous, and this used to
         # return False on the reasoning that nothing was inherited. That was
@@ -2867,10 +3016,15 @@ def wears_inherited_title(session_dir: Path) -> bool:
         # the identical opener beside its parent, which is exactly the
         # duplicate-row confusion the mark exists to resolve. It has no title
         # of its own yet by definition, so it is still borrowing.
+        #
+        # ``stamped is None`` lands here too (the sidecar is not on disk), which
+        # is the same answer the separate ``os.stat`` used to reach from the
+        # other side: a sidecar that is absent at the read is absent at the
+        # comparison. Only a deletion landing BETWEEN the two former calls could
+        # tell them apart, and the answer here is the one that matches the
+        # sidecar's own rule for a file that is not there.
         return True
-    try:
-        stamped = (session_dir / TITLE_SIDECAR_NAME).stat().st_mtime
-    except OSError:
+    if stamped is None:
         return False
     # The sidecar is rewritten when this session names itself, so a stamp newer
     # than the fork means the title on show is its own.

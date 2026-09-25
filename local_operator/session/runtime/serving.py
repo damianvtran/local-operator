@@ -7739,6 +7739,55 @@ async def spawn_owned_session(
         birth_effort=birth_effort,
         model_selection_override=model_selection_override,
     )
+
+    # PAY THE COMPOSITION ROOT'S IMPORTS HERE, AND IN A THREAD.
+    #
+    # ``create_session`` is a coroutine, but its body is one long SYNCHRONOUS
+    # stretch: until it first yields, the loop that called it paints nothing,
+    # services no frame and handles no keypress. In THIS process that loop is
+    # the runtime child's, and the stretch is what the operator waits through
+    # between sending a message and the session starting — measured on this tree
+    # against a heartbeat probe as a median 165.7 ms of CONTIGUOUS loop stall
+    # for ``_prepare`` alone, with that same probe's matched idle floor (2.2 to
+    # 15.9 ms) recorded beside it in every arm; with these imports already
+    # resident it is 77.3 ms, in 4 of 4 interleaved pairs (raw output under
+    # ``.perf/bench/lane11/``). Import drops the GIL for its file I/O and
+    # between bytecode switches, so doing it on a worker thread first turns one
+    # long stall into interleaved sub-frame ones while this coroutine is parked.
+    #
+    # HERE rather than in the child's ``main()``, which already fronts a
+    # tokenizer warm: ``main()`` runs before ``asyncio.run`` builds the loop, so
+    # a warm there would be free of the loop but free of any overlap too — it
+    # would move the same serial cost earlier and buy nothing. This is also the
+    # one composition root every owned session goes through, so the phone's
+    # runtime and the desktop's cannot drift on it.
+    #
+    # THIS POSITION IS A CONTRACT, NOT A PREFERENCE. ``create_session`` ->
+    # ``_prepare`` takes the session lease and writes the claim marker as one
+    # synchronous pair (``session_factory``: ``acquire_session_lease`` then
+    # ``claim_session``), and the comment that sits between them states the
+    # invariant in the factory's own words: that window stays on the loop with
+    # no yield inside it, because "putting a yield inside that window is how two
+    # cold resumes lose the race the lease exists to arbitrate". The ``await``
+    # below is strictly BEFORE ``create_session`` is entered — the lease has not
+    # been taken yet — so the acquire -> claim window still contains no yield.
+    # Do not move this call inside the factory, and do not move it between
+    # those two calls.
+    #
+    # FAIL-SOFT, LIKE THE WARM ITSELF. ``warm_session_imports`` never raises by
+    # contract; the thread hop around it can (a shut-down executor, an
+    # interpreter already tearing down), and a warm that fails must cost the
+    # warm and nothing else. Swallowing here is what leaves the factory as the
+    # ONLY reporter of a session-build failure — an exception escaping this line
+    # would replace the factory's own message with a traceback about import
+    # machinery, and ``process.amain`` would print that to the spawner instead.
+    try:
+        from local_operator.session_factory import warm_session_imports
+
+        await asyncio.to_thread(warm_session_imports)
+    except Exception:  # noqa: BLE001 — a warm-up must never be the failure
+        logger.debug("runtime session prewarm skipped", exc_info=True)
+
     session = await create_session(
         args,
         config_manager,
