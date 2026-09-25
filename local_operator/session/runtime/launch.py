@@ -746,6 +746,17 @@ def recover_stale_handoff(config_dir: Path, session_id: str) -> list[dict[str, A
         return []
     if not entry:
         return []
+    # A HANDOFF THAT ALREADY ARRIVED IS NOT IN FLIGHT (review round 2's ``p1c``): ...
+    # asked BEFORE the instance rule, because a promote that landed and raised leaves an
+    # entry owned by the relay that is still running, which every rule below deliberately
+    # skips — and then the conversation sits on this device with an engage refused.
+    try:
+        from local_operator.network import mobility as _mobility
+
+        if _mobility.settle_promoted_handoff(config_dir, session_id):
+            return [{"session_id": session_id, "action": "settled", "phase": "committed"}]
+    except Exception:  # noqa: BLE001 — best effort by contract; the guard still refuses
+        logger.debug("runtime: could not settle a finished handoff for %s", session_id)
     try:
         own_instance = _live_relay_instance(config_dir)
         wrote = str(entry.get("instance_id") or "")

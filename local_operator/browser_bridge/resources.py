@@ -1102,6 +1102,19 @@ async def cleanup_exact(directory: Path, generation: str) -> BrowserCleanupResul
     eligible, reason = cleanup_disposition(value)
     if not eligible:
         return BrowserCleanupResult("unresolved", reason)
+    # THE HANDOFF GUARD, CONSULTED HERE BECAUSE THIS IS THE ONE OTHER LEASE ACQUIRER
+    # (review round 2, MINOR 1). Every product opener goes through
+    # ``session_factory._prepare``, which refuses a session whose move is in flight; this
+    # path takes the lease directly, so a cleanup that lands between the move's lease
+    # re-check and its delete could become a second writer on a transcript that device is
+    # about to hand over. ``.browser-resource.json`` is all this holder writes, which is
+    # why the reviewer rated it a minor — but the refusal costs one sentence and the
+    # window is not worth keeping.
+    from local_operator.session.placement import handoff_guard_refusal
+
+    moving = handoff_guard_refusal(directory.parent.parent, directory.name)
+    if moving:
+        return BrowserCleanupResult("unresolved", moving)
     lease = acquire_session_lease(directory)
     try:
         # Constructed INSIDE the lease so it reads the generation the lease just
