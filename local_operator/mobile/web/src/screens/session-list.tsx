@@ -471,6 +471,24 @@ function ThemePicker({
 	);
 }
 
+/* The daemon's own words for a refused pin, or a plain line when it gave none.
+
+    The route's error body IS the reason and the remedy (`no saved messages yet —
+    pin it after you send one`), written for this reader, so it passes through
+    rather than being re-worded here — a second copy of one refusal is how two
+    surfaces end up describing the same rule differently (the same rule
+    `humanizeGateError` follows).
+
+    THE BARE-STATUS CASE IS NOT A REASON. `request` falls back to the status when
+    a failing response's body is not JSON, and `409` under a button the reader
+    just pressed explains nothing, so that spelling gets the plain line instead —
+    as does a failure that carried no message at all. */
+function pinRefusalReason(error: unknown): string {
+	const message = error instanceof Error ? error.message : String(error);
+	if (message === "" || /^\d{3}$/.test(message)) return "the daemon did not say why";
+	return message;
+}
+
 export function SessionListScreen() {
 	const { sessions, connected } = useSessions();
 	const pinMarks = usePinMarks();
@@ -482,6 +500,21 @@ export function SessionListScreen() {
 	   sheet describing a stale object — the row it names is re-read from
 	   `sessions` on every render, so the toggle always acts on current state. */
 	const [pinTarget, setPinTarget] = useState<string | null>(null);
+	/* THE REFUSAL TO RENDER INSIDE THAT SHEET, and the row it answers for.
+
+	   Held as a pair rather than as one sentence because the answer can land
+	   after the reader has moved on: a slow refusal for one row must never paint
+	   inside another row's sheet, so the render gate compares ids as well as
+	   clearing on open. */
+	const [pinRefusal, setPinRefusal] = useState<{
+		sessionId: string;
+		reason: string;
+	} | null>(null);
+	/* The row whose POST is still in flight, or NONE. The sheet STAYS OPEN across
+	   that wait (design round 11, D25), so without this the action would remain
+	   live and a second tap would send a second request for an answer already on
+	   its way. */
+	const [pinPending, setPinPending] = useState<string | null>(null);
 	/* FLIP settle state: card DOM by session id, plus each card's content
 	   coordinate from the previous commit. */
 	const mainRef = useRef<HTMLElement>(null);
@@ -516,6 +549,12 @@ export function SessionListScreen() {
 	const pinRow = pinTarget
 		? sessions.find((session) => session.session_id === pinTarget) ?? null
 		: null;
+	/* Busy is about THIS row's action, not about any request: a press on one row
+	   never disables another row's sheet. */
+	const pinBusy = pinRow !== null && pinPending === pinRow.session_id;
+	const refusalFor = pinRefusal && pinRow && pinRefusal.sessionId === pinRow.session_id
+		? pinRefusal.reason
+		: null;
 
 	/* The pin to RENDER for a row: the reader's unanswered mark over the daemon's
 	   confirmed flag. One helper for the ★, the sheet's wording and the value a
@@ -525,10 +564,23 @@ export function SessionListScreen() {
 		pinMarks.get(session.session_id) ?? Boolean(session.pinned);
 
 	/* The ★ shows what the reader asked for; only the daemon may move the row.
-	   A failed POST clears the mark, and the ★ falls back with it. */
+	   A failed POST clears the mark, and the ★ falls back with it.
+
+	   THE SHEET STAYS OPEN UNTIL THE ANSWER LANDS (design round 11, D25), and
+	   that is the whole point of this shape. Closing on the press left a refused
+	   pin with no reason anywhere: the ★ appeared at +2.2…5.0ms and cleared at
+	   +5.3…20.5ms — an existence window of ~3ms, a fifth of a 60Hz frame, so the
+	   reader often saw nothing at all, and on a slow answer saw a
+	   confirmation-shaped mark stay up for the whole wait (306ms, 1516ms, 46.9s
+	   measured) and then be withdrawn with no explanation. The refusal reason is
+	   rendered IN FLOW inside this sheet — never as an overlay: the reason the
+	   band was split out of this change is that anything floating above the list
+	   covers the search field. */
 	const togglePin = async (sessionId: string, pinnedNext: boolean) => {
 		applySessionPin(sessionId, pinnedNext);
-		setPinTarget(null);
+		/* A retry in the same sheet starts from no answer, not the last one. */
+		setPinRefusal(null);
+		setPinPending(sessionId);
 		try {
 			const saved = await setSessionPin(sessionId, pinnedNext);
 			/* The route answers with the state it READ BACK, which is the daemon's
@@ -538,15 +590,22 @@ export function SessionListScreen() {
 			   retires a mark a later frame AGREES with, so this one would never
 			   settle and the ★ would sit on a row the daemon never pinned. */
 			if (saved.pinned !== pinnedNext) clearSessionPinMark(sessionId);
-		} catch {
-			/* A refusal takes the MARK back with it, and that is the whole of what
-			   the press changed: the row never moved, because only a confirmed list
-			   frame reorders this screen. The reason the daemon gave is not shown
-			   here — a refusal band over the list was removed from this change (it
-			   covered the search field, and the caption at 200% root font) and is
-			   being rebuilt on its own PR, so the mark falling back is all the
-			   reader gets for now. */
+			/* Only a sheet still showing THIS row closes: the answer can land after
+			   the reader dismissed it and opened another row's, and closing that one
+			   would answer a press nobody made. */
+			setPinTarget((current) => (current === sessionId ? null : current));
+		} catch (error) {
+			/* A refusal takes the MARK back with it: the row never moved, because
+			   only a confirmed list frame reorders this screen. The reason the
+			   daemon gave is kept for the sheet to say, in the sheet's own layout,
+			   so the press that failed is the press that explains itself. */
 			clearSessionPinMark(sessionId);
+			setPinRefusal({
+				sessionId,
+				reason: pinRefusalReason(error),
+			});
+		} finally {
+			setPinPending((current) => (current === sessionId ? null : current));
 		}
 	};
 
@@ -573,7 +632,12 @@ export function SessionListScreen() {
 			s={s}
 			home={home}
 			pinned={renderedPin(s)}
-			onLongPress={() => setPinTarget(s.session_id)}
+			onLongPress={() => {
+				setPinTarget(s.session_id);
+				/* Opening a sheet clears the last refusal: it belonged to the press
+				   before, and a stale reason under a fresh action is a lie. */
+				setPinRefusal(null);
+			}}
 			ref={(el) => {
 				if (el) cardRefs.current.set(s.session_id, el);
 				else cardRefs.current.delete(s.session_id);
@@ -797,10 +861,11 @@ export function SessionListScreen() {
 				<div className="flex flex-col p-2">
 					<button
 						type="button"
+						disabled={pinBusy}
 						onClick={() =>
 							pinRow && void togglePin(pinRow.session_id, !renderedPin(pinRow))
 						}
-						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-left text-body active:bg-surface"
+						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-left text-body active:bg-surface disabled:opacity-50"
 					>
 						<span className="w-4 shrink-0 text-accent" aria-hidden>
 							★
@@ -814,6 +879,18 @@ export function SessionListScreen() {
 							? "Unpin from the top"
 							: "Pin to the top"}
 					</button>
+					{/* THE REFUSAL, IN FLOW INSIDE THE SHEET. A paragraph in the sheet's own
+					    column, not an overlay: it takes layout space, so it cannot cover
+					    another control, and nothing on the list scrolls or reorders to
+					    make room for it. `role="alert"` is what announces it — inside a
+					    dialog that is in flow, which is fine, unlike an alert floating over
+					    the list behind it. The wording is the app's own (`Could not save the
+					    pin: <daemon's reason>`), the same shape the withdrawn band used. */}
+					{refusalFor ? (
+						<p role="alert" className="px-2 pb-1 text-meta text-danger">
+							Could not save the pin: {refusalFor}
+						</p>
+					) : null}
 				</div>
 			</Sheet>
 		</div>
