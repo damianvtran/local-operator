@@ -92,7 +92,7 @@ async def _deliver_a_job_result_and_hold_it(tmp_path: Path) -> tuple[Any, Any, _
     handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
     # The production opener for a settled child's result (one idle-time turn,
     # ``Session._prompt_messages`` under ``_turn_lock``), not a stand-in.
-    session._deliver_job_results([("job-1", "child 1 done", None)])
+    await session._deliver_job_results([("job-1", "child 1 done", None)])
     await asyncio.wait_for(stream.entered.wait(), 5)
     assert session._turn_lock.locked(), "the delivery turn must hold the lock"
     return session, handle, stream
@@ -346,7 +346,7 @@ async def _deliver_a_failing_job_result_and_hold_it(
         inner_boundary(name)
 
     handle._note_turn_boundary = note  # type: ignore[method-assign]
-    session._deliver_job_results([("job-1", "child 1 done", None)])
+    await session._deliver_job_results([("job-1", "child 1 done", None)])
     await asyncio.wait_for(stream.entered.wait(), 5)
     assert session._turn_lock.locked(), "the delivery turn must hold the lock"
     return session, handle, stream, boundaries

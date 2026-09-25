@@ -574,6 +574,30 @@ dispose only on `True`; `"kept: <reason>"` otherwise (the existing answer shape
 at `session/runtime/server.py:2296-2309`). The quiet idle exit uses the same
 latch with `cause="idle-exit"`. Roughly 40 lines plus tests.
 
+**Correction, 2026-09-25 — the claim above was too broad, and an incident
+proved it.** "From that instant the admission paths refuse ... so no turn can
+open between here and the dispose" holds for the paths that existed when it was
+written and were the only ones in view: `prompt` and `receive_peer_message`. It
+is FALSE for a third, HARNESS-INITIATED arrival — a settled background job's
+result, which enters through `Session._deliver_job_results` with no client
+waiting on a receipt, so no admission gate ever sees it. Session
+`a81ceec0982b` (2026-09-24): a runtime latched a departure, the finishing turn's
+`finally` flushed nine results it had deferred during that turn into ONE delivery
+turn, the boundary re-read saw an idle runtime (the spawned delivery is invisible
+to `is_busy()`, which reads the handle's own tasks), the exit disposed, and the
+delivery turn was aborted before its first provider call. The conversation got a
+`kind=error cause=disposed` row 650 ms after the operator's own honest
+`complete`, rendered as a cut-off card for work that had already been merged.
+
+**The invariant, restated so it is true of every arrival:** *from the instant the
+departure latch is taken, no turn opens on this runtime for ANY arrival — that is
+the set that `prompt`, `receive_peer_message`, a fired wake, and a settled job's
+result all belong to.* An arrival that is not an admission is made DURABLE
+instead of run (the shape `Session._drop_pre_aborted_turn` already gives the
+pre-aborted case, "this drops the model call, never the message"), which is why
+the fix carries no new message shape: `harness/render.py`'s allow-list already
+renders a durable `job_result` row as an injected user message on the next turn.
+
 ### 5.2 A mismatched import must be a loud, named failure
 
 Verified shape (§1.6): a lazy `from local_operator… import x` inside a running
