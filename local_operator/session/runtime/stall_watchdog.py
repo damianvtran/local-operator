@@ -3051,9 +3051,10 @@ def _progress_sampler(armed: "_Armed", stop: threading.Event) -> None:
         # ONLY thing that re-reads the exit leg after the arm, and a raise from the
         # sample or from the fire bookkeeping would end it silently: ``armed.held``
         # would then stay frozen at whatever it last read, and a frozen ``False`` with
-        # work in flight is precisely the defect this change removes — the fatal fire
-        # needs no Python at all (``faulthandler._exit``). A reporter that dies takes
-        # its plane's evidence with it; the fix is to keep it running.
+        # work in flight is precisely the defect this change removes — after T1 the
+        # fire is this thread's own work (:func:`_fire`, and there is no C thread left
+        # to take it), so a reporter that dies takes the fire with it, not just its
+        # plane's evidence. The fix is to keep it running.
         try:
             # #1438's probe read, UNCHANGED: the progress probe is taken from under
             # the lock and CALLED outside it, then the armed-ness is re-checked after
@@ -3264,8 +3265,9 @@ def _fire_progress(armed: "_Armed", now: float) -> None:
 
     Past the window the runtime must stop being a session that burns a core to
     produce nothing, and the graceful rungs cannot be reached from the state
-    being detected — this is the module's oldest constraint, and the reason the
-    exit is ``faulthandler``'s rather than anything Python can sequence.
+    being detected — that is the module's oldest constraint, and it is why the exit,
+    on an arm that takes one at all, is an immediate ``_exit`` (:func:`_fire`) rather
+    than anything Python can sequence.
 
     SO THE FIRE GOES OUT THROUGH THE SAME PATH THE SILENCE LEG USES rather than
     adding a second one: the dump file, the ``FIRED_MARKER``, the every-thread
