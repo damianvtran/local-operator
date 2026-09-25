@@ -1934,6 +1934,8 @@ class ModelChangeEvent(AgentEvent[Literal["model_change"]]):
     provider: str
     model_id: str
     effort: str | None = None
+    # A route edge (pin, recovery, switch) must carry its cause; a display-only
+    # refresh sets ``context_metadata`` instead, and headless text skips it.
     reason: str = ""
     is_fallback: bool = False
     # The model-in-force's own window, carried so consumers that hold only the
