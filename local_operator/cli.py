@@ -8555,6 +8555,18 @@ def main() -> int:
                 print(f"\n\033[1;31mError: {str(e)}\033[0m", file=sys.stderr)
                 return 1
         elif args.subcommand == "serve":
+            # The desktop daemon engages a runtime for every conversation the app
+            # opens cold, so it keeps ONE pre-imported standby for its root (see
+            # ``session/runtime/standby.py`` for the cost it removes and the
+            # guards). ``daemon=True`` puts it in the root's singleton slot: the
+            # count of spares per root is capped, and the app's surface must not
+            # lose its spare to whichever TUI happened to start first. Here, at the
+            # CLI dispatch, rather than in ``serve_command`` or the app's lifespan:
+            # those are what the suite drives in-process, and a test must never
+            # leave a warmed interpreter behind.
+            from local_operator.session.runtime import standby
+
+            standby.enable_warming(daemon=True)
             # Use the provided host, port, and reload options for serving the API.
             return serve_command(args.host, args.port, args.reload, listener_fd=args.listener_fd)
         elif args.subcommand == "mobile":
@@ -9293,6 +9305,21 @@ def main() -> int:
                     return await viewer_factory(resume_id)
 
                 tui_entry = functools.partial(tui_entry, resume_factory=resume_factory)
+                # Every /new and every cold sidebar switch engages a runtime; a
+                # pre-imported standby takes the import cost off that path (see
+                # ``session/runtime/standby.py``). One spare per root per slot, for
+                # the whole machine: every TUI on this root shares the TUI slot and
+                # a TUI that cannot take it spawns cold, so ~20 TUIs hold ONE spare
+                # (~145 MB) rather than ~20 (measured with three consoles on one
+                # root before the cap). The slot is an ``flock`` rather than a
+                # shared spare because a spare is a private descriptor to a child
+                # of one console — sharing it across consoles needs a rendezvous
+                # path, which is exactly the escalation agent review round 1
+                # proved. Enabled at the CLI's launch point, never in ``run_tui``
+                # or the app, which the suite drives.
+                from local_operator.session.runtime import standby
+
+                standby.enable_warming(config_manager.config_dir)
                 # The silence starts HERE, not inside ``run_tui``. The
                 # scheduler is started by the wrapper below and logs
                 # "Scheduler started" at INFO before the app has painted a
