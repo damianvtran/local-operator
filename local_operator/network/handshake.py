@@ -989,9 +989,16 @@ def sas_mismatch_sentence() -> str:
     )
 
 
-def pair_timeout_seconds(ttl_s: float) -> float:
-    """Whichever fires first: the invite's own life, or the confirm budget."""
-    return min(ttl_s, PAIR_CONFIRM_TIMEOUT_S)
+def pair_timeout_seconds(remaining_s: float) -> float:
+    """Whichever fires first: what is LEFT of the invite, or the confirm budget.
+
+    The parameter is ``remaining_s`` since agent review round 1 (NIT 1) because all
+    three call sites — the joiner's read, the parked question's window and the
+    listener's wait — pass ``invite.remaining_seconds`` / ``relay._remaining_of``. A
+    parameter named ``ttl_s`` invited a reader to assume the MINTED duration was still
+    being passed, which is exactly the confusion that produced the overstated prompt.
+    """
+    return min(remaining_s, PAIR_CONFIRM_TIMEOUT_S)
 
 
 #: How much of a refusing device's own sentence travels in ``net_pair_abort``. The

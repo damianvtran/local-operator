@@ -31,6 +31,7 @@ from local_operator.network.handshake import (
     pair_timeout_seconds,
     sas_matches,
 )
+from local_operator.paths import config_dir as ambient_config_dir
 from local_operator.session.retention import SESSIONS_DIRNAME
 
 NETWORK_NAME = "home-net"
@@ -44,7 +45,7 @@ def serve_shaped_relay(
     WHY THIS IS THE DEFAULT HERE AND NOT A CONVENIENCE. Both production construction
     sites (``network/cli.py``: the serve command and the tool's engage path) pass
     settings and an identity only, so the config dir is resolved from the AMBIENT
-    environment (``store.config_dir()``). ``RelayServer.__init__`` turns that into
+    environment (``paths.config_dir()``). ``RelayServer.__init__`` turns that into
     ``self.root``, and everything path-shaped hangs off it — including the authoriser's
     ``StoreView``. A cell that supplies an explicit root therefore exercises a keyword
     the product never supplies: 25 of 26 constructions in this package did exactly that,
@@ -52,22 +53,37 @@ def serve_shaped_relay(
     (``StoreView.replica_owner``) was answered ``""`` on the real path, which refused
     every automatic replica sync across a real host boundary while a manual
     ``lop sessions sync`` worked (cross-host QA, Q-XH-1; agent review round 1, MAJOR 3).
-    Build through here so a raw-root regression cannot hide behind that coincidence.
+    Build through here so a raw-root regression cannot hide behind that coincidence
+    WHERE THIS HELPER REACHES — the shared ``devices`` fixture and its eleven consumers,
+    not every construction in the package: 17 ``RelayServer(…)`` calls in
+    ``tests/unit/network`` still pass an explicit root, recorded on the PR as deferred
+    (agent review round 2, MINOR 4). The scope is stated because this sentence claimed
+    the package on its first draft, and an over-claimed guard is what the round-1
+    finding was about.
 
     ``LOCAL_OPERATOR_CONFIG_DIR`` is what makes "no root argument" mean THIS test's own
     tree rather than the operator's live install, so the assignment is part of the
-    construction rather than something a caller might forget. The assertion is the guard
-    on the guard: if the environment did not take (a stale export, fixture reordering),
-    the cell would quietly assert about the wrong store.
+    construction rather than something a caller might forget.
+
+    THE ASSERTION COMPARES AGAINST THE AMBIENT RESOLUTION, not against the value it was
+    handed. ``server.root == root`` read as a guard on the environment but was true by
+    identity for the edit it was being credited with: a body that added
+    ``kwargs["root"] = root`` would have satisfied it silently (agent review round 2,
+    NIT 4). A caller passing ``root=`` is refused by the signature outright
+    (``TypeError: got multiple values for argument 'root'``), which is the stronger
+    guard; what is left to catch is the environment not taking, and that is exactly what
+    the ambient resolution — ``paths.config_dir()``, the same call ``RelayServer``
+    makes — answers.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
     kwargs: dict[str, Any] = {"settings": relay.NetworkSettings(port=0, listen_address="127.0.0.1")}
     kwargs.update(overrides)
     server = relay.RelayServer(**kwargs)
-    assert server.root == root, (
-        f"a serve-shaped relay resolved {server.root} rather than the ambient {root}: "
-        "the test env is not what the product would see"
+    assert server.root == ambient_config_dir(), (
+        f"a serve-shaped relay resolved {server.root} rather than the ambient "
+        f"{ambient_config_dir()}: the test env is not what the product would see"
     )
+    assert server.root == root, f"the ambient config dir is not this test's root: {root}"
     return server
 
 

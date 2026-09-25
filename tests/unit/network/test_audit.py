@@ -157,13 +157,32 @@ def test_a_stream_close_renders_a_machine_cause_from_the_enum(root: Path) -> Non
     assert relay_mod.stream_close_machine_cause("invented-by-a-future-call-site") == "internal"
 
 
+#: The methods that REPORT a close: every one of these ends a pipe that opened, so
+#: every call site names a reason. ``_discard_unopened_stream`` is deliberately absent —
+#: it is the refusal path and writes no row at all (agent review round 2, MAJOR 1).
+_CLOSE_REPORTERS = frozenset({"_close_stream", "_drop_stream"})
+
+
 def test_every_stream_close_word_a_call_site_passes_is_mapped() -> None:
     """The table is CLOSED against the call sites, read from relay.py's own source.
 
     The failure this replaces was a call site introducing a word nobody registered, so
-    asserting over the table's own keys would assert nothing. An AST walk over the two
+    asserting over the table's own keys would assert nothing. An AST walk over the
     close paths collects the literal words and the enum's values are read from the
     audit module, which is the pair that has to agree.
+
+    BOTH REPORTING PATHS, AND A WORD IS REQUIRED. This walked ``_close_stream`` (and
+    literal calls to ``_report_stream_closed``) only: a new word on a ``_drop_stream``
+    call passed the guard while the same word on ``_close_stream`` failed it — a guard
+    with a blind half, which is the same class of hole as the finding it was written
+    for (agent review round 2, MINOR 1). And because the scan collected only NON-EMPTY
+    literals, the one call site that passed nothing at all was invisible to it by
+    construction, so the empty reason that produced a causeless close row reached
+    production under a green guard. So the rule is now positive: every call to either
+    reporter must pass a non-empty literal ``cause`` (``_drop_stream`` made it a
+    required keyword, so a caller cannot omit it), and every word must be a key of the
+    table. ``_report_stream_closed`` is exempt by shape — it is the private half those
+    two call, and its only callers are their bodies passing the word they were given.
     """
     source = (Path(relay_mod.__file__)).read_text(encoding="utf-8")
     passed: set[str] = set()
@@ -172,17 +191,24 @@ def test_every_stream_close_word_a_call_site_passes_is_mapped() -> None:
             continue
         func = node.func
         name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-        if name not in {"_close_stream", "_report_stream_closed"}:
+        if name not in _CLOSE_REPORTERS:
             continue
-        for keyword in node.keywords:
-            if keyword.arg == "cause" and isinstance(keyword.value, ast.Constant):
-                if isinstance(keyword.value.value, str) and keyword.value.value:
-                    passed.add(keyword.value.value)
-        # ``_report_stream_closed(stream, cause)`` takes it positionally.
-        if name == "_report_stream_closed" and len(node.args) > 1:
-            second = node.args[1]
-            if isinstance(second, ast.Constant) and isinstance(second.value, str) and second.value:
-                passed.add(second.value)
+        # A reporting call with no ``cause=`` at all, or with one that is not a literal
+        # word, cannot be checked against the table and is refused here rather than
+        # skipped: that is the blind half this cell was rewritten to close.
+        literal = next(
+            (
+                keyword.value.value
+                for keyword in node.keywords
+                if keyword.arg == "cause" and isinstance(keyword.value, ast.Constant)
+            ),
+            None,
+        )
+        assert isinstance(literal, str) and literal, (
+            f"{name} at relay.py:{node.lineno} reports a close without naming a reason: "
+            "a close row with an empty machine cause cannot be counted by any filter"
+        )
+        passed.add(literal)
     # Non-empty, or the scan found nothing and would pass vacuously.
     assert passed, "no stream-close words found in relay.py: the scan lost its targets"
     unmapped = sorted(word for word in passed if word not in relay_mod.STREAM_CLOSE_MACHINE_CAUSES)
