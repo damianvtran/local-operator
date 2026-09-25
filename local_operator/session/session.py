@@ -15265,7 +15265,17 @@ class Session:
         saved = selection_from_payloads(
             row.payload for row in self._transcript.entries() if row.type == ENTRY_CUSTOM
         )
-        if self._model_source == "flag":
+        # A child is skipped like a flag, because its model was also chosen
+        # deliberately just before construction: ``run_subagent`` resolved the
+        # launch rule (a tier or role pin, else the parent's CURRENT model).
+        # Restoring the child's own journal row here silently returned every
+        # ``hub op='resume'`` to the model the child was born on. That defeated
+        # a parent ``/model`` switch and a re-configured tier alike: after the
+        # operator moved a session to a cheaper model, a paused child resumed
+        # on the expensive one and ran 26 calls there. The first resumed turn
+        # still journals a fresh row (``_selection_needs_initial_write`` stays
+        # True), so the transcript records the model it actually ran on.
+        if self._model_source in ("flag", "child"):
             return
         if saved is None:
             self._model_migration_notice = bool(self._transcript.entries())
