@@ -139,16 +139,24 @@ def test_async_steer_rejection_releases_identity_and_capacity(tmp_path) -> None:
     unsubscribe()
 
 
-def test_prompt_transfer_consumes_one_steer_slot_and_rejection_releases_it(tmp_path) -> None:
+def test_a_refused_prompt_releases_its_identity_for_a_prompt_or_a_steer_retry(tmp_path) -> None:
+    """QA on PR #1528, Q1-5: a refused identity is RELEASED, never parked.
+
+    ``TurnInFlight`` used to park the id as ``prompt-transfer``, a state that
+    served a steer retry and answered "already admitted" to a PROMPT retry of
+    the same id — the retry the desktop receipt journal and the phone make
+    after a 5xx — while the message was in no transcript and no queue. Both
+    retries must now reserve for real, and a steer retry still takes exactly one
+    unit of steering capacity.
+    """
     reservations = CommandReservations(_SessionAuthority(Transcript(tmp_path / "session")))
     assert reservations.reserve("race", kind="prompt")
-    reservations.reject("race", transfer_to_steer=True)
-    assert reservations.reserve("race", kind="steer", prompt_transfer=True)
+    reservations.reject("race")
+    assert reservations.reserve("race", kind="prompt"), "a prompt retry must admit"
+    reservations.reject("race")
+    assert reservations.reserve("race", kind="steer"), "a steer retry must admit"
     assert reservations._pending_steers == 1
 
     reservations.reject("race")
     assert reservations._pending_steers == 0
-    assert reservations.reserve("race", kind="steer")
-    reservations.clear()
-    assert reservations._pending_steers == 0
-    assert not reservations._commands
+    assert reservations._commands == {}
