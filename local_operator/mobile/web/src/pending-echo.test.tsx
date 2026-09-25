@@ -67,10 +67,14 @@ vi.mock("./store", async (importOriginal) => {
 	};
 });
 
-function userRow(id: string, text: string): TranscriptEntry {
+function userRow(
+	id: string,
+	text: string,
+	kind: TranscriptEntry["kind"] = "user",
+): TranscriptEntry {
 	return {
 		id,
-		kind: "user",
+		kind,
 		text,
 		tool_call_id: "",
 		tool_name: "",
@@ -218,6 +222,11 @@ describe("optimistic pending echo", () => {
 		   leave the user with nothing at all. The row stays, and there is one. */
 		await waitFor(() => expect(pendingRows(view)).toHaveLength(1));
 		expect(screen.getAllByText(SENT)).toHaveLength(1);
+		/* And it no longer claims the message is still going out: an admitted
+		   command is the session's, so the word is `sent` (U2's other half — a
+		   prompt is not queued behind anything). */
+		await waitFor(() => expect(screen.getByText("sent")).toBeTruthy());
+		expect(screen.queryByText("sending…")).toBeNull();
 
 		view.publish([userRow(COMMAND_ID, SENT)]);
 
@@ -284,18 +293,129 @@ describe("optimistic pending echo", () => {
 		   directly because the composer's attach path needs `createImageBitmap`,
 		   which the test environment does not have; what is under test here is the
 		   row's rendering of a count, not the downscale in front of it. */
-		registerPendingEcho("s1", { commandId: COMMAND_ID, text: SENT, imageCount: 2 });
+		registerPendingEcho("s1", {
+			commandId: COMMAND_ID,
+			text: SENT,
+			imageCount: 2,
+			op: "prompt",
+			accepted: false,
+		});
 		const view = open([], true);
 
 		await waitFor(() => expect(pendingRows(view)).toHaveLength(1));
 		expect(screen.getByText("2 images attached")).toBeTruthy();
 	});
 
+	it("reconciles a STEER against the row the fold writes for it", async () => {
+		/* B-1 / D1 / Q-1, the blocker. A phone steer is written as
+		   `kind: "steer"` under the SAME command id — `note_user_message(steer=True,
+		   message_id=command_id)` → `kind="steer" if steer else "user"` — and the
+		   composer picks `op="steer"` by itself whenever the turn is streaming, so
+		   matching on `kind === "user"` left the one flow that exists ONLY while a
+		   turn runs unreconciled: the message rendered twice and the phantom
+		   claimed `sending…` for the life of the tab (QA measured 2224 of 2224
+		   consecutive DOM samples showing both, against one row on base).
+
+		   This publishes the row the real fold writes for the op the composer
+		   chose, which is the cell whose absence let the suite stay green. */
+		vi.mocked(api.sendCommand).mockResolvedValueOnce({ ok: true, detail: "steering queued" });
+		vi.stubGlobal("crypto", { randomUUID: () => COMMAND_ID });
+		const view = open([], true);
+
+		await type(SENT);
+		fireEvent.click(screen.getByRole("button", { name: "steer" }));
+
+		await waitFor(() => expect(pendingRows(view)).toHaveLength(1));
+		view.publish([userRow(COMMAND_ID, SENT, "steer")], true);
+
+		await waitFor(() => expect(pendingRows(view)).toHaveLength(0));
+		expect(screen.getAllByText(SENT)).toHaveLength(1);
+	});
+
+	it("reconciles a row the fold rewrote into a parent message", async () => {
+		/* The third kind a user-authored row can be written under: a phone row whose
+		   text turned out to be a hub envelope is REWRITTEN to `parent_message` by
+		   `absorb_user_event` — still under the same id. Left out of the set, the
+		   phantom B-1 removes comes back by a rarer door. */
+		registerPendingEcho("s1", {
+			commandId: COMMAND_ID,
+			text: SENT,
+			imageCount: 0,
+			op: "prompt",
+			accepted: true,
+		});
+		const view = open([userRow(COMMAND_ID, SENT, "parent_message")]);
+
+		expect(pendingRows(view)).toHaveLength(0);
+		expect(screen.getAllByText(SENT)).toHaveLength(1);
+	});
+
+	it("says queued, not sending, for a steer the session has admitted", async () => {
+		/* U2: the row sat captioned `sending…` for the whole remainder of a turn —
+		   measured still unchanged at +12s, and a turn is minutes — while the
+		   composer's own footer read `1 queued` 600px below it. Two words for one
+		   message, and `sending…` is the one that invites a re-send. */
+		vi.mocked(api.sendCommand).mockResolvedValueOnce({ ok: true, detail: "steering queued" });
+		vi.stubGlobal("crypto", { randomUUID: () => COMMAND_ID });
+		const view = open([], true);
+
+		await type(SENT);
+		fireEvent.click(screen.getByRole("button", { name: "steer" }));
+
+		await waitFor(() =>
+			expect(screen.getByText("queued — sends when this step finishes")).toBeTruthy(),
+		);
+		expect(screen.queryByText("sending…")).toBeNull();
+		/* And the steer's pending row takes the STEER row's box, not the prompt
+		   bubble's (D2): the `surface` ground is what used to settle away at receipt,
+		   which made reconciliation read as a row changing rather than a caption
+		   leaving. */
+		expect(pendingRows(view)[0]?.querySelector(".bg-surface")).toBeNull();
+	});
+
+	it("shows the retained instruction the retry would resend", async () => {
+		/* U1. Park a send, type a follow-up while it is in flight, drop the link:
+		   the row is withdrawn (correct), the follow-up stays in the composer, and
+		   the only affordance is `Retry earlier instruction` — while the sent words
+		   appeared on NO surface and the empty state said "no messages yet". The
+		   restore is gated on an empty field, so exactly the operator who carried on
+		   typing was asked to retry a message they could not read. */
+		let rejectSend!: (reason: Error) => void;
+		vi.mocked(api.sendCommand).mockReturnValueOnce(
+			new Promise((_resolve, reject) => {
+				rejectSend = reject;
+			}),
+		);
+		vi.stubGlobal("crypto", { randomUUID: () => COMMAND_ID });
+		const view = open();
+
+		const composer = await type("first line of the sent message\nand a second");
+		send();
+		await waitFor(() => expect(pendingRows(view)).toHaveLength(1));
+
+		fireEvent.change(composer, { target: { value: "a second thought" } });
+		rejectSend(new Error("response lost"));
+
+		await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
+		/* Their follow-up survived, untouched... */
+		expect(composer.value).toBe("a second thought");
+		/* ...and the message the button will resend is readable again, by its first
+		   line, right above that button. */
+		expect(screen.getByText("first line of the sent message")).toBeTruthy();
+		expect(screen.queryByText(/and a second/)).toBeNull();
+	});
+
 	it("drops echoes when authentication changes ownership", async () => {
 		/* Direct: the purge is called by `clearPrivateSessionStorage`, which both
 		   the 401 handler and the login page's sweep reach. A row left standing
 		   would show the next user at this device what the last one typed. */
-		registerPendingEcho("s1", { commandId: COMMAND_ID, text: SENT, imageCount: 0 });
+		registerPendingEcho("s1", {
+			commandId: COMMAND_ID,
+			text: SENT,
+			imageCount: 0,
+			op: "prompt",
+			accepted: false,
+		});
 		const view = open([], true);
 		await waitFor(() => expect(pendingRows(view)).toHaveLength(1));
 

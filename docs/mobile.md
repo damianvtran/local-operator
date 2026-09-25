@@ -171,10 +171,16 @@ Screens, following branding.md §7's agent-output hierarchy:
   rungs), typing `/` opens the slash-command sheet with fuzzy filtering and
   argument hints, send/steer/stop button morphing with turn state, resume
   affordance after an abort. A send paints the message as a PENDING ROW in the
-  conversation immediately — before the daemon has acknowledged it — and the
-  row is reconciled against the session's own row by command id, so it resolves
-  to exactly one row; a failed send takes the row down and hands the text back
-  to the field with the retained-envelope retry beside it.
+  conversation immediately — before the daemon has acknowledged it — boxed like
+  the row its op settles into (a prompt's bubble, a steer's quieter row) and
+  reconciled against the session's own row by command id, so it resolves to
+  exactly one row. The caption says what is actually true of it: `sending…`
+  before the receipt, `queued — sends when this step finishes` (or `… with your
+  next message`) for a steer the session is holding for a turn boundary, and
+  `sent` once admitted. A failed send takes the row down and hands the text back
+  to the field, and the retained-envelope retry beside it names the instruction
+  it would resend — because the field is not where that text necessarily is any
+  more.
 
 ## Failure modes and rules
 

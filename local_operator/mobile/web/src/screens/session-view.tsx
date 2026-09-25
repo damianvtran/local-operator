@@ -244,6 +244,7 @@ export function SessionScreen({
 					pid={sessionId}
 					entries={projection.transcript}
 					pending={pendingEchoes}
+					streaming={projection.streaming}
 				/>
 			)}
 

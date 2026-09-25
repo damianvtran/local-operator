@@ -15,6 +15,7 @@ import {
 	submitContinuation,
 } from "../continuation-command";
 import {
+	markPendingEchoAccepted,
 	projectionCarriesCommand,
 	registerPendingEcho,
 	withdrawPendingEcho,
@@ -255,11 +256,27 @@ const RETAINED_RETRY_ERROR =
 	"An earlier instruction may have been delivered. Retry that earlier instruction before sending your current draft.";
 const RETRY_BUTTON_LABEL = "Retry earlier instruction";
 /* D11: the positive acknowledgement is a SUCCESS, not a failure — it renders in
-   the neutral/success notice, never the danger alert container. */
-const RETRY_ACK_NOTICE = "Earlier instruction delivered. Your edited draft is ready to send.";
+   the neutral/success notice, never the danger alert container.
+
+   U4: the sent draft is no longer the only thing that can be in the field when
+   the receipt lands — a send now MOVES the draft out, so the common case is a
+   SECOND message the user started while this one was in flight. "Your edited
+   draft" named a noun that describes only the retry-of-a-retained-instruction
+   case, which is now the rarer one. */
+const RETRY_ACK_NOTICE = "Earlier instruction delivered. Your draft is ready to send.";
 /* U4: the reason the primary send is disabled while an uncertain envelope is
    pending — stated inline so the dead control reads as intentional. */
 const RETRY_DISABLED_HINT = "Resolve the earlier instruction first.";
+const CONNECTING_STATUS = "Connecting…";
+/* U3: a submit while a send is in flight is a NO-OP — the send control is
+   disabled and `send()` returns on its `sending` guard — so the phone's return
+   key (`enterKeyHint="send"`) answered nothing at all. The disabled control and
+   the status line below were both already on screen, so the answer belongs in
+   that line's own sentence rather than in a fourth element beside the row's
+   caption and the button's glyph (UX round 1, U3, and nit N1 which asks for FEWER
+   ways of saying one thing). It appears only when there IS a draft that cannot
+   go, which is the moment the question is asked. */
+const SENDING_HINT = `${CONNECTING_STATUS} — send again when this one lands.`;
 const COMPOSER_PLACEHOLDER = "Message Local Operator…";
 
 export function Composer({
@@ -295,6 +312,25 @@ export function Composer({
 	const [dragOver, setDragOver] = useState(false);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 	const fileInputRef = useRef<HTMLInputElement>(null);
+
+	/* U1: what the retry button is about to resend.
+	 *
+	 * The withdrawn row took the failed message's only visible copy with it, and
+	 * the composer's restore is deliberately gated on an EMPTY field (text typed
+	 * since is the user's) — so the operator who carried on typing was being asked
+	 * to retry a message whose words appeared nowhere on screen, while the empty
+	 * state said "no messages yet". The first line names WHICH instruction; CSS
+	 * clips it to whatever width the alert has, and the body itself stays in the
+	 * envelope behind the button. An image-only instruction has no first line, so
+	 * the count stands in for it — the same words the pending row uses. */
+	const retainedPreview = (() => {
+		if (!retryEnvelope) return "";
+		const firstLine = retryEnvelope.text.split("\n")[0]?.trim() ?? "";
+		if (firstLine) return firstLine;
+		const attached = retryEnvelope.images?.length ?? 0;
+		if (attached === 1) return "1 image attached";
+		return attached > 1 ? `${attached} images attached` : "";
+	})();
 
 	/* The resume affordance is driven by the WIRE fact (stop_reason), not an
 	   inference from the streaming flag: a turn that completes also flips
@@ -414,6 +450,10 @@ export function Composer({
 							commandId: envelope.command_id,
 							text: envelope.text,
 							imageCount: envelope.images?.length ?? 0,
+							/* The envelope's op, not the local `chosen`: they agree today, and the
+							   envelope is the immutable identity the row is painted for. */
+							op: envelope.op,
+							accepted: false,
 						});
 						submitted.echo = { commandId: envelope.command_id, text: envelope.text };
 						/* The draft leaves the composer only when the envelope IS the body it
@@ -430,6 +470,10 @@ export function Composer({
 					},
 				);
 				setRetryEnvelope(null);
+				/* The session admitted this command — the receipt IS that fact, and it is
+				   what lets the row stop saying it is still going out. A no-op when the
+				   projection already answered the echo, or when none was painted. */
+				markPendingEchoAccepted(pid, receipt.envelope.command_id);
 				const currentPayloadImages = imagesRef.current.length
 					? imagesRef.current.map(({ data_b64, mime_type }) => ({ data_b64, mime_type }))
 					: undefined;
@@ -533,7 +577,7 @@ export function Composer({
 
 			{sending ? (
 				<p role="status" aria-live="polite" className="text-body-sm text-ink-muted">
-					Connecting…
+					{text.trim() ? SENDING_HINT : CONNECTING_STATUS}
 				</p>
 			) : null}
 
@@ -550,6 +594,9 @@ export function Composer({
 					<p role="alert" aria-live="assertive">{error}</p>
 					{retryPending ? (
 						<>
+							{retainedPreview ? (
+								<p className="mt-2 truncate text-body-sm text-ink-muted">{retainedPreview}</p>
+							) : null}
 							<button
 								type="button"
 								onClick={() => void send(text)}

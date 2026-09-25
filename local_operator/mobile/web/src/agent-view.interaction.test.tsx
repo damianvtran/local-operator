@@ -262,7 +262,7 @@ describe("AgentConversation", () => {
 		   alert — there is no alert once recovery succeeds. */
 		expect(screen.queryByRole("alert")).toBeNull();
 		expect(
-			screen.getByText("Earlier instruction delivered. Your edited draft is ready to send."),
+			screen.getByText("Earlier instruction delivered. Your draft is ready to send."),
 		).toBeTruthy();
 		expect(composer.value).toBe("Edited draft");
 
@@ -317,7 +317,7 @@ describe("AgentConversation", () => {
 		);
 		expect(screen.queryByRole("alert")).toBeNull();
 		expect(
-			screen.getByText("Earlier instruction delivered. Your edited draft is ready to send."),
+			screen.getByText("Earlier instruction delivered. Your draft is ready to send."),
 		).toBeTruthy();
 		fireEvent.click(screen.getByRole("button", { name: "steer" }));
 		await waitFor(() => expect(api.sendCommand).toHaveBeenCalledTimes(3));
