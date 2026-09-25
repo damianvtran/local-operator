@@ -455,17 +455,23 @@ def pid_environment(
     own ``/proc/<pid>/environ`` (:func:`proc_environ_text`): NUL-separated, the same
     snapshot ``ps`` itself would print, and free of a fork.
 
-    A SINGLE SPELLING WAS CONSIDERED AND NOT USED. Both manuals document the
-    BSD-style modifier ``e`` (procps: "Show the environment after the command";
-    macOS ``ps(1)``: ``-e`` "Display the environment as well. Same as -E"), so
-    ``ps eww -p PID -o command=`` is nominally one invocation for both. Rejected
-    because each implementation's own manual warns about precisely this mix —
-    procps: BSD-style options "may be grouped and must not be used with a dash",
-    and "Options of different types may be freely mixed, but conflicts can
-    appear", against the Unix-style ``-p``/``-o`` this module needs. A spelling
-    whose correctness rests on undefined mixing rules is the same class of
-    assumption that made ``-E`` look portable, and (unlike ``/proc``) it cannot be
-    exercised from a macOS developer machine.
+    A SINGLE SPELLING WAS CONSIDERED AND NOT USED, AND THERE IS NONE TO USE.
+    procps documents the BSD-style modifier ``e`` ("Show the environment after the
+    command"), and ``ps eww -p PID -o command=`` is the one form that looks as if it
+    would serve both families. It does not. macOS ``ps(1)`` documents NO bare ``e``
+    modifier at all: its environment spelling is ``-E`` ("Display the environment as
+    well. This does not reflect changes in the environment after process launch"),
+    its DASHED ``-e`` is "Identical to -A" — a process-SELECTION option — and the
+    ``-e`` that measures the environment exists only under LEGACY DESCRIPTION,
+    beside a redefined ``-g``/``-l``/``-u``. So the
+    "portable" spelling is a documented modifier on one family and an undocumented
+    one on the other; and on the family that has it, using it means mixing BSD
+    syntax with the Unix-style ``-p``/``-o`` this module needs — that same manual:
+    "Options of different types may be freely mixed, but conflicts can appear", and
+    BSD options "must not be used with a dash". A spelling whose correctness rests
+    on undefined mixing rules is the same class of assumption that made ``-E`` look
+    portable in the first place, and (unlike ``/proc``) it cannot be exercised from
+    a macOS developer machine.
 
     The NULs become single spaces so the text has the same SHAPE as the macOS
     route's — whitespace-separated ``NAME=value`` — which is what the patterns in
