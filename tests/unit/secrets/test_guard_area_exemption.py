@@ -1394,7 +1394,90 @@ async def test_a_record_left_by_a_torn_down_turn_is_swept(
     )
 
     assert REDACTION_MARKER in rows[0], "masking is not exempt and must still apply"
-    assert stale.exempt_source_verdicts == {}, "the leftover verdict survived the batch"
+    assert stale.exempt_source_verdicts == {}, "the leftover verdict survived the turn"
+    assert stale.original_call_args == {}, "the leftover arguments survived the turn"
     assert _escalation_flags(session) == [
         True
     ], "a record left by a torn-down turn priced the next turn's call"
+
+
+@pytest.mark.asyncio
+async def test_a_reader_in_an_earlier_batch_keeps_its_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1 REGRESSION ARM. A turn's batches share ONE append, so the sweep is per TURN.
+
+    ``_append_results`` runs once per assistant turn, after every batch of that turn
+    has run, so a turn whose calls split -- ``read`` plus an ``exclusive`` tool is the
+    commonest agent shape there is -- has batch 1's records LIVE while batch 2 runs.
+    Sweeping at the BATCH boundary destroyed them, and the redaction then fell back to
+    the scrubbed arguments and a second resolution, deterministically clearing a real
+    escalation (review round 7, F1, measured on this shape and on the R3-1 one). The
+    sweep belongs to the turn, whose scope mirrors the append's.
+
+    The read is drafted into batch 1 and an exclusive sibling into batch 2, with the
+    M2 retarget technique, so a lost record resolves onto the exempt tree and clears.
+    Reds if the sweep moves back to the batch.
+    """
+    root, exempt_dir, relative = _link_layout(tmp_path, monkeypatch)
+    link = root / "lnk"
+    link.unlink()
+    link.symlink_to(exempt_dir)  # the link STARTS at the exempt tree
+    session = _session(tmp_path)
+    original_execute = builtin.execute_read
+
+    async def retarget_then_read(
+        tool_call_id: str,
+        args: dict[str, Any],
+        signal: Any = None,
+        on_update: Any = None,
+        context: Any = None,
+    ) -> ToolResult:
+        link.unlink()
+        link.symlink_to(root / "decoydir")
+        try:
+            return await original_execute(tool_call_id, args, signal, on_update, context)
+        finally:
+            link.unlink()
+            link.symlink_to(exempt_dir)
+
+    async def exclusive_execute(
+        tool_call_id: str, args: dict[str, Any], signal: Any, on_update: Any, context: Any
+    ) -> ToolResult:
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="slow",
+            content=[TextContent(text="sibling done")],
+        )
+
+    read_tool = AgentTool(
+        name="read",
+        parameters={
+            "type": "object",
+            "properties": {"path": {"type": "string"}, "raw": {"type": "boolean"}},
+        },
+        execute=retarget_then_read,
+    )
+    sibling = AgentTool(
+        name="slow",
+        parameters={"type": "object", "properties": {}},
+        execute=exclusive_execute,
+        concurrency="exclusive",
+    )
+
+    rows = await _drive_tools(
+        session,
+        [read_tool, sibling],
+        _BatchStream(
+            [
+                ("c1", "read", json.dumps({"path": relative, "raw": True})),
+                ("c2", "slow", json.dumps({})),
+            ]
+        ),
+        str(root),
+    )
+
+    assert ATTACKER_BODY in rows[0], "the reader did not open the agent's file"
+    assert _escalation_flags(session) == [
+        True
+    ], "a reader in an earlier batch lost its record to the next batch's sweep"

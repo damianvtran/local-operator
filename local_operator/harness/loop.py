@@ -2962,7 +2962,21 @@ class AgentLoop:
         Approval prompts happen per-call INSIDE the tool task (after
         ``tool_execution_start``), so the UI shows the call while waiting and
         skipped calls never prompt.
+
+        This call is also the TURN boundary for the two redaction records, which is
+        the scope ``_append_results`` mirrors: every record a turn writes is
+        consumed by that turn's own append. A turn that never reaches it -- a
+        consumer that stops iterating between a tool's end and the append -- leaves
+        its records behind, and a later call reusing the id would be priced on them
+        (review round 6, L1). Sweeping HERE closes that without touching a live
+        turn: a turn whose calls split into several batches (``exclusive`` or keyed
+        resources) keeps batch 1's records until batch N is done, which a sweep at
+        the BATCH boundary destroyed -- and the redaction then fell back to the
+        scrubbed arguments and a second resolution, silently clearing a real
+        escalation (review round 7, F1).
         """
+        context.original_call_args.clear()
+        context.exempt_source_verdicts.clear()
         seen_ids: set[str] = set()
         plan: list[_PlannedCall] = []
         for call in calls:
@@ -3533,15 +3547,7 @@ class AgentLoop:
         which Anthropic rejects). A slot whose call failed planning never
         runs; its synthetic result is parked in its slot up front.
 
-        A batch is also the one place a TORN-DOWN turn's leftovers can be swept:
-        a turn whose consumer stops iterating between a tool's end and its append
-        leaves that call's dispatch records behind, and the next turn reusing the
-        id would consume them (review round 6, L1). Every legitimate record is
-        written and consumed inside one batch, so anything present as a batch
-        STARTS belongs to a turn that never finished.
         """
-        context.original_call_args.clear()
-        context.exempt_source_verdicts.clear()
         queue: asyncio.Queue[AgentEvent | _ToolDone | _BatchDone] = asyncio.Queue()
         results_by_slot: list[ToolResult | None] = [None] * len(batch)
         tasks: list[asyncio.Task[None]] = []
