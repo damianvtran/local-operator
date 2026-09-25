@@ -63,6 +63,7 @@ from textual.widgets import Static
 from local_operator.analytics.model import (
     COMPONENT_KEYS,
     COMPONENT_LABELS,
+    ModelRateRow,
     SessionNode,
     UsageAggregate,
     UsagePeriod,
@@ -1055,6 +1056,7 @@ def build_report(
     forest: list["SessionNode"] | None = None,
     search_spend: SearchSpendSnapshot | None = None,
     session_search_spend: SearchSpendSnapshot | None = None,
+    model_rates: "Sequence[ModelRateRow] | str | None" = None,
 ) -> list[Text]:
     """Render one aggregate as a list of ``Text`` lines for the screen body.
 
@@ -1569,6 +1571,19 @@ def build_report(
                 layout=layout,
             )
         )
+
+    # The per-model rate table, placed after the session tree and before the
+    # legends: it is the one section whose read is SEPARATE (a grouped scan of the
+    # raw ledger, seconds on a large one), so it is the one that can say
+    # "reading…" or "none", and a reader who opened this screen for the
+    # per-session tree has already found it above. ``None`` means this caller
+    # does not do the read at all and the section does not exist — see
+    # ``_model_rate_section`` for the three inputs and why ``None`` is distinct
+    # from an empty answer.
+    model_section = _model_rate_section(model_rates, width)
+    if model_section is not None:
+        lines.append(Text())
+        lines.append(model_section)
 
     # Footnote for the decode rate, drawn only when the rate does not speak for
     # every call (``decode_calls < calls``) — which includes the pre-release
@@ -2341,6 +2356,99 @@ def _group_section(
     return block
 
 
+#: The By-model section's states, kept as one spelling each because the screen
+#: and the tests both read them: the read is a separate, SLOW one (a grouped scan
+#: of the raw ledger), so the section has to be able to say "not yet" and "none"
+#: as clearly as it says a number.
+MODEL_RATES_PENDING = "pending"
+
+#: What the two rate columns are, and why one of them can be a dash. Printed
+#: under the table whenever anything in it is unknown, because ``—`` and a
+#: number are only distinguishable if the screen says what the dash means.
+MODEL_RATE_LEGEND = (
+    "tok/s decode = measured generation window · tok/s wall = whole call, "
+    "first token included · — = no measured window"
+)
+
+
+def _model_rate_section(
+    model_rates: "Sequence[ModelRateRow] | str | None",
+    width: int,
+) -> Text | None:
+    """The per-model rate table, or ``None`` when this caller asked for no such table.
+
+    Three distinct inputs, and the distinction is the point:
+
+    - ``None`` — the caller does not do this read at all, so there is no
+      section. That keeps every existing caller (and every test that composes a
+      report without a rates read) rendering exactly what it rendered before.
+    - ``MODEL_RATES_PENDING`` — the read is in flight. The section states that
+      rather than showing an empty table, because "no rows" and "no answer yet"
+      are different facts and this read takes seconds on a large ledger.
+    - a sequence — the answer, possibly empty. Empty is its own sentence.
+
+    The rows come from the raw LEDGER, not from the ``session_daily`` rollup the
+    headline above them comes from, and the meta line says so: these rows do not
+    partition that headline and the table must not read as if they did.
+    """
+    if model_rates is None:
+        return None
+    block = section_header("By model", meta=f"from the ledger · {MODEL_RATE_LEGEND}")
+    dim = semantic_style("dim")
+    fg = semantic_style("fg")
+    if isinstance(model_rates, str):
+        block.append("\n  reading the ledger…", style=dim)
+        return block
+    rows = list(model_rates)
+    if not rows:
+        block.append("\n  (no per-model rows in this window)", style=dim)
+        return block
+
+    # Column widths from the DATA, the same rule the group tables follow: a
+    # literal pad leaves a column ragged the moment one value is wider than the
+    # guess, and ragged numeric columns defeat scanning straight down.
+    tokens_col = max(len(format_tokens(row.output_tokens)) for row in rows)
+    decode_col = max(len(format_tps(row.decode_tps)) for row in rows)
+    wall_col = max(len(format_tps(row.wall_tps)) for row in rows)
+    coverage_col = max(len(f"{row.decode_calls}/{row.calls} calls") for row in rows)
+    # Everything except the name, in cells, so the name takes what is left — and
+    # is TRUNCATED to it rather than padded past it, which is what keeps the
+    # numeric columns aligned on a narrow terminal.
+    reserved = (
+        tokens_col
+        + len(" tokens")
+        + 3
+        + decode_col
+        + len(" tok/s")
+        + 3
+        + wall_col
+        + len(" tok/s")
+        + 3
+        + coverage_col
+    )
+    name_col = max(12, min(40, width - reserved - 2))
+    any_unknown = False
+    for row in rows:
+        label = f"{row.provider}/{row.model_id}"
+        block.append("\n")
+        block.append(f"  {truncate_cells(label, name_col):<{name_col}}", style=fg)
+        block.append(f"{format_tokens(row.output_tokens):>{tokens_col}} tokens", style=fg)
+        decode = format_tps(row.decode_tps)
+        wall = format_tps(row.wall_tps)
+        any_unknown = any_unknown or row.decode_tps is None or row.wall_tps is None
+        block.append("   ")
+        block.append(f"{decode:>{decode_col}} tok/s", style=dim)
+        block.append("   ")
+        block.append(f"{wall:>{wall_col}} tok/s", style=dim)
+        # Coverage as a fraction of CALLS rather than a percentage: the reader's
+        # next question is "how many calls is that", and a fraction answers it
+        # without a second number.
+        block.append(f"   {row.decode_calls}/{row.calls} calls", style=dim)
+    if any_unknown:
+        block.append("\n  " + MODEL_RATE_LEGEND, style=dim)
+    return block
+
+
 class AnalyticsScreen(ModalScreen[None]):
     """Full-screen, scrollable, Esc-dismissable usage analytics.
 
@@ -2416,9 +2524,18 @@ class AnalyticsScreen(ModalScreen[None]):
         window_totals: UsagePeriod | None = None,
         search_spend: SearchSpendSnapshot | None = None,
         session_search_spend: SearchSpendSnapshot | None = None,
+        model_rates: "Sequence[ModelRateRow] | str | None" = None,
     ) -> None:
         super().__init__()
         self._aggregate = aggregate
+        #: The per-model rate rows, and the ONE part of this report that is read
+        #: LATER than the rest: ``model_rates()`` is a grouped scan of the raw
+        #: ledger (seconds on a large one) and folding it into the open would
+        #: make every ``/analytics`` pay for a table most opens never scroll to.
+        #: So the caller may hand in ``MODEL_RATES_PENDING`` and call
+        #: :meth:`set_model_rates` when the read lands; ``None`` means the caller
+        #: does no such read and the section is absent. See ``_model_rate_section``.
+        self._model_rates: "Sequence[ModelRateRow] | str | None" = model_rates
         # Grand total over the daily chart's window (``series_totals``), shown in
         # that chart's meta so the bars and their sum describe the same span.
         self._window_totals = window_totals
@@ -2777,7 +2894,28 @@ class AnalyticsScreen(ModalScreen[None]):
             # Held snapshots, not ledger reads: see ``__init__``.
             search_spend=self._search_spend,
             session_search_spend=self._session_search_spend,
+            # The per-model rows, which may have arrived AFTER the screen was
+            # pushed (``set_model_rates``): a field rather than a parameter so
+            # the late answer reaches the next repaint through the same path
+            # every other held snapshot uses.
+            model_rates=self._model_rates,
         )
+
+    def set_model_rates(self, rows: "Sequence[ModelRateRow] | str") -> None:
+        """Attach the per-model rate rows and repaint.
+
+        Called from the app's worker when the separate ledger read lands, which
+        can be AFTER the user has dismissed this screen — so the caller guards
+        on the screen still being mounted, and this method stays a plain state
+        assignment plus a repaint that a detached screen simply does not do.
+        """
+        if rows == self._model_rates:
+            return
+        self._model_rates = rows
+        try:
+            self._repaint()
+        except Exception:  # noqa: BLE001 — a late read must never break the screen
+            pass
 
     def _expandable_rows(self) -> bool:
         """Whether the CURRENT paint has a row that can be expanded.
