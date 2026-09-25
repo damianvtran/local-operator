@@ -37,6 +37,7 @@ from pydantic import TypeAdapter, ValidationError
 from local_operator.ansi import sanitize_prompt_line
 from local_operator.harness.approval import ask_approval
 from local_operator.harness.guard_area import (
+    READING_TOOLS,
     exempt_from_escalation,
     resolves_to_exempt_source,
 )
@@ -1049,22 +1050,37 @@ def _call_arguments(context: "LoopContext", tool_call_id: str) -> dict[str, Any]
     return {}
 
 
-def _exempt_verdict_recorder(context: "LoopContext") -> Callable[[str, str, bool], None]:
+def _exempt_verdict_recorder(
+    context: "LoopContext", tool_name: str, tool_call_id: str
+) -> Callable[[str, bool], None]:
     """The callback a READER uses to publish the path it just resolved.
 
-    Installed on ``ToolContext.record_resolved_path`` for the duration of a call
+    Installed on ``ToolContext.record_resolved_path`` for the duration of ONE call
     whose result will be redacted, and called by ``execute_read``/``execute_grep``
     at the resolution they are about to open. The membership test is
     :func:`guard_area.resolves_to_exempt_source`, so the exemption's one definition
-    stays with the exemption; this only files the answer under the call's id, where
-    :func:`_exempt_source_verdict` pops it one step later.
+    stays with the exemption.
+
+    Two properties are enforced HERE rather than by convention, because the hook
+    sits on a context every dispatched tool receives (PR #1502 review round 6, M1):
+
+    * **the id is the loop's**, captured from the call this recorder was made for,
+      never an argument a tool body can supply -- so one call cannot file a verdict
+      against another call's id;
+    * **only a READING tool may confer it**: a tool outside
+      :data:`guard_area.READING_TOOLS` filing anything files ``False``, which is the
+      escalating reading. Before this seam existed the matcher itself enforced that
+      with a tool-name check; it is restated here so the property survives the move.
 
     A reader that never resolves (a scheme handle, a validation failure) records
     nothing, and the redaction then falls back to resolving for itself -- the
     escalating direction, unchanged.
     """
 
-    def record(tool_call_id: str, resolved: str, resolvable: bool) -> None:
+    def record(resolved: str, resolvable: bool) -> None:
+        if tool_name not in READING_TOOLS:
+            context.exempt_source_verdicts[tool_call_id] = False
+            return
         context.exempt_source_verdicts[tool_call_id] = resolves_to_exempt_source(
             resolved, resolvable
         )
@@ -3419,7 +3435,11 @@ class AgentLoop:
             if config.redact_tool_result is not None:
                 context.original_call_args[call.id] = item.args
                 execution_context = execution_context.model_copy(
-                    update={"record_resolved_path": _exempt_verdict_recorder(context)}
+                    update={
+                        "record_resolved_path": _exempt_verdict_recorder(
+                            context, tool.name, call.id
+                        )
+                    }
                 )
             return await tool.execute(call.id, item.args, signal, on_update, execution_context)
         except asyncio.CancelledError:
@@ -3512,7 +3532,16 @@ class AgentLoop:
         slots collide into one result (duplicate tool_result ids on the wire,
         which Anthropic rejects). A slot whose call failed planning never
         runs; its synthetic result is parked in its slot up front.
+
+        A batch is also the one place a TORN-DOWN turn's leftovers can be swept:
+        a turn whose consumer stops iterating between a tool's end and its append
+        leaves that call's dispatch records behind, and the next turn reusing the
+        id would consume them (review round 6, L1). Every legitimate record is
+        written and consumed inside one batch, so anything present as a batch
+        STARTS belongs to a turn that never finished.
         """
+        context.original_call_args.clear()
+        context.exempt_source_verdicts.clear()
         queue: asyncio.Queue[AgentEvent | _ToolDone | _BatchDone] = asyncio.Queue()
         results_by_slot: list[ToolResult | None] = [None] * len(batch)
         tasks: list[asyncio.Task[None]] = []
