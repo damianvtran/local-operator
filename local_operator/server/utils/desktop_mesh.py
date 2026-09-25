@@ -488,7 +488,12 @@ def _remote_status_label(row: Any) -> str:
 
 
 def create_on_peer(
-    root: Path | None, peer: str, *, cwd: str = "", model: dict[str, Any] | None = None
+    root: Path | None,
+    peer: str,
+    *,
+    cwd: str = "",
+    model: dict[str, Any] | None = None,
+    target: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Mint a conversation ON ``peer``, through this device's relay.
 
@@ -507,9 +512,35 @@ def create_on_peer(
     bad directory is a refusal rather than a silent relocation. An EMPTY ``cwd`` is
     the "the peer decides" case, and the peer's decision is its own home.
 
+    ``target`` IS forwarded too, and that is the change this signature exists for.
+    A chosen agent or team is exactly the kind of context the user expects to
+    survive the device boundary, and the peer can resolve the name because the
+    relay reconciles the definition on the way (``definitions.push_to_peer``) —
+    including when the peer is a CLEAN install that has never seen it. Refusing the
+    pick here, as this route did while definitions could not travel, is the
+    behaviour that left the user to "pick the target after moving it home".
+
+    The desktop's ``kind`` is the PROFILE vocabulary (``agent`` names a role, a
+    specialist or a packaged seed — ``server/utils/desktop_profiles.py``), so it maps
+    to the frame's ``profile`` rather than to the legacy ``agent_name`` slot. Those are
+    two different things on the wire and only one of them is what the picker offers.
+
     No first prompt is sent: the desktop's ``/new`` opens a conversation, and a prompt
     from this device would be work the user has not asked for yet.
     """
+    # ONE PLACE BUILDS THE FRAME'S FIELDS, so the three that travel cannot drift
+    # apart: ``cwd`` is ALWAYS forwarded (empty is the documented "the peer decides"
+    # case, and the peer is the only party that can resolve it), ``model`` only when
+    # the caller named one, and the pick in the vocabulary the picker itself uses.
+    fields: dict[str, Any] = {"peer": peer, "cwd": cwd}
+    if model is not None:
+        fields["model"] = model
+    if target is not None:
+        name = str(target.get("name") or "")
+        if str(target.get("kind") or "") == "team":
+            fields["team"] = name
+        else:
+            fields["profile"] = name
     return _call(
         root,
         "peer_session_create",
@@ -518,9 +549,7 @@ def create_on_peer(
         # runtime in the background and answers with the id), so this budget is the
         # one that covers the prompt-ful case; see ``relay._op_session_create``.
         timeout=120.0,
-        peer=peer,
-        cwd=cwd,
-        model=model,
+        **fields,
     )
 
 

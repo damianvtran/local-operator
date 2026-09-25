@@ -224,6 +224,12 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     "mesh.json": "the ownership stamp, rewritten by whoever adopts the copy",
     # Describes a replica, means nothing inside a session.
     REPLICA_CURSOR_NAME: "the replica cursor, which is about this device's copy",
+    # The definitions index (``network.definitions.INDEX_NAME``): the agent and team
+    # rows this device mirrors to a peer, written BESIDE the sessions tree
+    # (``<config>/network/definitions.json``) rather than into a session. It is not an
+    # entry of a session directory at all, so it belongs on this side of the copy
+    # set's answer rather than in ``COPY_SET_NAMES``.
+    "definitions.json": "the definitions index, which lives beside the sessions tree",
     # Lists jobs owned by the SOURCE's process; the destination's roster is its
     # own, and a copied one would name subagents that do not exist here.
     "subagent-roster.v1.json": "the source process's subagent roster",

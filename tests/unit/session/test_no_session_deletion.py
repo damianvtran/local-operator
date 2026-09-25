@@ -697,6 +697,36 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "temp FILE -> config.yml",
     ),
+    # The definition mirror's own two writers, both added by the mesh parity slice
+    # (``agents._write_text_atomically`` is that slice's torn-``agent.yml`` fix).
+    # Neither destination can name a session path: ``_write_text_atomically`` is
+    # called with ``agents/<id>/agent.yml`` and ``agents/<id>/system_prompt.md``,
+    # where the id is validated as one path segment at the write boundary before
+    # either call, and ``write_index`` writes the config root's own
+    # ``network/definitions.json``. Each stages a unique temp FILE beside its
+    # target and replaces a FILE with it — ``os.replace`` onto a file cannot
+    # displace a directory — and each ``finally`` unlink removes only the temp
+    # sibling that this same call created.
+    (
+        "local_operator/agents.py::_write_text_atomically",
+        "os.replace",
+        "temp FILE -> config/agents/<id>/agent.yml or system_prompt.md; never sessions/",
+    ),
+    (
+        "local_operator/agents.py::_write_text_atomically",
+        "<path>.unlink",
+        "only the same-directory temp FILE this write created",
+    ),
+    (
+        "local_operator/network/definitions.py::write_index",
+        "os.replace",
+        "temp FILE -> config/network/definitions.json",
+    ),
+    (
+        "local_operator/network/definitions.py::write_index",
+        "<path>.unlink",
+        "only the same-directory temp FILE this write created",
+    ),
     # The move route's own rollback. It removes `<sessions>/<id>/desktop.json`:
     # the marker FILE beside the transcript, whose name is the fixed
     # `DESKTOP_MARKER_NAME` basename joined onto the session directory the bridge
