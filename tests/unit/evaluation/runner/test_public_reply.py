@@ -918,7 +918,10 @@ async def test_an_episode_runs_on_wrapper_framed_replies(tmp_path: Path, episode
             )
         return _wrapped(wrappers[(calls - 1) % len(wrappers)], envelope(raw, note))
 
-    config = build_config(tmp_path)
+    # Control arm: the subject here is the reply WRAPPERS a real provider emits, so the episode
+    # runs without the completion gate's own extra cycle (covered by
+    # tests/unit/evaluation/runner/test_completion_gate.py).
+    config = build_config(tmp_path, completion_gate=False)
     stream = RecordingStream(reply)
     client = _client(stream, config.artifact_root)
     runner = EpisodeRunner(
@@ -1000,7 +1003,10 @@ async def test_a_tolerated_reply_reaches_the_bundle_with_its_counts(
             note,
         )
 
-    config = build_config(tmp_path)
+    # Control arm: the subject here is the tolerance counts a reply's framing costs, so the episode
+    # runs without the completion gate's own extra cycle (covered by
+    # tests/unit/evaluation/runner/test_completion_gate.py).
+    config = build_config(tmp_path, completion_gate=False)
     stream = RecordingStream(reply)
     client = _client(stream, config.artifact_root)
     runner = EpisodeRunner(
@@ -1281,7 +1287,10 @@ async def test_real_provider_runner_records_and_replays_public_evidence(
             )
         return envelope(raw, note if calls == 1 else "")
 
-    config = build_config(tmp_path)
+    # Control arm: the subject here is which public evidence is replayed, so
+    # the episode runs without the completion gate's own extra cycle (covered
+    # by tests/unit/evaluation/runner/test_completion_gate.py).
+    config = build_config(tmp_path, completion_gate=False)
     stream = RecordingStream(reply)
     client = _client(stream, config.artifact_root)
     runner = EpisodeRunner(
