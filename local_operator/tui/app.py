@@ -9804,32 +9804,26 @@ class OperatorApp(App[None]):
         def collect() -> tuple[list[CatalogEntry], list[str], int | None]:
             from local_operator.paths import config_dir
             from local_operator.tui.session_catalog import (
-                load_catalog_with_population,
+                load_catalog,
                 subagent_population,
             )
             from local_operator.tui.sidebar_pins import read_pins
 
             root = config_dir()
             pins = read_pins(root)
-            # ONE scan for both answers: the page, and the hidden population that
-            # same scan established. `subagent_population` walks the whole store
-            # a second time (measured +7.29 ms CPU, +1 scandir, +601 stat at
-            # n=200), and this build is on the path a sidebar OPEN takes in full,
-            # so the count travels with the page instead of being asked for.
-            entries, hidden_total = load_catalog_with_population(
+            entries = load_catalog(
                 root,
                 include_subagents=self._session_sidebar.show_subagents,
                 pinned_hidden_ids=tuple(pins),
             )
-            # PUBLISHED on a SLOW cadence, never per poll: the count changes when
-            # a delegated run starts, not when the list repaints, so the footer
-            # chip is updated every `SUBAGENT_POLL_EVERY`th poll. `None` means
-            # "unchanged", which is not the same as zero. The count itself is
-            # free — it came out of the scan above — so the cadence now decides
-            # only what the sidebar is TOLD, never what is measured.
+            # Read on a SLOW cadence, never per poll: `subagent_population` is
+            # a second whole-store scan (+2.36 ms, +21% measured with the layer
+            # off) and the count it answers changes when a delegated run
+            # starts, not when the list repaints. `None` means "unchanged",
+            # which is not the same as zero.
             total: int | None = None
             if self._subagent_population_poll % SUBAGENT_POLL_EVERY == 0:
-                total = subagent_population(root, known=hidden_total)
+                total = subagent_population(root)
             self._subagent_population_poll += 1
             return entries, pins, total
 

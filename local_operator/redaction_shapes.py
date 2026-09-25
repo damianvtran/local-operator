@@ -4546,6 +4546,11 @@ def _mask_with_recorded_hit(shape: Shape, match: Match[str], hits: list[ShapeHit
     replacement = shape.replacement
     if callable(replacement):
         return replacement(match)
+    # ``replacement`` is ``Callable | str``; the type checker cannot carry the
+    # ``callable`` narrowing through to here, so the assertion states what the
+    # branch above already established — the same shape ``_run_shapes`` uses for
+    # ``shape.replacement is not None``.
+    assert isinstance(replacement, str)
     return match.expand(replacement)
 
 

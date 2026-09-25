@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import threading
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -53,7 +54,7 @@ _LEAKY_ENV = (
 
 
 @pytest.fixture()
-def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """A hermetic credential root, plus an empty shared map around the test.
 
     ``LOCAL_OPERATOR_CONFIG_DIR`` is what makes ``config_dir()`` — and so the
