@@ -95,6 +95,7 @@ from pathlib import Path
 from typing import Any
 
 from local_operator.operator.macos import keyagent
+from local_operator.operator.macos.keyagent import USAGE_REFUSED
 from local_operator.operator.verify import key_id_for
 
 #: Backend names, in the order the presence ladder prefers them.
@@ -133,6 +134,18 @@ class KeyHandle:
     key_id: str
     spki: bytes
     presence: bool
+    #: False on a handle that was LOADED, and on every key this build created except one
+    #: the key agent found already in place: the tag is the contract, so a create that
+    #: found an existing key reports that key (``reused``) rather than making a second
+    #: one. Carried so ``lop operator init`` can report "nothing replaced" in the race
+    #: where a key appears between its probe and its create (agent review round 1, R1-5).
+    reused: bool = False
+    #: The protection class a create ACHIEVED (``kSecAttrAccessible…``), or empty when
+    #: nothing was generated. The ladder never settles for a weaker class, and which one
+    #: it got is the difference between a key the OS will only use when the device has a
+    #: passcode and one it will use whenever it is unlocked — a fact a report has to be
+    #: able to state (agent review round 1, R1-5).
+    rung: str = ""
 
     @property
     def level(self) -> str:
@@ -466,6 +479,9 @@ _REFUSAL_HEADLINES: dict[str, str] = {
     KEY_GENERATION_REFUSED: "the Secure Enclave refused to create an operator key",
     SIGNATURE_REFUSED: "the Secure Enclave refused the operator key's signature",
     KEY_LOOKUP_REFUSED: "the operator key could not be read from the Secure Enclave",
+    # The helper declined the request ITSELF, before any framework call: see
+    # ``secure_enclave_refusal_message`` for why this site gets no diagnosis table.
+    USAGE_REFUSED: "the key agent declined this request",
 }
 
 
@@ -487,6 +503,13 @@ def secure_enclave_refusal_message(refusals: dict[tuple[str, int, str], list[str
         if (site, status) in written:
             continue
         written.add((site, status))
+        # NO DIAGNOSIS FOR A USAGE REFUSAL (agent review round 1, R1-4; QA round 1, Q2).
+        # This site is the helper declining the request itself — `purge` on the
+        # operator's own tag, an unknown verb, a bad flag — so there is no OSStatus to
+        # look up and no protection class that was ever tried; its own sentence, below,
+        # is the whole explanation.
+        if site == USAGE_REFUSED:
+            continue
         lines.extend(secure_enclave_diagnosis(site, status))
     if not lines:
         # No explanation we can stand behind: say the plain fact, IN THE VERB OF THE
@@ -511,6 +534,12 @@ def secure_enclave_refusal_message(refusals: dict[tuple[str, int, str], list[str
         # printing "OSStatus 0 -" would put a SUCCESS code in a failure line (agent review
         # round 2, R2-1 / QA round 2, Q2-1).
         stated = not status or re.search(rf"error\s+{re.escape(str(status))}\b", detail)
+        if site == USAGE_REFUSED:
+            # NOT "framework detail": the framework was never called. The helper's own
+            # words are the explanation, and labelling them as a framework's would
+            # attribute a sentence to a library that had not been reached yet.
+            lines.append(detail)
+            continue
         lines.append(
             f"framework detail: {site} — {', '.join(classes)}: "
             f"{'' if stated else f'OSStatus {status} - '}{detail}"
@@ -522,16 +551,27 @@ def secure_enclave_refusal_message(refusals: dict[tuple[str, int, str], list[str
     return "\n".join(lines)
 
 
-#: The remedy sentence the key-agent states share, and the cost of the alternative it
-#: names: the SAME shape the table above uses for a `file-only` fallback, because it is
-#: the same offer with the same price.
-_KEYAGENT_REINSTALL = (
-    "reinstall the macOS wheel with `uv tool install local-operator --force` "
-    "(`lop-update` rebuilds a checkout) to get the key agent; to keep a file-backed key "
-    "instead run `lop operator init --backend file-only` — it raises no presence prompt, "
-    "and any process running as you can read it, which `lop operator status` reports as "
-    "the level `operator-file-only`"
+#: The remedy BLOCK the key-agent states share, and the cost of the alternative it names:
+#: the SAME offer, with the same price, however the install broke — and the same
+#: ``label : value`` shape ``status`` uses for its own report.
+#:
+#: ALIGNED LINES RATHER THAN ONE PARAGRAPH (design round 1, D4). The released copy was a
+#: 566-character sentence for the ``absent`` case — six wrapped lines at 100 columns,
+#: eight at 80 — whose first remedy token (``reinstall``) began on the FOURTH wrapped
+#: line, and the ``lop-update`` aside interrupted the command it was qualifying. A reader
+#: in this state is being told their install is broken; the remedy has to be reachable at
+#: a glance, not at the end of a wall of prose.
+_KEYAGENT_REMEDY = (
+    "  fix  : reinstall the macOS wheel — `uv tool install local-operator --force`\n"
+    "  or   : `lop operator init --backend file-only` — raises no presence prompt, and any\n"
+    "         process running as you can read it (reported as the level `operator-file-only`)\n"
+    "  note : `lop-update` rebuilds a checkout"
 )
+
+#: The first line of every broken-install block: the CAUSE, on the same aligned
+#: ``label : value`` shape as the remedy below it, so the whole message reads as one
+#: block rather than as a sentence with a list stuck to it (design round 1, D4).
+_KEYAGENT_WHY = "  why  : "
 
 #: ``key-agent state -> (what `init` says, what `status` reports)``.
 #:
@@ -546,24 +586,38 @@ _KEYAGENT_REINSTALL = (
 #: reports absence.
 _KEYAGENT_STATES: dict[str, tuple[str, str]] = {
     "absent": (
-        "the macOS key agent is not installed: this installation has no "
-        "`lop-keyagent.app` (an sdist install, or a wheel for another platform), so "
-        "nothing here can reach the operator key. " + _KEYAGENT_REINSTALL,
+        _KEYAGENT_WHY
+        + "this installation has no `lop-keyagent.app` (an sdist install, or a wheel for "
+        "another platform), so nothing here can reach the operator key\n" + _KEYAGENT_REMEDY,
         "the macOS key agent is not installed (broken install)",
     ),
     "unverified": (
-        "the macOS key agent is present but is not ours: its signature does not verify, "
+        _KEYAGENT_WHY
+        + "the macOS key agent is present but is not ours: its signature does not verify, "
         "or it carries no embedded provisioning profile, so the kernel would refuse it "
         "before it could run — the bundle is verified BEFORE it is executed for exactly "
-        "that reason. " + _KEYAGENT_REINSTALL,
+        "that reason\n" + _KEYAGENT_REMEDY,
         "the key agent failed verification",
     ),
     "killed": (
-        "the kernel refused the key agent's keychain entitlement: its embedded "
+        _KEYAGENT_WHY + "the kernel refused the key agent's keychain entitlement: its embedded "
         "provisioning profile is missing, stale, or does not authorize its application "
         "identifier, so the process was killed before it could run (measured shape: "
-        "SIGKILL, exit 137). " + _KEYAGENT_REINSTALL,
+        "SIGKILL, exit 137)\n" + _KEYAGENT_REMEDY,
         "the key agent was killed: bad or missing embedded profile",
+    ),
+    # A KIND WITH NO COPY WAS A HOLE IN BOTH REGISTERS (agent review round 1, R1-4).
+    # `helper_health` hands ANY `KeyagentError`'s kind to this table, and `doctor` exits
+    # 4 whenever the keychain query is neither success nor not-found — the realistic case
+    # being errSecMissingEntitlement, i.e. the entitlement is not in effect, which since
+    # the round-1 fix is also what a failed GENERATION reports. Without an entry the
+    # reader got the generic fallback, which names a reinstall for a state whose copy
+    # `init` already gets right through `keyagent_refusal_message`.
+    "refused": (
+        _KEYAGENT_WHY + "the key agent ran but the OS refused its keychain call: its embedded "
+        "provisioning profile is not in effect, so the entitlement that lets it create "
+        "or use the operator key is not granted (errSecMissingEntitlement)\n" + _KEYAGENT_REMEDY,
+        "the key agent's keychain call was refused: its entitlement is not in effect",
     ),
     "no-key": (
         "no operator key on this host: run `lop operator init`",
@@ -703,6 +757,8 @@ class SecureEnclaveBackend:
             key_id=key_id_for(created.point),
             spki=created.point,
             presence=True,
+            reused=created.reused,
+            rung=created.rung,
         )
 
     def load(self) -> Signer | None:
@@ -760,7 +816,16 @@ class _KeyagentSigner(Signer):
             raise KeyBackendError(keyagent_refusal_message(exc), status=exc.status) from exc
 
     def close(self) -> None:
-        """Nothing to release: the one-shot helper that held the key has exited.
+        """Nothing to release HERE: the signature is one shot, and the helper is gone.
+
+        WHY THAT CLAIM IS NOW TRUE ON EVERY PATH (agent review round 1, R1-1). It was
+        false in exactly the state a human produces: a Ctrl-C during ``sign`` raised
+        ``KeyboardInterrupt`` out of ``communicate()``, nothing reaped the child, and the
+        helper kept running in its own session — re-parented to launchd once the parent
+        exited the way ``cli.main`` does on an interrupt. ``keyagent._spawn`` now reaps the
+        process group on any exit path, so "has exited" means the caller either saw the
+        reply or saw the helper taken down; a helper that outlives the call is the one
+        thing this method must never be describing.
 
         Kept because :class:`Signer` requires it and every surface ends a signing session
         with it — the file backend's signer does hold an object, and a caller must not

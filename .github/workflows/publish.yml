@@ -335,7 +335,8 @@ jobs:
           # (a wheel that drops the mode installs cleanly and fails on the
           # operator's first verb).
           python3 - "$MACOS_WHEEL" <<'PY'
-          import sys, zipfile
+          import subprocess, sys, tempfile, zipfile
+          from pathlib import Path
           path = sys.argv[1]
           with zipfile.ZipFile(path) as zf:
               helper = "local_operator/operator/macos/lop-keyagent.app/Contents/MacOS/lop-keyagent"
@@ -347,7 +348,27 @@ jobs:
               mode = (zf.getinfo(helper).external_attr >> 16) & 0o777
               if mode != 0o755:
                   raise SystemExit(f"the helper installs mode {mode:o}, not 755")
-          print(f"{path}: bundle present, helper mode 755")
+              # THE ARCHITECTURES, READ FROM THE MACH-O HEADERS OF THE SHIPPING FILE.
+              # The wheel tag says macosx_11_0_universal2 and a tag is not a binary:
+              # `assemble_keyagent_bundle.sh` asserts this on the staged binary, and this
+              # asserts it again on the helper EXTRACTED FROM THE WHEEL, because the thing
+              # an Intel Mac downloads is the wheel and not the staging directory. A
+              # single-arch helper under a universal2 tag installs cleanly and then cannot
+              # execute — the silent downgrade this job exists to prevent.
+              with tempfile.TemporaryDirectory() as scratch:
+                  landed = Path(scratch) / "lop-keyagent"
+                  landed.write_bytes(zf.read(helper))
+                  landed.chmod(0o755)
+                  archs = subprocess.run(
+                      ["lipo", "-archs", str(landed)], capture_output=True, text=True, check=True,
+                  ).stdout.split()
+          for wanted_arch in ("x86_64", "arm64"):
+              if wanted_arch not in archs:
+                  raise SystemExit(
+                      f"the helper in {path} is not universal2: lipo -archs reports {archs}, "
+                      f"which has no {wanted_arch} slice"
+                  )
+          print(f"{path}: bundle present, helper mode 755, universal2 {archs}")
           PY
 
       - name: Upload the macOS distribution

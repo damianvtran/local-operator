@@ -242,15 +242,35 @@ def issue_device_cert(
 
 
 def describe_level(handle: KeyHandle) -> str:
-    """One line, for ``lop operator init``'s output, that does not overclaim."""
+    """One line, for ``lop operator init``'s output, that does not overclaim.
+
+    The presence branch names the protection class the ladder ACHIEVED (agent review
+    round 1, R1-5). The ladder never settles for a weaker class, so which one it got is
+    the difference between a key the OS will only use when the device has a passcode and
+    one it will use whenever it is unlocked — a fact an operator deserves, and the one
+    field of the helper's ``create`` reply that had no reader.
+    """
     if handle.presence:
-        return f"{handle.backend}: every signature requires a human gesture " "(the strong level)"
+        achieved = f" [{handle.rung}]" if handle.rung else ""
+        return (
+            f"{handle.backend}: every signature requires a human gesture "
+            f"(the strong level){achieved}"
+        )
     if handle.backend == FILE_ONLY:
+        # WHERE THIS COPY USED TO MISDIRECT (design round 1, D2). "this host has no
+        # presence store" and "use a host with a presence store" are false on the ONE
+        # platform that prints them — macOS, whose presence store this PR exists to
+        # reach. What is missing there is not the host's capability but THIS INSTALL's
+        # ability to reach it, and the remedy is the reinstall the sibling copy already
+        # names. "Pair a phone (stage D)" also leaked internal roadmap vocabulary into
+        # user-facing output; "stage D" is how the design document numbers a milestone,
+        # not something an operator can act on.
         return (
             "file-only: the key is a 0600 file under your config dir, so ANY "
             "process running as you can sign for you. This is NOT a boundary — "
             "it is reported as a lower level rather than counted as protection. "
-            "Pair a phone (stage D) or use a host with a presence store."
+            "Run `lop operator init` after reinstalling for a presence-gated key, "
+            "or pair a phone."
         )
     return f"{handle.backend}: reported as-is; this build makes no claim about it"
 

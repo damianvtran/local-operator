@@ -677,6 +677,10 @@ def test_the_spawn_only_status_lines_are_wrapped_by_the_terminal_not_by_hand(
     from local_operator.operator import handlers
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    # NO KEY-AGENT FAULT IN THIS STATE: the probe asks the real key agent on this host,
+    # and a broken one changes the block's shape (the remedy is named instead of `init`,
+    # design round 1 D3) — which is a different subject from the wrapping asserted here.
+    monkeypatch.setattr(handlers, "_keyagent_state", lambda backend: None)
     monkeypatch.setattr(
         handlers,
         "operator_authority_report",
@@ -688,7 +692,7 @@ def test_the_spawn_only_status_lines_are_wrapped_by_the_terminal_not_by_hand(
             "backend": "",
             "presence_enforced_by_os": False,
             "capability_guarantee": "spawn-capability",
-            "reason": "no anchor installed",
+            "reason": "no anchor is installed, so the runtime trusts no key yet",
         },
     )
     assert handlers._status() == 0

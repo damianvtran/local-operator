@@ -249,6 +249,14 @@ toolchain must not move under the artefact the entitlement depends on.
 8. the throwaway keychain and the decoded identity move are deleted in an `if:
    always()` step, and the p12 is never uploaded as an artefact.
 
+**The two wheels are OFFERED, never passed as two paths** (QA round 1, Q5).
+`uv pip install --find-links <dir> local-operator==<v>` lets the resolver choose, and
+the choice is measured: it selects
+`local_operator-<v>-py3-none-macosx_11_0_universal2.whl`. Passing both files
+explicitly — `uv pip install <pure.whl> <macos.whl>` — is refused outright with
+`Requirements contain conflicting URLs for package 'local-operator'`, so nothing in a
+document, a script or an operator's habit should imply that form works.
+
 **The profile is a secret, the app id is not.** The entitlement must name a real
 application identifier for `codesign` to accept it, and an app id is public — it is in
 the signature of every wheel we publish and `codesign -d` prints it from any installed

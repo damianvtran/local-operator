@@ -11,4 +11,12 @@
 #
 # The signed artefact itself is never in an sdist or a wheel built from source: it
 # cannot be, since it needs the signing identity and the profile.
+#
+# `graft` takes the WHOLE directory, so it also takes whatever a local build left
+# lying in it — `packaging/macos/__pycache__/make_macos_wheel.cpython-312.pyc` was
+# measured inside a locally-built sdist (QA round 1, Q6). CI builds the sdist from a
+# fresh checkout in a job that never imports that module, so the released sdist should
+# be clean either way; these two lines are what make that independent of who built it.
+prune packaging/macos/__pycache__
+global-exclude *.py[cod]
 graft packaging/macos

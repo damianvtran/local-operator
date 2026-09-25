@@ -10,11 +10,12 @@ on (nothing here may conclude "no operator key" from a query the runtime made
 itself).
 
 What is NOT covered here, stated rather than implied: the helper's own C
-behaviour (asserted in ``test_operator_authority.py`` against the SDK header and
-the C source, and by the ``selftest`` verb the release job runs), the real
-entitlement (only a signed bundle on a real keychain can show it), and the
-presence prompt (it is a sheet on an operator's screen; unproven by design, see
-the design document's §9).
+behaviour (asserted against the SDK header and the C source in
+``test_operator_authority.py``, and here where a defect in a C BRANCH is what a
+fake reply cannot see — see ``_HELPER_C``), the real entitlement (only a signed
+bundle on a real keychain can show it, and QA round 1 showed it outside this
+suite), and the presence prompt (it is a sheet on an operator's screen; unproven
+by design, see the design document's §9).
 
 NO TEST HERE WRITES TO ANY KEYCHAIN. The fake is a script; it has no keychain
 code at all. The tag every test passes is a test tag, never
@@ -25,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -35,6 +37,23 @@ import pytest
 
 from local_operator.operator import keychain
 from local_operator.operator.macos import keyagent
+
+#: The helper's source, in-tree, for the two assertions a fake reply cannot make:
+#: that ``create`` consults the tag before it generates, and that ``doctor`` performs an
+#: operation the OS actually gates. Its ABSENCE would make those checks vacuous, so the
+#: path is asserted to exist rather than skipped on — the same rule
+#: ``test_operator_authority`` applies to this same file for its symbol pins.
+_HELPER_C = (
+    Path(__file__).resolve().parents[3] / "packaging" / "macos" / "lop-keyagent" / "se-keyagent.c"
+)
+
+
+def _helper_body() -> str:
+    """The C source with its comments removed, so a prose mention cannot pass a check."""
+    source = _HELPER_C.read_text()
+    assert "se-keyagent.c" in source or source, "the helper source is empty"
+    return re.sub(r"/\*.*?\*/", "", source, flags=re.S)
+
 
 #: A real uncompressed P-256 point, exported from a Secure Enclave key created on
 #: the development host (public data — the private half never leaves the Enclave).
@@ -122,6 +141,13 @@ if MODE == "unknown-verb":
     print(json.dumps({{"ok": False, "protocol": 1, "site": "usage", "status": 5,
                       "detail": "unknown verb"}}))
     sys.exit(5)
+if MODE == "usage-other-protocol":
+    # A build that answers with SOMEBODY ELSE'S protocol number, plus the usage exit
+    # code: the reply cannot be read, which is the one case exit 5 really does mean
+    # "you and I do not agree" (QA round 1, Q2).
+    print(json.dumps({{"ok": False, "protocol": 99, "site": "usage", "status": 5,
+                      "detail": "unknown verb"}}))
+    sys.exit(5)
 if MODE == "no-key" and verb in ("public", "exists"):
     if verb == "exists":
         reply({{"ok": True, "protocol": 1, "present": False}})
@@ -139,9 +165,24 @@ if verb in ("public", "exists"):
     reply({{"ok": True, "protocol": 1, "present": True, "spki": b64(POINT)}})
 if verb == "sign":
     reply({{"ok": True, "protocol": 1, "signature": b64(DER)}})
+if MODE == "doctor-refused":
+    # DOCTOR AT THE GATED OPERATION (QA round 1, Q4): the query answers -25300, the
+    # profile is there, and GENERATION is refused — which is what a bundle whose
+    # entitlement the OS will not honour actually looks like.
+    if verb == "doctor":
+        print(json.dumps({{
+            "ok": False, "protocol": 1,
+            "rung": "kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly",
+            "keychain": "ok", "keychain_status": -25300, "profile": "ok",
+            "generation": "errSecMissingEntitlement", "generation_status": -34018,
+            "detail": "the key agent could not create in the keychain, so its entitlement \
+is not in effect (errSecMissingEntitlement)",
+        }}))
+        sys.exit(4)
 if verb == "doctor":
     reply({{"ok": True, "protocol": 1, "rung": "kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly",
-           "keychain": "ok", "keychain_status": 0, "profile": "ok"}})
+           "keychain": "ok", "keychain_status": 0, "profile": "ok",
+           "generation": "ok", "generation_status": 0}})
 if verb == "purge":
     reply({{"ok": True, "protocol": 1, "deleted": 0}})
 sys.exit(5)
@@ -242,13 +283,66 @@ def test_create_reports_the_point_the_helper_returned(fake_app: Any) -> None:
 
 
 def test_reuse_is_reported_rather_than_a_second_key(fake_app: Any) -> None:
-    """``reused`` is what makes a second ``lop operator init`` a report, not a key.
+    """``reused`` is what makes a second ``lop operator init`` a report, not a key —
+    and the helper has to CONSULT THE TAG before it makes one.
 
-    A second key would invalidate every device certificate signed under the first
-    anchor, so the flag is a security-relevant part of the protocol and not a
-    convenience.
+    TWO REGISTERS, because one of them could not see the defect (QA round 1, Q1). A
+    second key would invalidate every device certificate signed under the first anchor,
+    so the flag is a security-relevant part of the protocol and not a convenience; this
+    test used to assert ONLY that the client parses it, from a hand-written fake reply.
+    The round-1 measurement is that the helper never reached its own duplicate branch at
+    all: ``SecKeyCreateRandomKey`` SUCCEEDS against a tag that already holds an item, so
+    three consecutive REAL ``create`` calls each returned a fresh point with
+    ``reused:false`` while ``public`` kept resolving the tag to the first key — an anchor
+    staged from ``create()`` then pinned a public half the agent would never sign with.
+    A fake reply cannot see that, so the helper's half is asserted against the helper.
     """
     assert _client(fake_app("reused"), mode="reused").create().reused is True
+
+    assert _HELPER_C.is_file(), f"no helper source at {_HELPER_C}"
+    create = (
+        _helper_body()
+        .split("static int cmd_create", 1)[1]
+        .split("static int cmd_public_or_exists", 1)[0]
+    )
+    probe = create.index("find_key(tag")
+    generate = create.index("generate_key(tag")
+    assert probe < generate, (
+        "cmd_create generates a key before it looks for one: a tag that already holds an "
+        "item then gets a SECOND key, and the point it reports is one `public` will not "
+        "resolve to (QA round 1, Q1)"
+    )
+    # Generation lives in ONE place, so the ordering above is the whole story: a second
+    # `SecKeyCreateRandomKey` in this function would be a path the pin cannot see.
+    assert "SecKeyCreateRandomKey" not in create
+    # ...and the reuse report is what the caller reads, so the reply builder must still
+    # write it — and `cmd_create` must reach it on the path where the tag was occupied.
+    assert (
+        "emit_key_reply(point, 1, NULL)" in create
+    ), "the create path that found an existing key does not report it as reused"
+    reply = (
+        _helper_body().split("static int emit_key_reply", 1)[1].split("static int cmd_create", 1)[0]
+    )
+    assert "reused" in reply
+
+
+def test_doctor_establishes_usability_by_an_operation_the_os_gates() -> None:
+    """Q4/R1-2: a bundle whose entitlement the OS refuses must not read healthy.
+
+    The query ``doctor`` used to anchor on is answered ``errSecItemNotFound`` to an
+    UNENTITLED process as well as to an entitled one — that is the whole -25300 trap — so
+    it cannot tell a working install from a dead one, and ``status`` reported a healthy
+    presence tier on hosts whose ``create`` failed ``-34018``. Generation is the
+    operation the entitlement actually gates, so the helper must perform it AND delete
+    what it made.
+    """
+    assert _HELPER_C.is_file(), f"no helper source at {_HELPER_C}"
+    doctor = _helper_body().split("static int cmd_doctor", 1)[1].split("typedef struct", 1)[0]
+    assert "generate_key(" in doctor, "doctor inspects instead of exercising the OS gate"
+    assert "SecItemDelete" in doctor, "doctor creates an item and does not delete it again"
+    assert (
+        "getpid" in doctor
+    ), "doctor's probe tag is not unique to the process, so two doctors can collide"
 
 
 def test_sign_receives_exactly_the_bytes_it_was_given(fake_app: Any, tmp_path: Path) -> None:
@@ -287,6 +381,10 @@ def test_doctor_reports_every_measurement(fake_app: Any) -> None:
     assert report.keychain == "ok"
     assert report.keychain_status == 0
     assert report.profile == "ok"
+    # THE GATED MEASUREMENT: what the OS will actually let this bundle do. It travels as
+    # a word AND a number, like the keychain field, so a caller branches on the number.
+    assert report.generation == "ok"
+    assert report.generation_status == 0
 
 
 # ---------------------------------------------------------------------------
@@ -374,14 +472,32 @@ def test_the_protocol_version_is_checked(fake_app: Any) -> None:
     assert raised.value.kind == "protocol"
 
 
-def test_an_unknown_verb_is_a_protocol_error(fake_app: Any) -> None:
-    """Exit 5 means "you and I do not agree", which is a broken install.
+def test_the_helper_declining_a_request_is_not_a_protocol_mismatch(fake_app: Any) -> None:
+    """Exit 5 is TWO things, and the reply says which (QA round 1, Q2).
 
-    The helper refuses a verb or a protocol it does not know rather than
-    interpreting it, because the honest answer to "my peer is a different build"
-    is a reinstall, not a guess.
+    A deliberate refusal (`purge` on the operator's own tag), an unknown verb and a bad
+    flag all leave by EXIT_USAGE, exactly like a genuine mismatch with another build. The
+    helper echoes PROTOCOL in every reply it writes, so a parseable reply carrying THIS
+    protocol is the helper declining the request — and reporting that as "the key agent
+    does not match this runtime … reinstall" sent the operator to reinstall an install
+    that was working exactly as designed.
     """
     app = fake_app("unknown-verb")
+    with pytest.raises(keyagent.KeyagentError) as raised:
+        _client(app).create()
+    assert raised.value.kind == "refused"
+    assert raised.value.exit_code == 5
+    assert raised.value.site == keyagent.USAGE_REFUSED
+    assert "reinstall" not in keychain.keyagent_refusal_message(raised.value)
+
+
+def test_exit_five_from_another_protocol_is_still_a_broken_install(fake_app: Any) -> None:
+    """...and the case the original mapping was written for is unchanged.
+
+    A reply that echoes SOMEBODY ELSE'S protocol number is not a reply this client can
+    read, so it is the protocol kind, whose copy is the reinstall one.
+    """
+    app = fake_app("usage-other-protocol")
     with pytest.raises(keyagent.KeyagentError) as raised:
         _client(app).create()
     assert raised.value.kind == "protocol"
@@ -489,9 +605,10 @@ def test_helper_health_answers_reachability_and_names_the_reason(
 
     A healthy installation answers with what the pre-flight found; a broken one
     answers with a KIND, so a reporter can choose its own register instead of
-    parsing prose. The probe tag is a tag nothing writes to: whether an operator
-    key exists must not change the answer to "can this install reach an entitled
-    process".
+    parsing prose. The probe tag holds no key: whether an operator key exists must not
+    change the answer to "can this install reach an entitled process" — but ``doctor``
+    DOES create under it, once, under ``<tag>.<pid>``, and deletes what it made, because
+    a read is answered identically by a working install and a dead one (QA round 1, Q4).
     """
     app = fake_app()
     health = keyagent.helper_health(bundle=app)
@@ -501,6 +618,15 @@ def test_helper_health_answers_reachability_and_names_the_reason(
     assert missing.ok is False
     assert missing.kind in ("absent", "unverified")
     assert keyagent.HEALTH_TAG != keychain.APPLICATION_TAG
+
+    # THE STATE THE QUERY CANNOT SEE: the profile is present, the keychain answers "no
+    # item", and the GATED operation is refused. This is the install whose `status`
+    # reported a healthy presence tier while `create` failed -34018.
+    set_mode(app, "doctor-refused")
+    refused = keyagent.helper_health(bundle=app)
+    assert refused.ok is False, "a refused entitlement read as healthy"
+    assert refused.kind == "refused", refused.kind
+    assert "entitlement" in refused.detail, refused.detail
 
 
 # ---------------------------------------------------------------------------
@@ -518,17 +644,28 @@ def test_no_runtime_path_queries_the_keychain_for_the_operator_key() -> None:
     """
     import ast
 
-    tree = ast.parse(Path(keychain.__file__).read_text())
-    referenced = {
-        node.id
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Name) and node.id.startswith("SecItem")
-    } | {
-        node.attr
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Attribute) and node.attr.startswith("SecItem")
+    # The whole PACKAGE, not one file (agent review round 1, R1-7): the invariant is
+    # "no query made by the unsigned runtime", and it spans every module — a future
+    # ``SecItemCopyMatching`` in ``operator/macos/keyagent.py`` (a plausible
+    # "optimisation" of ``exists()``) would have passed a check that only read
+    # ``keychain.__file__``.
+    parsed = {
+        path: ast.parse(path.read_text())
+        for path in sorted(Path(keychain.__file__).parent.rglob("*.py"))
     }
-    # Read from the AST rather than the text: this module's docstrings NAME these
+    assert len(parsed) > 1, f"the walk found only {list(parsed)}"
+    referenced: set[str] = set()
+    for tree in parsed.values():
+        referenced |= {
+            node.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name) and node.id.startswith("SecItem")
+        } | {
+            node.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute) and node.attr.startswith("SecItem")
+        }
+    # Read from the AST rather than the text: these modules' docstrings NAME these
     # calls, deliberately, to explain why they are gone — a substring check would
     # forbid the explanation along with the defect.
     assert referenced == set(), f"{referenced} is back in the runtime; see the -25300 trap"
@@ -602,10 +739,24 @@ def test_every_state_has_copy_in_two_registers() -> None:
 
     Two commands describing one broken install differently is how a reader learns
     to trust neither, so both come from one table — and every state a
-    ``KeyagentError`` can raise must be in it, which is what this asserts.
+    ``KeyagentError`` can raise must be in it.
+
+    THE SET IS DERIVED FROM THE CLASS, NOT FROM A HAND-WRITTEN LIST (agent review
+    round 1, R1-4). The hand-written list here omitted ``refused`` while a pragma
+    claimed "every kind is in the table, pinned by a test", and ``refused`` is
+    reachable: ``helper_health`` hands ANY ``KeyagentError``'s kind to this table, and
+    ``doctor`` exits 4 when the keychain query is refused — errSecMissingEntitlement,
+    the entitlement-not-in-effect state (and now also what a refused generation
+    reports). Reading the documented kinds from ``KeyagentError`` is what makes the
+    claim true rather than restated.
     """
-    kinds = {"absent", "unverified", "killed", "no-key", "cancelled", "timeout", "protocol"}
-    assert kinds <= set(keychain._KEYAGENT_STATES)
+    documented = re.findall(r"^\s*\*\s*``([a-z-]+)``", keyagent.KeyagentError.__doc__ or "", re.M)
+    assert len(documented) >= 8, f"the kinds are no longer a readable list: {documented}"
+    assert "refused" in documented
+    kinds = set(documented)
+    assert kinds <= set(
+        keychain._KEYAGENT_STATES
+    ), f"{sorted(kinds - set(keychain._KEYAGENT_STATES))} can be raised and has no copy"
     for state in kinds:
         long_copy = keychain.keyagent_state_copy(state)
         short_copy = keychain.keyagent_state_copy(state, long=False)
@@ -714,21 +865,54 @@ def _run_status(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, backend: str = 
     return "\n".join(printed)
 
 
-def test_status_leads_with_the_key_agent_when_it_is_the_cause(
+def test_status_names_the_key_agent_beside_the_authority_reason(
     fake_app: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """No key recorded and no key agent: that is a BROKEN INSTALL, not an empty host.
+    """No key recorded and no key agent: TWO independent facts, on two lines (D1/D3).
 
-    The reason line is the key agent's state because it is the thing the operator must
-    act on — and the spec's own contrast: at ``lop operator init`` the two are different
-    commands with different remedies, so the report must not describe them identically.
+    The level is ``spawn-capability-only`` because NO ANCHOR IS INSTALLED; the key agent's
+    state does not move the level at all. Reporting the second IN PLACE OF the first — the
+    released shape — read as "my key vanished and my installation is broken" one command
+    after a successful ``init``, and its loudest word, "broken install", pointed at a
+    reinstall that neither installs the anchor nor changes the level. And ``status``'s
+    only named next action used to be ``lop operator init``, which in this exact state
+    exits 1 — a closed loop with no reinstall remedy at all.
     """
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(keyagent, "helper_bundle_path", lambda: tmp_path / "gone.app")
     report = _run_status(monkeypatch, tmp_path)
     assert "private-half backend   : (none)" in report
-    assert "reason                 : the macOS key agent is not installed" in report
+    assert (
+        "reason                 : no anchor is installed, so the runtime trusts no key yet"
+        in report
+    )
+    assert "key agent              : the macOS key agent is not installed" in report
     assert "broken install" in report
+    assert "fix                    : reinstall the macOS wheel" in report
+    assert "(or take a file-backed key now" in report, "nothing is staged, so file-only is offered"
+    # The closed loop: the one command `status` used to name cannot work in this state.
+    assert "`lop operator init` adds the operator key" not in report
+    assert "loosening: no operator authority on this host." in report
+
+
+def test_status_does_not_contradict_the_file_only_init_that_just_succeeded(
+    fake_app: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """D1's exact reproduction: `init --backend file-only`, then `status`.
+
+    A bare ``(none)`` beside a ``broken install`` reason is what made this state read as
+    a lost key, so the backend line names the staged key and the one pending step, and the
+    remedy does not offer the file-only route the reader has just taken.
+    """
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(keyagent, "helper_bundle_path", lambda: tmp_path / "gone.app")
+    report = _run_status(monkeypatch, tmp_path, backend="file-only")
+    assert "private-half backend   : (none — an operator key is staged" in report
+    assert "reason                 : no anchor is installed" in report
+    assert "key agent              : the macOS key agent is not installed" in report
+    assert "fix                    : reinstall the macOS wheel — `uv tool install" in report
+    assert "(or take a file-backed key now" not in report
+    assert "staged anchor" in report
 
 
 def test_status_names_a_broken_agent_beside_an_anchor_that_claims_it(
@@ -811,27 +995,147 @@ def test_the_real_preflight_refuses_a_bundle_with_no_runnable_helper(tmp_path: P
     assert "not executable" in raised.value.detail
 
 
-def test_the_profile_must_authorize_this_helper_s_identity(tmp_path: Path) -> None:
+def test_the_profile_must_authorize_this_helper_s_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """THE AUTHORIZATION PROPERTY, read from the profile's own bytes.
 
     This is the check whose absence is measured to be a kernel SIGKILL rather than an
     error, so it is the one the pre-flight exists for — and it needs no keychain, no
     codesign and no external tool, which is what keeps it true in an environment that
-    has none.
+    has none. The decode is stubbed to that environment's outcome here; what the decode
+    does when it RUNS is the next test's subject.
     """
     claimed = f"{keyagent.TEAM_IDENTIFIER}.{keyagent.BUNDLE_IDENTIFIER}"
+    app = tmp_path / "lop-keyagent.app"
+    monkeypatch.setattr(
+        keyagent,
+        "_decode_profile",
+        lambda _profile: ("no-keychain", "A default keychain could not be found", b""),
+    )
     good = tmp_path / "good.provisionprofile"
     good.write_bytes(b"\x30\x82lead-in DER" + claimed.encode() + b"trailing DER")
-    ok, detail = keyagent._profile_authorizes(good)
+    ok, detail = keyagent._profile_authorizes(good, app)
     assert ok is True and claimed in detail
+    assert "not decoded in this environment" in detail
 
     other = tmp_path / "other.provisionprofile"
     other.write_bytes(b"\x30\x82lead-in DEROTHER-TEAM.com.someone.else.apptrailing")
-    ok, detail = keyagent._profile_authorizes(other)
+    ok, detail = keyagent._profile_authorizes(other, app)
     assert ok is False and "does not authorize" in detail
 
-    ok, detail = keyagent._profile_authorizes(tmp_path / "gone.provisionprofile")
+    ok, detail = keyagent._profile_authorizes(tmp_path / "gone.provisionprofile", app)
     assert ok is False and "unreadable" in detail
+
+
+def _decoded_profile(**overrides: Any) -> bytes:
+    """A FABRICATED profile plist — the shape ``security cms -D`` produces."""
+    import datetime
+    import plistlib
+
+    body: dict[str, Any] = {
+        "Entitlements": {
+            "com.apple.application-identifier": (
+                f"{keyagent.TEAM_IDENTIFIER}.{keyagent.BUNDLE_IDENTIFIER}"
+            )
+        },
+        "ExpirationDate": datetime.datetime.now(datetime.timezone.utc)
+        + datetime.timedelta(days=30),
+        "DeveloperCertificates": [b"the signing leaf"],
+        "TeamIdentifier": [keyagent.TEAM_IDENTIFIER],
+    }
+    body.update(overrides)
+    return plistlib.dumps(body)
+
+
+def test_a_profile_that_cannot_be_decoded_is_not_a_pass(tmp_path: Path, monkeypatch: Any) -> None:
+    """R1-6/Q3: there are THREE outcomes, and the message has to say which.
+
+    Measured (QA round 1, Q3): on a host where ``security cms -D`` demonstrably works, a
+    MANGLED profile was reported as ``ok=True`` with "profile uncached in this
+    environment: no keychain to decode it with" — a claim about the invoker that was
+    false there, and a bundle whose profile is unreadable garbage passing the pre-flight
+    that exists to catch exactly that. The distinguishing fact is the tool's own text:
+    only "A default keychain could not be found" is the no-keychain case.
+    """
+    import subprocess as sp
+
+    claimed = f"{keyagent.TEAM_IDENTIFIER}.{keyagent.BUNDLE_IDENTIFIER}"
+    profile = tmp_path / "p.provisionprofile"
+    profile.write_bytes(claimed.encode())
+    app = tmp_path / "lop-keyagent.app"
+
+    def outcome(returncode: int, stdout: bytes, stderr: bytes) -> Any:
+        def run(argv: Any, *, timeout: float = 30.0) -> Any:
+            return sp.CompletedProcess(argv, returncode, stdout, stderr)
+
+        return run
+
+    monkeypatch.setattr(
+        keyagent, "_run", outcome(1, b"", b"security: the data is not a CMS message")
+    )
+    ok, detail = keyagent._profile_authorizes(profile, app)
+    assert ok is False, "a profile the decoder REFUSED must not pass the pre-flight"
+    assert "could not be decoded" in detail
+    assert "no keychain" not in detail
+
+    monkeypatch.setattr(
+        keyagent,
+        "_run",
+        outcome(1, b"", b"security: cert import failed: A default keychain could not be found"),
+    )
+    ok, detail = keyagent._profile_authorizes(profile, app)
+    assert ok is True, "the no-keychain case is neither accepted nor refused"
+    assert "not decoded in this environment" in detail
+
+
+def test_the_decoded_profile_has_to_be_USABLE_not_merely_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-2: lapsed and unpaired profiles, exercised rather than asserted.
+
+    The bytes test above accepts a LAPSED profile — it still names the right application
+    identifier — and a rotated-out-of-step one, and neither was checked anywhere before
+    (``grep -rn Expiration`` found the topic only in the design document's prose). Each
+    case below is a FABRICATED plist fed through the real function, and the first is the
+    control that shows the checks are not simply refusing everything.
+    """
+    import datetime
+
+    claimed = f"{keyagent.TEAM_IDENTIFIER}.{keyagent.BUNDLE_IDENTIFIER}"
+    app = tmp_path / "lop-keyagent.app"
+    now = datetime.datetime.now(datetime.timezone.utc)
+    monkeypatch.setattr(keyagent, "_signing_leaf", lambda _app: b"the signing leaf")
+
+    ok, detail = keyagent._profile_is_usable(_decoded_profile(), claimed, app)
+    assert ok is True and "current to" in detail, detail
+
+    lapsed = _decoded_profile(ExpirationDate=now - datetime.timedelta(days=3))
+    ok, detail = keyagent._profile_is_usable(lapsed, claimed, app)
+    assert ok is False and "expired" in detail, detail
+
+    # THE PAIRING: the profile decodes, is current, and names a certificate the
+    # signature was NOT made with. Nothing else in the pre-flight looks at this.
+    monkeypatch.setattr(keyagent, "_signing_leaf", lambda _app: b"a DIFFERENT certificate")
+    ok, detail = keyagent._profile_is_usable(_decoded_profile(), claimed, app)
+    assert ok is False and "does not name the certificate" in detail, detail
+
+    # ...and when the environment cannot produce a leaf at all, the check says the
+    # pairing was not established instead of claiming it passed.
+    monkeypatch.setattr(keyagent, "_signing_leaf", lambda _app: None)
+    ok, detail = keyagent._profile_is_usable(_decoded_profile(), claimed, app)
+    assert ok is True and "pairing was not established" in detail, detail
+
+    # The earlier cases return before the leaf is read, so these hold with it stubbed.
+    wrong_app = _decoded_profile(
+        Entitlements={"com.apple.application-identifier": "OTHERTEAM.com.other.app"}
+    )
+    ok, detail = keyagent._profile_is_usable(wrong_app, claimed, app)
+    assert ok is False and "grants" in detail, detail
+
+    no_certs = _decoded_profile(DeveloperCertificates=[])
+    ok, detail = keyagent._profile_is_usable(no_certs, claimed, app)
+    assert ok is False and "DeveloperCertificates" in detail, detail
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="codesign is macOS-only")
@@ -851,3 +1155,105 @@ def test_the_real_preflight_asks_codesign_and_reports_its_refusal(tmp_path: Path
         keyagent.verify_bundle(app)
     assert raised.value.kind == "unverified"
     assert "codesign" in raised.value.detail
+
+
+@pytest.mark.skipif(
+    not os.environ.get("LOP_KEYAGENT_BINARY"),
+    reason="set LOP_KEYAGENT_BINARY to a SIGNED lop-keyagent executable to run this",
+)
+def test_the_real_helper_is_idempotent_by_tag() -> None:
+    """Q1, measured against the real entitled process: three creates, ONE key.
+
+    Gated on ``LOP_KEYAGENT_BINARY`` because only a Developer-ID-signed bundle carrying an
+    embedded provisioning profile can reach the data-protection keychain, so this cannot
+    run in a checkout — and it is exactly the observation a fake reply cannot make. Before
+    the round-1 fix, three consecutive ``create`` calls on one tag returned three
+    DIFFERENT points with ``reused:false`` while ``public`` kept resolving the tag to the
+    first key, so an anchor staged from ``create()``'s handle pinned a public half the
+    agent would never sign with.
+
+    The tag is unique to this process and every item it makes is deleted before this
+    returns, so it can never touch the operator's own key (``keychain.APPLICATION_TAG``).
+    """
+    binary = os.environ["LOP_KEYAGENT_BINARY"]
+    tag = f"com.local-operator.keyagent.test.{os.getpid()}"
+
+    def run(verb: str) -> dict[str, Any]:
+        done = subprocess.run(
+            [binary, verb, "--tag", tag], capture_output=True, text=True, timeout=120
+        )
+        assert done.stdout.strip(), done.stderr
+        return json.loads(done.stdout)
+
+    try:
+        first = run("create")
+        assert first["reused"] is False
+        second = run("create")
+        assert second["reused"] is True, "a second create made a second key"
+        assert second["spki"] == first["spki"], "the tag's key moved between two creates"
+        assert run("public")["spki"] == first["spki"], "create and public disagree"
+        assert run("exists")["present"] is True
+    finally:
+        # Deletion is gated by the SAME entitlement as creation, so the cleanup goes
+        # through the entitled process too; "nothing was there" is not a failure.
+        deleted = run("purge")["deleted"]
+        assert deleted in (0, keychain._ERR_SEC_ITEM_NOT_FOUND), f"SecItemDelete={deleted}"
+    assert run("exists")["present"] is False, "the test's own key was left behind"
+
+
+def test_a_reused_create_reports_the_existing_key_and_not_a_new_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: Any
+) -> None:
+    """R1-5: ``create``'s ``reused`` DRIVES the report, so the race is not announced wrongly.
+
+    ``_init``'s probe and its create are two calls: a key can appear between them (the
+    race ``handlers._init`` documents), and the helper now answers that case with the
+    tag's key and ``reused:true`` rather than with a second key. Reporting "created"
+    there would be the one thing this verb's idempotence exists to prevent — a report
+    that does not match the machine — so the same block a second ``init`` prints is
+    printed here. Before round 1 the field was written by the helper and read by nobody.
+
+    Asserted through ``handlers._init`` rather than on the client, because the thing the
+    flag exists for is the REPORT, not the protocol parse.
+    """
+    import argparse
+
+    from local_operator.operator import handlers, trust
+
+    key_id = "d" * 32
+    handle = keychain.KeyHandle(
+        backend=keychain.SECURE_ENCLAVE,
+        key_id=key_id,
+        spki=bytes.fromhex("04" + "c" * 128),
+        presence=True,
+        reused=True,
+        rung="kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly",
+    )
+
+    class _Signer:
+        def __init__(self) -> None:
+            self.handle = handle
+
+        def close(self) -> None:
+            self.handle = handle
+
+    probes: list[int] = []
+
+    def probe(root: Path, preference: str) -> Any:
+        probes.append(1)
+        # NOTHING THERE when `init` looked; the key arrives while it creates.
+        return None if len(probes) == 1 else _Signer()
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(trust, "_ANCHOR_ROOT_OVERRIDE", tmp_path / "anchor-root", raising=False)
+    monkeypatch.setattr(handlers, "_existing_key", probe)
+    monkeypatch.setattr(handlers, "create_key", lambda **kwargs: handle)
+
+    code = handlers.dispatch(argparse.Namespace(operator_command="init", backend="auto", label=""))
+    assert code == 0
+    said = capsys.readouterr().out
+    assert "operator key already exists" in said, said
+    assert "nothing replaced" in said
+    assert "created in the" not in said, "a key this run did not make was announced as created"
+    assert key_id in said
+    assert "To replace this key" in said, "the reused report is the full one, not a stub"
