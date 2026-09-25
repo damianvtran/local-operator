@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import re
+import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from local_operator.network import invite as invite_mod
 from local_operator.network import store, types, wire
+from local_operator.network.handshake import pair_timeout_seconds
 
 NETWORK = "n_0123456789abcdef01234567"
 MATERIAL = wire.b64u(b"s" * 32)
@@ -263,6 +267,76 @@ def test_consume_before_the_announcing_frame_makes_a_replay_impossible() -> None
     invite_mod.consume(record, invite_id, outcome="admitted")
     assert record.invites[0].state == "consumed"
     assert record.invites[0].outcome == "admitted"
+
+
+def _printed_window(prompt: str) -> int:
+    """The seconds the joiner's prompt promises, read off the sentence a person reads."""
+    match = re.search(r"you have (\d+)s", prompt)
+    assert match is not None, prompt
+    return int(match.group(1))
+
+
+def test_the_prompt_promises_the_window_the_joiner_actually_gets() -> None:
+    """An AGED token: the number printed is what is LEFT, not what was minted.
+
+    Measured through these same functions on the pre-fix code at 480 s of invite age:
+    the prompt promised 180 s while the joiner's own read waited 120 s, and at 560 s it
+    promised 40 s. A prompt that overstates the window is worse than no window at all,
+    because a person budgets their attention on it (agent review round 1, MAJOR 2). The
+    prompt and the read are one number now, and this cell reads BOTH — a fresh-token cell
+    alone cannot see the drift, which is why it shipped.
+    """
+    record = _record()
+    minted = invite_mod.mint(record, MATERIAL, role="drive", ttl_s=600.0)
+
+    # 480 s into a 600 s token: the read waits 120 s, and the minted duration the prompt
+    # used to print is 180 s. The tolerance is one second because the prompt recomputes
+    # "now" a moment after this line does.
+    aged = replace(minted.envelope, issued_at=time.time() - 480.0)
+    read = pair_timeout_seconds(invite_mod.remaining_seconds(aged))
+    prompt = invite_mod.joiner_prompt(aged, "481926", "K7QM-3XPD")
+    printed = _printed_window(prompt)
+    assert abs(printed - read) <= 1, prompt
+    assert printed < 180, prompt  # the pre-fix prompt printed the MINTED duration
+    # Both halves of the sentence agree with each other, so the words can never again
+    # describe a longer window than the digits beside them.
+    assert f"({invite_mod._minutes(printed)})" in prompt, prompt  # noqa: SLF001
+
+    # …and nearer the end of its life the promise shrinks with it, still matching the
+    # read rather than the minted duration.
+    nearly_done = replace(minted.envelope, issued_at=time.time() - 560.0)
+    late = _printed_window(invite_mod.joiner_prompt(nearly_done, "481926", "K7QM-3XPD"))
+    assert abs(late - pair_timeout_seconds(invite_mod.remaining_seconds(nearly_done))) <= 1
+    assert late < 60, late
+
+    # A FRESH token still promises the full confirm budget: the fix must not shorten the
+    # ordinary window, only stop the prompt from promising more than remains.
+    fresh = _printed_window(invite_mod.joiner_prompt(minted.envelope, "481926", "K7QM-3XPD"))
+    assert fresh == int(pair_timeout_seconds(600.0)), fresh
+
+
+def test_a_delay_does_not_spend_a_code_guess(root: Path) -> None:
+    """``attempts`` bounds GUESSES, so a timeout costs the token nothing.
+
+    Before this, one timeout counted and three were the budget: two slow humans plus one
+    typo exhausted the three forgiven failures the typo path exists to have, and the
+    person at the OTHER device had to mint a fresh invite (agent review round 1, NIT 2).
+    """
+    record, invite = _with_invite()
+    invite_id = invite.invite_id
+    for _ in range(5):
+        invite_mod.release(record, invite_id, outcome="timeout", spent_an_attempt=False)
+    stored = record.invites[0]
+    assert stored.attempts == 0, stored
+    assert stored.state == "minted", stored
+    assert not invite_mod.failures_exhausted(record, invite_id)
+
+    # A compared-and-disagreed code is the one that spends it, and three of those still
+    # leave the token usable while the fourth reports the budget spent.
+    for expected in (1, 2, 3):
+        invite_mod.release(record, invite_id, outcome="sas_mismatch", spent_an_attempt=True)
+        assert record.invites[0].attempts == expected
+    assert invite_mod.failures_exhausted(record, invite_id)
 
 
 def test_the_prompt_names_the_code_and_the_fingerprint() -> None:

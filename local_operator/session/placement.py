@@ -485,7 +485,18 @@ def handoff_guard_refusal(config_dir: Path, session_id: str) -> str:
 
 
 def _as_int(value: Any) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
+    """A stamp's integer field, or 0 — through the mesh's PEER-INPUT validator.
+
+    A stamp is not always this device's own writing: a moved session's ``mesh.json`` is
+    written from the bytes another device sent, so ``version`` and ``stamp_revision`` are
+    peer input and are read with the same total, capped helper every other peer number goes
+    through (``types.peer_int``). The old ``int()`` here was total for the exceptions a
+    local file produced but not for a 401-digit JSON integer: it returned it, and a
+    ``stamp_revision`` larger than any real one wins every "which stamp is newer" question.
+    An unreadable value is 0 — the floor revision, which cannot win.
+    """
+    from local_operator.network.types import peer_whole_int
+
+    # A WHOLE number, not merely a number: ``stamp_revision: 2.5`` floored to 2 is a real
+    # revision this device never wrote, and a revision is what decides which stamp is newer.
+    return peer_whole_int(value, default=0)

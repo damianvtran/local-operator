@@ -1477,3 +1477,83 @@ def test_the_local_control_hop_carries_the_refusal_code(monkeypatch: pytest.Monk
     with pytest.raises(types.MeshRefusal) as bare:
         net_cli._relay_call("peer_create", target="d_" + "e" * 32)  # noqa: SLF001
     assert bare.value.code == "relay_refused"
+# Cross-host Q-XH-7: `lop sessions --all-peers` listed a live local session twice
+# ---------------------------------------------------------------------------
+
+
+def test_the_ordinary_listing_lists_a_live_local_session_once(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Q-XH-7: one id, one row, on the command an operator actually types.
+
+    Measured across hosts: ``lop sessions --all-peers --json | jq 'group_by(.session_id)
+    | map(select(length > 1))'`` returned the device's OWN live session twice, 4
+    repeats out of 4, while ``lop network sessions --all-peers`` was clean. The two
+    halves agree on why: the relay's ``federated_rows`` includes this device's rows
+    (§9.2's one-list shape, which the sidebar and ``network sessions`` rely on) and
+    ``sessions_command`` appended that whole half to the rows it had already built from
+    the local store. The merge now keeps the first row for an id, and this cell is the
+    id it must not lose.
+    """
+    from local_operator import cli as main_cli
+
+    server = _live_relay(root, monkeypatch)
+    try:
+        _publish_live_record_for(root, _UNSEEN_ROW)
+        assert main_cli.sessions_command(_ordinary_sessions_args(all_peers=True)) == 0
+        rows = json.loads(capsys.readouterr().out)
+        ids = [str(row.get("session_id") or "") for row in rows]
+        assert ids.count(_UNSEEN_ROW) == 1, ids
+    finally:
+        server.stop()
+
+
+def test_the_ordinary_listing_still_shows_a_stored_local_session_once(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The other half of Q-XH-7's fix, and the reason it is a MERGE and not a filter.
+
+    A COLD session of this device's own is in the federated half and NOT in the local
+    half, because ``--all-peers`` alone lists only live local rows. Dropping every
+    ``locality: "local"`` row — the obvious way to remove the duplicate — would have
+    hidden exactly the cold sessions an operator consults a peer listing about, so the
+    merge keeps any id the local half does not carry. This cell fails on that filter.
+    """
+    from local_operator import cli as main_cli
+
+    server = _live_relay(root, monkeypatch)
+    try:
+        _a_stored_session_with_an_unread_completion(root)
+        assert main_cli.sessions_command(_ordinary_sessions_args(all_peers=True)) == 0
+        rows = json.loads(capsys.readouterr().out)
+        ids = [str(row.get("session_id") or "") for row in rows]
+        assert ids.count(_UNSEEN_ROW) == 1, ids
+    finally:
+        server.stop()
+
+
+def _publish_live_record_for(root: Path, session_id: str) -> None:
+    """A REAL registry record naming THIS process, so the session reads as live.
+
+    Reused from the sync suite's helper rather than re-derived: ``registry.scan``
+    classifies on the record's pid, so a record pointing at this process is live for
+    the ordinary reason rather than because a test said so.
+    """
+    import os
+
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord
+
+    registry.publish(
+        SessionRecord(
+            pid=os.getpid(),
+            session_id=session_id,
+            kind="tui",
+            cwd=str(root),
+            conversation_name="",
+            model_label="",
+            control_port=0,
+            control_key="",
+        ),
+        root,
+    )

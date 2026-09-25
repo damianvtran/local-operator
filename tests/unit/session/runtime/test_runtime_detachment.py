@@ -337,3 +337,124 @@ def test_a_detached_runtime_survives_a_terminal_hangup(
         if child is not None:
             _reap(child, config_dir)
         signal.signal(signal.SIGUSR1, previous_usr1)
+
+
+# ---------------------------------------------------------------------------
+# Q-XH-5: a spawned runtime that exits is REAPED, not left as a corpse
+# ---------------------------------------------------------------------------
+
+
+def _await_collected(child: Any, *, timeout: float = _WAIT_S) -> bool:
+    """Whether the child's status was collected, observed WITHOUT collecting it.
+
+    ``Popen.poll()``/``wait()`` reap the child themselves, so either would repair
+    the condition under test and this test would pass on a tree with no reaper at
+    all — the dead-instrument failure this repo names by name. The two reads below
+    are both non-collecting: ``returncode`` is only filled in by a *waiter*, and
+    the zombie probe forks ``ps`` and reads the state column.
+    """
+    from local_operator import procstate
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        state = procstate.zombie_states([child.pid]).get(child.pid)
+        if child.returncode is not None:
+            assert (
+                state is not True
+            ), f"pid {child.pid} has a collected status AND reads as a zombie"
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_the_zombie_probe_reads_a_child_nobody_reaped() -> None:
+    """The instrument's own check, first: a corpse reads as one.
+
+    Without this, the cell below could pass because the probe answers "not a
+    zombie" about every pid, which is the reading a broken instrument gives.
+    """
+    import subprocess
+    import sys
+
+    from local_operator import procstate
+
+    corpse = subprocess.Popen([sys.executable, "-c", "pass"])  # noqa: S603 — fixed argv
+    try:
+        deadline = time.monotonic() + _WAIT_S
+        while time.monotonic() < deadline:
+            if procstate.zombie_states([corpse.pid]).get(corpse.pid) is True:
+                break
+            time.sleep(0.05)
+        else:  # pragma: no cover — a host where this never reads true is not testable
+            raise AssertionError(
+                "an exited, unreaped child never read as a zombie: the probe this "
+                "test rests on is not reading anything"
+            )
+    finally:
+        corpse.wait(timeout=_WAIT_S)
+
+
+def test_a_spawned_child_that_exits_is_reaped_by_its_spawner() -> None:
+    """Q-XH-5: the exit is harvested, so no ``<defunct>`` accumulates.
+
+    Measured on the tree before the reaper: a relay that had spawned runtimes across
+    two EC2 peers held them as ``Zs`` children for 18-47 minutes — one per remote
+    engage, alive as corpses until the RELAY exited, which for a supervised relay is
+    weeks. The property is asserted on a child that exits immediately, because a real
+    runtime's own exit is minutes away and a cell that waited for it would be
+    measuring the wait; the wiring is pinned on the production spawn by
+    ``test_a_spawned_runtime_is_reaped_by_the_process_that_spawned_it``.
+    """
+    import subprocess
+    import sys
+
+    from local_operator import procstate
+
+    # (1) THE MECHANISM, on a child that exits immediately: no wait is issued by
+    # this test anywhere, so a collected status can only have come from the
+    # reaper that the spawn path installed.
+    quick = subprocess.Popen([sys.executable, "-c", "pass"])  # noqa: S603 — fixed argv
+    launch_module._harvest_on_exit(quick)  # noqa: SLF001 — the seam under test
+    assert _await_collected(
+        quick
+    ), f"pid {quick.pid} is still uncollected after its exit: nothing reaped it"
+    assert procstate.zombie_states([quick.pid]).get(quick.pid) is not True
+
+
+def test_a_spawned_runtime_is_reaped_by_the_process_that_spawned_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same property through ``launch._spawn_runtime``, on a REAL runtime.
+
+    The child is the production runtime on the mock provider, so this is the process
+    a relay leaves behind when a remote session is stopped or moves, and the exit is
+    an immediate ``SIGKILL`` — the worst case, where no clean exit path could have
+    reaped anything on its own. Nothing here waits on the child: the status has to
+    arrive on its own, and the pid has to stop reading as a corpse.
+    """
+    from local_operator import procstate
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    _seed(config_dir)
+    _isolate(monkeypatch, config_dir)
+    child = None
+    try:
+        child = launch_module._spawn_runtime(_SESSION_ID, str(config_dir), defer_materialise=True)
+        pid = child.pid
+        # It is really up before the kill, so the cell is about a spawned process
+        # rather than about a spawn that failed.
+        deadline = time.monotonic() + _WAIT_S
+        while child.poll() is None and time.monotonic() < deadline:
+            if procstate.pid_liveness(pid) == "live":
+                break
+            time.sleep(0.05)
+        os.kill(pid, signal.SIGKILL)
+        assert _await_collected(child), (
+            f"the killed runtime {pid} was never reaped by its spawner: it is a "
+            f"corpse in ``ps`` (state={procstate.zombie_states([pid]).get(pid)})"
+        )
+        assert procstate.zombie_states([pid]).get(pid) is not True
+    finally:
+        if child is not None:
+            _reap(child, config_dir)

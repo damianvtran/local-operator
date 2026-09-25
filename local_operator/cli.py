@@ -2491,7 +2491,17 @@ def browser_command(args: argparse.Namespace) -> int:
                 print("Invalid session id; no action taken.")
                 return 1
             try:
-                result = asyncio.run(cleanup_exact(sessions / args.session_id, args.generation))
+                # THE CONFIG ROOT TRAVELS WITH THE CALL (review round 3, NIT 1): the
+                # cleanup path takes the execution lease directly, and the move guard it
+                # consults must be asked about the store THIS session belongs to rather
+                # than one derived from the path shape.
+                result = asyncio.run(
+                    cleanup_exact(
+                        sessions / args.session_id,
+                        args.generation,
+                        config_dir=sessions.parent,
+                    )
+                )
             except Exception as exc:
                 # The bridge and lease errors already carry operator-grade
                 # sentences naming the command that fixes them; printing the
@@ -4289,7 +4299,22 @@ def sessions_command(args: argparse.Namespace) -> int:
             print(note, file=sys.stderr)
         if peer_name:
             rows = []
-        rows = rows + remote_rows
+        # THE MERGE IS "MINE, THEN EVERYONE ELSE'S", AND AN ID APPEARS ONCE (Q-XH-7).
+        # ``relay.federated_rows`` deliberately includes the answering device's OWN
+        # rows with ``locality: "local"`` — the sidebar and ``lop network sessions``
+        # read that shape and need one list — so appending the federated half to the
+        # local half printed every LIVE local session twice (one id, two identical
+        # rows, same pid, 4/4 repeats on a real device). The local half wins the
+        # collision because it is the richer row (pid, rss, the fenced stall fields)
+        # and because it is the half this command owns. A row the local half does NOT
+        # carry is still kept: `federated_rows` lists this device's STORED sessions
+        # too, and a plain `--all-peers` (no `--all`) shows the local half only live
+        # ones — so a blanket "drop locality == local" would have hidden exactly the
+        # cold sessions a peer listing is most likely to be consulted about.
+        seen_ids = {str(row.get("session_id") or "") for row in rows}
+        rows = rows + [
+            row for row in remote_rows if str(row.get("session_id") or "") not in seen_ids
+        ]
 
     if args.json:
         print(_json.dumps(rows, indent=2))

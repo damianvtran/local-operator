@@ -11,6 +11,7 @@ this code is tested in ``test_mobility.py``, which is where the link is real.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 from pathlib import Path
@@ -60,9 +61,14 @@ def _row(index: int, text: str) -> str:
 
 def seed(root: Path, session_id: str, *, rows: int = 3) -> Path:
     """One session with the WHOLE copy set, so a test can assert it all travels."""
-    from local_operator.fork import FORK_BOUNDARY_NAME, FORK_BOUNDARY_VERSION
+    from local_operator.fork import (
+        BOOT_PROMPT_NAME,
+        FORK_BOUNDARY_NAME,
+        FORK_BOUNDARY_VERSION,
+    )
     from local_operator.resume import (
         ATTACHMENT_SIDECAR_NAME,
+        GOAL_SIDECAR_NAME,
         ORIGIN_NAME,
         TITLE_SIDECAR_NAME,
     )
@@ -92,6 +98,17 @@ def seed(root: Path, session_id: str, *, rows: int = 3) -> Path:
         json.dumps({"version": FORK_BOUNDARY_VERSION}), encoding="utf-8"
     )
     (directory / DESKTOP_MARKER_NAME).write_text(json.dumps({"cwd": "/tmp"}), encoding="utf-8")
+    # THE TWO THE FOLD AND THE FORK ADDED, in the fixture for the same reason the two
+    # below are: a test that asserts "every name in COPY_SET_NAMES arrives" has to give the
+    # session one of each, or it is testing the fixture. A judged goal (``resume``) and a
+    # fork's unconsumed opening message (``fork``) are both content (review round 2,
+    # MAJOR 1).
+    (directory / GOAL_SIDECAR_NAME).write_text(
+        json.dumps({"goal": "ship the move", "status": "active"}), encoding="utf-8"
+    )
+    (directory / BOOT_PROMPT_NAME).write_text(
+        json.dumps({"version": 1, "text": "start here"}), encoding="utf-8"
+    )
     # THE BIRTH TIME and a SCRATCHPAD with a file in it: the two entries whose
     # absence from the copy set let a move delete them for good (review round 1,
     # B-M2). In the fixture because every copy test should see them.
@@ -137,9 +154,10 @@ def test_the_copy_set_names_match_the_modules_that_own_them() -> None:
     half of that is ``test_sync_copy_set.py``, which imports the entry names from
     the modules that create them.
     """
-    from local_operator.fork import FORK_BOUNDARY_NAME
+    from local_operator.fork import BOOT_PROMPT_NAME, FORK_BOUNDARY_NAME
     from local_operator.resume import (
         ATTACHMENT_SIDECAR_NAME,
+        GOAL_SIDECAR_NAME,
         ORIGIN_NAME,
         TITLE_SIDECAR_NAME,
     )
@@ -165,6 +183,11 @@ def test_the_copy_set_names_match_the_modules_that_own_them() -> None:
         # newly created on the destination (``session_created_at`` falls back to
         # ``st_birthtime``) and the real date is gone with the source (B-M2).
         CREATED_AT_NAME,
+        # The judged-goal record (review round 2, MAJOR 1) and a fork's unconsumed
+        # opening message: both are a session's own content, and both landed in neither
+        # list while this branch was open.
+        GOAL_SIDECAR_NAME,
+        BOOT_PROMPT_NAME,
     }
     # And the deny-list is a real deny-list: every name on it is a file a session
     # directory actually holds, so the copy's allow-list is the only thing keeping
@@ -499,6 +522,37 @@ def test_a_stale_plan_is_refused_rather_than_spliced(tmp_path: Path) -> None:
     assert refusal.value.code == "stale_plan"
 
 
+def test_a_root_copy_set_file_that_is_a_link_is_refused_as_one(tmp_path: Path) -> None:
+    """The refusal names the SHAPE, not a writer that does not exist.
+
+    MEASURED (review round 3, NIT 2): ``title.json`` as a symlink refused with
+    ``stale_plan`` — "the conversation changed while it was being copied" — because the
+    stamp was taken through the link and the lstat comparison found the link's own size
+    against a stamp for the file it points at. It refused (no data loss, no following of the
+    link), so this is about the sentence: a person who reads "something changed" goes looking
+    for a writer, and the thing to change is the link.
+
+    A ``--keep`` copy and a replica take this path; a DELETING move is refused earlier, by the
+    copy set's own shape rule (``test_a_symlinked_content_tree_is_refused_and_reported`` and
+    ``test_a_move_of_a_session_whose_scratchpad_is_a_link_is_refused`` have that half).
+    """
+    source = tmp_path / "owner"
+    source.mkdir()
+    directory = seed(source, "abc123")
+    outside = tmp_path / "elsewhere.json"
+    outside.write_text('{"title": "not this session\'s"}\n', encoding="utf-8")
+    (directory / "title.json").unlink()
+    (directory / "title.json").symlink_to(outside)
+    plan = sync.build_manifest(source, "abc123")
+
+    with pytest.raises(sync.SyncRefused) as refusal:
+        sync.serve_fetch(source, "abc123", plan=str(plan["plan_id"]), name="title.json", offset=0)
+
+    assert "title.json" in refusal.value.message, refusal.value
+    assert "symlink" in refusal.value.message, refusal.value
+    assert "changed while it was being copied" not in refusal.value.message, refusal.value
+
+
 def test_a_fetch_cannot_reach_outside_the_copy_set(tmp_path: Path) -> None:
     """The deny-list is enforced on the SERVE side, not just by the planner."""
     source = tmp_path / "owner"
@@ -804,3 +858,59 @@ def test_the_watcher_says_nothing_about_a_session_without_replicas(tmp_path: Pat
     assert watcher.tick(now=1000.0) == []
     assert watcher.tick(now=5000.0) == []
     assert push == []
+
+
+def test_the_served_bytes_are_the_ones_the_plan_described(tmp_path: Path) -> None:
+    """A fetch serves the VARIANT ITS PLAN WAS BUILT WITH, not the session's current state.
+
+    The two variants of a transcript differ for a TORN TAIL: a move carries every byte (there
+    is no next sync — the source is deleted), while a replica of a live session carries the
+    safe region and lets the next sync bring the tail. They are served from the same file, so
+    the only thing that can say which bytes a given plan described is the plan — and the
+    holder verifies what it receives against the digest ITS plan carried.
+
+    The case this protects: a replica pull that races a MOVE of the same session. The journal
+    says a move is in flight, but this holder's plan is the safe-region variant; serving it
+    the raw bytes would hand it a file whose digest is not the one it will check, so the pull
+    would fail with a `digest_mismatch` instead of simply succeeding.
+    """
+    from local_operator.session.placement import write_handoff_entry
+
+    source = tmp_path / "owner"
+    source.mkdir()
+    directory = seed(source, "abc123")
+    with (directory / "transcript.jsonl").open("ab") as handle:
+        handle.write(b'{"id": "e99", "type": "assist')  # a torn tail
+    # A DELETING move is in flight on this device, which is what makes the raw variant
+    # reachable at all.
+    write_handoff_entry(
+        source,
+        "abc123",
+        {
+            "role": "source",
+            "phase": "prepared",
+            "to_device": "d_other",
+            "instance_id": "i_probe",
+            "mode": "move",
+            "at": 1.0,
+        },
+    )
+
+    replica_plan = sync.build_manifest(source, "abc123")
+    raw_plan = sync.build_manifest(source, "abc123", whole_transcript=True)
+
+    for plan in (replica_plan, raw_plan):
+        served = sync.serve_fetch(
+            source,
+            "abc123",
+            plan=str(plan["plan_id"]),
+            name="transcript.jsonl",
+            offset=0,
+            limit=1 << 20,
+        )
+        payload = base64.b64decode(served["data"])
+        assert (
+            sync.sha256_bytes(payload) == plan["transcript"]["digest"]
+        ), "a fetch served bytes its own plan does not describe"
+    # And the two really are different, or this test proves nothing.
+    assert replica_plan["transcript"]["digest"] != raw_plan["transcript"]["digest"]
