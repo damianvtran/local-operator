@@ -1026,3 +1026,41 @@ async def test_a_silenced_process_offers_no_banner(
 
     assert bridge.kinds == ["attention"], bridge.kinds
     assert state["unseen"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_is_not_the_users_own_offers_no_banner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The IDENTITY gate is asked here too, and for a different reason.
+
+    The process switch above silences a backend a rig started. This gate covers
+    the backend that never adopted a mock and was never told to be quiet — a
+    backend running under a redirected ``HOME`` is a rig or a sandbox by the
+    same reasoning the TUI's own OS legs use, and the frame it would publish is
+    raised by the ATTACHED APP under ITS bundle identity, so withholding the
+    offer is the only place this repository can decline the banner.
+
+    The control arm is the identical cell with the predicate answered for it
+    (which is what this module's opt-in does), so the cell cannot pass on the
+    machinery being broken; and the attention frame is asserted to still go out,
+    because the refusal is of the chrome and not of the receipt sync.
+    """
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    _session_dir(tmp_path, sid, assistant="A real answer.", title="Real work")
+    bridge = await _baselined(tmp_path, sid)
+
+    _publish(tmp_path, sid, "result-1")
+    await bridge.refresh_attention()
+    assert len(bridge.of("notification")) == 1, "the control arm published nothing"
+
+    # Counted rather than cleared: `frames` accumulates for the bridge's life,
+    # and the property is that the second publish adds NO banner — not that the
+    # first one disappeared.
+    monkeypatch.setattr("local_operator.tui.notify.desktop_belongs_to_this_process", lambda: False)
+    _publish(tmp_path, sid, "result-2")
+    await bridge.refresh_attention()
+
+    assert len(bridge.of("notification")) == 1, bridge.of("notification")
+    assert bridge.of("attention"), "the receipt sync is not the thing refused"

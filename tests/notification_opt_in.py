@@ -18,6 +18,17 @@ The escape itself is documented on its own constant in the product
 properties that make it safe: it can only ever ENABLE a notification, and the
 kill switch still wins because every leg asks it first.
 
+AND IT WAIVES THE IDENTITY GATE, WHICH IS A THIRD THING. Since 2026-09-24 an OS
+toast is also refused when this process is not running as the real user
+(``tui.notify.desktop_belongs_to_this_process``, which asks the passwd home).
+Every test in this suite runs under a redirected ``HOME`` — that is the
+autouse isolation fixture's whole job — so a test whose SUBJECT is a delivered
+toast takes the same refusal a rig takes, and would assert against a leg that
+had silently declined to fire. This is that test's visible, deliberate opt-in,
+the same shape as the other two, applied in-process because the predicate reads
+no environment variable (which is the point of it: a redirected rig cannot
+opt itself out).
+
 HOW TO USE IT, and the reason it is a context manager rather than a fixture.
 Each module keeps its OWN opt-in fixture — that is this repository's established
 style (see ``tests/unit/session/test_runtime_completion_announce.py`` and
@@ -41,12 +52,19 @@ from __future__ import annotations
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
+from unittest import mock
 
 from local_operator.session.model_selection import ENV_ALLOW_TEST_HOSTING_NOTIFY
 from local_operator.tui.notify import ENV_DISABLE
 
 #: The two variables this module owns, in the order it sets them.
 _OWNED = (ENV_DISABLE, ENV_ALLOW_TEST_HOSTING_NOTIFY)
+
+#: The predicate that answers "is this the user's own run", patched for the
+#: duration. Named by module path so the patch reaches every call site — the
+#: TUI's legs, the two observer branches in ``tui/app.py`` and the two desktop
+#: frame sites all resolve it from ``local_operator.tui.notify`` at call time.
+_IDENTITY_GATE = "local_operator.tui.notify.desktop_belongs_to_this_process"
 
 
 @contextmanager
@@ -63,7 +81,8 @@ def notification_path_opt_in() -> Iterator[None]:
     os.environ.pop(ENV_DISABLE, None)
     os.environ[ENV_ALLOW_TEST_HOSTING_NOTIFY] = "1"
     try:
-        yield
+        with mock.patch(_IDENTITY_GATE, lambda: True):
+            yield
     finally:
         for name, value in prior.items():
             if value is None:
