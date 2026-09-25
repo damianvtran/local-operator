@@ -2865,6 +2865,22 @@ def test_a_real_runtime_child_engages_at_publication_and_moves_its_own_bound(
 # it is half the evidence rather than a courtesy — a predicate that fires on a
 # long wait is the bug this bound exists to prevent wearing the other hat.
 
+#: THE FLOOR IS LOWERED IN THE CHILD, and it is the one number in this rig that is
+#: about the HOST rather than the contract. The module's ``PROGRESS_CPU_FLOOR`` (5% of
+#: a core) is a claim about a quiet machine, and this fleet is not one: measured on
+#: 2026-09-24 (load ~100 beside ~25 sessions) the spinning child below came in at
+#: 0.0185-0.0283 of a core -- BELOW the floor -- and the sibling rig beside
+#: ``test_runtime_stall_watchdog_arm_deadlock.SPIN_FLOOR`` recorded the same class at
+#: 0.017-0.021. On 2026-09-25 the same child cleared the shipped floor outright, and
+#: that swing is exactly the point: whether the CPU gate is reachable is a bet on the
+#: host that day. With it out of reach the leg cannot fire at all -- measured (floor
+#: 999): the child spins its full four bounds, prints "still-alive" and leaves no
+#: marker, a reading about load wearing the face of a broken mechanism. So the rig
+#: sets a threshold the host cannot fail to reach: 0.0005 keeps ~35x headroom under
+#: the smallest burn measured here while staying far above what an idle runtime
+#: burns. The burn is the real subject either way -- only the threshold moves.
+SPIN_FLOOR = 0.0005
+
 _SPINNING_CHILD = r"""
 import asyncio
 import os
@@ -2890,8 +2906,12 @@ def _stream(request, signal):
 
 async def main() -> None:
     root = pathlib.Path(sys.argv[2])
+    bound = float(sys.argv[1])
     process.HEARTBEAT_INTERVAL_S = 0.3
     server.HEARTBEAT_INTERVAL_S = 0.3
+    # The rig's floor, NOT the module's: see ``SPIN_FLOOR``. The spin below is the
+    # subject; the threshold is set where THIS host can reach it.
+    stall_watchdog.PROGRESS_CPU_FLOOR = float(sys.argv[4])
 
     session = make_session(root, _stream)
     handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(root))
@@ -2902,7 +2922,7 @@ async def main() -> None:
     # THE PRODUCTION SEAM, not a double: the handle the entry point publishes and
     # the probe the entry point arms with.
     process._live_handle = handle
-    assert stall_watchdog.arm(seconds=float(sys.argv[1]), probe=process._progress_probe)
+    assert stall_watchdog.arm(seconds=bound, probe=process._progress_probe)
     print(f"armed:{os.getpid()}", flush=True)
 
     stop = asyncio.Event()
@@ -2918,11 +2938,10 @@ async def main() -> None:
     # advancing no work at all. Nothing here is a double: the spin is real CPU.
     #
     # BOUNDED, WHERE IT USED TO BE ``while True``: under the retired design the
-    # bound cut this process, so the loop never needed an exit of its own. The
-    # verdict is recorded in Python now and does NOT end the runtime (see the cell),
-    # so the child has to leave on its own terms and PRINT that it was still healthy
-    # when it did -- which is what makes "it survived the spin" a fact the child
-    # states rather than one the parent infers from a missing exit status.
+    # bound cut this process, so the loop never needed an exit of its own. The fire
+    # the sampler takes is what ends it now (see the cell); this window is the
+    # child's own exit for the arm where NO leg fires, so a rig that stopped firing
+    # prints "still-alive" and leaves rc 0 rather than hanging the cell.
     started = time.monotonic()
     while time.monotonic() - started < bound * 4:
         await asyncio.sleep(0)
@@ -3023,7 +3042,7 @@ def test_the_progress_leg_fires_on_a_spinning_loop_that_never_advances(tmp_path:
     result = _run_script(
         _SPINNING_CHILD,
         tmp_path,
-        args=(str(CHILD_BOUND_S), str(tmp_path), str(REPO)),
+        args=(str(CHILD_BOUND_S), str(tmp_path), str(REPO), str(SPIN_FLOOR)),
         timeout=120.0,
     )
     # THE FIRE ENDS THE RUNTIME, and this cell is what pins that. The sampler is the
@@ -3043,6 +3062,12 @@ def test_the_progress_leg_fires_on_a_spinning_loop_that_never_advances(tmp_path:
     pid = int(result.stdout.split("armed:", 1)[1].split()[0])
     text = _dump_for(tmp_path, pid).read_text(encoding="utf-8")
     assert stall_watchdog.FIRED_MARKER in text, text
+    # THE ALL-THREAD DUMP IS IN THE SAME FILE, and it is asserted rather than
+    # assumed: the marker alone could be a line; the thread walk is what makes the
+    # artifact the fire's own.
+    assert (
+        "Thread 0x" in text or "Current thread" in text
+    ), f"the fire wrote no all-thread dump: {text[-800:]!r}"
     # THE FIRING PATH NAMED ITS CLASS AND ITS LEG, and the all-thread dump is there
     # beside it: with the deadline taken by the sampler, the same ``_fire`` the liveness
     # leg uses writes both, which is what makes this fire evidence rather than a line.
@@ -3337,7 +3362,7 @@ def test_the_progress_leg_spares_a_manager_whose_lane_holds_a_step(tmp_path: Pat
     control = _run_script(
         _SPINNING_CHILD,
         control_root,
-        args=(str(CHILD_BOUND_S), str(control_root), str(REPO)),
+        args=(str(CHILD_BOUND_S), str(control_root), str(REPO), str(SPIN_FLOOR)),
         timeout=120.0,
     )
     assert control.returncode == 1, (
