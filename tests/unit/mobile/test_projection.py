@@ -3534,9 +3534,9 @@ def test_a_held_child_report_and_a_delivered_one_do_not_read_alike_on_the_phone(
 
     assert held.kind == "notice" and delivered.kind == "notice"
     assert held.text.endswith(HELD_DELIVERY_NOTICE.split("\n")[-1])
-    assert held.details.get("severity") == "warning", (
-        "the held row takes the tier the shared decision gives it"
-    )
+    assert (
+        held.details.get("severity") == "warning"
+    ), "the held row takes the tier the shared decision gives it"
     # The delivered row carries the child's text and NO held marker, so the two
     # are distinguishable — which is the whole finding.
     assert HELD_DELIVERY_NOTICE.split("\n")[-1] not in delivered.text

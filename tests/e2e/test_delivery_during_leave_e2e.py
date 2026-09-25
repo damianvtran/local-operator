@@ -289,9 +289,9 @@ async def test_a_settled_batch_survives_an_exit_that_already_committed(
         assert decided is not None, "the row is still marked held, which is now harmless"
         text, _severity = decided
         assert "no turn ran for it at that point" in text
-        assert "has read it yet" not in text, (
-            "after the answering turn, the notice must not still claim nobody read it"
-        )
+        assert (
+            "has read it yet" not in text
+        ), "after the answering turn, the notice must not still claim nobody read it"
     assert "no turn has read it yet" not in HELD_DELIVERY_NOTICE
 
 
