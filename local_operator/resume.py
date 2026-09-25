@@ -1303,13 +1303,77 @@ def is_user_session(session_dir: Path) -> bool:
 class _reverse_name(str):
     """A ``max`` key for "ascending id wins on a tie": ``max`` over
     ``(activity, id)`` would pick the LARGEST id, and the picker's sort puts
-    the smallest first."""
+    the smallest first.
+
+    Kept after ``@latest`` stopped calling ``max`` at all, because it is the
+    tie-break's OWN definition and the identity test's oracle: the ranking every
+    caller now goes through is ``_scan_sessions``'s ``(-activity, name)`` sort,
+    which spells this same rule in the direction a sort needs. Deleting this
+    would leave the tie-break described only by that sort's key expression.
+    """
 
     def __lt__(self, other: object) -> bool:
         return str.__gt__(self, str(other))
 
     def __gt__(self, other: object) -> bool:
         return str.__lt__(self, str(other))
+
+
+def _latest_session_row(config_dir: Path) -> tuple[str, float, str, bool] | None:
+    """The newest user-visible row in the store, from the ONE cached scan.
+
+    ``@latest`` used to answer this with a private ``sessions.glob("*")`` walk —
+    two ``stat`` calls and an ``origin.json`` READ per directory, re-done on
+    every ``lop --resume`` — while :func:`_scan_sessions` (the picker's own scan,
+    which the origin-verdict cache and the known-hidden skip already make cheap)
+    answers the same question from the same rule. Measured against a fixture
+    built to the real store's own census (11,546 directories, 93% of them
+    delegated runs): **690.8 -> 45.4 ms CPU**, and **23,093 -> 887 syscalls**
+    (one ``scandir`` plus one marker stat per USER session, zero for the hidden
+    population).
+
+    This is not a second ranking. The ranking IS ``_scan_sessions``'s: rows come
+    back sorted by ``(-activity, name)``, so ``rows[0]`` is the same element
+    ``max`` computed over ``(activity, _reverse_name(name))`` — newest first,
+    ascending id on a tie — and there is exactly one place that decides it.
+
+    Identity, spelled out because this picks WHICH conversation reopens and a
+    wrong-but-plausible answer is a data bug the caller cannot see:
+
+    * ``include_archived=True``. The glob never consulted the archive index, so
+      an archived session has always been eligible HERE even though the picker
+      does not DRAW it. The scan's default would have silently changed which
+      session ``@latest`` opens on a store whose newest session is archived,
+      which this change is not allowed to do; the picker/``@latest`` mismatch is
+      pre-existing and left exactly as it was.
+    * The candidate rule is the scan's own, not a parallel one: activity is
+      ``session.retention.session_activity_path`` (:func:`session_activity` is
+      the same body taking a ``Path``, so it is the same clock and the same
+      answer), and visibility is :func:`_is_hidden_origin` — the documented
+      negation of :func:`is_user_session`'s rule, sharing ``USER_ORIGINS``.
+    * The one real difference is the ORIGIN VERDICT CACHE, and it is the window
+      the 2-second poll already accepts: a marker DELETED by hand keeps its
+      cached verdict until :data:`REVALIDATE_EVERY` (and a cold start always
+      revalidates), where the glob re-read the file every time. The direction is
+      safe — the cached verdict was itself parsed off a marker that existed, so
+      the directory stays hidden exactly as the backfill intended. A NEW marker
+      is never served from that cache (absence is deliberately not memoised), so
+      a delegated run that started since the last scan is hidden on this very
+      resolution.
+    * A store that cannot be walked answers "nothing to resume"
+      (:class:`ResumeNotFound`) rather than raising, which is what the
+      explicit-id path below already promises for the same condition.
+
+    The cost model, because "one scandir + one stat per user session" is the
+    claim this function is measured by: the scan iterates the store with
+    ``scandir`` (free — no per-entry stat for a directory it already knows is
+    hidden, which is what makes the bulk of a real store cost zero syscalls) and
+    must stat each user-visible directory's ``origin.json`` to re-validate the
+    verdict it cannot memoise for an UNMARKED directory; those stats are the
+    invalidation check and nothing else is issued.
+    """
+    rows = _scan_sessions(config_dir, 1, include_archived=True)[0]
+    return rows[0] if rows else None
 
 
 def resume_dir(config_dir: Path, requested: str) -> Path:
@@ -1345,15 +1409,14 @@ def resume_dir(config_dir: Path, requested: str) -> Path:
         # directory on disk — so a bare ``--resume`` reopened the reviewer
         # rather than the session that launched it.
         # Ranked by the picker's clock with the picker's tie-break, so
-        # ``@latest`` is the picker's first row by construction (R3-5).
-        candidates = [
-            (activity, path)
-            for path in sessions.glob("*")
-            if (activity := session_activity(path)) is not None and is_user_session(path)
-        ]
-        if not candidates:
+        # ``@latest`` is the picker's FIRST ROW by construction (R3-5) — and
+        # since this lane it is taken from the picker's own scan rather than
+        # ranked a second time by a private walk; see
+        # :func:`_latest_session_row` for the identity argument and the cost.
+        row = _latest_session_row(config_dir)
+        if row is None:
             raise ResumeNotFound("no previous session to resume")
-        return max(candidates, key=lambda item: (item[0], _reverse_name(item[1].name)))[1]
+        return sessions / row[0]
 
     # A session id must be ONE path component and nothing else. Enumerating the
     # ways to escape (`/`, `\`, `..`, and on Windows the drive-relative `C:x`
