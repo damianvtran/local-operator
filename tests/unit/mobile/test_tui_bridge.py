@@ -988,3 +988,84 @@ async def test_an_idle_resume_reaches_the_record_without_waiting_for_the_heartbe
         ) == ("synthresum01", "the resumed one", "deepseek/flash")
     finally:
         await server.aclose()
+
+
+def test_rebind_carries_the_model_on_a_host_without_a_projection_subscription() -> None:
+    """Review R3-2 (#1555). On every attached host ``subscribe()`` →
+    ``_refresh_state()`` also writes the new model, which hid the ``rebind``
+    reset behind it. A handle nobody subscribed to (no registrant yet, or one
+    torn down) must still describe the NEW session, not the old one's model."""
+    app = _SwapApp(_IdentitySession("synthfirst01", "first", "test/model"))
+    handle = TuiSessionHandle(app)  # type: ignore[arg-type]
+    assert handle._on_projection is None, "the case under test is the unsubscribed host"
+
+    app._session = _IdentitySession("synthresum01", "the resumed one", "deepseek/flash")
+    handle.rebind()
+
+    seed = handle.session_projection_seed
+    assert (seed.session_id, seed.conversation_name, seed.model_label) == (
+        "synthresum01",
+        "the resumed one",
+        "deepseek/flash",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_rebind_during_an_in_flight_push_is_owed_a_follow_up_push() -> None:
+    """Review R3-1 (#1555). ``_push_soon`` returned early while a push was in
+    flight, so a ``rebind`` nudge landing after that push had already read the
+    identity was dropped — and on an idle session nothing else ever pushed, so
+    the record waited for the 15 s heartbeat.
+
+    Structural, no clock: the in-flight push is PARKED in its send (a recipient
+    exists, as a phone or daemon would be), the rebind lands, the send is
+    released, and the test then joins every push the server schedules. On the
+    unfixed tree the chain ends after the first push with the OLD identity."""
+    from local_operator.session.runtime.server import RuntimeServer
+
+    app = _SwapApp(_IdentitySession("synthfirst01", "first", "test/model"))
+    handle = TuiSessionHandle(app)  # type: ignore[arg-type]
+    server = RuntimeServer(handle, kind="tui")
+    await server.start_in_process()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def parked_send(_conn: Any, _frame: Any) -> None:
+        entered.set()
+        await release.wait()
+
+    try:
+        # One projection consumer, so ``_push`` goes past the no-recipients
+        # return and holds the push open in its send.
+        server._projection_recipients = lambda: [object()]  # type: ignore[method-assign]
+        server._projection_frame = lambda _conn, ordinary: ordinary  # type: ignore[method-assign]
+        server._send_to = parked_send  # type: ignore[method-assign]
+
+        server._schedule_push()
+        await asyncio.wait_for(entered.wait(), 10)
+        assert server._push_scheduled, "the first push must still be in flight"
+
+        app._session = _IdentitySession("synthresum01", "the resumed one", "deepseek/flash")
+        handle.rebind()  # the nudge: _schedule_push -> call_soon_threadsafe(_push_soon)
+        for _ in range(50):  # loop turns, not seconds: the hop is one callback
+            if server._push_dirty:
+                break
+            await asyncio.sleep(0)
+        assert server._push_dirty, "the nudge was dropped instead of marked"
+
+        release.set()
+        # Join the whole push chain the server itself schedules.
+        while server._push_task is not None and not server._push_task.done():
+            await asyncio.wait_for(asyncio.shield(server._push_task), 10)
+            await asyncio.sleep(0)  # let a follow-up's create_task land
+
+        record = json.loads(server.record_path.read_text())
+        assert (record["session_id"], record["conversation_name"], record["model_label"]) == (
+            "synthresum01",
+            "the resumed one",
+            "deepseek/flash",
+        )
+        assert not server._push_dirty and not server._push_scheduled
+    finally:
+        release.set()
+        await server.aclose()
