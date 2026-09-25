@@ -882,3 +882,109 @@ async def test_tui_hop_names_itself_on_all_three_expiry_paths(monkeypatch) -> No
     assert messages[0], "the third expiry path reported an empty message"
     assert "did not answer within" in messages[0]
     assert handle._late_hop_tasks, "the in-flight hop is not held by the handle"
+
+
+class _IdentitySession(FakeSession):
+    """A fake whose id, title and model differ per instance, as a ``/new`` or
+    ``/resume`` target's do; ``FakeSession`` pins all three."""
+
+    def __init__(self, session_id: str, title: str, model: str) -> None:
+        super().__init__()
+        self._sid = session_id
+        self._title = title
+        self._model = model
+
+    @property
+    def session_id(self) -> str:
+        return self._sid
+
+    @property
+    def conversation_name(self) -> str:
+        return self._title
+
+    @property
+    def model_label(self) -> str:
+        return self._model
+
+    @property
+    def effective_model_label(self) -> str:
+        return self._model
+
+
+class _SwapApp:
+    def __init__(self, session: Any) -> None:
+        self._session = session
+
+    def call_from_thread(self, callback: Any) -> None:
+        callback()
+
+
+async def _record_after(server: Any, want: tuple[str, str, str], seconds: float = 3.0) -> Any:
+    """Poll the PUBLISHED record (what `lop sessions` scans) until it reads
+    ``want`` or the deadline passes — far inside the 15 s heartbeat."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + seconds
+    record: dict[str, Any] = {}
+    while loop.time() < deadline:
+        record = json.loads(server.record_path.read_text())
+        if (record["session_id"], record["conversation_name"], record["model_label"]) == want:
+            break
+        await asyncio.sleep(0.02)
+    return (record["session_id"], record["conversation_name"], record["model_label"])
+
+
+@pytest.mark.asyncio
+async def test_new_after_a_named_conversation_drops_the_old_title_from_the_record() -> None:
+    """QA Q3 (#1555). ``rebind`` reset the id but not the title, and
+    ``_refresh_state`` skips an empty title, so after ``/new`` on a TUI host the
+    record paired the NEW id with the OLD conversation's name — forever, since
+    every writer copies from that projection."""
+    from local_operator.session.runtime.server import RuntimeServer
+
+    named = _IdentitySession("synthnamed01", "triage the flaky shard", "test/model")
+    app = _SwapApp(named)
+    handle = TuiSessionHandle(app)  # type: ignore[arg-type]
+    server = RuntimeServer(handle, kind="tui")
+    await server.start_in_process()
+    try:
+        assert await _record_after(
+            server, ("synthnamed01", "triage the flaky shard", "test/model")
+        ) == ("synthnamed01", "triage the flaky shard", "test/model")
+
+        app._session = _IdentitySession("synthfresh01", "", "test/model")
+        handle.rebind()
+
+        assert handle.session_projection_seed.conversation_name == ""
+        assert await _record_after(server, ("synthfresh01", "", "test/model")) == (
+            "synthfresh01",
+            "",
+            "test/model",
+        )
+    finally:
+        await server.aclose()
+
+
+@pytest.mark.asyncio
+async def test_an_idle_resume_reaches_the_record_without_waiting_for_the_heartbeat() -> None:
+    """QA Q4 (#1555). An idle ``/resume`` emits no session event, so nothing
+    pushed and the record carried the previous conversation's identity until
+    the 15 s heartbeat. ``rebind`` now nudges the push tick itself; the poll
+    bound is 3 s and nothing else happens in between."""
+    from local_operator.session.runtime.server import RuntimeServer
+
+    first = _IdentitySession("synthfirst01", "first", "test/model")
+    app = _SwapApp(first)
+    handle = TuiSessionHandle(app)  # type: ignore[arg-type]
+    server = RuntimeServer(handle, kind="tui")
+    await server.start_in_process()
+    try:
+        await _record_after(server, ("synthfirst01", "first", "test/model"))
+
+        app._session = _IdentitySession("synthresum01", "the resumed one", "deepseek/flash")
+        handle.rebind()
+
+        assert await _record_after(
+            server, ("synthresum01", "the resumed one", "deepseek/flash")
+        ) == ("synthresum01", "the resumed one", "deepseek/flash")
+    finally:
+        await server.aclose()

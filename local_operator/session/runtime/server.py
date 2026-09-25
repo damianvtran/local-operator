@@ -4240,6 +4240,36 @@ class RuntimeServer:
         except Exception:  # noqa: BLE001 — a stale marker is not worth an exception
             logger.debug("could not republish the session record", exc_info=True)
 
+    def _republish_identity(self) -> None:
+        """Carry a changed model or title from the projection into the record.
+
+        `lop sessions` reads the RECORD, and only the 15 s heartbeat used to
+        copy these two fields into it, so a `/model` switch showed the old model
+        for up to a heartbeat — and ``_republish`` above does not carry them at
+        all. Called from every coalesced push, so the comparison is the steady
+        cost and a record write happens only on an actual change.
+
+        ``session_id`` moves WITH the title: after ``/resume`` or ``/new`` on a
+        TUI host the projection carries both, and writing the title alone paired
+        the new conversation's name with the old id until the heartbeat — an id
+        someone copies from `lop sessions` to resume the wrong conversation.
+        """
+        publisher = getattr(self, "_publisher", None)
+        if publisher is None:
+            return
+        try:
+            seed = self._handle.session_projection_seed
+            identity = {
+                "session_id": seed.session_id,
+                "model_label": seed.model_label,
+                "conversation_name": seed.conversation_name,
+            }
+            if all(getattr(self._record, key) == value for key, value in identity.items()):
+                return
+            publisher.heartbeat(**identity)
+        except Exception:  # noqa: BLE001 — the heartbeat still corrects it within 15 s
+            logger.debug("could not republish the session identity", exc_info=True)
+
     def attach_clients(self) -> int:
         """Live terminal viewers or leased desktop delivery surfaces.
 
@@ -6791,6 +6821,9 @@ class RuntimeServer:
         Full-TUI attach clients are skipped (see ``_projection_recipients``).
         Phone daemon frames stay byte-identical.
         """
+        # FIRST, ahead of the no-recipients return: a detached owner has nobody
+        # to repaint, but `lop sessions` still reads its record.
+        self._republish_identity()
         recipients = self._projection_recipients()
         if not recipients:
             # Detached owners and full-TUI-only viewers have nobody consuming
