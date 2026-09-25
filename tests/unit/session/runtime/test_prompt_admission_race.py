@@ -243,64 +243,101 @@ def _request_text(request: Any) -> str:
     return "\n".join(parts)
 
 
+def _last_role(request: Any) -> str:
+    return str(getattr(request.messages[-1], "role", "") or "")
+
+
 def _is_delivery_followup(request: Any) -> bool:
     """The delivery turn's post-tool request, and not the queued command's.
 
-    Both are follow-ups whose last message is a tool result, so the id-bearing
-    text is what tells them apart: the queued command's own requests carry its
-    prompt text, the delivery turn's do not.
+    Keyed on the tool RESULT the request ends at, not on a provider-call index:
+    both turns' follow-ups end at one, so the id-bearing text is what tells them
+    apart — the queued command's own requests carry its prompt text, the delivery
+    turn's do not. (An index would silently pin the wrong request as soon as the
+    handle's conversation-naming call moves; agent review round 2, MINOR-1.)
     """
-    return getattr(request.messages[-1], "role", "") == "tool" and "exec hi" not in _request_text(
-        request
-    )
+    return _last_role(request) == "tool" and "exec hi" not in _request_text(request)
 
 
-async def _deliver_a_failing_job_result_and_hold_it(
-    tmp_path: Path,
-) -> tuple[Any, Any, _GatedStream, list[str]]:
-    """A delivery turn that holds the lock, completes a REAL tool, then FAILS.
+def _is_own_followup(request: Any) -> bool:
+    """The queued command's SECOND generation: its own tool result, then failure.
 
-    The gate parks the delivery turn's first provider call; the turn is answered
-    with a ``todo`` call, completes that boundary, and then its follow-up
-    request raises — so the waited-out turn ends with ``AgentEndEvent(error=...)``
-    after a real ``ToolExecutionEndEvent``. That is the shape agent review round
-    1's MAJOR-1 probe exercised, and the tool is a REGISTERED one on purpose: a
-    planning failure ("tool not found") emits no end event at all
-    (``harness/loop.py`` withholds it for a call that never started), so an
-    invented tool name cannot reach the boundary note this cell measures.
+    Deliberately the second call rather than the first: this is the shape a
+    per-turn attribution with the wrong generation comparison would report as
+    clean, which is what the cell below is here to catch.
+    """
+    return _last_role(request) == "tool" and "exec hi" in _request_text(request)
+
+
+def _rig_tape() -> list[list[StreamEvent]]:
+    """The provider script, indexed by CALL, in the order this rig issues them.
+
+    Measured on the rig (agent review round 2, MINOR-1), and the middle entry is
+    the one worth naming: the handle's conversation-naming call is issued when
+    the QUEUED command is enqueued and lands BETWEEN the delivery turn's two
+    calls, so a tape that ignored it would serve the delivery turn's follow-up
+    from the queued command's script and the cells would pass by alignment rather
+    than by design.
+
+    1. the delivery turn's first request — parked by the gate, answered with a
+       ``todo`` call so that turn completes a REAL tool boundary;
+    2. the naming call (raises nothing; its turn is irrelevant here);
+    3. the delivery turn's follow-up — the request that FAILS;
+    4. the queued command's first request — answered with a ``glob`` call, a
+       different tool name from the delivery turn's, so a boundary note can be
+       attributed to the turn that produced it;
+    5. the queued command's follow-up — served a reply, or made to fail by the
+       cell's own predicate.
+    """
+    return [
+        tool_call_turn(
+            text="delivery",
+            tool_name="todo",
+            tool_call_id="call-delivery",
+            arguments={"op": "view"},
+        ),
+        text_turn("unused: the handle's naming call"),
+        text_turn("unused: the delivery follow-up raises"),
+        tool_call_turn(
+            text="exec",
+            tool_name="glob",
+            tool_call_id="call-exec",
+            arguments={"pattern": "*.jsonl"},
+        ),
+        text_turn("unused: the queued command's follow-up"),
+    ]
+
+
+def _exec_tools(tmp_path: Path) -> list[Any]:
+    """Two REGISTERED tools, deliberately distinct names.
+
+    A planning failure ("tool not found") emits no ``ToolExecutionEndEvent`` at
+    all (``harness/loop.py`` withholds it for a call that never started), so an
+    invented tool name cannot reach the boundary note; and two names are what
+    make ``boundaries`` say WHICH turn was noted rather than only how many.
     """
     from local_operator.harness.types import ToolContext
     from local_operator.tools.registry import create_tools
 
-    stream = _GatedStream(
-        [
-            tool_call_turn(
-                text="delivery",
-                tool_name="todo",
-                tool_call_id="call-delivery",
-                arguments={"op": "view"},
-            ),
-            text_turn("unused: the delivery follow-up raises"),
-            tool_call_turn(
-                text="exec",
-                tool_name="todo",
-                tool_call_id="call-exec",
-                arguments={"op": "view"},
-            ),
-            text_turn("exec reply"),
-            text_turn("named"),
-        ],
-        gate_call=1,
-        fail=_is_delivery_followup,
-    )
-    session = build_session(
-        tmp_path / "sess",
-        stream,
-        tools=create_tools(ToolContext(cwd=str(tmp_path)), enabled=["todo"]),
-    )
+    return create_tools(ToolContext(cwd=str(tmp_path)), enabled=["todo", "glob"])
+
+
+async def _deliver_a_failing_job_result_and_hold_it(
+    tmp_path: Path, *, fail: Any = None
+) -> tuple[Any, Any, _GatedStream, list[str]]:
+    """A delivery turn that holds the lock, completes a REAL tool, then FAILS.
+
+    The gate parks the delivery turn's first provider call; the turn is then
+    answered with a ``todo`` call, completes that boundary, and its follow-up
+    request raises — so the waited-out turn ends with ``AgentEndEvent(error=...)``
+    after a real ``ToolExecutionEndEvent``. That is the shape agent review round
+    1's MAJOR-1 probe exercised.
+    """
+    stream = _GatedStream(_rig_tape(), gate_call=1, fail=fail or _is_delivery_followup)
+    session = build_session(tmp_path / "sess", stream, tools=_exec_tools(tmp_path))
     handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
-    # Spy on the boundary note: the second half of the review's finding is WHICH
-    # turn's tool ends reach it, and a spy measures exactly that.
+    # Spy on the boundary note: the second half of the finding is WHICH turn's
+    # tool ends reach it, and a spy measures exactly that.
     boundaries: list[str] = []
     inner_boundary = handle._note_turn_boundary
 
@@ -347,13 +384,15 @@ async def test_a_turn_that_failed_during_the_wait_is_not_this_commands_failure(
         )
         assert handle.last_prompt_failure == ""
         assert _user_rows(tmp_path / "sess", "exec hi") == 1, "the exec row must land exactly once"
-        # NOTHING, because this command's own turn ran no tool. Measured on the
-        # unfixed head, the delivery turn's ``todo`` boundary was noted here at
-        # provider-call index 2 — after the waited-out turn's tool call and
-        # while this command was still waiting at the head of the queue.
-        assert (
-            boundaries == []
-        ), f"the waited-out turn's tool boundary was noted against this command: {boundaries}"
+        # OUR OWN boundary, and only it. Both turns complete a tool call, so the
+        # list says WHICH was noted rather than only how many: the delivery
+        # turn's ``todo`` reaching this note is the finding, and the unfixed head
+        # notes both names. Measured there, the ``todo`` note lands at
+        # provider-call index 2 — after the waited-out turn's tool call and while
+        # this command was still waiting at the head of the queue.
+        assert boundaries == [
+            "glob"
+        ], f"the waited-out turn's tool boundary was noted against this command: {boundaries}"
     finally:
         stream.release.set()
         await handle.dispose()
@@ -364,41 +403,15 @@ async def test_this_commands_own_failure_is_still_reported(tmp_path: Path) -> No
     """The other direction, so the gate above cannot be an over-correction.
 
     The failure is moved onto the QUEUED command's own turn, and that turn is
-    deliberately MULTI-GENERATION — a tool call, then a failing follow-up — so
-    this covers the one way a per-turn attribution could swallow a real verdict:
-    the session stamps a run's ends with its LOGICAL generation, which is the
-    run's first, and a gate that compared against anything else (a later
-    generation, or the generation live when the turn ended) would report this
-    failed turn as clean. ``False`` is what the goal loop's continuation reads
-    before deciding whether to iterate again.
+    genuinely MULTI-GENERATION — it completes a ``glob`` boundary and its
+    SECOND request fails — which is the shape a per-turn attribution with the
+    wrong generation comparison would report as clean. ``False`` is what the
+    goal loop's continuation reads before deciding whether to iterate again.
     """
-    from local_operator.harness.types import ToolContext
-    from local_operator.tools.registry import create_tools
-
-    stream = _GatedStream(
-        [
-            text_turn("delivery reply"),
-            tool_call_turn(
-                text="exec",
-                tool_name="todo",
-                tool_call_id="call-exec",
-                arguments={"op": "view"},
-            ),
-            text_turn("unused: this command's follow-up raises"),
-            text_turn("named"),
-        ],
-        gate_call=1,
-        fail=lambda request: "exec hi" in _request_text(request),
+    session, handle, stream, boundaries = await _deliver_a_failing_job_result_and_hold_it(
+        tmp_path, fail=_is_own_followup
     )
-    session = build_session(
-        tmp_path / "sess",
-        stream,
-        tools=create_tools(ToolContext(cwd=str(tmp_path)), enabled=["todo"]),
-    )
-    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
     try:
-        session._deliver_job_results([("job-1", "child 1 done", None)])
-        await asyncio.wait_for(stream.entered.wait(), 5)
         run = asyncio.ensure_future(handle.run_headless_prompt("exec hi"))
         for _ in range(20):
             await asyncio.sleep(0)
@@ -407,6 +420,9 @@ async def test_this_commands_own_failure_is_still_reported(tmp_path: Path) -> No
         assert (
             await asyncio.wait_for(run, 10) is False
         ), "this command's own failed turn was reported as a success"
+        # Its own boundary DID fire (so the verdict above is about a turn that
+        # really ran), and the delivery turn's ``todo`` boundary is still absent.
+        assert boundaries == ["glob"], boundaries
         # The row still lands: a failing turn is reported, never silently
         # dropped. ``last_prompt_failure`` is deliberately NOT asserted — that
         # string is only set on the RAISING path (the drain's ``except`` arm);
@@ -435,3 +451,158 @@ def _user_rows(directory: Path, text: str) -> int:
         if any(isinstance(part, dict) and part.get("text") == text for part in content):
             rows += 1
     return rows
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_admission_awaiter_does_not_break_the_running_turn(
+    tmp_path: Path,
+) -> None:
+    """Agent review round 2, MAJOR-1: a cancelled awaiter must not raise on the bus.
+
+    ``admitted`` is awaited BARE at the handle's own receipt (``serving.py:2886``)
+    and by a duplicate's ``await existing.admitted`` (``2703``), so cancelling any
+    awaiter — a desktop client disconnect, a request timeout, a shed task, the
+    same-id retry this PR targets — cancels the SHARED future. The outcome gate
+    then read ``.exception()`` on it, which RAISES ``CancelledError``; that is a
+    ``BaseException``, so ``Session._emit``'s per-handler ``except Exception``
+    cannot contain it and it leaves the fan-out into whichever turn was
+    emitting. Measured consequence: the RUNNING turn is truncated at its first
+    event, the prompt drain is cancelled, and nothing is reported anywhere.
+
+    Both halves are asserted, because either alone would leave the other open: the
+    running turn must survive, and the queued command must still land.
+    """
+    from local_operator.harness.types import AgentEndEvent
+
+    session, handle, stream = await _deliver_a_job_result_and_hold_it(tmp_path)
+    ends: list[AgentEndEvent] = []
+
+    def observe(event: Any) -> None:
+        if isinstance(event, AgentEndEvent):
+            ends.append(event)
+
+    unsubscribe = session.subscribe(observe)
+    try:
+        waiter = asyncio.ensure_future(handle.prompt("race hi", command_id="cancel-1"))
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert not waiter.done(), "the prompt must still be queued behind the delivery turn"
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        # The delivery turn is still running and still emitting: from here on its
+        # events are the ones that reached the gate.
+        stream.release.set()
+        deadline = asyncio.get_running_loop().time() + 10
+        while not ends and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.01)
+        assert ends, "the running turn was truncated: its end event never arrived"
+        drain = handle._prompt_drain_task
+        assert drain is not None and not drain.cancelled(), "the prompt drain was cancelled"
+        # And the cancelled caller's message is NOT silently lost: the drain runs
+        # it once the delivery turn releases the lock.
+        deadline = asyncio.get_running_loop().time() + 10
+        while _user_rows(tmp_path / "sess", "race hi") != 1 and (
+            asyncio.get_running_loop().time() < deadline
+        ):
+            await asyncio.sleep(0.01)
+        assert (
+            _user_rows(tmp_path / "sess", "race hi") == 1
+        ), "the cancelled caller's message never landed"
+    finally:
+        stream.release.set()
+        unsubscribe()
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_duplicate_retry_leaves_the_first_admission_intact(
+    tmp_path: Path,
+) -> None:
+    """The other door to the same state: a cancelled SAME-ID retry.
+
+    A duplicate send with an id the queue already holds awaits the FIRST
+    command's future. Cancelling that duplicate (the client gives up) cancels the
+    shared future unless it is shielded, and the first caller's own receipt then
+    raises ``CancelledError`` for a message that was admitted — the retry path
+    this PR exists to make safe, walking into the same hole from the other side.
+    """
+    session, handle, stream = await _deliver_a_job_result_and_hold_it(tmp_path)
+    try:
+        first = asyncio.ensure_future(handle.prompt("race hi", command_id="dup-1"))
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert not first.done()
+        duplicate = asyncio.ensure_future(handle.prompt("race hi", command_id="dup-1"))
+        for _ in range(20):
+            await asyncio.sleep(0)
+        duplicate.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await duplicate
+        command = handle._prompt_commands.get("dup-1")
+        assert (
+            command is not None and not command.admitted.cancelled()
+        ), "the duplicate's cancellation destroyed the first caller's admission"
+        stream.release.set()
+        assert await asyncio.wait_for(first, 10) == "prompt admitted"
+        assert _user_rows(tmp_path / "sess", "race hi") == 1, "the message must land exactly once"
+    finally:
+        stream.release.set()
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_admission_future_reads_as_not_ours(tmp_path: Path) -> None:
+    """The gate's own half, isolated from the shields.
+
+    The two shields below remove the handle's OWN route to a cancelled admission
+    future, and this cell is why the ORDER of the gate's two checks still
+    matters: ``Future.exception()`` RAISES ``CancelledError`` on a cancelled
+    future, a ``BaseException`` that ``Session._emit``'s ``except Exception``
+    cannot contain, so the next event on the bus takes the running turn and the
+    drain down with it. Constructed here by cancelling the future the way a
+    foreign awaiter would (``asyncio.wait_for``, a gather that cancels siblings,
+    any later caller), because "another holder destroyed it" is the state a
+    shared future has to survive rather than one this handle can prevent.
+    """
+    from local_operator.harness.types import AgentEndEvent
+
+    session, handle, stream = await _deliver_a_job_result_and_hold_it(tmp_path)
+    ends: list[AgentEndEvent] = []
+
+    def observe(event: Any) -> None:
+        if isinstance(event, AgentEndEvent):
+            ends.append(event)
+
+    unsubscribe = session.subscribe(observe)
+    waiter: asyncio.Future[str] | None = None
+    try:
+        waiter = asyncio.ensure_future(handle.prompt("race hi", command_id="cancel-2"))
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert waiter is not None and not waiter.done(), (
+            "the prompt must still be queued behind the delivery turn"
+        )
+        command = handle._prompt_commands["cancel-2"]
+        command.admitted.cancel()
+        stream.release.set()
+        # The running turn must still finish; on the unfixed gate its first event
+        # after the cancellation raises into the fan-out and truncates it.
+        deadline = asyncio.get_running_loop().time() + 10
+        while not ends and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.01)
+        assert ends, "a cancelled admission future truncated the running turn"
+        drain = handle._prompt_drain_task
+        assert drain is not None and not drain.cancelled(), "the prompt drain was cancelled"
+        deadline = asyncio.get_running_loop().time() + 10
+        while _user_rows(tmp_path / "sess", "race hi") != 1 and (
+            asyncio.get_running_loop().time() < deadline
+        ):
+            await asyncio.sleep(0.01)
+        assert _user_rows(tmp_path / "sess", "race hi") == 1, "the message never landed"
+    finally:
+        stream.release.set()
+        if waiter is not None:
+            waiter.cancel()
+        unsubscribe()
+        await handle.dispose()

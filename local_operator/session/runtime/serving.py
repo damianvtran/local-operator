@@ -2700,7 +2700,13 @@ class ServingSessionHandle(SessionHandle):
             command_id = str(uuid.uuid4())
         existing = self._prompt_commands.get(command_id)
         if existing is not None:
-            await existing.admitted
+            # Shielded for the reason the receipt below documents: this is a
+            # DUPLICATE, so the future it awaits belongs to a producer that is
+            # still waiting for its own answer. A retry whose client gives up
+            # would otherwise cancel the first caller's admission — the very
+            # retry path this change exists to make safe, entered from the other
+            # side (agent review round 2, MAJOR-1).
+            await asyncio.shield(existing.admitted)
             return "already admitted"
         # Bounded BEFORE the reservation, deliberately: the bound is a thread
         # hop, and awaiting between reserving a producer identity and queueing
@@ -2883,7 +2889,16 @@ class ServingSessionHandle(SessionHandle):
             self._prompt_drain_task = asyncio.ensure_future(self._drain_prompt_queue())
             self._prompt_drain_task.add_done_callback(self._observe_prompt_drain)
         # ACK is the durable transcript append, never insertion into this queue.
-        await admitted
+        #
+        # SHIELDED, like ``completed`` two statements below and for the same
+        # reason: this future is SHARED with the drain (and with any duplicate
+        # sender awaiting it), so a plain ``await`` makes this caller's
+        # cancellation destroy every other holder's admission — the state agent
+        # review round 2 reproduced by cancelling a caller. The cancellation
+        # still reaches THIS caller (``shield`` protects the future, not the
+        # await), which is the honest outcome: this sender gave up, the message
+        # it sent is unaffected.
+        await asyncio.shield(admitted)
         self._command_reservations.accept(command_id)
         if completed is not None and not await asyncio.shield(completed):
             raise RuntimeError("The admitted loop turn did not complete")
@@ -3466,7 +3481,20 @@ class ServingSessionHandle(SessionHandle):
                 attributable from the start and keeps its historical all-events
                 reading, so no reduced or third-party host loses its verdict.
                 """
-                return command.admitted.done() and command.admitted.exception() is None
+                #
+                # A CANCELLED future reads as "not ours" and is checked BEFORE
+                # ``exception()``, which RAISES ``CancelledError`` on a cancelled
+                # future — a ``BaseException``, so ``Session._emit``'s per-handler
+                # ``except Exception`` cannot contain it and it left the fan-out
+                # into whichever turn was emitting: the running turn truncated at
+                # its first event, the prompt drain cancelled, and nothing
+                # reported (agent review round 2, MAJOR-1). The shields below
+                # remove the state from the handle's own waiters; this order is
+                # what keeps the gate safe for any other, and it is the reason the
+                # two are not redundant.
+                if not command.admitted.done() or command.admitted.cancelled():
+                    return False
+                return command.admitted.exception() is None
 
             def observe_end(event: AgentEvent) -> None:
                 nonlocal emitted_failure
