@@ -36,6 +36,15 @@ control — is written to this same store below, and a pin made here reaches an
 open phone list within one mobile-daemon discovery pass (about 2 s), because
 that pass fingerprints the pin file on every tick.
 
+The phone pins in two phases, which is worth knowing when comparing the two
+surfaces (the measured figures are in `docs/mobile.md`): the press paints the ★
+at once from an optimistic mark, and the row is re-sectioned only when a list
+frame from the mobile daemon confirms the pin. So a confirmed pin moves the
+phone's rows by up to one row height, and a refused one clears the mark and
+moves nothing. The phone renders no refusal text in this release — the daemon
+still sends its reason in the 409 body, and a follow-up PR is what puts it back
+on screen.
+
 ### Pins
 
 `F10` pins or unpins the session under the pointer; with no pointer on the list
