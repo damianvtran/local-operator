@@ -19073,9 +19073,96 @@ def _launched_line(entry: Mapping[str, Any], context: ToolContext | None) -> str
     # (R-1). Today's only call site renders at launch, where the two agree — this
     # keeps the next one honest.
     owns = _job_owns_model(context, job_id)
+    return f"- {label} ({agent}) {_model_clause(model, owns, session_model)}: job {job_id}"
+
+
+def _model_clause(model: str, owns: bool | None, session_model: str) -> str:
+    """``on <model>`` or ``on this session's model (<model>)``.
+
+    Shared by the ``task`` launch line and the ``hub op='resume'`` receipt
+    because both state the same fact, and a resume is a second launch that
+    follows the same model rule. See :func:`_launched_line` for why the owns
+    stamp is read alongside the label comparison and never instead of it.
+    """
     if owns is not True and model == session_model:
-        return f"- {label} ({agent}) on this session's model ({model}): job {job_id}"
-    return f"- {label} ({agent}) on {model}: job {job_id}"
+        return f"on this session's model ({model})"
+    return f"on {model}"
+
+
+def _row_model(comms: Any, job_id: str) -> tuple[str, bool | None]:
+    """``(model_label, owns_model)`` off a job row the comms registry can see.
+
+    Read through ``comms.job`` rather than ``ToolContext.jobs``: a resume
+    registers the new job on the comms ROOT's manager, so a nested manager
+    calling ``hub`` would not find it in its own. ``("", None)`` for an
+    unknown row or a reduced host, and the caller then names no model.
+    """
+    try:
+        job = comms.job(job_id)
+    except Exception:  # noqa: BLE001 — a label is decoration, never a resume
+        return "", None
+    owns = getattr(job, "owns_model", None)
+    return str(getattr(job, "model_label", None) or ""), owns if isinstance(owns, bool) else None
+
+
+def _resumed_line(
+    comms: Any,
+    label: str,
+    from_id: str,
+    new_job_id: str | None,
+    previous_model: str,
+    session_model: str,
+) -> str:
+    """One resumed child, naming the model it will run on.
+
+    A resume follows the LAUNCH rule, not the child's history: an inheriting
+    child takes the parent's model as it is now, and a pinned child re-resolves
+    its tier from current config. So a resumed child can run on a different
+    model from its previous run, and a different model is a different bill.
+    The line says which model applies, and says so again when it changed, so
+    the delegating model learns it from the call that caused it.
+    """
+    line = f"- {label} ({from_id}): resumed as job {new_job_id}"
+    model, owns = _row_model(comms, new_job_id) if new_job_id else ("", None)
+    if not model:
+        return line
+    # A fallback (D9.2, D9.3) is said out loud, never silent: an unannounced
+    # model is how the cost incident behind this receipt went unnoticed.
+    note_of = getattr(comms, "resume_model_note", None)
+    note = note_of(new_job_id) if callable(note_of) and new_job_id else ""
+    on_parent = getattr(comms, "resumed_on_parent_model", None)
+    if note:
+        # The note names the model's source, so the clause must not name a
+        # second one: "on this session's model (X) (its parent's model could not
+        # be found; ...)" would state two sources for one model (review R7).
+        line += f" on {model} ({note})"
+        return line
+    if callable(on_parent) and new_job_id and on_parent(new_job_id):
+        # Inherited from an ancestor rather than from this session (D9.4): "on
+        # this session's model" would be false, and a bare "on <model>" reads
+        # as a pin.
+        line += f" on its parent's model ({model})"
+    else:
+        line += f" {_model_clause(model, owns, session_model)}"
+    if previous_model and previous_model != model:
+        line += f" (its previous run was on {previous_model})"
+    return line
+
+
+def _previous_model(comms: Any, job_id: str) -> str:
+    """The model a child last ran on, read before its resume replaces the row.
+
+    ``comms.last_model_label`` also covers a nested child after a restart,
+    whose job row was not rehydrated (QA round 1, Q2). The row read is the
+    degrade for a reduced registry that lacks the method.
+    """
+    reader = getattr(comms, "last_model_label", None)
+    if callable(reader):
+        try:
+            return str(reader(job_id) or "")
+        except Exception:  # noqa: BLE001 — a label is decoration, never a resume
+            return ""
+    return _row_model(comms, job_id)[0]
 
 
 @_guard("task")
@@ -20242,7 +20329,7 @@ async def execute_hub(
         )
     if comms.is_child(context.job_id if context else None):
         return await _execute_hub_child(tool_call_id, args, comms, context)
-    return await _execute_hub_parent(tool_call_id, args, comms)
+    return await _execute_hub_parent(tool_call_id, args, comms, context)
 
 
 async def _execute_hub_child(
@@ -20266,6 +20353,7 @@ async def _execute_hub_parent(
     tool_call_id: str,
     args: dict[str, Any],
     comms: Any,
+    context: ToolContext | None = None,
 ) -> ToolResult:
     try:
         params = HubParams(**args)
@@ -20339,11 +20427,17 @@ async def _execute_hub_parent(
         # returns a ``(new_job_id, error)`` tuple rather than a ``Delivery``, so
         # we collect per-target receipts here and format them like the
         # send/steer/cancel block below without borrowing the Delivery shape.
+        # The previous run's model is read BEFORE resuming: once the new child
+        # attaches, the old record folds into it and the old id aliases to the
+        # new attempt, so reading it afterwards would compare the new row with
+        # itself.
+        previous_models = {job_id: _previous_model(comms, job_id) for job_id in ids}
         resumed: list[tuple[str, str | None, str | None]] = [
             # (resumed-from id, new job id, error)
             (job_id, *comms.resume(job_id, message))
             for job_id in ids
         ]
+        session_model = str(getattr(context, "session_model_label", "") or "")
         acted = [receipt for receipt in resumed if receipt[2] is None]
         header = (
             f"resume: {len(acted)}/{len(resumed)} subagent(s)"
@@ -20357,7 +20451,16 @@ async def _execute_hub_parent(
                 # Each success carries the NEW job id it was resumed as; the
                 # transcript-replay guidance is stated once in the footer
                 # rather than repeated on every line.
-                lines.append(f"- {label} ({from_id}): resumed as job {new_job_id}")
+                lines.append(
+                    _resumed_line(
+                        comms,
+                        label,
+                        from_id,
+                        new_job_id,
+                        previous_models.get(from_id, ""),
+                        session_model,
+                    )
+                )
             else:
                 lines.append(f"- {label} ({from_id}): failed \u2014 {error}")
         lines.extend(f"- {error}" for error in errors)
