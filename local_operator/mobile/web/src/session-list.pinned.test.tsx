@@ -458,6 +458,29 @@ describe("a pin press reorders nothing until the daemon confirms (Q13/Q14/Q15/D1
 		expect(rowOrder(list)[0]).toBe("Row 2");
 	}, SLOW);
 
+	it("clears a mark the daemon answered for but did not keep (round 10, MINOR 1)", async () => {
+		await realStoreHarness();
+		await pushFrame(rowsOf(4));
+		const list = mainScroller();
+		const before = rowOrder(list);
+
+		/* A 200 whose body reports the state the route READ BACK — the old one.
+		   That is the daemon saying the row is not pinned, and it is the answer
+		   the sweep cannot retire: `settlePinMarks` drops a mark only when a
+		   frame AGREES with it, so a disagreeing mark would never settle and the
+		   ★ would stay on a row the daemon never pinned, for as long as the
+		   module lives. No frame is pushed here, deliberately — the guard has to
+		   answer the POST's own read-back. */
+		setSessionPin.mockResolvedValueOnce({ ok: true, pinned: false });
+		longPress(cardByName("Row 1"));
+		fireEvent.click(await screen.findByRole("button", { name: "Pin to the top" }));
+		expect(starOn("Row 1")).toBe(true);
+
+		await waitFor(() => expect(starOn("Row 1")).toBe(false));
+		expect(pinnedSection()).toBe(false);
+		expect(rowOrder(list)).toEqual(before);
+	}, SLOW);
+
 	it("reorders nothing at all when the pin is refused (Q13/D18)", async () => {
 		await realStoreHarness();
 		await pushFrame(rowsOf(6));

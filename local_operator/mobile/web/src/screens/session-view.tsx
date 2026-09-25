@@ -127,7 +127,13 @@ function Header({
 		   next repaint is the authority for the list. */
 		applySessionPin(sessionId, next);
 		try {
-			await setSessionPin(sessionId, next);
+			const saved = await setSessionPin(sessionId, next);
+			/* The route answers with the state it READ BACK, so a 200 that disagrees
+			   is the daemon saying it did not pin the row. The mark must go now:
+			   `settlePinMarks` retires a mark only when a later frame AGREES with it,
+			   so a disagreeing one never settles and the ★ would stay on a row the
+			   daemon never pinned. */
+			if (saved.pinned !== next) clearSessionPinMark(sessionId);
 		} catch {
 			/* A refusal takes the mark back with it, and that is the whole of the
 			   response this screen shows: the reason the daemon gave is not rendered
