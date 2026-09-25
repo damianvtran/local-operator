@@ -327,6 +327,16 @@ class PrintRenderer:
             self.console.print(f"{glyph}{text}", style=style, highlight=False, markup=False)
         elif isinstance(event, RetryStartEvent):
             self.console.print(f"[dim]retry {event.attempt}: {event.error}[/dim]", highlight=False)
+        elif isinstance(event, ModelChangeEvent) and (
+            # A context-metadata refresh (turn start/end, or a per-request
+            # window read) re-announces the model already in force with no
+            # reason. It is a display refresh, not a route edge: printed, it
+            # read as a recovery that never happened ("back to X") or a repeat
+            # of a pin already narrated ("fell back to X").
+            getattr(event, "context_metadata", False)
+            or not event.reason
+        ):
+            pass
         elif isinstance(event, ModelChangeEvent):
             # The route edge in one line, both directions — the exec-mode
             # counterpart of the TUI band repaint: a reader of a long headless

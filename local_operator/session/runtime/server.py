@@ -4248,20 +4248,25 @@ class RuntimeServer:
         for up to a heartbeat — and ``_republish`` above does not carry them at
         all. Called from every coalesced push, so the comparison is the steady
         cost and a record write happens only on an actual change.
+
+        ``session_id`` moves WITH the title: after ``/resume`` or ``/new`` on a
+        TUI host the projection carries both, and writing the title alone paired
+        the new conversation's name with the old id until the heartbeat — an id
+        someone copies from `lop sessions` to resume the wrong conversation.
         """
         publisher = getattr(self, "_publisher", None)
         if publisher is None:
             return
         try:
             seed = self._handle.session_projection_seed
-            model_label = seed.model_label
-            conversation_name = seed.conversation_name
-            if (model_label, conversation_name) == (
-                self._record.model_label,
-                self._record.conversation_name,
-            ):
+            identity = {
+                "session_id": seed.session_id,
+                "model_label": seed.model_label,
+                "conversation_name": seed.conversation_name,
+            }
+            if all(getattr(self._record, key) == value for key, value in identity.items()):
                 return
-            publisher.heartbeat(model_label=model_label, conversation_name=conversation_name)
+            publisher.heartbeat(**identity)
         except Exception:  # noqa: BLE001 — the heartbeat still corrects it within 15 s
             logger.debug("could not republish the session identity", exc_info=True)
 

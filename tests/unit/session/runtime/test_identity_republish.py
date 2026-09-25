@@ -94,8 +94,29 @@ async def test_a_detached_owner_republishes_the_new_model_on_the_push_tick(tmp_p
 
         identity_writes = [w for w in publisher if "model_label" in w]
         assert identity_writes == [
-            {"model_label": "deepseek/deepseek-flash", "conversation_name": ""}
+            {
+                "session_id": session.session_id,
+                "model_label": "deepseek/deepseek-flash",
+                "conversation_name": "",
+            }
         ]
+
+
+@pytest.mark.asyncio
+async def test_a_new_session_id_moves_with_its_title(tmp_path: Path) -> None:
+    """Review R1-1. After ``/resume`` or ``/new`` on a TUI host the projection
+    carries a new id AND a new title; a republish that carried only the title
+    paired the new conversation's name with the OLD id until the heartbeat, and
+    an id copied from `lop sessions` then resumes the wrong conversation."""
+    async with _rig(tmp_path / "s") as (_session, handle, server, _writes):
+        handle._projection.session_id = "synthnewid01"
+        handle._fold.set_state(conversation_name="the resumed conversation")
+        await server._push()
+        record = _on_disk(server)
+        assert (record["session_id"], record["conversation_name"]) == (
+            "synthnewid01",
+            "the resumed conversation",
+        )
 
 
 @pytest.mark.asyncio
@@ -153,15 +174,77 @@ async def test_a_failing_record_write_does_not_break_the_push(tmp_path: Path) ->
             "back to anthropic/claude-opus-5",
         ),
         (
-            ModelChangeEvent(provider="zai", model_id="glm-5.3", is_fallback=True),
+            # Every production pin carries its cause (``RouteState.activate``).
+            ModelChangeEvent(
+                provider="zai", model_id="glm-5.3", is_fallback=True, reason="provider failure"
+            ),
             "fell back to zai/glm-5.3",
         ),
     ],
 )
-def test_headless_output_names_a_deliberate_switch(event: ModelChangeEvent, line: str) -> None:
+def test_headless_output_names_each_route_edge(event: ModelChangeEvent, line: str) -> None:
     """A deliberate switch is not a recovery: "back to" would claim a model the
     run never left."""
     buffer = io.StringIO()
     console = Console(file=buffer, no_color=True, highlight=False, width=100)
     PrintRenderer(json_mode=False, console=console).handle(event)
     assert buffer.getvalue().splitlines() == [line]
+
+
+@pytest.mark.parametrize("pinned", [False, True], ids=["unpinned", "under-a-fallback-pin"])
+def test_headless_output_prints_no_route_line_for_a_metadata_refresh(
+    tmp_path: Path, pinned: bool
+) -> None:
+    """Design D1 / review R1-2. ``_refresh_context_metadata`` re-announces the
+    model in force (``context_metadata=True``, no reason) at turn start and end
+    whenever the resolved window differs. Printed, that read as a recovery that
+    never happened ("back to <primary>") or, under a pin, as the fallback being
+    taken again ("fell back to …"). Driven through a REAL session and turn, so
+    the events are the ones production emits, rewritten by ``_emit``.
+    """
+    from local_operator.providers.failover import FallbackTarget
+
+    class _WindowStream(ScriptedStream):
+        route_handler: Any = None
+
+        def set_route_handler(self, handler: Any) -> None:
+            self.route_handler = handler
+
+        def resolve_context_model(self, spec: ModelSpec) -> ModelSpec:
+            return spec.model_copy(update={"context_window": 400_000})
+
+    async def turn() -> tuple[str, int]:
+        directory = tmp_path / "s"
+        directory.mkdir()
+        stream = _WindowStream([text_turn("hi")])
+        session = build_session(directory, stream)
+        buffer = io.StringIO()
+        renderer = PrintRenderer(
+            json_mode=False, console=Console(file=buffer, no_color=True, width=120)
+        )
+        if pinned:
+            await stream.route_handler(FallbackTarget("zai/glm-5.3", None), "provider failure")
+        refreshes: list[Any] = []
+        session.subscribe(
+            lambda e: (
+                refreshes.append(e)
+                if isinstance(e, ModelChangeEvent) and e.context_metadata
+                else None
+            )
+        )
+        session.subscribe(renderer.handle)
+        try:
+            await session.prompt("hi")
+            await _until(lambda: bool(refreshes))
+        finally:
+            await session.dispose()
+        return buffer.getvalue(), len(refreshes)
+
+    out, refreshes = asyncio.run(turn())
+    assert refreshes, "the rig never produced a metadata refresh, so it proves nothing"
+    route_lines = [
+        line
+        for line in out.splitlines()
+        if line.startswith(("back to", "fell back to", "switched to"))
+    ]
+    assert route_lines == [], route_lines
