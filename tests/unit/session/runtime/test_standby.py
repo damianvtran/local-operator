@@ -278,13 +278,20 @@ class _FakeHandoff:
 #: listening only on the natural path would see nothing and this test would pass
 #: against the very revision it exists to reproduce — measured.
 #: Binds the rendezvous path THE FIRST REVISION WOULD HAVE COMPUTED, and reports
-#: what it got. That rule had two candidates: the natural path under the root, and
-#: a ``$TMPDIR/lop-standby-<uid>-<digest>`` fallback chosen whenever the natural one
-#: was too long for ``sun_path`` (104 bytes on macOS). Getting this wrong makes the
-#: test pass for the wrong reason in both directions — an impostor listening only
-#: on the natural path sees nothing under a long pytest ``tmp_path`` (measured: the
-#: bind fails with ``AF_UNIX path too long``), and one listening only on the
-#: fallback misses the root the engage actually uses.
+#: what it got. That rule, transcribed from ``207d3d6a4``'s ``socket_path``, is:
+#: the natural ``<root>/run/standby/standby.sock`` when it fits in ``sun_path``
+#: (``len(str(natural)) <= 103``), otherwise
+#: ``$TMPDIR/lop-standby-<uid>-<sha256(str(root))[:12]>/standby.sock``. THE DIGEST
+#: IS OVER THE ROOT, not over the natural directory (agent review round 2, minor):
+#: hashing the wrong thing made the fallback arm listen where no console would ever
+#: ask, so the guard would have passed against a reintroduced path rendezvous on
+#: any root of 79+ characters while still discriminating at this suite's own
+#: ``tmp_path`` (92 chars, natural path — which is the branch that actually runs
+#: here). Both arms now, rather than one hand-copied rule:
+#:
+#: * the candidate the retired rule would choose is bound, and
+#: * the OTHER candidate is bound too, so a console that reached either one meets
+#:   the impostor instead of a free port.
 _IMPOSTOR = textwrap.dedent("""
     import hashlib, json, os, select, socket, sys, tempfile
     from pathlib import Path
@@ -292,31 +299,58 @@ _IMPOSTOR = textwrap.dedent("""
     out = Path(sys.argv[2])
     natural_dir = root / "run" / "standby"
     natural_dir.mkdir(parents=True, exist_ok=True)
-    digest = hashlib.sha256(str(natural_dir).encode("utf-8")).hexdigest()[:12]
+    # The retired derivation, exactly: the digest is over the ROOT.
+    digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:12]
     uid = os.getuid() if hasattr(os, "getuid") else 0
     fallback_dir = Path(tempfile.gettempdir()) / ("lop-standby-%d-%s" % (uid, digest))
     natural = natural_dir / "standby.sock"
-    # The retired rule, verbatim: 103 is the longest ``sun_path`` payload the
-    # first revision would use (macOS allows 104 bytes including the NUL).
-    path = natural if len(str(natural)) <= 103 else fallback_dir / "standby.sock"
-    if path.parent != natural_dir:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        os.chmod(path.parent, 0o700)
-    if path.exists():
-        path.unlink()
-    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    listener.bind(str(path))
-    os.chmod(path, 0o600)
-    listener.listen(1)
-    report = {"bound": str(path), "connections": 0, "cap_len": 0}
+    chosen = natural if len(str(natural)) <= 103 else fallback_dir / "standby.sock"
+    candidates = [chosen] if chosen == natural else [chosen, natural]
+    listeners = []
+    skipped = []
+    for path in candidates:
+        # EVERY candidate, not just the chosen one: a fallback-only listener would
+        # be asked nothing at this suite's ``tmp_path`` (92 chars -> the natural
+        # path), and a natural-only one would be asked nothing on a deep root.
+        if path.parent != natural_dir:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            os.chmod(path.parent, 0o700)
+        if path.exists():
+            path.unlink()
+        try:
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(str(path))
+        except OSError as error:
+            # A path that does not fit ``sun_path`` is not a candidate the retired
+            # rule would choose either (it falls back for exactly this reason), so
+            # skipping it is faithful rather than lenient.
+            skipped.append("%s: %s" % (path, error))
+            continue
+        os.chmod(path, 0o600)
+        listener.listen(1)
+        listeners.append((listener, path))
+    report = {
+        "bound": [str(p) for _l, p in listeners],
+        "skipped": skipped,
+        "connections": 0,
+        "cap_len": 0,
+    }
+    if not listeners:
+        # Nothing bound at all: say so rather than sitting in a 25 s select that
+        # cannot return, so the test fails on the bind and not on its deadline.
+        out.write_text(json.dumps(report))
+        sys.stderr.write("no candidate path could be bound: " + "; ".join(skipped))
+        raise SystemExit(3)
     # Ready to be contacted; the marker goes out BEFORE the wait, so the test
     # knows the listener is bound rather than waiting out its own deadline.
     Path(sys.argv[3]).write_text("ready")
-    ready, _w, _x = select.select([listener], [], [], 25.0)
+    ready, _w, _x = select.select([listener for listener, _p in listeners], [], [], 25.0)
     if ready:
+        listener = ready[0]
         conn, _ = listener.accept()
         with conn:
             report["connections"] = 1
+            report["via"] = str(dict((l, p) for l, p in listeners)[listener])
             conn.settimeout(5.0)
             try:
                 _marker, fds, _flags, _address = socket.recv_fds(conn, 1, 1)
@@ -329,19 +363,21 @@ _IMPOSTOR = textwrap.dedent("""
                 conn.sendall(len(payload).to_bytes(4, "big") + payload)
             except OSError:
                 pass
-    listener.close()
+    for listener, _path in listeners:
+        listener.close()
     # Clean up after ourselves, including the fallback directory when this rig had
     # to create it: the retired design leaked one of these per root (R1-5), and a
     # test that reproduces the leak must not add to it.
-    try:
-        path.unlink()
-    except OSError:
-        pass
-    if path.parent != natural_dir:
+    for _listener, path in listeners:
         try:
-            path.parent.rmdir()
+            path.unlink()
         except OSError:
             pass
+        if path.parent != natural_dir:
+            try:
+                path.parent.rmdir()
+            except OSError:
+                pass
     out.write_text(json.dumps(report))
     """)
 
@@ -418,9 +454,9 @@ def test_an_impostor_listener_receives_no_capability(
         # this session's spawn — least of all a descriptor — reached it.
         assert impostor.wait(timeout=40) == 0
         seen = json.loads(report.read_text())
-        # The retired path was bound and never reached: nothing of this session's
-        # spawn, least of all a descriptor, travelled anywhere.
-        assert seen["bound"].endswith("standby.sock"), seen
+        # EVERY retired candidate was bound and none was reached: nothing of this
+        # session's spawn, least of all a descriptor, travelled anywhere.
+        assert seen["bound"] and all(p.endswith("standby.sock") for p in seen["bound"]), seen
         assert seen["connections"] == 0, seen
         assert seen["cap_len"] == 0, seen
         # And the console never bound a capability to it. This is the assertion
@@ -505,9 +541,6 @@ _STANDBY_DRIVER = textwrap.dedent("""
     from pathlib import Path
     from local_operator.session.runtime import standby
     standby._warm = lambda: None
-    # The band is the host scheduler's business, not this test's: at load 100+ a
-    # background-band process is starved for minutes, which is weather, not logic.
-    standby._background_priority = lambda on: None
     if "--probe" in sys.argv:
         out = Path(os.environ["STANDBY_PROBE_OUT"])
         def become(fd):
@@ -549,6 +582,11 @@ class _Standby:
         self.proc = proc
         self.sock = sock
         self.root = root
+        #: The number of the descriptor this child was started with (set by
+        #: :func:`_start`); the capability is moved onto it at handover.
+        self.standby_fd = -1
+        #: The console's own end of this standby's capability handoff.
+        self._cap_fd: tuple[int, int] = (0, 0)
 
     @property
     def pid(self) -> int:
@@ -666,7 +704,7 @@ def _start(
     """Fork a driver the way ``_spawn_standby`` does: private socketpair, inherited."""
     console_end, child_end = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     argv0 = f"Local Operator {label} id=--------"
-    argv = [argv0, "-P", "-c", _STANDBY_DRIVER, "--standby-fd", str(child_end.fileno())]
+    argv = [argv0, "-P", "-c", _STANDBY_DRIVER, standby.STANDBY_FD_FLAG, str(child_end.fileno())]
     if probe:
         argv.append("--probe")
     # The module word production passes with ``-m``, so the adoption rename
@@ -683,8 +721,12 @@ def _start(
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    child_end.close()
     item = _Standby(proc, console_end, root)
+    #: The descriptor number this child was STARTED with — where ``_commit_adoption``
+    #: moves the capability, so the row ``ps`` shows names the descriptor the runtime
+    #: really reads. Recorded before the parent's end is closed.
+    item.standby_fd = child_end.fileno()
+    child_end.close()
     # A fresh capability handoff for this standby, whose child end is sent by
     # SCM_RIGHTS on each request — exactly what the spawn path passes.
     item._handoff = _new_handoff()
@@ -736,6 +778,11 @@ def test_adoption_hands_over_the_whole_spawn(
     # ...and ps now names a runtime of that session, which the census counts.
     assert f"-m {RUNTIME_MODULE}" in report["ps"]
     assert "[session] id=abcdef12" in report["ps"]
+    # ...and the row is LITERALLY a cold child's (agent review round 2, nit): the
+    # flag a fork appends, over the descriptor number this process was started
+    # with, with the capability moved onto that number — so the word in the row and
+    # the descriptor the runtime reads are the same statement.
+    assert f"{approval.OPERATOR_FD_FLAG} {item.standby_fd} " in report["ps"], report["ps"]
     assert reclaim.parse_process_row(f"1 1 01:00 00:01 {report['ps']}") is not None
     # R1-3: the boot record exists BEFORE construction, so the sweep can date and
     # attribute this process from the instant it starts building a session.
@@ -747,6 +794,45 @@ def test_adoption_hands_over_the_whole_spawn(
     assert fleet.boots[item.pid]["session_id"] == "abcdef123456"
     assert fleet.boot_starts[item.pid] > 0
     assert item.proc.wait(timeout=30) == 0
+
+
+def test_the_adopted_row_carries_the_cold_childs_flag() -> None:
+    """The flag the row names must be the one a cold child is given.
+
+    The row identity above is only truthful while the two constants agree, and they
+    are two literals in two modules: ``_commit_adoption`` cannot rename the word
+    (``_rename_argv`` rewrites in place and ``--standby-fd`` is 12 bytes against
+    ``--operator-fd``'s 13 — the mismatch that produced the review's nit), so the
+    standby is STARTED with the operator flag and the capability is moved onto that
+    descriptor number. Drift here would silently give an adopted runtime a row
+    naming a descriptor nothing will ever read.
+    """
+    assert standby.STANDBY_FD_FLAG == approval.OPERATOR_FD_FLAG
+
+
+def test_a_moved_generation_retires_the_standby(tmp_path: Path, monkeypatch) -> None:
+    """The one guard an isolated root cannot produce end to end.
+
+    ``generation-moved`` compares the interpreter a COLD spawn would use now
+    (``update.current_interpreter``) against this process's own venv. In a test
+    tree that resolution is ``None`` — which is exactly what QA's round-2 rig hit
+    when it tried to flip ``current`` (recorded BLOCKED, not passed), so the branch
+    would otherwise have no test at all. Pinned here at the predicate, including
+    the ``None`` case that every worktree and every test root takes: no generation
+    layout means NOT stale, or the feature would retire its spare in every dev
+    checkout.
+    """
+    from local_operator import update
+    from local_operator.session.runtime.standby import _Warmth
+
+    config = tmp_path / "cfg"
+    config.mkdir()
+    (config / "config.yml").write_text("values: {}\n", encoding="utf-8")
+    warmth = _Warmth(config)
+    monkeypatch.setattr(update, "current_interpreter", lambda: None)
+    assert warmth.stale() == ""
+    monkeypatch.setattr(update, "current_interpreter", lambda: str(tmp_path / "other" / "python3"))
+    assert warmth.stale() == "generation-moved"
 
 
 def test_the_young_rung_uses_the_boot_record() -> None:
@@ -933,6 +1019,43 @@ def test_a_moved_input_refuses_and_retires_the_standby(
     finally:
         if what == "tree":
             os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+
+def test_a_declined_request_does_not_retire_the_consoles_spare(
+    root: Path, tmp_path: Path, started: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 2, Q2-2 — the console side of a decline, which the test above does not reach.
+
+    The test above proves the STANDBY keeps waiting; this one proves its console does
+    not kill it on the way out. ``try_adopt``'s ``finally`` retired the spare whenever
+    ``adopted is None``, which is exactly the case a decline produces (a foreign venv,
+    a differing warm-sensitive environment), and it set ``consumed`` first so nothing
+    re-warmed either: measured twice by QA, a decline cost the console the spare its
+    own host had paid ~145 MB for. A decline must leave the socket, the tracking entry
+    and the child all in place, because the next engage is supposed to ask it again.
+    """
+    item = _start(root, tmp_path, started)
+    item.ready()
+    warm = standby._Standby(item.proc, item.sock, root)
+    warm.ready = True
+    monkeypatch.setattr(standby, "_WARM", [warm])
+    retired: list[Any] = []
+    monkeypatch.setattr(standby, "_retire", lambda candidate: retired.append(candidate))
+    (root / "capture.log").touch()
+    adopted = standby.try_adopt(
+        root,
+        # A venv the standby did not warm under: the standby's own decline, the case
+        # QA measured, rather than a torn channel or a dead child.
+        str(tmp_path / "other" / "bin" / "python3"),
+        {"LOP_MOBILE_CHILD_RESUME": "abcdef123456"},
+        root / "capture.log",
+        None,
+    )
+    assert adopted is None
+    assert retired == [], "a decline must not retire the spare"
+    assert not warm.consumed, "a declined spare is still this console's spare"
+    assert standby._WARM[0] is warm
+    assert item.proc.poll() is None, "the child must still be alive and waiting"
 
 
 def test_a_differing_requester_is_declined_and_the_standby_keeps_waiting(
