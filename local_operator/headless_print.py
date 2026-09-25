@@ -334,10 +334,15 @@ class PrintRenderer:
             # The verbs pair with the failure notice's "falling back to"
             # (design D2): "serving from" reads as a location, not a route.
             selector = f"{event.provider}/{event.model_id}"
-            self.console.print(
-                f"[dim]{'fell back to' if event.is_fallback else 'back to'} " f"{selector}[/dim]",
-                highlight=False,
-            )
+            if event.is_fallback:
+                verb = "fell back to"
+            elif event.reason == "model switched":
+                # A deliberate switch (`/model`, the phone, a peer) is not a
+                # recovery: "back to" would claim a model this run never left.
+                verb = "switched to"
+            else:
+                verb = "back to"
+            self.console.print(f"[dim]{verb} {selector}[/dim]", highlight=False)
         elif isinstance(event, CompactionStartEvent):
             self.console.print("[dim]compacting context…[/dim]", highlight=False)
         elif isinstance(event, AgentEndEvent):
