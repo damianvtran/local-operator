@@ -107,12 +107,13 @@ the fire writes the leg marker — in ``faulthandler``'s own
   child (see the function), so this leg owns the sigaction slot rather than
   layering on another handler. A signal handler is per-process state that ``exec``
   resets, so an exec'd child cannot inherit it. TWO LIMITS, stated rather than
-  implied: ``process.amain`` installs its own ``SIGUSR1`` handler on the loop (the
-  ``LOP_RUNTIME_DEBUG_STACKS`` task-stack dump, on by default) — but the loop is
-  created AFTER this arm, so when ``amain`` installs a handler it displaces this
-  leg entirely, and an operator's ``kill -USR1`` reaches the asyncio dump instead;
-  and a runtime that forks without exec does inherit the descriptor and the
-  handler.
+  implied: this leg owns the sigaction slot for the arm's lifetime and is never
+  displaced — ``process.amain`` installs no ``SIGUSR1`` handler of its own, and the
+  runtime's ``LOP_RUNTIME_DEBUG_STACKS`` task-stack walk rides
+  :func:`notify_on_evidence_signal` instead (the callback the sampler fires once a
+  dump it did not write lands in this module's file), so the walk waits for Python
+  while this leg's dump does not; and a runtime that forks without exec does
+  inherit the descriptor and the handler.
 
 WHAT THIS DOES NOT COVER, so that nothing here is read as covered: the
 HARD-DEADLINE class — no Python running at all, e.g. a loop parked in a
@@ -1075,7 +1076,11 @@ MIN_REARM_S = 0.05
 #: notification is an OBSERVATION of the dump file rather than a signal — so this is
 #: the latency an operator's ``kill -USR1`` waits for the runtime's half of the
 #: evidence. Well under the 15 s heartbeat because it is a person waiting, and paid
-#: only by a process that registered a listener.
+#: only by a process that registered a listener — WHICH PRODUCTION DOES ONLY WHEN
+#: ``LOP_RUNTIME_DEBUG_STACKS`` IS ON: ``process.py`` gates the registration on it,
+#: so with stacks switched off there is no callback, nothing here applies, and the
+#: signal recovers this module's own dump alone. That switch turns off the runtime's
+#: half of the evidence, never the leg.
 EVIDENCE_POLL_S = 1.0
 
 #: How many times one window is LOOKED AT, which is the leg's resolution and
@@ -2448,9 +2453,12 @@ def _register_evidence_signal(armed: "_Armed") -> None:
     THE LEG FOR THE CLASS THIS MODULE CANNOT SERVE: when no Python runs at all — a
     loop parked in a GIL-holding C scan — neither the sampler nor any other leg of
     this module executes, so the dump has to be pulled from OUTSIDE the process.
-    The signal writes the same all-threads dump, through the same ``O_APPEND``
-    handle, so the evidence stays inside this module's file policy rather than
-    appearing wherever the signaller chose.
+    The signal writes the signal's OWN thread — ``all_threads=False``, which the
+    register call decides rather than defaults to: the all-threads walk is what
+    SEGFAULTED a booting armed child in this leg's measurements, and the thread that
+    interests an operator, the one parked in the loop, IS the signal's thread — and
+    it goes through the same ``O_APPEND`` handle, so the evidence stays inside this
+    module's file policy rather than appearing wherever the signaller chose.
 
     NO CHAIN, AND THAT IS A MEASUREMENT RATHER THAN A PREFERENCE: a signal has one
     sigaction slot. An earlier revision registered with ``chain=True`` so that it could
@@ -2526,13 +2534,23 @@ def _note_evidence_dump(armed: "_Armed") -> bool:
 
 
 def _format_timeout(seconds: float) -> str:
-    """``faulthandler``'s own timeout stamp, reproduced byte for byte.
+    """``faulthandler``'s own timeout stamp, reproduced byte for byte for a bound
+    whose fraction is non-zero; a whole-second bound is the one shape spelled
+    differently, measured below rather than implied.
 
     THE FORMAT IS A CONTRACT WITH READERS THAT ARE NOT IN THIS MODULE:
-    :data:`FIRED_MARKER` is the prefix every reader in this tree tests for,
-    ``_fired_seconds`` parses ``H:MM:SS.ssssss`` out of it, and the incident
-    taxonomy and ``journal._stall_bound_evidence`` are keyed to both — so the fire
-    writes the C thread's spelling rather than a Python-flavoured one.
+    :data:`FIRED_MARKER` is the prefix every reader in this tree tests for, the
+    stamp after it parses as ``H:MM:SS.ssssss`` (the test tree's ``_fired_seconds``
+    is the reader that parses it), and the incident taxonomy and
+    ``journal._stall_bound_evidence`` are keyed to both — so the fire writes the C
+    thread's spelling rather than a Python-flavoured one.
+
+    THE ONE DIVERGENCE, and it is the shipping case rather than an edge:
+    ``faulthandler`` prints the fraction only when it is non-zero — ``Timeout
+    (0:00:01)!`` for a whole-second bound, ``Timeout (0:00:01.500000)!`` for a
+    fractional one — while this writer always emits six digits, so a whole-second
+    bound reads ``Timeout (0:00:01.000000)!``. Every reader tests the prefix and
+    parses defensively, so the difference is inert.
     """
     minutes, secs = divmod(max(0.0, seconds), 60.0)
     hours, minutes = divmod(int(minutes), 60)
