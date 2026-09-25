@@ -72,9 +72,10 @@ measured, and NEITHER is shippable:
   to remove, on the pass most likely to coincide with it.
 
 So the automatic in-process leg is REMOVED rather than fixed, and what is left for that
-class is its other two instruments (see "WHAT THIS DOES NOT COVER" below): the
-supervisor's ``.deadline`` sibling and the registry heartbeat, with the dump pulled ON
-DEMAND by ``SIGUSR1``. **A named gap, never a false stall report** — and
+class is the artifact this module can still write (see "WHAT THIS DOES NOT COVER" below
+for what is, and is not, verified about its reader): the ``.deadline`` sibling beside the
+dump and the registry heartbeat, with the dump pulled ON DEMAND by ``SIGUSR1``. **A named
+gap, never a false stall report** — and
 :func:`_arm_may_not_be_automatic_here` records both measurements so a future reader does
 not restore a leg that has already failed twice.
 
@@ -119,9 +120,13 @@ WHAT THIS DOES NOT COVER, so that nothing here is read as covered: the
 HARD-DEADLINE class — no Python running at all, e.g. a loop parked in a
 GIL-holding C scan — is NOT self-bounded from inside, and after this change it is not
 dumped automatically either (see the two measurements above; there is no automatic
-in-process leg left for it). That class belongs to the supervisor (the ``.deadline``
-sibling written beside the dump, and the registry heartbeat), with the signal leg above
-for evidence ON DEMAND. This change composes with the dump-only policy: a fire that
+in-process leg left for it). What this module provides for that class is the ARTIFACT and
+not a reader: the ``.deadline`` sibling it writes beside the dump, and the registry
+heartbeat, are both written and readable while a thread is parked, with the signal leg
+above for evidence ON DEMAND. The reader that would turn them into a detection lives
+OUTSIDE this repository and was NOT exercised by this change, so the supervisor half of
+that mitigation is ASSERTED rather than verified here. This change composes with the
+dump-only policy: a fire that
 only dumps loses nothing by moving into Python. **THE GAP IS NAMED HERE AND ON THE
 PR, deliberately, rather than papered over with a leg that reports stalls that are not
 there.**

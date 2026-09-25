@@ -2978,8 +2978,18 @@ def test_a_real_runtime_child_engages_at_publication_and_moves_its_own_bound(
 #: full window, prints "spin-finished" and leaves no marker, a reading about load
 #: wearing the face of a broken mechanism — and the fire is this cell's whole subject.
 #: So the rig sets a threshold the host cannot fail to reach: 0.0005 keeps ~35x
-#: headroom under the smallest burn measured here while staying far above what an idle
-#: runtime burns. The burn is the real subject either way — only the threshold moves.
+#: headroom under the smallest SPIN burn measured here — and it is BELOW an idle
+#: runtime's own burn rather than above it. This module records an idle runtime at
+#: 0.006-0.011 of a core (beside ``PROGRESS_CPU_FLOOR``), and this rig's own awaiting
+#: child measured 0.0079 here (0.0700 s of CPU over an 8.87 s wait, load ~93), so
+#: 0.0005 sits ~16x UNDER the idle band. The lowered floor therefore buys reachability
+#: at the cost of the spin/idle separation, and that is safe only because it is applied
+#: to the FIRING arms alone (the fire cell and its without-lane control): every negative
+#: arm — the awaiting child, the lane children — keeps the shipped floor, which is what
+#: keeps "a long wait is not a spin" a real test rather than a gate nobody can miss.
+#: (The rig's own dump line reads "at least 0% of a core": ``PROGRESS_MARKER`` formats
+#: the floor with ``:.0%``, and 0.0005 renders as 0%.) The burn is the real subject
+#: either way — only the threshold moves.
 SPIN_FLOOR = 0.0005
 
 _SPINNING_CHILD = r"""
