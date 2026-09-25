@@ -107,6 +107,17 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the credential client's own two-token vocabulary, not a peer's prose",
     ),
+    # The incident receipt's per-peer rows: ``reason`` here is either the PEER'S OWN
+    # refusal sentence (the authoriser's prose, carried verbatim — the panicking device
+    # has no other window onto the peer) or this device's own note about the wait
+    # ("no answer inside 2s", "no live link to that device right now"). Neither is a
+    # machine token from the mesh's ``reason`` vocabulary, so there is nothing for a
+    # gloss to map: `Q-R1-2` is precisely the case where withholding the peer's own
+    # sentence left the operator unable to tell a refusal from a delivery.
+    ("local_operator/network/cli.py", "_peer_report_lines", "reason"): (
+        1,
+        "the peer's own refusal sentence, or this device's own words for a wait",
+    ),
     # Carried into the catalog row (a ``str()`` coercion, not a render). The row is
     # painted by ``network_cli._peer_line`` and the TUI panel, both through the gloss.
     ("local_operator/network/projection.py", "RelayPeerCatalog.peers", "reason"): (

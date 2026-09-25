@@ -7,6 +7,7 @@ import json
 import re
 from argparse import Namespace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -766,3 +767,106 @@ def test_the_session_planes_state_token_is_said_in_words() -> None:
     assert session_state_words("stored") == "not running"
     assert session_state_words("live") == "live"
     assert session_state_words("") == ""
+
+
+# ---------------------------------------------------------------------------
+# The incident receipts, as the CLI renders them
+# ---------------------------------------------------------------------------
+
+
+def _panic_args(**overrides: Any) -> Namespace:
+    base = {
+        "action": "panic",
+        "network": "home-net",
+        "json": False,
+    }
+    base.update(overrides)
+    return Namespace(**base)
+
+
+def test_a_refused_panic_receipt_is_not_a_success_and_names_the_peer(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Q-R1-2's half that lives in the CLI: the receipt is the PEER's, and `ok` is theirs.
+
+    The relay now reports per-peer outcomes; this pins what the operator actually sees
+    — a refusing peer is named with its own sentence, `ok` is false so a script can
+    branch, and a peer that took it contributes no noise. The relay-side behaviour is
+    driven on a real pair in ``test_relay_e2e.py``; this is the rendering contract.
+    """
+    record = _record_in(root)
+    monkeypatch.setattr(net_cli, "_resolve", lambda _target: record)
+    monkeypatch.setattr(
+        net_cli,
+        "_relay_call",
+        lambda op, **fields: {
+            "network_id": NETWORK,
+            "epoch": 2,
+            "rotated": True,
+            "sent": 2,
+            "acked": 1,
+            "unacked": [],
+            "refused": ["d_" + "b" * 32],
+            "failed": [],
+            "ok": False,
+            "peers": [
+                {
+                    "device_id": "d_" + "a" * 32,
+                    "name": "laptop",
+                    "outcome": "acked",
+                    "reason": "",
+                },
+                {
+                    "device_id": "d_" + "b" * 32,
+                    "name": "phone",
+                    "outcome": "refused",
+                    "reason": "this link authenticated at the previous epoch, so only "
+                    "net_reconcile and ping may dispatch",
+                },
+            ],
+        },
+    )
+    rc = net_cli._cmd_panic(_panic_args())  # noqa: SLF001 — the CLI's own entry point
+    out = capsys.readouterr().out
+    assert rc == 1, "a panic one peer refused must not exit 0"
+    assert "peers told: 1 of 2 acted on it" in out, out
+    assert "phone" in out, out
+    assert "net_reconcile" in out, "the peer's own sentence is what a person reads"
+    assert "laptop" not in out, out
+
+    monkeypatch.setattr(
+        net_cli,
+        "_relay_call",
+        lambda op, **fields: {
+            "network_id": NETWORK,
+            "epoch": 2,
+            "rotated": True,
+            "sent": 1,
+            "acked": 1,
+            "unacked": [],
+            "refused": [],
+            "failed": [],
+            "ok": True,
+            "peers": [
+                {"device_id": "d_" + "a" * 32, "name": "laptop", "outcome": "acked", "reason": ""}
+            ],
+        },
+    )
+    rc = net_cli._cmd_panic(_panic_args(json=True))  # noqa: SLF001
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0, payload
+    assert payload["acked"] == 1 and payload["peers"][0]["outcome"] == "acked", payload
+
+
+def _record_in(root: Path) -> types.NetworkRecord:
+    """A minimal local record: these cells exercise the CLI's rendering, not a relay."""
+    return types.NetworkRecord(
+        network_id=NETWORK,
+        name="home-net",
+        epoch=2,
+        self_device_id="d_" + "c" * 32,
+        self_role="admin",
+        self_capabilities=sorted(types.capabilities_for_role("admin")),
+    )

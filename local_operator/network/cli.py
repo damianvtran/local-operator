@@ -2848,16 +2848,63 @@ def _cmd_disconnect(args: argparse.Namespace) -> int:
         secrets_file = store.secrets_path(record.network_id)
         if secrets_file.exists():
             secrets_file.unlink()
-        live = {"network_id": record.network_id, "reachable_peers": 0, "secret_deleted": True}
+        # NO RELAY ANSWERED, so nobody was told anything — and the receipt says so
+        # rather than "peers notified (0)", which reads as "there were none"
+        # (QA round 1, Q-R1-2: the receipt must describe what the peers did).
+        live = {
+            "network_id": record.network_id,
+            "reachable_peers": 0,
+            "secret_deleted": True,
+            "sent": 0,
+            "acked": 0,
+            "unacked": [],
+            "refused": [],
+            "failed": [],
+            "peers": [],
+            "ok": False,
+            "relay": "did not answer",
+        }
     return _emit(
         args,
-        {"ok": True, **live},
-        [
-            f"left {record.name}: peers notified where reachable "
-            f"({live.get('reachable_peers', 0)}), links closed, local secret deleted, "
-            "audit trail kept",
-        ],
+        {**live},
+        _disconnect_lines(record.name, live),
     )
+
+
+def _peer_report_lines(live: dict[str, Any], *, verb: str) -> list[str]:
+    """One line per peer that did not simply take it, naming the peer and its reason.
+
+    A COUNT IS NOT AN ANSWER to "did the incident land" (QA round 1, Q-R1-2): the
+    operator's next move is per device — re-admit this one, chase that one — so the
+    device's name and the reason it gave are printed, and the per-peer rows stay in
+    the ``--json`` payload for anything that parses.
+    """
+    rows = live.get("peers")
+    if not isinstance(rows, list):
+        return []
+    lines: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict) or row.get("outcome") == "acked":
+            continue
+        outcome = str(row.get("outcome") or "?")
+        reason = str(row.get("reason") or "")
+        lines.append(
+            f"  {row.get('name') or row.get('device_id')}: {verb} it was not taken "
+            f"({outcome}{': ' + reason if reason else ''})"
+        )
+    return lines
+
+
+def _disconnect_lines(name: str, live: dict[str, Any]) -> list[str]:
+    sent = int(live.get("sent") or 0)
+    acked = int(live.get("acked") or 0)
+    lines = [f"left {name}: local secret deleted, links closed, audit trail kept"]
+    if sent:
+        lines.append(f"peers told: {acked} of {sent} took the leave")
+    else:
+        lines.append("no peer was told: this device held no link to anybody")
+    lines += _peer_report_lines(live, verb="the leave")
+    return lines
 
 
 def _cmd_panic(args: argparse.Namespace) -> int:
@@ -2883,25 +2930,41 @@ def _cmd_panic(args: argparse.Namespace) -> int:
                 "reachable_peers": 0,
             },
         )
+        # NO RELAY ANSWERED: the latch is set here, and no peer was asked at all.
+        # ``ok: False`` is the honest answer for that (the old receipt said
+        # ``ok: true, broadcast_to: 0`` and printed "every other device is told to
+        # stop trusting the network" — Q-R1-2's class of lie, in the degraded path).
         live = {
             "network_id": record.network_id,
             "epoch": record.epoch,
             "rotated": is_admin,
-            "broadcast_to": 0,
+            "sent": 0,
+            "acked": 0,
+            "unacked": [],
+            "refused": [],
+            "failed": [],
+            "peers": [],
+            "ok": False,
+            "relay": "did not answer",
         }
-    return _emit(
-        args,
-        {"ok": True, **live},
-        [
-            f"panic raised on {record.name}: epoch {live.get('epoch')}"
-            + (
-                ", every other device is told to stop trusting the network"
-                if live.get("rotated")
-                else ""
-            ),
-            "each device must be re-admitted with `lop network trust <net> --active`",
-        ],
+    lines = [
+        f"panic raised on {record.name}: this device is untrusted at epoch {live.get('epoch')} "
+        "and refuses peer traffic until it is re-admitted",
+    ]
+    sent = int(live.get("sent") or 0)
+    if sent:
+        lines.append(f"peers told: {live.get('acked', 0)} of {sent} acted on it")
+    else:
+        lines.append("no peer was told: no relay answered, so nothing was broadcast")
+    lines += _peer_report_lines(live, verb="the panic")
+    # THE PROHIBITION, IN THE COPY AND NOT ONLY IN THE DESIGN (§1.5/§1.6.3): "stop
+    # the network" reads as "stop what is running", and nothing here stops anything.
+    lines.append(
+        "sessions on other devices are NOT stopped — they keep running and are "
+        "unreachable from here"
     )
+    lines.append("re-admit each device with `lop network trust <network> --active`")
+    return _emit(args, {**live}, lines)
 
 
 def _cmd_trust(args: argparse.Namespace) -> int:

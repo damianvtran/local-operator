@@ -2178,6 +2178,21 @@ def set_trust(
         store.save(record, root)
 
 
+#: How long ONE peer is given to acknowledge an incident frame, and why it is this
+#: number rather than a config key (incident design §2.1): it reuses the secret
+#: broker's ``NOTIFY_ACK_TIMEOUT_S`` for the same job — long enough for a healthy
+#: peer, short enough that a dead or hostile one cannot hold up the state change the
+#: operator just asked for. The tasks run CONCURRENTLY, so the whole fan-out costs
+#: one deadline, not one per peer.
+INCIDENT_ACK_DEADLINE_S = 2.0
+
+#: How long the fan-out waits past its own deadline for a task to finish, before it
+#: stops waiting and reports that peer as ``unacked``. A task can outlive its reply
+#: deadline by the SEND bound (a full queue waits up to ``op_wait_s``), which is why
+#: the sweep is not the deadline itself.
+INCIDENT_SEND_SLACK_S = 1.0
+
+
 def panic_frame(
     record: NetworkRecord, state: SecretState, *, reason: str = "operator_panic"
 ) -> dict[str, Any]:
@@ -2234,18 +2249,45 @@ def panic(
 
 def apply_panic(
     record: NetworkRecord,
+    state: SecretState,
     frame: dict[str, Any],
     *,
     sender_device_id: str,
     root: Path | None = None,
     persist: bool = True,
 ) -> ApplyOutcome:
-    """Mark this network untrusted on receipt. The secret, if any, is NOT applied.
+    """Mark this network untrusted on receipt, AND adopt the rotation it carries.
 
-    A panic does not rotate anything on the receiving side either: the network is
-    untrusted, which refuses every link, so a new secret would be a secret for a
-    network nobody may talk on.
+    THE TRUST HALF IS THE ONE THE TRANSPORT OWNS, and it is unconditional: every
+    receiver goes ``untrusted`` (transport §8.2), which closes every link for the
+    network and refuses all further peer traffic for it, including a connection
+    that arrives afterwards. The safe direction is never in doubt, so this half runs
+    whether or not the rotation below applies.
+
+    WHY THE ROTATION IS ADOPTED HERE, and why it once was not. An ADMIN panic is a
+    rotation that announces itself — ``panic`` rotates first and builds the frame
+    from the rotated record — and the incident design counts on the receiver holding
+    the result: §1.5 ("every member that receives it ... ends up holding the new
+    key") and §3.1, whose second consequence is that "the network is coherent again
+    immediately, because the panic's ``net_epoch`` already gave every receiver the
+    new epoch, the new secret and the member list ... it is why this document does
+    not re-pair devices after a panic". Left unadopted, every receiver stayed an
+    epoch behind its panicker, so the documented recovery (``lop network trust
+    --active`` on each device) produced a fleet split across epochs whose only way
+    back was a reconcile grant, three an hour — measured in QA round 1 (Q-R1-1),
+    where both devices read ``trust: active`` afterwards and still could not talk.
+
+    THE VALIDITY RULE IS NOT RE-IMPLEMENTED HERE: the frame goes through
+    :func:`apply_epoch`, the one place that decides whether an announced epoch may be
+    adopted (an ACTIVE sender, strictly greater, the rotation attributed to that
+    sender, the member list internally consistent, the digest verified, the secret
+    present). A frame that fails any of those still leaves this device untrusted — a
+    malformed alarm is an alarm — and the returned detail names which rule refused,
+    which is what :func:`RelayServer._op_panic` writes to ``panic_received``.
     """
+    outcome = apply_epoch(
+        record, state, frame, sender_device_id=sender_device_id, root=root, persist=persist
+    )
     set_trust(
         record,
         trust="untrusted",
@@ -2253,7 +2295,7 @@ def apply_panic(
         root=root,
         persist=persist,
     )
-    return ApplyOutcome(True, "untrusted")
+    return ApplyOutcome(True, f"untrusted:{outcome.detail}")
 
 
 @dataclass
@@ -3852,7 +3894,21 @@ class RelayServer:
                 subject=f"{addr[0]}:{addr[1]}" if isinstance(addr, tuple) else str(addr),
                 outcome="refused",
                 cause="handshake_cap",
-                detail={"cause": "handshake_cap", "mode": "unauthenticated"},
+                detail={
+                    "cause": "handshake_cap",
+                    "mode": "unauthenticated",
+                    # THE FIELD SET IS STABLE ACROSS EVERY `handshake_refused` ROW (Q-R1-4):
+                    # ``their_device`` is present and EMPTY when no device can be
+                    # attributed — it used to carry the socket address, which every
+                    # consumer of a field named for a device reads as an id. The address
+                    # has its own key, and `unidentified` says why the actor is unknown.
+                    "their_device": "",
+                    "their_addr": f"{addr[0]}:{addr[1]}" if isinstance(addr, tuple) else str(addr),
+                    "unidentified": (
+                        "the connection was dropped before any frame was read, so only "
+                        "the address it arrived from is known"
+                    ),
+                },
             )
         )
 
@@ -3879,6 +3935,12 @@ class RelayServer:
         mode = "member"
         network_id = ""
         peer_addr = f"{addr[0]}:{addr[1]}" if isinstance(addr, tuple) else str(addr)
+        #: Bound BEFORE the ``try`` because the refusal handler reports what the
+        #: handshake knows, and ``Handshake.new`` itself can refuse (an unknown
+        #: protocol version, a malformed hello) — the one case where there is no
+        #: handshake object to ask and the row must say so rather than crash the
+        #: accept loop.
+        handshake: Handshake | None = None
         try:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             reader = wire.FrameReader(sock)
@@ -3982,7 +4044,18 @@ class RelayServer:
                     store.save(joined, self.root)
             result = handshake.establish()
         except MeshRefusal as refusal:
-            self._audit_handshake_refusal(refusal, network_id, peer_addr, mode)
+            self._audit_handshake_refusal(
+                refusal,
+                network_id,
+                peer_addr,
+                mode,
+                # ``handshake`` is created INSIDE this ``try`` (it is the first
+                # thing that can refuse), so a refusal raised by its own
+                # construction has nothing to read: the row then says so rather
+                # than this handler failing the accept loop.
+                declared_device=handshake.peer_device_id if handshake is not None else "",
+                verified=handshake.auth_verified if handshake is not None else False,
+            )
             _close_quietly(sock)
             return
         except (wire.LinkCryptoError, ConnectionError, OSError, TimeoutError):
@@ -4022,8 +4095,40 @@ class RelayServer:
         self.register_link(sock, handshake, result, peer_addr, reader=reader)
 
     def _audit_handshake_refusal(
-        self, refusal: MeshRefusal, network_id: str, peer_addr: str, mode: str
+        self,
+        refusal: MeshRefusal,
+        network_id: str,
+        peer_addr: str,
+        mode: str,
+        *,
+        declared_device: str = "",
+        verified: bool = False,
+        expected_device: str = "",
     ) -> None:
+        """The record of a refused handshake, naming what the transport actually knows.
+
+        `actor: "unknown"` WITH ONLY AN EPHEMERAL SOCKET is the row that made "who
+        reached what" unanswerable for exactly the refusal class an incident
+        responder asks about (QA round 1 trust & operations, Q-R1-4): every one of
+        the seven rows from a device this network had REMOVED, and an hour of rows
+        from a peer this device had stopped trusting, said `actor: "unknown"` and
+        `their_device: "127.0.0.1:53381"` — the port, in a field named for a device.
+
+        THE DISTINCTION THIS ROW NOW MAKES is the one the protocol actually offers.
+        A refused handshake happens BEFORE the peer has proved anything except in
+        one direction: once :meth:`Handshake.verify_auth` has matched the MAC, the id
+        that peer declared is bound to key material this device checked, so it can be
+        named as the actor. Before that point the id is a CLAIM — and an attacker
+        chooses it, which is why a guess here is worse than an unknown: a row that
+        says `d_<a member>` because the attacker wrote that id into its hello is an
+        accusation this device cannot support.
+
+        So the actor is named only when it is proven, and every row says WHY it is
+        not, plus the two things that are always true and always useful: the address
+        it arrived from, and the id it declared (or the id this device dialled, on
+        the outbound side, which is this device's own record rather than the peer's
+        claim).
+        """
         # A self-connection is its own event kind, not a generic refusal: it is the
         # one handshake failure that is usually the OPERATOR's mistake rather than an
         # attack, and `lop network log` should say which it was.
@@ -4052,15 +4157,45 @@ class RelayServer:
             "invite_invalid": "policy",
             "self_link": "policy",
         }.get(refusal.code, "policy")
+        if verified and declared_device:
+            actor = declared_device
+            unidentified = ""
+        else:
+            actor = "unknown"
+            if declared_device:
+                unidentified = (
+                    "refused before that device proved the id it declared, so its id is "
+                    "in declared_device and is a claim, not an identity"
+                )
+            elif expected_device or mode:
+                unidentified = (
+                    "refused before any device id was presented, so only the address it "
+                    "arrived from is known"
+                )
+            else:
+                unidentified = "refused before any device id was presented"
         self.audit.record(
             AuditEvent(
                 event="handshake_refused",
-                actor="unknown",
+                actor=actor,
                 subject=peer_addr,
                 outcome="refused",
                 network_id=network_id,
                 cause=cause,
-                detail={"cause": refusal.code, "mode": mode, "their_device": peer_addr},
+                detail={
+                    "cause": refusal.code,
+                    "mode": mode,
+                    # ``their_device`` keeps its documented meaning — the device this
+                    # refusal is about — and it is written ONLY when this device can
+                    # support it. The address moved to its own field, because a port
+                    # number in a field named for a device is what hid the identity
+                    # in the first place.
+                    "their_device": declared_device if verified else "",
+                    "their_addr": peer_addr,
+                    "declared_device": declared_device,
+                    "expected_device": expected_device,
+                    "unidentified": unidentified,
+                },
             )
         )
 
@@ -5103,29 +5238,79 @@ class RelayServer:
             self._broadcast_epoch(record, state, reason="member_left", removed=outcome.removed)
         return {"op": "ack", "req": frame.get("req"), "detail": {"left": link.device_id}}
 
-    def _op_panic(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
+    def _op_panic(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any] | None:
         if self.store_view.network(link.network_id) is None:
             raise MeshRefusal("not_a_member", "this device is not in that network")
+        # The secret the panic may carry, read OUTSIDE the lock and tolerated when it
+        # is missing: an admin's frame is a rotation as well as an alarm, and a device
+        # that has already deleted its secret (``lop network disconnect`` does that on
+        # purpose) must still be able to go untrusted. ``apply_epoch`` refuses to
+        # adopt an epoch without key material, so an empty state is the honest
+        # fallback rather than a new failure mode on the trust path.
+        try:
+            state = store.require_secrets(link.network_id, self.root)
+        except MeshRefusal:
+            state = SecretState(network_id=link.network_id, epoch=0)
         # A panic rewrites trust, and an admin sender's panic rotates the epoch and
         # the secret: the read is inside the lock so the alarm is not written back
         # over a record that moved underneath it.
         with store.mutate(link.network_id, self.root) as record:
-            apply_panic(record, frame, sender_device_id=link.device_id, root=self.root)
+            epoch_before = record.epoch
+            outcome = apply_panic(
+                record,
+                state,
+                frame,
+                sender_device_id=link.device_id,
+                root=self.root,
+            )
+            epoch_after = record.epoch
         self.audit.record(
             AuditEvent(
                 event="panic_received",
                 actor=link.device_id,
                 subject=record.network_id,
                 network_id=record.network_id,
-                epoch=int(frame.get("epoch") or 0),
+                epoch=epoch_after,
                 outcome="ok",
                 detail={
                     "from_device": link.device_id,
-                    "epoch_before": int(frame.get("epoch") or 0),
-                    "epoch_after": record.epoch,
+                    # THE RECEIVER'S OWN EPOCH, before and after — not the frame's.
+                    # These two were ``int(frame.get("epoch"))`` and ``record.epoch``,
+                    # so on the row that answers "what did the alarm do to THIS
+                    # device" they were the SENDER's new epoch and our old one: a row
+                    # that read like an epoch change in the wrong direction on a
+                    # device that had not moved at all (QA round 1, Q-R1-1).
+                    "epoch_before": epoch_before,
+                    "epoch_after": epoch_after,
                     "reason": str(frame.get("reason") or ""),
+                    # Which rule the rotation half met, when the frame was an admin's:
+                    # "applied", or the reason it was not adopted. The trust half below
+                    # applies either way, so an operator reading this needs to be able
+                    # to tell "it rotated us" from "it only alarmed us".
+                    "rotation": outcome.detail,
                 },
             )
+        )
+        # THE REPORT IS QUEUED BEFORE THE CLOSES, and that ordering is the whole
+        # reason it is sent here rather than returned. ``PeerLink._handle`` writes a
+        # handler's return value as the reply AFTER the handler returns, and this
+        # handler closes every link for the network — including the one carrying the
+        # reply — so a returned ack was dropped on the floor at ``send`` and the
+        # panicking device never learned what happened here. A write to a socket is
+        # also not an act by a device (Q-R1-2), so what crosses the wire is the
+        # receiver's REPORT: the epoch it held before, the epoch it holds now, and
+        # which rule the rotation met.
+        link.send(
+            {
+                "op": "ack",
+                "req": frame.get("req"),
+                "detail": {
+                    "applied": "untrusted",
+                    "epoch_before": epoch_before,
+                    "epoch_after": epoch_after,
+                    "rotation": outcome.detail,
+                },
+            }
         )
         # Every link for this network closes, and a connection that arrives
         # afterwards is refused at handshake step 3 — "refuse all further peer
@@ -5134,7 +5319,11 @@ class RelayServer:
             if other.network_id == record.network_id:
                 other.send({"op": "net_bye", "reason": "untrusted"})
                 other.close("we-closed")
-        return {"op": "ack", "req": frame.get("req"), "detail": "untrusted"}
+        # ``None`` rather than the frame above: the dispatcher's own ack would be a
+        # second reply with the same ``req``, queued after the link is closed so it
+        # can never be written, and a duplicate reply on the wire is the shape the
+        # stray-reply guard exists to drop.
+        return None
 
     def _op_trust(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
         if self.store_view.network(link.network_id) is None:
@@ -6334,6 +6523,7 @@ class RelayServer:
                 epoch=record.epoch,
                 timeout_s=remaining,
                 connected=probe.sock,
+                expected_device=device_id,
             )
             if link is not None:
                 return link, ""
@@ -7102,6 +7292,7 @@ class RelayServer:
         joiner_name: str = "",
         timeout_s: float | None = None,
         connected: socket.socket | None = None,
+        expected_device: str = "",
     ) -> tuple[PeerLink | None, str]:
         """Dial a peer and complete the handshake. Returns the link and a reason.
 
@@ -7142,6 +7333,10 @@ class RelayServer:
             except OSError as exc:
                 return None, f"connect_failed:{exc.__class__.__name__}"
         deadline = wire.deadline_in(budget)
+        #: Bound before the ``try`` for the same reason the listener's is: the refusal
+        #: rows below report what the handshake knows, and ``Handshake.new`` can itself
+        #: refuse, so the one case with nothing to ask must not be an ``UnboundLocal``.
+        handshake: Handshake | None = None
         try:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             handshake = Handshake.new(
@@ -7219,11 +7414,24 @@ class RelayServer:
             return link, "ok"
         except MeshRefusal as refusal:
             _close_quietly(sock)
-            self._audit_handshake_refusal(refusal, network_id, host, mode)
+            self._audit_handshake_refusal(
+                refusal,
+                network_id,
+                host,
+                mode,
+                declared_device=handshake.peer_device_id if handshake is not None else "",
+                verified=handshake.auth_verified if handshake is not None else False,
+                # This side chose the address and, when the caller knew it, the id:
+                # this device's own record of who it meant to reach — useful, and
+                # never mistaken for the peer's proof of anything.
+                expected_device=expected_device,
+            )
             return None, refusal.code
         except (wire.LinkCryptoError, OSError, TimeoutError) as exc:
             _close_quietly(sock)
-            self._note_refused_handshake(record.network_id, host, mode)
+            self._note_refused_handshake(
+                record.network_id, host, mode, expected_device=expected_device
+            )
             return None, handshake_refused_reason(exc)
 
     def _clear_refusal_mark(self, network_id: str) -> None:
@@ -7249,7 +7457,9 @@ class RelayServer:
         except FileNotFoundError:
             return
 
-    def _note_refused_handshake(self, network_id: str, host: str, mode: str) -> None:
+    def _note_refused_handshake(
+        self, network_id: str, host: str, mode: str, *, expected_device: str = ""
+    ) -> None:
         """Name a peer's SILENT refusal of this device's handshake, LOCALLY.
 
         THE REFUSAL IS SILENT BY DESIGN AND THAT LEFT THIS DEVICE WITHOUT A CLUE. A
@@ -7297,7 +7507,18 @@ class RelayServer:
                 cause="auth_failed",
                 detail={
                     "cause": "peer_closed_silently",
-                    "their_device": host,
+                    # NOT ``host`` IN ``their_device`` (Q-R1-4): a socket address in a
+                    # field named for a device is what made these rows unreadable.
+                    # Nothing was proved here — the peer said nothing at all — so the
+                    # actor stays unknown and the row carries the address, the id this
+                    # device dialled, and the reason it cannot name who answered.
+                    "their_device": "",
+                    "their_addr": host,
+                    "expected_device": expected_device,
+                    "unidentified": (
+                        "the peer closed the connection without a frame, so the address "
+                        "is all this device observed"
+                    ),
                     "mode": mode or "member",
                 },
             )
@@ -7721,6 +7942,205 @@ class RelayServer:
             "joiner_device_id": pending.joiner_device_id,
         }
 
+    # -- incident fan-out: what the PEERS report -----------------------------
+
+    def _incident_fan_out(
+        self, network_id: str, *, op: str, fields: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Ask every REACHABLE peer to act, and collect what each one REPORTS back.
+
+        A RECEIPT MUST DESCRIBE THE PEERS, NOT THE SOCKET (QA round 1 trust &
+        operations, Q-R1-2). ``broadcast_to`` was ``len(links the frame was written
+        to)``, so a broadcast every peer refused was byte-identical on screen to one
+        that landed: measured, a ``lop network disconnect`` printed
+        ``reachable_peers: 2`` while the peer's own log held a ``net_leave`` refused
+        as ``policy`` and nothing on that device changed. A write to a socket is not
+        an act by a device, and the operator's next move depends on which it was.
+
+        EVERY ACTIVE MEMBER GETS A ROW, not only the ones with a link. The design
+        counts a member it could not ask as ``unacked`` (its §2.2/§6.5: a stopped
+        third device is one `panic_undelivered` with ``detail.outcome == "unacked"``,
+        and the tally reads ``{sent: 2, acked: 1, unacked: 1}``), which is also the
+        honest answer — that device is still out there on the old epoch. A row that
+        exists only for peers with a socket would report a network of two when three
+        were admitted, and the third is exactly the one an incident responder is
+        asking about.
+
+        NO DIAL. A member without a live link is reported rather than dialled:
+        the ONE-ATTEMPT rule (§2.1) is about the traffic a panic must not generate,
+        and a dial to a device the operator has just declared untrusted is that
+        traffic. ``lop network doctor --peer <device>`` is how reachability is
+        chased afterwards.
+
+        ONE CONCURRENT TASK PER PEER, ONE ATTEMPT, BOUNDED (§2.1). Concurrent because
+        the deadline then costs one wait rather than one per peer; one attempt
+        because retrying against a possibly-compromised peer is the stop-word the
+        operator asked for; bounded because the local state change has already
+        happened by the time this runs and a wedged peer must not delay the answer
+        about it.
+
+        FOUR OUTCOMES, and the fourth is this round's addition. The design names
+        three (§2.2: ``acked``, ``unacked``=deadline, ``failed``=could not even try)
+        and none of them describes "the peer answered and said NO" — which is the case
+        QA measured and the receipt hid. A refusal is not `unacked` (it answered) and
+        not `failed` (the frame arrived); it is its own word, so a partially landed
+        incident can say which peers acted and which refused, with the peer's own
+        sentence beside it.
+        """
+        record = self.store_view.network(network_id)
+        links = {
+            link.device_id: link
+            for link in list(self.links.values())
+            if link.network_id == network_id and link.alive
+        }
+        reports: list[dict[str, Any]] = []
+        guard = threading.Lock()
+        threads: list[threading.Thread] = []
+
+        def row_for(device_id: str) -> dict[str, Any]:
+            return {
+                "device_id": device_id,
+                "name": self._member_name(device_id) or device_id,
+                "network_id": network_id,
+                # THE DEFAULT IS ``unacked`` AND THAT IS THE POINT: a task still
+                # running when the sweep below gives up leaves this row reading "no
+                # answer inside Xs", which is exactly what the caller knows. A
+                # default of "failed" would claim an error nobody observed.
+                "outcome": "unacked",
+                # The machine CAUSE, carried on the row because the audit's ``cause``
+                # is a closed enum and a value outside it renders as "internal": the
+                # mapping is decided where the fact is known rather than re-derived
+                # from the outcome word afterwards.
+                "cause": "timeout",
+                "reason": f"no answer inside {INCIDENT_ACK_DEADLINE_S:g}s",
+            }
+
+        def ask(link: PeerLink, entry: dict[str, Any]) -> None:
+            try:
+                reply = link.request(
+                    {"op": op, "req": self._next_relay_req(), "locality": "remote", **fields},
+                    timeout=INCIDENT_ACK_DEADLINE_S,
+                )
+            except Exception as exc:  # noqa: BLE001 — one peer's failure is one row
+                entry["outcome"] = "failed"
+                entry["cause"] = "internal"
+                entry["reason"] = f"{type(exc).__name__}: {exc}"
+            else:
+                if reply is None:
+                    pass
+                elif reply.get("op") == "error":
+                    entry["outcome"] = "refused"
+                    # "policy": the PEER answered with a refusal. The authoriser's
+                    # refusals are codeless on the wire on purpose (a remote peer is
+                    # not told which guard fired), so the peer's own sentence is the
+                    # only detail there is — and it is carried verbatim below.
+                    entry["cause"] = "policy"
+                    entry["reason"] = str(reply.get("message") or "that device refused it")
+                else:
+                    entry["outcome"] = "acked"
+                    entry["cause"] = ""
+                    entry["reason"] = ""
+                    detail = reply.get("detail")
+                    # WHAT THE PEER SAYS IT DID, kept verbatim and un-summarised: the
+                    # panicking device cannot see the peer's record, so anything this
+                    # method derived rather than copied would be this device's guess
+                    # wearing the peer's authority.
+                    entry["reported"] = detail if isinstance(detail, dict) else {"value": detail}
+            with guard:
+                reports.append(entry)
+
+        for member in record.active_members() if record is not None else []:
+            if member.device_id == self.identity.device_id:
+                continue
+            entry = row_for(member.device_id)
+            link = links.get(member.device_id)
+            if link is None:
+                entry["reason"] = "no live link to that device right now"
+                reports.append(entry)
+                continue
+            threads.append(
+                threading.Thread(
+                    target=ask,
+                    args=(link, entry),
+                    daemon=True,
+                    name="mesh-incident",
+                )
+            )
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(INCIDENT_ACK_DEADLINE_S + INCIDENT_SEND_SLACK_S)
+        with guard:
+            return list(reports)
+
+    @staticmethod
+    def _incident_tally(reports: list[dict[str, Any]]) -> dict[str, Any]:
+        """The design's ``{sent, acked, unacked}`` tally (§2.1), from the reports.
+
+        ``unacked`` and ``failed`` are the device IDS rather than counts: the
+        operator's next question is always WHICH device, and a count cannot answer it
+        (``lop network doctor --peer <device>`` is the follow-up).
+
+        ``ok`` is "every peer we know of took it", so a peer this device could not
+        ask — and a peer that answered NO — both make it false. That is the whole
+        point of the field: it used to be absent entirely, and the CLI filled it in
+        as ``true`` for a broadcast that nobody acted on.
+        """
+        return {
+            "sent": len(reports),
+            "acked": sum(1 for row in reports if row["outcome"] == "acked"),
+            "unacked": [row["device_id"] for row in reports if row["outcome"] == "unacked"],
+            "refused": [row["device_id"] for row in reports if row["outcome"] == "refused"],
+            "failed": [row["device_id"] for row in reports if row["outcome"] == "failed"],
+            "ok": bool(reports) and all(row["outcome"] == "acked" for row in reports),
+        }
+
+    def _audit_incident_delivery(self, event_prefix: str, reports: list[dict[str, Any]]) -> None:
+        """One row per peer, then the tally (incident design §1.5).
+
+        ``panic_delivered`` / ``panic_undelivered`` per peer and then
+        ``panic_broadcast_result`` is the design's own catalogue, and it is the half
+        of Q-R1-2 that outlives the operator's terminal: the receipt is read once,
+        the log is read during the review.
+
+        The per-peer event NAMES the outcome and the reason is the peer's own
+        sentence, because this is the record an operator reconstructs "which device
+        was still out there on the old epoch" from (§2.2).
+        """
+        for row in reports:
+            self.audit.record(
+                AuditEvent(
+                    event=(
+                        f"{event_prefix}_delivered"
+                        if row["outcome"] == "acked"
+                        else f"{event_prefix}_undelivered"
+                    ),
+                    actor=row["device_id"],
+                    subject=row["network_id"],
+                    network_id=row["network_id"],
+                    outcome="ok" if row["outcome"] == "acked" else "refused",
+                    cause=str(row["cause"]),
+                    detail={
+                        "outcome": row["outcome"],
+                        "reason": row["reason"],
+                    },
+                )
+            )
+        tally = self._incident_tally(reports)
+        self.audit.record(
+            AuditEvent(
+                event=f"{event_prefix}_broadcast_result",
+                actor="self",
+                outcome="ok" if tally["ok"] else "refused",
+                detail={
+                    "sent": tally["sent"],
+                    "acked": tally["acked"],
+                    "unacked": len(tally["unacked"]),
+                    "failed": len(tally["failed"]),
+                },
+            )
+        )
+
     def _ctl_panic(self, frame: dict[str, Any]) -> dict[str, Any]:
         # The panic's own read-modify-write: an admin's panic rotates the epoch and
         # the secret, so the read is inside the lock. The broadcast that follows it
@@ -7738,6 +8158,17 @@ class RelayServer:
                 reason=str(frame.get("reason") or "operator_panic"),
                 root=self.root,
             )
+            # THE LOCAL STATE CHANGE COMES FIRST AND IS NEVER CONDITIONAL ON THE
+            # BROADCAST (incident design §1.5/§2.1: "panic latches first"). It used to
+            # be a second ``mutate`` AFTER the fan-out, which left the device `active`
+            # at the new epoch for as long as the peers took to answer and would have
+            # left it there for good had the process died mid-broadcast.
+            set_trust(
+                record,
+                trust="untrusted",
+                reason="this device raised a panic",
+                root=self.root,
+            )
             self.audit.record(
                 AuditEvent(
                     event="panic_raised",
@@ -7748,35 +8179,47 @@ class RelayServer:
                     detail={
                         "epoch_before": record.epoch - (1 if is_admin else 0),
                         "epoch_after": record.epoch,
-                        "reachable_peers": len(self.links),
+                        "reachable_peers": sum(
+                            1
+                            for link in list(self.links.values())
+                            if link.network_id == record.network_id and link.alive
+                        ),
                     },
                 )
             )
         # PANIC KEEPS ITS BROADCAST BEHAVIOUR: the frame carries the new secret to
-        # every reachable peer.
-        delivered = 0
-        for link in list(self.links.values()):
-            if link.network_id == record.network_id and link.send(dict(outbound)):
-                delivered += 1
-        for link in list(self.links.values()):
-            if link.network_id == record.network_id:
-                link.close("we-closed")
-        # A SECOND block, not one held across the broadcast: this write is an edit
-        # of the trust field alone, and it re-reads (so it cannot revert anything
-        # the rotation above, or another writer, put on disk meanwhile).
-        with store.mutate(resolved.network_id, self.root) as record:
-            set_trust(
-                record,
-                trust="untrusted",
-                reason="this device raised a panic",
-                root=self.root,
-            )
+        # every reachable peer, once each, and what comes back is what the receipt
+        # reports. The frame is built per link by the fan-out (each needs its own
+        # ``req`` so its reply can be matched), and the links close after the answers
+        # rather than before them — a peer cannot report on a link this side has
+        # already torn down.
+        links = [
+            link for link in list(self.links.values()) if link.network_id == resolved.network_id
+        ]
+        reports = self._incident_fan_out(
+            resolved.network_id, op="net_panic", fields=self._incident_fields(outbound)
+        )
+        self._audit_incident_delivery("panic", reports)
+        for link in links:
+            link.close("we-closed")
+        tally = self._incident_tally(reports)
         return {
-            "network_id": record.network_id,
-            "epoch": record.epoch,
+            "network_id": resolved.network_id,
+            "epoch": store.load(resolved.network_id, self.root).epoch,
             "rotated": is_admin,
-            "broadcast_to": delivered,
+            **tally,
+            "peers": reports,
         }
+
+    @staticmethod
+    def _incident_fields(frame: dict[str, Any]) -> dict[str, Any]:
+        """A peer frame minus the two fields the fan-out owns (``op`` and ``req``).
+
+        The carrier is dropped rather than the fields re-listed, so a field added to
+        the frame's construction (``members_digest`` was) reaches the wire without a
+        second list here to keep in step.
+        """
+        return {key: value for key, value in frame.items() if key not in ("op", "req")}
 
     def _ctl_disconnect(self, frame: dict[str, Any]) -> dict[str, Any]:
         """This device leaves: say goodbye, stop trusting, keep the audit trail.
@@ -7791,18 +8234,20 @@ class RelayServer:
         # sends below are addressed from this resolved copy, and the write re-reads
         # inside the lock rather than writing that copy back.
         resolved = self._require_network(str(frame.get("network") or ""))
-        reachable = 0
-        for link in list(self.links.values()):
-            if link.network_id != resolved.network_id:
-                continue
-            if link.send(
-                {"op": "net_leave", "network_id": resolved.network_id, "locality": "remote"}
-            ):
-                reachable += 1
-        time.sleep(0.05)
-        for link in list(self.links.values()):
-            if link.network_id == resolved.network_id:
-                link.close("we-closed")
+        # ASK, AND WAIT FOR THE ANSWERS, BEFORE THE LINKS GO. The leave is answered by
+        # the peer that accepted it, so closing first (what this did) made every
+        # receipt a count of writes: measured, `reachable_peers: 2` on a device whose
+        # peer had refused its leave (Q-R1-2). One attempt each, bounded, concurrent.
+        links = [
+            link for link in list(self.links.values()) if link.network_id == resolved.network_id
+        ]
+        reports = self._incident_fan_out(
+            resolved.network_id,
+            op="net_leave",
+            fields={"network_id": resolved.network_id},
+        )
+        for link in links:
+            link.close("we-closed")
         secrets_file = store.secrets_path(resolved.network_id, self.root)
         if secrets_file.exists():
             secrets_file.unlink()
@@ -7820,13 +8265,27 @@ class RelayServer:
                     subject=record.network_id,
                     network_id=record.network_id,
                     epoch=record.epoch,
-                    detail={"epoch": record.epoch, "reachable_peers": reachable},
+                    # ``reachable_peers`` counted LINKS, so it read 2 on a leave the
+                    # peer refused. The design gives disconnect no per-peer delivery
+                    # rows (§6.3 asserts there are none), so the truth lives here:
+                    # who was asked, who took it, and who would not.
+                    detail={
+                        "epoch": record.epoch,
+                        "peers": [row["device_id"] for row in reports],
+                        "acked": sum(1 for row in reports if row["outcome"] == "acked"),
+                    },
                 )
             )
         return {
-            "network_id": record.network_id,
-            "reachable_peers": reachable,
+            "network_id": resolved.network_id,
             "secret_deleted": True,
+            # ONE KEY FOR ONE FACT ACROSS BOTH INCIDENT VERBS: `peers` is the per-peer
+            # report list, the same name `panic` ships, because the CLI's renderer reads
+            # it and two spellings for one payload is how a surface prints nothing for
+            # the verb nobody re-checked.
+            "peers": reports,
+            "reachable_peers": sum(1 for row in reports if row["outcome"] == "acked"),
+            **self._incident_tally(reports),
         }
 
     # -- the local session-plane ops (the viewer's CLI drives these) ----------
@@ -8636,6 +9095,7 @@ class RelayServer:
                 epoch=record.epoch,
                 timeout_s=remaining,
                 connected=sock,
+                expected_device=member.device_id,
             )
         except MeshRefusal as refusal:
             return self._handshake_row(member, endpoint, ok=False, detail=refusal.code)

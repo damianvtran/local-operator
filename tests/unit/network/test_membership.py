@@ -375,11 +375,55 @@ def test_a_non_admin_panic_raises_the_alarm_and_rotates_nothing() -> None:
 
 def test_a_received_panic_marks_the_network_untrusted(root: Path) -> None:
     record, state = _record()
-    outcome = relay.apply_panic(record, {"epoch": 9}, sender_device_id=PEER, root=root)
+    outcome = relay.apply_panic(record, state, {"epoch": 9}, sender_device_id=PEER, root=root)
     assert outcome.applied is True
     assert record.trust == "untrusted"
     assert PEER in record.untrusted_reason
     assert store.load(NETWORK, root).trust == "untrusted"
+
+
+def test_a_received_admin_panic_adopts_the_rotation_it_carries(root: Path) -> None:
+    """The receiver ends the panic at the SENDER's epoch, not an epoch behind.
+
+    QA round 1, Q-R1-1: with the trust half applied and the rotation dropped, the
+    documented recovery (`lop network trust --active` on each device) left the two
+    devices at different epochs with `trust: active` and still unable to talk. The
+    incident design's §3.1 counts on this: "the network is coherent again
+    immediately, because the panic's ``net_epoch`` already gave every receiver the
+    new epoch, the new secret and the member list".
+    """
+    record, state = _record()
+    _admit_peer(record)
+    sender_record, sender_state = _record()
+    _admit_peer(sender_record)
+    frame = relay.panic(sender_record, sender_state, by=PEER, is_admin=True, persist=False)
+    outcome = relay.apply_panic(record, state, frame, sender_device_id=PEER, root=root)
+    assert outcome.detail == "untrusted:applied"
+    assert record.trust == "untrusted"
+    assert record.epoch == sender_record.epoch == 2
+    assert state.secret == sender_state.secret
+    assert store.load_secrets(NETWORK, root).secret == sender_state.secret
+
+
+def test_a_received_panic_with_a_torn_rotation_still_goes_untrusted(root: Path) -> None:
+    """The trust half is unconditional; the rotation half is not.
+
+    A malformed alarm is still an alarm — the safe direction is to distrust — but a
+    frame that fails :func:`relay.apply_epoch`'s rules must not move this device's
+    epoch or hand it a secret it cannot verify, and the row says which rule
+    refused.
+    """
+    record, state = _record()
+    _admit_peer(record)
+    sender_record, sender_state = _record()
+    _admit_peer(sender_record)
+    frame = relay.panic(sender_record, sender_state, by=PEER, is_admin=True, persist=False)
+    frame["members_digest"] = "0" * 64
+    outcome = relay.apply_panic(record, state, frame, sender_device_id=PEER, root=root)
+    assert outcome.detail == "untrusted:members_digest_mismatch"
+    assert record.trust == "untrusted"
+    assert record.epoch == 1
+    assert state.secret != sender_state.secret
 
 
 def test_trust_can_be_restored_and_is_stored(root: Path) -> None:

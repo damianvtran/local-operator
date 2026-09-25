@@ -1439,7 +1439,15 @@ def push_to_peer(
         detail = state if isinstance(state, dict) else {}
         return {
             "ok": False,
-            "code": str(detail.get("code") or "state_failed"),
+            # A PEER THAT ANSWERED IS NOT A PEER THAT DID NOT (Q-R1-3). The authoriser's
+            # refusals are deliberately CODELESS on the wire (a remote peer is never told
+            # which guard fired — see ``wire.refusal_frame``), so this used to report the
+            # same ``state_failed`` for "this member refused the op" and for "nothing came
+            # back", and the cadence could not tell a policy answer that can never change
+            # from a transport failure that might clear in a second. It retried both on
+            # the 15 s failure floor, forever: measured at 240 refused op rows an hour
+            # against one paired ``drive`` member (QA round 1, Q-R1-3).
+            "code": str(detail.get("code") or "refused"),
             "message": str(
                 detail.get("message") or "that device did not answer with its definitions"
             ),
@@ -1984,12 +1992,16 @@ class DefinitionsSyncer(threading.Thread):
         self._server = server
         self._stop = threading.Event()
         self._lock = threading.Lock()
-        #: When this member was last ATTEMPTED, and whether that attempt succeeded.
+        #: When this member's last attempt was ATTEMPTED, and whether it succeeded.
         #: Two dicts rather than one because the two outcomes get different floors:
         #: see :meth:`tick` for why a failed dial must not park a member for a minute.
         self._last_attempt_at: dict[str, float] = {}
         self._last_ok: dict[str, bool] = {}
         self._last_pushed: dict[str, str] = {}
+        #: ``device_id -> the moment this member may be asked again`` for a member
+        #: whose attempt came back REFUSED. Refused is not failed: see
+        #: REFUSED_MIN_INTERVAL_S.
+        self._refused_at: dict[str, float] = {}
         self._tick_s = _tick_seconds(server.root)
 
     def stop(self) -> None:
@@ -2036,7 +2048,33 @@ class DefinitionsSyncer(threading.Thread):
         moment = time.time() if now is None else now
         outcomes: list[tuple[str, str]] = []
         for device_id in self._targets():
+            blocked = _unholdable_capability(self._server, device_id, "net_definitions")
+            if blocked:
+                # A MEMBER THAT CANNOT HOLD THE OP IS NOT ASKED ON A TIMER (Q-R1-3).
+                # The requirement is read from the ONE table that decides it
+                # (``types.OP_CAPABILITY``) rather than re-stated here, and it is
+                # checked against THIS device's own row, so the cadence stops
+                # generating wire traffic AND a refusal row on the peer for a
+                # question whose answer the shared table already gave. Measured, by
+                # the QA that found it: 300 s of idle network wrote 21 rows, 20 of
+                # them this device's refusals on the peer, every 15 s, forever.
+                #
+                # WHY A SKIP AND NOT A SLOWER RETRY: nothing can change the answer
+                # between ticks — the peer's table and ours both say the same thing
+                # until somebody grants a capability — and asking anyway costs, per
+                # attempt, a dial, two envelopes and an audited refusal on the far
+                # device. The on-demand paths (``definitions_sync``, the create
+                # path's push) deliberately still ASK, so an operator chasing "why
+                # are my definitions not reaching that box" gets the peer's own
+                # sentence, and a grant made on the peer's side is discovered there
+                # rather than never.
+                outcomes.append((device_id, f"skipped:no_{blocked}"))
+                continue
             with self._lock:
+                if self._refused_at.get(device_id, 0.0) > moment:
+                    # A REFUSAL IS A POLICY ANSWER, NOT A FLAP: see
+                    # REFUSED_MIN_INTERVAL_S for the measurement and the reasoning.
+                    continue
                 last = self._last_attempt_at.get(device_id, 0.0)
                 floor = STATE_MIN_INTERVAL_S if self._last_ok.get(device_id) else self._tick_s
                 if moment - last < floor:
@@ -2049,6 +2087,9 @@ class DefinitionsSyncer(threading.Thread):
                 self._last_ok[device_id] = ok
                 if ok:
                     self._last_pushed[device_id] = str(result.get("message") or "")
+                    self._refused_at.pop(device_id, None)
+                elif str(result.get("code") or "") in POLICY_REFUSAL_CODES:
+                    self._refused_at[device_id] = moment + REFUSED_MIN_INTERVAL_S
         return outcomes
 
     def _targets(self) -> list[str]:
@@ -2080,6 +2121,34 @@ class DefinitionsSyncer(threading.Thread):
 #: ``DefinitionsSyncer.tick`` for why one floor for both outcomes was wrong.
 STATE_MIN_INTERVAL_S = 60.0
 
+#: The floor for a member whose attempt was REFUSED BY THE PEER, as opposed to one
+#: that failed on the wire. The two are different facts: a failed dial is transient
+#: and is retried on the next tick, while a refusal is a POLICY answer — the peer's
+#: own authorisation table said no — and that answer does not change between ticks.
+#: Retrying it on the 15 s failure floor is what wrote 240 refusal rows an hour
+#: against one ``drive`` member, on both sides, for as long as the membership
+#: existed (QA round 1, Q-R1-3). Half an hour is deliberately a RE-ATTEMPT and not a
+#: permanent skip: a capability the operator later grants on the peer's side is
+#: discovered within one interval, where an indefinite skip would hide it.
+REFUSED_MIN_INTERVAL_S = 1800.0
+
+#: The result codes that mean "the peer ANSWERED and said no" — a policy answer
+#: rather than a transport failure. ``refused`` is the codeless case
+#: (``push_to_peer`` names it), and the rest are a peer handler's own refusals, whose
+#: code does cross the wire (``wire.error_from``). Everything not in here is treated
+#: as transient and keeps the fast retry.
+POLICY_REFUSAL_CODES: frozenset[str] = frozenset(
+    {
+        "refused",
+        "not_authorised",
+        "capability_denied",
+        "phase_forbidden",
+        "not_a_member",
+        "policy",
+        "no_network_secret",
+    }
+)
+
 
 def _tick_seconds(root: Path) -> float:
     from local_operator.network.sync import SYNC_TICK_S, SyncSettings
@@ -2088,6 +2157,38 @@ def _tick_seconds(root: Path) -> float:
         return max(1.0, float(SyncSettings.from_config(root).tick_s))
     except Exception:  # noqa: BLE001 — an unreadable setting falls back to the shipped one
         return SYNC_TICK_S
+
+
+def _unholdable_capability(server: "RelayServer", device_id: str, op: str) -> str:
+    """The capability that blocks ``op`` to ``device_id``, or ``""`` when it does not.
+
+    THE ANSWER IS OURS ONLY WHEN IT CANNOT DIFFER. The peer authorises an inbound
+    frame against ITS OWN row for this device, so the local row is evidence and not
+    authority — which is why this may only skip when EVERY network shared with
+    ``device_id`` lacks the capability: in no such case can the dial the cadence
+    would have made land on a table that would have said yes. If this device holds
+    it in at least one shared network, the answer depends on which network's link
+    the dial opens, and the cadence asks exactly as it did before.
+
+    The requirement comes from ``types.OP_CAPABILITY``, the same table the receiving
+    authoriser reads, so this is not a second copy of the rule and cannot drift from
+    it. It is read per tick rather than cached: ``lop network member grant`` on this
+    device takes effect on the next tick, and a cached answer would outlive it.
+    """
+    from local_operator.network import store
+    from local_operator.network.types import OP_CAPABILITY
+
+    required = OP_CAPABILITY.get(op)
+    if not required:
+        return ""
+    shared = False
+    for record in store.list_networks(server.root):
+        if not any(member.device_id == device_id for member in record.active_members()):
+            continue
+        shared = True
+        if required in record.self_capabilities:
+            return ""
+    return required if shared else ""
 
 
 def ensure_syncer(server: "RelayServer") -> "DefinitionsSyncer":
