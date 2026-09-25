@@ -1531,9 +1531,7 @@ class AnalyticsStore:
                 and row[4] is None
             )
             self._has_session_daily = (
-                meta_present
-                and set(_SESSION_DAILY_INSERT_COLUMNS) <= present
-                and not unwritable
+                meta_present and set(_SESSION_DAILY_INSERT_COLUMNS) <= present and not unwritable
             )
             if present and not self._has_session_daily:
                 missing = sorted(set(_SESSION_DAILY_INSERT_COLUMNS) - present)
