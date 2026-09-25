@@ -61,7 +61,12 @@ from local_operator.mobile.attach_client import (
     AttachClient,
     _projection_from_json,
 )
-from local_operator.network.types import normalise_pending
+from local_operator.network.types import (
+    PEER_NUMBER_CEILING,
+    normalise_pending,
+    peer_number,
+    peer_whole_int,
+)
 from local_operator.session.owner import SessionSeed
 from local_operator.session.placement import (
     SessionPlacement,
@@ -127,6 +132,43 @@ class ProjectionRefusal(Exception):
         super().__init__(sentence)
         self.code = code
         self.sentence = sentence
+
+
+#: The marker for "the row did not carry this key at all", which is a DIFFERENT answer from
+#: a key that is present and unreadable (``None``, ``0``, ``""``): absent means the peer says
+#: nothing about the field, so the value this client was built with survives; present means
+#: the peer made a claim, and an unreadable claim falls to that field's fail-safe.
+_ABSENT = object()
+
+#: The ``started`` a peer row carries when its own value could not be read: the epoch plus
+#: a second, NOT zero (QA round 2 / review round 2 m1, one slice over). ``started`` is
+#: rendered through ``as_record``, which spells an absent value as ``time.time()`` — "just
+#: now" — and ``0.0`` is falsy, so a garbled ``started`` used to make a peer of unknown age
+#: look BRAND NEW. A real epoch is a value the renderer cannot reinterpret, and it can only
+#: read as an old peer.
+STARTED_UNKNOWN_S = 1.0
+
+#: The ``age_s`` a peer row carries when its own value could not be read. The age is a
+#: LOWER BOUND on staleness, so the fallback is the largest number this protocol accepts
+#: (``PEER_NUMBER_CEILING``) rather than 0: a garbled age must not read as "seen seconds
+#: ago". Used as both the default and the cap, so every unreadable spelling — a string, a
+#: negative, a 401-digit integer, a missing key — lands on the same value.
+AGE_UNKNOWN_S = float(PEER_NUMBER_CEILING)
+
+
+def _peer_age(value: Any) -> float:
+    """``age_s`` from a peer: unreadable, AND A CLAIMED ZERO, both mean UNKNOWN.
+
+    WHY ZERO IS ON THE STALE SIDE (review round 3, NIT 3). Every unreadable spelling lands
+    on ``AGE_UNKNOWN_S``, which renders as "last seen a very long time ago" — except ``0``,
+    which parses and renders as "just now", the one reading that makes a stale peer look
+    fresh. ``0`` is exactly what the pre-validator spelling ``float(value or 0.0)`` wrote
+    for an age it did not know, so a mixed fleet can still send it, and a device cannot
+    truthfully send it: the value is the age of the peer's process, and 0.0 s means it
+    started within this microsecond. Fail safe on the ambiguous value.
+    """
+    age = peer_number(value, default=AGE_UNKNOWN_S, maximum=AGE_UNKNOWN_S)
+    return AGE_UNKNOWN_S if age <= 0 else age
 
 
 # ---------------------------------------------------------------------------
@@ -232,15 +274,26 @@ class PeerRow:
             conversation_name=str(data.get("conversation_name") or ""),
             cwd=str(data.get("cwd") or ""),
             model_label=str(data.get("model_label") or ""),
-            pid=int(data.get("pid") or 0),
+            # EVERY NUMBER HERE IS THE PEER'S CLAIM (QA round 2, one slice over:
+            # ``pid: "abc"`` raised ``ValueError`` into this reader, so one listed peer
+            # broke the listing for all of them, and ``pid: 10**400`` was ACCEPTED as a
+            # pid). ``peer_number``/``peer_int`` are the mesh's one validator for that
+            # boundary — the same two helpers the credentials slice reads its frames with.
+            #
+            # THE FALLBACK DIRECTION IS THE POINT: a pid that could not be read becomes 0
+            # ("no pid this device can dial"), never a value that looks live; an ``age_s``
+            # becomes the stalest number this protocol can carry, never a fresh-looking 0;
+            # a ``started`` becomes a real epoch rather than 0 (which the record facade
+            # turns into "just now").
+            pid=peer_whole_int(data.get("pid"), default=0),
             kind=str(data.get("kind") or "daemon"),
             state=str(data.get("state") or ""),
             busy=_bool("busy"),
             pending=normalise_pending(data.get("pending")),
             detached=_bool("detached"),
             capabilities=tuple(str(item) for item in (data.get("capabilities") or ())),
-            started=float(data.get("started") or 0.0),
-            age_s=float(data.get("age_s") or 0.0),
+            started=peer_number(data.get("started"), default=STARTED_UNKNOWN_S),
+            age_s=_peer_age(data.get("age_s")),
             reachable=bool(data.get("reachable", True)),
             placement=SessionPlacement.from_json(data.get("placement")),
             origin=dict(data["origin"]) if isinstance(data.get("origin"), dict) else {},
@@ -356,7 +409,7 @@ class RelayPeerCatalog:
                 network_id=str(block.get("network_id") or ""),
                 reachable=bool(block.get("reachable")),
                 reason=str(block.get("reason") or ""),
-                age_s=float(block.get("age_s") or 0.0),
+                age_s=_peer_age(block.get("age_s")),
             )
             for device_id, block in peers.items()
             if isinstance(block, dict)
@@ -901,14 +954,32 @@ def _refresh_facts(facts: RemoteSessionFacts, row: dict[str, Any]) -> RemoteSess
     not carry has to survive the refresh, and a listed copy is a field silently
     dropped the next time one is added.
     """
+    # A KEY THAT IS PRESENT IS THE PEER'S CLAIM, whatever it holds; a key that is ABSENT is
+    # not a claim at all. The old ``row.get("pid") or facts.pid or 0`` collapsed the two, so
+    # a row that explicitly said ``pid: 0`` or ``pid: null`` (this session has no pid here)
+    # resurrected the pid from the previous refresh — a value that was true minutes ago and
+    # may look live now.
+    row_pid = row.get("pid", _ABSENT)
+    row_protocol = row.get("protocol", _ABSENT)
     return replace(
         facts,
-        pid=int(row.get("pid") or facts.pid or 0),
+        # ABSENT IS NOT UNREADABLE (the distinction the old ``or`` chain lost): a row that
+        # does not restate ``pid`` leaves the value this client was built with, while a row
+        # that restates it with something that cannot be read CLEARS it — an unreadable pid
+        # must not leave the previous one looking live, and a 401-digit one must not become
+        # a pid at all.
+        pid=peer_whole_int(facts.pid if row_pid is _ABSENT else row_pid, default=0),
         conversation_name=str(row.get("conversation_name") or facts.conversation_name),
         cwd=str(row.get("cwd") or facts.cwd),
         model_label=str(row.get("model_label") or facts.model_label),
         capabilities=tuple(str(item) for item in (row.get("capabilities") or facts.capabilities)),
-        protocol=int(row.get("protocol") or facts.protocol or 0),
+        # Same rule, and here the direction matters for a CHOICE: the attach path refuses a
+        # peer below protocol 2, so an unreadable revision falls to 0 — the oldest thing
+        # this protocol can be — rather than to whatever number would select the newest
+        # path.
+        protocol=peer_whole_int(
+            facts.protocol if row_protocol is _ABSENT else row_protocol, default=0
+        ),
         state=str(row.get("state") or facts.state),
         reachable=True,
     )

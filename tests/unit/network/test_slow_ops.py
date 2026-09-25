@@ -300,12 +300,14 @@ def _stub_link() -> Any:
 def test_the_shipped_slices_route_their_ops_through_the_hook(root: Path) -> None:
     """The hook carries every slice's ops, with the SLICE's own deadline.
 
-    WHAT CHANGED WITH SLICE M: the mobility ops no longer answer the by-name
-    refusal, because that slice has landed. ``net_broker`` still does — the
-    credentials slice is a separate piece of work — so it is the one that keeps this
-    test's original assertion, and the other three are asserted to be SERVED (the
-    refusal that names only a document is gone). The deadlines are the mechanism
-    P0 pinned, so they are asserted for all four.
+    WHAT CHANGED, TWICE: slice M landed the mobility ops and the credentials slice
+    landed ``net_broker``, so none of the four is the crude by-name refusal any more.
+    ``net_broker`` still ANSWERS that refusal on this root — the broker is built per
+    request and decides from the document on disk, and this device owns nothing here —
+    which is why it is the one that keeps the original assertion, while the mobility
+    three answer AS THEIR SLICE (a frame with no conversation id is their own
+    ``bad_request``). The deadlines are the mechanism P0 pinned, so they are asserted
+    for all four.
     """
     server = _unstarted(root)
     try:
@@ -422,32 +424,38 @@ def test_a_slice_that_fails_to_install_is_reported_not_fatal(
 
 
 def test_an_unregistered_local_slice_verb_says_which_slice_owns_it(root: Path) -> None:
-    """A verb no slice has claimed refuses by NAME, with the document that owns it.
+    """A verb no slice has claimed refuses by NAME, with the owner it declares.
 
-    THE CREDENTIALS VERBS ARE THE REMAINING CASE: slice M registers ``session_move``,
-    ``session_sync`` and ``session_lifecycle`` at construction, so those dispatch to
-    their handlers (asserted below), while the broker's leg-1 verbs still have no
-    slice behind them.
+    WHY THE VERB KEEPS CHANGING, and what has not: this test was written about
+    ``net_forward_session``, then about the credential verbs, and both are SERVED now —
+    slice M registers the three session verbs, the credentials slice registers its three
+    leg-1 verbs, and the stream plane its two. ``stream_open`` is what is left, and its
+    answer comes from the CONTROL LOOP rather than from a slice, so it names
+    ``network/control.py`` rather than a design document. The invariant the test has
+    always carried is the one that survives: the operator is told WHO owns the verb and
+    that nothing changed — never the developer language (``unknown local op 'x'``) the
+    guide agent found.
     """
     server = _unstarted(root)
     try:
-        for op in ("credential_grant", "credential_report", "credential_placement"):
-            reply = server.control_dispatch(op, {"req": 3})
-            assert reply["code"] == "not_implemented", reply
-            assert ".md" in reply["message"] and "owns that slice" in reply["message"]
+        reply = server.control_dispatch("stream_open", {"req": 3})
+        assert reply["code"] == "not_implemented", reply
+        assert "owns that slice" in reply["message"]
+        assert "unknown local op" not in reply["message"], "developer language is back"
         # A REGISTERED verb never takes that path: it is served, and its own handler
         # decides (here: that it was given no conversation id).
-        reply = server.control_dispatch("session_sync", {"req": 4})
-        assert reply["op"] == "ack", reply
-        assert reply["detail"]["ok"] is False
-        assert reply["detail"]["code"] == "bad_request"
+        served = server.control_dispatch("session_sync", {"req": 4})
+        assert served["op"] == "ack", served
+        assert served["detail"]["ok"] is False
+        assert served["detail"]["code"] == "bad_request"
+        # AND A NAME NOBODY DECLARED STILL GETS AN OPERATOR SENTENCE. The two shapes
+        # are deliberately different: "owned by someone else, later" against "no such
+        # action", and collapsing them would tell an operator with a typo to wait.
+        unknown = server.control_dispatch("not_a_real_op", {"req": 5})
+        assert unknown["code"] == "unknown_local_op", unknown
+        assert "lop network doctor" in unknown["message"]
     finally:
         server.stop()
-
-
-# ---------------------------------------------------------------------------
-# The frozen seams
-# ---------------------------------------------------------------------------
 
 
 def test_the_seams_are_served_by_the_slice_and_refuse_without_a_relay(root: Path) -> None:

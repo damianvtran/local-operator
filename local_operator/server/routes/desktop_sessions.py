@@ -26,6 +26,7 @@ from starlette.background import BackgroundTask
 
 from local_operator.harness.types import ModelSpec
 from local_operator.media import SUPPORTED_IMAGE_MIME_TYPES
+from local_operator.network.projection import ProjectionRefusal
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_mesh import MESH_ID_PATTERN
 from local_operator.server.models.desktop_sessions import (
@@ -67,6 +68,8 @@ from local_operator.server.utils.desktop_sessions import (
     DesktopSessionBridge,
     DesktopSessions,
     LegacySubscriberDuringMove,
+    PeerAttachmentUnavailable,
+    PeerSessionUnreachable,
     SessionDeletionRefused,
     SubagentChildUnavailable,
     move_session,
@@ -1387,6 +1390,26 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         # the reader distinguishes nothing from it, but it is retryable, and a
         # client that cannot see WHY would have to guess whether to re-probe.
         raise HTTPException(404, {"code": error.code, "message": str(error)}) from None
+    except PeerSessionUnreachable as error:
+        # A PEER HOLDS THIS CONVERSATION AND THIS DEVICE CANNOT REACH THAT DEVICE
+        # (mesh slice DB2). 409 with the family's own code, which is the answer
+        # this id already had while the remote viewer was unwired — the
+        # conversation EXISTS and the row is on the user's screen, so 404 would be
+        # a lie about their own work, and a 5xx would be a lie about the machine.
+        #
+        # THE SENTENCE IS THE TUI'S, CHARACTER FOR CHARACTER, because it is the
+        # same sentence: ``DesktopSessions``'s refusal is built from
+        # ``remote_open.unreachable_peer_sentence``, which is what the TUI's own
+        # pick refuses with, so the two surfaces cannot describe one situation two
+        # ways (``mesh-ui.md`` §1.3's degraded states — the finding that produced
+        # the shared composer).
+        raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
+    except PeerAttachmentUnavailable as error:
+        # The bytes are on the device that holds the conversation, and this
+        # device's content-addressed store is what the route reads. 409 rather
+        # than 404 for the same reason as above: the image exists, and the reader
+        # is told where it is instead of being told it does not.
+        raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
     except SessionStoreUnavailable as error:
         # The catalogue refused to answer, most often because the store's
         # ``sessions/`` directory could not be walked at all (descriptor
@@ -1561,6 +1584,24 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
             },
             headers={"Retry-After": str(max(1, RUNTIME_BUSY_RETRY_AFTER_MS // 1000))},
         ) from None
+    except ProjectionRefusal as error:
+        # THE MESH'S OWN REFUSAL, which carries a machine ``code`` AND the sentence
+        # the device that refused composed (``network.projection``). Unmapped it was
+        # a 500 with no sentence at all -- measured on this slice's own rig with a
+        # peer whose runtime would not start: the user's send answered "Internal
+        # Server Error" and nothing else.
+        #
+        # 503 RATHER THAN 409, because every code it carries is a RETRY condition
+        # (``session.relay_unavailable``: this device's relay is not answering;
+        # ``session.peer_refused``: the peer would not start the session). The 409
+        # ``session_is_remote`` above is the UNOPENABLE case, where retrying changes
+        # nothing; a link that is down is the opposite of that.
+        #
+        # THE SENTENCE TRAVELS VERBATIM, the rule the rest of this ladder follows:
+        # the party that can see which guard fired is the only one that can say what
+        # to do about it, and re-deriving words here is how two surfaces come to
+        # disagree about one machine's state.
+        raise HTTPException(503, {"code": error.code, "message": error.sentence}) from None
     except ConnectionError as error:
         # A cold session that cannot start a runtime reports WHY -- but only when
         # the reason arrives as an `ActionableConnectionError`, whose TYPE is
@@ -2071,14 +2112,28 @@ async def snapshot(session_id: str, request: Request):
     # (``READ_ATTACH_BUDGET_S``) and the cold facade serves it with a
     # ``cold_reason``; the previous envelope answered 503 "Session owner is
     # unavailable" after ~17 s for a runtime whose loop was merely busy.
+    # A PEER'S CONVERSATION IS OPENED BY THIS READ NOW (mesh slice DB2). The row a
+    # click lands on is resolved inside the pool
+    # (``DesktopSessions.session``): a local id answers from its own directory, and
+    # an id ANOTHER DEVICE holds resolves to a bridge whose owner is that device,
+    # so the snapshot serves the peer's transcript over the mesh and every control
+    # act (a prompt, a steer, stop, a model switch) executes on the PEER's runtime.
     #
-    # A PEER'S CONVERSATION IS ANSWERED IN WORDS, NOT AS UNKNOWN (see
-    # :func:`_remote_open_refusal`): this is the read a click on a row reaches
-    # first, and until the remote viewer is wired to the desktop's bridge the row
-    # a user can SEE must not answer "Requested session … not found" about their
-    # own conversation. Deferred deliberately — the viewer is its own slice, and a
-    # half-wired one that answered 200 with nothing to drive would be worse.
-    await _remote_open_refusal(request, session_id)
+    # WHICH CASES STILL REFUSE, and why each one is a refusal rather than a fault:
+    #
+    # * an UNREACHABLE peer — 409 ``session_is_remote``, carrying
+    #   ``remote_open.unreachable_peer_sentence``: the SAME sentence the TUI refuses
+    #   the same state with. The row is visible, so a 404 would be false about the
+    #   user's own conversation, and a viewer built for a device that cannot answer
+    #   can never bind;
+    # * a peer that is reachable but whose runtime will not serve this surface at
+    #   BIND TIME (an older build without the desktop watch capability, a relay that
+    #   stopped between the row's listing and the dial) — the attach client's own
+    #   vetted sentence, through the ladder's ``ConnectionError`` arm, because a
+    #   runtime that did not answer is a retry rather than a refusal;
+    # * a genuinely unknown id — the shared 404, unchanged, and still answered by
+    #   the same lookup (one ``is_dir`` plus the peer cache, and no socket at all on
+    #   a machine in no network).
     async with errors(request), host(request).session(session_id, read=True) as bridge:
         return reply(await bridge.snapshot())
 

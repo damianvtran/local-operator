@@ -756,7 +756,11 @@ def _staging_content_digest(server: "RelayServer", session_id: str, staging: Pat
     """
     from local_operator.network import sync as sync_mod
 
-    return sync_mod.copy_content_digest(staging, session_id, Path(server.root))
+    # THE BLOB DIRECTORY, not the config root: ``_member_stamps`` reads
+    # ``<dir>/<ref>.bin``, so passing the root silently dropped every attachment from the
+    # comparison — a copy whose blobs were all zeroed would have matched. Both ends pass
+    # the same directory now, which is what makes the comparison mean what it says.
+    return sync_mod.copy_content_digest(staging, session_id, Path(server.root) / "attachments")
 
 
 def _verify_staging(
@@ -1092,7 +1096,17 @@ def _destination_move(
             ),
             "",
         )
-    promoted = _promote(server, staging, target_id)
+    try:
+        promoted = _promote(server, staging, target_id)
+    finally:
+        # THE PROMOTE IS THE POINT OF NO RETURN. However it exits — including a raise
+        # between the rename and the cleanup below — the id is on this device now, so an
+        # entry still saying "being received" would refuse every engage until this relay
+        # restarted (review round 2, the ``p1c`` probe). Clearing it here cannot lose a
+        # move: the entry is only written for a deleting move, whose directory is either
+        # present (settled) or absent (and then the helper returns without touching it).
+        if not keep:
+            settle_promoted_handoff(server.root, session_id)
     if not promoted:
         clear_handoff_entry(server.root, session_id)
         return (
@@ -1288,6 +1302,70 @@ def _roll_back_destination(server: "RelayServer", session_id: str, staging: Path
 # ---------------------------------------------------------------------------
 
 
+def settle_promoted_handoff(root: Path, session_id: str) -> bool:
+    """Clear a destination-side handoff entry whose session has ALREADY ARRIVED.
+
+    THE ONE FACT THE INSTANCE RULE CANNOT SEE, and the reason the ``p1c`` probe still
+    reproduced as written (review round 2, data-integrity items). An entry left by a
+    relay that is still running is deliberately skipped by every recovery path — a live
+    relay may be driving a handoff right now — but a destination entry whose session
+    directory EXISTS with a transcript is not a handoff in progress: it is a handoff that
+    finished. It can only be left in that state by a promote that landed and then failed
+    (or died) before its cleanup, which is exactly the window between ``os.replace`` and
+    ``clear_handoff_entry``. Before this, the conversation was present and usable on this
+    device and every engage was refused with "This conversation is being received from
+    device-a; it will be available when the move finishes" until the relay itself
+    restarted.
+
+    WHY THIS CANNOT ROLL A LIVE MOVE BACK: the promote happens only after the owner has
+    answered ``committed``, and until it happens there is no session directory to find.
+    The phase is required to be ``handing-off`` as well, so a ``prepared`` entry (the state
+    a destination holds while its copy is still being made) is never touched.
+
+    AND THE BYTES STILL STAGED FOR THIS ID SAY IT HAS NOT ARRIVED (review round 4). A
+    session directory plus a transcript is NOT sufficient evidence: ``session_factory``'s
+    opener calls ``recover_stale_handoff`` and then the handoff guard, so a recovery that
+    settled the entry on that evidence alone disarmed the refusal it runs immediately
+    before — a destination entry whose verified copy is still in ``network/staging``
+    (the owner may already have deleted its own bytes, so that copy is the only one left)
+    was cleared instead of refused. ``_promote`` is ONE ``os.replace``, so a promote that
+    landed consumed this device's staging directory; a staging directory that is still
+    here is a handoff that has not finished, whatever else is on disk.
+
+    ``ready.json`` goes with it: the marker is the move's own bookkeeping, and a promote
+    that died before deleting it would otherwise leave it inside a conversation the user
+    opens (``_reconcile_destination`` removes it for the same reason).
+    """
+    from local_operator.session.placement import clear_handoff_entry, handoff_in_flight
+
+    try:
+        entry = handoff_in_flight(root, session_id)
+    except Exception:  # noqa: BLE001 — an unreadable journal is the guard's refusal
+        return False
+    if not entry or str(entry.get("role") or "source") != "destination":
+        return False
+    if str(entry.get("phase") or "") != "handing-off":
+        return False
+    target = Path(root) / "sessions" / session_id
+    if not (target / "transcript.jsonl").is_file():
+        return False
+    from local_operator.network import sync as sync_mod
+
+    # STAGED BYTES OUTRANK A PRESENT SESSION DIRECTORY (see the docstring's last
+    # paragraph). ``staging_dir``/``NETWORK_DIRNAME`` are the sync plane's own names, so
+    # they are read from it rather than re-spelled here — a second spelling of the store
+    # layout is how this check would drift away from the thing it is checking.
+    if sync_mod.staging_dir(Path(root), session_id).exists():
+        return False
+    (target / "ready.json").unlink(missing_ok=True)
+    clear_handoff_entry(root, session_id)
+    logger.info(
+        "mobility: %s had already arrived on this device; cleared the finished handoff entry",
+        session_id,
+    )
+    return True
+
+
 def _source_refused(
     server: "RelayServer", link: "PeerLink", frame: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1441,7 +1519,12 @@ def _source_prepare(
         # makes the result safe is that the copy is a FORK by construction: the
         # destination stamps ``origin: fork`` and writes ``fork-boundary.json``, so
         # an off-by-one row boundary is a divergence point, not a corruption (§7.4).
-        manifest = sync_mod.build_manifest(server.root, session_id, have=frame.get("have") or {})
+        manifest = sync_mod.build_manifest(
+            server.root,
+            session_id,
+            have=frame.get("have") or {},
+            attachments_dir=Path(server.root) / "attachments",
+        )
         _audit(server, AUDIT_PREPARE, session_id, link.device_id, mode="keep", keep=True)
         return {
             "result": "prepared",
@@ -1465,6 +1548,26 @@ def _source_prepare(
             "message": incomplete.message,
             "session_id": session_id,
         }
+    # THE EXPENSIVE PASS RUNS BEFORE THE CONVERSATION IS STOPPED (review round 2, MAJOR
+    # 2). Every member of the copy set is digested here — the one pass a move cannot avoid,
+    # because the commit compares digests derived from these bytes — and only then is the
+    # local runtime retired. Stopping first made a 1.9 GB scratchpad hold the session shut
+    # for the whole digest, and then for the copy as well; now the stop covers the copy
+    # plus a stat-level re-check, which is the only part that has to be quiescent.
+    # THE MOVE'S TAIL RULE, ASKED FOR RATHER THAN ASSERTED. Three ``whole_transcript=True``
+    # literals used to sit in this file, and NONE of them changed what the destination
+    # receives — that is decided by the wire purpose in ``sync._plan`` (review round 3,
+    # MINOR 2: reverting all three here passes every torn-tail cell; reverting the
+    # predicate below fails them). All four sites now derive the answer from
+    # ``sync.whole_transcript_for``, so "fixing the wrong one" is no longer possible: the
+    # source's own prepare-vs-commit comparison and the plan a destination reads are keyed
+    # on the same predicate.
+    stamps = sync_mod.member_stamps(
+        server.root,
+        session_id,
+        attachments_dir=Path(server.root) / "attachments",
+        whole_transcript=sync_mod.whole_transcript_for(sync_mod.COPY_PURPOSE_MOVE),
+    )
     outcome = _retire_local_runtime(server.root, session_id)
     if outcome["result"] != "retired" and outcome["result"] != "cold":
         return {
@@ -1473,8 +1576,34 @@ def _source_prepare(
             "message": outcome["sentence"] or "this session is busy, so nothing was moved",
             "session_id": session_id,
         }
+    if not sync_mod.stamps_valid(
+        Path(server.root) / "sessions" / session_id,
+        session_id,
+        Path(server.root) / "attachments",
+        stamps,
+    ):
+        # A TURN LANDED BETWEEN THE DIGEST AND THE RETIRE. Nothing has been journaled and
+        # nothing has been deleted, so the honest answer is "ask again": the retry digests
+        # the session as it now is. Re-digesting here instead would double the stopped
+        # window for a race the caller can simply repeat, and ``--wait`` already re-probes.
+        return {
+            "result": "refused",
+            "code": "busy",
+            "message": (
+                "the conversation changed while this device was preparing to hand it over, "
+                "so nothing was changed; try again"
+            ),
+            "session_id": session_id,
+        }
     lease_epoch = new_lease_epoch()
-    manifest = sync_mod.build_manifest(server.root, session_id, have=frame.get("have") or {})
+    manifest = sync_mod.build_manifest(
+        server.root,
+        session_id,
+        have=frame.get("have") or {},
+        attachments_dir=Path(server.root) / "attachments",
+        whole_transcript=sync_mod.whole_transcript_for(sync_mod.COPY_PURPOSE_MOVE),
+        stamps=stamps,
+    )
     write_handoff_entry(
         server.root,
         session_id,
@@ -1494,7 +1623,9 @@ def _source_prepare(
             # computed from ITS bytes over the same function, and the two are equal
             # only if the copy is complete (review round 1, M-2).
             "content_digest": sync_mod.copy_content_digest(
-                Path(server.root) / "sessions" / session_id, session_id, Path(server.root)
+                Path(server.root) / "sessions" / session_id,
+                session_id,
+                Path(server.root) / "attachments",
             ),
             # WHICH RELAY WROTE THIS (see ``reconcile``): without it an entry is
             # indistinguishable from one a crashed process left, and the reconcile
@@ -1566,7 +1697,14 @@ def _source_commit(
             "message": "that handoff belongs to another device, so nothing was changed",
             "session_id": session_id,
         }
-    current = sync_mod.plan_id(server.root, session_id)
+    # The SAME predicate the plan used, so a commit cannot disagree with the plan it is
+    # completing about whether the transcript travelled whole.
+    current = sync_mod.plan_id(
+        server.root,
+        session_id,
+        attachments_dir=Path(server.root) / "attachments",
+        whole_transcript=sync_mod.whole_transcript_for(sync_mod.COPY_PURPOSE_MOVE),
+    )
     directory = Path(server.root) / "sessions" / session_id
     # WHAT THE DESTINATION SAYS IT HOLDS, and what this device's own bytes hash to
     # over the SAME function. Both are needed: ``plan_id`` is the SOURCE-state
@@ -1574,7 +1712,9 @@ def _source_commit(
     # derived from a directory's bytes on each end and is therefore the only value
     # that can prove the copy is complete (review round 1, M-2).
     reported = str(frame.get("content_digest") or "")
-    expected = sync_mod.copy_content_digest(directory, session_id, Path(server.root))
+    expected = sync_mod.copy_content_digest(
+        directory, session_id, Path(server.root) / "attachments"
+    )
     refusal_code = ""
     refusal_cause = ""
     refusal_message = ""

@@ -1098,6 +1098,60 @@ def _accepts_kw(fn: Any, name: str) -> bool:
 _KEYWORD_SUPPORT: "weakref.WeakKeyDictionary[Any, dict[str, bool]]" = weakref.WeakKeyDictionary()
 
 
+@dataclass(frozen=True)
+class _ConnectionAuthority:
+    """The two connection FACTS a dispatch may need, without the connection.
+
+    ``RuntimeServer._dispatch`` deliberately has no ``conn``: it must not be able
+    to read or write per-connection state, which is why every per-connection op
+    (``event_mute``, ``watch_job``, ``operator_challenge``) is handled by the
+    reader loop that owns the socket instead. Some ops do need a connection's
+    AUTHORITY, though — the resolved capabilities and the caller's locality decide
+    whether a verb may run at all — so those two facts travel as VALUES, and a
+    dispatch can weigh a verb while remaining unable to touch a writer, a registry
+    entry or a mute flag.
+
+    They travel TOGETHER on purpose. Forwarding the locality and dropping the
+    capabilities is precisely how round 1's V2 survived its first fix: the
+    ``slash`` op reached the owner's dispatcher with no connection facts at all,
+    so a ``drive`` member's ``/archive`` was weighed as a local request and ran.
+    """
+
+    locality: ClientLocality = "local"
+    capabilities: frozenset[str] = frozenset()
+
+
+#: What a dispatch under no connection at all is treated as: the pre-existing
+#: default of every locality gate in this module, and the reading every direct
+#: call site had before the connection's own facts were passed down.
+_LOCAL_AUTHORITY = _ConnectionAuthority()
+
+
+def _authority_kwargs(method: Any, authority: _ConnectionAuthority) -> dict[str, Any]:
+    """``locality``/``capabilities`` for a handle method that can accept them.
+
+    ONE helper rather than a probe at each call site, because the two views of a
+    connection's authority have to travel TOGETHER: a dispatch that forwarded
+    ``locality`` and dropped ``capabilities`` leaves the owner's own dispatch
+    unable to weigh a verb it is about to RUN. That is the exact shape of round
+    1's V2 — the resolved set never reached the verb — and it recurred one
+    carrier over, at the un-imaged half of the ``slash`` op, where a
+    ``drive`` member's ``/archive`` was executed by the owner's own dispatcher
+    under a default ``locality="local"``.
+
+    Both keywords stay OPTIONAL in the protocol for the reason ``_accepts_kw``
+    documents: a handle is an injected collaborator, so a double that has not
+    been updated is called the narrow way it always was rather than forced into
+    a lockstep change.
+    """
+    kwargs: dict[str, Any] = {}
+    if _accepts_kw(method, "locality"):
+        kwargs["locality"] = authority.locality
+    if _accepts_kw(method, "capabilities"):
+        kwargs["capabilities"] = authority.capabilities
+    return kwargs
+
+
 #: Rows one ``job_trajectory`` reply may carry. The whole retained window is
 #: 500 events with no size bound per event, which is what overflows the frame
 #: limit in the first place, so the viewer pages rather than asking for all of
@@ -3469,12 +3523,27 @@ class RuntimeServer:
         # upgrade would demote the phone bridge to a follower.
         raw_kind = frame.get("client", "daemon")
         kind: ClientKind = "attach" if raw_kind == "attach" else "daemon"
-        # Absent means LOCAL, matching every client that exists today: the
-        # listener is loopback-only, so anything that dialed is on this
-        # machine. A relay forwarding a remote device's commands is the one
-        # caller that must say ``"remote"``, and an old client that never
-        # heard of the field keeps the behaviour it always had.
-        locality: ClientLocality = "remote" if frame.get("locality") == "remote" else "local"
+        # ONLY THE EXACT EXPECTED VALUE TAKES THE LOCAL LANE (round 4, V4-2).
+        # Absent is the pre-field default every client that exists today relies
+        # on — the listener is loopback-only, so anything that dialed is on this
+        # machine, and an old client that never heard of the field keeps the
+        # behaviour it always had. The string ``"local"`` is what this repo's own
+        # desktop router sends. Anything ELSE a client bothered to send — a typo,
+        # ``""``, ``0``, ``"LOCAL"``, ``"loopback"`` — is read as RELAYED, because
+        # ``local`` is now the WIDEST lane in the model (it types into the owner's
+        # terminal): the old reading was ``"remote" if … else "local"``, which
+        # handed every unrecognised spelling that lane, measured with a relayed
+        # ``/move`` actually running. That is the fail-open shape rounds 1-3 closed
+        # three times one layer down, so it is closed at the layer that PRODUCES the
+        # value too. Nothing legitimate sends an unrecognised one: ``locality`` is
+        # written only by a dialer (``mobile/daemon.py`` and ``network/dial.py``
+        # hardcode ``"remote"``, ``dial.py``'s ``AUTH_FIELDS`` excludes it from a
+        # caller-supplied ``auth`` dict), and the peer-link authorizer refuses a
+        # frame claiming ``local`` (``network/authorizer.py``).
+        raw_locality = frame.get("locality")
+        locality: ClientLocality = (
+            "local" if raw_locality is None or raw_locality == "local" else "remote"
+        )
         # §3.3: the capabilities the dialling relay RESOLVED for the member it is
         # relaying for. Absent (every client that exists today, plus every local
         # dial) is the empty set, which leaves each gate below at the flat refusal
@@ -5327,9 +5396,14 @@ class RuntimeServer:
                     # The stream sink is built for the one op that uses it, so no
                     # other dispatch pays for a closure capture. See ``_dispatch``
                     # for why the dispatcher is handed a sink rather than ``conn``.
-                    outcome = await self._dispatch(
+                    # It travels WITH the connection's authority through the same
+                    # probe: a fold that kept only one of the two would either send
+                    # a relayed frame unweighted (round 1's V2) or drop the aside
+                    # stream for every caller.
+                    outcome = await self._dispatch_with_authority(
                         op,
                         frame,
+                        conn,
                         deliver=(
                             self._aside_delta_sink(conn, req) if op == "complete_aside" else None
                         ),
@@ -5734,14 +5808,49 @@ class RuntimeServer:
             logger.debug("admitted-command probe failed", exc_info=True)
             return False
 
+    async def _dispatch_with_authority(
+        self,
+        op: str,
+        frame: dict[str, Any],
+        conn: _ClientConn,
+        *,
+        deliver: Callable[[str], None] | None = None,
+    ) -> str | AckDetail:
+        """``_dispatch`` with THIS connection's authority, for a seam that takes it.
+
+        The probe rather than a plain call for the reason ``_accepts_kw`` exists:
+        test rigs replace ``_dispatch`` outright to raise a chosen exception and
+        exercise the error-frame machinery (``test_server_registry_error_count``),
+        and those doubles take the two arguments the method took before a
+        connection's authority had to travel with the frame. A double is an
+        injected collaborator, not a caller to be migrated — the fallback below is
+        the identical call every one of them has always received.
+
+        ``deliver`` rides the same probe, and for the same reason: it is the one
+        ``complete_aside`` stream sink, built by the CALLER so the target
+        connection and the request id stay the caller's facts. A double that
+        predates it must keep being called with the arguments it takes.
+        """
+        kwargs: dict[str, Any] = {}
+        if _accepts_kw(self._dispatch, "authority"):
+            kwargs["authority"] = _ConnectionAuthority(conn.locality, conn.capabilities)
+        if deliver is not None and _accepts_kw(self._dispatch, "deliver"):
+            kwargs["deliver"] = deliver
+        return await self._dispatch(op, frame, **kwargs)
+
     async def _dispatch(
         self,
         op: str,
         frame: dict[str, Any],
+        authority: _ConnectionAuthority = _LOCAL_AUTHORITY,
         *,
         deliver: Callable[[str], None] | None = None,
     ) -> str | AckDetail:
         """Run one control op and return its receipt.
+
+        ``authority`` is the CONNECTION's, carried into the payload seam so a gate
+        can weigh the caller rather than assume the loopback reading (round 1's V2
+        survived its first fix by exactly that assumption).
 
         ``deliver`` is the frame sink for the ONE op that answers with a STREAM
         rather than a single receipt (``complete_aside``). It exists so the
@@ -5868,17 +5977,38 @@ class RuntimeServer:
                 if not callable(slash_images):
                     raise ValueError("this owner cannot route slash-command images")
                 typed_slash_images = cast(
-                    Callable[[str, str, list[dict[str, str]]], Awaitable[str]],
+                    Callable[..., Awaitable[str]],
                     slash_images,
                 )
                 return await typed_slash_images(
                     str(frame.get("command", "")),
                     str(frame.get("args", "")),
                     images,
+                    **_authority_kwargs(slash_images, authority),
                 )
-            # Old daemon/reduced handles predate attachment-bearing slash ops;
-            # preserve their two-argument call shape when no pixels ride the frame.
-            return await h.slash(str(frame.get("command", "")), str(frame.get("args", "")))
+            # THE UN-IMAGED HALF CARRIES THE SAME AUTHORITY, and leaving it out is
+            # how round 1's V2 survived the first fix: this branch used to call the
+            # handle with no connection facts at all, and a TUI host's ``slash``
+            # runs the line in the OWNER's terminal (``_run_slash_command``) —
+            # where ``/archive`` writes the owner's own archive index. Measured
+            # over two real relays on this head before the forward existed: a
+            # ``drive`` member's ``{"op": "slash", "command": "archive"}`` with
+            # one image attached archived the owner's session and wrote the
+            # owner's index. The capability can only be weighed where the verb is
+            # chosen, so it has to arrive.
+            slash = getattr(h, "slash", None)
+            if not callable(slash):
+                raise ValueError("this owner cannot route slash commands")
+            # Old daemon/reduced handles predate attachment-bearing slash ops AND
+            # these two keywords; both are preserved for the call shape they have
+            # always had, and ``_authority_kwargs`` is what makes the second half
+            # of that true rather than assumed.
+            typed_slash = cast(Callable[..., Awaitable[str]], slash)
+            return await typed_slash(
+                str(frame.get("command", "")),
+                str(frame.get("args", "")),
+                **_authority_kwargs(slash, authority),
+            )
         if op == "new_conversation":
             return await h.new_conversation()
         if op == "resume_session":
@@ -6085,6 +6215,21 @@ class RuntimeServer:
                 # known — the same reason ``consumers`` is (design round 2 D10,
                 # UX round 2 U9).
                 kwargs["may_loosen"] = may_loosen
+            if _accepts_kw(run, "capabilities"):
+                # THE AUTHORITY THE OWNER-SIDE DISPATCH NEEDS TO SEE. Some
+                # routed commands have an effect the mesh vocabulary reserves
+                # for a capability ``slash`` does not imply — ``/archive``,
+                # ``/unarchive`` and ``/delete`` write this owner's archive
+                # index and session store, which is ``delete``'s lane
+                # (``network.types.OP_CAPABILITY["net_session_lifecycle"]``).
+                # Which VERB was typed is only known where the verb is chosen,
+                # so the resolved set has to travel with the call; without it a
+                # member the lifecycle lane refuses could archive a session here
+                # through the slash seam alone (round 1, V2). Same optional-probe
+                # stance as the keywords above: a handle that has not been
+                # updated is not forced into a lockstep change, and one that
+                # cannot accept the set is left at the flat behaviour it had.
+                kwargs["capabilities"] = capabilities
 
             result = run(*args, **kwargs)
             if inspect.isawaitable(result):
