@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import gzip
 import json
 import stat
@@ -11,6 +12,7 @@ from typing import Any
 import pytest
 
 from local_operator.network import audit as audit_mod
+from local_operator.network import relay as relay_mod
 from local_operator.network.audit import AuditEvent, AuditLog
 from local_operator.network.store import audit_path
 
@@ -120,6 +122,73 @@ def test_the_taxonomy_is_closed_and_self_consistent() -> None:
     for kind in audit_mod.EVENT_KINDS:
         assert kind == kind.strip().lower()
     assert "handshake_refused" in audit_mod.EVENT_KINDS
+
+
+def test_a_stream_close_renders_a_machine_cause_from_the_enum(root: Path) -> None:
+    """Every close word in the table renders as a COUNTABLE cause, not ``internal``.
+
+    ``_render`` substitutes ``internal`` for anything outside ``CAUSES``, so the nine
+    words the stream-close call sites passed made every ``session_stream_closed`` row
+    read as an internal fault on a working mesh — and the enum had zero literal
+    outliers before that (agent review round 1, MAJOR 1). Written through the real
+    writer rather than asserted on the table, because the substitution IS the writer.
+    """
+    log = AuditLog(root)
+    for word in relay_mod.STREAM_CLOSE_MACHINE_CAUSES:
+        log.record(
+            AuditEvent(
+                event="session_stream_closed",
+                network_id=NETWORK,
+                cause=relay_mod.stream_close_machine_cause(word),
+                detail={"stream": "s_1", "peer": "d_x", "role": "owner", "cause": word},
+            )
+        )
+    log.close()
+    rows = _lines(root)
+    assert len(rows) == len(relay_mod.STREAM_CLOSE_MACHINE_CAUSES)
+    for row, word in zip(rows, relay_mod.STREAM_CLOSE_MACHINE_CAUSES):
+        assert row["cause"] == relay_mod.STREAM_CLOSE_MACHINE_CAUSES[word], row
+        assert row["cause"] in audit_mod.CAUSES, row
+        assert row["cause"] not in ("", "internal"), row
+        assert row["detail"]["cause"] == word, row
+    # An unmapped word is the one case that DOES read as internal, and that is the whole
+    # reason the table has to be complete: assert the fallback so it stays a deliberate
+    # last resort rather than something a reader might mistake for a mapped value.
+    assert relay_mod.stream_close_machine_cause("invented-by-a-future-call-site") == "internal"
+
+
+def test_every_stream_close_word_a_call_site_passes_is_mapped() -> None:
+    """The table is CLOSED against the call sites, read from relay.py's own source.
+
+    The failure this replaces was a call site introducing a word nobody registered, so
+    asserting over the table's own keys would assert nothing. An AST walk over the two
+    close paths collects the literal words and the enum's values are read from the
+    audit module, which is the pair that has to agree.
+    """
+    source = (Path(relay_mod.__file__)).read_text(encoding="utf-8")
+    passed: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+        if name not in {"_close_stream", "_report_stream_closed"}:
+            continue
+        for keyword in node.keywords:
+            if keyword.arg == "cause" and isinstance(keyword.value, ast.Constant):
+                if isinstance(keyword.value.value, str) and keyword.value.value:
+                    passed.add(keyword.value.value)
+        # ``_report_stream_closed(stream, cause)`` takes it positionally.
+        if name == "_report_stream_closed" and len(node.args) > 1:
+            second = node.args[1]
+            if isinstance(second, ast.Constant) and isinstance(second.value, str) and second.value:
+                passed.add(second.value)
+    # Non-empty, or the scan found nothing and would pass vacuously.
+    assert passed, "no stream-close words found in relay.py: the scan lost its targets"
+    unmapped = sorted(word for word in passed if word not in relay_mod.STREAM_CLOSE_MACHINE_CAUSES)
+    assert not unmapped, f"close words with no machine cause: {unmapped}"
+    for word, machine in relay_mod.STREAM_CLOSE_MACHINE_CAUSES.items():
+        assert machine in audit_mod.CAUSES, (word, machine)
 
 
 def test_unknown_detail_keys_are_dropped_and_never_raise(root: Path) -> None:

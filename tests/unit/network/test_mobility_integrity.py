@@ -53,7 +53,7 @@ from tests.unit.network.test_mobility import (  # noqa: F401 — fixtures
     devices,
     pair,
 )
-from tests.unit.network.test_relay_e2e import _pair
+from tests.unit.network.test_relay_e2e import _pair, serve_shaped_relay
 
 
 def _transcript_with_scratchpad(
@@ -656,9 +656,12 @@ def test_a_relay_built_the_way_network_serve_builds_it_admits_the_owner_s_push(
     push, and every replica across a REAL host boundary stayed frozen for 150 s beyond
     the debounce — refused ``authorisation_refused … capability_denied`` at every push —
     while a manual ``lop sessions sync`` worked (cross-host QA, Q-XH-1). Passing an
-    explicit root is not coverage for the shape the product supplies, so this cell builds
-    BOTH relays the way ``serve`` does, with the ambient config dir naming each one's
-    root, and drives the push over a real link with the holder's own refresher pulling.
+    explicit root is not coverage for the shape the product supplies, so both relays here
+    are built through ``test_relay_e2e.serve_shaped_relay`` — the product's own shape, no
+    ``root=`` — and the push is driven over a real link with the holder's own refresher
+    pulling. That helper is now what the shared ``devices`` fixture builds too, so this
+    module and the pairing/pilot matrix answer the authoriser's questions off the same
+    construction the product uses (agent review round 1, MAJOR 3).
     """
     from local_operator.network import identity
 
@@ -667,19 +670,8 @@ def test_a_relay_built_the_way_network_serve_builds_it_admits_the_owner_s_push(
     identity_a = identity.mint(root_a, name="serve-a")
     identity_b = identity.mint(root_b, name="serve-b")
 
-    def _serve_shaped(root: Path, device_identity: Any) -> relay.RelayServer:
-        # EXACTLY `lop network serve`'s call: no ``root``, settings only. The env tells
-        # this relay whose install it is, which is why it is set per server.
-        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
-        server = relay.RelayServer(
-            settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1"),
-            identity=device_identity,
-        )
-        assert server.root == root, "a serve-shaped relay did not resolve the ambient root"
-        return server
-
-    server_a = _serve_shaped(root_a, identity_a)
-    server_b = _serve_shaped(root_b, identity_b)
+    server_a = serve_shaped_relay(root_a, monkeypatch, identity=identity_a)
+    server_b = serve_shaped_relay(root_b, monkeypatch, identity=identity_b)
     host, port = server_a.bind()
     server_a.bind_control()
     server_a.start()

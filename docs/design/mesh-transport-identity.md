@@ -909,11 +909,18 @@ device-id conflict, a protocol error, or a mistyped code past the forgiving
 budget. Two outcomes are **not** terminal, because both are about the people
 rather than about the token: a timeout (nobody had typed the code yet) and a
 mistyped code inside a bounded budget return the invite to `minted` through
-`invite.release`, counting the failure on the invite row so a relay restart
-cannot hand the same token a fresh budget. `invite.PAIRING_MAX_FORGIVEN_FAILURES`
-is the bound: the design's anti-grind property is `≤ 3 × 2²⁰`, which is hopeless
-online beside the token's own TTL, and the alternative cost a person sitting at
-the *other* device a fresh `lop network invite` for one mistyped digit. A second
+`invite.release`. Only a code that was compared and disagreed spends the budget
+(`release(spent_an_attempt=…)`): a delay spends nothing, because no guess was
+made, and it is bounded instead by what REMAINS of the invite's own life — the
+listener's wait, the parked question's window and the joiner's own read are all
+`pair_timeout_seconds(invite.remaining_seconds(…))`, one number, which is what
+makes a delay unable to extend the token. The counter lives on the invite row, so
+a relay restart cannot hand the same token a fresh budget.
+`invite.PAIRING_MAX_FORGIVEN_FAILURES` is the bound on CODE guesses: the first
+three failures are forgiven and the fourth consumes, so the design's anti-grind
+property is `≤ 4 × 2²⁰`, hopeless online beside the token's own TTL. The
+alternative cost a person sitting at the *other* device a fresh `lop network
+invite` for one mistyped digit. A second
 redemption against `redeemed` → `invite_in_use`; against `consumed` →
 `invite_already_used`. Entries older than 24 h are pruned. The state is on disk,
 so a relay restart mid-pairing cannot be used to replay an invite.
@@ -1060,11 +1067,17 @@ than a check. Each side computes its own from its own transcript and displays
 - **B declines locally** (its human rejects): B sends
   `{"op":"net_pair_abort","reason":"declined_local"}` and closes; A's prompt is
   cancelled with `the other device declined`.
-- **Timeout:** every wait in this step is the HUMAN's window, not a machine's:
-  `invite.pair_timeout_seconds(ttl_s)` = `min(ttl_s, PAIR_CONFIRM_TIMEOUT_S = 180)`.
-  It bounds A's wait for B's transcription, A's prompt, and B's wait for A's
-  answer — one number, printed to both people by `invite.joiner_prompt`, so the
-  window a person is promised is the window they get. When it fires A sends
+- **Timeout:** every wait in this step is the HUMAN's window, not a machine's, and
+  it is the same number on all three sides: **what is left of the invite**, capped
+  at the confirm budget. `invite.remaining_seconds(envelope)` and
+  `relay._remaining_of(record, invite_id)` compute it for the joiner and the
+  inviter respectively; `pair_timeout_seconds` = `min(remaining, 180)` bounds A's
+  wait for B's transcription, A's parked question, and B's wait for A's answer, and
+  `invite.joiner_prompt` prints that same value. The prompt used to print the full
+  minted `ttl_s` while the joiner's own read waited the remainder — a token carried
+  to the other device and left for eight minutes promised three minutes and gave
+  two, which is worse than no window at all because a person budgets their
+  attention on it (agent review round 1, MAJOR 2). When it fires A sends
   `{"op":"net_pair_abort","reason":"timeout"}` and the invite is **returned to
   `minted`**, not consumed: nobody typed anything, nothing was admitted, and the
   invite's own TTL remains the real bound — so a slow human retries with the same
@@ -1135,9 +1148,9 @@ statement is:
   the same class as Bluetooth's numeric comparison. Its strength comes from
   everything around the digits: a successful grind still needs *two* humans to
   confirm, repeated failed comparisons spend the invite (up to
-  `PAIRING_MAX_FORGIVEN_FAILURES` of them, see §5.4 — so a grind costs the
-  attacker that many detections rather than one), and a fresh invite is a fresh
-  human action on the inviter. It is not a proof;
+  `PAIRING_MAX_FORGIVEN_FAILURES` of them before the next one consumes, see §5.4 —
+  so a grind costs the attacker that many detections rather than one), and a fresh
+  invite is a fresh human action on the inviter. It is not a proof;
 - because it is not a proof, the CLI **also prints the full transcript
   fingerprint** — the leading 20 bytes of `sha256(T)` as 32 Crockford base32
   characters in 8 groups of 4 (`K7QM-3XPD-…-9T2B`, 160 bits) — in the same panel

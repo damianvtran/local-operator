@@ -710,10 +710,14 @@ class InviteRecord:
     redeemed_by: str = ""
     redeemed_at: float | None = None
     outcome: str = ""
-    #: How many times this invite has been presented to a human and did not end in an
-    #: admission — a mistyped code, a delay, a decline. Kept on the record so a relay
-    #: restart cannot hand the same token a fresh mistype budget (invite.py's
-    #: ``PAIRING_MAX_CODE_ATTEMPTS``).
+    #: How many CODE guesses this invite has spent: incremented by
+    #: :func:`local_operator.network.invite.release` when a ceremony failed on a code
+    #: that was compared and disagreed. A delay does not spend one (no guess was made),
+    #: and neither does anything that consumes the token outright — a decline or a
+    #: device-id conflict ends it, and ``consume`` does not touch this field.
+    #: :func:`local_operator.network.invite.failures_exhausted` reads it against
+    #: :data:`local_operator.network.invite.PAIRING_MAX_FORGIVEN_FAILURES`, and it lives
+    #: on the record so a relay restart cannot hand the same token a fresh budget.
     attempts: int = 0
 
     @property

@@ -36,6 +36,41 @@ from local_operator.session.retention import SESSIONS_DIRNAME
 NETWORK_NAME = "home-net"
 
 
+def serve_shaped_relay(
+    root: Path, monkeypatch: pytest.MonkeyPatch, **overrides: Any
+) -> relay.RelayServer:
+    """Build a relay THE WAY ``lop network serve`` BUILDS ONE — with no ``root=``.
+
+    WHY THIS IS THE DEFAULT HERE AND NOT A CONVENIENCE. Both production construction
+    sites (``network/cli.py``: the serve command and the tool's engage path) pass
+    settings and an identity only, so the config dir is resolved from the AMBIENT
+    environment (``store.config_dir()``). ``RelayServer.__init__`` turns that into
+    ``self.root``, and everything path-shaped hangs off it — including the authoriser's
+    ``StoreView``. A cell that supplies an explicit root therefore exercises a keyword
+    the product never supplies: 25 of 26 constructions in this package did exactly that,
+    and the one relational question they never asked of a serve-shaped relay
+    (``StoreView.replica_owner``) was answered ``""`` on the real path, which refused
+    every automatic replica sync across a real host boundary while a manual
+    ``lop sessions sync`` worked (cross-host QA, Q-XH-1; agent review round 1, MAJOR 3).
+    Build through here so a raw-root regression cannot hide behind that coincidence.
+
+    ``LOCAL_OPERATOR_CONFIG_DIR`` is what makes "no root argument" mean THIS test's own
+    tree rather than the operator's live install, so the assignment is part of the
+    construction rather than something a caller might forget. The assertion is the guard
+    on the guard: if the environment did not take (a stale export, fixture reordering),
+    the cell would quietly assert about the wrong store.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    kwargs: dict[str, Any] = {"settings": relay.NetworkSettings(port=0, listen_address="127.0.0.1")}
+    kwargs.update(overrides)
+    server = relay.RelayServer(**kwargs)
+    assert server.root == root, (
+        f"a serve-shaped relay resolved {server.root} rather than the ambient {root}: "
+        "the test env is not what the product would see"
+    )
+    return server
+
+
 @pytest.fixture()
 def devices(
     root: Path, monkeypatch: pytest.MonkeyPatch
@@ -45,17 +80,13 @@ def devices(
     root_b = root / "b"
     identity_a = identity.mint(root_a, name="device-a")
     identity_b = identity.mint(root_b, name="device-b")
-    server_a = relay.RelayServer(
-        root=root_a,
-        settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1"),
-        identity=identity_a,
-        audit=audit_mod.AuditLog(root_a),
+    # Serve-shaped, both of them: this fixture's relays back the pairing, pilot and
+    # listing matrix, so the product's own construction is what those cells exercise.
+    server_a = serve_shaped_relay(
+        root_a, monkeypatch, identity=identity_a, audit=audit_mod.AuditLog(root_a)
     )
-    server_b = relay.RelayServer(
-        root=root_b,
-        settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1"),
-        identity=identity_b,
-        audit=audit_mod.AuditLog(root_b),
+    server_b = serve_shaped_relay(
+        root_b, monkeypatch, identity=identity_b, audit=audit_mod.AuditLog(root_b)
     )
     host, port = server_a.bind()
     server_a.bind_control()
@@ -391,8 +422,9 @@ def test_a_joiner_slower_than_the_handshake_timeout_still_pairs(
     identity_b = identity.mint(root_b, name="joiner-b")
     #: The machine's budget, deliberately far below a human's reading time.
     machine_budget_s = 4.0
-    server_a = relay.RelayServer(
-        root=root_a,
+    server_a = serve_shaped_relay(
+        root_a,
+        monkeypatch,
         settings=relay.NetworkSettings(
             port=0, listen_address="127.0.0.1", handshake_timeout_s=machine_budget_s
         ),
@@ -530,7 +562,11 @@ def test_an_unanswered_confirmation_times_out_and_admits_nobody(
     assert (
         refreshed.invites[0].state == "minted"
     ), f"an abandoned pairing left the token {refreshed.invites[0].state!r}"
-    assert refreshed.invites[0].attempts == 1, refreshed.invites[0]
+    # AND A DELAY SPENDS NO CODE BUDGET (agent review round 1, NIT 2): ``attempts``
+    # bounds GUESSES, and nobody guessed — so two slow humans plus one typo can no
+    # longer exhaust the three forgiven failures the typo path is meant to have. The
+    # outcome field still records what happened, which is what the listing reads.
+    assert refreshed.invites[0].attempts == 0, refreshed.invites[0]
     assert refreshed.invites[0].outcome == "timeout", refreshed.invites[0]
     assert "pairing_refused" in _events(server_a)
     # And the parked question was cleaned up rather than left behind holding a code.
@@ -698,7 +734,9 @@ def test_a_hello_that_never_authenticates_does_not_burn_the_invite(
     assert len(store.load(record.network_id, server_a.root).active_members()) == 2
 
 
-def test_silent_connections_are_capped_before_authentication(root: Path) -> None:
+def test_silent_connections_are_capped_before_authentication(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Round-1 MAJOR 1: the pre-auth phase is BOUNDED, so a silent connection
     costs a slot and not an unbounded thread.
 
@@ -712,8 +750,9 @@ def test_silent_connections_are_capped_before_authentication(root: Path) -> None
     import socket
 
     root_a = root / "cap"
-    server = relay.RelayServer(
-        root=root_a,
+    server = serve_shaped_relay(
+        root_a,
+        monkeypatch,
         settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1", max_handshakes=2),
         identity=identity.mint(root_a, name="cap-device"),
         audit=audit_mod.AuditLog(root_a),
@@ -753,7 +792,9 @@ def _refusal_was_delivered(sock: Any) -> bool:
         return True
 
 
-def test_a_cap_drop_names_itself_in_the_local_audit(root: Path) -> None:
+def test_a_cap_drop_names_itself_in_the_local_audit(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The cap's refusal is SILENT to the peer, so the operator's log is where it has
     to be named.
 
@@ -769,8 +810,9 @@ def test_a_cap_drop_names_itself_in_the_local_audit(root: Path) -> None:
     import socket
 
     root_a = root / "cap-audit"
-    server = relay.RelayServer(
-        root=root_a,
+    server = serve_shaped_relay(
+        root_a,
+        monkeypatch,
         settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1", max_handshakes=2),
         identity=identity.mint(root_a, name="cap-audit-device"),
         audit=audit_mod.AuditLog(root_a),
@@ -833,7 +875,9 @@ def test_a_cap_drop_names_itself_in_the_local_audit(root: Path) -> None:
         server.stop()
 
 
-def test_a_member_cannot_send_into_or_close_another_members_stream(root: Path) -> None:
+def test_a_member_cannot_send_into_or_close_another_members_stream(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Round-1 MINOR 5: the stream-ownership rule holds on send and close, not
     only on push.
 
@@ -844,9 +888,9 @@ def test_a_member_cannot_send_into_or_close_another_members_stream(root: Path) -
     ``send``/``close``) did not, so knowing the id was enough.
     """
     root_a = root / "streams"
-    server = relay.RelayServer(
-        root=root_a,
-        settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1"),
+    server = serve_shaped_relay(
+        root_a,
+        monkeypatch,
         identity=identity.mint(root_a, name="stream-device"),
         audit=audit_mod.AuditLog(root_a),
     )
@@ -1164,8 +1208,9 @@ def test_a_paired_device_is_dialable_from_its_record_alone(
 
     # A FRESH RELAY on B's saved root, with nothing in memory, dials A from the row.
     # This is the production path: the relay that pairs is not the relay that lists.
-    fresh = relay.RelayServer(
-        root=server_b.root,
+    fresh = serve_shaped_relay(
+        server_b.root,
+        monkeypatch,
         settings=relay.NetworkSettings(port=port_b, listen_address="127.0.0.1"),
         identity=server_b.identity,
         audit=audit_mod.AuditLog(server_b.root),

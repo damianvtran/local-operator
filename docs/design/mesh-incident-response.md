@@ -599,7 +599,7 @@ have to define what happens when a payload contains the delimiter.
 | `network_name` | string | no | Convenience; never used in a decision. |
 | `actor_name` | string | no | The device's human name; convenience only. |
 | `actor_kind` | string | yes | `human` \| `agent` \| `relay` \| `unknown`. **A hint, not an attestation** — from `LOP_ACTOR` when a harness sets it, else `unknown`. Never presented as proof of who typed the command. |
-| `cause` | string | yes (`""` when `ok`) | Closed machine enum: `owner_offline`, `not_a_holder`, `revoked`, `epoch_stale`, `not_a_member`, `not_authorised`, `sas_mismatch`, `wrong_device`, `tick_expired`, `capability_denied`, `auth_failed`, `replay`, `untrusted`, `reconcile_rate_limited`, `protocol_mismatch`, `duplicate_identity`, `policy`, `timeout`, `internal`. Prose lives in the renderer. |
+| `cause` | string | yes (`""` when `ok`) | Closed machine enum: `owner_offline`, `not_a_holder`, `revoked`, `epoch_stale`, `not_a_member`, `not_authorised`, `sas_mismatch`, `wrong_device`, `tick_expired`, `capability_denied`, `auth_failed`, `replay`, `untrusted`, `reconcile_rate_limited`, `protocol_mismatch`, `duplicate_identity`, `policy`, `timeout`, `internal`, `declined`, `unanswered`, `viewer_left`, `peer_closed`, `owner_gone`, `peer_unreachable`. Prose lives in the renderer. A value outside this enum is rendered as `internal`, which is why an out-of-enum cause reports a deliberate close as an internal fault — the four `viewer_left`/`peer_closed`/`owner_gone`/`peer_unreachable` members exist so a forwarded stream's close does not (`local_operator/network/relay.py`'s `STREAM_CLOSE_MACHINE_CAUSES` is the only place that translation happens, and it keeps the finer word — `viewer-gone`, `owner-socket-gone`, … — in `detail.cause`). |
 | `prev_hash` | string | yes | Lowercase hex sha256 of the previous record's `hash`; the genesis record uses the chain anchor. |
 | `hash` | string | yes | Lowercase hex sha256 over the canonical serialisation (§4.4). |
 
@@ -664,6 +664,8 @@ emission points.
 | `session_handoff_completed` | a move finishes | `{from, to, bytes_copied, duration_ms}` |
 | `session_handoff_refused` | a move is refused | `{cause}` — `fenced \| in_flight_turn \| unreachable \| occupied` |
 | `session_remote_op_refused` | a remote op was denied by capability | `{op, capability}` |
+| `session_stream_opened` | a viewer's forwarded pipe is opened, on BOTH relays (the opener and the owner) | `{stream, peer, role}` — `role` is `viewer` or `owner`, so a leak reads as an imbalance in the two counts |
+| `session_stream_closed` | that pipe ends, on BOTH relays | `{stream, peer, role, cause}` — the machine `cause` is one of the four added above; `cause` here is the finer word the call site passed (`viewer-gone`, `viewer-requested`, `peer-requested`, `peer-closed`, `owner-gone`, `owner-socket-gone`, `no-peer-link`, `peer-stopped-answering`) |
 | `session_sync_completed` | the R22 cadence / pre-spin-down sync ran | `{to_device, bytes, reason}` — `cadence \| pre_spindown \| move` |
 | `meter_interval` / `meter_close` | **reserved**; owned by `mesh-compute-pool.md` §5.2, which fixes their literal fields | see that document — not duplicated here, so the two cannot drift |
 | `pool_grant_minted`, `pool_request_queued`, `member_draining`, `drain_barrier_timeout`, `pool_member_expired` | **reserved**; owned by `mesh-compute-pool.md` §3.4, which fixes their literal fields | see that document — not duplicated here, so the two cannot drift |
