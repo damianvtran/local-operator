@@ -361,9 +361,12 @@ lop network ls                           # devmesh  n_2bf6b70bd36b1cca228daa9f  
 
 `invite --print` reads the token straight off a terminal when you would rather
 copy it than move a file. Roles are `read`, `drive` and `admin`; a token can be
-bound to one device and given a shorter life. The full walk-through — including
-what to do when a device is unreachable, and the incident verbs (`panic`,
-`disconnect`) — is in the packaged
+bound to one device and given a shorter life. The pairing *did* work when
+`lop network peers` names the other machine — it is the live answer, not the
+stored one — and `lop network doctor` is what to run when a device that should
+be there is missing, since it reports reachability, epochs and identity per
+link. The full walk-through — including what to do when a device is
+unreachable, and the incident verbs (`panic`, `disconnect`) — is in the packaged
 [network guide](./local_operator/guides/network/GUIDE.md).
 
 **From inside a session.** The mesh is a slash-command family, so you never
@@ -394,14 +397,54 @@ The session is minted, spawned and admitted by that device, and the receipt in
 your transcript names it. `/network sessions --peer radiant-m4` then lists what
 that peer is holding, and `--engage <session>` warms one or `--stop <session>`
 ends it — so a session started this way is visible and controllable from the
-machine you are sitting at, without a second terminal.
+machine you are sitting at, without a second terminal. The same act is one
+command from a shell, which is how a script or another agent asks:
 
-**A note on what is not here yet.** A session stays where it runs. Creating,
-listing, warming and stopping a session on a peer all work; *moving* a running
-session from one device to another, and recalling a remote session back onto
-this machine, are still being built —
-[`docs/design/mesh-session-mobility.md`](./docs/design/mesh-session-mobility.md)
-is that design. Nothing above documents a command that does not run today.
+```bash
+lop network sessions --peer radiant-m4 --create --name "auth rebase" \
+  --prompt "rebase the auth branch and run the test suite"
+```
+
+Whichever front end starts it, the session is the *peer's*: it appears in that
+device's own `lop sessions`, it shows up here under the `⇄` heading for that
+device, and piloting it is what piloting a local session is — read the
+transcript, send a turn, watch it work.
+
+**Moving a session between devices.** Work that has outgrown the machine it
+started on, or work you want back in front of you, moves with its id and its
+transcript:
+
+```bash
+lop sessions move 9f3ac1e0b7d2 --to build-box          # hand it to the peer; the copy here is retired
+lop sessions move 9f3ac1e0b7d2 --to local              # bring a remote one home to this machine
+lop sessions move 9f3ac1e0b7d2 --to build-box --keep   # copy it and leave the original running — a new id, marked as a fork
+```
+
+The device that will **hold** the conversation is the one that issues the move,
+so `--to <peer>` is this machine asking the peer to pull and `--to local` is
+this machine pulling; there is no push verb. A session with a turn in flight is
+refused rather than interrupted, and `--wait` re-checks a busy one every five
+seconds. Inside the TUI the same act is `/move <id> --to <peer|local>
+[--keep]`. `lop sessions sync <id>` keeps this machine's copy of a conversation
+a peer owns up to date without opening it, and `lop sessions move <id> --to
+local --from-replica` recovers that copy as a new session for when the device
+that held it is gone.
+
+**A note on what is not here yet.** The credential half is not finished: a
+session created on a peer needs a model *that peer* can reach, and this build
+does not broker one. The desktop app has no mesh view yet — the networks and
+devices screen would live in `local-operator-ui`, next to the sessions it lists.
+Nothing above documents a command that does not run today.
+
+The design set behind all of it is in
+[`docs/design/mesh-network.md`](./docs/design/mesh-network.md) — the spine, with
+its requirements and, for each one, the document that owns it — alongside
+[`mesh-transport-identity.md`](./docs/design/mesh-transport-identity.md),
+[`mesh-session-mobility.md`](./docs/design/mesh-session-mobility.md),
+[`mesh-credentials.md`](./docs/design/mesh-credentials.md),
+[`mesh-incident-response.md`](./docs/design/mesh-incident-response.md),
+[`mesh-compute-pool.md`](./docs/design/mesh-compute-pool.md) and
+[`mesh-ui.md`](./docs/design/mesh-ui.md).
 
 ## 🌙 Always On
 
