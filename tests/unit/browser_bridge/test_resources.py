@@ -164,6 +164,51 @@ async def test_exact_cleanup_rejects_live_lease_and_stale_selection(
 
 
 @pytest.mark.asyncio
+async def test_cleanup_exact_refuses_a_session_a_move_is_handing_over(
+    tmp_path: Path, bridge: BridgeFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE ONE LEASE ACQUIRER THE MOVE'S GUARDS DID NOT COVER (review round 2, MINOR 1).
+
+    Every product opener reaches a session through ``session_factory._prepare``, which
+    refuses an id whose move is in flight. This path takes the execution lease DIRECTLY, so
+    a cleanup landing between the move's lease re-check and its delete would be a second
+    writer on a transcript another device is about to own. The holder writes only
+    ``.browser-resource.json``, which is why the reviewer rated it a minor; the refusal
+    costs one sentence.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path.parent))
+    resource = BrowserResource(tmp_path, tmp_path.name)
+    resource.initialize()
+    # A resource whose OWNER finished and recorded the terminal intent — i.e. everything
+    # this path needs to be willing to clean up — so the only thing that can refuse is the
+    # handoff guard under test (without it, the next step takes the lease and cleans up).
+    resource.record["terminal"] = "failed"
+    resource.remember("bridge:100:private")
+    directory, resource_generation = tmp_path, resource.generation
+
+    from local_operator.session.placement import write_handoff_entry
+
+    config_dir = directory.parent.parent
+    write_handoff_entry(
+        config_dir,
+        directory.name,
+        {
+            "role": "source",
+            "phase": "prepared",
+            "to_device": "d_other",
+            "to_name": "pixel",
+            "instance_id": "i_probe",
+            "at": 1.0,
+        },
+    )
+    result = await cleanup_exact(directory, resource_generation)
+
+    assert result.state == "unresolved", result
+    assert "pixel" in result.detail, result
+    assert not bridge.calls
+
+
+@pytest.mark.asyncio
 async def test_dead_process_alone_never_authorizes_cleanup(
     tmp_path: Path, bridge: BridgeFixture
 ) -> None:
