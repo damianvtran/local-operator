@@ -1118,7 +1118,15 @@ def test_status_prints_the_cause_beside_the_kind_of_a_refused_key_agent(
     entitlement was not in effect, and then offered the reinstall that follows from that
     diagnosis. The helper's own sentence is now the cause, so the entitlement is still named
     when it IS the cause and is absent when it is not.
+
+    ``sys.platform`` IS PATCHED BECAUSE THE REPORT IS macOS-ONLY — caught by CI, not by me:
+    the first version of this test passed on the author's Mac and failed on the ubuntu
+    runner, where ``handlers._keyagent_state`` returns ``None`` before it reaches the backend
+    and the ``key agent`` line is never printed. The sibling ``status`` tests patch it the
+    same way, so what is exercised is the report's darwin gate rather than the runner's
+    platform.
     """
+    monkeypatch.setattr(sys, "platform", "darwin")
     refused = fake_app("doctor-refused")
     entitlement = _run_status(monkeypatch, tmp_path)
     assert "key agent              : the key agent refused its keychain call:" in entitlement
