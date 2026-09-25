@@ -84,11 +84,13 @@ def test_the_measured_commands_from_the_live_child_are_refused(command: str) -> 
     assert "the wait is cancelled" in message
     assert "`wait_ms` in ms" in message
     # D1: every bullet LEADS with its actionable token, because a failed-call
-    # card paints each advice line as ONE cropped row (91 cells at a 100-column
-    # frame, 72 at 80, 52 at 60, 41 at 50) — the unhedged copy put `wait` at cells
-    # 86-92 and the hatch variable at 57-90, so both were cut exactly on the
-    # frames operators run. This pins the copy the MODEL reads and the operator
-    # reads once the card is rebuilt; the plan-time refusal's LIVE row is the
+    # card paints each advice line as ONE cropped row — a measured `card_width -
+    # 2 - OUTPUT_INDENT`, so 92 cells at a 100-column frame, 72 at 80, 52 at 60,
+    # 42 at 50 (one measure for every site; design review round 3, D11) — and the
+    # unhedged copy put `wait` at cells 86-92 and the hatch variable at 57-90, so
+    # both were cut exactly on the frames operators run. This pins the copy the
+    # MODEL reads and the operator reads once the card is rebuilt; the
+    # plan-time refusal's LIVE row is the
     # not-run ending, which is clipped at 200 chars before any widget sees it and
     # is not what this assertion describes (design review D6).
     bullets = [line for line in message.splitlines() if line.startswith("  - ")]
@@ -101,7 +103,7 @@ def test_the_measured_commands_from_the_live_child_are_refused(command: str) -> 
         # A SECOND token on the same line is what an operator on a narrow pane
         # loses first: with `background: true` leading bullet 1, `wait` ended at
         # cell 52 against the 52-cell lane at 60 columns and painted as an
-        # unclosed `` then `wait… `` (design review D7).
+        # unclosed `` then `wait… `` (design review round 2, D7).
         if len(spans) > 1:
             assert spans[1][0] <= _ADVICE_TOKEN_LEAD_CELLS, bullet
     assert _token_spans(bullets[0])[1][1] <= 52, bullets[0]
@@ -446,8 +448,8 @@ def _token_spans(line: str) -> list[tuple[int, int]]:
 
 
 #: How far into a bullet its actionable token may run. The operator's failed-call
-#: card crops each advice line at 74 cells in the canonical 80-column frame (54 at
-#: 60, 44 at 50), so a token starting past ~40 cells is a token the operator
+#: card crops each advice line at 72 cells in the canonical 80-column frame (52 at
+#: 60, 42 at 50), so a token starting past ~40 cells is a token the operator
 #: cannot read (design review D1).
 _ADVICE_TOKEN_LEAD_CELLS = 40
 
