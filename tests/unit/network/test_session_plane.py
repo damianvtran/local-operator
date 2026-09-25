@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import socket
 import threading
 import time
@@ -580,7 +581,13 @@ def test_a_promptless_create_is_still_a_row_on_both_devices(
 
         # THE IDLE EXIT, as the real device performs it: the runtime goes, its
         # discovery record goes with it, and the only thing left is the
-        # directory and its stamp.
+        # directory and its stamp. It waits for the join first: a PROMPTLESS create
+        # answers BEFORE its runtime is up (``relay._warm_after_create``), so reading
+        # ``served`` straight out of the ack is a race, and the "idle exit" this test
+        # simulates starts from a runtime that is actually running.
+        assert _wait_for(
+            lambda: session_id in served, 60.0
+        ), "the peer's runtime never came up for the created session"
         served[session_id].stop()
         assert not [
             row
@@ -715,6 +722,11 @@ def test_the_name_survives_the_hand_over_to_the_catalogue(
         # session leaves the empty-mint half and the catalogue takes over.
         transcript = server_b.root / "sessions" / session_id / "transcript.jsonl"
         transcript.write_text("", encoding="utf-8")
+        # THE RUNTIME JOINS IN THE BACKGROUND for a promptless create, so this waits for
+        # the one it is about to stop rather than assuming the ack proved it was up.
+        assert _wait_for(
+            lambda: session_id in served, 60.0
+        ), "the peer's runtime never came up for the created session"
         served[session_id].stop()
 
         own = [row for row in server_b.local_session_rows() if row["session_id"] == session_id]
@@ -844,7 +856,26 @@ def _create_named_session_on_a_real_peer(
             session_id=reply["detail"]["session_id"],
             link=link,
         )
-        assert created.session_id in served, "the relay brought up no runtime for the new session"
+        assert created.session_id not in ("", None), reply["detail"]
+        if prompt:
+            # THE PROMPT IS ADMITTED BEFORE THE ACK, so the runtime is up already.
+            assert (
+                created.session_id in served
+            ), "the relay brought up no runtime for the new session"
+        else:
+            # A PROMPTLESS CREATE ANSWERS BEFORE ITS RUNTIME IS UP
+            # (``relay._warm_after_create``: the spawn measured 15.9-22.1 s against a
+            # front end whose own window for this call is 20 s, so the answer no longer
+            # waits for it — that wait is what made the desktop time out on a
+            # conversation it had just created). The property these tests assert is what
+            # the surfaces paint WHILE the runtime is live, so they wait for the join
+            # instead of reading it out of the ack. A warm that FAILS leaves the session
+            # cold and records ``session.create.warm_failed`` in the peer's audit log,
+            # which is what this failure names rather than waiting forever.
+            assert _wait_for(lambda: created.session_id in served, 60.0), (
+                "the relay never brought up a runtime for the new session; a warm that "
+                "fails says so in the peer's audit record `session.create.warm_failed`"
+            )
     except BaseException:
         # The rig is what is expensive here, not the assertion: a failure between
         # the boot and the hand-off would otherwise leave a session, a runtime and
@@ -2194,3 +2225,230 @@ def test_the_pending_field_reads_as_one_vocabulary() -> None:
         {"session_id": "s", "pending": True}, device_id="d_" + "e" * 32
     )
     assert row.pending == NEEDS_ASK
+
+
+# ---------------------------------------------------------------------------
+# QA round 1 (the desktop round that drove a REAL backend): the backend's half
+# ---------------------------------------------------------------------------
+
+
+def test_a_peer_in_two_networks_is_asked_once_and_contributes_one_row_per_session(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q1 at the source: the fan-out asks a DEVICE once, however many networks it shares.
+
+    Measured on three real paired devices: B is in two networks with A, so the loop
+    over ``this device's networks × each network's members`` reached B twice — it
+    dialled ``net_catalog`` twice and appended B's rows twice, which is how two
+    conversations became four rows in the listing, the search and the count. A device's
+    catalogue does not depend on which network carried the question, so one answer is
+    the whole answer.
+    """
+    from tests.unit.network.test_refusals import _admit_a_member_that_cannot_answer
+
+    server = relay.RelayServer(
+        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    peer = "d_" + "b" * 32
+    # TWO networks, the SAME member in both: the shape QA built with two real joins.
+    _admit_a_member_that_cannot_answer(server, name="qa-laptop-b", endpoints=["127.0.0.1:1"])
+    _admit_a_member_that_cannot_answer(server, name="qa-laptop-b", endpoints=["127.0.0.1:1"])
+
+    dials: list[str] = []
+    rows = [
+        {"session_id": "c7c74407768f", "state": "idle", "started": 1.0, "conversation_name": "One"},
+        {"session_id": "0835f0d1a2b3", "state": "idle", "started": 2.0, "conversation_name": "Two"},
+    ]
+
+    class _Link:
+        def request(self, frame: dict[str, Any], timeout: float | None = None) -> dict[str, Any]:
+            return {"op": "ack", "detail": {"sessions": [dict(row) for row in rows]}}
+
+    def _ensure(device_id: str, probe_timeout_s: float | None = None) -> tuple[Any, str]:
+        dials.append(device_id)
+        return _Link(), ""
+
+    monkeypatch.setattr(server, "_ensure_link_with_reason", _ensure)
+    peers, sessions = server._fan_out_catalog()
+
+    assert dials == [peer], "a device sharing two networks was asked once per network"
+    assert [row["session_id"] for row in sessions] == ["c7c74407768f", "0835f0d1a2b3"]
+    assert len(peers) == 1 and peers[peer]["reachable"] is True
+
+
+def test_a_create_for_a_folder_the_peer_does_not_have_is_refused_by_the_peer(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q9: the peer validates the working directory the create frame names.
+
+    The field names a path on the PEER'S disk — the requesting device cannot see that
+    disk — and the desktop's own hint promises as much ("Must exist on <peer>"). The
+    relay dropped the value instead, so ``/nonexistent/on/this/mac`` was accepted with
+    a 200 and the conversation ran in the peer's home directory: for an agent that runs
+    commands, silently the wrong place.
+    """
+    server_a, server_b, _host_a, _port_a = peer_pair
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    link = _dial_to(server_a, record, host_b, port_b)
+    try:
+        missing = link.request(
+            {
+                "op": "net_session_create",
+                "req": 31,
+                "locality": "remote",
+                "cwd": "/nonexistent/on/this/mac",
+                "name": "nowhere",
+                "prompt": "",
+            }
+        )
+        assert missing is not None and missing["op"] == "error", missing
+        # THE SENTENCE IS WHAT CROSSES THE PEER BOUNDARY (``wire.refusal_frame``: a peer
+        # is told the refusal, never the code, so the cause stays in the local audit
+        # log). What this asserts is therefore what the requesting device — and through
+        # it the user — is told.
+        sentence = str(missing["message"])
+        assert "/nonexistent/on/this/mac" in sentence
+        assert (
+            "device-b" in sentence
+        ), f"the refusal must name the peer that checked it: {sentence!r}"
+        assert not list((server_b.root / "sessions").glob("*")), (
+            "a refused create must mint nothing: a half-created session would be a row "
+            "with no runtime and no way to ask for one"
+        )
+
+        # A RELATIVE PATH IS REFUSED TOO, and it is the same class of silent
+        # somewhere-else: it would resolve against the RELAY's working directory, a
+        # directory the user never named and cannot see from the request.
+        relative = link.request(
+            {
+                "op": "net_session_create",
+                "req": 32,
+                "locality": "remote",
+                "cwd": "some/folder",
+                "name": "relative",
+                "prompt": "",
+            }
+        )
+        assert relative is not None and relative["op"] == "error", relative
+        assert "not a full path" in str(relative["message"]), relative
+        assert "device-b" in str(relative["message"]), relative
+        assert not list((server_b.root / "sessions").glob("*"))
+    finally:
+        link.close("test")
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="root can enter any directory, so a mode bit says nothing about it",
+)
+def test_a_folder_the_peer_cannot_enter_is_refused_before_anything_is_minted(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 1, MINOR 1: ``is_dir()`` is not "this device's user can open it".
+
+    ``stat`` needs search permission on the PARENTS only, so a ``chmod 000`` directory
+    passed the Q9 check: the create answered 200 and the failure surfaced later as a
+    spawn error whose only trace was a ``session.create.warm_failed`` audit record, so
+    the user was left a row that could never warm and the 200 was not the signal this
+    route claims it is. Measured in the same process: ``os.chdir`` on such a directory
+    raises ``PermissionError`` while ``is_dir()`` is True. The mode is restored in a
+    ``finally`` so the test root can still be cleaned up.
+    """
+    server_a, server_b, _host_a, _port_a = peer_pair
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    locked = server_b.root / "locked"
+    locked.mkdir()
+    locked.chmod(0o000)
+    link = _dial_to(server_a, record, host_b, port_b)
+    try:
+        reply = link.request(
+            {
+                "op": "net_session_create",
+                "req": 41,
+                "locality": "remote",
+                "cwd": str(locked),
+                "name": "locked",
+                "prompt": "",
+            }
+        )
+        assert reply is not None and reply["op"] == "error", reply
+        sentence = str(reply["message"])
+        # The sentence names the path and the device that checked it, the same two
+        # things the missing-folder refusal names — the remedy is the same and the
+        # cause is what differs.
+        assert str(locked) in sentence, sentence
+        assert "device-b" in sentence, sentence
+        assert "cannot be entered" in sentence, sentence
+        assert not list((server_b.root / "sessions").glob("*")), (
+            "a create refused for an unenterable folder must mint nothing: the row a "
+            "half-create leaves can never warm"
+        )
+    finally:
+        locked.chmod(0o700)
+        link.close("test")
+
+
+def test_a_promptless_create_answers_before_its_runtime_has_joined(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q4b: the answer is the id, and the warm-up is not on the caller's path.
+
+    The spawn plus its discovery record measured 15.9-22.1 s on LOOPBACK on this fleet
+    while the desktop's own window for this call is 20 s, so the create timed out on a
+    conversation the peer HAD created, the app reported the deadline as "refused", and
+    a retry would have minted a second one. The engage is held here until the test
+    releases it, so the ack arriving at all is the proof that it did not wait.
+    """
+    server_a, server_b, _host_a, _port_a = peer_pair
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
+    entered = threading.Event()
+    released = threading.Event()
+
+    async def engage(session_id: str, cwd: str, work: Any, **kwargs: Any) -> None:
+        entered.set()
+        assert released.wait(30.0), "the test never released the warm-up"
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", engage)
+    link = _dial_to(server_a, record, host_b, port_b)
+    try:
+        started = time.monotonic()
+        reply = link.request(
+            {
+                "op": "net_session_create",
+                "req": 33,
+                "locality": "remote",
+                "cwd": str(server_b.root),
+                "name": "fast",
+                "prompt": "",
+            }
+        )
+        elapsed = time.monotonic() - started
+        assert reply is not None and reply["op"] == "ack", reply
+        detail = reply["detail"]
+        assert detail["warming"] is True, detail
+        assert detail["detail"] == "", "a join in progress is not a complaint"
+        # THE ACK ARRIVED WHILE THE JOIN WAS STILL BLOCKED: ``engage`` cannot finish
+        # until this test releases it, so an ack that had waited for the warm-up would
+        # have taken the full 30 s (or answered an error) rather than a round trip. That
+        # the worker has STARTED by now is expected — it is scheduled the moment the
+        # create returns — and it is what makes the next line a real statement about
+        # ordering rather than about a thread that never ran.
+        assert entered.wait(5.0), "the background warm never started"
+        assert not released.is_set(), "the runtime joined before the create answered"
+        assert elapsed < 5.0, f"the create held the caller for {elapsed:.1f}s"
+        # THE SESSION EXISTS ALREADY, which is what the id is for.
+        assert (server_b.root / "sessions" / detail["session_id"]).is_dir()
+
+        # ...and the JOIN IS REAL: releasing it lets the background warm finish.
+        released.set()
+        assert entered.wait(30.0), (
+            "the create never warmed the runtime in the background, so the session would "
+            "stay cold (a failed warm says so in the peer's audit record)"
+        )
+    finally:
+        released.set()
+        link.close("test")

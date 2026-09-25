@@ -729,7 +729,18 @@ class DraftModel(Input):
 
 class CreateSession(Input):
     request_id: RequestID
-    cwd: str = Field(min_length=1, max_length=4096)
+    #: The folder the conversation runs in, ON THE DEVICE THAT HOSTS IT — this machine
+    #: for a local create, the PEER for one that names ``peer``.
+    #:
+    #: EMPTY IS EXPRESSIBLE, AND ONLY FOR A PEER (review round 1, MINOR 3): absence
+    #: means "the peer decides", which is the rule the peer's own resolver implements
+    #: and documents (``relay._resolve_peer_cwd``: empty → that device's home), and this
+    #: field used to be ``min_length=1``, which made the documented shape unreachable
+    #: through this route. The contract is explicit in both directions: a create naming
+    #: NO peer still has to name a folder, because an empty path resolves against the
+    #: SERVER's working directory — a directory the user never named — so the validator
+    #: below keeps that a 422.
+    cwd: str = Field(default="", max_length=4096)
     target: SessionTarget | None = None
     #: Omitted or null ⇒ today's behaviour, byte for byte: the session is born on
     #: the configured default. This is the ONLY optional admission of the two
@@ -742,6 +753,23 @@ class CreateSession(Input):
     #: member of the network it is being addressed through, and its sentence is the
     #: one the user should see.
     peer: str | None = Field(default=None, pattern=MESH_ID_PATTERN)
+
+    @model_validator(mode="after")
+    def _a_local_create_still_names_a_folder(self) -> "CreateSession":
+        """Refuse an empty ``cwd`` for a LOCAL create, as a 422 like ``min_length=1``.
+
+        Same status and same shape as the field constraint this replaces; what is new
+        is that the rule is stated where it can also say WHY, because the identical
+        empty value is now legal a few characters to the right. An empty path on the
+        local path resolves to the server's own working directory
+        (``resolve_working_directory``: ``Path("")`` is ``.``), so accepting it would
+        start a user's conversation somewhere nobody named — the failure this whole
+        working-directory admission exists to prevent, arriving through the door the
+        peer's "the peer decides" rule opens.
+        """
+        if not self.peer and not self.cwd:
+            raise ValueError("cwd is required: name the folder this conversation runs in")
+        return self
 
 
 class MoveSession(Input):
@@ -1796,12 +1824,17 @@ async def create_session(body: CreateSession, request: Request):
             # exists in two places at once is the permanent routing ambiguity the
             # mesh exists to prevent, so this device does not choose one.
             #
-            # ``cwd`` IS DELIBERATELY NOT FORWARDED. The field names a path on THIS
-            # machine — the renderer sends the directory it is showing — and a peer
-            # asked to create a session there would either fail or, worse, land in a
-            # directory that merely happens to share the path on its disk. An empty
-            # cwd makes the peer default to its own home, which is the same rule
-            # ``session/remote_open`` states for a remote attach.
+            # ``cwd`` IS FORWARDED, AND THE PEER CHECKS IT (QA round 1, Q9). The field
+            # names a path on the PEER's disk when a peer is chosen — that is what the
+            # pane's own hint says ("Must exist on <peer>") — and the peer is the only
+            # device that can stat it. This route therefore does NOT admit it here (the
+            # path need not exist on this machine) and does NOT drop it either: dropping
+            # it was measured as a 200 for ``/nonexistent/on/this/mac`` with the
+            # conversation quietly started in the peer's home directory. The peer's
+            # refusal names the peer and comes back as this route's 409, the same status
+            # the local admission gives an unusable directory. An EMPTY ``cwd`` still
+            # means "the peer decides" and becomes the peer's home
+            # (``session/remote_open`` states the same rule for a remote attach).
             assert spec is not None or body.model is None
             # Imported here rather than at module scope: the mesh package is a boot
             # cost this file must not add for every backend, and a create that names
@@ -1815,6 +1848,7 @@ async def create_session(body: CreateSession, request: Request):
                     create_on_peer,
                     host(request).root,
                     body.peer,
+                    cwd=body.cwd,
                     model=(
                         {
                             "provider": spec.provider,
@@ -1843,25 +1877,50 @@ async def create_session(body: CreateSession, request: Request):
                     # answer instead of minting a second conversation.
                     return document
                 raise Unclaimed(document) from None
-            return {
-                "session_id": str(detail.get("session_id") or ""),
-                # THE PEER'S OWN ANSWER, not a guess from this device's registries.
-                # The binding names what THAT device recorded, which is the whole
-                # point of the identity travelling: a local resolution here would be a
-                # claim about a store that does not hold this session.
+            # EVERY FIELD THE CALLER NEEDS IS FORWARDED, and the reason is the class of
+            # defect this feature keeps producing: a value the PEER sends that this route
+            # does not put in its own reply is a value that EXISTS and silently
+            # disappears at the boundary (review round 1, MAJOR 2 — the peer has answered
+            # ``warming``/``admitted``/``model`` since Q4b and the desktop saw none of
+            # them, so it could not tell "joining" from "ready" and had no field in
+            # which to tell the truth). The fields are declared on ``CreatedSession``:
+            # adding one here without adding it there drops it again.
+            #
+            # THE BINDING IS THE PEER'S OWN ANSWER, and that is the same rule rather than
+            # an exception to it: a remote session has no LOCAL attachment, it names the
+            # agent or team recorded on the session's own marker, and that marker lives on
+            # the peer — so resolving the name here would be a claim about a store that
+            # does not hold this session. A create that named no target gets the peer's
+            # ``null`` and reports ``None`` for both.
+            peer_reply = detail if isinstance(detail, dict) else {}
+            created: dict[str, Any] = {
+                "session_id": str(peer_reply.get("session_id") or ""),
                 "binding": {
-                    "agent": ((detail.get("agent") or {}) or {}).get("name"),
-                    "team": ((detail.get("team") or {}) or {}).get("name"),
+                    "agent": ((peer_reply.get("agent") or {}) or {}).get("name"),
+                    "team": ((peer_reply.get("team") or {}) or {}).get("name"),
                 },
+                # AN ABSENT ``admitted`` READS AS NOT ADMITTED: the claim it carries is
+                # that an owner exists for the conversation, only the peer can make it,
+                # and a reply that did not say so must not be reported as ready.
+                "admitted": bool(peer_reply.get("admitted")),
+                "warming": bool(peer_reply.get("warming")),
+                "detail": str(peer_reply.get("detail") or ""),
                 # The rest of the peer's receipt, so the renderer can show what it
                 # needs (whether the profile's instructions were applied, and what the
                 # session is actually running on) without a second round trip.
                 "identity": {
-                    "agent": detail.get("agent"),
-                    "team": detail.get("team"),
-                    "model": detail.get("model"),
+                    "agent": peer_reply.get("agent"),
+                    "team": peer_reply.get("team"),
+                    "model": peer_reply.get("model"),
                 },
             }
+            model_result = peer_reply.get("model")
+            if isinstance(model_result, dict):
+                created["model"] = {
+                    "applied": bool(model_result.get("applied")),
+                    "detail": str(model_result.get("detail") or ""),
+                }
+            return created
         pool = host(request)
         target = body.target.model_dump() if body.target else None
         session_id = await pool.create(

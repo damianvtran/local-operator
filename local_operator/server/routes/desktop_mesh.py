@@ -182,7 +182,14 @@ async def remove_network_member(
 
     def work() -> dict[str, Any]:
         record = resolve_network(root, network)
-        if body.confirm.strip() != str(record.name):
+        # EXACTLY THE NAME AS TYPED, which is what this docstring has always claimed and
+        # what the UI enforces (QA round 1, Q7). ``strip()`` made the backend the LOOSER
+        # of the two gates: ``{"confirm": " qa498net "}`` was accepted and removed the
+        # device, while the same string left the tab's Remove button disabled. One act
+        # with two answers depending on which door the request came through is the
+        # disagreement this route exists to prevent — and removal is the one act that
+        # changes every other device's state.
+        if body.confirm != str(record.name):
             raise MeshRefusal(
                 "confirmation_mismatch",
                 f"removing a member of {record.name!r} needs that network's name typed "
@@ -211,6 +218,15 @@ async def transfer_session(session_id: str, body: TransferSession, request: Requ
     retirement, a copy and a confirmation on top of it, so this handler takes NO
     generic short bound — the only bound is the one ``mobility.request_move`` sets for
     the work it does.
+
+    THE CLIENT'S DEADLINE IS DERIVED, NOT NEGOTIATED, and it depends on the SHAPE:
+    ``mobility.move_client_bound_s(wait_s, keep, to)``, whose three answers at the
+    default ``wait_s=0`` are **145 s** for an offload, **415 s** for a ``keep`` copy
+    and **415 s** for a recall. Both routes' defaults are ``wait_s=0``; a client that
+    gives up sooner reports its own timeout for a move this side was about to answer
+    (review round 1, MAJOR 1 — the desktop gave up at ``wait_s + 15`` against a route
+    answering at ``wait_s + 30``). A recall is a BUDGET rather than a promise (the copy
+    is transcript-sized), so a timeout on one is "unknown", never "refused".
 
     A REFUSAL IS A 409 CARRYING THE MOVE'S OWN SENTENCE, never a paraphrase: the
     renderer's S7 notice shows it, and the codes a caller can branch on

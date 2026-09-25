@@ -621,3 +621,137 @@ def test_delete_of_a_live_remote_session_is_refused_by_the_owners_guard(
     assert result["code"] == "session_delete_refused"
     assert str(result["message"]) in set(_GUARD_REFUSALS.values()) or result["message"]
     assert source.exists()
+
+
+def test_an_offload_returns_the_destinations_refusal_instead_of_waiting_it_out(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 1, Q4a: the refusal the peer makes in milliseconds must not cost the budget.
+
+    An offload's inviter watches its OWN durable progress — the journal it wrote and the
+    tombstone it will write — and never asks the destination, which is right for every
+    phase the destination reports and wrong for exactly one: a REFUSAL writes nothing
+    here. So the inviter held the request for its whole budget (``wait_s +
+    OFFLOAD_CONFIRM_WAIT_S``: 30 s at ``wait_s=0``, 60 s at the CLI's default) and then
+    answered "the outcome is unconfirmed" about a move that never started. Measured with
+    the desktop's own pane holding the session: the peer refused 9 times out of 9 in
+    ~3 ms with "This session is open in another terminal or attached client." and the
+    user read a timeout 60 s later. The refusing device now reports it over the link it
+    was invited on, and the wait ends where the refusal happened.
+    """
+    import time
+
+    server_a, server_b, _host, _port = pair
+    # B'S OWN SETTINGS, so the join records the endpoint B is actually listening on: the
+    # default settings would advertise the CLI's configured port, which nothing is bound
+    # to here — and this is the one rig in this file where A DIALS B (recalls have B dial
+    # A), so an undialable advertisement reads as an unreachable peer rather than as a
+    # fixture detail.
+    _pair(pair, monkeypatch, role="admin", settings=server_b.settings)
+    _owned_session(server_a)
+    sentence = (
+        "This session is open in another terminal or attached client. "
+        "Disconnect that client, then move again."
+    )
+    # The owner's own runtime refuses to retire — the "another terminal or attached
+    # client" case, which is ``_retire_local_runtime``'s ``viewed`` outcome.
+    monkeypatch.setattr(
+        mobility,
+        "_retire_local_runtime",
+        lambda root, session_id, deadline_s=0: {"result": "viewed", "sentence": sentence},
+    )
+
+    budget = mobility.move_bound_s(0.0)
+    started = time.monotonic()
+    result = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+    elapsed = time.monotonic() - started
+
+    assert result["ok"] is False, result
+    assert result["code"] == "busy", result
+    assert result["message"] == sentence, "the refusing device's own words, verbatim"
+    assert result["changed"] is False, "nothing moved, so a retry is safe"
+    assert elapsed < budget / 2, (
+        f"the refusal took {elapsed:.1f}s of a {budget:.0f}s budget, so it waited for the "
+        "deadline rather than being told: that is the finding this test exists for"
+    )
+
+
+def test_the_move_bound_is_the_formula_a_client_can_derive() -> None:
+    """Q4a's contract: the bound is ``wait_s + the settle window``, published as a function.
+
+    The desktop's own deadline was ``wait_s + 15`` while this side answered at
+    ``wait_s + 30``, so the client's timeout ALWAYS won and its vaguer sentence ("the
+    move may have happened") replaced the backend's real answer. A client's bound has to
+    be this plus a margin, and the relay's own budget is the same expression rather than
+    a second number that can drift from it.
+    """
+    assert mobility.move_bound_s(0.0) == mobility.OFFLOAD_CONFIRM_WAIT_S
+    assert mobility.move_bound_s(30.0) == 30.0 + mobility.OFFLOAD_CONFIRM_WAIT_S
+    assert mobility.move_bound_s(30.0, keep=True) == 30.0 + mobility.KEEP_COPY_WAIT_S
+    assert mobility.move_bound_s(-5.0) == mobility.OFFLOAD_CONFIRM_WAIT_S
+
+
+def test_every_shape_the_route_accepts_derives_its_bound_from_one_place() -> None:
+    """Review round 1, MAJOR 1: the offload's formula is not the route's contract.
+
+    Published as if it were, it was wrong for the two other shapes the SAME route
+    accepts. A ``keep`` copy is held for ``wait_s + KEEP_COPY_WAIT_S`` — 330 s at
+    ``wait_s=30`` — while the published ``wait_s + 30 + margin`` gave up at 75 s, so a
+    client following the advice still hit the exact pre-fix symptom on a live field of
+    the same route (``TransferSession.keep``). And a recall (``to="local"``) is not
+    bounded by that formula at all: this device is the DESTINATION, so there is no
+    invite and no settle window in it, and what bounds the wait is the owner's
+    retire-plus-record deadline plus a transcript-sized copy.
+    """
+    assert mobility.move_hold_s(0.0) == mobility.OFFLOAD_CONFIRM_WAIT_S
+    assert mobility.move_hold_s(30.0, keep=True) == 30.0 + mobility.KEEP_COPY_WAIT_S
+    # THE RECALL IS A COPY, and the offload's term is not merely imprecise for it: at
+    # ``wait_s=30`` the formula would say 60 s where the copy's own budget is 330.
+    assert mobility.move_hold_s(30.0, to="local") == 30.0 + mobility.KEEP_COPY_WAIT_S
+    assert mobility.move_hold_s(30.0, to="local") != mobility.move_bound_s(30.0)
+
+    # The PUBLISHED bound is the route's own envelope plus the client's margin, and
+    # the CLI's control timeout is the same expression — so a client using these
+    # numbers cannot beat the route, which is what the desktop did at ``wait_s + 15``
+    # against a route answering at ``wait_s + 30``.
+    for keep, to in ((False, "d_peer"), (True, "d_peer"), (False, "local")):
+        published = mobility.move_client_bound_s(30.0, keep=keep, to=to)
+        route = (
+            mobility.MOVE_OP_DEADLINE_S
+            + mobility.move_hold_s(30.0, keep=keep, to=to)
+            + mobility.MOVE_CONTROL_SLACK_S
+        )
+        assert published == route + mobility.MOVE_CLIENT_MARGIN_S
+        assert published > route, "a client may never EQUAL the bound it is outlasting"
+    assert mobility.move_client_bound_s(0.0) == 145.0
+    assert mobility.move_client_bound_s(0.0, keep=True) == 415.0
+    assert mobility.move_client_bound_s(0.0, to="local") == 415.0
+
+
+def test_the_cli_envelope_is_the_published_bound_less_its_margin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SECOND half of one place: the caller's deadline is the published derivation.
+
+    ``move_client_bound_s`` is advice to another repository; the number this side
+    actually waits on is ``request_move``'s control-socket timeout. A test that only
+    read the function would let the two drift apart while both looked right, which is
+    how the recall's envelope stayed at the offload's 30 s term and made the CLI report
+    ``relay_unavailable`` — "this device's relay could not be asked" — about a copy
+    that was still running.
+    """
+    seen: list[float] = []
+
+    def _capture(record: Any, op: str, *, timeout: float = 5.0, **fields: Any) -> Any:
+        seen.append(timeout)
+        return None  # no relay answer: the refusal path, which is all this measures
+
+    monkeypatch.setattr(relay, "control_request", _capture)
+    monkeypatch.setattr("local_operator.network.store.find_own_relay", lambda root=None: object())
+
+    for keep, to in ((False, "build-box"), (True, "build-box"), (False, "local")):
+        seen.clear()
+        mobility.request_move(SESSION, to=to, keep=keep, wait_s=30.0, root=Path("/tmp/x"))
+        assert seen == [
+            mobility.move_client_bound_s(30.0, keep=keep, to=to) - mobility.MOVE_CLIENT_MARGIN_S
+        ], (keep, to, seen)
