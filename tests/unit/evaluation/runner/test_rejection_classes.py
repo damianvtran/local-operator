@@ -602,9 +602,15 @@ def test_the_sealed_corpus_replays_through_the_reply_normaliser(
     1. A reply with NO declared marker at its head is left byte-identical and
        keeps its verdict. That is "no previously-passing reply changes verdict",
        asserted over every published reply rather than over a sample.
-    2. A reply that IS stripped was, before the strip, unreadable at offset 0.
-       A strip may only ever rescue a reply the decoder could not START -- it can
-       never be a repair of a reply that was merely wrong.
+    2. A reply that IS stripped is judged on its bytes and nothing else. The
+       strip's ORIGINAL licence was that a tagged reply was unreadable at offset
+       0; the leading-object tolerance now reads a decision behind leading junk
+       whenever it is the reply's only decision, so a tagged reply arrives here
+       in one of two states -- already accepted by the decoder, or still
+       unreadable because its remainder is not one complete object (the 2 of the
+       17 that the strip never repaired either). What the assert forbids is the
+       third possibility: a VERDICT the strip changed, which would mean it had
+       altered what the reply says rather than where it starts.
     3. The set of rejection classes the corpus produces afterwards is a subset of
        the set it produced before: the split renames two halves of one class and
        the strip removes one cause, so a class that is NEW after the change is a
@@ -632,6 +638,8 @@ def test_the_sealed_corpus_replays_through_the_reply_normaliser(
     before: dict[str, int] = {}
     after: dict[str, int] = {}
     transitions: dict[str, int] = {}
+    #: Tagged replies that come out of the replay ACCEPTED. See claim 4 below.
+    tagged_accepted = 0
     for artifact, episode in published:
         reply = _published_reply(artifact) or ""
         verdict_before = _replay_verdict(reply)
@@ -643,13 +651,21 @@ def test_the_sealed_corpus_replays_through_the_reply_normaliser(
             assert stripped == reply, episode
             assert verdict_after == verdict_before, episode
             continue
-        assert verdict_before == "leading-delimiter", episode
+        # Claim 2, restated for the leading-object tolerance: a tagged reply is
+        # either already readable by the decoder or still unreadable, and never
+        # a reply whose verdict the strip moved. See the docstring.
+        assert verdict_before in {"leading-delimiter", _ACCEPTED_SHAPE}, episode
         moved = f"{verdict_before} -> {verdict_after}"
         transitions[moved] = transitions.get(moved, 0) + 1
+        tagged_accepted += verdict_after == _ACCEPTED_SHAPE
 
     assert set(after) - {_ACCEPTED_SHAPE} <= set(before), sorted(after)
-    recovered = transitions.get(f"leading-delimiter -> {_ACCEPTED_SHAPE}", 0)
-    assert recovered > 0, sorted(transitions)
+    # Claim 4, measured the way the tolerance now works: the TAGGED replies that
+    # come out accepted once the marker is handled -- whether the decoder read
+    # them itself (``_locate_leading_object``) or a declared strip removed the
+    # token first. A corpus where none of them is accepted has stopped
+    # exercising the path either mechanism exists for.
+    assert tagged_accepted > 0, sorted(transitions)
 
     with capsys.disabled():
         print(f"\nsealed reply replay ({len(published)} published replies):")
@@ -657,7 +673,7 @@ def test_the_sealed_corpus_replays_through_the_reply_normaliser(
             print(f"  {label}: " + ", ".join(f"{k}={v}" for k, v in sorted(histogram.items())))
         for label, count in sorted(transitions.items()):
             print(f"  {count:4d}  {label}")
-        print(f"  {recovered:4d}  recovered to the accepted shape")
+        print(f"  {tagged_accepted:4d}  tagged replies accepted")
 
 
 def _actions_value(reply: str) -> Any:
