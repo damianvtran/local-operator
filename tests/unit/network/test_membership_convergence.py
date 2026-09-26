@@ -438,13 +438,33 @@ def test_membership_converges_over_links_that_were_already_up(
     assert d.device_id not in _link_peers(c)
 
     # And the device that learned it says so in its audit, naming its source.
-    learned = [
-        row
-        for row in a.server.audit.tail(limit=500)  # noqa: SLF001 — the relay's own log
-        if row.get("event") == "membership_learned"
-    ]
-    assert learned, _events(a)
-    assert d.device_id in learned[-1]["detail"]["added"]
+    #
+    # THIS READS THE ROW, SO IT WAITS FOR THE ROW. ``refresh_membership`` saves the
+    # merged record and only THEN records ``membership_learned``, so the merge the loop
+    # above polls is visible while the row is still pending on the pulling thread — and
+    # the predicate above is that merge, not this record. Measured with a delay injected
+    # at ``AuditLog.record``: 1 s reds this cell at the old ``learned[-1]`` with
+    # ``assert 'd_…' in []``, against the 525-668 ms starvation gaps this fleet records
+    # with the loop idle.
+    #
+    # The predicate is the ASSERTION'S OWN condition — the row that names D as added —
+    # rather than "some row appeared", which a pull that changed nothing also satisfies
+    # (``adopt_members`` reports ``changed`` without ``added``).
+    def _rows_naming_d() -> list[dict[str, Any]]:
+        return [
+            row
+            for row in a.server.audit.tail(limit=500)  # noqa: SLF001 — the relay's own log
+            if row.get("event") == "membership_learned"
+            and d.device_id in (row.get("detail") or {}).get("added", [])
+        ]
+
+    assert net_fixtures.wait_for(
+        lambda: bool(_rows_naming_d())
+    ), f"the device that learned the late member recorded no row naming it: {_events(a)}"
+    learned = _rows_naming_d()
+    # The trail is read AGAIN rather than reused from the predicate: the pulls here run
+    # on a compressed cadence (1 s), so a row describing a later no-op merge can land
+    # between the wait and this assertion, and the assertion is about D's row.
     assert learned[-1]["detail"]["source"] == c.device_id
 
 
