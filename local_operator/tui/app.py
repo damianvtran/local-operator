@@ -257,7 +257,12 @@ from local_operator.tui.network_cli import (
 from local_operator.tui.notify import Notifier, notifications_enabled
 from local_operator.tui.session_catalog import CatalogEntry, SidebarSettings
 from local_operator.tui.session_drafts import SessionDraftStore
-from local_operator.tui.session_interaction import SessionDraft, SessionInteraction
+from local_operator.tui.session_interaction import (
+    FailedSend,
+    PendingSend,
+    SessionDraft,
+    SessionInteraction,
+)
 from local_operator.tui.session_move import (
     MOVE_PHASE_ORDER,
     MoveTo,
@@ -270,6 +275,7 @@ from local_operator.tui.session_presentation import (
     HistoryPageNotice,
     OlderHistoryNotice,
     PreparedReplay,
+    SendFailureNotice,
     SessionPresentation,
     activity_phase_clock,
     live_projection_call_ids,
@@ -711,6 +717,15 @@ UNSENT_RUNTIME_NOTICE = (
 #: The blank line a restored draft is loaded behind, so the operator's next
 #: thought cannot weld onto it (UX round 3, U2 — see :meth:`_restore_unsent_for`).
 RESTORE_SEAM = "\n\n"
+
+#: How many unresolved failed sends one conversation may hold (design §4b.8).
+#:
+#: The record is the payload's HOME once its send has failed after the paint —
+#: the composer was cleared at Enter, and the boundary rule deliberately never
+#: refills it automatically — so, unlike the echo buffer, this list must never
+#: silently evict: overflowing it PARKS the oldest payload through the ordinary
+#: restore funnel (``_edit_failed_send``) instead of dropping the text.
+FAILED_SEND_BOUND = 4
 
 
 #: The drain notice: what the viewer says the moment a runtime commits to
@@ -1345,6 +1360,24 @@ def _is_retiring_refusal(error: BaseException) -> bool:
     return any(marker in str(error) for marker in _RETIRING_REFUSAL_MARKERS)
 
 
+def _oversize_notice_text(error: BaseException) -> str:
+    """The oversize refusal's own sentence, minus the retry the controls carry.
+
+    ``OversizedRequest``'s message ends "…; shorten it and send again"
+    (``attach_client.fit_request_frame``), and the failure notice's label then
+    adds its own controls — so the rendered row said `send again` twice one
+    clause apart (design round 1, D2). The trim is TEXTUAL on purpose: the
+    transport's wording is the authority for the numbers and the remedy, and a
+    rephrase here would free them to drift; a message that does not carry the
+    clause passes through untouched.
+    """
+    sentence = str(error)
+    suffix = "and send again"
+    if sentence.endswith(suffix):
+        sentence = sentence[: -len(suffix)].rstrip()
+    return sentence
+
+
 def _retiring_notice_text(error: BaseException) -> str:
     """The refusal row, with the viewer's claim placed where it READS.
 
@@ -1358,10 +1391,35 @@ def _retiring_notice_text(error: BaseException) -> str:
     correct to read after a sentence with no terminal punctuation, which is the
     shape that path arrives in. Its wrap can still end short, and that is a
     property of a string we do not own (UX round 3, U4 records that window).
+
+    THE CLAIM IS "not sent", NOT "back in the composer". This row is now the
+    sentence of a failure record (``_mark_send_failed``, the oversize/drain/
+    attach branches): under the boundary rule a post-paint failure keeps its
+    row, so the payload is exactly where it was when the refusal landed and the
+    composer claim the withdraw-and-restore round gave this sentence would now
+    be false. The placement and the two shapes are unchanged from that round —
+    only the clause in the middle moved with the behaviour.
     """
     if isinstance(error, RuntimeRetiring):
-        return f"{error.HEAD} Your message is back in the composer — {error.TAIL}"
-    return f"{error}. Your message is back in the composer."
+        tail = error.TAIL
+        for lead in ("send it again ", "send again "):
+            if tail.startswith(lead):
+                # D2 (design round 1): the class sentence's own re-send clause is
+                # DROPPED here, because the controls one clause away carry it
+                # ("…; send it again once the new build is up. — send again ⏎"
+                # said the same thing twice, with a mid-label full stop from the
+                # reused head+tail). The condition survives as a statement about
+                # when sending works again; the terminal period goes with the
+                # imperative, because the label seam is an em dash.
+                return (
+                    f"{error.HEAD} Your message was not sent; "
+                    f"sending can resume {tail[len(lead):].rstrip('.')}"
+                )
+        # A queued tail names carriage, not an instruction (it is composed for
+        # callers whose spool took the message), so it keeps the claim-tail
+        # join; only the trailing period is the seam's casualty.
+        return f"{error.HEAD} Your message was not sent — {tail.rstrip('.')}"
+    return f"{error}. Your message was not sent"
 
 
 #: How often the band re-counts running background jobs. Nothing emits an
@@ -2567,20 +2625,18 @@ ATTACH_BEHIND_VERDICT = (
 )
 ATTACH_BEHIND_RECOVERED = "session {session_id} is answering again"
 #: A message sent while the paint-first attach was still pending, whose bind
-#: then failed: it NEVER reached the owner, so it comes back to the composer and
-#: its echo row comes down (UX round 2, U6). The transport's own reason ("owner
+#: then failed: it NEVER reached the owner. The transport's own reason ("owner
 #: did not send its state") is logged, not shown — it names an owner and a
 #: protocol step, and says nothing about the one thing the user needs to know,
-#: which is where their text went (U8).
+#: which is what happened to their message (U8).
 #:
-#: Two authored rows for the same reason as the verdict (U9), and the first is
-#: the SHORTER one now: "…is back in the composer." wrapped at 80 columns (UX
-#: round 3, U13), so where the text went moves into the actionable row, which
-#: is the one the user acts on and the one that has to stay whole.
-ATTACH_BEHIND_UNSENT = (
-    "session {session_id} did not answer — your message was not sent.\n"
-    "It is back in the composer: send it again to retry."
-)
+#: ONE LINE NOW, and that is the boundary rule rather than an edit: the row used
+#: to pair this fact with "It is back in the composer: send it again to retry",
+#: and under the boundary rule the payload does NOT come home automatically —
+#: the message's own row stays, and its failure notice carries the retry verbs
+#: (``_mark_send_failed``, class "attach-behind"). Keeping a composer claim here
+#: would contradict the notice in the same frame.
+ATTACH_BEHIND_UNSENT = "session {session_id} did not answer — your message was not sent"
 
 
 def _resume_redial_clock() -> float:
@@ -3317,6 +3373,23 @@ def _owning_transcript(block: Any) -> "TranscriptView | None":
     return None
 
 
+class _BlockSink:
+    """The `ReplayTarget` seam for collection: appends blocks to a list.
+
+    `append_image_blocks` mounts through ``self._append_block``, so a prepared
+    replay that must not mount yet (the offscreen view is still being built)
+    hands it this sink instead of the app, and the caller appends the collected
+    blocks in its own batch. The same shape `_paint_skipped_live_tool_rows`
+    uses with its ``collect`` argument.
+    """
+
+    def __init__(self, into: list[Any]) -> None:
+        self._into = into
+
+    def _append_block(self, block: Any) -> None:
+        self._into.append(block)
+
+
 class _AttachBehindSend:
     """One message sent while its conversation's paint-first attach was pending.
 
@@ -3335,8 +3408,9 @@ class _AttachBehindSend:
         view: TranscriptView | None,
     ) -> None:
         self.attempt = attempt
-        #: The echo rows as captured; public so the worker can tell whether the
-        #: interaction's single ``submitted_blocks`` slot still names them.
+        #: The echo rows as captured; public so the failure branch can hand
+        #: ``_mark_send_failed`` the ROWS (``_start_turn_for``'s ``send_box``
+        #: is the identity the shared slot is compared against).
         self.blocks = blocks
         self._blocks = blocks
         self._view = view
@@ -3348,19 +3422,21 @@ class _AttachBehindSend:
             self._done = True
             self.attempt.landed()
 
-    def returned(self) -> None:
+    def failed(self) -> None:
+        """The message's own bind failed; its failure record states the outcome.
+
+        NOT ``returned()``. That method spent the account's "your message is
+        back in the composer" row, and under the boundary rule the message does
+        not go back there: its row stays on the transcript and the failure
+        record's notice carries the retry verbs, so painting the account row too
+        would put two sentences on one failure (and the account's copy would be
+        false). The attempt's own schedule still runs — its verdict is about the
+        SESSION (is it answering), which is not this message's story.
+        """
         if self._done:
             return
         self._done = True
-        held, self._blocks = self._blocks, None
-        view = self._view
-        if held is not None and view is not None and view.is_attached:
-            # THIS message's rows, from the view the submit painted them into —
-            # never "the newest submit" and never "the view in front".
-            user_block, image_blocks = held
-            for block in (*image_blocks, user_block):
-                view.remove_block(block)
-        self.attempt.returned()
+        self.attempt.carrier_failed()
 
     def ended(self, *, bound: bool) -> None:
         """Any other way the send ended (cancelled, oversize, stopped); idempotent."""
@@ -6051,20 +6127,24 @@ class OperatorApp(App[None]):
         # BEFORE the turn paints, so the queue's own row is gone by the time
         # the prompt's echo appears under it — the notice narrates the hold,
         # and the hold ends here (design round 3, D15). Same current-view
-        # guard as `_withdraw_user_echo_for`: a background source's notice
+        # guard the retired-echo removal used: a background source's notice
         # lives in a view this app can no longer reach, and its teardown is
         # the view's own business.
         if notice is not None and self._is_current(source):
             self._transcript_view().remove_block(notice)
         if held or images:
-            # HANDED TO THE TURN, so the rows this prompt painted at submit are
-            # withdrawable by the worker that dispatches it. Set BEFORE
-            # `_start_turn_for` for the reason the direct path gives: the worker
-            # it starts can reach its `except` before a later line would run,
-            # and an echo the worker cannot see is one it cannot withdraw. The
-            # worker's `finally` clears it on every path (review round 2,
-            # MAJOR-3).
-            source.turn.submitted_blocks = blocks
+            # HANDED TO THE TURN, so the failure branches can resolve on the
+            # rows this prompt painted at submit, and a resolution can take them
+            # down. Set BEFORE `_start_turn_for` for the reason the direct path
+            # gives: the worker it starts can reach its `except` before a later
+            # line would run, and an echo the worker cannot see is one it cannot
+            # resolve. The worker's `finally` clears it on every path (review
+            # round 2, MAJOR-3). Boxed like the direct path (see
+            # ``PendingSend``), so the dispatch capture follows a view rebuild;
+            # a hold that somehow lost its rows hands the slot nothing rather
+            # than an empty box — its failure then resolves by text, exactly as
+            # before the record existed.
+            source.turn.submitted_blocks = PendingSend(blocks) if blocks is not None else None
             self._start_turn_for(
                 source,
                 held,
@@ -6350,6 +6430,388 @@ class OperatorApp(App[None]):
         self._sync_draft_recoveries(source)
         self._editor().focus()
 
+    # --- failed sends: the boundary rule in the transcript -----------------
+    #
+    # THE BOUNDARY RULE, stated once (it supersedes the TUI's reviewed
+    # preference that a refused send withdraw its row and return the payload to
+    # the composer): a failure raised BEFORE the row was painted keeps the text
+    # in the composer and paints nothing (the editor gate, `_composer_send`
+    # refusals); a failure raised AFTER the row was painted keeps the row and
+    # gets `send again` / `edit` on a notice beneath it. The retry is one
+    # keystroke on the row, the payload has one home, and a message that never
+    # left the machine is not silently erased from the conversation it was
+    # typed into.
+    #
+    # Every branch of `run_prompt`'s `except Exception` that runs post-paint
+    # funnels through `_mark_send_failed`; the record it keeps lives on the
+    # interaction (`source.turn.failed_sends`), so a parked conversation keeps
+    # its failures the way it keeps its drafts, and their notices are projected
+    # into whichever view is in front — never appended through another
+    # conversation's transcript.
+
+    def _mark_send_failed(
+        self,
+        source: SessionInteraction,
+        *,
+        blocks: tuple[Any, list[Any]] | None,
+        text: str,
+        sent: str | None,
+        typed: str,
+        images: list[Any] | None,
+        accepted: SessionDraft | None,
+        failure_class: str,
+        sentence: str,
+        kind: NoticeKind = "warning",
+        can_send_again: bool = True,
+        unknown_delivery: bool = False,
+        message_id: str = "",
+    ) -> None:
+        """Keep a post-paint failure's row, and resolve it ON the record.
+
+        ONE RECORD PER FAILED ROW, restated in place if a failure lands twice
+        for the same rows — the `_notice_unsent_runtime` discipline ("once
+        while it stands", not once per attempt): a second sentence under the
+        same row is the stacking defect the U6 measurement recorded, and
+        `NoticeBlock.restate` is the mechanism that prevents it here.
+
+        The sentence is the CLASS's own copy (the error's, the refusal's, the
+        notice helper's), with no composer claim: the payload is exactly where
+        it was when the row was painted, and saying it went back to the
+        composer would be the old behaviour's copy attached to the new
+        behaviour's screen.
+
+        `unknown_delivery` records the ONE class where the message may have
+        reached the owner before the failure was observed (a generic transport
+        error on an attached session — design OQ2): its row stays even through
+        `edit`, because a row that may describe a real message must not be
+        retired on a guess.
+        """
+        for held in source.turn.failed_sends:
+            # IDENTITY OF THE ROWS, or — when a re-entry arrives without them
+            # (the capture can be empty: a later submit's ``finally`` may have
+            # cleared the slot before this failure landed) — identity of the
+            # SEND, by the id the echo was registered under. Without the second
+            # arm the loop skipped and a re-entry STACKED a second record +
+            # notice under one row, the stacking this docstring forbids
+            # (agent review round 1, R-MINOR-5).
+            same_rows = blocks is not None and held.blocks is blocks
+            same_send = blocks is None and bool(message_id) and held.message_id == message_id
+            if same_rows or same_send:
+                held.sentence = sentence
+                held.failure_class = failure_class
+                held.kind = kind
+                held.unknown_delivery = unknown_delivery
+                held.can_send_again = can_send_again
+                notice = held.notice
+                if notice is not None and notice.is_attached:
+                    notice.restate(SendFailureNotice._label_for(held), kind)
+                return
+        record = FailedSend(
+            text=text,
+            sent=sent,
+            typed=typed,
+            images=list(images or []),
+            accepted=accepted,
+            message_id=message_id,
+            failure_class=failure_class,
+            sentence=sentence,
+            kind=kind,
+            unknown_delivery=unknown_delivery,
+            can_send_again=can_send_again,
+            blocks=blocks,
+        )
+        source.turn.failed_sends.append(record)
+        # BOUNDED, NEVER EVICTED: once the composer no longer keeps a copy the
+        # record is the payload's only home, so overflow PARKS the oldest
+        # through the ordinary restore funnel rather than dropping the text
+        # (design §4b.8 — this list may not do what the echo buffer does).
+        while len(source.turn.failed_sends) > FAILED_SEND_BOUND:
+            self._edit_failed_send(source, source.turn.failed_sends[0], focus=False)
+        self._sync_send_failure_notices(source)
+
+    @staticmethod
+    def _send_failure_unknown_delivery(session: Any, error: BaseException) -> bool:
+        """Whether a GENERIC post-paint failure may have reached the owner anyway.
+
+        The one class design OQ2 requires classified rather than assumed. Every
+        other branch catches a refusal raised before admission, where the
+        message provably never left this side. A generic transport error on an
+        ATTACHED session is different in kind: the write crosses a socket and
+        the failure may land mid-flight, so the message may have reached the
+        owner while the outcome was never observed — its row must survive
+        `edit` as the fate statement rather than be retired on a guess.
+
+        In-process sessions are exempt: their ``prompt()`` raises before
+        admission (session disposed, already streaming, an MCP failure while
+        building the request), which is the same proof the sibling branches
+        carry.
+        """
+        if getattr(session, "owns_runtime", True):
+            return False
+        return isinstance(error, (ConnectionError, TimeoutError, OSError))
+
+    def _sync_send_failure_notices(self, source: SessionInteraction) -> None:
+        """Project this source's failure notices into whichever view it owns.
+
+        MIRRORS `_sync_draft_recoveries`, and exists for the same hazard: a
+        parked conversation's records outlive the view they were painted into,
+        and a notice may be (re)painted only while ITS source is the one on
+        screen. Appending through `self._transcript_view()` from a failure
+        that lands while another conversation is in front is the
+        wrong-transcript defect the attach-behind rounds were spent removing;
+        the parked record waits here and is projected on reveal.
+        """
+        if not self._is_current(source):
+            return
+        view = self._transcript_view()
+        remaining: list[SendFailureNotice] = []
+        for block in [b for b in view.blocks() if isinstance(b, SendFailureNotice)]:
+            if block.source_token != source.token or not any(
+                record is block.record for record in source.turn.failed_sends
+            ):
+                view.remove_block(block)
+                if block.record.notice is block:
+                    block.record.notice = None
+            else:
+                remaining.append(block)
+        for record in source.turn.failed_sends:
+            if any(block.record is record for block in remaining):
+                continue
+            notice = SendFailureNotice(source.token, record)
+            record.notice = notice
+            self._append_block(notice)
+
+    def on_send_failure_notice_requested(self, message: SendFailureNotice.Requested) -> None:
+        """One of a failed send's verbs, from its notice row.
+
+        The guards are `on_draft_recovery_notice_requested`'s, for the same
+        reasons: a transition in flight makes the acting session ambiguous, a
+        notice from another source's view is not this conversation's offer, a
+        notice no longer attached to the view in front is stale, and a record
+        already resolved (retired by the other verb, or by `/clear`) has
+        nothing left to act on.
+        """
+        message.stop()
+        source = self._interaction
+        notice = message.notice
+        record = notice.record
+        if (
+            self._session_transition_pending
+            or notice.source_token != source.token
+            or notice not in self._transcript_view().blocks()
+            or not any(held is record for held in source.turn.failed_sends)
+        ):
+            return
+        if message.action == "send_again":
+            self._resend_failed_send(source, record)
+        else:
+            self._edit_failed_send(source, record)
+
+    def _resend_failed_send(self, source: SessionInteraction, record: FailedSend) -> None:
+        """`send again`: retire the failed row + notice, then replay the payload.
+
+        RETIRE-THEN-RESUBMIT, IN ONE HANDLER, is J1's requirement: the frame
+        must never show two rows for one payload and never show neither.
+        `_submit_prompt` paints the successor row synchronously, so the fresh
+        row lands in the same pump handling that removed the failed one.
+
+        The RESUBMIT IS THE ORDINARY SUBMIT PATH, not a replay protocol: the
+        same `_submit_prompt` the composer presses through, so steering/heavy
+        holds/naming all behave exactly as they would for a retyped message.
+        The submit-time draft rides `source.turn.submitted_draft` again so the
+        resend carries the SAME attachment pixels, not a rebuilt blur.
+
+        SUPERSEDED RETIREMENT (agent review round 1, R-MAJOR-1): the rows go
+        for EVERY class, the unknown-delivery one included. Its row survives
+        `edit` because an edit moves the payload without making a second
+        attempt (the row is the only statement that a copy may exist), but a
+        resend IS that second attempt — the successor row is the standing
+        statement, and the frame must never show two rows for one payload
+        (J1). Until this fix the retry's row landed BESIDE the failed one for
+        exactly the class the design singles out as unknown-delivery.
+
+        FOCUS RETURNS TO THE COMPOSER (UX round 1, U4): the sibling paths
+        (`DraftRecoveryNotice.Requested`, `_edit_failed_send`) already end with
+        an explicit refocus, and the notice was the focused row when the verb
+        fired — leaving focus on the transcript would leave the composer dark
+        until the next keystroke re-lit it.
+        """
+        if source.session is None:
+            # The offer is gated on this when the record is made; a stale offer
+            # (session stopped since) resolves nothing and retires nothing.
+            return
+        text, sent, typed = record.text, record.sent, record.typed
+        images = list(record.images)
+        accepted = record.accepted
+        attachments = dict(accepted.attachments) if accepted is not None else {}
+        self._resolve_send_failure(source, record, returned=True, superseded=True)
+        previous = source.turn.submitted_draft
+        source.turn.submitted_draft = accepted
+        try:
+            self._submit_prompt(text, images, attachments, sent=sent, typed=typed)
+        finally:
+            source.turn.submitted_draft = previous
+        if self._is_current(source):
+            self._editor().focus()
+
+    def _edit_failed_send(
+        self, source: SessionInteraction, record: FailedSend, *, focus: bool = True
+    ) -> None:
+        """`edit`: return the payload through the existing restore funnel.
+
+        NOTHING ABOUT THE RESTORE IS NEW except who triggers it: this is the
+        same `_restore_unsent_for` the withdraw-and-restore branches called, so
+        a busy composer parks into `source.unsent` and paints its own recovery
+        offer (one offer per payload, never two).
+
+        Retirement follows the delivery fact: a provably-not-delivered class
+        loses its row with the payload move — a row standing beside the
+        payload's new life would count one send twice — while an
+        unknown-delivery row stays as the message's fate statement (design
+        §4b.5; the row is the deliverable half, the offer is spent).
+        """
+        if not any(held is record for held in source.turn.failed_sends):
+            return
+        unknown = record.unknown_delivery
+        self._restore_unsent_for(
+            source, record.text, record.images, accepted=record.accepted, seam=True
+        )
+        self._resolve_send_failure(source, record, returned=not unknown)
+        if focus and self._is_current(source):
+            self._editor().focus()
+
+    def _resolve_send_failure(
+        self,
+        source: SessionInteraction,
+        record: FailedSend,
+        *,
+        returned: bool,
+        superseded: bool = False,
+    ) -> None:
+        """Drop one record; retire its notice, and its rows when the payload moved.
+
+        `returned` marks the resolutions where the payload went back under the
+        user's control (edit, an overflow park): for a provably-not-delivered
+        class the row goes with it, because the send never happened and the
+        transcript would otherwise count one message twice; an
+        unknown-delivery record keeps its row as the fate statement, and only
+        the offer (the notice) is spent either way.
+
+        `superseded` marks `send again`, which retires the rows for EVERY class
+        including the unknown-delivery one: the resubmit paints the successor
+        row in the same handler, so the pair would read as two sends for one
+        payload (J1). The unknown-delivery row survives `edit` for the opposite
+        reason — an edit makes no second attempt, so the row is the only
+        statement that a copy may exist (agent review round 1, R-MAJOR-1).
+        """
+        source.turn.failed_sends[:] = [
+            held for held in source.turn.failed_sends if held is not record
+        ]
+        if superseded or (returned and not record.unknown_delivery):
+            self._retire_failed_send_rows(record)
+        self._sync_send_failure_notices(source)
+
+    def _retire_failed_send_rows(self, record: FailedSend) -> None:
+        """Take a failed send's painted rows down, wherever they were painted.
+
+        The old withdrawal could assume "a background source's rows were never
+        mounted"; a record can outlive the view its rows were painted into (a
+        parked conversation keeps its widgets), so the owning view is found per
+        block instead of assumed to be the current transcript.
+        """
+        blocks = record.blocks
+        record.blocks = None
+        if blocks is None:
+            return
+        user_block, image_blocks = blocks
+        for block in (*image_blocks, user_block):
+            view = _owning_transcript(block)
+            if view is not None:
+                view.remove_block(block)
+
+    def _reseed_pending_user_rows(
+        self, source: SessionInteraction, blocks: list[Any], history: list[Any]
+    ) -> None:
+        """Re-author this conversation's PENDING user rows into a fresh replay.
+
+        THE S3 HOLE (design §4d). A cache-miss rebuild paints from
+        `display_history_window()`, so a message that was submitted but not yet
+        durable — or one whose send FAILED after its row was painted — had no
+        row in the rebuilt view while its failure notice was projected (the
+        notice rides the failure record, which survives the view). A switch
+        back in that window showed a transcript with no row for a send that is
+        still live. The fix is the design's: the pending rows already live on
+        the interaction (`submitted_blocks` for the in-flight send,
+        `failed_sends[].blocks` for failures), so re-author them here, in
+        submission order, at the tail of the replay.
+
+        IDENTITY FOLLOWS `on_user_message_start`. An in-flight row is re-seeded
+        only when its anchor id is ABSENT from the durable history, so the
+        admitted-but-not-yet-announced window cannot double it; an id-less send
+        (a session whose ``prompt`` predates the seam) falls back to the text
+        of the last durable user row, the same fallback the echo consumer
+        uses. A failed send is never durable, so it is re-seeded
+        unconditionally.
+
+        The records take the FRESH rows as their own (`record.blocks`, and
+        `submitted_blocks` for the in-flight send) — the old blocks live in the
+        view being replaced, and a later `edit`/`send again` must retire what is
+        actually on screen. The in-flight send's rows are swapped INSIDE its
+        `PendingSend` box rather than by assigning the slot: the worker that
+        dispatched that send captured the box, and a fresh slot value would
+        strand its failure on rows the replaced view no longer shows.
+        """
+        from local_operator.tui.session_presentation import (
+            ReplayTarget,
+            append_image_blocks,
+        )
+
+        def reseed(text: str, images: list[Any], marker_text: str) -> tuple[Any, list[Any]]:
+            user_block = UserBlock(text, len(images))
+            blocks.append(user_block)
+            # `append_image_blocks` declares the `ReplayTarget` protocol, whose
+            # other members are the resume bookkeeping a MOUNTED target needs;
+            # the sink is a collect-only stand-in for the single method this
+            # call reaches (`_append_block`), so the cast states the one thing
+            # this call site needs rather than faking the whole protocol.
+            image_blocks = append_image_blocks(
+                cast(ReplayTarget, _BlockSink(blocks)), images, marker_text=marker_text
+            )
+            return user_block, image_blocks
+
+        for record in source.turn.failed_sends:
+            record.blocks = reseed(record.text, list(record.images), record.typed or record.text)
+
+        pending = source.turn.submitted_blocks
+        if pending is None:
+            return
+        user_block, _old_image_blocks = pending.blocks
+        anchor = str(getattr(user_block, "navigation_anchor_id", "") or "")
+        row_text = user_block.text()
+        durable_user_ids = {
+            str(getattr(message, "id", "") or "")
+            for message in history
+            if str(getattr(message, "role", "")) == "user"
+        }
+        durable_user_texts = [
+            str(getattr(message, "text", "") or "")
+            for message in history
+            if str(getattr(message, "role", "")) == "user"
+        ]
+        if anchor:
+            already_durable = anchor in durable_user_ids
+        else:
+            already_durable = durable_user_texts[-1:] == [row_text]
+        if already_durable:
+            return
+        accepted = source.turn.submitted_draft
+        images = (
+            [attachment.image for _, attachment in sorted(accepted.attachments.items())]
+            if accepted is not None
+            else []
+        )
+        pending.blocks = reseed(row_text, images, getattr(accepted, "text", ""))
+
     def _register_user_echo_for(
         self, source: SessionInteraction, text: str, *, message_id: str = ""
     ) -> _PendingUserEcho:
@@ -6489,39 +6951,6 @@ class OperatorApp(App[None]):
             f"{len(lost)} image{plural} resized to fit this message: " + ", ".join(clauses),
             "note",
         )
-
-    def _withdraw_user_echo_for(self, source: SessionInteraction) -> None:
-        """Take the painted prompt rows back off the transcript.
-
-        FOR A MESSAGE THAT WAS NEVER SENT, and only for that. The echo is
-        painted at submit so the app answers the keystroke immediately, which is
-        right for every path where the prompt does reach the session. A refused
-        send is the one path where it does not, and there the row is a durable
-        lie: identical styling to a delivered message — same rule, same weight,
-        same full-width thumbnail — so a scroll-back a week later cannot tell it
-        from a real turn. Worse after the user complies than before: they follow
-        the refusal's advice, resend, and the transcript now shows the message
-        twice with an attachment that never left the machine (design round 1,
-        D3).
-
-        REMOVED rather than dimmed or struck through. The draft is back in the
-        composer by the time this runs and is about to be echoed again by the
-        resend, so a marked-up copy would leave the user reading two rows for
-        one message and deciding which is real. The same reasoning
-        ``_recall_queued_steers`` gives for lifting a recalled steer's rows, and
-        the removal is the same call it makes.
-
-        Only touches the CURRENT view's transcript, because that is the only
-        one holding widgets: a background source's rows were never mounted, and
-        its restored draft is carried by ``source.unsent`` instead.
-        """
-        held, source.turn.submitted_blocks = source.turn.submitted_blocks, None
-        if held is None or not self._is_current(source):
-            return
-        user_block, image_blocks = held
-        transcript = self._transcript_view()
-        for block in (*image_blocks, user_block):
-            transcript.remove_block(block)
 
     def _post_turn_abandoned_for(
         self,
@@ -7008,6 +7437,12 @@ class OperatorApp(App[None]):
                 session=session,
                 queued_cards=prepared_queued_cards,
             )
+            # PENDING USER ROWS ride into the fresh replay too (design §4d): a
+            # return can land on a rebuild whose durable history does not yet
+            # contain the send — pre-admission, a cold bind, a stalled ack — or
+            # whose send FAILED after its row was painted, and those rows must
+            # not vanish while their failure notice is projected.
+            self._reseed_pending_user_rows(source, replay.blocks, history)
             replay.view.styles.layer = "session-cache"
             # visibility:hidden removes the compositor map and makes size=0.
             # A screen overlay is excluded from flow/virtual bounds; parking it
@@ -8689,6 +9124,11 @@ class OperatorApp(App[None]):
             )
             self._restore_sidebar_aside(source)
             self._sync_draft_recoveries(source)
+            # The records' notices ride the same reveal discipline as the draft
+            # offers above: a failure that landed while this conversation was
+            # parked has its notice projected HERE, into the view it owns, and
+            # one that landed while current was already painted.
+            self._sync_send_failure_notices(source)
             for text, kind in source.notices:
                 self._system_notice(text, kind)
             source.notices.clear()
@@ -24501,6 +24941,14 @@ class OperatorApp(App[None]):
         self._reasoning_block = None
         self._tool_cards = {}
         self._composing_cards = {}
+        # The failure records' rows went with the transcript, and /clear is a
+        # request to empty the SCREEN: resolve them here rather than project
+        # them back onto a transcript the user just emptied (the design's
+        # resolution points: resend admitted, edit, /clear, conversation
+        # transition). The payload is deliberately not re-homed — restoring a
+        # draft nobody asked for would be the old automatic-return defect with
+        # a different trigger.
+        self._interaction.turn.failed_sends.clear()
         # An empty transcript is the welcome view's whole precondition, so the
         # clear hook is also what brings it back — and with it the boot layout,
         # since `_set_welcome_visible` drives both from this one condition. One
@@ -27335,8 +27783,25 @@ class OperatorApp(App[None]):
             # reopen command, not "still starting" (measured: the first
             # prompt after /stop said exactly that, contradicting the receipt
             # one row above it).
+            #
+            # THE ROW IS KEPT and resolved on a failure record, like every
+            # other post-paint failure: the text is not dropped (the old shape
+            # left it only in the composer's history) and `edit` returns it.
+            # There is no session to send into, so the offer is edit alone.
             body, kind = self._no_session_notice(unsent=True)
-            self._append_block(NoticeBlock(body, kind))
+            self._mark_send_failed(
+                self._interaction,
+                blocks=(user_block, image_blocks),
+                text=text,
+                sent=sent,
+                typed=typed,
+                images=images,
+                accepted=self._interaction.turn.submitted_draft,
+                failure_class="no-session",
+                sentence=body,
+                kind=kind,
+                can_send_again=False,
+            )
             return
         session = self._session
         assert self._status is not None
@@ -27472,12 +27937,14 @@ class OperatorApp(App[None]):
             self._interaction.compaction.held_notice = queued_notice
             self._maybe_name_conversation(named)
             return
-        # HELD ACROSS THE DISPATCH so a refusal can take the echo back down.
-        # Set before `_start_turn` rather than after: the worker it starts can
-        # reach its `except` before this line would otherwise run, and an echo
-        # the worker cannot see is one it cannot withdraw. Cleared by the
-        # worker's `finally` on every path (see `_start_turn_for`).
-        self._interaction.turn.submitted_blocks = (user_block, image_blocks)
+        # HELD ACROSS THE DISPATCH so a refusal can resolve on the rows a
+        # resolution must retire. Set before `_start_turn` rather than after:
+        # the worker it starts can reach its `except` before this line would
+        # otherwise run, and it captures the box AT DISPATCH. Cleared by the
+        # worker's `finally` on every path (see `_start_turn_for`); the worker
+        # holds its own capture, so clearing only affects later readers of the
+        # slot (a rebuild's re-seed).
+        self._interaction.turn.submitted_blocks = PendingSend((user_block, image_blocks))
         echo = self._start_turn(sent, images)
         if isinstance(echo, _PendingUserEcho):
             user_block.navigation_anchor_id = echo.message_id
@@ -27513,6 +27980,18 @@ class OperatorApp(App[None]):
         session = source.session
         if session is None or self._status is None:
             return
+        # THE SEND'S OWN ROWS, captured where the send is DISPATCHED. The
+        # interaction keeps ONE `submitted_blocks` slot and every submit writes
+        # it, so without this a second message submitted while this one is still
+        # in flight would steal this failure: the record would name the second's
+        # text and rows, `edit` would erase a delivered message's row while the
+        # failed send's stayed standing, and `send again` would replay the wrong
+        # payload (agent review round 1, R-MAJOR-2 — the attach-behind carrier
+        # captured for exactly this reason and the plain branches did not). The
+        # BOX is captured, not its tuple: a view rebuild swaps the rows INSIDE
+        # the box, so the failure binds whatever rows a later `edit`/`send
+        # again` must retire (`PendingSend`).
+        send_box = source.turn.submitted_blocks
         # The user asked for something, so a start failure from here on is news
         # again even if this binding has already reported one — see
         # `_claim_start_engage_notice`. Placed at this dispatch point because it
@@ -27570,7 +28049,9 @@ class OperatorApp(App[None]):
             attempt = self._attach_behind_attempt_for(source, session)
             if attempt is not None:
                 attach_send = _AttachBehindSend(
-                    attempt, source.turn.submitted_blocks, self._transcript_view()
+                    attempt,
+                    send_box.blocks if send_box is not None else None,
+                    self._transcript_view(),
                 )
             self._push_starting_band()
 
@@ -27633,6 +28114,16 @@ class OperatorApp(App[None]):
                 from local_operator.mobile.attach_client import OversizedRequest
 
                 error_text = str(error)
+                # THE ROWS THIS FAILURE KEEPS — the ones the submit painted for
+                # this message, read from THIS dispatch's own capture rather
+                # than the shared slot (a second submit overwrites it; a view
+                # rebuild mutates the capture's box, so it follows the re-seed).
+                # The row's OWN text (not the send form) is what a resend must
+                # paint again: for a ``$skill`` invocation they differ, exactly
+                # as at submit.
+                failed_blocks = send_box.blocks if send_box is not None else None
+                failed_row_text = text if failed_blocks is None else failed_blocks[0].text()
+                failed_typed = accepted.text if accepted is not None else ""
                 # A message typed into a STOPPED viewer gets the same sentence
                 # the owner's own path gives, not the facade's bare clause:
                 # the dropped text and the way back are exactly what the user
@@ -27644,7 +28135,24 @@ class OperatorApp(App[None]):
                     and "stopped" in str(error)
                 ):
                     text_line, kind = self._no_session_notice(unsent=True)
-                    self._notice_for(source, text_line, kind)
+                    # There is no session to send into, so the offer is `edit`
+                    # alone — and it is an offer now, where the old shape only
+                    # left the sentence: the row stays either way, and the
+                    # payload must be reachable from it (the boundary rule).
+                    self._mark_send_failed(
+                        source,
+                        blocks=failed_blocks,
+                        text=failed_row_text,
+                        sent=text,
+                        typed=failed_typed,
+                        images=images,
+                        accepted=accepted,
+                        failure_class="stopped",
+                        sentence=text_line,
+                        kind=kind,
+                        can_send_again=False,
+                        message_id=echo.message_id,
+                    )
                 elif isinstance(error, OversizedRequest):
                     # THE MESSAGE WAS NEVER SENT, and that is the whole reason
                     # this branch exists rather than falling through to the
@@ -27657,33 +28165,37 @@ class OperatorApp(App[None]):
                     # no text and no attachment: their work, gone, for a
                     # transport limit they cannot see.
                     #
-                    # So the draft goes back the same way a dead runtime returns
-                    # it, and the error's own sentence is the notice — it
-                    # already names the size, the ceiling that applied, and
-                    # which attachment to drop, which is what makes the refusal
-                    # actionable.
-                    #
-                    # AND THE ECHO COMES DOWN WITH IT, before anything is said,
-                    # so the refusal is not printed under a prompt row the
-                    # transcript is about to retract.
-                    self._withdraw_user_echo_for(source)
-                    self._notice_for(
+                    # SO THE ROW KEEPS IT, and the record becomes the payload's
+                    # home: the old shape withdrew this row and put the draft
+                    # in the composer (the superseded preference), which under
+                    # the boundary rule is the other mistake in the same
+                    # family — a message the user can still see must not be
+                    # erased from the conversation while its text is silently
+                    # handed somewhere else. The refusal's own sentence says
+                    # what to change; `send again` replays and `edit` returns
+                    # the draft through the same restore funnel the old
+                    # automatic path used.
+                    self._mark_send_failed(
                         source,
-                        # The neighbouring runtime-stopped notice tells the user
-                        # their text survived and this one did not, so the user
-                        # was told to act without being told they still had
-                        # anything to act with (design round 1, D7).
-                        f"{error} — your message is back in the composer",
-                        "warning",
+                        blocks=failed_blocks,
+                        text=failed_row_text,
+                        sent=text,
+                        typed=failed_typed,
+                        images=images,
+                        accepted=accepted,
+                        failure_class="oversize",
+                        # The claim is "not sent", never "back in the
+                        # composer": the composer no longer receives it, and
+                        # the neighbouring runtime-stopped notice told that
+                        # story while this one did not (design round 1, D7) —
+                        # the fix now lives in the same clause for every
+                        # class. The transport's own sentence is trimmed of its
+                        # retry clause here, where the controls carry it
+                        # (design round 1, D2; see `_oversize_notice_text`).
+                        sentence=f"{_oversize_notice_text(error)} — your message was not sent",
+                        kind="warning",
+                        message_id=echo.message_id,
                     )
-                    # AFTER the explanation. `_restore_unsent_for` can append a
-                    # `DraftRecoveryNotice`, and appending it first put the
-                    # offer to restore ABOVE the reason anything needs restoring
-                    # — the transcript read effect-then-cause (design round 1,
-                    # D5). On the common branch it loads the composer directly
-                    # and appends nothing, so this only reorders the case that
-                    # has two rows to order.
-                    self._restore_unsent_for(source, text, images, accepted=accepted, seam=True)
                 elif _is_retiring_refusal(error):
                     # THE DRAIN REFUSED A MESSAGE THAT WAS NEVER DELIVERED, and
                     # that is the whole reason this branch exists rather than
@@ -27695,8 +28207,10 @@ class OperatorApp(App[None]):
                     # their message again while their message was gone and its
                     # row stood there looking sent — twice over for a second
                     # attempt inside the same drain (design round 1, D1; UX
-                    # round 1, U1). With the text back in the composer, "send it
-                    # again" is one keystroke rather than a retype.
+                    # round 1, U1). Under the boundary rule the same cost is
+                    # answered on the row: the retry is one keystroke there
+                    # rather than a retype, and the row is no longer withdrawn
+                    # — the message it stands for is still the user's to send.
                     #
                     # THE TWO SIBLING BRANCHES ABOVE DO EXACTLY THIS for their
                     # own refusals; this case is the one that fell past them
@@ -27705,21 +28219,19 @@ class OperatorApp(App[None]):
                     # because the runtime on the other end can be the build that
                     # was resident before this viewer: an older one raises the
                     # same refusal uncategorised (see `_is_retiring_refusal`).
-                    self._withdraw_user_echo_for(source)
-                    # The reason is painted BEFORE the restore, because
-                    # `_restore_unsent_for` can append a `DraftRecoveryNotice`
-                    # and that offer must not read as the cause of the refusal
-                    # — the ordering the sibling branch above documents for its
-                    # own restore. The refusal sentence itself says nothing
-                    # about where the draft went — the owner builds it for the
-                    # peer-send path too — so the viewer adds the claim only
-                    # where it is true.
-                    self._notice_for(
+                    self._mark_send_failed(
                         source,
-                        _retiring_notice_text(error),
-                        "warning",
+                        blocks=failed_blocks,
+                        text=failed_row_text,
+                        sent=text,
+                        typed=failed_typed,
+                        images=images,
+                        accepted=accepted,
+                        failure_class="retiring",
+                        sentence=_retiring_notice_text(error),
+                        kind="warning",
+                        message_id=echo.message_id,
                     )
-                    self._restore_unsent_for(source, text, images, accepted=accepted, seam=True)
                 elif _is_runtime_gone(error):
                     # THE RUNTIME DIED UNDER US (crash, OOM, kill -9). What
                     # the user got was `✗ owner socket unreachable: [Errno 61]
@@ -27729,29 +28241,32 @@ class OperatorApp(App[None]):
                     # are the transport's vocabulary, and the lost text is the
                     # part that actually costs the user something.
                     #
-                    # The text goes back in the composer so it can be sent
-                    # again with one keystroke, and the viewer drops its
-                    # binding so the NEXT send engages a fresh runtime rather
-                    # than dialling a socket that is never coming back.
-                    #
-                    # AND THE ECHO COMES DOWN FIRST, for the same reason the
-                    # oversize branch takes it down: this message was never
-                    # delivered, so the row standing for it is a claim the
-                    # transcript is about to retract. Leaving it also stacked: a
-                    # user following the notice's own advice ("send it again")
-                    # while the runtime is still unreachable got one row per
-                    # press — three copies of one message and two warnings,
-                    # measured (QA round 2, U6).
-                    self._withdraw_user_echo_for(source)
-                    self._restore_unsent_for(source, text, images, accepted=accepted, seam=True)
+                    # THE ROW KEEPS THE MESSAGE and the notice states the
+                    # fate; `send again` replays it (starting a fresh runtime
+                    # through the same cold open a retyped message would use),
+                    # and the viewer drops its binding below so that replay
+                    # engages a new owner rather than dialling a socket that is
+                    # never coming back. The old shape put the text back in the
+                    # composer and took the row down, one press at a time —
+                    # three copies of one message and two warnings, measured
+                    # (QA round 2, U6); a record per failed row makes the
+                    # second press a RESTATEMENT, not a second row.
+                    self._mark_send_failed(
+                        source,
+                        blocks=failed_blocks,
+                        text=failed_row_text,
+                        sent=text,
+                        typed=failed_typed,
+                        images=images,
+                        accepted=accepted,
+                        failure_class="runtime-gone",
+                        sentence="this session's runtime stopped — your message was not sent",
+                        kind="warning",
+                        message_id=echo.message_id,
+                    )
                     go_cold = getattr(session, "_go_cold", None)
                     if callable(go_cold):
                         go_cold()
-                    # One row for the standing state, not one per attempt: the
-                    # refusals repeat every ~0.4 s while the record still claims
-                    # a live owner, and each append made the screen longer
-                    # without making it truer (QA round 2, U6).
-                    self._notice_unsent_runtime(source)
                 elif (
                     attach_send is not None
                     and getattr(session, "is_cold", False)
@@ -27769,28 +28284,46 @@ class OperatorApp(App[None]):
                     # composer empty — the user's text gone, under a row that
                     # looked sent, 4/4 in UX round 2's runs.
                     #
-                    # So it gets the in-pattern refusal the siblings above give
-                    # an undelivered message: echo down, draft back, and one row
-                    # in the product's words. Scoped to `attach_behind` because
-                    # this arm's verdict is what invites the send ("send a
-                    # message to retry"); an ordinary cold open's failures keep
-                    # the copy their own tests pin.
+                    # So it gets the in-pattern treatment the siblings above
+                    # give an undelivered message: the row KEEPS the message
+                    # and the record's notice states the fate with the two
+                    # verbs. Scoped to `attach_behind` because this arm's
+                    # verdict is what invites the send ("send a message to
+                    # retry"); an ordinary cold open's failures keep the copy
+                    # their own tests pin.
                     #
-                    # EVERY step keys on what the send captured: `attach_send`
-                    # withdraws THIS message's rows from the view that holds
-                    # them (on screen or parked), and its attempt restates the
-                    # ONE row of the conversation the message was sent from.
-                    # `_restore_unsent_for(source, …)` routes the text to that
-                    # conversation's composer or its stored draft. Nothing here
-                    # asks which conversation is in front (UX round 3, U10/U11).
+                    # EVERY step keys on what the send captured: the record
+                    # holds THIS message's rows (on screen or parked), and the
+                    # attempt's own schedule still narrates/judges the attach
+                    # it belongs to. Nothing here asks which conversation is in
+                    # front (UX round 3, U10/U11).
                     logger.info("prompt bind failed during a paint-first attach: %s", error)
                     # The shared slot is cleared only while it still names THIS
                     # message: a second send may have overwritten it, and its
                     # own refusal must still find its rows.
-                    if source.turn.submitted_blocks is attach_send.blocks:
+                    if source.turn.submitted_blocks is send_box:
                         source.turn.submitted_blocks = None
-                    attach_send.returned()
-                    self._restore_unsent_for(source, text, images, accepted=accepted, seam=True)
+                    # `attach_send.failed()` settles the attempt's carrier
+                    # WITHOUT spending its account row: that row's "It is back
+                    # in the composer" half is exactly what the boundary rule
+                    # superseded, and a second sentence about one failure would
+                    # contradict the notice in the same frame (J4).
+                    self._mark_send_failed(
+                        source,
+                        blocks=attach_send.blocks,
+                        text=(attach_send.blocks[0].text() if attach_send.blocks else text),
+                        sent=text,
+                        typed=failed_typed,
+                        images=images,
+                        accepted=accepted,
+                        failure_class="attach-behind",
+                        sentence=ATTACH_BEHIND_UNSENT.format(
+                            session_id=str(getattr(session, "session_id", "") or "")
+                        ),
+                        kind="warning",
+                        message_id=echo.message_id,
+                    )
+                    attach_send.failed()
                 else:
                     # THROUGH the same helper the `agent_end` path uses. This
                     # branch printed a bare `str(error)` while the event path
@@ -27798,7 +28331,43 @@ class OperatorApp(App[None]):
                     # and the other did not purely by route — and this is the
                     # route the reported incident took, because an MCP auth
                     # failure is what makes `prompt()` raise.
-                    self._notice_for(source, self._with_recovery_hint(str(error)), "error")
+                    #
+                    # THE ONE CLASS THAT IS NOT PROVABLY NOT-DELIVERED: a
+                    # generic transport error on an attached session may have
+                    # reached the owner before the failure was observed, so the
+                    # classification is explicit (`_send_failure_unknown_delivery`,
+                    # design OQ2) and its row survives `edit` as the message's
+                    # fate statement.
+                    # THE ONE CLASS THAT IS NOT PROVABLY NOT-DELIVERED: a
+                    # generic transport error on an attached session may have
+                    # reached the owner before the failure was observed, so the
+                    # classification is explicit (`_send_failure_unknown_delivery`,
+                    # design OQ2) and its row survives `edit` as the message's
+                    # fate statement.
+                    unknown_delivery = self._send_failure_unknown_delivery(session, error)
+                    sentence = self._with_recovery_hint(str(error))
+                    if unknown_delivery:
+                        # THE RISK THE RESEND CARRIES, stated (UX round 1, U3):
+                        # for the one class where a copy may already have
+                        # reached the owner, `send again` can duplicate the
+                        # message, and the row that must not CLAIM delivery
+                        # must still not hide that. The clause is about the
+                        # resend; it makes no claim about the first attempt.
+                        sentence = f"{sentence} — sending again may send it twice"
+                    self._mark_send_failed(
+                        source,
+                        blocks=failed_blocks,
+                        text=failed_row_text,
+                        sent=text,
+                        typed=failed_typed,
+                        images=images,
+                        accepted=accepted,
+                        failure_class="generic",
+                        sentence=sentence,
+                        kind="error",
+                        unknown_delivery=unknown_delivery,
+                        message_id=echo.message_id,
+                    )
                 # A prompt that failed never announced itself, so its echo
                 # entry has no event coming. Left standing it would swallow
                 # the next identical prompt's event; `_discard_user_echo` is
@@ -27816,12 +28385,16 @@ class OperatorApp(App[None]):
                     attach_send.ended(bound=not getattr(session, "is_cold", True))
                 if source.turn.submitted_draft is accepted:
                     source.turn.submitted_draft = None
-                # The echo is only withdrawable while the send's outcome is
+                # The echo is only resolvable while the send's outcome is
                 # unknown. Past this point the prompt was either delivered (the
-                # row is true and permanent) or already withdrawn above, and a
-                # stale reference would let a LATER refusal remove the rows of
-                # an earlier, successfully delivered message.
-                source.turn.submitted_blocks = None
+                # row is true and permanent) or already resolved above, and a
+                # stale reference would let a LATER refusal retire the rows of
+                # an earlier, successfully delivered message. Cleared only while
+                # the slot still names THIS send: with two sends in flight, the
+                # first to finish must not drop the second's slot (the reseed
+                # path re-reads it).
+                if source.turn.submitted_blocks is send_box:
+                    source.turn.submitted_blocks = None
                 source.active_workers -= 1
                 self.call_later(self._source_frontend_changed, source)
                 # THE TWO-MECHANISM HAZARD, and why these two lines belong

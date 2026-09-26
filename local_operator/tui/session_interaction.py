@@ -20,6 +20,25 @@ if TYPE_CHECKING:
 
 
 @dataclass
+class PendingSend:
+    """The painted rows of ONE in-flight send, swappable in place.
+
+    WHY A BOX RATHER THAN THE TUPLE ITSELF. The interaction has one
+    ``submitted_blocks`` slot, and two separate facts use it: the submit writes
+    the newest send's rows there, and a view rebuild re-authors them (a
+    cache-miss replay replaces the tuple with fresh blocks from the new view).
+    A worker that captured the tuple at dispatch would lose both properties —
+    a later submit would not confuse it, but a rebuild of ITS OWN send would
+    strand it on rows that are no longer on screen. So the dispatch captures
+    THIS object instead, and the rebuild path mutates ``blocks`` in place: the
+    capture follows its send through a re-seed, while a second submit simply
+    points the slot at a different box, leaving the first capture intact.
+    """
+
+    blocks: "tuple[Any, list[Any]]"
+
+
+@dataclass
 class TurnInteraction:
     provider_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     epoch: int = 0
@@ -35,13 +54,17 @@ class TurnInteraction:
     #:
     #: The echo is painted at SUBMIT, before the worker runs, because a prompt
     #: that appears the instant Enter is pressed is what makes the app feel
-    #: answerable. When the send is then REFUSED the row is a lie that outlives
-    #: the failure: styled exactly like a delivered message, and still there
-    #: after the user follows the refusal's advice and resends, so the
-    #: transcript shows the message twice and asserts an image was sent that
-    #: never left the machine (design round 1, D3). Holding the blocks is what
-    #: lets that echo be withdrawn; ``_withdraw_user_echo_for`` is the consumer.
-    submitted_blocks: tuple[Any, list[Any]] | None = None
+    #: answerable. When the send is then REFUSED the row is kept and resolved on
+    #: its failure record (the boundary rule): the record's ``blocks`` are what
+    #: ``_retire_failed_send_rows`` takes down when a resolution moves the
+    #: payload, and this slot is the in-flight send's handle on the same rows.
+    #:
+    #: A ``PendingSend`` box rather than the tuple, because BOTH the worker that
+    #: owns the send and the view-rebuild path address these rows: the worker
+    #: captures the box at dispatch (so a second submit cannot steal its
+    #: failure) and the rebuild mutates ``.blocks`` in place (so the capture
+    #: follows a re-seed). See ``PendingSend``.
+    submitted_blocks: PendingSend | None = None
     #: Prompts this surface has sent into a DRAINING runtime's spool, keyed by the
     #: message id the successor will announce them under — the one identity that
     #: survives the handover. This is what backs the row's queued marker (taken
@@ -51,6 +74,18 @@ class TurnInteraction:
     #: ``Any`` here for the reason ``pending_echoes`` is — this module is imported
     #: by the app and must not import it back.
     queued_prompts: dict[str, Any] = field(default_factory=dict)
+    #: Sends whose failure arrived AFTER their row was painted, newest last, one
+    #: record per failed row. Under the boundary rule a post-paint failure keeps
+    #: its row and is resolved ON this record — ``send again`` replays it, ``edit``
+    #: returns the payload through the existing restore funnel — so the record is
+    #: the payload's one home once the composer no longer keeps a copy.
+    #:
+    #: It lives on the interaction for the same reason ``pending_echoes`` does:
+    #: a parked source keeps its records, and their notices are projected into
+    #: whichever view the conversation has in front — never appended through
+    #: another conversation's transcript (the wrong-transcript hazard `_sync_
+    #: send_failure_notices` exists to close).
+    failed_sends: list["FailedSend"] = field(default_factory=list)
     #: The row that names messages this surface did NOT send (``peek_inbox`` at
     #: a bind), held so it can be taken down when the spool stops holding them —
     #: a state row that is only ever added outlives the state it describes
@@ -89,8 +124,8 @@ class CompactionInteraction:
     held_typed: str = ""
     held_images: dict[int, Any] = field(default_factory=dict)
     #: The transcript rows painted for a prompt HELD through a compaction —
-    #: the same ``(UserBlock, [ImageBlock, ...])`` tuple ``turn.submitted_blocks``
-    #: carries, parked here for the minutes a pass can take.
+    #: the same rows ``turn.submitted_blocks`` names for a direct send, parked
+    #: here for the minutes a pass can take.
     #:
     #: A held prompt is dispatched long after the submit that painted it, and
     #: it can be refused exactly like a direct one. Without this the echo was
@@ -173,6 +208,69 @@ class SessionDraft:
     history_index: int | None = None
     history_stash: str = ""
     history_stash_attachments: dict[int, Any] = field(default_factory=dict)
+
+
+@dataclass
+class FailedSend:
+    """One painted message whose send failed AFTER its row was painted.
+
+    THE BOUNDARY RULE this record implements, stated once: a failure raised
+    before the row was painted keeps the text in the composer and paints
+    nothing; a failure raised after keeps the row and gets ``send again`` /
+    ``edit`` on a notice below it. This supersedes the earlier preference of
+    withdrawing the row and returning the payload to the composer (the same
+    inversion the desktop design made): the retry is one keystroke on the row,
+    the payload has one home, and a message that never left the machine is not
+    silently erased from the conversation it was typed into.
+
+    Lives BESIDE the echo entry it was born from, on the interaction, because
+    the two facts have the same scope: a parked conversation keeps both, and a
+    resend's announcement must find neither a stale echo nor a stale record.
+    """
+
+    #: The row's own text — what the UserBlock paints, and what a resend must
+    #: paint again. For a ``$skill`` invocation this is the SHORT typed line
+    #: while ``sent`` is the expanded body, exactly as at submit.
+    text: str
+    #: The send form (``sent`` at submit), replayed verbatim on ``send again``.
+    sent: str | None
+    #: The ``typed`` split from the submit, for naming only (see
+    #: ``OperatorApp._submit_prompt``'s docstring).
+    typed: str
+    #: The resolved images that would have been sent.
+    images: list[Any] = field(default_factory=list)
+    #: The submit-time snapshot (typed text + attachment map), kept because
+    #: ``source.turn.submitted_draft`` is cleared in ``run_prompt``'s finally
+    #: and the resend must carry the SAME map — rebuilding attachments from the
+    #: transcript's image blocks would resend a downscaled copy.
+    accepted: "SessionDraft | None" = None
+    #: The correlation id the echo entry was registered under (``""`` for a
+    #: session whose ``prompt`` cannot take one).
+    message_id: str = ""
+    #: The class token, one per failure branch: "no-session" | "stopped" |
+    #: "oversize" | "retiring" | "runtime-gone" | "attach-behind" | "generic".
+    failure_class: str = ""
+    #: The class's sentence, already product copy, with no composer claim: the
+    #: payload is NOT back in the composer under the boundary rule.
+    sentence: str = ""
+    #: The notice ink for this class (preserves each branch's existing grade).
+    kind: str = "warning"
+    #: Whether the payload may have reached the owner despite the failure.
+    #: Everything the failure branches catch before admission is provably not
+    #: delivered; the one explicit exception is a generic transport error on an
+    #: attached session, where a write may have landed (design OQ2).
+    unknown_delivery: bool = False
+    #: Whether ``send again`` can work at all: false when there is no session to
+    #: send into (a stopped viewer, a bare `/stop`, a boot failure).
+    can_send_again: bool = True
+    #: The transcript rows the failure kept, as painted:
+    #: ``(UserBlock, [ImageBlock, ...])``. Held so a resolution can retire
+    #: exactly these rows; ``None`` once they are gone.
+    blocks: tuple[Any, list[Any]] | None = None
+    #: The notice row, while one is painted in the CURRENT view. ``None`` while
+    #: the record is parked — the notice is projected on reveal, the same way
+    #: ``source.unsent`` offers are (``_sync_send_failure_notices``).
+    notice: Any = None
 
 
 @dataclass
