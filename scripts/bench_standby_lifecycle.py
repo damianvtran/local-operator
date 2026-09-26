@@ -203,6 +203,15 @@ class _RuntimeLedger:
     Popen is ours to keep is its spawn as a spare. Patches ``subprocess.Popen``
     for its lifetime; every call passes through, and only receivers whose argv
     names the standby or runtime module word are retained.
+
+    ONE OWNER IS ALSO THE READING'S PRECONDITION (agent review round 2, NIT3):
+    the exit status is reap-order-independent only while THIS process's held
+    Popen is the reaper. A third-party reaper would make ``poll()`` answer ``0``
+    (CPython maps the ECHILD dead-state to a clean exit), so a signalled runtime
+    reaped elsewhere would read as clean. Nothing else in this bench waits on
+    these pids — the ledger is the only reaper by construction — so the caveat is
+    a precondition to preserve, not a hole to plug; if that ever changes, this
+    is the paragraph to re-read.
     """
 
     #: The two module words the real spawns carry.
@@ -243,7 +252,9 @@ class _RuntimeLedger:
         ``ok`` is False only for a SIGNAL (rc < 0) — the harm the check exists
         for. A clean self-exit (rc 0, no viewer/lease yet) is not a signal and
         passes with its evidence named; a pid with no Popen on file says so
-        instead of guessing from a liveness read that cannot see zombies.
+        instead of guessing from a liveness read that cannot see zombies. The
+        status is authoritative while this process's held Popen is the only
+        reaper (the class docstring's NIT3 caveat).
         """
         if pid is None:
             return "no runtime pid recorded", False
@@ -594,6 +605,8 @@ def main() -> int:
                 ready_after is not None,
                 ready_pid=fork_pid,
                 ready_s=None if ready_after is None else round(ready_after, 2),
+                budget_s=budget,
+                budget_source=budget_source,
                 load=_load1(),
             )
         else:
@@ -658,6 +671,8 @@ def main() -> int:
                 ready_after is not None,
                 ready_pid=got_pid,
                 ready_s=None if ready_after is None else round(ready_after, 2),
+                budget_s=budget,
+                budget_source=budget_source,
                 load=_load1(),
             )
         else:
@@ -713,6 +728,8 @@ def main() -> int:
                 ready_after is not None,
                 ready_pid=fork_pid,
                 ready_s=None if ready_after is None else round(ready_after, 2),
+                budget_s=budget,
+                budget_source=budget_source,
                 load=_load1(),
             )
         else:
@@ -1000,16 +1017,24 @@ def _concurrent_engage_scenario(
     try:
         for thread in threads:
             thread.start()
-        for thread in threads:
-            thread.join(240)
+        # Wait for both engages to have RECORDED their runtime — not for the
+        # threads to END: each one holds its remote until ``release``, and the
+        # evidence reads stronger while those remotes still hold the runtimes
+        # up ("alive at check"), so it is read HERE and the release happens in
+        # the finally. The old order joined first, which made every thread burn
+        # its full hold-wait and read statuses only after ``dispose()`` (agent
+        # review round 2, NIT5).
+        wait_deadline = time.monotonic() + 240
+        while time.monotonic() < wait_deadline and len(results) < 2:
+            time.sleep(0.1)
+        runtime_pids = [r["runtime"] for r in results if r.get("runtime")]
+        statuses = {pid: ledger.status(pid) for pid in runtime_pids}
     finally:
         release.set()
         for thread in threads:
             thread.join(30)
         standby._retire = real_retire
 
-    runtime_pids = [r["runtime"] for r in results if r.get("runtime")]
-    statuses = {pid: ledger.status(pid) for pid in runtime_pids}
     admitted = [r["runtime"] for r in results if r.get("adopted")]
     signalled = {pid: st for pid, (st, ok) in statuses.items() if not ok}
     retired = [r for r in retires if r["pid"] in set(runtime_pids)]
