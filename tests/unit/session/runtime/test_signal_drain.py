@@ -691,7 +691,8 @@ def test_the_ways_out_are_armed_before_the_record_makes_this_process_addressable
 
     WAITING ON PUBLICATION IS NOT A SUBSTITUTE, which is what made the window
     reachable: ``wait_until_published`` settles at the END of ``_serve``'s boot
-    prologue, so the record — written inside ``RecordPublisher.__init__`` — is
+    prologue, so the record — written by ``RecordPublisher.publish()``, from
+    the constructor by default and explicitly on the deferred boot path — is
     already readable for as long as those two boot registrations take to come
     back from the session's loop.
 
