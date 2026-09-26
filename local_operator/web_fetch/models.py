@@ -11,6 +11,17 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# The defaults themselves live in ``local_operator.web_defaults`` — a module with
+# no third-party imports — and are re-exported here, so this module stays their
+# documented home for every existing consumer
+# (``local_operator.web_fetch.service``, ``tests/unit/test_settings_io.py``) and
+# there is still exactly ONE definition of the values. They moved because
+# ``local_operator.config`` needs this one dict and nothing else from here, and
+# importing it for that dragged pydantic onto every CLI start.
+from local_operator.web_defaults import (  # noqa: F401 — re-export
+    DEFAULT_WEB_FETCH_CONFIG,
+)
+
 #: How the body was turned into text. Surfaced in ``details`` and the card so a
 #: reader can tell a good markdown render from the degraded stdlib fallback or a
 #: pass-through, and so tests can assert which backend actually ran.
@@ -95,17 +106,3 @@ class WebFetchSettings(BaseModel):
     # the cost is one request on an already-failed fetch. Off is for an operator
     # who wants the client to stay honest even in the face of a refusal.
     blocked_retry: bool = True
-
-
-DEFAULT_WEB_FETCH_CONFIG: dict[str, object] = {
-    "enabled": True,
-    "timeout_seconds": 20.0,
-    "max_bytes": 5 * 1024 * 1024,
-    "max_redirects": 5,
-    "cache_ttl_seconds": 900,
-    "allow_private": False,
-    "render_backend": "auto",
-    "enrich": True,
-    "max_attempts": 3,
-    "blocked_retry": True,
-}

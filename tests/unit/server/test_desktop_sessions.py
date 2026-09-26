@@ -187,25 +187,39 @@ async def test_watch_aggregation_does_not_resurrect_an_expired_viewer(tmp_path, 
 
 
 @pytest.mark.asyncio
-async def test_the_last_lease_to_expire_is_still_reported_to_the_owner(tmp_path, monkeypatch):
-    """Expiring the FINAL lease must recompute presence before the loop ends.
+async def test_the_last_lease_to_expire_is_withdrawn_explicitly(tmp_path, monkeypatch):
+    """Expiring the FINAL lease must WITHDRAW, not merely re-say the pair.
 
     `_expire_watches` returned as soon as no live lease remained, which left
     the owner holding whatever presence the previous pass asserted -- visible
     and notifiable -- for the rest of the session, because nothing else
     recomputes it once the loop is gone. The expiry that ends the loop is
-    exactly the one the owner needs to hear about.
+    exactly the one the owner needs to hear about, and since round 3 it is
+    told in the strongest available form: the explicit withdrawal
+    (``withdraw_desktop_watch``), which clears the runtime's session-scoped
+    attach memory and is replayed on a re-dial -- rather than a
+    ``(False, False)`` renewal whose shape a transient stream end also sends.
     """
     pool = DesktopSessions(tmp_path)
     sid = await pool.create(str(tmp_path))
     async with pool.session(sid) as bridge:
         remote = bridge.remote
-        writes: list[dict[str, Any]] = []
+        writes: list[tuple[str, dict[str, Any]]] = []
 
         async def record(**kwargs):
-            writes.append(kwargs)
+            writes.append(("watch", kwargs))
 
-        bridge.remote = cast(Any, SimpleNamespace(is_cold=False, update_desktop_watch=record))
+        async def withdraw(**kwargs):
+            writes.append(("withdraw", kwargs))
+
+        bridge.remote = cast(
+            Any,
+            SimpleNamespace(
+                is_cold=False,
+                update_desktop_watch=record,
+                withdraw_desktop_watch=withdraw,
+            ),
+        )
         try:
             now = 100.0
             monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: now))
@@ -213,18 +227,59 @@ async def test_the_last_lease_to_expire_is_still_reported_to_the_owner(tmp_path,
             watcher.visible, watcher.can_notify = True, True
             watcher.expires = 100.5
             await bridge.refresh_watch()
-            assert writes[-1] == {"visible": True, "can_notify": True}
+            assert writes[-1] == ("watch", {"visible": True, "can_notify": True})
 
             # Time passes the only lease's TTL, and the expiry loop runs out.
             now = 101.0
             await bridge._expire_watches()
 
-            assert writes[-1] == {
-                "visible": False,
-                "can_notify": False,
-            }, "the owner was left believing a watcher is present after its lease expired"
+            assert writes[-1] == (
+                "withdraw",
+                {},
+            ), "the owner was left believing a watcher is present after its lease expired"
+            # And nothing after it re-asserted a lease: the last word is the
+            # withdrawal, which is what a successor dial replays.
+            assert all(kind == "watch" for kind, _ in writes[:-1])
         finally:
             bridge.remote = remote
+
+
+@pytest.mark.asyncio
+async def test_a_transient_stream_end_renews_and_does_not_withdraw(tmp_path, monkeypatch):
+    """THE STORM'S OWN SHAPE: an SSE restart is not a leave (round 3).
+
+    The events() teardown pops the subscriber and refreshes the aggregate
+    pair -- (False, False) -- and the runtime's session-scoped memory
+    deliberately survives that, because the renderer restarts its stream on
+    transient failures and the pane never left. If the pop withdrew instead,
+    every restart would wipe the memory and re-open the incident the fix
+    exists for. The withdrawal is reserved for the lease EXPIRY path, where
+    45 s of silence is the earliest honest evidence that the pane is gone.
+    """
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        remote = bridge.remote
+        assert remote is not None
+        withdrawn: list[str] = []
+
+        async def spy_withdraw(*args: Any, **kwargs: Any) -> None:
+            withdrawn.append("withdraw")
+
+        # Spy on the REAL facade: the pop path must reach refresh_watch and
+        # never withdraw_desktop_watch. (A fake remote cannot drive events(),
+        # whose first frame needs the facade's own frontend state.)
+        monkeypatch.setattr(remote, "withdraw_desktop_watch", spy_withdraw)
+
+        sub = bridge.subscribe()
+        sub.visible = sub.can_notify = True
+        stream = bridge.events(sub, epoch=bridge.epoch, after_seq=0)
+        await anext(stream)
+        await stream.aclose()  # the transient end: the renderer reconnects
+
+        assert withdrawn == [], "a transient stream end withdrew the attachment"
+        # And the pop still renewed, rather than cleared: the aggregate pair
+        # the server-scoped memory keeps surviving.
 
 
 @pytest.mark.asyncio
@@ -3332,16 +3387,20 @@ async def test_an_expired_lease_stops_warming_and_releases_presence(tmp_path, mo
     rather than by replacing the module's `time` for the module under test: a
     whole-module clock also freezes the retry loop's own comparisons, so the
     next `loop.time()`-based one would silently escape it. The assertion that
-    matters is on the pair the facade was last recorded with, which is the same
-    thing the fake clock bought.
+    matters is on the presence the facade was last left with -- the explicit
+    withdrawal since round 3 -- which is the same thing the fake clock bought.
     """
     pool = DesktopSessions(tmp_path)
     sid = await pool.create(str(tmp_path))
     writes: list[dict[str, Any]] = []
+    withdrawals: list[str] = []
     engages: list[bool] = []
 
     async def record_watch(*, visible: bool, can_notify: bool) -> None:
         writes.append({"visible": visible, "can_notify": can_notify})
+
+    async def record_withdraw() -> None:
+        withdrawals.append("withdraw")
 
     async def record_engage(*, foreground: bool = True) -> None:
         engages.append(foreground)
@@ -3349,6 +3408,7 @@ async def test_an_expired_lease_stops_warming_and_releases_presence(tmp_path, mo
     async with pool.session(sid) as bridge:
         assert bridge.remote is not None
         monkeypatch.setattr(bridge.remote, "update_desktop_watch", record_watch)
+        monkeypatch.setattr(bridge.remote, "withdraw_desktop_watch", record_withdraw)
         monkeypatch.setattr(bridge.remote, "_ensure_bound", record_engage)
         watcher = bridge.subscribe()
         await bridge.watch(watcher.id, visible=True, can_notify=True)
@@ -3360,16 +3420,20 @@ async def test_an_expired_lease_stops_warming_and_releases_presence(tmp_path, mo
         # expiry loop runs out. The COLD half of the bargain: nothing
         # re-creates the process this change started, and there is no runtime
         # left holding a presence it no longer has -- including no STALE
-        # presence: a cold facade is told the live aggregate on every beat, so
-        # the `visible=True` this lease recorded is withdrawn here rather than
-        # re-asserted by the next dial (H1).
+        # presence: since round 3 the expiry is told as the explicit WITHDRAWAL
+        # (which clears the runtime's session-scoped attach memory and is
+        # replayed on a re-dial), not as a ``(False, False)`` renewal whose
+        # shape a transient stream end also sends.
         watcher.expires = time.monotonic() - 1.0
         await bridge._expire_watches()
         assert engages == [False], "the expired lease started a second engage"
-        assert writes[-1] == {
-            "visible": False,
-            "can_notify": False,
-        }, "a viewer with no runtime was left asserted at after its lease expired"
+        assert withdrawals == [
+            "withdraw"
+        ], "a viewer with no runtime was left asserted at after its lease expired"
+        # And no pair was re-recorded on the way out: the withdrawal replaced
+        # the renewal rather than following it (the last word is the one a
+        # successor dial replays).
+        assert writes == [{"visible": True, "can_notify": True}], writes
 
         # A hidden notifiable subscriber on the same bridge, live and fresh,
         # re-warms nothing either -- which is the state the session was in
@@ -3398,11 +3462,22 @@ async def test_an_expired_lease_is_released_from_the_owner_that_was_warm(tmp_pat
     async with pool.session(sid) as bridge:
         original = bridge.remote
         writes: list[dict[str, Any]] = []
+        withdrawals: list[str] = []
 
         async def record_watch(*, visible: bool, can_notify: bool) -> None:
             writes.append({"visible": visible, "can_notify": can_notify})
 
-        bridge.remote = cast(Any, SimpleNamespace(is_cold=False, update_desktop_watch=record_watch))
+        async def record_withdraw() -> None:
+            withdrawals.append("withdraw")
+
+        bridge.remote = cast(
+            Any,
+            SimpleNamespace(
+                is_cold=False,
+                update_desktop_watch=record_watch,
+                withdraw_desktop_watch=record_withdraw,
+            ),
+        )
         try:
             now = 200.0
             monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: now))
@@ -3413,10 +3488,9 @@ async def test_an_expired_lease_is_released_from_the_owner_that_was_warm(tmp_pat
 
             now = 200.0 + module.WATCH_TTL + 1
             await bridge._expire_watches()
-            assert writes[-1] == {
-                "visible": False,
-                "can_notify": False,
-            }, "the owner was left believing a watcher is present after its lease expired"
+            assert withdrawals == [
+                "withdraw"
+            ], "the owner was left believing a watcher is present after its lease expired"
         finally:
             bridge.remote = original
     await pool.close()

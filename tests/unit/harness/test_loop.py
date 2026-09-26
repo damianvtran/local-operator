@@ -1297,6 +1297,63 @@ class TestABrokenApprovalGateIsNotAUserRefusal:
         )
 
 
+class TestAnUnanswerableGateIsNotAUserRefusal:
+    """A gate that cannot reach a person SAYS SO, and it is not a fault either.
+
+    ``ApprovalUnavailableError`` (``harness.approval``) is raised by a host
+    that knows no human can answer — the headless CLI's non-tty gate. Rendering
+    it through the broken-gate path would report "harness fault" for a run
+    whose settings simply left nobody to ask; letting it fall through to the
+    refusal copy is the incident this pins: a transcript reading "User denied
+    approval for 'bash'." for calls no user ever saw. The text names the real
+    cause and the remedies instead.
+    """
+
+    def _stream(self) -> ScriptedStream:
+        return ScriptedStream(
+            [
+                [
+                    tool_call_delta(0, id="c1", name="echo", args="{}"),
+                    StreamEndEvent(stop_reason="toolUse"),
+                ],
+                [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
+            ]
+        )
+
+    async def _run(self, gate: Any) -> tuple[ToolResult, list[str]]:
+        executed: list[str] = []
+        result: list[ToolResult] = []
+        context = LoopContext(
+            tools=[echo_tool(executed)], tool_context=ToolContext(request_approval=gate)
+        )
+        async for event in AgentLoop().run(
+            [Message.user("go")], context, make_config(self._stream()), None
+        ):
+            if isinstance(event, ToolExecutionEndEvent):
+                result.append(event.result)
+        return result[0], executed
+
+    @pytest.mark.asyncio
+    async def test_the_reason_and_remedies_replace_the_user_denial(self) -> None:
+        from local_operator.harness.approval import ApprovalUnavailableError
+
+        async def unanswerable(name: str, summary: str) -> bool:
+            raise ApprovalUnavailableError(name, "no terminal is attached")
+
+        result, executed = await self._run(unanswerable)
+        assert executed == [], "an unavailable gate has granted nothing"
+        assert result.is_error
+        assert "User denied" not in result.text
+        assert result.text.startswith("Approval unavailable for 'echo'")
+        assert "(no terminal is attached)" in result.text
+        for remedy in ("--yolo", "--tools", "--control"):
+            assert remedy in result.text
+        # ``denied`` (refused, not dispatched) and NOT ``gate_failed``: no fault
+        # occurred — the host simply had nobody to ask — and the two markers
+        # bucket differently in the host's stats. The text carries the cause.
+        assert result.details == {"__synthetic": True, "__fault": "denied"}
+
+
 @pytest.mark.asyncio
 async def test_shared_calls_run_in_parallel():
     """Two shared tools overlap in time (gather), both results arrive."""

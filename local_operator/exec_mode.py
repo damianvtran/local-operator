@@ -461,7 +461,7 @@ def resolve_hosting_model_dry(exec_args: ExecArgs) -> tuple[str, str]:
     plus the registry's agent-id lookup, raising ``ValueError`` with the
     legacy message shapes when unconfigured.
     """
-    from local_operator.agents import AgentRegistry
+    from local_operator.agents import AgentRegistry, agents_store_present
     from local_operator.config import ConfigManager
     from local_operator.paths import config_dir
     from local_operator.session_factory import resolve_agent, resolve_hosting_model
@@ -474,14 +474,34 @@ def resolve_hosting_model_dry(exec_args: ExecArgs) -> tuple[str, str]:
     # agents and config and then spawned a worker that used the override's.
     base_dir = config_dir()
     config_manager = ConfigManager(base_dir)
-    agent_registry = AgentRegistry(base_dir)
+    # GUARDED (review round 2, finding 1): build the registry only when it has
+    # something to answer — an agent selector, or a store already on disk.
+    # ``resolve_agent`` returns ``None`` for a selector-less call WITHOUT
+    # reading the registry, so on a truly fresh root the old unconditional
+    # construction wrote ``config/agents/`` for an answer nothing consumed,
+    # and it did so on BOTH launch arms before the deny-trap advisory could
+    # reach its fresh-root branch (foreground: the ``cli.py`` preflight then
+    # ``run_exec``; background: ``_spawn_background``). A selector keeps the
+    # construction exactly as it was — ``--agent`` creates on a miss, so the
+    # registry is load-bearing there — and a store that EXISTS is still
+    # constructed (migrations included) even without one, preserving prior
+    # behaviour byte for byte.
     selector_args = argparse.Namespace(
         hosting=exec_args.hosting,
         model=exec_args.model,
         agent_name=exec_args.agent_name,
         agent_id=exec_args.agent_id,
     )
-    agent = resolve_agent(selector_args, agent_registry)
+    agent_registry: AgentRegistry | None = (
+        AgentRegistry(base_dir)
+        if (exec_args.agent_name or exec_args.agent_id) or agents_store_present(base_dir)
+        else None
+    )
+    # ``agent_registry`` is None only when no selector is present (the guard
+    # above) — which is exactly the case ``resolve_agent`` answers with
+    # ``None`` before it reads the registry, so this branch is that same
+    # answer without the construction's write.
+    agent = resolve_agent(selector_args, agent_registry) if agent_registry is not None else None
     return resolve_hosting_model(agent, selector_args, config_manager)
 
 
@@ -594,6 +614,14 @@ def _spawn_background(command: str, exec_args: ExecArgs) -> int:
         # `lop sessions` is the one command that shows what a run NEEDS, and it
         # was the one command this receipt never mentioned.
         print("Waiting on you? lop sessions shows what a run needs", file=sys.stderr)
+    elif status in ("starting", "running"):
+        # The receipt is where a launch is read back, so a run nobody can
+        # approve has to say so HERE rather than only in a transcript of
+        # denials (see ``_deny_trapped_advisory``). Printed only while the run
+        # is live: a launch that already failed carries its own reason above.
+        advisory = _deny_trapped_advisory(exec_args)
+        if advisory is not None:
+            print(advisory, file=sys.stderr)
     return 1 if status in ("failed", "cancelled", "interrupted") else 0
 
 
@@ -732,6 +760,107 @@ def reject_detached_supervisor_fd(args: ExecArgs) -> str | None:
     return None
 
 
+def _declared_by_profile(name: str | None) -> bool:
+    """Whether the named role's own allow-list answers the deny trap (M2).
+
+    ``--tools`` is not the only declaration that stands as the approval for
+    its own members in an unattended run: a ``lop exec --profile reviewer``
+    run resolves its inventory from the seed's ``tools:`` list
+    (``exec_startup.declared_tool_inventory``), and that list is exactly what
+    approves its write/exec members where nobody can be asked. The advisory
+    must consult the same source of truth, or it tells a run that will work
+    that it will be denied (review round 1, M2).
+
+    Resolution is best-effort and matches the session side by value, not by
+    identity: an unresolvable name resolves to "no declaration" and leaves
+    the advisory on — ``resolve_startup`` refuses such runs before this is
+    reached anyway.
+
+    DOCUMENTED LIMITS (post-merge review of #1597). This is a launch-time
+    oracle, and it is narrower than the session's own resolution in two known
+    ways. ``--resume`` restores a stored role attachment INSIDE the session,
+    with no ``--profile`` on this command line, so a resumed run whose role
+    declares tools still prints the advisory — the copy stays true (calls that
+    need approval will be denied; the role's own members do not need it), but
+    the suppression is narrower than the session's. Conversely, a role's
+    allow-list approves only its members, so a call outside it still denies
+    with no advisory: the declaration bounds reach rather than approving the
+    run. Sharing one predicate with ``exec_startup.declared_tool_inventory``
+    would close both gaps, but that function needs the live session and runs
+    after this point; it is a recorded follow-up, not a claim of equivalence.
+    """
+    if not name:
+        return False
+    try:
+        from local_operator.agent_profiles import resolve_profile_or_specialist
+        from local_operator.agents import AgentRegistry, agents_store_present
+        from local_operator.paths import config_dir
+
+        config_root = config_dir()
+        # GUARDED so a best-effort probe cannot WRITE: ``AgentRegistry``'s
+        # constructor creates ``config_dir`` and ``config_dir/agents`` when
+        # missing (then runs its migrations), and a launch-path check has no
+        # business creating directories (post-merge review of #1597; round 1,
+        # finding 2). ``agents_store_present`` counts BOTH shapes — the
+        # per-agent tree and a legacy ``agents.json`` — so a legacy root still
+        # resolves its registered roles here rather than being reported as
+        # "no declaration" (round 1, finding 3); a truly fresh root constructs
+        # nothing and the packaged seeds resolve without a registry. The same
+        # predicate guards the sibling writer in
+        # ``exec_startup.resolve_startup``, which fires before this probe.
+        #
+        # Flagged for review, not settled here: on a legacy ``agents.json``
+        # root the construction this predicate permits still runs the
+        # registry's migrations — a write triggered by a name check. That
+        # migration is what the session side runs too, so name resolution
+        # stays identical; whether a launch-time CHECK should be what triggers
+        # a migration is a question for the store's design, not this probe.
+        registry = AgentRegistry(config_root) if agents_store_present(config_root) else None
+        _kind, profile, _prompt, _display = resolve_profile_or_specialist(name, registry=registry)
+    except Exception:  # noqa: BLE001 — an odd registry means "no declaration"
+        return False
+    return profile is not None and bool(profile.tools)
+
+
+def _deny_trapped_advisory(args: ExecArgs) -> str | None:
+    """The launch advisory for a run whose approval calls nobody can answer.
+
+    A headless run has no terminal to prompt on, and ``--background``'s worker
+    is spawned with ``stdin=DEVNULL``, so every write/exec tool call is denied
+    by the CLI's headless gate unless one of the flags that makes the run
+    answerable is present: ``--control`` (cards park for a supervisor),
+    ``--yolo`` (approve every tier inline), or a tool declaration (``--tools``,
+    or a role whose own allow-list resolves through ``--profile`` — both are
+    the declaration ``exec_startup.apply_startup`` lets stand as the approval
+    exactly where nobody can be asked). Before this advisory the operator's
+    first evidence of the trap was a transcript of denials for calls no user
+    had seen; this is the same news told BEFORE the run, which is the half
+    that was missing.
+
+    Returns the two-line advisory to print to stderr, or ``None`` when the run
+    can be approved on (a foreground tty) or a flag answers the gate. A tty
+    gets ``None`` because its y/N prompt IS the answer, and the advisory must
+    not decorate a run that already works.
+    """
+    if args.control or args.yolo:
+        return None
+    from local_operator.exec_startup import parse_tool_inventory
+
+    if parse_tool_inventory(getattr(args, "tools", None)):
+        return None
+    if _declared_by_profile(getattr(args, "profile", None)):
+        return None
+    if not args.background and (sys.stdin is not None and sys.stdin.isatty()):
+        return None
+    return (
+        "Warning: this run cannot ask for approval (no terminal attached), so "
+        "any tool call that needs approval will be denied.\n"
+        "  Remedies: --control parks cards for a supervisor; --yolo auto-approves "
+        "every tier; --tools NAME[,NAME] pre-approves the listed tools and bounds "
+        "this run's reach to them."
+    )
+
+
 def run_exec(command: str | None, args: ExecArgs) -> int:
     """Entry point for the ``exec`` subcommand (README contract: exit 0 on
     success, non-zero on error).
@@ -792,6 +921,14 @@ def run_exec(command: str | None, args: ExecArgs) -> int:
         return 1
     if args.background:
         return _spawn_background(command, args)
+
+    # Foreground, non-tty only: say what will happen before it does. The
+    # background half prints inside its launch receipt (see
+    # ``_spawn_background``); a tty run gets nothing because its y/N prompt is
+    # the answer the advisory would otherwise describe as missing.
+    advisory = _deny_trapped_advisory(args)
+    if advisory is not None:
+        print(advisory, file=sys.stderr)
 
     import asyncio
 

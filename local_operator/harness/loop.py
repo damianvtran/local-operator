@@ -35,7 +35,7 @@ from typing import Any, TypeVar, cast
 from pydantic import TypeAdapter, ValidationError
 
 from local_operator.ansi import sanitize_prompt_line
-from local_operator.harness.approval import ask_approval
+from local_operator.harness.approval import ApprovalUnavailableError, ask_approval
 from local_operator.harness.guard_area import (
     READING_TOOLS,
     exempt_from_escalation,
@@ -262,7 +262,7 @@ NOT_RUN_REASON_MAX_CHARS = 200
 # Importing them keeps one spelling for the value the ledger stores.
 FAULT_UNKNOWN_TOOL = "unknown_tool"  # model named a tool that does not exist
 FAULT_DUPLICATE_ID = "duplicate_id"  # model emitted one call id twice
-FAULT_DENIED = "denied"  # the user declined the call
+FAULT_DENIED = "denied"  # refused at the gate (a user's no, or nobody could be asked)
 FAULT_GATE_FAILED = "gate_failed"  # our approval plumbing raised
 FAULT_ABORTED = "aborted"  # the user stopped the turn
 FAULT_SKIPPED = "skipped"  # steering redirected before this call ran
@@ -3237,6 +3237,26 @@ class AgentLoop:
                 )
             except asyncio.CancelledError:
                 raise
+            except ApprovalUnavailableError as exc:
+                # Nobody was asked, so nobody denied anything: render the gate's
+                # own reason and remedies rather than the "User denied" copy
+                # below, which is reserved for a person who answered. A headless
+                # run whose transcript read "User denied approval for 'bash'."
+                # for calls no user ever saw is exactly the incident this
+                # branch exists for (the gate raises only where it KNOWS no
+                # person can be asked — see ``ApprovalUnavailableError``).
+                #
+                # Marked ``denied``, not ``gate_failed``: the approval policy
+                # did refuse the call (it never dispatched, the property the
+                # two markers share), and no fault occurred — the host simply
+                # has no one to ask. The text carries the distinction; the
+                # marker keeps the closed fault vocabulary the host's stats
+                # already bucket.
+                return self._synthetic_result(
+                    call,
+                    str(exc),
+                    details={FAULT_KEY: FAULT_DENIED},
+                )
             except Exception as exc:
                 # A gate that CRASHED has not decided anything, and reporting it
                 # as "User denied approval" blamed the user for our own bug: the

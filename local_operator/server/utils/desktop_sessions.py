@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import sqlite3
+import sys
 import time
 import uuid
 from collections import deque
@@ -1057,6 +1058,13 @@ class DesktopSessionBridge:
         self.announced: deque[str] = deque()
         self.subscribers: dict[str, DesktopSubscription] = {}
         self.users = 0
+        #: Whether :meth:`close` has run for this bridge. Read only by the
+        #: subscriber-stream end log (C5), to name "bridge dispose" instead of
+        #: the "client disconnect" every ordinary SSE teardown would report:
+        #: ``close`` ends every subscriber through the same ``_disconnect`` a
+        #: slow-client overflow uses, so the cause is not recoverable from the
+        #: subscription alone. No behaviour reads it.
+        self._closing = False
         self.touched = time.monotonic()
         self.lock = asyncio.Lock()
         self.watch_lock = asyncio.Lock()
@@ -1668,6 +1676,7 @@ class DesktopSessionBridge:
         self.attention_served_stale = False
 
     async def close(self) -> None:
+        self._closing = True
         for sub in self.subscribers.values():
             self._disconnect(sub)
         async with self.lock:
@@ -3378,18 +3387,49 @@ class DesktopSessionBridge:
                 if not s.overflow and s.expires > time.monotonic()
             ]
             if not remaining:
-                # LAST lease has expired. Returning here without a final refresh
-                # left the runtime holding whatever presence the previous pass
-                # asserted -- visible, notifiable -- for the rest of the
-                # session, because nothing else recomputes it once the loop is
-                # gone. The expiry that ends the loop is exactly the one the
-                # runtime still needs to be told about.
+                # LAST lease has expired. Returning here without a final
+                # refresh left the runtime holding whatever presence the
+                # previous pass asserted -- visible, notifiable -- for the rest
+                # of the session, because nothing else recomputes it once the
+                # loop is gone. The expiry that ends the loop is exactly the
+                # one the runtime still needs to be told about, and since
+                # round 3 it is told in the STRONGEST available form: the
+                # explicit withdrawal (see ``_withdraw_last_lease``), not a
+                # ``(False, False)`` renewal whose shape a transient stream
+                # end also carries.
                 with contextlib.suppress(ConnectionError, RuntimeError):
-                    await self.refresh_watch()
+                    await self._withdraw_last_lease()
                 return
             await asyncio.sleep(max(0, min(remaining) - time.monotonic()))
             with contextlib.suppress(ConnectionError, RuntimeError):
                 await self.refresh_watch()
+
+    async def _withdraw_last_lease(self) -> None:
+        """No live lease is left: withdraw it EXPLICITLY rather than by lapse.
+
+        THE EARLIEST MOMENT THIS LAYER CAN HONESTLY SAY "the pane left". A
+        transient renderer stream end is indistinguishable from a leave at the
+        stream boundary -- both close the subscriber -- and that churn is the
+        very incident this fix exists for, so the withdrawal waits for the
+        lease to run out: 45 s with no beat, with every beat in between keeping
+        the loop alive and cancelling this outcome. Sending it at the stream
+        pop instead would clear the runtime's session-scoped attach memory on
+        every restart and re-open the incident (and would flap the persisted
+        interactivity block on a host with no notification channel, whose live
+        hidden pane beats ``(False, False)``).
+
+        WHAT IT RECORDS OUTLIVES THE SEND: ``AttachedSession`` keeps the
+        withdrawal as the desired state for the next dial, so a runtime engaged
+        after the pane left starts detached instead of resurrecting a 45 s
+        attachment nobody holds (``session/attached.py::_dial``). The warm
+        intent is cleared here for the same reason the not-visible branch
+        clears it: no live lease means no pace is owed.
+        """
+        self._clear_warm_backoff()
+        remote = self.remote
+        if remote is None:
+            return
+        await remote.withdraw_desktop_watch()
 
     def subscribe(self, *, frontend_replace: bool = False) -> DesktopSubscription:
         """Register one event subscriber.
@@ -3459,6 +3499,34 @@ class DesktopSessionBridge:
                     yield frame
         finally:
             self.subscribers.pop(sub.id, None)
+            # ONE LINE PER ENDED SUBSCRIBER STREAM, NAMING THE REASON (C5).
+            # The drop storm this fix addresses had no readable cause anywhere:
+            # the runtime logged the socket dying, the app logged nothing, and
+            # "who ended the stream" had to be inferred from write-only
+            # bookkeeping. The reason is read from THIS frame's own state --
+            # the bridge closing, a subscriber marked overflowed by
+            # ``_disconnect``, or the exception (if any) still propagating
+            # through this ``finally``: ``GeneratorExit``/``CancelledError``
+            # are the ordinary client teardown, anything else is a relay
+            # error. Instrumentation only; the cleanup below is unchanged.
+            pending = sys.exc_info()[1]
+            if self._closing:
+                reason, level = "bridge dispose", logging.INFO
+            elif sub.overflow:
+                reason, level = "subscriber overflow", logging.INFO
+            elif pending is not None and not isinstance(
+                pending, (GeneratorExit, asyncio.CancelledError)
+            ):
+                reason, level = f"relay error: {type(pending).__name__}", logging.WARNING
+            else:
+                reason, level = "client disconnect", logging.INFO
+            logger.log(
+                level,
+                "desktop stream ended for %s (sub=%s): %s",
+                self.session_id,
+                sub.id[:8],
+                reason,
+            )
             # ASGI disconnect runs inside a cancelled anyio scope. Cleanup must
             # still reach the runtime; otherwise a dead renderer leaves presence
             # asserted until TTL expiry and the bridge never releases its socket.

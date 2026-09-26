@@ -1264,9 +1264,16 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # re-derivation nothing moved under; an owner ``Session`` publishes through
     # its own store and has no follower copy to diff. Declared in
     # ``ViewerSessionProtocol`` in the same commit.
-    assert len(viewer_only) == 66, (
+    #
+    # 66 → 67 is the desktop withdrawal (round 3, the transport-bound hole).
+    # ``withdraw_desktop_watch`` is the viewer's explicit end-of-attachment
+    # signal — the one frame that clears the runtime's session-scoped attach
+    # memory rather than renewing it. An owner ``Session`` serves its own pane
+    # in-process, so it holds no attach lease of its own to withdraw. Declared
+    # in ``ViewerSessionProtocol`` in the same commit.
+    assert len(viewer_only) == 67, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 66, and the aggregate floor is set at 40 against that number. A "
+        "says 67, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )

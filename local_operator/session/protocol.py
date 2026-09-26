@@ -635,7 +635,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 129 public members and a POSITIVE
+    than stylistic. This protocol carries 130 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -672,7 +672,8 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint, 128 once an answer that was accepted at the pane and never reached its
     owner needed a surface to say so (``set_gate_undelivered_handler``), 129
     once the dock band needed ``frontend_revision`` to skip a roster
-    re-derivation nothing moved under), so
+    re-derivation nothing moved under, 130 once the desktop withdrawal needed
+    ``withdraw_desktop_watch``), so
     recompute it rather
     than adjusting it by the size of your own change.
 
@@ -890,6 +891,21 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         Desktop-surface viewers only; the host recomputes visibility and
         notifiability from its live subscribers and pushes the result so a
         bare proxy socket is not mistaken for a watching human.
+        """
+        ...
+
+    async def withdraw_desktop_watch(self) -> None:
+        """Withdraw this viewer's desktop attach lease: the pane has left.
+
+        Desktop-surface viewers only. The explicit end-of-attachment signal
+        (the transport-bound hole): the runtime CLEARS its session-scoped
+        attach memory rather than renewing it, and the facade keeps the
+        withdrawal as the state a re-dial replays — so a successor runtime
+        starts detached instead of resurrecting a lease nobody holds. Its own
+        member rather than a shape of ``update_desktop_watch`` because no
+        ``(visible, can_notify)`` pair can carry the meaning: a transient
+        renderer stream end sends ``(False, False)`` too, and must keep the
+        memory alive.
         """
         ...
 

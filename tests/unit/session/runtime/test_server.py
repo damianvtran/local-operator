@@ -31,7 +31,11 @@ from local_operator.session.frontend_state import FrontendSubscription
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.runtime.serving import ServingSessionHandle
-from local_operator.session.runtime.types import ATTACH_MAX_CLIENTS, PROTOCOL_VERSION
+from local_operator.session.runtime.types import (
+    ATTACH_MAX_CLIENTS,
+    LEAVING_FOR_BUILD,
+    PROTOCOL_VERSION,
+)
 
 
 class FakeHandle:
@@ -2062,6 +2066,181 @@ async def test_the_record_directory_is_fixed_for_an_in_process_runtime(
 
 
 @pytest.mark.asyncio
+async def test_a_write_through_survives_a_delayed_publisher_install(tmp_path, monkeypatch) -> None:
+    """A write-through that lands while the runtime is still installing its
+    publisher must be readable once the record is.
+
+    THE WINDOW this pins is the boot's own: the publisher's constructor used to
+    publish the record, and ``_serve`` assigned ``self._publisher`` only after
+    the constructor returned, so the record could already be READ while
+    ``_republish`` still answered "no publisher" — a write-through landing
+    there (``note_leaving``, ``set_record_started``) was set on the record
+    object, no-opped against the unset attribute, and the readable file kept
+    its pre-write state until the next 15 s heartbeat. Preemption alone opens
+    it on a loaded runner, which is how it flaked:
+    ``test_a_draining_session_hands_a_cold_facade_its_canonical_sync`` read
+    ``leaving == ''`` and ``test_started_survives_the_republish`` read
+    ``started`` False on CI shards.
+
+    The hold below parks the runtime thread inside the construction (what a
+    descheduled thread is), runs both write-throughs while it is parked, and
+    reads the record back. On the tree that published from the constructor the
+    parked thread has already left a readable pre-write file behind, so the
+    facts read back empty — this test failed deterministically there, and
+    passes once the publish waits until the instance is installed.
+    """
+    entered = threading.Event()
+    release = threading.Event()
+    original_init = registry.RecordPublisher.__init__
+
+    def holding_init(self, record, *args, **kwargs):  # noqa: ANN001, ANN202
+        original_init(self, record, *args, **kwargs)
+        entered.set()
+        release.wait(30)
+
+    monkeypatch.setattr(registry.RecordPublisher, "__init__", holding_init)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    server = RuntimeServer(FakeHandle(), kind="tui")
+    server.start()
+    try:
+        try:
+            assert await asyncio.to_thread(
+                entered.wait, 30
+            ), "the publisher's construction never started"
+            # What a reader in this window sees. Stated here rather than
+            # asserted, because the guarantee under test is read back below;
+            # this is the context a failure needs (on the pre-fix tree it is a
+            # live record whose ``leaving`` is still "").
+            while_held = registry.scan()
+            server.set_record_started(True)
+            server.note_leaving(LEAVING_FOR_BUILD)
+        finally:
+            release.set()
+        record = await _wait_record()
+        assert record.leaving == LEAVING_FOR_BUILD, (
+            f"leaving={record.leaving!r}; readable while the publisher was "
+            f"being installed: {while_held!r}"
+        )
+        assert record.started is True, (
+            f"started={record.started!r}; readable while the publisher was "
+            f"being installed: {while_held!r}"
+        )
+    finally:
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_first_publish_leaves_no_readable_record_behind(
+    tmp_path, monkeypatch
+) -> None:
+    """The failed-boot rollback unpublishes what a racing write-through wrote,
+    and a closed publisher refuses everything after.
+
+    THE RESIDUAL THIS PINS (agent review round 1, R1-1). Between the install
+    of ``self._publisher`` and the rollback that nulls it, a session thread's
+    write-through finds a publisher and can COMPLETE a record write; if the
+    boot's own ``publish()`` then fails — the transient failure the rollback
+    exists for — the record it wrote outlives the rollback, and nothing else
+    unlinks it (``_shutdown_impl`` unpublishes only behind a publisher, and
+    thread mode swallows the raise). The window needs publish-failure ×
+    concurrent write-through-success, which is why the hold and the injected
+    failure below make it deterministic rather than probable.
+
+    Three marks, in the order the window produces them:
+    * mid-window, the write-through's record is READABLE — the file the
+      rollback must remove really exists before ``publish()`` raises;
+    * a heartbeat ALREADY IN FLIGHT when the rollback closes must not land
+      after the unpublish (writes and close are serialised, and a closed
+      publisher skips);
+    * after the rollback, the record is gone, a stranded writer holding the
+      old publisher can neither heartbeat nor publish it back, and it stays
+      gone through ``server.close()``.
+    """
+    publish_entered = threading.Event()
+    publish_release = threading.Event()
+    staged_entered = threading.Event()
+    staged_release = threading.Event()
+
+    real_publish = registry.RecordPublisher.publish
+    real_staged_write = registry._staged_write
+    failed_once: list[bool] = []
+
+    def failing_first_publish(self):  # noqa: ANN001, ANN202
+        if failed_once:
+            return real_publish(self)
+        failed_once.append(True)
+        publish_entered.set()
+        publish_release.wait(30)
+        raise OSError("injected first-publish failure")
+
+    def holding_staged_write(target, payload, *, prefix):  # noqa: ANN001, ANN202
+        staged_entered.set()
+        staged_release.wait(30)
+        return real_staged_write(target, payload, prefix=prefix)
+
+    monkeypatch.setattr(registry.RecordPublisher, "publish", failing_first_publish)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    server = RuntimeServer(FakeHandle(), kind="tui")
+    server.start()
+    in_flight: threading.Thread | None = None
+    held: registry.RecordPublisher | None = None
+    try:
+        assert await asyncio.to_thread(
+            publish_entered.wait, 30
+        ), "the boot's first publish never ran"
+        held = server._publisher
+        assert held is not None, "the rollback's subject was never installed"
+        # (1) The write-through completes while the boot's publish is parked:
+        # the readable record the rollback has to remove exists.
+        server.set_record_started(True)
+        server.note_leaving(LEAVING_FOR_BUILD)
+        assert held.path.exists(), "the write-through never reached the disk"
+        # (2) A heartbeat already inside its write when the rollback closes.
+        monkeypatch.setattr(registry, "_staged_write", holding_staged_write)
+
+        def in_flight_write() -> None:
+            assert held is not None
+            held.heartbeat(conversation_name="in-flight")
+
+        in_flight = threading.Thread(
+            target=in_flight_write, name="test-in-flight-writer", daemon=True
+        )
+        in_flight.start()
+        assert await asyncio.to_thread(
+            staged_entered.wait, 30
+        ), "the in-flight heartbeat never entered its write"
+        publish_release.set()
+        staged_release.set()
+    finally:
+        publish_release.set()
+        staged_release.set()
+    if in_flight is not None:
+        in_flight.join(30)
+    thread = server._thread
+    assert thread is not None
+    thread.join(30)  # the rollback runs on the boot thread
+    assert held is not None
+    try:
+        assert server._publisher is None, "the rollback kept the publisher installed"
+        assert (
+            await server.wait_until_published(timeout=1) is False
+        ), "a failed first publish must look like a boot that never published"
+        assert not held.path.exists(), (
+            "a record a racing write-through wrote outlived the failed boot's " "rollback"
+        )
+        assert not registry.scan(), "the record is still discoverable"
+        # (3) Stranded writers are refused, not resurrected: neither the
+        # write-through path nor an explicit publish writes through a closed
+        # publisher.
+        held.heartbeat(conversation_name="zombie")
+        held.publish()
+        assert not held.path.exists(), "a closed publisher wrote its record back"
+    finally:
+        server.close()
+    assert not held.path.exists(), "the record survived even the closed server"
+
+
+@pytest.mark.asyncio
 async def test_desktop_watch_lease_separates_visibility_and_notification_delivery() -> None:
     from local_operator.mobile.attach_client import AttachClient
     from local_operator.session.runtime.types import DESKTOP_WATCH_LEASE_S
@@ -2434,6 +2613,422 @@ async def test_a_presence_record_that_cannot_name_a_session_does_not_suppress_an
         finally:
             await desktop.detach()
             runtime.close()
+
+
+# ---------------------------------------------------------------------------
+# THE TRANSPORT-BOUND HOLE (round 3): THE ATTACH FACT IS SESSION-SCOPED
+#
+# Every desktop fact on RuntimeServer was per-CONNECTION, so a drop erased it:
+# the app was up, the pane was mounted, and between the socket closing and the
+# bridge's re-dial landing the model was told "No interface is attached".
+# Live evidence (2026-09-25): "dropped attach client (... surface=desktop)" at
+# 09:14:46 and storms at 09:17:10-22 / 09:19:02-39, each coinciding with an
+# injected detached block. The fix under test: the last desktop heartbeat is
+# remembered per SESSION, for the same 45 s lease window, not cleared by a
+# drop, not read by the residency or attention tiers, cleared ONLY by an
+# explicit withdrawal, and backed up by the app's own "showing this session"
+# record for a successor runtime booted before the re-dial lands.
+# ---------------------------------------------------------------------------
+
+
+async def _wait_for_drop(runtime: RuntimeServer) -> None:
+    """Poll until the runtime has actually observed the closed socket.
+
+    The drop is noticed on the runtime's OWN loop (its reader sees EOF), and
+    an assertion about the memory surviving the drop means nothing if the
+    assertion races the removal: the old per-connection clause would still be
+    live and the test would pass for the wrong reason.
+    """
+    deadline = asyncio.get_running_loop().time() + 5
+    while runtime._clients and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.02)
+    assert not runtime._clients, "the runtime never observed the closed socket"
+
+
+@pytest.mark.asyncio
+async def test_socket_lost_while_the_pane_is_mounted_does_not_move_the_attachment_answer() -> None:
+    """THE INCIDENT'S FIRST SHAPE: a drop with no withdrawal (round 3).
+
+    The bridge re-dials ~500 ms after a drop and the pane never leaves; that
+    gap is what the model read. Fails on the pre-fix tree (``frozenset()``
+    once the connection is reaped), passes once the heartbeat is remembered
+    per session — while the ATTENTION tier stays empty, because a dropped
+    socket is not a person looking.  See the round-3 probe table in
+    ``docs/design/attached-interface-signal.md``.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    runtime.start()
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    try:
+        record = await _wait_record()
+        await desktop.connect(record, "s1")
+        await desktop.desktop_watch(visible=True, can_notify=True)
+        assert runtime.attached_surfaces() == frozenset({"desktop"})
+
+        # The socket dies with NO withdrawal — every drop in the fleet log,
+        # where the bridge is re-dialing the same pane a moment later.
+        desktop.close()
+        await _wait_for_drop(runtime)
+
+        assert runtime.attached_surfaces() == frozenset(
+            {"desktop"}
+        ), "the attachment died with the socket that carried it"
+        # The two tiers stay separate: nothing is being LOOKED AT.
+        assert runtime.watching_surfaces() == frozenset()
+    finally:
+        desktop.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_redial_before_its_re_assert_has_landed_does_not_move_the_answer() -> None:
+    """THE INCIDENT'S SECOND SHAPE: the re-dial's re-assert is best-effort.
+
+    ``AttachedSession._dial`` re-asserts the lease only after the welcome and
+    under a 5 s bound, so there is a real window where the successor
+    connection exists but has asserted nothing. The connection is not the
+    fact; the remembered heartbeat is. Fails on the pre-fix tree (a fresh
+    connection with no ``desktop_watch`` yet counts for nothing).
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    runtime.start()
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    redialed = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    try:
+        record = await _wait_record()
+        await desktop.connect(record, "s1")
+        await desktop.desktop_watch(visible=True, can_notify=True)
+        desktop.close()
+        await _wait_for_drop(runtime)
+
+        # The re-dial arrives; the re-assert has not landed yet.
+        await redialed.connect(record, "s1")
+        assert runtime.attached_surfaces() == frozenset({"desktop"})
+
+        # And the re-assert landing later changes nothing — same answer.
+        await redialed.desktop_watch(visible=True, can_notify=True)
+        assert runtime.attached_surfaces() == frozenset({"desktop"})
+    finally:
+        desktop.close()
+        redialed.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_lapsed_lease_past_the_ttl_reads_detached() -> None:
+    """HONESTY AFTER THE WINDOW (round 3): no heartbeat, no attachment.
+
+    The memory is the SAME 45 s window as the per-connection lease (not a
+    second constant and not a wider one), so driving both clocks past
+    ``DESKTOP_WATCH_LEASE_S`` with no beat behind them must read detached — a
+    closed app cannot keep a runtime claiming an interface forever.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+    from local_operator.session.runtime.types import DESKTOP_WATCH_LEASE_S
+
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    runtime.start()
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    try:
+        record = await _wait_record()
+        await desktop.connect(record, "s1")
+        await desktop.desktop_watch(visible=True, can_notify=True)
+        conn = _desktop_connection(runtime)
+        stale = time.monotonic() - (DESKTOP_WATCH_LEASE_S + 1.0)
+
+        # Both clocks, with the connection still alive: honest again.
+        conn.desktop_seen = stale
+        runtime._desktop_attach_seen = stale
+        assert runtime.attached_surfaces() == frozenset()
+
+        # AND THE MEMORY ALONE MUST LAPSE TOO: with the socket gone, the
+        # remembered heartbeat is the only grant, and after its own TTL with
+        # no beat behind it the answer is honest again — a closed app cannot
+        # keep a runtime claiming an interface forever. (This half fails on
+        # the pre-fix tree one line earlier: the dropped pane already reads
+        # detached there.)
+        await desktop.desktop_watch(visible=True, can_notify=True)
+        desktop.close()
+        await _wait_for_drop(runtime)
+        assert runtime.attached_surfaces() == frozenset({"desktop"})
+        runtime._desktop_attach_seen = stale
+        assert runtime.attached_surfaces() == frozenset()
+    finally:
+        await desktop.detach()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_heartbeat_re_arms_the_attachment_answer() -> None:
+    """THE MIRROR: one accepted beat re-arms both clocks (round 3).
+
+    A renderer that was silent past the TTL and then beats again is a pane
+    that came back; the answer must follow it back up without a re-dial.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+    from local_operator.session.runtime.types import DESKTOP_WATCH_LEASE_S
+
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    runtime.start()
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    try:
+        record = await _wait_record()
+        await desktop.connect(record, "s1")
+        await desktop.desktop_watch(visible=True, can_notify=True)
+        conn = _desktop_connection(runtime)
+        stale = time.monotonic() - (DESKTOP_WATCH_LEASE_S + 1.0)
+        conn.desktop_seen = stale
+        runtime._desktop_attach_seen = stale
+        assert runtime.attached_surfaces() == frozenset()
+
+        await desktop.desktop_watch(visible=False, can_notify=True)
+        assert runtime.attached_surfaces() == frozenset({"desktop"})
+    finally:
+        await desktop.detach()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_successor_runtime_reads_the_record_that_names_this_session(
+    monkeypatch, tmp_path
+) -> None:
+    """A SWAP LEAVES NO CONNECTION AT ALL (round 3, C3).
+
+    The bridge re-engages a successor within boot+dial, but until that dial
+    lands there is no conn to count — and a turn starting in the window used
+    to be told the app was gone. The app's OWN record names this conversation
+    (``present ∧ has_window ∧ session_id == mine``), so the successor can
+    answer honestly before the bridge arrives. Bounded by the record's own
+    TTL, which its reader already reaps.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    with _desktop_presence_claim(tmp_path, session_id="s1"):
+        runtime.start()
+        try:
+            await _wait_record()
+            # NO connection at all: this is the boot window, not a dial.
+            assert runtime.attached_surfaces() == frozenset({"desktop"})
+            assert runtime.watching_surfaces() == frozenset()
+        finally:
+            runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_an_unnamed_record_does_not_grant(monkeypatch, tmp_path) -> None:
+    """THE C3 OVERRULE, PINNED: ``session_id == ""`` is NOT evidence.
+
+    On this machine the record reads ``session_id: ""`` WHILE the operator is
+    watching — the UI withdraws the name on every transient stream end — so a
+    grant on the empty field would tell every session on the machine "an
+    interface is attached". A name for SOMEONE ELSE is not evidence for this
+    session either; both stay detached until the app can name a conversation.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    runtime.start()
+    try:
+        await _wait_record()
+        with _desktop_presence_claim(tmp_path, session_id=""):
+            assert runtime.attached_surfaces() == frozenset()
+        with _desktop_presence_claim(tmp_path, session_id="someone-else"):
+            assert runtime.attached_surfaces() == frozenset()
+    finally:
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_then_recent_heartbeat_moves_none_of_the_other_tiers() -> None:
+    """THE NO-MOVE PINS: the memory grants the MODEL answer and nothing else.
+
+    A stale memory must never keep a runtime resident and must never be read
+    as attention: after a drop-then-recent heartbeat, ``attach_clients()``
+    (the reaper's count), ``watching_surfaces()`` and
+    ``_visible_attach_surfaces()`` must read exactly what a heartbeat of the
+    same shape reads on a live connection — which, for
+    ``visible=False, can_notify=False``, is NOTHING on all three, while
+    ``attached_surfaces()`` still answers for the mounted pane.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    runtime.start()
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    try:
+        record = await _wait_record()
+        await desktop.connect(record, "s1")
+        await desktop.desktop_watch(visible=False, can_notify=False)
+        desktop.close()
+        await _wait_for_drop(runtime)
+
+        assert runtime.attached_surfaces() == frozenset({"desktop"})
+        # The residency and attention tiers do not read the memory:
+        assert runtime.attach_clients() == 0
+        assert runtime.watching_surfaces() == frozenset()
+        assert runtime._visible_attach_surfaces() == set()
+
+        # A re-dial plus the same heartbeat: still nothing for them.
+        redialed = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+        try:
+            await redialed.connect(record, "s1")
+            await redialed.desktop_watch(visible=False, can_notify=False)
+            assert runtime.attach_clients() == 0
+            assert runtime.watching_surfaces() == frozenset()
+            assert runtime._visible_attach_surfaces() == set()
+            assert runtime.attached_surfaces() == frozenset({"desktop"})
+        finally:
+            redialed.close()
+    finally:
+        desktop.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_withdrawal_clears_the_memory_and_a_drop_does_not() -> None:
+    """THE C2 PIN: withdrawal clears; drop does not.
+
+    An explicit withdrawal (the bridge's "the pane left for real" signal) is
+    the ONE thing that clears the session-scoped memory early: it drops the
+    model-facing answer immediately, on the connection that is still open.
+    A dropped socket, by contrast, leaves the answer standing for the rest of
+    the lease window — that asymmetry IS the fix.
+
+    Fails on the pre-fix tree at the first assertion (``desktop_withdraw``
+    does not exist to send).
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    runtime.start()
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    try:
+        record = await _wait_record()
+        await desktop.connect(record, "s1")
+        await desktop.desktop_watch(visible=True, can_notify=True)
+        assert runtime.attached_surfaces() == frozenset({"desktop"})
+
+        await desktop.desktop_withdraw()
+        assert runtime.attached_surfaces() == frozenset()
+        assert runtime.attach_clients() == 0
+
+        # The mirror: the SAME state, dropped instead of withdrawn, survives.
+        await desktop.desktop_watch(visible=True, can_notify=True)
+        assert runtime.attached_surfaces() == frozenset({"desktop"})
+        desktop.close()
+        await _wait_for_drop(runtime)
+        assert runtime.attached_surfaces() == frozenset({"desktop"})
+    finally:
+        desktop.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_only_a_live_desktop_connection_can_withdraw_the_attachment() -> None:
+    """THE SHAPE GATE (N1): a non-desktop caller's withdrawal is refused.
+
+    ``desktop_withdraw`` is the ONE frame that clears the session-scoped attach
+    memory, so the refusal must be by SHAPE and free of side effects: a
+    terminal attach and the daemon both get the error frame, and the memory a
+    live desktop pane planted stands through both attempts. Delete the gate
+    and either caller silently drops the model-facing answer.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    runtime.start()
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    terminal = AttachClient(lambda _projection: None, lambda _reason: None)
+    daemon_writer = None
+    try:
+        record = await _wait_record()
+        await desktop.connect(record, "s1")
+        await desktop.desktop_watch(visible=True, can_notify=True)
+        memory = runtime._desktop_attach_seen
+        assert memory > 0.0
+        assert runtime.attached_surfaces() == frozenset({"desktop"})
+
+        # A TERMINAL ATTACH: the error frame is the reply, and the client's
+        # shared reader raises the frame's own sentence for it.
+        await terminal.connect(record, "s1")
+        with pytest.raises(
+            RuntimeError, match="desktop withdrawal requires a live desktop attach connection"
+        ):
+            await terminal.desktop_withdraw()
+
+        # THE DAEMON: the same gate read on the wire, so what is asserted is
+        # the frame itself — this is the ``conn.kind != "attach"`` branch.
+        daemon_reader, daemon_writer = await _dial(record)
+        daemon_writer.write(json.dumps({"op": "desktop_withdraw", "req": 91}).encode() + b"\n")
+        await daemon_writer.drain()
+        err = await _until(daemon_reader, "error", 91)
+        assert "desktop withdrawal requires a live desktop attach connection" in err["message"]
+
+        # NEITHER REFUSAL MOVED THE MEMORY, so the next answer still sees the
+        # pane (the live terminal is its own surface and stays counted): a
+        # refusal that cleared the memory would re-open the incident silently.
+        assert runtime._desktop_attach_seen == memory
+        assert runtime.attached_surfaces() == frozenset({"attach", "desktop"})
+    finally:
+        if daemon_writer is not None:
+            daemon_writer.close()
+        terminal.close()
+        desktop.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_real_drop_does_not_flip_the_interactivity_block() -> None:
+    """PROMPT-LEVEL: the churn never reaches the rendered bytes (round 3).
+
+    The block is recomputed per turn from the probe, so "the attachment died
+    with the socket" surfaced to the model as a rewritten system prompt — the
+    operator's actual complaint. Mirroring
+    ``test_prompts_api.py::test_interactivity_costs_the_same_whatever_the_attach_churn``
+    at the WIRE level instead of the renderer level: drive the REAL probe
+    across a drop, a re-dial and a re-assert, and assert the rendered bytes
+    are identical through all of it (the cost property is that same byte
+    equality — nothing is journalled because nothing changes).
+    """
+    from local_operator.mobile.attach_client import AttachClient
+    from local_operator.prompts_api import CHANNEL_ASK, build_system_blocks
+
+    def block_for(interactive: bool) -> str:
+        return build_system_blocks(
+            [], "", "env", "2026-01-01", interactive=interactive, channel=CHANNEL_ASK
+        )[-1]
+
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    runtime.start()
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    redialed = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    try:
+        record = await _wait_record()
+        await desktop.connect(record, "s1")
+        await desktop.desktop_watch(visible=True, can_notify=True)
+
+        rendered = [block_for(bool(runtime.attached_surfaces()))]
+
+        desktop.close()
+        await _wait_for_drop(runtime)
+        rendered.append(block_for(bool(runtime.attached_surfaces())))
+
+        await redialed.connect(record, "s1")
+        rendered.append(block_for(bool(runtime.attached_surfaces())))
+        await redialed.desktop_watch(visible=True, can_notify=True)
+        rendered.append(block_for(bool(runtime.attached_surfaces())))
+
+        assert len(set(rendered)) == 1, [
+            "the block moved across the churn" if len(set(rendered)) > 1 else ""
+        ]
+        assert "<interactivity>" in rendered[0]
+    finally:
+        desktop.close()
+        redialed.close()
+        runtime.close()
 
 
 @pytest.mark.asyncio
