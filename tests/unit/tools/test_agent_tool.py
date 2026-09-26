@@ -951,9 +951,7 @@ async def test_an_edit_keeps_the_sync_baseline(context, registry) -> None:
     """
     await call(context, op="install", name="reviewer")
     before = registry.get_agent_by_name("reviewer")
-    stamps = [
-        tag for tag in before.tags if tag.startswith(("seed_version:", "seed_sha256:"))
-    ]
+    stamps = [tag for tag in before.tags if tag.startswith(("seed_version:", "seed_sha256:"))]
     assert len(stamps) == 2
 
     await call(context, op="update", name="reviewer", instructions="ONLY CHECK THE MIGRATIONS.")
