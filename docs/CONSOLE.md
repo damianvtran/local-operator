@@ -148,8 +148,9 @@ What to expect, in order:
    can pass it by name (`secret_ref`) and never see the value.
 4. **Prompts the agent cannot answer.** macOS's Command Line Tools dialog and
    Windows's UAC consent dialog are drawn by the OS: the pty cannot see them and
-   the agent cannot click them — the macOS half is exercised, the Windows half is
-   only documented (see the provenance note below). An installer's own agreement
+   the agent cannot click them — the macOS install path is exercised, the Windows
+   half is documented only, and neither dialog has been raised in testing (see
+   the provenance note below). An installer's own agreement
    or licence prompt is the user's consent too. The agent's job in all three
    cases is to say what is on the screen, hand it to the user, and wait.
 5. **The receipt.** When it finishes the agent reports the package, the command
