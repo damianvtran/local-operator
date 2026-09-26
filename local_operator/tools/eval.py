@@ -255,14 +255,18 @@ def _record_reset(key: str, reason: str) -> None:
         _LOST_KERNELS.popitem(last=False)
 
 
-#: Name of the per-session restart marker inside the session directory. Its
-#: presence is the whole signal; the content (``generation``,
+#: Name of the per-session restart marker inside the session directory. Public
+#: because the session copy set has to CLASSIFY it: it travels with the session
+#: (``network.sync.COPY_SET_NAMES``), so a moved session's first cell still gets
+#: the restart notice instead of silently fresh state — which is why
+#: ``tests/unit/network/test_sync_copy_set.py`` pins it against this module.
+#: Its presence is the whole signal; the content (``generation``,
 #: ``written_at_ms``) exists for debugging, not for logic.
-_MARKER_FILENAME = "eval-kernel.json"
+KERNEL_MARKER_NAME = "eval-kernel.json"
 
 
 def _marker_path(session_dir: str) -> str:
-    return os.path.join(session_dir, _MARKER_FILENAME)
+    return os.path.join(session_dir, KERNEL_MARKER_NAME)
 
 
 def _read_marker(session_dir: str) -> bool:
