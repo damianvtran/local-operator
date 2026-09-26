@@ -37,8 +37,21 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
+class _RegistryFakeSession(FakeSession):
+    """``FakeSession`` plus the optional registry slot the picker reads.
+
+    The real session protocol declares ``project_registry`` (slice 1); the
+    pilot fake does not, and ``app.on_file_query_opened`` deliberately reads
+    it with ``getattr(..., None)`` because a session without one is a
+    supported state (no rows). Declaring the slot here keeps the fake honest
+    to pyright instead of assigning an attribute the class never declares.
+    """
+
+    project_registry: ProjectRegistry | None = None
+
+
 def _session_with(registry: ProjectRegistry | None) -> FakeSession:
-    session = FakeSession()
+    session = _RegistryFakeSession()
     session.project_registry = registry
     return session
 
