@@ -412,6 +412,18 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "The human's recorded answer FILE <config>/network/pending/<invite>.decision.json",
     ),
     (
+        "local_operator/network/store.py::clear_pending_join",
+        "<path>.unlink",
+        "The JOINER's parked ceremony FILE "
+        "<config>/network/pending/<invite>.joining.json, once its window closes or its "
+        "answer is reported",
+    ),
+    (
+        "local_operator/network/store.py::clear_join_answer",
+        "<path>.unlink",
+        "The joiner's recorded answer FILE " "<config>/network/pending/<invite>.join-answer.json",
+    ),
+    (
         "local_operator/network/store.py::queued_frames",
         "<path>.unlink",
         "Deletes one UNPARSABLE <stamp>.frame FILE found by globbing that peer's own "

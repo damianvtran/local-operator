@@ -223,10 +223,22 @@ def test_sas_stdin_is_a_test_seam_and_says_so(monkeypatch: pytest.MonkeyPatch) -
 def test_join_without_a_person_is_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """No terminal, no prompt — and a CODE, because ``--json`` carries it.
+
+    The refusal is a ``MeshRefusal`` rather than a bare ``ValueError``: the raw
+    exception reached an agent as a non-answer with no machine code, and the sentence
+    it now carries names the two-phase pair, which is the path a caller with no
+    terminal actually has. The refusal itself STAYS: a prompt needs a person, and the
+    park is a deliberate, explicit alternative rather than something this call does
+    for you.
+    """
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
-    with pytest.raises(ValueError) as excinfo:
+    with pytest.raises(types.MeshRefusal) as excinfo:
         net_cli._read_code(Namespace(sas_stdin=False, verify=False), "481926", "FP")  # noqa: SLF001
-    assert "person at a keyboard" in str(excinfo.value)
+    assert excinfo.value.code == "join_needs_tty"
+    assert "person at a keyboard" in excinfo.value.sentence
+    # The sentence has to name the way OUT, or the refusal is a dead end.
+    assert "--park" in excinfo.value.sentence and "--confirm" in excinfo.value.sentence
 
 
 def test_verify_makes_the_fingerprint_the_compared_value(

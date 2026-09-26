@@ -364,9 +364,12 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: raise is not paid. Two things make that the right trade anyway, and both are
 #: stated rather than implied: the tool is the only way the operator's R19 brief
 #: ("an agent can set a network up from a verbal request") is satisfiable on a
-#: fresh machine, and its schema is already the trimmed one — a twelve-value
+#: fresh machine, and its schema is the trimmed one — a sixteen-value
 #: ``action`` enum with one field per flag the CLI takes, which is one schema
-#: where twelve tools would be twelve.
+#: where sixteen tools would be sixteen. The four values added since (``sessions``,
+#: ``trust``, ``credentials``, ``definitions_state``) are the same trade at a
+#: smaller size: they close surfaces the tool could already SEE (a peer and
+#: nothing it held), and every one of them is a flag the CLI already takes.
 #:
 #: A reader comparing this number to a real session's start context should know
 #: the one place the mesh's "nothing changes on a device with no network" claim
@@ -443,7 +446,30 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: The raise is 54 tokens and lands the ceiling at head + 46 — the headroom band
 #: the entry above keeps — so the next addition finds the ratchet as tight as
 #: this one did, and the tighten band below (1,200) is not in play.
-BUDGET_BILLED_TOKENS = 32_791
+#: RAISED 32,737 -> 33,193 for the ``network`` SESSION PLANE (the agent tool's
+#: session verbs and the two-phase pair). Measured by running THIS script on the
+#: SAME host from two trees, one after the other, so the difference is this
+#: change and nothing else:
+#:
+#:   baseline (origin/main a937895ce)      90,883 chars = ~32,692 billed
+#:   head (this branch, rebased on it)     92,152 chars = ~33,148 billed
+#:     = +1,269 chars = +456 billed: the four added ``action`` values
+#:       (sessions / trust / credentials / definitions_state), the fields that
+#:       drive them (peer, create, prompt, engage, stop, delete, all_peers,
+#:       trust_state, role, device, expires) and ``confirm``, which is the
+#:       two-phase pair's own half — one schema where sixteen tools would be
+#:       sixteen, the trade this tool's entry further up records.
+#:
+#: The raise RESTORES the headroom rather than loosening it, the same way the
+#: projects entry does: the tree carried 45 tokens before this change
+#: (32,737 - 32,692) and carries 45 after (33,193 - 33,148), so the next
+#: addition finds the ratchet as tight as this one did. The tighten band below
+#: (1,200) is not in play.
+#:
+#: What was NOT paid for out of the budget: the tool DESCRIPTION. It replaced a
+#: sentence claiming sessions on other devices were unreachable — a capability
+#: the relay has served for rounds — so that half is a correction, not a cost.
+BUDGET_BILLED_TOKENS = 33_193
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

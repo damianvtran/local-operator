@@ -42,7 +42,34 @@ _ALL_ACTIONS = (
     "panic",
     "log",
     "doctor",
+    "sessions",
+    "trust",
+    "credentials",
+    "definitions_state",
 )
+
+#: One plausible call per action, in the order the enum declares them. Defined once
+#: because TWO properties are asserted over every action — that it reaches a real CLI
+#: verb, and that it can never spell a confirmation flag — and a second table would be
+#: the place one of them quietly stopped covering an action.
+_SAMPLES: dict[str, dict[str, Any]] = {
+    "status": {},
+    "init": {"network": "devmesh"},
+    "invite": {"role": "drive"},
+    "join": {"token": "@token.invite"},
+    "ls": {},
+    "show": {"network": "devmesh"},
+    "peers": {},
+    "member_rm": {"network": "devmesh", "device": "d_" + "a" * 32},
+    "disconnect": {"network": "devmesh"},
+    "panic": {"network": "devmesh"},
+    "log": {"since": "15m"},
+    "doctor": {},
+    "sessions": {"peer": "device-b"},
+    "trust": {"network": "devmesh"},
+    "credentials": {},
+    "definitions_state": {},
+}
 
 
 @pytest.fixture()
@@ -129,6 +156,25 @@ def test_reads_never_prompt_and_every_mutating_action_does() -> None:
     assert tool.concurrency == "exclusive"
 
 
+def test_the_sessions_action_is_tiered_by_what_it_does_not_by_its_name() -> None:
+    """One action, both sides of the gate: a listing is silent, a stop is not.
+
+    Sabotage check for why ``call_approval_tier`` takes the arguments: a tier decided by
+    the action name alone would have to either prompt for every listing or stay silent
+    for a stop that ends somebody's session on another device.
+    """
+    tool = TOOL_BUILDERS["network"](ToolContext(cwd="."))
+    assert tool is not None and tool.call_approval_tier is not None
+    tier = tool.call_approval_tier
+    assert tier({"action": "sessions", "peer": "device-b"}) == "read"
+    assert tier({"action": "sessions", "all_peers": True}) == "read"
+    for verb in ("create", "engage", "stop", "delete"):
+        assert tier({"action": "sessions", "peer": "device-b", verb: "s1"}) == "write", verb
+    # A model that sends the boolean as text is not a read either.
+    assert tier({"action": "sessions", "peer": "device-b", "create": "true"}) == "write"
+    assert tier({"action": "sessions", "peer": "device-b", "create": "false"}) == "read"
+
+
 # ---------------------------------------------------------------------------
 # Argv discipline — the flags this tool cannot pass
 # ---------------------------------------------------------------------------
@@ -139,20 +185,7 @@ def test_every_action_maps_to_a_real_cli_verb() -> None:
     # Keyed by the tool's own action vocabulary (``NetworkParams.action``'s alias)
     # rather than by ``str``: the mapping is asserted against ``_ALL_ACTIONS`` below,
     # and typing it as ``str`` is what let a typo pass the checker and fail the model.
-    samples: dict[net_tool.NetworkAction, dict[str, Any]] = {
-        "status": {},
-        "ls": {},
-        "show": {"network": "devmesh"},
-        "peers": {},
-        "doctor": {},
-        "log": {"since": "15m"},
-        "init": {"network": "devmesh"},
-        "invite": {"role": "drive"},
-        "join": {"token": "@token.invite"},
-        "member_rm": {"network": "devmesh", "device": "d_" + "a" * 32},
-        "disconnect": {"network": "devmesh"},
-        "panic": {"network": "devmesh"},
-    }
+    samples: dict[net_tool.NetworkAction, dict[str, Any]] = dict(_SAMPLES)  # type: ignore[arg-type]
     assert set(samples) == set(_ALL_ACTIONS)
     for action, fields in samples.items():
         argv, problem = net_tool._argv_for(NetworkParams(action=action, **fields))
@@ -172,11 +205,155 @@ def test_the_argv_carries_no_confirmation_and_no_token_printing_flag() -> None:
         NetworkParams(action="disconnect", network="devmesh"),
         NetworkParams(action="panic", network="devmesh"),
         NetworkParams(action="init", network="devmesh"),
+        # The four verbs that COULD spell one if the tool were allowed to: a
+        # delete is a dry run because ``--yes`` is absent, and a stop never
+        # escalates because ``--force`` is.
+        NetworkParams(action="sessions", peer="device-b", delete="s1"),
+        NetworkParams(action="sessions", peer="device-b", stop="s1"),
+        NetworkParams(action="sessions", peer="device-b", create=True, prompt="hi"),
+        NetworkParams(action="trust", network="devmesh", trust_state="untrusted"),
     ]
     for params in samples:
         argv, problem = net_tool._argv_for(params)
         assert problem == ""
         assert not (set(argv) & forbidden), argv
+
+
+def test_the_tool_never_supplies_the_confirmation_code_itself() -> None:
+    """R3's pin: the tool may START a pairing and may never finish one by itself.
+
+    The property is not "no ``--confirm`` anywhere" — the flag has to exist, or an
+    agent could not hand the user's half back. It is that the flag is reached by
+    exactly ONE argv, carrying exactly the caller's own value, and that NO combination
+    of the tool's fields reaches it otherwise. A refactor that defaulted ``confirm`` to
+    the code the park returned, or derived the flag from the parked record, would pass
+    every other test in this file and fail here.
+    """
+    for action in _ALL_ACTIONS:
+        argv, problem = net_tool._argv_for(NetworkParams(action=action, **_SAMPLES[action]))
+        assert problem == "", (action, problem)
+        assert "--confirm" not in argv, (action, argv)
+    # The parked code is not a confirmation, even when a caller echoes it through every
+    # other field of the same call: only 'confirm' produces the flag, and only with its
+    # own value.
+    argv, problem = net_tool._argv_for(NetworkParams(action="join", token="tok", device="481926"))
+    assert problem == ""
+    assert "--confirm" not in argv and "--park" in argv, argv
+    # And the one branch that carries it carries it once, verbatim.
+    argv, problem = net_tool._argv_for(NetworkParams(action="join", confirm="481 926"))
+    assert problem == ""
+    assert argv.count("--confirm") == 1
+    assert argv[argv.index("--confirm") + 1] == "481 926"
+    assert "--park" not in argv
+
+
+def test_the_description_teaches_the_two_phase_pair_and_drops_the_old_claim() -> None:
+    """The description is the FIRST thing an agent reads, so it is the place a
+    capability that does not exist costs the most: it used to say sessions on other
+    devices were not reachable, which the ``sessions`` action now contradicts."""
+    tool = TOOL_BUILDERS["network"](ToolContext(cwd="."))
+    assert tool is not None
+    text = tool.description
+    assert "Read and drive a lop mesh network from this device" in text
+    assert "creating a session on a peer" in text
+    assert "not reachable" not in text
+    assert "Pairing and incident controls need a human" in text
+    assert "reports what the CLI refused and why" in text
+
+
+def test_the_invite_action_carries_the_options_the_guide_teaches() -> None:
+    """Guide and tool must not disagree about what is possible.
+
+    The guide tells an agent to reach for ``--expires`` and ``--device``; before this,
+    the tool had no field for either, so an instruction the guide gives resolved to a
+    call that could not carry it.
+    """
+    argv, problem = net_tool._argv_for(
+        NetworkParams(action="invite", role="drive", expires="30m", device="d_abc")
+    )
+    assert problem == ""
+    assert "--expires" in argv and argv[argv.index("--expires") + 1] == "30m"
+    assert "--device" in argv and argv[argv.index("--device") + 1] == "d_abc"
+
+
+def test_the_new_actions_render_what_the_cli_actually_emits() -> None:
+    """The digests for ``sessions``/``trust``/``credentials``/``definitions_state``.
+
+    These payloads are the CLI's own ``--json`` shapes, so a render that reads a key
+    nobody sends (or prints a raw wire token where the family has a gloss) would only
+    show up against a live peer — which is exactly what a unit test of the renderer is
+    for. The glossing is asserted, not assumed: ``connect_failed`` is the relay's
+    word, and a person reads the sentence.
+    """
+    listing = {
+        "ok": True,
+        "sessions": [
+            {
+                "session_id": "s_1",
+                "state": "stored",
+                "conversation_name": "Field notes",
+                "peer": {"device_id": "d_1", "name": "mbp"},
+            }
+        ],
+        "peers": {
+            "d_1": {"name": "mbp", "reachable": True},
+            "d_2": {"name": "old-box", "reachable": False, "reason": "connect_failed"},
+        },
+    }
+    lines = net_tool._render("sessions", listing)  # noqa: SLF001 — the renderer under test
+    assert any("s_1" in line and "Field notes" in line and "on mbp" in line for line in lines)
+    assert any(line.startswith("old-box: did not answer") for line in lines), lines
+    assert not any("connect_failed" in line for line in lines), lines
+
+    empty = net_tool._render("sessions", {"ok": True, "sessions": [], "peers": {}})  # noqa: SLF001
+    assert empty == ["no sessions are held by other devices right now"]
+
+    # A MUTATION's receipt is the owner's own sentence, never a re-rendering of it.
+    assert net_tool._render(
+        "sessions", {"ok": True, "detail": "runtime joining"}
+    ) == [  # noqa: SLF001
+        "runtime joining"
+    ]
+
+    assert net_tool._render(  # noqa: SLF001
+        "trust",
+        {"ok": True, "network_id": "n_1", "trust": "active", "applied_locally": True},
+    ) == ["n_1 is now active", "the relay is not running on this device: applied locally"]
+
+    credentials = {
+        "ok": True,
+        "networks": [
+            {
+                "network": "home-net",
+                "credentials": [
+                    {
+                        "key": "OPENAI_API_KEY",
+                        "kind": "api_key",
+                        "owned_here": True,
+                        "owner_device": "d_1",
+                        "owner_device_name": "mbp",
+                    }
+                ],
+            }
+        ],
+    }
+    assert net_tool._render("credentials", credentials) == [  # noqa: SLF001
+        "home-net:",
+        "  OPENAI_API_KEY  api_key  owner: this device",
+    ]
+    assert net_tool._render("credentials", {"ok": True, "networks": []}) == [  # noqa: SLF001
+        "nothing is shared with or by this device"
+    ]
+
+    assert net_tool._render(  # noqa: SLF001
+        "definitions_state",
+        {
+            "ok": True,
+            "agents": {"scout": {}},
+            "teams": {"pod": {}},
+            "mirrored": {"agents": {"scout": "d_1"}, "teams": {}},
+        },
+    ) == ["agent: scout (mirrored from d_1)", "team: pod (yours)"]
 
 
 def test_a_missing_argument_is_refused_with_a_sentence_not_a_call() -> None:
@@ -217,22 +394,47 @@ def test_a_pasted_token_goes_to_a_private_file_and_does_not_survive_the_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``ps`` reads argv. The CLI accepts ``@path``, so a token handed to the
-    tool as TEXT never becomes an argv entry, and the file is gone afterwards."""
+    tool as TEXT never becomes an argv entry, and the file is gone afterwards.
+
+    The parked pair is the path a token join now takes, so THIS is the spawn it is
+    sent through: stubbing ``_run_cli`` alone left the real CLI dialling with the
+    fake token, which is how this test noticed the change (an ``invite_invalid`` from
+    the wire, not an assertion about argv).
+    """
     seen: dict[str, Any] = {}
 
-    async def fake_run(argv: list[str], timeout: float) -> tuple[int, str, str]:
+    async def fake_park(argv: list[str]) -> tuple[int, str, str]:
         token_arg = argv[2]
         path = Path(token_arg[1:])
+        seen["path"] = path
         seen["mode"] = stat.S_IMODE(path.stat().st_mode)
         seen["content"] = path.read_text(encoding="utf-8")
-        return 0, json.dumps({"ok": True, "name": "devmesh", "network_id": "n_1"}), ""
+        return (
+            0,
+            json.dumps(
+                {
+                    "ok": True,
+                    "status": "awaiting_confirmation",
+                    "sas": "481926",
+                    "fingerprint": "K7QM-3XPD-4B1N-9T2B",
+                    "name": "devmesh",
+                    "network_id": "n_1",
+                    "seconds_left": 180.0,
+                    "sentence": "Ask the user to read back the code 481 926.",
+                }
+            ),
+            "",
+        )
 
-    monkeypatch.setattr(net_tool, "_run_cli", fake_run)
+    monkeypatch.setattr(net_tool, "_start_parked_join", fake_park)
     result = _call("join", token="T0KEN-material")
 
     assert not result.is_error
     assert seen["mode"] == 0o600
     assert seen["content"] == "T0KEN-material"
+    # The token file is the tool's OWN temporary: it must not outlive the call, or the
+    # credential sits in a private directory until something else cleans it up.
+    assert not Path(str(seen["path"])).exists()
     assert "T0KEN-material" not in _text(result)
     assert "T0KEN-material" not in json.dumps(result.details or {}, default=str)
 
@@ -301,9 +503,16 @@ def test_the_invite_result_carries_the_path_and_never_the_token() -> None:
     assert "hand that FILE to the other device" in _text(invited)
 
 
-def test_join_cannot_be_completed_by_the_tool_and_says_why() -> None:
-    """The CLI has no ``--confirm``: the code is read at the joining device's own
-    prompt. So the tool reports the refusal and hands the step to the user."""
+def test_a_join_from_the_tool_parks_and_never_supplies_the_code() -> None:
+    """The tool STARTS a pairing; it does not finish one.
+
+    Before the two-phase pair this asserted the opposite shape — a refusal that told
+    the agent to hand the step to a human at a terminal — and the sentence it checked
+    is gone with the behaviour it described. What is left to assert is the property
+    R3 asks for: the tool's own call cannot produce the transcription, so the code
+    still has to come from a person, and the only thing that resolves a pairing is a
+    SECOND call carrying their value.
+    """
     _call("init", network="devmesh")
     invited = _call("invite", role="drive")
     token_path = Path(_payload(invited)["path"])
@@ -317,10 +526,10 @@ def test_join_cannot_be_completed_by_the_tool_and_says_why() -> None:
     # ("nothing was listening at …"). Asserting only the first made this test pass on
     # the author's machine and fail on CI, where `init` advertised the runner's own
     # address — so both the local refusal and the dial refusal are accepted here, and
-    # the teeth are the two sentences below, which are the same either way.
+    # the teeth are the sentences below, which are the same either way.
     assert "no endpoint" in text or "nothing was listening at" in text, text
-    assert "needs a person at a terminal" in text
-    assert "No flag completes this for them" in text
+    assert "Pairing needs a person" in text
+    assert "never the one this tool printed back" in text
 
 
 def test_a_refusal_from_the_cli_is_a_sentence_not_a_traceback() -> None:
