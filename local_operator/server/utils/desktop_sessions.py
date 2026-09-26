@@ -4470,9 +4470,12 @@ class DesktopSessions:
         from_draft = False
         if draft_id is not None:
             if self._draft_for(draft_id) is not None:
-                # Consumed BEFORE the write, so two creates racing on one draft
-                # cannot both materialise it (the loser of that race gets the
-                # refusal below rather than a second session).
+                # Consumed BEFORE the write, so no later create can REUSE the id.
+                # A second create racing this one on a DIFFERENT request id (the
+                # same id is the receipt journal's business) sees an unregistered
+                # id and mints fresh until the marker lands, when it gets the
+                # typed refusal — the MARKER, not the registry entry, is what
+                # makes an id materialised.
                 del self.drafts[draft_id]
                 session_id = draft_id
                 from_draft = True
