@@ -39,6 +39,7 @@ from local_operator.server.models.desktop_sessions import (
     CreatedSession,
     DeletedSession,
     DraftPreviewPayload,
+    DraftReceipt,
     HistoryPage,
     InterruptReceipt,
     MessageAdmission,
@@ -67,6 +68,7 @@ from local_operator.server.utils.desktop_sessions import (
     SUBSCRIBER_COUNT,
     DesktopSessionBridge,
     DesktopSessions,
+    DraftAlreadyMaterialised,
     LegacySubscriberDuringMove,
     SessionDeletionRefused,
     SubagentChildUnavailable,
@@ -739,6 +741,15 @@ class CreateSession(Input):
     #: the configured default. This is the ONLY optional admission of the two
     #: routes, and it is what lets an older client keep posting the old body.
     model: DraftModel | None = None
+    #: The draft id a mint handed this pane (spec §1.4), when the pane warmed a
+    #: new chat before sending. It supplies the ID and the already-running warm;
+    #: ``cwd``/``target``/``model`` stay THIS body's and its admissions re-run
+    #: exactly as before. Constrained to the session-id shape HERE, at the
+    #: declaration — the pool still only ever builds ``root / "sessions" /
+    #: session_id``, so a malformed value must be a 422 and never a path. The id
+    #: is an optimisation, never an authorization surface: unknown, expired or
+    #: lost ids fall back to a freshly minted session with every ladder intact.
+    draft_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{12}$")
 
 
 class MoveSession(Input):
@@ -779,6 +790,26 @@ class DraftPreview(Input):
     #: The same optional birth selection ``create`` accepts, resolved by the same
     #: authority — the pane is asking the question it will ask for real on the
     #: first send, so a body that may differ here would be a body that diverges.
+    model: DraftModel | None = None
+
+
+class DraftMint(Input):
+    """The new-chat pane's first keystroke: mint an id and register a warmable draft.
+
+    Same shape as :class:`CreateSession` on purpose — the mint is the first half
+    of the question create asks for real, and a body that differed would let the
+    two answers diverge. ``request_id`` IS JOURNALLED as a receipt (unlike
+    :class:`DraftPreview`'s envelope-parity token): a mint is fired once per
+    pane, and a retry (a StrictMode double-effect, a lost response) must return
+    the SAME id — two ids for one pane would warm two runtimes and leave a
+    second registry entry nobody can ever consume. The receipt is one row per
+    new-chat pane that ever received a keystroke, the same order of cost as the
+    ``create:`` row each chat already writes.
+    """
+
+    request_id: RequestID
+    cwd: str = Field(min_length=1, max_length=4096)
+    target: SessionTarget | None = None
     model: DraftModel | None = None
 
 
@@ -1328,6 +1359,16 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         # live) and the settlement refusal in ``_settle_unconfirmed_move`` (with
         # all four readbacks).
         raise HTTPException(503, {"code": error.code, "message": str(error)}) from None
+    except DraftAlreadyMaterialised as error:
+        # THE DRAFT'S ONE REFUSAL (spec §1.4), sitting ABOVE the
+        # ``(ReceiptConflict, ValueError)`` arm deliberately: that arm's
+        # catch-all would render this as a bare 409 ``str(error)`` and drop the
+        # machine code, and the client's remedy here is its own — drop the draft
+        # reference and open the conversation it already became, rather than
+        # retry a create that can never succeed. 422 as the spec fixes, in the
+        # same named-condition body shape the arms above use, so a renderer keys
+        # on the code instead of parsing prose.
+        raise HTTPException(422, {"code": error.code, "message": str(error)}) from None
     except (ReceiptConflict, ValueError) as error:
         from local_operator.session.errors import (
             AsideUnanswered,
@@ -1750,6 +1791,12 @@ async def create_session(body: CreateSession, request: Request):
                 if spec is not None
                 else None
             ),
+            # The pane's minted warm, when it has one (spec §1.4). It supplies
+            # the ID and the already-running engage; the body above remains
+            # authoritative for everything else. Unknown/expired ids fall back
+            # to a fresh id inside the pool; an id that already became a
+            # conversation is refused there with its own typed answer.
+            draft_id=body.draft_id,
         )
         return {"session_id": session_id, "binding": await pool.binding(session_id)}
 
@@ -1792,6 +1839,16 @@ async def create_session(body: CreateSession, request: Request):
                     target_row["kind"],
                     target_row["name"],
                 )
+            if body.draft_id is not None:
+                # The DRAFT id is an admission of its own, and it is decided
+                # BEFORE the claim for the same reason the body's are: a draft
+                # that already became a conversation must refuse its retry with
+                # the refusal — not leave a pending receipt row behind that
+                # answers "outcome indeterminate" to the client's next attempt.
+                # ``assert_draft_unmaterialised`` is read-only (it never spends
+                # the draft; that is ``create``'s job) and ``create`` re-asks it,
+                # so the two call sites cannot disagree.
+                await asyncio.to_thread(pool.assert_draft_unmaterialised, body.draft_id)
         return reply(await receipts(request).run(key, body.model_dump(), create))
 
 
@@ -1904,6 +1961,83 @@ async def preview_session(body: DraftPreview, request: Request):
         return reply(await preview())
 
 
+@router.post("/v1/desktop/sessions/draft", response_model=CRUDResponse[DraftReceipt])
+async def draft_mint(body: DraftMint, request: Request):
+    """Mint a new-chat pane's draft id, so its first send need not pay the engage.
+
+    **Declared BESIDE ``preview`` and before the parametrised routes** for the
+    same declaration-order reason: no POST route exists under
+    ``/v1/desktop/sessions/{session_id}`` today, and a literal segment must not
+    become the fallback a later edit's route serves for a session named "draft".
+
+    WHAT THIS DOES — AND, JUST AS IMPORTANTLY, WHAT IT DOES NOT (spec §0.2):
+    it registers an in-memory draft (id + the body's validated cwd/model/target)
+    and returns the id; nothing under ``sessions/`` is written and NO RUNTIME IS
+    STARTED. The pane warms through the ordinary ``sessions.warm`` op once its
+    ``/events`` subscription holds the bridge — the same one lifetime an
+    existing session's warm uses — so abandonment is already solved: detach
+    cancels an in-flight warm, and an engaged runtime with no live lease is
+    reaped by the existing residency drain. An abandoned pane therefore leaves
+    the registry entry to the TTL/cap and the runtime to that drain, and the
+    draft is invisible to every listing (no transcript, no marker).
+
+    THE RECEIPT IS DELIBERATE (unlike ``preview``, which skips it): a mint is
+    fired once per pane, and a retry — a StrictMode double-effect, a lost
+    response — must return the SAME id. Two ids for one pane would warm two
+    runtimes and leave a second registry entry nobody can ever consume. The row
+    is one per new-chat pane that ever received a keystroke, the same order of
+    cost as the ``create:`` row each chat already writes.
+
+    The SAME admissions ``create`` applies, in the same order (cwd, model,
+    target) and BEFORE the receipt is claimed — for the two reasons
+    ``create``'s own docstring states: a refusal must leave the store exactly as
+    it found it, and the pool re-runs every admission as its own contract.
+
+    A LATCHED daemon mints nothing: the refusal is ``assert_admitting``'s, asked
+    first, exactly as on ``create``.
+    """
+
+    async def mint():
+        pool = host(request)
+        target = body.target.model_dump() if body.target else None
+        draft_id = await pool.mint_draft(
+            body.cwd,
+            target=target,
+            # The NORMALISED spec, not the raw body: it is the exact value a
+            # later create persists into the marker and the engage is born on.
+            model=spec,
+            request_id=body.request_id,
+        )
+        return {"draft_id": draft_id}
+
+    async with errors(request):
+        # REFUSED BEFORE ANYTHING IS ADMITTED OR CLAIMED, as on ``create``.
+        host(request).assert_admitting()
+        pool = host(request)
+        key = "draft:" + body.request_id
+        spec: ModelSpec | None = None
+        # A recorded key short-circuits the admissions below, exactly as on
+        # ``create``: a replayed retry replays, it does not re-admit.
+        if not await asyncio.to_thread(receipts(request).recorded, key):
+            await asyncio.to_thread(resolve_working_directory, body.cwd)
+            if body.model is not None:
+                spec = await asyncio.to_thread(_draft_model_spec, body.model)
+            if body.target is not None:
+                target_row = body.target.model_dump()
+                from local_operator.agents import AgentRegistry
+                from local_operator.server.utils.desktop_profiles import validate_target
+                from local_operator.teams import TeamRegistry
+
+                await asyncio.to_thread(
+                    validate_target,
+                    AgentRegistry(pool.root),
+                    TeamRegistry(pool.root),
+                    target_row["kind"],
+                    target_row["name"],
+                )
+        return reply(await receipts(request).run(key, body.model_dump(), mint))
+
+
 @router.get("/v1/desktop/sessions/{session_id}", response_model=CRUDResponse[SessionSnapshot])
 async def snapshot(session_id: str, request: Request):
     # READ: an existing but silent owner must not fail a read. The durable answer
@@ -1911,7 +2045,12 @@ async def snapshot(session_id: str, request: Request):
     # (``READ_ATTACH_BUDGET_S``) and the cold facade serves it with a
     # ``cold_reason``; the previous envelope answered 503 "Session owner is
     # unavailable" after ~17 s for a runtime whose loop was merely busy.
-    async with errors(request), host(request).session(session_id, read=True) as bridge:
+    # ``allow_draft``: one of the five doors a new-chat pane may hold before a
+    # session exists (spec §1.3); a draft answers the cold/empty shape.
+    async with (
+        errors(request),
+        host(request).session(session_id, read=True, allow_draft=True) as bridge,
+    ):
         return reply(await bridge.snapshot())
 
 
@@ -1922,8 +2061,13 @@ async def history(
     before_id: str | None = Query(default=None, max_length=128),
     limit: int = Query(default=100, ge=1, le=500),
 ):
-    # READ, for the same reason as ``snapshot`` beside it.
-    async with errors(request), host(request).session(session_id, read=True) as bridge:
+    # READ, for the same reason as ``snapshot`` beside it — and on a draft the
+    # empty page is the correct answer (the open frame's own ``history()``
+    # returns one for a directory that does not exist), not a 404.
+    async with (
+        errors(request),
+        host(request).session(session_id, read=True, allow_draft=True) as bridge,
+    ):
         return reply(await bridge.history(before_id=before_id, limit=limit))
 
 
@@ -2788,7 +2932,14 @@ async def watch(session_id: str, body: Watch, request: Request):
     # made the panel report a lost connection for a session that was running.
     # The visible lease this beat carries still CREATES residency (through
     # ``bridge.watch`` and its lease-warm loop); read mode bounds only the attach.
-    async with errors(request), host(request).session(session_id, read=True) as bridge:
+    # ``allow_draft``: the pane's watch beat for a new-chat draft is one of the
+    # two users that hold its bridge across the engage (the other is
+    # ``/events``), and the first beat is what arms ``_lease_warm_loop`` for a
+    # warm the route may still be starting (spec §1.3).
+    async with (
+        errors(request),
+        host(request).session(session_id, read=True, allow_draft=True) as bridge,
+    ):
         await bridge.watch(body.subscription_id, visible=body.visible, can_notify=body.can_notify)
         return reply({"lease_seconds": 45})
 
@@ -2848,7 +2999,10 @@ async def warm(session_id: str, body: Warm, request: Request):
     for.
     """
     del body
-    async with errors(request), host(request).session(session_id) as bridge:
+    # ``allow_draft``: THIS is the engage for a new-chat pane — the warm that
+    # must fire once ``/events`` holds the bridge, and the one lifetime the
+    # feature adds nothing to (spec §0.1/§1.3).
+    async with errors(request), host(request).session(session_id, allow_draft=True) as bridge:
         assert bridge.remote is not None
         return reply({"state": await bridge.warm()})
 
@@ -3227,7 +3381,11 @@ async def events(
 ):
     # Acquire BEFORE returning response headers: invalid identity/capacity must
     # return JSON status, not a misleading 200 followed by a broken SSE stream.
-    context = host(request).session(session_id, read=True)
+    # ``allow_draft``: the pane's subscription is the bridge user that holds a
+    # draft across its engage — the pane opens this stream before it warms, and
+    # the warm is cancelled on detach precisely because this is the user whose
+    # absence would leave a runtime with nobody to serve (spec §1.3).
+    context = host(request).session(session_id, read=True, allow_draft=True)
     async with errors(request):
         bridge: DesktopSessionBridge = await context.__aenter__()
         try:
