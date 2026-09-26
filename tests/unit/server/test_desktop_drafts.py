@@ -975,3 +975,34 @@ async def test_a_bound_drafts_live_record_is_not_listed(draft_app) -> None:
         assert control_id in {row["id"] for row in page.rows}
     finally:
         runtime_registry.unpublish(os.getpid(), root)
+
+
+@pytest.mark.asyncio
+async def test_a_page_refills_past_a_bound_draft(draft_app) -> None:
+    """C1 (round-2 review): the excluded draft must not eat a page slot.
+
+    Measured on the first cut (the pool filtered the ASSEMBLED page): a store
+    with 4 sessions + 1 bound draft answered ``limit=2`` with one row and
+    ``limit=1`` with an empty page. The exclusion now runs inside the
+    catalogue's ranking→window step, so every page fills from the rows behind
+    the excluded one (and the same assertions fail on the pre-C1/cut tree).
+    """
+    client, app, root = draft_app
+    pool = app.state.desktop_sessions
+    draft_id = await _mint(client, root)
+    _write_warm_residue(root, draft_id)
+    resident = await client.get(f"/v1/desktop/sessions/{draft_id}")
+    assert resident.status_code == 200
+    for _ in range(4):
+        await pool.create(str(root))
+    _publish_record(root, draft_id, "Untitled conversation")
+    try:
+        for limit in (1, 2, 3):
+            page = await pool.list(limit=limit)
+            listed = [row["id"] for row in page.rows]
+            assert draft_id not in listed
+            assert len(listed) == limit, (limit, listed)
+        page = await pool.list(limit=2)
+        assert page.truncated is True, "more rows still follow the refilled page"
+    finally:
+        runtime_registry.unpublish(os.getpid(), root)

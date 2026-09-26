@@ -424,3 +424,45 @@ def test_a_live_archived_session_is_not_offered_and_is_stamped_when_revealed(
     assert {
         entry.id: entry.row.archived for entry in load_catalog(tmp_path, include_archived=True)
     } == {A: True, B: True}
+
+
+def _speculative_residue(root: Path, session_id: str) -> Path:
+    """A speculative engage's directory as measured: the runtime's bookkeeping only.
+
+    No ``desktop.json`` marker, no ``created_at.json`` birth sidecar, no
+    transcript and no inbox — exactly what a draft's warm leaves behind while
+    the id is not a session yet (measured on the real engage:
+    ``.execution-lease`` + ``.session.pid``, nothing else).
+    """
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / ".execution-lease").write_text('{"pid": 1}', encoding="utf-8")
+    (directory / ".session.pid").write_text("1", encoding="utf-8")
+    return directory
+
+
+def test_a_speculative_engages_residue_is_not_appended_as_a_live_row(tmp_path: Path) -> None:
+    """C2 (round-2 review): the shared catalogue must not carry a draft id.
+
+    The live-append branch re-adds rows the scan cannot carry — including a
+    user's transcript-less session, which MUST stay listed (pinned above by
+    ``_transcript_less_session``, which carries the ``created_at.json`` a real
+    one gets at construction) — but a speculative engage's directory holds no
+    marker, no birth sidecar, no transcript and no spool, so it is not a
+    session yet. Without this every consumer of this function (the TUI
+    sidebar included) painted the warm draft as an "Untitled conversation"
+    row while its own doors called the id unknown (spec §1.6).
+    """
+    _transcript_less_session(tmp_path, A)
+    _speculative_residue(tmp_path, B)
+
+    # B's record — the phantom row's source — is skipped; A has no record yet,
+    # so nothing is listed.
+    _publish_live(tmp_path, B)
+    assert load_catalog(tmp_path) == [], "a speculative engage's residue was listed"
+
+    # The same machinery over a user session's id still appends its row (one
+    # record per pid: this publish replaces B's). Without this half the cell
+    # would pass on a predicate that broke the append entirely.
+    _publish_live(tmp_path, A)
+    assert [entry.id for entry in load_catalog(tmp_path)] == [A]

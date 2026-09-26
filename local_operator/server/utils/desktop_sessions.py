@@ -4687,7 +4687,10 @@ class DesktopSessions:
         The MARKER is the one fact that says the draft became a conversation:
         once it exists the id lists by the ordinary rules, whatever a stale
         bridge reference still says. Loop-only, like every read of these two
-        fields.
+        fields. ``list()`` calls it at the LISTING BOUNDARY and passes the set
+        into ``catalogue_page``'s ranking→window step, so the exclusion and the
+        scan see one moment and a page refills from behind an excluded row
+        (round-2 review C1).
         """
         excluded: set[str] = set()
         for session_id in list(self.drafts):
@@ -4778,8 +4781,9 @@ class DesktopSessions:
 
         # DRAFTS ARE NEVER LISTED (spec §1.6; QA round 2's Q-2). The exclusion
         # set is computed HERE, on the loop — ``_draft_for`` prunes an expired
-        # entry, which is loop-only mutation — and read inside the worker
-        # thread below, so the filter and the scan describe one moment.
+        # entry, which is loop-only mutation — and passed into the catalogue's
+        # ranking→window step inside the worker thread below, so the exclusion
+        # and the scan describe one moment.
         excluded_drafts = self._draft_listing_exclusions()
 
         def rows() -> SessionPage:
@@ -4812,13 +4816,19 @@ class DesktopSessions:
                 # below as a phantom row with no section to belong to.
                 include_archived=include_archived,
                 with_counts=with_counts,
+                # DRAFTS ARE NEVER LISTED (spec §1.6; QA round 2's Q-2), and the
+                # exclusion is handed INTO the catalogue's ranking→window step:
+                # the window, the truncation verdict, ``next_cursor`` and the
+                # census are all computed over the filtered list, so a page
+                # REFILLS from behind an excluded row (round-2 review C1 — a
+                # post-hoc filter over the assembled page answered a store with
+                # 4 sessions + 1 bound draft with 1 row at ``limit=2`` and an
+                # EMPTY page at ``limit=1``). A cursor stays a rank POSITION, so
+                # the walk tolerates this set changing between pages exactly as
+                # it already tolerated deletions.
+                exclude_ids=excluded_drafts,
             )
-            # THE DRAFT ROWS ARE DROPPED HERE, before the page slice so the page
-            # still fills to ``limit`` from the rows that may be shown. The
-            # catalogue's own truncation verdict and counts were taken before
-            # this filter, so excluding a row can only ever OVER-report "more"
-            # for one poll — it can never hide a row a client should see.
-            entries = [entry for entry in page.entries if entry.id not in excluded_drafts]
+            entries = page.entries
             page_entries = entries[:limit]
             # A PINNED ROW THE PAGE DOES NOT CARRY, and the filter is on the id
             # rather than on the projected row's flag so it runs before the
