@@ -1,4 +1,5 @@
-"""The zero triage: an apparatus zero is excluded and named, never counted.
+"""The apparatus triage: an apparatus-attributable episode is excluded and
+named from BOTH sides of the rate, never counted.
 
 WHY REAL SEALED BUNDLES RATHER THAN A FAKE DIRECTORY. ``read_bundle`` is a
 READER, and what a reader gets wrong is which bytes it opened: whether the bundle
@@ -8,6 +9,13 @@ exercise the classifier and nothing else. So the tests below seal REAL bundles
 through the REAL ``EpisodeRunner`` -- the fake adapter is handed a score whose
 details carry an evaluator log, exactly as the OSWorld adapter hands over its
 own -- and then read them back the way a campaign does.
+
+BOTH DIRECTIONS ARE TESTED, because the defect the facility exists for is not a
+zero-maker: of the four measured episodes that carry the signature, two are
+zeros and two are PASSES, and a reader that triaged only ``binary == 0`` left the
+two passes in the numerator. The regression is therefore pinned twice -- once
+with a sealed apparatus PASS, and once over the corpus, where the reading has to
+move from 6/62 to 4/60.
 
 THE CLASSIFIER'S OWN INPUT is also a real one: the diagnostic block in
 ``test_the_measured_signature_classifies`` is quoted from the sealed bundle of
@@ -35,7 +43,7 @@ from local_operator.evaluation.triage import (
     UNSCORED,
     CampaignReadout,
     EpisodeTriage,
-    classify_zero,
+    classify_apparatus_attribution,
     find_bundles,
     format_readout,
     read_bundle,
@@ -160,19 +168,22 @@ async def _rescue_ok(descriptor: Any, **kwargs: Any) -> Any:
 def test_the_measured_signature_classifies_and_each_half_alone_does_not() -> None:
     """Both halves are required, and the reason names what a reader checks next."""
 
-    reason = classify_zero(MEASURED_DIAGNOSTICS)
+    reason = classify_apparatus_attribution(MEASURED_DIAGNOSTICS)
 
     assert reason is not None
     assert "get_active_url_from_accessTree" in reason
     assert "input.ZBTq6e" in reason
     # The getter failing is what the evaluator tried to recover from; the
     # fallback is what it did about it. One half alone is not attributable.
-    assert classify_zero("get_active_url_from_accessTree attempt 1/3 returned: None") is None
-    assert classify_zero("Falling back to an open Google Maps tab.") is None
+    assert (
+        classify_apparatus_attribution("get_active_url_from_accessTree attempt 1/3 returned: None")
+        is None
+    )
+    assert classify_apparatus_attribution("Falling back to an open Google Maps tab.") is None
     # And an ordinary unmet checkpoint is not touched: this facility must not
     # launder capability failures.
-    assert classify_zero(PLAIN_DIAGNOSTICS) is None
-    assert classify_zero("") is None
+    assert classify_apparatus_attribution(PLAIN_DIAGNOSTICS) is None
+    assert classify_apparatus_attribution("") is None
 
 
 @pytest.mark.asyncio
@@ -228,6 +239,36 @@ async def test_a_correct_episode_counts_toward_the_rate(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_manufactured_pass_leaves_both_sides_of_the_rate(tmp_path: Path) -> None:
+    """THE REGRESSION: the same defect manufactures PASSES, and they must not count.
+
+    An earlier revision read every episode through ``binary == 0``, so the two
+    task_017 passes in the measured corpus were never even asked the question:
+    the matching zero left the denominator while the manufactured pass stayed in
+    the numerator, which inflates the arm exactly as much as the facility
+    corrects it. Sealing a PASS whose diagnostics carry the signature is the
+    smallest bundle that can catch that, and it only passes if the binary is not
+    consulted at all.
+    """
+
+    bundle, _ = await _seal_bundle(
+        tmp_path,
+        "manufactured-pass",
+        diagnostics=MEASURED_DIAGNOSTICS,
+        binary=1,
+        partial_ppm=1_000_000,
+    )
+
+    read = read_bundle(bundle)
+
+    assert read.verified
+    assert read.binary == 1
+    assert read.attribution == APPARATUS_ATTRIBUTABLE, read.reason
+    assert read.reason and "open-tab fallback" in read.reason
+    assert not read.counts_toward_capability
+
+
+@pytest.mark.asyncio
 async def test_the_readout_excludes_the_apparatus_zero_and_names_it(tmp_path: Path) -> None:
     _, apparatus_id = await _seal_bundle(
         tmp_path, "apparatus", diagnostics=MEASURED_DIAGNOSTICS, binary=0, partial_ppm=0
@@ -249,7 +290,48 @@ async def test_the_readout_excludes_the_apparatus_zero_and_names_it(tmp_path: Pa
     assert [e.episode_id for e in readout.apparatus_attributable] == [apparatus_id]
     report = format_readout(readout)
     assert "capability rate         1/2 = 50.0%" in report
-    assert f"{apparatus_id}  [apparatus-attributable]" in report
+    assert f"{apparatus_id}  [apparatus-attributable] binary=0" in report
+
+
+@pytest.mark.asyncio
+async def test_a_manufactured_pass_is_named_and_moves_neither_number(tmp_path: Path) -> None:
+    """Both directions in one reading: the pass and the zero each leave the rate.
+
+    Four scored episodes, one of each kind. The two apparatus-attributable ones
+    are excluded, so the rate stays 1/2 -- while the naive binary rate over the
+    same bundles would read 2/3, the manufactured pass having been the numerator
+    the earlier revision could not see. The report has to show WHICH side each
+    exclusion came off, because that is the difference between the two figures.
+    """
+
+    _, apparatus_zero_id = await _seal_bundle(
+        tmp_path, "apparatus-zero", diagnostics=MEASURED_DIAGNOSTICS, binary=0, partial_ppm=0
+    )
+    _, apparatus_pass_id = await _seal_bundle(
+        tmp_path,
+        "apparatus-pass",
+        diagnostics=MEASURED_DIAGNOSTICS,
+        binary=1,
+        partial_ppm=1_000_000,
+    )
+    await _seal_bundle(
+        tmp_path, "capability", diagnostics=PLAIN_DIAGNOSTICS, binary=0, partial_ppm=0
+    )
+    await _seal_bundle(tmp_path, "right", diagnostics=None, binary=1, partial_ppm=1_000_000)
+
+    readout = read_run([tmp_path / "evidence"])
+
+    assert len(readout.scored) == 4
+    assert len(readout.apparatus_attributable) == 2
+    assert readout.correct == 1
+    assert readout.denominator == 2
+    assert readout.capability_rate == pytest.approx(0.5)
+    # The number the correction exists to replace: what a reader who counted
+    # every binary == 1 would have quoted.
+    assert sum(1 for e in readout.scored if e.binary == 1) == 2
+    report = format_readout(readout)
+    assert f"{apparatus_pass_id}  [apparatus-attributable] binary=1" in report
+    assert f"{apparatus_zero_id}  [apparatus-attributable] binary=0" in report
 
 
 def test_an_unreadable_bundle_is_named_rather_than_guessed(tmp_path: Path) -> None:
@@ -334,6 +416,17 @@ DEFAULT_CORPUS = Path.home() / "worktrees" / "osworld" / "runs"
 #: on screen and whose zero came from the evaluator reading another tab.
 MEASURED_EPISODE_GLOB = "cohort7-*/evidence/ep-94b968963d3e"
 
+#: The full roster the 2026-09-26 audit of the 96 sealed bundles found carrying
+#: the signature: four task_017 episodes across three arms, TWO ZEROS AND TWO
+#: PASSES. The passes are the half an earlier revision's ``binary == 0`` gate
+#: could not see, so they are the half that has to stay pinned.
+MEASURED_ROSTER_GLOBS = (
+    "cohort7-*/evidence/ep-94b968963d3e",
+    "gateOFF-task_017-*/evidence/ep-9a6876e889e1",
+    "gateON-t017-*/evidence/ep-b62377fe1ba5",
+    "strong-task_017-*/evidence/ep-3dcae8b48633",
+)
+
 
 def _corpus_root() -> Path:
     return Path(os.environ.get(CORPUS_ENV) or DEFAULT_CORPUS)
@@ -349,6 +442,38 @@ def test_the_measured_episode_is_classified_from_its_sealed_bundle() -> None:
     assert read.verified is True, read.reason
     assert read.binary == 0
     assert read.attribution == APPARATUS_ATTRIBUTABLE, read.reason
+
+
+def test_the_measured_roster_is_classified_regardless_of_binary() -> None:
+    """The corpus reading, both directions: 4 of 60, not 6 of 62.
+
+    Read over the roster ALONE, where the arithmetic is stable whatever else the
+    campaign later adds: all four are excluded, so the corrected numerator and
+    denominator are both 0 while a reader counting ``binary == 1`` would still
+    find 2. Over the whole audited corpus those two passes are what takes the
+    figure from 6/62 = 9.7% (zeros-only, what the earlier revision reported) to
+    4/60 = 6.7% (both directions).
+    """
+
+    found = [sorted(_corpus_root().glob(glob)) for glob in MEASURED_ROSTER_GLOBS]
+    if not all(found):
+        pytest.skip(f"the four measured bundles are not all at {_corpus_root()}")
+
+    readout = read_run([bundles[0] for bundles in found])
+
+    assert len(readout.episodes) == 4
+    assert all(e.verified for e in readout.episodes)
+    assert all(e.attribution == APPARATUS_ATTRIBUTABLE for e in readout.episodes)
+    # In roster order -- cohort7, gateOFF, gateON, strong -- so the two zeros the
+    # earlier revision flagged and the two passes it could not are both named here
+    # rather than only counted.
+    assert [e.binary for e in readout.scored] == [0, 0, 1, 1]
+    # Both directions, on the same four bundles:
+    assert sum(1 for e in readout.scored if e.binary == 1) == 2  # the naive count
+    assert readout.correct == 0  # ... and the corrected one
+    assert readout.denominator == 0
+    report = format_readout(readout)
+    assert report.count("[apparatus-attributable] binary=") == 4
 
 
 def test_the_corpus_reading_excludes_only_what_it_can_name() -> None:

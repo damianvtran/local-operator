@@ -1,4 +1,4 @@
-"""Read a scored episode's zero, and say whether the APPARATUS produced it.
+"""Read a scored episode's verdict, and say whether the APPARATUS produced it.
 
 WHY THIS EXISTS, precisely. The campaign of 2026-09-25 scored ``task_017``
 zero while a rendered Google Maps walking-route page -- every stop, the travel
@@ -7,8 +7,30 @@ claim was TRUE. The evaluator's own retained diagnostics show why the score is
 zero anyway: ``get_active_url_from_accessTree`` returned ``None`` on all three
 attempts, the fallback then selected a DIFFERENT open Google Maps tab (a place
 page, which has no directions inputs), and the selector it went on to wait for
-timed out. One of the 32 scored episodes carries that signature. That zero is
-not a capability reading, and counting it as one understates the arm.
+timed out.
+
+FOUR SCORED EPISODES CARRY THAT SIGNATURE, NOT ONE, AND IT MANUFACTURES PASSES
+AS WELL AS ZEROS. The audit of all 96 sealed bundles (2026-09-26) found it on
+four ``task_017`` episodes -- the Maps task, the one that opens several Maps
+tabs -- across three arms:
+
+    ep-94b968963d3e  cohort7-20260925-002218           binary 0  partial 0
+    ep-9a6876e889e1  gateOFF-task_017-20260925-184401  binary 0  partial 142857
+    ep-b62377fe1ba5  gateON-t017-20260925-181934       binary 1  partial 1000000
+    ep-3dcae8b48633  strong-task_017-20260926-043257   binary 1  partial 1000000
+
+(The two zeros are the pair an earlier revision of this module flagged; the two
+ones are the pair it could not see, because it triaged only ``binary == 0``.)
+
+The fallback grades a tab the episode did not produce, so its score is not a
+reading in EITHER direction, and the correction has to move both sides of the
+rate. Flagging only the zeros -- what this module did -- removes two zeros from
+the denominator while leaving two manufactured PASSES in the numerator, which
+inflates the arm as much as it corrects it. Over this corpus the honest figure
+is 4/60 = 6.7% against an uncorrected binary rate of 6/62 = 9.7%; the honest
+capability reading is 4-6 correct of 60-62, the width being roster completeness
+(a signature a cohort does not carry cannot be corrected out of it) rather than
+arithmetic.
 
 SO THIS IS A READ-SIDE TRIAGE, NOT A HARNESS FIX. The pinned vendor tree's
 getter is deliberately left alone: patching it would make the arm
@@ -19,14 +41,14 @@ score-details artifact, so the classification is derivable from the sealed
 bundle and nothing about scoring changes.
 
 WHAT IT DOES NOT DO. It does not decide that an episode "really" succeeded, and
-it never turns a zero into a one: an apparatus-attributable episode is EXCLUDED
-and NAMED, so the capability rate is computed over the episodes whose score the
-apparatus could actually read. Unscored episodes are excluded and named for the
-same reason and by the same rule (``INFRA.md``: "Exclude them honestly and name
-why; do not count them as zeros"). A campaign reading this rate still has to
-exclude a non-reportable arm -- a scripted or fake-provider run -- by its own
-manifest ``reportability_label``; that is the driver's stamp and not something a
-score can be triaged into.
+it never rewrites a score: an apparatus-attributable episode is EXCLUDED and
+NAMED from BOTH sides of the rate, so the figure is computed over the episodes
+whose score the apparatus could actually read. Unscored episodes are excluded
+and named for the same reason and by the same rule (``INFRA.md``: "Exclude them
+honestly and name why; do not count them as zeros"). A campaign reading this
+rate still has to exclude a non-reportable arm -- a scripted or fake-provider
+run -- by its own manifest ``reportability_label``; that is the driver's stamp
+and not something a score can be triaged into.
 
 Run it over a run directory (``<run>/evidence/<episode>`` bundles) or over one
 bundle:
@@ -54,7 +76,7 @@ from local_operator.evaluation.evidence.models import (
 )
 from local_operator.evaluation.evidence.verify import verify_bundle
 
-#: The classification this module can add to a zero. A STRING rather than a bool
+#: The classification this module can add to a score. A STRING rather than a bool
 #: so a report can carry the reason, and a closed set so a later classification
 #: (a second apparatus signature) is an addition to it rather than a second
 #: boolean every reader would have to learn.
@@ -80,12 +102,17 @@ _WAIT_TIMEOUT_RE = re.compile(r"wait_for_selector timed out for '([^']*)'")
 _DIAGNOSTICS_KEY = "evaluator_diagnostics"
 
 
-def classify_zero(diagnostics_text: str) -> str | None:
-    """Why this zero looks apparatus-attributable, or ``None`` if it does not.
+def classify_apparatus_attribution(diagnostics_text: str) -> str | None:
+    """Why this episode looks apparatus-attributable, or ``None`` if it does not.
+
+    Deliberately takes the diagnostics and NOT the score: the signature can land
+    on an episode that passed exactly as it can on one that failed (see the
+    roster in the module docstring), so a caller that only asked about zeros
+    would miss half of what the defect manufactures.
 
     ``diagnostics_text`` is the evaluator's retained stdout and stderr, joined.
     A capture that was TRUNCATED can hide the signature (the ring drops the head
-    of the stream), which costs a false negative -- an unclassified zero that
+    of the stream), which costs a false negative -- an unclassified episode that
     stays in the rate -- and never a false positive, because both markers have
     to be present in the bytes that survived.
     """
@@ -129,7 +156,7 @@ def _diagnostics_text(details: Any) -> str:
 
 @dataclass(frozen=True)
 class EpisodeTriage:
-    """One bundle's score, and what (if anything) can be said about a zero."""
+    """One bundle's score, and what (if anything) can be said about it."""
 
     episode_id: str
     bundle: Path
@@ -151,9 +178,11 @@ class EpisodeTriage:
     def counts_toward_capability(self) -> bool:
         """Whether this episode is a capability reading at all.
 
-        A zero the apparatus produced is not one, and neither is an episode the
-        evaluator never scored; only the first is what this module classifies,
-        so the two are both excluded and separately named.
+        A score the apparatus produced is not one -- in EITHER direction, a
+        manufactured pass inflating the numerator exactly as a manufactured zero
+        deflates it -- and neither is an episode the evaluator never scored. The
+        first is what this module classifies, so the two are both excluded and
+        separately named.
         """
 
         return self.attribution in (CAPABILITY,)
@@ -171,7 +200,14 @@ class CampaignReadout:
 
     @property
     def correct(self) -> int:
-        return sum(1 for e in self.scored if e.binary == 1)
+        """Passes that are capability readings.
+
+        Not ``sum(binary == 1)``: a pass the apparatus manufactured is excluded
+        from the numerator for the same reason a manufactured zero is excluded
+        from the denominator, so this counts only the episodes that count.
+        """
+
+        return sum(1 for e in self.scored if e.binary == 1 and e.counts_toward_capability)
 
     @property
     def apparatus_attributable(self) -> tuple[EpisodeTriage, ...]:
@@ -263,9 +299,13 @@ def read_bundle(bundle: Path) -> EpisodeTriage:
         )
     score = scores[0]
     episode_id = report.manifest.episode_id if report.manifest is not None else label
-    if score.binary != 0 or score.details is None:
-        # Only a ZERO is triaged: a one is a reading whatever the evaluator's
-        # logs say, and an unscored artifact is already excluded by status.
+    if score.details is None:
+        # Nothing was captured to attribute the score to, so there is nothing to
+        # classify and the score stands as the capability reading it is. The
+        # binary is deliberately NOT consulted: the same evaluator defect
+        # manufactures passes as well as zeros (module docstring), and a rule of
+        # "only a zero is triaged" is exactly what left two manufactured passes
+        # in this corpus's numerator.
         return EpisodeTriage(
             episode_id=episode_id,
             bundle=bundle,
@@ -283,9 +323,9 @@ def read_bundle(bundle: Path) -> EpisodeTriage:
             score=score,
             attribution=CAPABILITY,
             reason=f"score details could not be read ({type(error).__name__}); "
-            "the zero stands unless another reading explains it",
+            "the score stands unless another reading explains it",
         )
-    reason = classify_zero(_diagnostics_text(details))
+    reason = classify_apparatus_attribution(_diagnostics_text(details))
     if reason is None:
         return EpisodeTriage(
             episode_id=episode_id,
@@ -361,14 +401,23 @@ def format_readout(readout: CampaignReadout) -> str:
     if excluded:
         lines.append("  excluded, named:")
         for episode in excluded:
-            lines.append(f"    {episode.episode_id}  [{episode.attribution}] {episode.reason}")
+            # The binary is shown because the exclusion can come off either side
+            # of the rate now: a manufactured pass leaves the numerator exactly as
+            # a manufactured zero leaves the denominator, and a reader checking
+            # the arithmetic needs to see which of the two each line is. An
+            # unscored or unreadable episode has no score to show, and its
+            # attribution already says so.
+            scored = "" if episode.binary is None else f"binary={episode.binary} "
+            lines.append(
+                f"    {episode.episode_id}  [{episode.attribution}] {scored}{episode.reason}"
+            )
     return "\n".join(lines)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m local_operator.evaluation.triage",
-        description="Classify apparatus-attributable zeros out of a capability rate",
+        description="Classify apparatus-attributable episodes out of a capability rate",
     )
     parser.add_argument(
         "paths",
