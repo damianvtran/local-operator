@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import socket
 import stat
 import sys
 from pathlib import Path
@@ -64,7 +65,49 @@ def isolated_network_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     root.mkdir()
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
     monkeypatch.setenv("PATH", str(Path(sys.executable).parent))
+    _pin_loopback_listener(root)
     return root
+
+
+def _free_port() -> int:
+    """A port the OS just handed back, so "nothing is there" is the common case.
+
+    Deliberately not a fixed number: everything below is about a dial this test does
+    not want to succeed, and a constant would eventually be somebody's live port.
+    The tiny race (a parallel worker's own ``bind(0)`` taking it back) is why the
+    joining test still accepts the two other first clauses.
+    """
+    probe = socket.socket()
+    try:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+    finally:
+        probe.close()
+
+
+def _pin_loopback_listener(root: Path) -> None:
+    """Loopback, on a port nothing else on this machine is listening on.
+
+    THE DEVICE'S OWN ADDRESS IS REAL NOW, so these tests have to say WHERE it is. A
+    device on the default ``0.0.0.0`` listener advertises whatever the interface
+    table shows it (``network/addresses.py`` — before that fix, macOS advertised
+    nothing), and the default mesh port is the one an operator's OWN relay is
+    listening on. ``test_join_cannot_be_completed_by_the_tool_and_says_why`` drives a
+    real dial, so without this it reaches the operator's live mesh — a unit test's
+    side effect on someone's running network, and the reason its refusal clause would
+    depend on what is listening there. Pinning the listener to loopback keeps the
+    whole exchange inside the test, which is the same rule that strips ``launchctl``
+    from this fixture's PATH.
+
+    Written through the settings registry rather than by hand: it is the route
+    ``/settings`` writes, so a config the child CLI cannot read would fail here.
+    """
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+
+    manager = ConfigManager(root)
+    settings_io.write_setting(manager, settings_io.BY_KEY["network.listen_address"], "127.0.0.1")
+    settings_io.write_setting(manager, settings_io.BY_KEY["network.port"], _free_port())
 
 
 async def _run_call(args: dict[str, Any]) -> Any:
@@ -313,12 +356,17 @@ def test_join_cannot_be_completed_by_the_tool_and_says_why() -> None:
     text = _text(joined)
     # WHICH FIRST CLAUSE APPEARS IS AN ENVIRONMENT FACT, not this test's subject: a
     # token minted where nothing is advertised is refused locally with "no endpoint",
-    # while a token naming a detected address gets the dial's own refusal instead
-    # ("nothing was listening at …"). Asserting only the first made this test pass on
-    # the author's machine and fail on CI, where `init` advertised the runner's own
-    # address — so both the local refusal and the dial refusal are accepted here, and
-    # the teeth are the two sentences below, which are the same either way.
-    assert "no endpoint" in text or "nothing was listening at" in text, text
+    # a token naming a detected address gets the dial's own refusal instead ("nothing
+    # was listening at …"), and — the case this file's fixture now keeps out of reach —
+    # a token naming an address where SOMETHING ELSE answers (an operator's own relay
+    # on the default mesh port) gets the handshake's refusal. The fixture pins this
+    # device to loopback on a free port, so the middle clause is the one that should
+    # appear; the other two are accepted because the clause is the environment's and a
+    # port can be taken. The teeth are the two sentences below, which are the same
+    # either way.
+    assert (
+        "no endpoint" in text or "nothing was listening at" in text or "the handshake at" in text
+    ), text
     assert "needs a person at a terminal" in text
     assert "No flag completes this for them" in text
 
