@@ -73,29 +73,21 @@ class ProjectParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     op: Literal["list", "show", "create", "update", "link", "unlink", "milestone"] = Field(
-        description=(
-            "list/show: read; create/update: author or fix; link/unlink: attach or "
-            "detach a session; milestone: add-or-update or remove ONE. "
-            "project_delete removes irreversibly."
-        )
+        description="The verb to run. project_delete removes irreversibly."
     )
     name: str | None = Field(default=None, description="Project name (all ops but list).")
     description: str | None = Field(
-        default=None, description="create/update: one line on what this workstream is."
+        default=None, description="create/update: one line on the workstream."
     )
     status: Literal["active", "paused", "done", "archived"] | None = Field(
         default=None,
-        description=(
-            "create/update. 'done' with completed_at omitted stamps today; an "
-            "explicit '' clears it; moving away from 'done' leaves it."
-        ),
+        description="create/update: 'done' stamps completed_at unless it is given.",
     )
     progress: str | None = Field(
         default=None,
         description=(
-            "update: one dated line, not a transcript. Re-sending the same line on "
-            "a stale record refreshes its timestamp; on a fresh record it writes "
-            "nothing."
+            "update: one dated line, not a transcript. The same line on a stale "
+            "record re-stamps its freshness."
         ),
     )
     tags: list[str] | None = Field(
@@ -124,10 +116,7 @@ class ProjectParams(BaseModel):
     )
     milestones: list[ProjectMilestone] | None = Field(
         default=None,
-        description=(
-            "create/update: FULL replace (<= 20, names unique case-insensitively). "
-            "Prefer op='milestone' for one edit."
-        ),
+        description="create/update: FULL replace, <= 20, names unique; prefer op='milestone'.",
     )
     milestone: str | None = Field(
         default=None, description="milestone: its name (add-or-update by name)."
@@ -436,8 +425,10 @@ async def _op_update(
         return _text(
             tool_call_id,
             "project",
-            f"refreshed project {updated.name!r} — the progress line is unchanged "
-            f"and now dated today ({reporter}).",
+            # The STAMP moved, not the text: "now dated today" read as if the
+            # snippet had gained a date (agent review round 1, n2).
+            f"refreshed project {updated.name!r} — the progress line is unchanged, "
+            f"re-stamped just now ({reporter}).",
         )
     age = _reported_age(updated)
     detail = f"progress {age} ago" if age is not None else "no progress recorded"
@@ -600,11 +591,9 @@ def build_project_tool(context: ToolContext) -> AgentTool | None:
         name="project",
         label="Projects",
         description=(
-            "Track multi-session workstreams: create a project (auto-linked to "
-            "this session), report honest progress, link sessions, set "
-            "dates/estimate/milestones, and read the aggregated view of its "
-            "sessions (runtime state, subagents, todos). Read guide://projects "
-            "before first use."
+            "Track multi-session workstreams: create a project (auto-linked to this "
+            "session), report honest progress, link sessions, set dates/estimate/"
+            "milestones, read the aggregated view. Read guide://projects first."
         ),
         parameters=ProjectParams.model_json_schema(),
         approval_tier="read",

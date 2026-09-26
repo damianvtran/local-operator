@@ -271,7 +271,16 @@ def validate_milestones(milestones: list[Any] | None) -> list["ProjectMilestone"
         else:
             values.append(ProjectMilestone.model_validate(item))
     if len(values) > MILESTONES_MAX:
-        raise ValueError(f"at most {MILESTONES_MAX} milestones")
+        # The remedy clause is what makes the two cap refusals one shape: the
+        # link cap names ``unlink`` (which the guide's housekeeping section
+        # promises of BOTH), so a caller told "at most 20" without "remove one
+        # first" is the inconsistent one. The removal verb differs because the
+        # surfaces differ: ``unlink`` is a slash verb, milestone removal is the
+        # tool's ``op='milestone' remove=true``.
+        raise ValueError(
+            f"at most {MILESTONES_MAX} milestones; remove one with op='milestone' "
+            "remove=true first"
+        )
     seen: set[str] = set()
     for milestone in values:
         key = milestone.name.casefold()
@@ -320,10 +329,15 @@ class ProjectMilestone(BaseModel):
 def milestone_status(
     milestone: ProjectMilestone, *, today: date | None = None
 ) -> Literal["completed", "overdue", "upcoming"]:
-    """The milestone's status, DERIVED at render, never stored."""
+    """The milestone's status, DERIVED at render, never stored.
+
+    ``today`` exists for tests; left ``None`` the basis is :func:`_utc_today`
+    — the SAME date ``completed_at`` is stamped from — so "overdue" and "done
+    today" cannot disagree about which day it is.
+    """
     if milestone.completed_at:
         return "completed"
-    moment = today or date.today()
+    moment = today or _utc_today()
     if milestone.target_date and date.fromisoformat(milestone.target_date) < moment:
         return "overdue"
     return "upcoming"
@@ -560,8 +574,19 @@ def _utc_now() -> float:
     return time.time()
 
 
+def _utc_today() -> date:
+    """The ONE "today" this module reasons about: the UTC date.
+
+    ``completed_at`` is stamped from the UTC date when ``status='done'`` is set,
+    so every date COMPARISON has to use the same basis or an operator far from
+    UTC reads a badge one day off the stamp it contradicts (agent review round
+    1, n1). One helper, two callers, so the two cannot drift apart again.
+    """
+    return datetime.now(timezone.utc).date()
+
+
 def _today_iso() -> str:
-    return datetime.now(timezone.utc).date().isoformat()
+    return _utc_today().isoformat()
 
 
 def _try_lock_exclusive(fd: int) -> bool:
