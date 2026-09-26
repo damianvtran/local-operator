@@ -2021,16 +2021,26 @@ def test_the_owner_s_close_row_reaches_the_file_it_writes(
 
     AN INDEPENDENT VERIFIER READS THE AUDIT THE WAY AN OPERATOR DOES — `jq` over
     ``network/audit.jsonl``, in another process, which cannot flush a buffer it does not
-    own. Every stream row is appended to the writer's buffer and is NOT in the file at
-    the instant it is recorded (measured with an instrument that reads the path after
-    each ``record``: ``raw_stream_rows 0 -> 0`` for both roles in every departure shape),
-    so what such a reader can see depends on the relay publishing its own tail. It does:
-    the heartbeat flushes unconditionally, so the row lands within one ``HEARTBEAT_S``.
-    This cell reads the file with no flush and no ``tail()`` — the reader QA used — and
-    fails if the owner's release is invisible there for longer than two of them (the wait
-    below is 20 s, against a 15 s heartbeat: the bound it names with slack for the tick
-    that was already in flight when the close landed — a 3x bound would pass a cell whose
-    real latency had doubled, agent review round 2, NIT 2).
+    own. This cell reads the file with no flush and no ``tail()`` — the reader QA used.
+
+    THE ROW IS PUBLISHED WHEN THE STREAM'S STATE CHANGES, and this bound says so. The
+    pre-fix relay left it to the heartbeat: measured with an append->file-write trace
+    over three runs, the owner's close row took **14.7416 / 14.7417 / 14.7436 s** to
+    reach the file — one full 15 s tick, because the close lands just after a flush and
+    an otherwise idle relay has nothing else to drain — so the 20 s bound this cell
+    carried was 1.24x the product's own publication latency, and a relay whose
+    publication had doubled would have passed it (agent review round 2, NIT 2). On the
+    fixed head the same trace reads **0.0006 / 0.0015 / 0.0004 s**: the flush is the
+    close's own act now (``audit.STREAM_LIFECYCLE_EVENTS``).
+
+    WHY 5 s, AND WHAT IT STOPS CATCHING. The wait is on the event; the deadline is the
+    backstop that turns a hang into a failure, and it is deliberately BELOW one
+    heartbeat, so a regression that puts the row back on the tick cadence fails here
+    instead of passing 1.24x. Five seconds is a catastrophe ceiling, not precision: the
+    work being waited on is one ``write(2)`` on a thread in this process (measured
+    above at 1.5 ms), and the largest starvation gap recorded for this fleet is 525-668
+    ms (AGENTS.md, "If you must measure"), so the bound sits ~7x above the worst gap this
+    host has produced and ~1/3 of the latency it must reject.
     """
     server_a, server_b, host_a, port_a = peer_pair
     record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
@@ -2073,12 +2083,18 @@ def test_the_owner_s_close_row_reaches_the_file_it_writes(
                     return row
             return None
 
-        assert net_fixtures.wait_for(lambda: _owner_close_row() is not None, timeout_s=20), (
+        assert net_fixtures.wait_for(lambda: _owner_close_row() is not None, timeout_s=5.0), (
             "the owner's close row never reached the file it writes: an operator "
             "reading audit.jsonl cannot see that the release happened or why"
         )
         row = _owner_close_row()
         assert row is not None
+        # THE WRITER'S OWN ANSWER AGREES WITH THE FILE, which is the other half of the
+        # fix: the row's sequence is at or below what this writer says it has published,
+        # so a reader that found nothing could have asked and been told "still buffered"
+        # rather than concluding the row does not exist (``AuditLog.publication_of``).
+        assert server_a.audit.published_through >= int(row["seq"]), row["seq"]
+        assert server_a.audit.recorded_through >= server_a.audit.published_through
         # THE MACHINE FIELD SURVIVES THE FILE, which is the surface an incident reader
         # filters on (agent review round 1, MAJOR 1): a mapped cause, not `internal`.
         assert row["cause"] not in ("", "internal"), row
