@@ -187,6 +187,39 @@ def network_subcommand_rows() -> tuple[tuple[str, str], ...]:
     return tuple((word, NETWORK_SUBCOMMAND_HELP[word]) for word in NETWORK_SUBCOMMANDS)
 
 
+#: The subcommand vocabulary of ``/project`` — ONE frozen tuple beside the
+#: registry, for the same three readers ``NETWORK_SUBCOMMANDS`` serves: the
+#: handler (which refuses an unknown word), the picker (which offers the rows)
+#: and :func:`command_argument_words` (which publishes the words to the desktop
+#: catalogue and the command route's validator). Milestone editing is NOT a
+#: slash verb: that is tool/API/UI work, so the vocabulary stays six words.
+PROJECT_SUBCOMMANDS: tuple[str, ...] = ("list", "show", "new", "delete", "link", "unlink")
+
+#: The picker's one line of help per word, keyed by the vocabulary word so
+#: :func:`project_subcommand_rows` is total over ``PROJECT_SUBCOMMANDS`` (the
+#: test that pins the two tables equal is what enforces a new word's help line).
+PROJECT_SUBCOMMAND_HELP: dict[str, str] = {
+    "list": "Every tracked project and where it stands",
+    "show": "One project: progress, milestones, its sessions",
+    "new": "Create a project and link this session",
+    "delete": "Remove a project permanently",
+    "link": "Link this session to a project",
+    "unlink": "Detach this session from a project",
+}
+
+
+def project_subcommand_rows() -> tuple[tuple[str, str], ...]:
+    """``(word, help)`` for every ``PROJECT_SUBCOMMANDS`` entry, in that order.
+
+    The ONE reader the picker builds its rows from — the same contract
+    :func:`network_subcommand_rows` states: the words come from the vocabulary
+    the handler accepts, so the row a user picks is the word the handler runs,
+    and a missing help line raises ``KeyError`` at import rather than painting
+    a blank row.
+    """
+    return tuple((word, PROJECT_SUBCOMMAND_HELP[word]) for word in PROJECT_SUBCOMMANDS)
+
+
 #: Slash commands handled synchronously before any prompt is sent. One
 #: registry entry per command; aliases live on the entry (TUI-014).
 #:
@@ -1124,6 +1157,32 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # whatever it says (see ArgumentShape's precedence note).
         argument_shape=ArgumentShape.ANY,
         desktop_destination="session.agent",
+    ),
+    # The projects primitive: one entry with a RESERVED subcommand vocabulary
+    # (``PROJECT_SUBCOMMANDS``) beside the registry, the `/network` precedent.
+    #
+    # NOT an echo: the listing or the receipt IS the answer, and nothing here is
+    # words the model is told — the project TOOL is how the model writes project
+    # rows, while this surface is the operator's own list/show/new/link/delete.
+    # Same reasoning as `/team` and `/usage` in `ECHO_POLICY`.
+    #
+    # ``arguments=OPTIONAL`` so bare `/project` lists (matching `/team`), and
+    # ``argument_shape=SUBCOMMAND`` + its own vocabulary so `/project delete x`
+    # is the command (the route's validator and the desktop catalogue both read
+    # the words through `command_argument_words`) while `/project delete this
+    # thing` stays prose (the shape's two-token cap, `autocomplete.py`).
+    #
+    # ``desktop_destination="project"`` and DELIBERATELY not in
+    # ``server/utils/desktop_commands.OWNER_COMMANDS``: the desktop renders
+    # `/project` as a presentation-only native action (the renderer's Projects
+    # panel/dialogs), never as an owner-side command (design §5.2).
+    SlashCommand(
+        "project",
+        "Track workstreams: list, show, new, delete, link, unlink",
+        arguments=ArgumentMode.OPTIONAL,
+        argument_shape=ArgumentShape.SUBCOMMAND,
+        subcommands=PROJECT_SUBCOMMANDS,
+        desktop_destination="project",
     ),
 ]
 
