@@ -34,6 +34,7 @@ THE TWO REFUSALS THAT ARE FEATURES, NOT FRUSTRATIONS:
 from __future__ import annotations
 
 import argparse
+import asyncio  # stdlib, so add_parser's import graph stays stdlib-only.
 import json
 import sys
 import time
@@ -265,6 +266,50 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         "--force",
         action="store_true",
         help="with --stop: signal a target whose turn is in flight (as `lop stop --force`)",
+    )
+    # THE THREE PILOT ACTS. `--engage` warms a session elsewhere and `--stop`
+    # kills one, but nothing in this family could put a TURN to a conversation
+    # that already lives on another device: the viewer existed (a peer's row
+    # opened as an ordinary viewer, ``session/remote_open.py``) and only the TUI
+    # could reach it, so a shell — or an agent, which has no composer — had no way
+    # to prompt, correct or configure a session the mesh had just moved.
+    #
+    # THEY DRIVE THE SAME VIEWER the TUI's sidebar pick and `lop --resume <peer's
+    # id>` open, and that is deliberate: a second client that built its own frames
+    # would be a second front-end path for one conversation (the spine's rule, and
+    # the reason ``RemoteSessionClient`` overrides only ``connect``).
+    #
+    # THE TEXT IS A POSITIONAL BECAUSE THE FLAG'S VALUE IS TAKEN. `--prompt`
+    # already means "--create's first turn", and one flag with two meanings a
+    # caller cannot tell apart from the flag itself is how `--prompt X` comes to
+    # do two things depending on a token three words to the left. So the session
+    # id is the flag's value — the way `--engage`/`--stop` already spell "do this
+    # to that conversation" — and the words to deliver are the positional, with
+    # stdin for the shell case (`lop send`'s own rule).
+    net_sessions.add_argument(
+        "--send",
+        metavar="SESSION",
+        default="",
+        help="deliver a turn to that session on its device, and wait for the outcome",
+    )
+    net_sessions.add_argument(
+        "--steer",
+        metavar="SESSION",
+        default="",
+        help="inject into that session's turn, where it is already running",
+    )
+    net_sessions.add_argument(
+        "--slash",
+        metavar="SESSION",
+        default="",
+        help="run a slash command in that session on its device (e.g. '/rename new name')",
+    )
+    net_sessions.add_argument(
+        "text",
+        nargs="*",
+        default=[],
+        metavar="TEXT",
+        help="with --send/--steer/--slash: the text to deliver; omit to read it from stdin",
     )
     net_sessions.add_argument("--cwd", default="", help="with --create: where it should run")
     net_sessions.add_argument("--name", default="", help="with --create: its title")
@@ -2331,6 +2376,410 @@ _STOP_REMEDIES: dict[str, str] = {
 }
 
 
+#: How long a pilot act waits for the viewer to OPEN and BIND its owner. A warm
+#: peer answers in about a second (measured against a real pair), but the first
+#: act on a STORED session has to engage a runtime over there — a process launch
+#: plus that device's own registry work — so this is a spawn budget rather than a
+#: socket default. It is the same reason the TUI grants a peer call 260 s.
+PILOT_BIND_TIMEOUT_S = 120.0
+
+#: How long ``--send`` waits for the owner's TERMINAL outcome once the prompt is
+#: admitted. ADMISSION IS NOT COMPLETION (``AttachedSession.prompt_and_wait``
+#: says exactly that), and a turn is unbounded work on a machine nobody here
+#: supervises: a tool call can take minutes. So the bound is real, and its expiry
+#: is REPORTED as "still running" with the session named — never retried, and
+#: never rounded up into a success. It sits below the TUI's own child budget for
+#: these acts (``tui/network_cli.PILOT_CALL_TIMEOUT_S``) so the composer shows
+#: this verb's answer rather than a timeout about a call that was working.
+PILOT_TURN_TIMEOUT_S = 300.0
+
+#: How long a steer frame or a routed slash may take to come back. Both are
+#: request/reply against a runtime that is ALREADY running (the dial is made on
+#: the peer's side of an open stream), so this is a round trip, not a spawn.
+PILOT_REPLY_TIMEOUT_S = 60.0
+
+
+def _pilot_text(args: argparse.Namespace) -> str:
+    """The words a pilot act delivers: the positional, else stdin.
+
+    stdin is the shell's route for text that is not one argv word — an embedded
+    newline, a heredoc, a paste — which is ``lop send``'s own rule. A TTY is NOT
+    read: at a terminal an empty positional is a caller mid-command, and a verb
+    that parked on EOF waiting for one would read as a hang. The TUI's child gets
+    ``/dev/null`` for stdin (``tui/network_cli``), so a composer line reaches
+    this function with its words on argv and never blocks here.
+    """
+    text = " ".join(str(part) for part in (getattr(args, "text", None) or ())).strip()
+    if text or sys.stdin.isatty():
+        return text
+    return sys.stdin.read().strip()
+
+
+def _pilot_last_reply(viewer: Any) -> str:
+    """The last assistant text the viewer holds, or "" — the turn's own output.
+
+    Read from the display window rather than from anywhere this module keeps: the
+    owner is the author of a reply, and a CLI that cached one would be a second
+    copy of a conversation it does not own.
+    """
+    try:
+        rows = list(viewer.display_history_window())
+    except Exception:  # noqa: BLE001 — a missing history is "no reply", not a crash
+        return ""
+    for row in reversed(rows):
+        if str(getattr(row, "role", "")) != "assistant":
+            continue
+        text = getattr(row, "text", "")
+        if isinstance(text, str) and text.strip():
+            return text
+    return ""
+
+
+def _pilot_unresolved(session_id: str, peer: str) -> tuple[str, str]:
+    """The refusal an id that resolved to no peer row actually deserves.
+
+    THREE STATES WEAR ONE SYMPTOM, and a caller cannot act on any of them until it
+    knows which: no relay is running here (nothing on the mesh can be piloted at
+    all, and the remedy is `lop network start`), the named device did not answer
+    (the conversation may well be there — telling the user it is not would be a
+    claim this side cannot support), or the device answered and holds no such id (a
+    real "no", and a different next step).
+
+    The resolver answers ``None`` for all three, so this asks the peer's own
+    catalogue — and it is called ONLY on that failure path, so a pilot act that
+    works pays nothing for the distinction.
+    """
+    from local_operator.network.types import MeshRefusal
+    from local_operator.resume import peer_reason_words
+
+    try:
+        answer = _relay_answer("peer_session_rows", timeout=_listing_timeout())
+    except MeshRefusal as refusal:
+        # THIS DEVICE'S OWN RELAY is the component that failed, and its sentence
+        # already names it and the remedy.
+        return refusal.code, refusal.sentence
+    blocks = answer.get("peers") or {}
+    matched = [
+        entry
+        for device_id, entry in blocks.items()
+        if device_id == peer or str(entry.get("name") or "") == peer
+    ]
+    if not matched:
+        return (
+            "peer_unreachable",
+            f"{peer} is not a device this network knows — `lop network peers` lists the "
+            "members this device can see",
+        )
+    if not matched[0].get("reachable"):
+        reason = peer_reason_words(str(matched[0].get("reason") or ""))
+        return (
+            "peer_unreachable",
+            f"{peer} is unreachable ({reason}), so whether {session_id} is held there "
+            f"cannot be answered from here: `lop network doctor --peer {peer}` diagnoses "
+            "the link",
+        )
+    return (
+        "session_unknown",
+        f"{peer} does not hold {session_id}: `lop network sessions --peer {peer}` lists "
+        "what it does hold",
+    )
+
+
+def _cmd_pilot(args: argparse.Namespace, *, verb: str, session_id: str) -> int:
+    """``--send``/``--steer``/``--slash``: one act on a session that is not here.
+
+    WHY THIS DOES NOT GO THROUGH ``_relay_answer``. Every other verb in this file
+    is a request to THIS device's relay, and the session plane has a local op for
+    each of them. A turn is a different shape: what it needs is a PIPE — the owner
+    streams the turn's rows down it, and the answer is many frames rather than
+    one — and the client that speaks that pipe is the viewer (``stream_open`` plus
+    the viewer protocol, ``RemoteSessionClient``). So this opens the SAME viewer
+    the TUI's sidebar pick and ``lop --resume <a peer's id>`` open, and drives it.
+    A client that built its own frames here would be a second front-end path for
+    one conversation, which is what the spine forbids.
+
+    THE OWNER'S OWN WORDS ARE THE RECEIPT. Nothing here invents an outcome: the
+    admission sentence is the owner's, a slash receipt is the owner's own
+    ``SlashResult``, and "the turn ended" is the owner's terminal event. What this
+    side adds is the CONTRACT around them: ``ok`` answers one question — did the
+    peer run the act to its own terminal outcome — so a delivered-but-unfinished
+    act reports ``outcome: running``/``queued`` rather than an exit 0 that a
+    script would read as "it is done".
+    """
+    from local_operator.network.types import MeshRefusal
+
+    peer = str(getattr(args, "peer", "") or "")
+    if not peer:
+        raise MeshRefusal(
+            "peer_required",
+            f"--{verb} needs --peer: a conversation lives on one device, and only that "
+            "device's runtime can run a turn inside it",
+        )
+    text = _pilot_text(args)
+    if not text:
+        print(
+            f"--{verb} needs some text — pass it after the session id, or pipe it in",
+            file=sys.stderr,
+        )
+        return 2
+    if verb == "slash" and not text.lstrip("/").strip():
+        print(
+            "--slash needs a command, e.g. --slash <session> '/rename a better name'",
+            file=sys.stderr,
+        )
+        return 2
+
+    from local_operator.paths import config_dir
+
+    payload, lines = asyncio.run(
+        _pilot_act(
+            verb=verb,
+            session_id=session_id,
+            peer=peer,
+            text=text,
+            config_dir=Path(config_dir()),
+        )
+    )
+    return _emit(args, payload, lines)
+
+
+async def _pilot_act(
+    *,
+    verb: str,
+    session_id: str,
+    peer: str,
+    text: str,
+    config_dir: Path,
+) -> tuple[dict[str, Any], list[str]]:
+    """Open ``session_id`` on the peer as its viewer, perform ONE act, report it."""
+    from local_operator.network.types import MeshRefusal
+    from local_operator.session.remote_open import (
+        open_remote_viewer,
+        remote_row_for,
+        unreachable_peer_sentence,
+    )
+
+    # The reachability read is CACHE-FIRST and answers ``None`` with no dial when
+    # this device holds the id itself, so the local path pays nothing for it —
+    # the same property the TUI's guard and the shell's ``--resume`` rely on.
+    row = await asyncio.to_thread(remote_row_for, session_id, config_dir)
+    if row is None:
+        # WHICH refusal this is depends on facts this side has not read yet, and
+        # the three of them need three different next steps — see
+        # ``_pilot_unresolved``. Read on the failure path only.
+        code, sentence = await asyncio.to_thread(_pilot_unresolved, session_id, peer)
+        raise MeshRefusal(code, sentence)
+    if not row.reachable:
+        # The peer's name, the reason in words and the diagnosing command, all
+        # composed in the one place that owns "a peer row becomes a viewer".
+        raise MeshRefusal("peer_unreachable", unreachable_peer_sentence(session_id, row))
+
+    async def _never() -> Any:
+        # A remote viewer never takes over: a remote owner sets ``_can_go_cold``,
+        # so owner loss leaves this viewer cold rather than making this device a
+        # second writer (INV-1). The facade requires the factory, and it is
+        # unreachable — the same spelling the shell's ``--resume`` path uses.
+        raise RuntimeError("a viewer never takes over a session")
+
+    try:
+        viewer = await asyncio.wait_for(
+            open_remote_viewer(session_id, config_dir=config_dir, takeover=_never),
+            timeout=PILOT_BIND_TIMEOUT_S,
+        )
+    except TimeoutError as exc:
+        raise MeshRefusal(
+            "peer_unreachable",
+            f"{peer} did not open {session_id} within {PILOT_BIND_TIMEOUT_S:.0f}s; "
+            f"`lop network doctor --peer {peer}` diagnoses the link",
+        ) from exc
+    if viewer is None:
+        # Between the row read and here the id stopped being a peer's row (moved
+        # away, tombstoned). Refuse rather than let the id fall through to a local
+        # viewer for a conversation this device does not hold.
+        raise MeshRefusal("session_unknown", f"{session_id} is no longer a session held by {peer}")
+    try:
+        try:
+            # The cold-to-working seam: the first act that needs the runtime binds
+            # it, which is where a stored session on the peer ENGAGES a runtime.
+            await asyncio.wait_for(viewer.bind_runtime(), timeout=PILOT_BIND_TIMEOUT_S)
+        except TimeoutError as exc:
+            raise MeshRefusal(
+                "session_unreachable",
+                f"{peer} did not answer for {session_id} within "
+                f"{PILOT_BIND_TIMEOUT_S:.0f}s — its runtime may be starting, or wedged; "
+                f"`lop network doctor --peer {peer}` diagnoses the link",
+            ) from exc
+        except ConnectionError as exc:
+            # The owner's own refusal, verbatim: a stopped session, a runtime that
+            # cannot start, a capability this device does not hold.
+            raise MeshRefusal("session_unreachable", str(exc)) from exc
+        if verb == "send":
+            return await _pilot_send(viewer, session_id, peer, text)
+        if verb == "steer":
+            return await _pilot_steer(viewer, session_id, peer, text)
+        return await _pilot_slash(viewer, session_id, text)
+    finally:
+        # The viewer goes away and the PEER keeps its runtime: closing a viewer
+        # never stops the owner (the product's own rule, and the reason a moved
+        # session is still there next time).
+        await viewer.dispose()
+
+
+async def _pilot_send(
+    viewer: Any, session_id: str, peer: str, text: str
+) -> tuple[dict[str, Any], list[str]]:
+    """Deliver a turn and wait for the owner's terminal outcome.
+
+    ``prompt_and_wait`` rather than ``prompt`` for exactly the reason its own
+    docstring gives: ``prompt`` returns on durable ADMISSION, which a shell
+    caller cannot tell from completion. It also routes the frame to the owner's
+    ``steer`` op when the peer is already streaming — the reconciliation the
+    composer makes, kept here rather than re-decided, so a message sent into a
+    live turn is delivered rather than refused for a race the client owns.
+    """
+    from local_operator.session.errors import RuntimeRetiring
+
+    payload: dict[str, Any] = {"session_id": session_id, "peer": peer, "verb": "send"}
+    try:
+        await asyncio.wait_for(viewer.prompt_and_wait(text), timeout=PILOT_TURN_TIMEOUT_S)
+    except TimeoutError:
+        payload.update(ok=False, outcome="running", code="turn_running")
+        return payload, [
+            f"{session_id} on {peer} took the turn and is still running it.",
+            "It was admitted there, so the work is happening — this command simply "
+            f"stopped waiting at {PILOT_TURN_TIMEOUT_S:.0f}s. Open it to watch it: "
+            f"`lop --resume {session_id}`",
+        ]
+    except RuntimeRetiring as exc:
+        payload.update(ok=False, outcome="queued", code="runtime_retiring", error=str(exc))
+        return payload, [
+            f"{peer} is retiring that session's runtime, so no turn ran here.",
+            str(exc),
+        ]
+    except RuntimeError as exc:
+        # The owner's own terminal outcome was an error — the peer's sentence is
+        # the receipt (``prompt_and_wait`` raises with ``outcome.error`` in it).
+        payload.update(ok=False, outcome="failed", code="turn_failed", error=str(exc))
+        return payload, [f"{session_id} on {peer} ran the turn and it failed:", str(exc)]
+    except ConnectionError as exc:
+        payload.update(ok=False, outcome="lost", code="session_unreachable", error=str(exc))
+        return payload, [
+            f"the connection to {peer} for {session_id} was lost during the turn:",
+            str(exc),
+            "The turn may still be running there — re-read the session before assuming "
+            "it stopped.",
+        ]
+    reply = _pilot_last_reply(viewer)
+    payload.update(ok=True, outcome="finished", reply=reply)
+    lines = [f"{session_id} on {peer}: the turn finished."]
+    if reply:
+        lines.append(reply)
+    return payload, lines
+
+
+async def _pilot_steer(
+    viewer: Any, session_id: str, peer: str, text: str
+) -> tuple[dict[str, Any], list[str]]:
+    """Inject into the turn that is running there — or say there is none.
+
+    A STEER IS NOT A PROMPT WITH ANOTHER NAME, and this gate is where the
+    difference becomes visible: the owner queues a steer against the turn it is
+    running, so a steer aimed at a session whose turn has ENDED has nothing to
+    correct. ``AttachedSession.prompt`` routes to a steer when the session is
+    streaming and to a prompt when it is not — right for a composer, where the
+    user does not choose, and wrong for this flag, whose whole meaning is "into
+    the turn already running": it would start a new turn instead. So the
+    streaming edge is read first, and an idle owner is refused BY NAME.
+
+    The read is the viewer's synced copy of the owner's own state (an owner that
+    stops clears it, ``_end_turn_locally``), not a guess from a timer. If it is
+    stale in the other direction the owner still QUEUES the steer for its next
+    turn and says so in its receipt, which this verb prints verbatim.
+    """
+    from local_operator.network.types import MeshRefusal
+
+    if not bool(getattr(viewer, "is_streaming", False)):
+        raise MeshRefusal(
+            "turn_not_running",
+            f"{session_id} on {peer} is not running a turn, so a steer has nothing to "
+            "correct: use --send to start one, or --slash to change the session",
+        )
+    try:
+        receipt = await asyncio.wait_for(viewer.prompt(text), timeout=PILOT_REPLY_TIMEOUT_S)
+    except TimeoutError as exc:
+        raise MeshRefusal(
+            "session_unreachable",
+            f"{peer} did not answer for the steer within {PILOT_REPLY_TIMEOUT_S:.0f}s; "
+            "the turn there is unaffected, and the steer may or may not have landed",
+        ) from exc
+    except ConnectionError as exc:
+        raise MeshRefusal("session_unreachable", str(exc)) from exc
+    because = str(receipt or "").strip() or "accepted"
+    return (
+        {
+            "ok": True,
+            "session_id": session_id,
+            "peer": peer,
+            "verb": "steer",
+            "outcome": "steered",
+            "receipt": because,
+        },
+        [
+            f"{session_id} on {peer}: {because}",
+            "A steer is delivered at the owner's "
+            "next tool boundary; it does not interrupt the step already running.",
+        ],
+    )
+
+
+async def _pilot_slash(viewer: Any, session_id: str, text: str) -> tuple[dict[str, Any], list[str]]:
+    """Run a routed slash command in the peer's session, and print its receipt.
+
+    ROUTED, not re-implemented: ``route_shared_slash`` carries the commands the
+    owner's capability list marks ``authoritative_session``, so the OWNER's state
+    is what moves (a rename lands in the peer's own session record, a model switch
+    in its own registry). The receipt is the owner's ``SlashResult`` — its ``text``
+    is the sentence, its ``style`` says whether it worked — so the exit code comes
+    from the peer rather than from this side's guess about what a command did.
+    """
+    from local_operator.network.types import MeshRefusal
+
+    command, _, arguments = text.lstrip("/").partition(" ")
+    command = command.strip()
+    try:
+        receipt = await asyncio.wait_for(
+            viewer.route_shared_slash(command, arguments.strip()),
+            timeout=PILOT_REPLY_TIMEOUT_S,
+        )
+    except TimeoutError as exc:
+        raise MeshRefusal(
+            "session_unreachable",
+            f"the peer did not answer /{command} within {PILOT_REPLY_TIMEOUT_S:.0f}s",
+        ) from exc
+    except ConnectionError as exc:
+        raise MeshRefusal("session_unreachable", str(exc)) from exc
+    payload: dict[str, Any] = {
+        "session_id": session_id,
+        "verb": "slash",
+        "command": command,
+        "receipt": receipt,
+    }
+    if not isinstance(receipt, dict):
+        # An owner that answers prose instead of a typed result: report what it
+        # said rather than dressing it up as one.
+        payload.update(ok=True, outcome="answered", text=str(receipt))
+        return payload, [f"/{command} on {session_id}: {receipt}"]
+    style = str(receipt.get("style") or "")
+    said = str(receipt.get("text") or receipt.get("detail") or "").strip()
+    payload.update(
+        ok=style != "error",
+        outcome="ran" if style != "error" else "refused",
+        text=said,
+        style=style,
+    )
+    return payload, [f"/{command} on {session_id}: {said or 'no receipt'}"]
+
+
 def _cmd_sessions(args: argparse.Namespace) -> int:
     """``lop network sessions`` — the session plane, across the mesh.
 
@@ -2363,6 +2812,41 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         # a sentence naming a flag that does not exist (Q-R5-2).
         print("--force applies to --stop only", file=sys.stderr)
         return 2
+
+    # THE PILOT ACTS ARE DECIDED FIRST, and that ordering is the point: they are
+    # the only verbs here that open a VIEWER, and a command line that asked for
+    # one of them AND an archive/stop would run one act while silently dropping
+    # the other — the class of untruth ``--force`` above is refused for.
+    pilot = [
+        (name, str(getattr(args, name, "") or ""))
+        for name in ("send", "steer", "slash")
+        if str(getattr(args, name, "") or "")
+    ]
+    if pilot:
+        if len(pilot) > 1:
+            print(
+                "name one of --send/--steer/--slash: each is one act on one session, and "
+                "they are not a pipeline",
+                file=sys.stderr,
+            )
+            return 2
+        verb, target = pilot[0]
+        clash = next(
+            (
+                name
+                for name in ("create", "engage", "stop", "archive", "unarchive", "delete")
+                if getattr(args, name, "")
+            ),
+            "",
+        )
+        if clash:
+            print(
+                f"--{verb} acts on the session you name; --{clash} would act on another, so "
+                "this command would do one of the two",
+                file=sys.stderr,
+            )
+            return 2
+        return _cmd_pilot(args, verb=verb, session_id=target)
 
     # ARCHIVE, RESTORE AND DELETE: routed to the OWNER, never replicated (§8.1).
     # The guards, the confirmation semantics and the retention interaction stay in
