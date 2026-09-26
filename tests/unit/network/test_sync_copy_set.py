@@ -80,6 +80,7 @@ def _entry_owners() -> dict[str, str]:
         TURN_JOURNAL_NAME,
     )
     from local_operator.session_lease import LEASE_NAME, MIRROR_NAME, RECOVERY_LOCK_NAME
+    from local_operator.tools.eval import KERNEL_MARKER_NAME
     from local_operator.wakes.lock import WAKE_LOCK_NAME
 
     return {
@@ -102,6 +103,9 @@ def _entry_owners() -> dict[str, str]:
         RECOVERY_LOCK_NAME: "session_lease",
         WAKE_LOCK_NAME: "wakes.lock",
         RESOURCE_NAME: "browser_bridge.resources",
+        # The eval kernel's restart marker (``tools.eval``): carried so a moved
+        # session's first cell still learns its namespace was left behind.
+        KERNEL_MARKER_NAME: "local_operator.tools.eval",
         # The copy machinery's own two: a replica's cursor (never inside a session)
         # and the move's boot marker, which lives in a staging directory and is
         # deleted by the promote (a crash can leave one inside a promoted session,
