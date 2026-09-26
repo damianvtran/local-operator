@@ -505,6 +505,18 @@ async def capabilities():
                 # gating that working composer on a newer version would take a
                 # surface away to advertise nothing. A client that does not see
                 # the key must send the draft as typed and offer no affordance.
+                # The PROJECT primitive (`/v1/desktop/projects*`, the ``project``
+                # tool and ``/project``). ONE key gating both the affordance and
+                # the reads: the Projects tab, its CRUD dialogs and the
+                # ``@project:`` picker section all hang off this surface, and an
+                # older backend has no routes to answer any of them.
+                #
+                # Absent ⇒ no Projects destination and no project rows in the
+                # ``@`` picker, which is the honest degradation: an older
+                # backend does not know what a project is. Its own key rather
+                # than a bump of anything above it, by the rule every neighbour
+                # states — nothing on an existing surface changes shape here.
+                "projects": 1,
                 **({"references": 1} if at_references_enabled() else {}),
             },
         },

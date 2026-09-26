@@ -69,6 +69,11 @@ def _engine_context(**kwargs) -> ToolContext:
         # against a real registry.
         agent_registry=object(),
         team_registry=object(),
+        # Presence-only, exactly as the two above: the createIf gate for the
+        # ``project``/``project_delete`` tools reads the attribute, and the ops
+        # themselves are exercised in the project-tool tests against a real
+        # registry.
+        project_registry=object(),
         has_ui=True,
         ask_user=_ask_user,
     )

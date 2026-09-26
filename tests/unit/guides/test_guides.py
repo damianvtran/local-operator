@@ -38,6 +38,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "mobile",
         "network",
         "peer-messaging",
+        "projects",
         "qwencloud",
         "scratchpad",
         "system-tools",

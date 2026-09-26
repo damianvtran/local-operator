@@ -48,6 +48,7 @@ from local_operator.server.routes import (
     desktop_mcp,
     desktop_mesh,
     desktop_profiles,
+    desktop_projects,
     desktop_radient,
     desktop_runtimes,
     desktop_sessions,
@@ -642,6 +643,11 @@ app.include_router(settings.router)
 app.include_router(desktop_sessions.router)
 app.include_router(desktop_catalogues.router)
 app.include_router(desktop_profiles.router)
+# The projects surface: `/v1/desktop/projects` and its `.../{key}` templates.
+# Registered after the profile routes for the reason every block in this file
+# gives — FastAPI matches in declaration order, and no sibling above declares a
+# `/v1/desktop/projects...` template, so nothing can swallow these.
+app.include_router(desktop_projects.router)
 app.include_router(desktop_lifecycle.router)
 # `/v1/desktop/mcp` and its two POSTs: literal paths, no collision with the
 # session-scoped `/v1/desktop/sessions/{id}/mcp` above.
