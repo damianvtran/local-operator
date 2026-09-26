@@ -176,11 +176,20 @@ def maintenance_lock_path(root: Path) -> Path:
 
 
 def _try_lock_maintenance(path: Path) -> int | None:
-    """Take the election lock, or return ``None``. NEVER blocks.
+    """Take the election lock, return ``None``, or report it unsupported.
+
+    ``None`` means a PEER owns this hour. :data:`_LOCK_UNSUPPORTED` means nobody
+    can own any hour on this root, which the caller answers by sweeping unowned —
+    the distinction review R1-3 is about, and the reason the two cannot share a
+    return value. NEVER blocks.
 
     The mechanism is the tree's existing singleton one, copied from
     :func:`local_operator.secrets.client.ensure_broker` rather than invented:
     ``os.open(O_RDWR | O_CREAT, 0o600)``, then ``flock(LOCK_EX | LOCK_NB)``.
+
+    THREE outcomes, not two: an ``int`` fd when this process owns the lock, ``None``
+    when a peer does, and :data:`_LOCK_UNSUPPORTED` when the kernel or the
+    filesystem refuses the call altogether — see the errno split below.
 
     **Non-blocking is the whole design, and it is #401's lesson.** A blocking
     ``flock`` in this codebase froze the TUI — a holder that wedges must cost a
@@ -231,7 +240,16 @@ def _try_lock_maintenance(path: Path) -> int | None:
         # most once per process per hour. N processes on such a root fall back to
         # the pre-election behaviour rather than to no maintenance at all, and the
         # warning says so once per attempt rather than silently.
-        if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES):
+        # EAGAIN/EWOULDBLOCK (the same value) is the ONLY documented contention
+        # signal: `flock(2)`'s ERRORS list is EBADF, EINTR, EINVAL, ENOLCK,
+        # EWOULDBLOCK on Linux and EWOULDBLOCK, EBADF, EINVAL, EOPNOTSUPP on the
+        # OpenBSD/macOS lineage — `EACCES` appears in neither, so classifying it
+        # here would re-admit the wedge through an errno this code only guessed
+        # at (an SMB/CIFS mount is exactly where an undocumented errno is most
+        # likely, per the same man page's mandatory-locking note). The asymmetry
+        # decides it: the two branches differ only in whether retention can
+        # stall, so the default is the sweep.
+        if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
             return None
         logger.warning(
             "analytics: flock is unusable on %s (errno %s); sweeping unowned",
@@ -581,8 +599,10 @@ class AnalyticsRecorder:
         THE MECHANISM, in three steps:
 
         1. Take ``<root>/run/analytics-maintenance.lock`` with
-           ``LOCK_EX | LOCK_NB``. A loser returns here and does nothing else:
-           no polling, no waiting, no sweep. The lock is held for the duration
+           ``LOCK_EX | LOCK_NB``. A loser returns here and does nothing else: no
+           polling, no waiting, no sweep. A root whose filesystem REFUSES the call
+           is not a loser — it cannot have a winner — so that case sweeps unowned
+           instead (see :data:`_LOCK_UNSUPPORTED`). The lock is held for the duration
            of the sweep only, so a process that is killed mid-sweep releases it
            with its descriptor.
         2. Read the hour stamped in the file. The winner of the LOCK is not
@@ -628,8 +648,7 @@ class AnalyticsRecorder:
         """
         if not _MAINTENANCE_ELECTION_SUPPORTED:
             # No ``flock`` on this platform: sweep unowned. See the constant.
-            self._sweep()
-            return True
+            return self._sweep()
         path = self.maintenance_lock
         fd = _try_lock_maintenance(path)
         if fd is None:

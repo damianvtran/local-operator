@@ -729,3 +729,43 @@ def test_contention_is_still_a_refusal_not_a_sweep(tmp_path, monkeypatch):
         assert store.calls == [], store.calls
     finally:
         rec.close()
+
+
+def test_an_undocumented_errno_sweeps_rather_than_stalling(tmp_path, monkeypatch):
+    """``EACCES`` is not a documented ``flock`` errno, so it must not refuse.
+
+    ``flock(2)``'s ERRORS list is EBADF, EINTR, EINVAL, ENOLCK, EWOULDBLOCK on
+    Linux and EWOULDBLOCK, EBADF, EINVAL, EOPNOTSUPP on the OpenBSD/macOS
+    lineage — ``EACCES`` is in neither, and an SMB/CIFS mount is exactly where an
+    undocumented errno turns up. Classing it as contention would re-admit the
+    wedge this whole change closes, through a branch that exists to close it.
+
+    The asymmetry is the argument, and it is worth stating as a test rather than
+    a comment: the two branches differ ONLY in whether retention can stall. A
+    wrong "contention" answer stops maintenance forever on that root; a wrong
+    "sweep" answer costs one extra sweep per process per hour, which the
+    ``_last_prune`` stamp already bounds. So an errno nobody documented defaults
+    to the sweep.
+    """
+    import errno
+    import fcntl
+
+    from local_operator.analytics import recorder as recorder_module
+
+    handle, store = _fake()
+    rec = AnalyticsRecorder(store=handle, maintenance_root=tmp_path / "iso")
+    try:
+        _hour_turns(rec)
+        monkeypatch.setattr(
+            fcntl, "flock", lambda *a, **k: (_ for _ in ()).throw(OSError(errno.EACCES, "smb"))
+        )
+        assert (
+            recorder_module._try_lock_maintenance(rec.maintenance_lock)
+            == recorder_module._LOCK_UNSUPPORTED
+        )
+        assert (
+            rec._run_owned_maintenance() is True
+        ), "an undocumented errno must not stall retention"
+        assert "prune" in store.calls, store.calls
+    finally:
+        rec.close()
