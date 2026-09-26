@@ -444,6 +444,15 @@ class _ChildRecord:
     #: attribute it was added to outlast, and a child that settled hours ago is
     #: normally resumed after a restart (review round 3, R6).
     restricted: bool = False
+    #: The team, team lineage (ids, top first) and depth the child was born
+    #: under (BEN-7-D1). Persisted like ``restricted`` and for the same reason:
+    #: a resume rebuilds against a session that is not necessarily the real
+    #: parent, so these cannot be re-derived there. An old sidecar loads with
+    #: ``""``/``()``/``0``, meaning "unknown"; resume then falls back to the
+    #: ancestry it can still see.
+    team_name: str = ""
+    team_lineage: tuple[str, ...] = ()
+    depth: int = 0
     #: The child's transcript directory. Set at attach; the whole basis of
     #: resume, and the reason a record outlives the job row.
     session_dir: Path | None = None
@@ -1195,6 +1204,9 @@ class SubagentComms:
         launch_message_id: str = "",
         agent_role: str = "",
         effort: str = "",
+        team_name: str = "",
+        team_lineage: tuple[str, ...] = (),
+        depth: int = 0,
     ) -> None:
         """Note a child that has been registered but may not have started.
 
@@ -1232,6 +1244,9 @@ class SubagentComms:
             existing.launch_message_id = launch_message_id
             existing.agent_role = agent_role
             existing.effort = effort
+            existing.team_name = team_name
+            existing.team_lineage = tuple(team_lineage)
+            existing.depth = depth
             existing.job_ref = self.job(job_id)
             self._notify_change()
             return
@@ -1244,6 +1259,9 @@ class SubagentComms:
             launch_message_id=launch_message_id,
             agent_role=agent_role,
             effort=effort,
+            team_name=team_name,
+            team_lineage=tuple(team_lineage),
+            depth=depth,
         )
         self._records[job_id].job_ref = self.job(job_id)
         self._evict_overflow()
@@ -1282,6 +1300,12 @@ class SubagentComms:
             # truthy, so a fold can only ever preserve a denial, never clear
             # one.
             record.restricted = record.restricted or prior.restricted
+            # A continuation is the same child, so it keeps the team it was
+            # born under (BEN-7-D1); the live launch already stamped these
+            # when it had them.
+            record.team_name = record.team_name or prior.team_name
+            record.team_lineage = record.team_lineage or prior.team_lineage
+            record.depth = record.depth or prior.depth
             record.attempt_aliases = list(
                 dict.fromkeys([*prior.attempt_aliases, prior.job_id, *record.attempt_aliases])
             )
@@ -1764,6 +1788,9 @@ class SubagentComms:
                     # and a resumed grandchild that can activate the writes it
                     # was refused (review round 3, R6).
                     "restricted": record.restricted,
+                    "team_name": record.team_name,
+                    "team_lineage": list(record.team_lineage),
+                    "depth": record.depth,
                     # Read off the retained row when there is one, because the
                     # runner keeps that label current (a provider fallback
                     # rewrites it); the restored copy covers a row that did
@@ -1865,6 +1892,14 @@ class SubagentComms:
                 # never recorded. A denial can only ever be ADDED afterwards,
                 # by the attach stamp or the live computation.
                 restricted=bool(row.get("restricted")),
+                # Missing on a pre-BEN-7 sidecar: "unknown", see the field.
+                team_name=str(row.get("team_name") or ""),
+                team_lineage=tuple(str(item) for item in row.get("team_lineage") or () if item),
+                depth=(
+                    row["depth"]
+                    if isinstance(row.get("depth"), int) and not isinstance(row["depth"], bool)
+                    else 0
+                ),
                 # Missing defaults to "" for a sidecar written before this
                 # field existed; the resume then reads only the live row.
                 model_label=str(row.get("model_label") or ""),
@@ -2567,6 +2602,22 @@ class SubagentComms:
         # silently downgraded every resumed child to a generic no-role one.
         agent = record.agent_role or "task"
         effort = record.effort or None
+        # The team, lineage and depth the child was born under ride the
+        # record for the reason ``restricted`` does: the session this rebuilds
+        # against need not be the real parent, and a resumed pod worker must
+        # come back as a pod worker, not as a member of the root's team
+        # (BEN-7-D1, D7).
+        from local_operator.harness.subagent import (
+            TeamLaunchError,
+            resolve_launch_target,
+        )
+
+        try:
+            target = resolve_launch_target(
+                agent, self._session, carried=self._carried_launch(record)
+            )
+        except TeamLaunchError as exc:
+            return None, f"cannot resume {record.label}: {exc}"
         # A resume is a SECOND LAUNCH, so it must re-resolve the tier into a
         # model the way the first one did (``run_subagent`` explains why the
         # tier does not survive that resolution and rides separately). Passing
@@ -2601,7 +2652,9 @@ class SubagentComms:
             from local_operator.harness.subagent import SubagentModelUnavailable
 
             try:
-                resolved = resolve(agent, effort, strict=True)
+                # The role the child RUNS as: a ``team:pod`` lead is pod's
+                # manager, whose tier the first launch priced (BEN-7-D1).
+                resolved = resolve(target.role, effort, strict=True)
             except SubagentModelUnavailable as exc:
                 return None, f"cannot resume {record.label}: {exc}"
             if isinstance(resolved, ModelSpec):
@@ -2621,6 +2674,7 @@ class SubagentComms:
             effort=effort,
             restricted=record.restricted,
             inherited_model=inherited,
+            target=target,
         )
         if inherited is not None or note:
             self._resume_models[new_job_id] = (inherited is not None and not note, note)
@@ -2630,6 +2684,39 @@ class SubagentComms:
         # invited to "resume" a run that is already going.
         record.paused = False
         return new_job_id, None
+
+    def _carried_launch(self, record: _ChildRecord) -> Any:
+        """The team, lineage, depth and reporting line a resume re-enters.
+
+        A record written before these fields existed carries depth 0
+        ("unknown"): it falls back to what the registry can still see — depth
+        from the surviving ancestry, and the root's team, which is what every
+        resume stamped before BEN-7.
+        """
+        from local_operator.harness.subagent import (
+            CarriedLaunch,
+            describe_reports_to,
+            lookup_team,
+        )
+
+        team_name, lineage, depth = record.team_name, record.team_lineage, record.depth
+        if depth <= 0:
+            depth = len(self.ancestors(record.job_id)) + 1
+            root_team = getattr(self._session, "active_team", None)
+            team_name = str(getattr(root_team, "name", "") or "") if root_team else ""
+            root_id = getattr(root_team, "id", None) if root_team else None
+            lineage = (str(root_id),) if root_id else ()
+        reports_to = describe_reports_to("", "", None)
+        parent = self._record(record.parent_job_id) if record.parent_job_id else None
+        if parent is not None:
+            role = parent.agent_role or "task"
+            if role.lower().startswith("team:"):
+                team = lookup_team(self._session, role[len("team:") :])
+                role = str(getattr(team, "manager", role)) if team is not None else role
+            reports_to = describe_reports_to(parent.team_name, role, parent.job_id)
+        return CarriedLaunch(
+            team_name=team_name, team_lineage=tuple(lineage), depth=depth, reports_to=reports_to
+        )
 
     # -- child -> parent ------------------------------------------------------
 

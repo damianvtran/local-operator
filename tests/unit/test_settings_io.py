@@ -46,6 +46,7 @@ def _consumer_defaults() -> dict[str, object]:
     from local_operator.cross_session import DEFAULT_HIDE_CROSS_SESSION
     from local_operator.harness.jobs import DEFAULT_MAX_RUNNING_JOBS
     from local_operator.harness.subagent import (
+        DEFAULT_MAX_TEAM_DEPTH,
         DEFAULT_MODEL_CHOICE,
         DEFAULT_SLIM_CHILD_KNOWLEDGE,
     )
@@ -197,6 +198,7 @@ def _consumer_defaults() -> dict[str, object]:
         # the constant sits beside that reader, not here, so the registry
         # default and the code default cannot drift.
         "subagents.slim_child_knowledge": DEFAULT_SLIM_CHILD_KNOWLEDGE,
+        "subagents.max_team_depth": DEFAULT_MAX_TEAM_DEPTH,
         "network.audit.max_bytes": AUDIT_MAX_BYTES,
         "network.audit.generations": AUDIT_GENERATIONS,
         "network.audit.max_age_days": AUDIT_MAX_AGE_DAYS,
@@ -2007,9 +2009,9 @@ class TestTheSubagentModelChoiceRow:
         # model"), and it buys the 8 cells that let the KEY PATH stay on the line
         # at 100 columns — the frame the evidence is captured on.
         assert "empty inherits" in setting.help
-        # Names the row instead of its position: registry order is
-        # max_running, model_choice, lo, med, hi, so "row above" points `med` at
-        # `lo` and `hi` at `med` — and `hi` is the row the incident ran through.
+        # Names the row instead of its position: registry order is max_running,
+        # slim_child_knowledge, max_team_depth, model_choice, lo, med, hi, so "row above"
+        # points `med` at `lo` and `hi` at `med` — and `hi` is the row the incident ran through.
         assert "See subagents.model_choice" in setting.help
         # ...and they FIT beside the row's own key path at 100 columns, which is
         # the width the /settings evidence frames are captured at. The detail
