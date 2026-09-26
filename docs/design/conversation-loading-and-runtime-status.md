@@ -1092,8 +1092,9 @@ fix because it is paid *inside* every cold boot. This is the change that makes
 
 **Risk: high** (data-loss adjacency; the reason it was deferred). **Blast
 radius: wide** — `session/transcript.py`, `session_factory.py`, and every reader
-of `entries`/`build_llm_history`. **Independent: yes** (R1 does not need it; it
-is needed for the first *prompt* on a cold session).
+of `entries`/`build_llm_history`. **Independent: yes — and it is rank 1** (revision
+1: the parse sits between the pid and the socket, so nothing else moves the
+operator's 261 MB shape; §5).
 
 **Measurement.** Structural, load-independent: **rows JSON-decoded during
 `create_session`**, counted from the boot path, asserted equal to the
