@@ -295,6 +295,58 @@ async def test_nothing_awaits_between_the_snapshot_state_and_its_watermark(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_the_delivery_boundary_is_strictly_above_the_watermark(tmp_path, monkeypatch):
+    """The `>` in the drain, pinned from the side a natural publish cannot reach.
+
+    Nothing awaits between the snapshot's state capture and the drain, so a frame
+    above the watermark cannot be produced by publishing during the handshake --
+    which is exactly the property the supersession proof rests on, and exactly why
+    the boundary needs a hand-placed frame to be observable at all.
+
+    The two frames differ by ONE: seq == the watermark is superseded and dropped,
+    seq == the watermark + 1 is newer than the snapshot and must be delivered,
+    after it.
+    """
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        original = bridge.snapshot
+
+        async def snapshot_and_place():
+            snapshot = await original()
+            for offset, marker in ((0, "at-the-watermark"), (1, "above-the-watermark")):
+                frame = {
+                    "session_id": bridge.session_id,
+                    "epoch": bridge.epoch,
+                    "seq": snapshot["seq"] + offset,
+                    "type": "event",
+                    "payload": {"marker": marker},
+                }
+                size = len(json.dumps(frame, separators=(",", ":")).encode())
+                sub.queue.put_nowait((frame, size))
+                sub.queued_bytes += size
+            return snapshot
+
+        sub = bridge.subscribe()
+        monkeypatch.setattr(bridge, "snapshot", snapshot_and_place)
+        stream = bridge.events(sub, epoch=bridge.epoch, after_seq=bridge.sequence)
+        assert (await anext(stream))["type"] == "open"
+        snapshot = await anext(stream)
+        assert snapshot["type"] == "snapshot"
+
+        delivered = await anext(stream)
+        assert (
+            delivered["seq"] == snapshot["seq"] + 1
+        ), "the frame ABOVE the watermark is the one that must survive the drain"
+        assert delivered["payload"] == {"marker": "above-the-watermark"}
+        assert sub.queue.empty(), (
+            "and the frame AT the watermark was dropped as superseded rather than "
+            "delivered behind the snapshot - it is already inside `frontend`"
+        )
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
 async def test_watch_aggregation_does_not_resurrect_an_expired_viewer(tmp_path, monkeypatch):
     pool = DesktopSessions(tmp_path)
     sid = await pool.create(str(tmp_path))
