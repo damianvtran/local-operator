@@ -193,6 +193,30 @@ class TestThePageIsTheScopesOwnTopN:
 
         assert [entry.id for entry in page.entries] == [entry.id for entry in expected]
 
+    def test_an_excluded_id_refills_the_page_from_behind_it(self, tmp_path: Path) -> None:
+        """C1 (round-2 review): an exclusion must not eat a page slot.
+
+        ``exclude_ids`` is applied inside the ranking→window step, so the
+        window, the truncation verdict and ``next_cursor`` are computed over
+        the filtered list. Moving the same filter to the assembled page — the
+        first cut of the draft-listing fix — answered a store with rows to
+        spare with a short page and, at ``limit=1``, an EMPTY one.
+        """
+        for index in range(5):
+            _session(tmp_path, f"chat{index:05d}", created=2_000.0 + index, stamp=2_000.0 + index)
+
+        full = catalogue_page(tmp_path, limit=5)
+        ordered = [entry.id for entry in full.entries]
+        assert len(ordered) == 5
+        first_id = ordered[0]
+
+        excluded = catalogue_page(tmp_path, limit=2, exclude_ids={first_id})
+        assert [entry.id for entry in excluded.entries] == ordered[1:3]
+
+        one = catalogue_page(tmp_path, limit=1, exclude_ids={first_id})
+        assert [entry.id for entry in one.entries] == ordered[1:2]
+        assert one.next_cursor is not None, "more rows still follow the refilled page"
+
 
 class TestTheWalkIsTotalAndUnique:
     """Paging a scope to exhaustion returns exactly the scope's rows."""
