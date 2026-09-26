@@ -130,11 +130,25 @@ _OVERLAP_MIN_CHARS = 200
 #:
 #: Third-party names sit alongside our own deliberately: the cost is theirs, and
 #: naming only our modules would warm the cheap half of the problem.
+#:
+#: ``tools.registry`` and ``classification`` were the two heaviest groups this
+#: list still omitted, and their absence was measurable rather than theoretical:
+#: with the entries below resident, the factory's own synchronous stretch still
+#: measured a median 135.5 ms of CPU and 127.2 ms of CONTIGUOUS loop stall
+#: (``_prepare``, interleaved arms, a fresh process and a matched idle control
+#: per arm; raw output under ``.perf/bench/lane11/``). Warming these two as well
+#: takes it to 81.6 ms and 77.3 ms — a median 53.9 ms of CPU and 55.8 ms of
+#: stall less, in 4 of 4 interleaved pairs, against 187 and 33 modules left for
+#: the factory to import. They are the same shape of work as every other entry
+#: here — imported lazily by the factory or by something it calls, and never at
+#: module scope (see ``test_import_graph.py``, which pins that importing this
+#: module stays off these stacks).
 _WARM_IMPORTS: tuple[str, ...] = (
     "mcp",
     "httpx",
     "httpcore",
     "truststore",
+    "local_operator.classification",
     "local_operator.compaction.api",
     "local_operator.mcp.manager",
     "local_operator.model.configure",
@@ -142,6 +156,7 @@ _WARM_IMPORTS: tuple[str, ...] = (
     "local_operator.providers.auth_store",
     "local_operator.session.session",
     "local_operator.skills.discovery",
+    "local_operator.tools.registry",
 )
 
 

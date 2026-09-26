@@ -17,8 +17,10 @@ from typing import Any, Dict
 
 import yaml
 
-from local_operator.web_fetch.models import DEFAULT_WEB_FETCH_CONFIG
-from local_operator.web_search.models import DEFAULT_WEB_SEARCH_CONFIG
+from local_operator.web_defaults import (
+    DEFAULT_WEB_FETCH_CONFIG,
+    DEFAULT_WEB_SEARCH_CONFIG,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -207,8 +209,11 @@ class Config:
         Creates a new Config instance that manages configuration settings.
         If a config file exists at the specified path, loads settings from it.
         """
-        # Set version and metadata first
-        self.version = config_dict.get("version", _package_version())
+        # Set metadata first. The schema version is DELIBERATELY absent from
+        # this constructor when the caller did not supply one — see
+        # :meth:`__getattr__`, which resolves it on first read instead.
+        if "version" in config_dict:
+            self.version = config_dict["version"]
         self.metadata = config_dict.get(
             "metadata",
             {
@@ -228,6 +233,40 @@ class Config:
         self.values = {}
         for key, value in config_dict.get("values", {}).items():
             self.values[key] = value
+
+    def __getattr__(self, name: str) -> Any:
+        """Resolve ``version`` on FIRST READ, not at construction.
+
+        WHY THIS IS AN ``__getattr__`` AND NOT A PROPERTY. ``import
+        local_operator.config`` builds :data:`DEFAULT_CONFIG`, whose dict literal
+        used to carry ``version=version("local-operator")`` evaluated right
+        there. That single call is what made the module cost 117.6 ms of CPU for
+        every ``lop`` verb — and, worse, what made it walk every ``sys.path``
+        entry at IMPORT time, so a ``python -m``/pytest start from a directory
+        with 30,000 entries (this machine's own attachments directory has 30,372)
+        paid +95 ms and one at 137,050 entries paid +721 ms for a string only
+        ``--version`` and a config WRITE ever print.
+
+        A ``version`` property was the obvious shape and is the wrong one:
+        ``_write_config`` persists ``vars(self.config)`` and
+        :func:`_fresh_default_config` copies ``vars(DEFAULT_CONFIG)``, so the
+        backing field would have to be spelled ``_version`` and every one of
+        those call sites would have to learn about it — with a stray
+        ``_version: ''`` key written into the operator's ``config.yml`` as the
+        failure mode if one was missed. Leaving the attribute simply UNSET until
+        it is asked for keeps ``vars()`` byte-identical to the old shape (the
+        key appears once read, exactly as before) and keeps ``self.version = x``
+        an ordinary assignment.
+
+        Falls through to ``AttributeError`` for every other name, which is what
+        ``copy.deepcopy`` and ``pickle`` probe for: this must stay a lookup hook
+        for one attribute, not a catch-all that answers for the class.
+        """
+        if name == "version":
+            value = _package_version()
+            self.version = value
+            return value
+        raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
 
     def get_value(self, key: str, default: Any = None) -> Any:
         """Get a specific configuration value.
@@ -251,9 +290,14 @@ class Config:
 
 
 # Default configuration settings for Local Operator
+#
+# No ``"version"`` key: ``Config`` resolves the schema stamp from the installed
+# distribution on FIRST READ (``Config.__getattr__`` / :func:`_package_version`).
+# Spelling it out here would evaluate it while this module is imported, which is
+# the whole cost this avoids — and the value it produces is the same one either
+# way, so a config written from these defaults is stamped identically.
 DEFAULT_CONFIG = Config(
     {
-        "version": version("local-operator"),
         "metadata": {
             "created_at": "",
             "last_modified": "",

@@ -352,7 +352,9 @@ def session_activity(directory: Path) -> float | None:
     return session_activity_path(os.fspath(directory))
 
 
-def session_activity_path(directory: str) -> float | None:
+def session_activity_path(
+    directory: str, seen: dict[str, os.stat_result] | None = None
+) -> float | None:
     """:func:`session_activity` taking a plain path string. THE clock's body.
 
     Identical rule, identical answer; only the argument type differs. It exists
@@ -372,13 +374,25 @@ def session_activity_path(directory: str) -> float | None:
     answers drift apart again, and the failure mode is the policy deleting rows
     the picker is still showing (QA round 1 Q2, UX round 2 U11). Optimising the
     call shape is safe; forking the rule is not.
+
+    ``seen``, when given, is filled with the ``os.stat_result`` of every activity
+    file this call stat-ed, keyed by file NAME. It is the SAME stat the clock used
+    — no second syscall, and no second implementation of the rule — for the one
+    caller that needs a specific file rather than the maximum: ``resume``'s scan
+    hands the transcript's entry to ``session.catalog``, whose row cache is keyed
+    on that file's ``(mtime, size)`` and otherwise stats it again once per listed
+    session on every poll. Absent or unreadable files are simply not in the map,
+    exactly as they contribute nothing to the clock.
     """
     newest: float | None = None
     for name in _ACTIVITY_FILES:
         try:
-            stamp = os.stat(os.path.join(directory, name)).st_mtime
+            info = os.stat(os.path.join(directory, name))
         except OSError:
             continue
+        if seen is not None:
+            seen[name] = info
+        stamp = info.st_mtime
         newest = stamp if newest is None else max(newest, stamp)
     return newest
 
