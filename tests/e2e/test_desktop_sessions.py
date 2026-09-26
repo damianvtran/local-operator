@@ -25,6 +25,7 @@ import uvicorn
 
 from local_operator.mobile.attach_client import AttachClient
 from local_operator.server.app import app
+from local_operator.server.utils import desktop_sessions as desktop_module
 from local_operator.session.attention import AttentionStore
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.runtime.serving import ServingSessionHandle
@@ -115,6 +116,20 @@ async def next_frame(lines, predicate):
 @pytest.mark.asyncio
 async def test_canonical_desktop_over_http(headless_tui_env: Path, workspace: Path, monkeypatch):
     root = headless_tui_env
+    # THE DWELL MAKES `not subscribers` A CLAIM ABOUT THE ZERO CASE, and this
+    # stage is its SECOND site rather than its only one: the design's §8.4 named
+    # the unit case, and CI found this one, which is why that section's count is
+    # a floor rather than a total. With the dwell armed, a stream whose reader
+    # goes away HOLDS its subscription for `RECONNECT_DWELL_S` so a reopen can be
+    # patched instead of repainted, and the release this test waits for becomes
+    # bounded-delayed rather than immediate -- BY DESIGN.
+    #
+    # ZERO IS SET HERE, AT THE TOP, AND NOT AT THE ASSERTION. The reader this test
+    # closes is closed EARLIER than that assertion, so a patch applied there is a
+    # patch applied after the dwell it means to disable. That is measured rather
+    # than reasoned: the first attempt at this fix sat at the assertion and the
+    # test still failed.
+    monkeypatch.setattr(desktop_module, "RECONNECT_DWELL_S", 0)
     token = secrets.token_hex(32)
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", token)
     monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", raising=False)
