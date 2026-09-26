@@ -635,7 +635,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 132 public members and a POSITIVE
+    than stylistic. This protocol carries 133 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -677,7 +677,8 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     not-stale contract turns on — ``verified_at`` (when the owner last ANSWERED)
     and ``verify_live`` (the ``ping`` round trip that refreshes it), which is one
     rung adding two members because a stamp with no way to refresh it cannot
-    distinguish "the owner is there" from "the owner was there"), so
+    distinguish "the owner is there" from "the owner was there"), 133 once the
+    projects primitive needed the ``project_registry`` ``/project`` reads), so
     recompute it rather
     than adjusting it by the size of your own change.
 
@@ -1633,9 +1634,9 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         """The MCP startup outcome (discovery failures), or ``None``."""
         ...
 
-    # The registries behind ``/agent`` and ``/team``. Each is the registry of
-    # the machine the VIEWER runs on, which is why a viewer is a real
-    # implementation and not a passthrough.
+    # The registries behind ``/agent``, ``/team`` and ``/project``. Each is the
+    # registry of the machine the VIEWER runs on, which is why a viewer is a
+    # real implementation and not a passthrough.
 
     @property
     def agent_registry(self) -> Any | None:
@@ -1645,6 +1646,16 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     @property
     def team_registry(self) -> Any | None:
         """The user's team registry, or ``None`` when none is wired."""
+        ...
+
+    @property
+    def project_registry(self) -> Any | None:
+        """The user's project registry, or ``None`` when none is wired.
+
+        Under the same rule as its two neighbours: ``/project`` names projects
+        on the machine the VIEWER runs on, so a viewer implements it lazily
+        off its own config dir rather than proxying the owner's.
+        """
         ...
 
     # Per-frame reads with a narrow accessor, so a frame does not pay the

@@ -389,7 +389,41 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: 146 billed tokens of headroom exactly, so the network raise costs the ratchet
 #: nothing it does not describe. ONE assignment: the guard reads the module
 #: constant, so a second value above it would be a figure nothing asserts.
-BUDGET_BILLED_TOKENS = 31_055
+#: RAISED 31,055 -> 32,737 for the PROJECTS PAIR (``project`` + ``project_delete``,
+#: the projects primitive's slice 1), stated with the arithmetic rather than a
+#: wave of the hand, and only after the trim this file's ``secret`` entry
+#: demands was taken. Measured by running THIS script with the pair filtered out
+#: of the same surface in the same tree, so the difference is the pair and
+#: nothing else:
+#:
+#:   baseline (this tree, pair excluded)   86,208 chars = ~31,010 billed
+#:   head (pair included)                  90,883 chars = ~32,692 billed
+#:     = +4,675 chars = +1,682 billed: the two tool schemas (+4,648 chars) and
+#:       the two tool-inventory lines (+27). The guide's own row rides no block
+#:       here — measured by hiding ``guide://projects`` from discovery: block 3
+#:       moves by 0 chars.
+#:
+#: The pair as this branch first wrote it cost 1,799 billed (the reviewer's
+#: 32,809 on the untrimmed head, against the 31,010 baseline above); moving the
+#: rationale out of the field descriptions and into ``guide://projects`` — which
+#: costs nothing until it is read — cut it to 1,682, the same remedy the
+#: ``secret`` entry records. What is left is the price of the capability: 18
+#: option fields plus a nested milestone model, both required by the design's
+#: §V2.A model extensions, in two tools rather than one merged behind the write
+#: tier (which would save one schema and one inventory line) because the
+#: destructive-split convention every neighbouring pair follows is worth more
+#: than the ~100 tokens it costs. Merging the pair is the one lever a future
+#: round could pull; dropping the date/estimate/milestone fields is the other,
+#: and it would delete the interface this slice exists to ship.
+#:
+#: The raise RESTORES the headroom rather than loosening it: the tree carried
+#: 45 tokens before the pair (31,055 - 31,010) and carries 45 after
+#: (32,737 - 32,692), so the next addition finds the ratchet as tight as this
+#: one did, and the tighten band below (1,200) is not in play. The pair is
+#: createIf-gated on a store being attached, so a session without one carries
+#: neither schema; on a healthy host it is paid on every request, which is why
+#: it was trimmed before the ceiling moved.
+BUDGET_BILLED_TOKENS = 32_737
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

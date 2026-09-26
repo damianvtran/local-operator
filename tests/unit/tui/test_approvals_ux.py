@@ -771,6 +771,11 @@ def test_the_registry_states_which_commands_offer_values() -> None:
         # from the completion path, which is the `/login` line this sits on the
         # other side of.
         "delete": ArgumentMode.OPTIONAL,
+        # OPTIONAL like `/mcp`: bare `/project` LISTS (the listing is the
+        # receipt), and the space opens the reserved subcommand vocabulary
+        # (`PROJECT_SUBCOMMANDS`) — the words the route validates and the picker
+        # will offer; project NAMES are the projects-view slice's argument rows.
+        "project": ArgumentMode.OPTIONAL,
     }
     # `/provider` was the third candidate and is deliberately not here: it takes
     # no argument at all — `_cmd_providers` ignores what follows it — so a list

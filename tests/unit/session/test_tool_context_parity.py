@@ -74,6 +74,12 @@ SENTINELS: dict[str, Any] = {
     # ``/team`` slash command. Dropped on the way to the executor, teams would
     # silently vanish from a session that was built with them.
     "team_registry": object(),
+    # The projects registry backs the ``project`` / ``project_delete`` tools and
+    # the ``/project`` slash command. Dropped on the way to the executor, a
+    # session built with a store would advertise neither tool and every
+    # ``/project`` surface would answer "unavailable" while the store sat right
+    # there on disk.
+    "project_registry": object(),
 }
 
 #: ToolContext fields the Session takes under a DIFFERENT name. Kept tiny and
