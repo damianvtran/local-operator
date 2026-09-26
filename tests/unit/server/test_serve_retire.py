@@ -717,10 +717,18 @@ def test_the_create_route_does_not_call_every_failure_a_retirement(
     """
 
     class Boom(DesktopSessions):
-        async def create(self, cwd: str, *, target: Any = None, model: Any = None) -> str:
-            # ``model`` because ``main``'s draft-pane route now passes the birth
-            # selection through here (see ``DesktopSessions.create``): the mirror
-            # is about the ERROR the adapter raises, not about that parameter.
+        async def create(
+            self,
+            cwd: str,
+            *,
+            target: Any = None,
+            model: Any = None,
+            draft_id: Any = None,
+        ) -> str:
+            # ``model`` and ``draft_id`` because the create route passes the birth
+            # selection and the pane's minted warm id through here (see
+            # ``DesktopSessions.create``): the mirror is about the ERROR the
+            # adapter raises, not about those parameters.
             raise ValueError("something else went wrong")
 
     from local_operator.server.app import app
@@ -1013,6 +1021,17 @@ REFUSAL_MATRIX: tuple[_DoorRoute, ...] = (
         "/v1/desktop/sessions",
         {"request_id": "01234567-89ab-cdef-0123-456789abcdef", "cwd": "/"},
     ),
+    # The draft MINT (PR-2a): like ``create_session`` it refuses WITHOUT the
+    # door — the pool's ``assert_admitting`` is its first statement — and like
+    # that route it must leave no claimed receipt behind, which is why it is a
+    # row here rather than trusted to the walk below (the walk only sees
+    # handlers that TAKE a bridge; this one must not take one).
+    _DoorRoute(
+        "draft_mint",
+        "POST",
+        "/v1/desktop/sessions/draft",
+        {"request_id": "01234567-89ab-cdef-0123-456789abcdef", "cwd": "/"},
+    ),
     _DoorRoute(
         "move",
         "POST",
@@ -1165,7 +1184,7 @@ REFUSAL_MATRIX: tuple[_DoorRoute, ...] = (
 #: refusal there is the pool's own (``DesktopSessions.create``) and there is no
 #: other entry. Named and one entry long, so the completeness test below can
 #: assert the whole plane rather than a subset of it.
-GATED_WITHOUT_THE_DOOR = frozenset({"create_session"})
+GATED_WITHOUT_THE_DOOR = frozenset({"create_session", "draft_mint"})
 
 _DESKTOP_ROUTER_MODULES = (
     "local_operator.server.routes.desktop_sessions",
@@ -1364,8 +1383,10 @@ def test_the_refusal_matrix_covers_every_route_that_reaches_the_door() -> None:
 
     ``create_session`` is the one route that refuses WITHOUT the door (the pool
     refuses it directly — it needs no bridge because it makes a session rather than
-    a runtime), and it is named in ``GATED_WITHOUT_THE_DOOR`` rather than left out,
-    so the two sets together are the whole plane.
+    a runtime), and ``draft_mint`` is the second for the same reason (it makes a
+    DRAFT; its refusal is ``assert_admitting``'s, asked first, exactly as
+    ``create_session``'s is). They are named in ``GATED_WITHOUT_THE_DOOR`` rather
+    than left out, so the two sets together are the whole plane.
     """
     plane = _plane_routes()
     reached: set[str] = set()
