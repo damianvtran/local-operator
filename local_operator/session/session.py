@@ -10173,6 +10173,26 @@ class Session:
             # result had already made durable at settle time (reproduced:
             # rows = 2, distinct ids = 1).
             if not self._transcript.has_entry(message.id):
+                # ...AND THE DROP IS THE ACKNOWLEDGEMENT THAT NEVER COMES (Sir
+                # Knight review round 2, finding 1). A row still missing from
+                # the transcript here is one whose settle-time write FAILED,
+                # and this turn -- the only one that would have answered it --
+                # is being dropped, so the row about to be written is exactly
+                # the report the held marker exists for: no screen saw it
+                # arrive and no turn ran for it. Writing it unmarked made the
+                # TUI fold skip it entirely and the phone lose its sentence.
+                # The mark is set HERE rather than at hand-off because this is
+                # the one point where the drop is actually known; the object
+                # has no other consumer left (the batch is dead the moment the
+                # gate fires), so marking the row the transcript is about to
+                # record is the same shape a rebuild through
+                # ``_job_result_message(..., held=True)`` would produce.
+                if (
+                    isinstance(message, CustomMessage)
+                    and getattr(message, "custom_type", None) == JOB_RESULT_MESSAGE_TYPE
+                    and isinstance(getattr(message, "details", None), dict)
+                ):
+                    message.details["held"] = True
                 await self._transcript.append_message(
                     message,
                     producer_command_id=(
@@ -11472,7 +11492,7 @@ class Session:
                         if self._transcript.has_entry(message.id)
                         else self._job_result_message(job_id, text, job, held=True)
                     )
-                    for (job_id, text, job), message in zip(results, messages)
+                    for (job_id, text, job), message in zip(results, messages, strict=True)
                 ]
             else:
                 held = [
@@ -11519,7 +11539,7 @@ class Session:
         """
         failed: list[tuple[str, str]] = []
         reason = ""
-        for (job_id, _text, job), message in zip(results, messages):
+        for (job_id, _text, job), message in zip(results, messages, strict=True):
             # A row journaled at settle time (the streaming early write) is
             # already durable; re-appending would file a second line under the
             # same entry id. It still parks below: this process has no further
