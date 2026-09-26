@@ -41,9 +41,7 @@ from local_operator.network.handshake import MAX_DECLARED_ENDPOINTS
 #: How macOS fails, verbatim: this is the exception the old code swallowed, and a
 #: test that reproduced it with a generic ``Exception`` would not be reproducing
 #: the report it exists for.
-_MACOS_RESOLVER_FAILURE = OSError(
-    8, "nodename nor servname provided, or not known"
-)
+_MACOS_RESOLVER_FAILURE = OSError(8, "nodename nor servname provided, or not known")
 
 _UP = 0x1
 _LOOPBACK = 0x8
@@ -81,16 +79,14 @@ def test_a_hostname_that_does_not_resolve_is_no_longer_the_answer(
         raise _MACOS_RESOLVER_FAILURE
 
     monkeypatch.setattr(socket, "getaddrinfo", _refuse)
-    monkeypatch.setattr(
-        addresses, "_interface_ipv4s", _table(("en0", _UP, "192.168.1.10"))
-    )
+    monkeypatch.setattr(addresses, "_interface_ipv4s", _table(("en0", _UP, "192.168.1.10")))
     monkeypatch.setattr(addresses, "_default_route_address", lambda: "192.168.1.10")
 
     published = relay.advertise_endpoints(relay.NetworkSettings(port=4097))
 
-    assert published == ["192.168.1.10:4097"], (
-        "a hostname the resolver does not know must not decide where peers can dial us"
-    )
+    assert published == [
+        "192.168.1.10:4097"
+    ], "a hostname the resolver does not know must not decide where peers can dial us"
 
 
 def test_the_real_enumeration_answers_when_the_resolver_cannot(
@@ -117,21 +113,22 @@ def test_the_real_enumeration_answers_when_the_resolver_cannot(
         host, _, _port = endpoint.rpartition(":")
         assert addresses.is_advertisable_ipv4(host), endpoint
     assert not any(endpoint.startswith("127.") for endpoint in released), released
-    holds_one = any(
-        (flags & _UP)
-        and not (flags & _LOOPBACK)
-        and addresses.is_advertisable_ipv4(address)
-        for _name, flags, address in (addresses._interface_ipv4s() or [])
-    ) or addresses._default_route_address()
+    holds_one = (
+        any(
+            (flags & _UP) and not (flags & _LOOPBACK) and addresses.is_advertisable_ipv4(address)
+            for _name, flags, address in (addresses._interface_ipv4s() or [])
+        )
+        or addresses._default_route_address()
+    )
     if holds_one:
         assert released, (
             "the resolver does not know this host's name, and that must no longer be "
             "the answer to where peers can reach it"
         )
     else:
-        assert released == [], (
-            "a host holding no advertisable address owes an empty list, not a guess"
-        )
+        assert (
+            released == []
+        ), "a host holding no advertisable address owes an empty list, not a guess"
 
 
 def test_the_table_not_the_hostname_is_what_the_listener_publishes(
@@ -153,9 +150,7 @@ def test_the_table_not_the_hostname_is_what_the_listener_publishes(
         raise _MACOS_RESOLVER_FAILURE
 
     monkeypatch.setattr(socket, "getaddrinfo", _spy)
-    monkeypatch.setattr(
-        addresses, "_interface_ipv4s", _table(("en0", _UP, "192.168.1.10"))
-    )
+    monkeypatch.setattr(addresses, "_interface_ipv4s", _table(("en0", _UP, "192.168.1.10")))
 
     relay.advertise_endpoints(relay.NetworkSettings(port=4097))
 
