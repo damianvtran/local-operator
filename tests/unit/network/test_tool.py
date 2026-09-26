@@ -587,3 +587,44 @@ def test_the_agent_digest_carries_the_audit_state_at_its_own_column() -> None:
     ), spoken
     stale = dict(payload, relay={"pid": 4711})
     assert not [line for line in net_tool._render("status", stale) if line.startswith("audit:")]
+
+
+def test_the_agent_digest_does_not_call_a_wedged_relay_not_running() -> None:
+    """A relay that is up and silent is NOT "not running", on the model's surface too.
+
+    The registry knows three states and this line read only one of them: the pid lives
+    in the relay block, that block is ``None`` whenever the control socket does not
+    answer, and the line therefore said ``not running`` about a process that is running
+    — the Q-R3-4 contradiction the CLI's block was fixed for, left on the one surface a
+    model reads. It matters more now than it did: the audit line directly below says the
+    relay is not answering, so a digest whose own relay line disagreed with it would
+    have told the model two different things about one process in two adjacent rows,
+    and the model cannot look at ``details`` to settle it.
+
+    ``record`` is what carries the pid when the live answer is missing: it is the
+    on-disk record of a process that IS there.
+    """
+    wedged = {
+        "installed": True,
+        "supported": True,
+        "identity_present": True,
+        "relay_running": True,
+        "relay_answering": False,
+        "relay_state": "wedged",
+        "relay": None,
+        "record": {"pid": 4711},
+        "log": "/tmp/network.log",
+        "networks": [],
+    }
+    lines = net_tool._render("status", wedged)  # noqa: SLF001 — the renderer under test
+    relay_line = next(line for line in lines if line.startswith("relay:"))
+    assert relay_line == (
+        "relay:     running (pid 4711), NOT answering its control socket (state: wedged)"
+    ), lines
+    # And the same fact one row below, in the audit's own words: one process, one story.
+    assert any("relay not answering" in line for line in lines), lines
+
+    stopped = dict(wedged, relay_running=False, relay_answering=False, relay_state="stopped")
+    assert any(
+        line == "relay:     not running" for line in net_tool._render("status", stopped)  # noqa: SLF001
+    ), lines
