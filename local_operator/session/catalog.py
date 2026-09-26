@@ -12,7 +12,7 @@ import json
 import logging
 import os
 import sqlite3
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -999,6 +999,10 @@ def decorate_rows(
     if include_live:
         from local_operator.resume import is_user_session
         from local_operator.session.archived import archived_ids
+        from local_operator.session.retention import (
+            DESKTOP_MARKER_NAME,
+            session_activity,
+        )
 
         # THE ARCHIVE PREDICATE APPLIES TO THE LIVE ROWS TOO, and this is one of
         # the places it has to be asked — not the one place it is documented
@@ -1016,6 +1020,24 @@ def decorate_rows(
         # Read LAZILY, on the first live row that is actually about to be
         # appended: a store with no live records (or none missing from the scan)
         # pays nothing, which is the same rule the scan follows.
+        #
+        # AND A LIVE ROW NEEDS A DIRECTORY THAT HOLDS A SESSION (round-2 review
+        # C2): the registry knows an id is RUNNING, not that it is LISTABLE. A
+        # SPECULATIVE engage — a new-chat draft's warm, or a TUI WarmErrand under
+        # ``LOP_RUNTIME_DEFER_MATERIALISE`` — leaves, from its runtime boot,
+        # exactly the bookkeeping files (``.execution-lease`` + ``.session.pid``;
+        # measured) and nothing else, and without this the branch painted such a
+        # directory as "Untitled conversation" under Active in EVERY consumer of
+        # this function (the TUI sidebar, the desktop catalogue, any other
+        # process) while the id's own doors called it unknown (spec §1.6). The
+        # three facts are the same shape the desktop door applies on resolution,
+        # plus the BIRTH SIDECAR that keeps a legitimately transcript-less
+        # session visible: the normal ``Transcript`` construction publishes
+        # ``created_at.json`` (measured: 99.6% of the store's visible
+        # directories carry one) while a speculative engage writes none until
+        # its first real write. The marker document is asked by EXISTENCE, not
+        # readability (#1110 R3), and activity is ``session_activity`` — the
+        # transcript + mail spool clock, never the directory mtime.
         archived: frozenset[str] | None = None
         known = {row.id for row in rows}
         rows = list(rows)
@@ -1023,7 +1045,16 @@ def decorate_rows(
             if not session_directory_name(session_id):
                 continue
             session_dir = directory / "sessions" / session_id
-            if session_id not in known and session_dir.is_dir() and is_user_session(session_dir):
+            if (
+                session_id not in known
+                and session_dir.is_dir()
+                and is_user_session(session_dir)
+                and (
+                    (session_dir / DESKTOP_MARKER_NAME).exists()
+                    or (session_dir / CREATED_AT_NAME).exists()
+                    or session_activity(session_dir) is not None
+                )
+            ):
                 if archived is None:
                     archived = archived_ids(directory)
                 is_archived = session_id in archived
@@ -1992,6 +2023,7 @@ def catalogue_page(
     with_counts: bool = False,
     pinned_off_page: Sequence[str] = (),
     pinned_hidden_ids: Sequence[str] = (),
+    exclude_ids: Collection[str] = (),
 ) -> CatalogPage:
     """One scope's page, its resume position, and (opt-in) the group census.
 
@@ -2030,6 +2062,16 @@ def catalogue_page(
         include_archived=include_archived,
         pinned_hidden_ids=pinned_hidden_ids,
     )
+    if exclude_ids:
+        # BEFORE THE WINDOW ARITHMETIC, and that is the whole point (round-2
+        # review C1): the window, the truncation verdict, ``next_cursor`` and the
+        # census below are all computed over this list, so filtering HERE refills
+        # a page from the rows behind the excluded ones. Filtering the assembled
+        # page instead — where this replace started — left the caller one row
+        # short and answered ``limit=1`` with an EMPTY page on a store with a
+        # ranked row to spare. Callers that pass nothing are byte-for-byte
+        # unchanged.
+        ranked = [entry for entry in ranked if entry.id not in exclude_ids]
     # THE BINDING READ, once, and only when the answer needs it: a scoped page
     # cannot be filtered without every candidate's binding and the census is a
     # counter over the same rows, so one read serves both. That is what makes a

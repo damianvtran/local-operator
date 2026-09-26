@@ -10955,6 +10955,28 @@ class OperatorApp(App[None]):
             self._subagent_costs = self._frontend_child_costs(state)
             self._spend_is_floor = knowledge in {"floor", "partial"}
         usage = getattr(state, "last_usage", None)
+        # The band's LAST-RATE cell, fed from the same usage reading everything
+        # else here comes from. The window is materialised on the wire model by the
+        # session (``decode_us``/``decode_tokens``), so this reads two extras rather
+        # than querying the ledger — the band never does I/O on a repaint. Absent
+        # (empty string) when the last call measured no window, which is the band's
+        # convention for an inapplicable reading; a ``—`` in a numeric slot would
+        # read as a broken figure rather than as an unknown.
+        # Local, like this module's other analytics_panel imports, and the reason
+        # is BOOT COST rather than a cycle: measured (review round 1), importing
+        # the panel in a fresh interpreter does NOT pull `tui.app` in, so there is
+        # no cycle to avoid — but `import local_operator.tui.app` is 772 modules and
+        # the panel adds 6 more for one formatter. The panel is deliberately off the
+        # boot path; hoisting this would put it back.
+        from local_operator.tui.widgets.analytics_panel import format_tps
+
+        window_us = int(getattr(usage, "decode_us", 0) or 0) if usage is not None else 0
+        window_tokens = int(getattr(usage, "decode_tokens", 0) or 0) if usage is not None else 0
+        last_rate = (
+            f"{format_tps(window_tokens / (window_us / 1_000_000))} tok/s"
+            if window_us > 0 and window_tokens > 0
+            else ""
+        )
         billed_unknown = bool(
             usage is not None
             and (getattr(usage, "input_tokens", 0) or getattr(usage, "output_tokens", 0))
@@ -10971,6 +10993,7 @@ class OperatorApp(App[None]):
         # one short.
         search_usd = self._session_search_spend().usd
         self._status.update(
+            last_rate=last_rate,
             model_label=getattr(state, "effective_model_label", "")
             or getattr(state, "model_label", ""),
             model_name=str(

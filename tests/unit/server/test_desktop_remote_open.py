@@ -52,6 +52,7 @@ from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentSt
 from local_operator.session.owner import SessionSeed
 from local_operator.session.placement import SessionPlacement
 from local_operator.session.remote_open import unreachable_peer_sentence
+from local_operator.session.retention import DESKTOP_MARKER_NAME
 
 MINE = "c" * 12
 OTHER = "e" * 12
@@ -172,6 +173,14 @@ def _seed_local(root: Path, session_id: str) -> None:
     path.mkdir(parents=True, exist_ok=True)
     (path / "created_at.json").write_text("1700000000")
     (path / "conversation.json").write_text(json.dumps({"name": "local chat"}))
+    # THE MARKER, because a directory THIS device holds is one that was created here:
+    # main's M1 guard refuses a directory that has no marker document, no transcript and
+    # no mail spool — the shape a draft's engage leaves behind (measured as
+    # ``probe_residue_locate``) — and that guard is the newer decision, so a seed
+    # without a marker describes residue rather than a session. Every other desktop
+    # seed on this tree writes one; this helper was the shortcut, and the fold is where
+    # it showed: without it these cells read 404.
+    (path / DESKTOP_MARKER_NAME).write_text(json.dumps({"version": 1, "cwd": str(root)}))
 
 
 # ---------------------------------------------------------------------------

@@ -2157,3 +2157,73 @@ def test_a_join_is_one_step_to_a_publisher_even_at_the_worst_instruction() -> No
         "its snapshot gives it the sequence it already holds, which the client's "
         "exact-+1 check reads as a gap"
     )
+
+
+def test_the_turn_end_refresh_keeps_the_decode_window_on_last_usage() -> None:
+    """The frame's ``last_usage`` must still carry the window once the turn ends.
+
+    ``refresh_from_session`` runs from ``observe_event`` at the END of the message
+    and of the turn — after the branches that record usage — so when its own
+    ``last_usage`` came from a plain ``model_dump`` of ``restored_usage()``, it
+    overwrote the materialised pair with a payload that cannot carry a private
+    attribute. Measured by review round 2: ``decode_us`` absent after BOTH events,
+    while the ledger held the call's window. That is the worst moment to lose it —
+    "the last completed call decoded at N tok/s" is exactly what a status band
+    wants to show when a turn settles.
+
+    Four steps, and the third is the one that distinguishes the winning writer: the
+    turn's aggregate sums to a DIFFERENT output token count than the call's, so a
+    ``last_usage`` carrying the sum is a different failure with the same symptom.
+    """
+    usage = Usage(input_tokens=100, output_tokens=240, context_tokens=100)
+    usage._decode_window = (12_345, 240)
+    sibling = Usage(input_tokens=10, output_tokens=300, context_tokens=100)
+    session = SimpleNamespace(effective_model=_spec(), restored_usage=lambda: usage)
+    store = FrontendStateStore(FrontendSessionState(session_id="s1", epoch="e1"))
+    store.observe_event(session, AgentStartEvent(generation=1))
+
+    # 2 — the message boundary.
+    store.observe_event(session, MessageEndEvent(message=Message.assistant("a", usage=usage)))
+    after_message = store.state.last_usage
+    assert after_message is not None
+    assert (
+        after_message.model_dump().get("decode_us") == 12_345
+    ), "the message-end refresh dropped the decode window"
+
+    # 3 — the turn boundary, where the aggregate would win if the refresh did not.
+    store.observe_event(
+        session,
+        AgentEndEvent(
+            messages=[
+                Message.assistant("a", usage=usage),
+                Message.assistant("b", usage=sibling),
+            ]
+        ),
+    )
+    last = store.state.last_usage
+    assert last is not None
+    dumped = last.model_dump()
+    assert dumped.get("decode_us") == 12_345, (
+        "the turn-end refresh dropped the decode window: the band would read unknown "
+        "for a call the ledger measured"
+    )
+    assert dumped.get("decode_tokens") == 240
+    # The refresh's LIVE reading wins over the aggregate, which is what makes the
+    # pair survivable at all: a per-call window is not summable, so a last_usage
+    # carrying the summed 540 would have nowhere to have got one.
+    assert dumped.get("output_tokens") == 240, (
+        "last_usage carries the turn aggregate (540); the window cannot be summed, "
+        "so the pair and the aggregate can never both be right"
+    )
+
+    # 4 — the no-op rule: an unstamped usage adds NOTHING, because a zeroed pair
+    # would spend the frame's slack on every frame to say nothing.
+    plain = Usage(input_tokens=1, output_tokens=2, context_tokens=3)
+    fresh = SimpleNamespace(effective_model=_spec(), restored_usage=lambda: plain)
+    store2 = FrontendStateStore(FrontendSessionState(session_id="s2", epoch="e1"))
+    store2.observe_event(fresh, AgentStartEvent(generation=1))
+    store2.observe_event(fresh, AgentEndEvent(messages=[Message.assistant("b", usage=plain)]))
+    last2 = store2.state.last_usage
+    assert last2 is not None
+    dumped2 = last2.model_dump()
+    assert "decode_us" not in dumped2 and "decode_tokens" not in dumped2
