@@ -5328,7 +5328,16 @@ class Session:
         # (``/agent <name>``) journals the holder — writing that empty goal over
         # the user's durable one. Set straight onto the holder: this is a read
         # of disk state, not a user action, so it must not re-journal.
-        if stored.goal:
+        #
+        # F1 (review round 1): "unconditionally" needs ONE exception — a LIVE
+        # goal set before the first turn (its journal write having failed
+        # silently) is newer than the file, so a stored value that DIFFERS is
+        # skipped and the live goal wins; see ``_apply_stored_attachment`` for
+        # the full why. The goal is applied here rather than only there so it
+        # survives the registry early-return below, which is why the same
+        # per-slot rule has to hold at this seat too.
+        live_goal = self._goal_state.text
+        if stored.goal and (not live_goal or live_goal == stored.goal):
             self._goal_state.set(stored.goal)
         if stored.agent or stored.team:
             from local_operator.session.errors import ProfileRegistryUnavailable
@@ -5357,7 +5366,26 @@ class Session:
         Split out so the suppression flag around it is a plain ``try/finally``
         with no early ``return`` able to skip the reset.
         """
-        if stored.goal:
+        # F1 (review round 1): the sidecar write is BEST-EFFORT — every
+        # mutation reaches ``write_session_attachment`` through
+        # ``_persist_attachment``, and that helper swallows failures by
+        # contract — so the FILE can be stale while the live slots are
+        # current (a live ``/team``, ``/agent`` or ``/goal`` in a warm draft
+        # before the first turn, whose write silently failed). Applying a
+        # stored value that DIFFERS from such a live slot would revert the
+        # attach the operator just made; the live slot must win. Per slot:
+        # when the live value is non-empty and differs from the stored one,
+        # skip the stored value; equal values still apply (idempotent), and a
+        # live-empty slot still takes the stored value. Construction-time
+        # live values are always empty (``_unresolved_*`` are seeded ""
+        # before ``__init__`` calls the restore), so the constructor's
+        # restore is unchanged in effect and this guard binds only on the
+        # late-adoption path.
+        live_team = self.active_team_name or self._unresolved_team
+        live_agent = self._goal_state.agent_name or self._unresolved_agent
+        live_goal = self._goal_state.text
+
+        if stored.goal and (not live_goal or live_goal == stored.goal):
             # Straight onto the holder: ``set_goal`` would re-journal a value
             # that just came off disk, and the restore is not a user action.
             self._goal_state.set(stored.goal)
@@ -5373,7 +5401,7 @@ class Session:
         # is still there (D2/R3). Both of those are also the transient cases the
         # carried-name recovery exists for.
         looked_up_and_absent = True
-        if stored.team:
+        if stored.team and (not live_team or live_team == stored.team):
             team = None
             registry = self.team_registry
             if registry is None:
@@ -5393,7 +5421,7 @@ class Session:
                 # ``active_team`` (what subagents inherit) is restored too, not
                 # just the prompt text.
                 self.attach_team(team)
-        if stored.agent:
+        if stored.agent and (not live_agent or live_agent == stored.agent):
             resolved = None
             try:
                 resolved = self.attach_agent_profile(stored.agent)
