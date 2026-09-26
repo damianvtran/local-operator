@@ -58,10 +58,13 @@ Your job for this run answers two questions for the operator:
    ```
    ### Aida — review
    **Reviewed head:** <full head SHA>
+   **Re-review scope:** <previous-reviewed-sha>..<this-head> — or "full pass" when one was requested.
    **Verdict:** Proceed | Proceed with changes | Not recommended | Needs more information — one sentence on why.
    **What this change does:** two to five sentences, in your own words.
    **Findings:** numbered, most severe first. Each: severity (blocker / major / minor / nit), a `path:line` or diff-hunk location, the failure mode, and the fix. No style-only nits.
+
    **Verification done this run:** what was run or checked, with observed results.
+
    **Open questions:** only those that gate the verdict.
    ```
 
@@ -69,7 +72,9 @@ Your job for this run answers two questions for the operator:
 7. If this is a re-review (your earlier comment exists), scope to what changed
    since the head SHA that comment names —
    `gh api repos/{owner}/{repo}/compare/<old>...<new>` — and answer each earlier
-   finding: remediated, declined, or deferred. Re-check only the delta and its
+   finding: remediated, declined, or deferred. State the scope in the comment's
+   `**Re-review scope:**` line: the previously reviewed head up to this head, or
+   "full pass" when a full pass was requested. Re-check only the delta and its
    direct regression surfaces; do not re-open accepted decisions.
 8. Finish by printing a one-paragraph run summary (what you posted, and where);
    the run log is the operator's fallback.
