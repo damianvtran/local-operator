@@ -635,7 +635,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 132 public members and a POSITIVE
+    than stylistic. This protocol carries 133 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -677,7 +677,8 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     not-stale contract turns on — ``verified_at`` (when the owner last ANSWERED)
     and ``verify_live`` (the ``ping`` round trip that refreshes it), which is one
     rung adding two members because a stamp with no way to refresh it cannot
-    distinguish "the owner is there" from "the owner was there"), so
+    distinguish "the owner is there" from "the owner was there"), 133 once the
+    projects primitive needed the ``project_registry`` ``/project`` reads), so
     recompute it rather
     than adjusting it by the size of your own change.
 
