@@ -76,7 +76,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
-from local_operator.network import addresses, dial as session_dial
+from local_operator.network import addresses
+from local_operator.network import dial as session_dial
 from local_operator.network import projection, store, wire
 from local_operator.network.audit import AuditEvent, AuditLog
 from local_operator.network.authorizer import Authorizer, NetworkState
