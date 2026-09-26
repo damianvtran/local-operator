@@ -4824,6 +4824,40 @@ async def test_a_delivery_turn_does_not_journal_its_row_twice(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_dropped_delivery_turn_does_not_journal_its_row_twice(tmp_path):
+    """The pre-abort drop path journals the initials, guarded the same way.
+
+    Sir Knight review round 1, finding 1: a delivery turn whose batch is
+    stopped-work residue enters ``_run_turn`` with ``_abort_requested`` still
+    set (``_STOPPED_WORK_RESIDUE_TYPES`` includes ``job_result``), so the drop
+    gate fires and ``_drop_pre_aborted_turn`` -- a second, sibling journal loop
+    -- wrote each settle-time row AGAIN under the same id (reproduced before
+    the guard: rows = 2, distinct ids = 1). The earlier cells all run the
+    un-aborted path, so none covered this arm.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("start a job")
+    session._is_streaming = True
+    await session._on_job_completed("j1", "one", _settled_job("j1"))
+    session._is_streaming = False
+    session._abort_requested = True  # the abort the residue arrived under
+
+    await session._deliver_deferred_job_results()
+
+    deadline = asyncio.get_running_loop().time() + 5.0
+    while session._pre_aborted_drops < 1 and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
+    assert session._pre_aborted_drops >= 1, "the drop gate never fired"
+    assert len(stream.requests) == 1, "a dropped turn must not call the provider"
+
+    rows = _job_result_rows(session)
+    assert [row.payload["details"]["job_id"] for row in rows] == ["j1"]
+    assert len({row.id for row in rows}) == 1, "the dropped turn re-journaled the row"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_job_result_opens_no_turn_on_a_leaving_runtime(tmp_path):
     """A delivery that lands after the departure latch is DURABLE, not run.
 

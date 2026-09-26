@@ -10164,10 +10164,21 @@ class Session:
             # held peer/wake message outright. Exactly-once must not become
             # exactly-zero, and this method's contract is that the message
             # survives even though its turn did not.
-            await self._transcript.append_message(
-                message,
-                producer_command_id=(producer_command_id if message.id == admitted_id else None),
-            )
+            #
+            # ...AND ALREADY-DURABLE INITIALS ARE SKIPPED, the same guard as
+            # ``_run_turn``'s loop (Sir Knight review round 1, finding 1): a
+            # delivery turn whose batch is stopped-work residue enters with
+            # ``_abort_requested`` still set, so THIS path is the one that
+            # runs -- and an unconditional append re-wrote the row each
+            # result had already made durable at settle time (reproduced:
+            # rows = 2, distinct ids = 1).
+            if not self._transcript.has_entry(message.id):
+                await self._transcript.append_message(
+                    message,
+                    producer_command_id=(
+                        producer_command_id if message.id == admitted_id else None
+                    ),
+                )
             if isinstance(message, CustomMessage):
                 self._append_or_park_journal(message)
             else:
