@@ -73,8 +73,10 @@ disagree, so the artefact's ``rev`` always names a tree this run actually measur
 DECLARATION, READ BACK. ``--mcp-variant mcpx`` is supposed to declare one MCP
 server and ``none`` is supposed to declare nothing, and the session reports what
 it actually sees back — recorded per row as ``mcp_declared_servers`` and graded in
-the summary. A run whose declaration does not match its own arm name exits 3
-rather than reporting a treatment arm that measured the control (QA round 1, Q1).
+the summary. A valid read that does not match its own arm name exits 3 (as does
+one nobody could read, named separately) rather than reporting a treatment arm
+that measured the control (QA round 1, Q1; the tri-state and the draft arms'
+live-page acceptance are QA round 1, Q-1).
 """
 
 from __future__ import annotations
@@ -358,7 +360,40 @@ class _DraftStream:
         self.close()
 
 
-def _declared_servers(client: Any, session_id: str, *, settle_s: float = 0.0) -> list[str] | None:
+def _read_declaration(
+    client: Any, session_id: str, *, allow_live: bool
+) -> tuple[list[str] | None, bool]:
+    """One read of the declaration page, as ``(names, known)``.
+
+    ``known`` is False when the page is neither shape that can carry a
+    declaration; ``names`` is None then too. The two ACCEPTABLE shapes:
+
+    * the COLD page (``cold: true``) — what the control arm requires, because
+      verification must not warm the path it is measuring; and
+    * for the DRAFT arms (``allow_live``), the LIVE page the route serves once
+      the warm HAS bound (``{"operations": [...], "servers": [...]}``, no
+      ``cold`` key). QA round 1 (Q-1): refusing this shape graded the runs where
+      the warm worked best as `unknown`, and the exit path then reported a
+      mismatch that had not happened. The draft arm's warm is its own work, so
+      reading the live page warms nothing new.
+    """
+    try:
+        listed = client.get(f"/v1/desktop/sessions/{session_id}/mcp")
+        listed.raise_for_status()
+        data = listed.json()["result"]["data"]
+    except Exception:  # noqa: BLE001 — a record we could not read is not a result
+        return None, False
+    if data.get("cold") is not True and not allow_live:
+        return None, False
+    servers = data.get("servers")
+    if not isinstance(servers, list):
+        return None, False
+    return sorted(str(server["name"]) for server in servers), True
+
+
+def _declared_servers(
+    client: Any, session_id: str, *, settle_s: float = 0.0, allow_live: bool = False
+) -> list[str] | None:
     """The MCP servers the RUNNING session sees declared, asked of the session.
 
     A benchmark whose "declared" arm declares nothing is measuring its own
@@ -372,29 +407,26 @@ def _declared_servers(client: Any, session_id: str, *, settle_s: float = 0.0) ->
     cwd without binding a runtime. The live POST refuses while the deferred
     manager is starting (and forever for a no-server session), so that refusal
     cannot distinguish absent configuration from wiring that is merely pending.
-    Require the cold marker as well: verification must not warm the measured path.
-    An unreadable response is unknown, never a successful empty control.
+    The control arm still requires the cold marker: verification must not warm
+    the path it measures. An unreadable response is unknown, never a successful
+    empty control.
 
-    ``settle_s`` is for the DRAFT arms, whose create has just happened while the
-    warm's runtime may still be mid-boot: the read envelope can then answer a
-    refusal-to-reconcile (the owner is ATTACHING) rather than a cold page, and
-    the same config read seconds later is the same fact. The budget only delays
-    the verdict — an unreadable response after it is still ``None`` — and the
-    unit tests keep the default single-shot read.
+    ``settle_s``/``allow_live`` are for the DRAFT arms, whose create has just
+    happened while the warm's runtime may still be mid-boot: the read envelope
+    can answer a refusal-to-reconcile (the owner is ATTACHING) rather than a
+    page, and it can briefly answer the COLD page before the live one takes
+    over — or vice versa. The budget only delays the verdict (an unreadable
+    response after it is still ``None``), and the unit tests keep the default
+    single-shot read.
     """
     deadline = time.monotonic() + settle_s
     while True:
-        try:
-            listed = client.get(f"/v1/desktop/sessions/{session_id}/mcp")
-            listed.raise_for_status()
-            data = listed.json()["result"]["data"]
-            if data.get("cold") is not True:
-                return None
-            return sorted(str(server["name"]) for server in data["servers"])
-        except Exception:  # noqa: BLE001 — a record we could not read is not a result
-            if time.monotonic() >= deadline:
-                return None
-            time.sleep(0.5)
+        names, known = _read_declaration(client, session_id, allow_live=allow_live)
+        if known:
+            return names
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.5)
 
 
 def _one_run(
@@ -481,7 +513,13 @@ def _one_run(
         session_id = created_body["result"]["session_id"]
 
         declared = _declared_servers(
-            client, session_id, settle_s=0.0 if pre_engage == "off" else 30.0
+            client,
+            session_id,
+            settle_s=0.0 if pre_engage == "off" else 30.0,
+            # The draft arms MAY read the live page: by the time they read, the
+            # warm THEY fired may have bound, and refusing that shape graded the
+            # runs where the warm worked best as unreadable (QA round 1, Q-1).
+            allow_live=pre_engage != "off",
         )
         census_before = _runtime_children(daemon_pid)
         started = time.perf_counter()
@@ -506,7 +544,15 @@ def _one_run(
             # on the control arm, which has no warm to attribute.
             "warm_spawned_before_send": (bool(census_before) if pre_engage != "off" else None),
             "mcp_declared_servers": declared,
-            "mcp_declaration_correct": declared == (["bench-slow"] if variant == "mcpx" else []),
+            # TRI-STATE, and that is the Q-1 fix: True (a valid read that
+            # matched), False (a VALID read that mismatched), None (unreadable —
+            # no verdict). The one-shot `None != []` comparison used to grade an
+            # unreadable row as a mismatch and exit 3 on it.
+            "mcp_declaration_correct": (
+                None
+                if declared is None
+                else declared == (["bench-slow"] if variant == "mcpx" else [])
+            ),
             "create_status": created.status_code,
             "create_body": created_body,
             "send_status": sent.status_code,
@@ -554,9 +600,18 @@ def _summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         #: matches the arm's own name for itself. A `mcpx` arm that declares
         #: nothing is the control arm wearing the treatment's label, which is the
         #: failure Q1 found; this is the field that makes it visible instead of
-        #: plausible.
+        #: plausible. TRI-STATE (Q-1): False only when a VALID read mismatched;
+        #: unreadable rows are ``None`` and named separately, so a wrong
+        #: declaration and an unlucky read cannot be read for each other.
         "mcp_servers_seen": declared,
-        "declaration_correct": all(correct) if correct else None,
+        "declaration_correct": (
+            False
+            if any(value is False for value in correct)
+            else (True if correct and all(value is True for value in correct) else None)
+        ),
+        "declaration_unreadable": [
+            row["run"] for row in rows if row.get("mcp_declaration_correct") is None
+        ],
     }
 
 
@@ -808,15 +863,32 @@ def main() -> int:
     if stats.get("declaration_correct") is False:
         # Non-zero, because a driver that only reads the exit status must not
         # treat an arm that measured its own control as a treatment reading
-        # (QA round 1, Q1). The numbers are still written above and in --json,
-        # so nothing is hidden — this only says they are not what the arm's name
-        # claims.
+        # (QA round 1, Q1). Only a VALID read that mismatched lands here now
+        # (Q-1's tri-state), and the sentence names what THIS arm asked for.
+        expected = (
+            "one declaration ('bench-slow')" if args.mcp_variant == "mcpx" else "NO declaration"
+        )
         print(
-            "\n  DECLARATION NOT VERIFIED: --mcp-variant "
-            f"{args.mcp_variant!r} asked for one declaration and the running "
-            f"sessions reported {stats.get('mcp_servers_seen') or 'none'}. The arm "
-            "measured the wrong thing; see _write_mcp_config for where the "
-            "declaration has to live (the session's cwd).",
+            "\n  DECLARATION MISMATCH: --mcp-variant "
+            f"{args.mcp_variant!r} asked for {expected} and the running sessions "
+            f"reported {stats.get('mcp_servers_seen') or 'none'}. The arm measured "
+            "the wrong thing; see _write_mcp_config for where the declaration has "
+            "to live (the session's cwd).",
+            flush=True,
+        )
+        return 3
+    if stats.get("declaration_unreadable"):
+        # A row nobody could read is a hole in the verification, not a
+        # mismatch — named separately so it can pass as neither. Non-zero for
+        # the control arm, where an unreadable response has always meant "not
+        # verified"; the draft arms settle for it first (30 s, plus the live
+        # page accepted), so reaching here means the read answered something
+        # else entirely.
+        print(
+            "\n  DECLARATION UNREADABLE for runs "
+            f"{stats['declaration_unreadable']}: the read answered neither the "
+            "cold page nor (draft arms) the live one. Nothing is said about the "
+            "declaration either way; see _declared_servers.",
             flush=True,
         )
         return 3

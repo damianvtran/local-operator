@@ -1801,14 +1801,14 @@ async def create_session(body: CreateSession, request: Request):
         return {"session_id": session_id, "binding": await pool.binding(session_id)}
 
     async with errors(request):
-        # REFUSED BEFORE ANYTHING IS CLAIMED OR ADMITTED — before the receipt is
-        # claimed and before the draft's own admissions (the working directory, the
-        # model spec, the target registry) run: a refused request must leave no
-        # pending receipt behind, or the client's retry against the SUCCESSOR would
-        # meet the indeterminate 409 the receipts layer reserves for a crashed
-        # attempt (``desktop_receipts``). ``DesktopSessions.create`` re-asks the
-        # same question as its first statement, so a caller that reaches the
-        # adapter another way gets the same refusal.
+        # THE LATCH IS ASKED FIRST — before the receipt is claimed and before
+        # ANY admission runs (the three body admissions below, then the draft
+        # probe). ``DesktopSessions.create``'s own FIRST statement is the same
+        # question, so a caller that reaches the adapter another way gets the
+        # same refusal; and a refused request leaves no pending receipt row
+        # behind, or the client's retry against the SUCCESSOR would meet the
+        # indeterminate 409 the receipts layer reserves for a crashed attempt
+        # (``desktop_receipts``).
         host(request).assert_admitting()
         pool = host(request)
         key = "create:" + body.request_id
@@ -1840,14 +1840,15 @@ async def create_session(body: CreateSession, request: Request):
                     target_row["name"],
                 )
             if body.draft_id is not None:
-                # The DRAFT id is an admission of its own, and it is decided
-                # BEFORE the claim for the same reason the body's are: a draft
-                # that already became a conversation must refuse its retry with
-                # the refusal — not leave a pending receipt row behind that
-                # answers "outcome indeterminate" to the client's next attempt.
+                # The DRAFT id is an admission of its own, decided AFTER the
+                # three body admissions above and BEFORE the claim: a draft that
+                # already became a conversation must refuse its retry with the
+                # refusal — not leave a pending receipt row behind that answers
+                # "outcome indeterminate" to the client's next attempt.
                 # ``assert_draft_unmaterialised`` is read-only (it never spends
-                # the draft; that is ``create``'s job) and ``create`` re-asks it,
-                # so the two call sites cannot disagree.
+                # the draft; that is ``create``'s job) and ``create`` re-asks it
+                # itself, after its own admissions — so the two call sites cannot
+                # disagree.
                 await asyncio.to_thread(pool.assert_draft_unmaterialised, body.draft_id)
         return reply(await receipts(request).run(key, body.model_dump(), create))
 
@@ -2006,7 +2007,6 @@ async def draft_mint(body: DraftMint, request: Request):
             # The NORMALISED spec, not the raw body: it is the exact value a
             # later create persists into the marker and the engage is born on.
             model=spec,
-            request_id=body.request_id,
         )
         return {"draft_id": draft_id}
 

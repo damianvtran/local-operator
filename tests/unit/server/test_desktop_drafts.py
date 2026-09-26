@@ -512,7 +512,7 @@ async def test_a_malformed_draft_id_is_a_422_and_never_a_path(draft_app) -> None
 async def test_single_use_is_enforced_by_the_pool_itself(tmp_path) -> None:
     """Callers that reach the pool directly get the same single-use discipline."""
     pool = DesktopSessions(tmp_path)
-    draft_id = await pool.mint_draft(str(tmp_path), request_id="r1")
+    draft_id = await pool.mint_draft(str(tmp_path))
     assert await pool.create(str(tmp_path), draft_id=draft_id) == draft_id
     with pytest.raises(DraftAlreadyMaterialised) as raised:
         await pool.create(str(tmp_path), draft_id=draft_id)
@@ -530,7 +530,7 @@ async def test_a_lost_registry_falls_back_to_a_fresh_id(tmp_path) -> None:
     lands in a session of its own.
     """
     first = DesktopSessions(tmp_path)
-    draft_id = await first.mint_draft(str(tmp_path), request_id="r1")
+    draft_id = await first.mint_draft(str(tmp_path))
     _write_warm_residue(tmp_path, draft_id)
     await first.close()
     # The restart: same root, a new pool — the registry is empty.
@@ -547,7 +547,7 @@ async def test_an_expired_draft_resolves_as_unknown_and_frees_its_id(tmp_path, m
     clock = {"now": 100.0}
     monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
     pool = DesktopSessions(tmp_path)
-    draft_id = await pool.mint_draft(str(tmp_path), request_id="r1")
+    draft_id = await pool.mint_draft(str(tmp_path))
     clock["now"] = 100.0 + DRAFT_TTL_S + 1.0
     with pytest.raises(KeyError):
         async with pool.session(draft_id, allow_draft=True):
@@ -566,7 +566,7 @@ async def test_the_cap_evicts_the_oldest_draft(tmp_path, monkeypatch) -> None:
     pool = DesktopSessions(tmp_path)
     ids: list[str] = []
     for index in range(DRAFT_COUNT_MAX + 1):
-        ids.append(await pool.mint_draft(str(tmp_path), request_id=f"r{index}"))
+        ids.append(await pool.mint_draft(str(tmp_path)))
         clock["now"] += 1.0
     assert len(pool.drafts) == DRAFT_COUNT_MAX
     assert ids[0] not in pool.drafts, "the oldest draft survived the cap"
@@ -587,7 +587,7 @@ async def test_a_draft_bridge_is_built_from_the_draft_spec(tmp_path) -> None:
     """
     pool = DesktopSessions(tmp_path)
     spec = ModelSpec(provider="anthropic", model_id="claude-opus-5", reasoning_effort="high")
-    draft_id = await pool.mint_draft(str(tmp_path), model=spec, request_id="r1")
+    draft_id = await pool.mint_draft(str(tmp_path), model=spec)
     async with pool.session(draft_id, read=True, allow_draft=True) as bridge:
         assert bridge.remote is not None
         assert bridge.remote.is_cold
@@ -615,7 +615,7 @@ async def test_a_draft_materialised_elsewhere_refuses_before_the_registry(tmp_pa
     contract would quietly stop holding.
     """
     pool = DesktopSessions(tmp_path)
-    draft_id = await pool.mint_draft(str(tmp_path), request_id="r1")
+    draft_id = await pool.mint_draft(str(tmp_path))
     # A registered draft is fine (it is unmaterialised by definition) and the
     # probe must not SPEND it.
     pool.assert_draft_unmaterialised(draft_id)
@@ -632,3 +632,189 @@ async def test_a_draft_materialised_elsewhere_refuses_before_the_registry(tmp_pa
     _write_warm_residue(tmp_path, "0123456789cd")
     pool.assert_draft_unmaterialised("0123456789cd")
     await pool.close()
+
+
+# ---------------------------------------------------------------------------
+# M1 (round-1 review): a draft whose ENTRY is gone must be unknown everywhere
+# ---------------------------------------------------------------------------
+
+
+async def _door_matrix(client: AsyncClient, draft_id: str, root: Path) -> dict[str, int]:
+    """Every door this file drives for one id, as ``{label: status}``.
+
+    The five opted-in doors first, then the mutating/foreign ones the
+    containment exists for — the same set round-1 review's
+    ``repro_expired_draft_bridge.py`` drove, so the rig and this file cannot
+    disagree about what "every door" means.
+    """
+    calls: dict[str, tuple[str, str, dict[str, Any] | None]] = {
+        "snapshot": ("GET", f"/v1/desktop/sessions/{draft_id}", None),
+        "history": ("GET", f"/v1/desktop/sessions/{draft_id}/history", None),
+        "events": ("GET", f"/v1/desktop/sessions/{draft_id}/events", None),
+        "watch": (
+            "POST",
+            f"/v1/desktop/sessions/{draft_id}/watch",
+            {"subscription_id": uuid.uuid4().hex, "visible": False, "can_notify": False},
+        ),
+        "warm": ("POST", f"/v1/desktop/sessions/{draft_id}/warm", {}),
+        "messages": (
+            "POST",
+            f"/v1/desktop/sessions/{draft_id}/messages",
+            {"request_id": str(uuid.uuid4()), "text": "hello"},
+        ),
+        "commands": (
+            "POST",
+            f"/v1/desktop/sessions/{draft_id}/commands",
+            {"request_id": str(uuid.uuid4()), "command": "session", "args": ""},
+        ),
+        "interrupt": (
+            "POST",
+            f"/v1/desktop/sessions/{draft_id}/interrupt",
+            {"request_id": str(uuid.uuid4())},
+        ),
+        "working-directory": (
+            "POST",
+            f"/v1/desktop/sessions/{draft_id}/working-directory",
+            {"request_id": str(uuid.uuid4()), "cwd": str(root)},
+        ),
+    }
+    statuses: dict[str, int] = {}
+    for label, (method, url, body) in calls.items():
+        response = await client.request(method, url, json=body)
+        statuses[label] = response.status_code
+    return statuses
+
+
+@pytest.mark.asyncio
+async def test_an_expired_drafts_resident_bridge_is_dropped_and_refused_everywhere(
+    draft_app, monkeypatch
+) -> None:
+    """M1 (round-1 review): expiry must be indistinguishable from unknown.
+
+    The pane holds /events, so the draft's bridge is RESIDENT when the registry
+    entry expires. Before the fix the containment could not fire (it asks the
+    live registry) and the cached bridge served every door — snapshot/history
+    200, commands/interrupt/working-directory 200, and ``POST messages``
+    reached ``_ensure_bound(foreground=True)``, a mutating route engaging a
+    materialising draft. Round 1's own rig is the source of this cell
+    (``scratchpad/review1607/repro_expired_draft_bridge.py``).
+    """
+    client, app, root = draft_app
+    pool = app.state.desktop_sessions
+    engaged: list[str] = []
+
+    async def record_engage(self: Any, *, foreground: bool = True) -> None:
+        engaged.append(f"foreground={foreground}")
+
+    monkeypatch.setattr(AttachedSession, "_ensure_bound", record_engage)
+    draft_id = await _mint(client, root)
+    resident = await client.get(f"/v1/desktop/sessions/{draft_id}")
+    assert resident.status_code == 200
+    assert draft_id in pool.bridges, "the pane's stream did not make a resident bridge"
+    # While REGISTERED the containment still refuses a non-opted door.
+    refused = await client.post(
+        f"/v1/desktop/sessions/{draft_id}/messages",
+        json={"request_id": str(uuid.uuid4()), "text": "hello"},
+    )
+    assert refused.status_code == 404
+
+    clock = {"now": time.monotonic() + DRAFT_TTL_S + 1.0}
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
+
+    statuses = await _door_matrix(client, draft_id, root)
+    assert statuses == {label: 404 for label in statuses}, statuses
+    assert draft_id not in pool.bridges, "the dead draft's bridge stayed resident"
+    assert engaged == [], "a refused door reached the engage seam"
+    with pytest.raises(KeyError):
+        async with pool.session(draft_id):
+            pass  # pragma: no cover — the door refuses on entry
+    with pytest.raises(KeyError):
+        async with pool.session(draft_id, allow_draft=True):
+            pass  # pragma: no cover — the door refuses on entry
+
+
+@pytest.mark.asyncio
+async def test_a_warmed_expired_draft_leaves_nothing_servable(draft_app, monkeypatch) -> None:
+    """M1's SECOND LEG: the residue directory must not re-open as a phantom.
+
+    A warmed draft leaves ``sessions/<id>`` behind (the engage's residue), and
+    once the bridge is dropped the LOCATE path is what a later ask walks. It
+    used to answer that directory with the checkpoint fallback — a bridge on
+    ``root.parent`` — so the id kept serving 200s after the drop. The residue
+    is simulated exactly as measured (``.execution-lease`` + ``.session.pid``);
+    a unit test must not spawn the runtime that writes it.
+    """
+    client, app, root = draft_app
+    pool = app.state.desktop_sessions
+    draft_id = await _mint(client, root)
+    _write_warm_residue(root, draft_id)
+    resident = await client.get(f"/v1/desktop/sessions/{draft_id}")
+    assert resident.status_code == 200
+    assert draft_id in pool.bridges
+
+    clock = {"now": time.monotonic() + DRAFT_TTL_S + 1.0}
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
+
+    statuses = await _door_matrix(client, draft_id, root)
+    assert statuses == {label: 404 for label in statuses}, statuses
+    assert draft_id not in pool.bridges, "the dead draft's bridge stayed resident"
+    # And create still mints fresh — the warm was wasted, the send can go on.
+    created = await client.post(
+        "/v1/desktop/sessions",
+        json={"request_id": str(uuid.uuid4()), "cwd": str(root), "draft_id": draft_id},
+    )
+    assert created.status_code == 200, created.text
+    assert created.json()["result"]["session_id"] != draft_id
+
+
+@pytest.mark.asyncio
+async def test_a_restart_refuses_a_drafts_residue_and_still_creates_fresh(draft_app) -> None:
+    """Post-restart (round-1 review's second requested cell).
+
+    A restarted daemon has NO bridge cache and NO registry — only what the
+    engage wrote on disk — and BEFORE this fix the locate fallback turned
+    exactly that directory into a live-looking cold session with
+    ``root.parent`` as its cwd. The replacement pool is what keeps the
+    fixture's teardown honest: it closes ``app.state.desktop_sessions``.
+    """
+    client, app, root = draft_app
+    old_pool = app.state.desktop_sessions
+    draft_id = await old_pool.mint_draft(str(root))
+    _write_warm_residue(root, draft_id)
+    await old_pool.close()
+    app.state.desktop_sessions = DesktopSessions(
+        root, retiring=lambda: bool(getattr(app.state, RETIRING_STATE_ATTR, False))
+    )
+
+    statuses = await _door_matrix(client, draft_id, root)
+    assert statuses == {label: 404 for label in statuses}, statuses
+    created = await client.post(
+        "/v1/desktop/sessions",
+        json={"request_id": str(uuid.uuid4()), "cwd": str(root), "draft_id": draft_id},
+    )
+    assert created.status_code == 200, created.text
+    assert created.json()["result"]["session_id"] != draft_id
+
+
+@pytest.mark.asyncio
+async def test_a_materialised_drafts_bridge_becomes_an_ordinary_session_bridge(draft_app) -> None:
+    """The other side of M1's detection: create turns the id into a session.
+
+    ``bridge.draft`` is cleared once the marker exists — the marker is the
+    birth source from then on — and the resident bridge keeps serving, which is
+    what the pane needs the moment its own create returns.
+    """
+    client, app, root = draft_app
+    pool = app.state.desktop_sessions
+    draft_id = await _mint(client, root)
+    resident = await client.get(f"/v1/desktop/sessions/{draft_id}")
+    assert resident.status_code == 200
+    assert pool.bridges[draft_id].draft is not None
+    created = await client.post(
+        "/v1/desktop/sessions",
+        json={"request_id": str(uuid.uuid4()), "cwd": str(root), "draft_id": draft_id},
+    )
+    assert created.status_code == 200, created.text
+    again = await client.get(f"/v1/desktop/sessions/{draft_id}")
+    assert again.status_code == 200, again.text
+    assert pool.bridges[draft_id].draft is None, "the dead draft reference was not cleared"
