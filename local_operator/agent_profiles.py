@@ -55,7 +55,10 @@ only the selected row's body is loaded.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Sequence, TypeVar
@@ -80,6 +83,26 @@ SEEDS_DIR = Path(__file__).parent / "agent_seeds"
 #: the profile. Folding it in would make ``op='create'`` stamp a self-authored
 #: role as seed-derived just because it renders the same fields.
 SEED_ORIGIN_PREFIX = "seed:"
+
+#: Tag prefix recording the packaged seed's ``version:`` frontmatter as it was
+#: at INSTALL time, e.g. ``seed_version:1.0.0``. Written by
+#: :func:`install_seed` alongside the ``seed:`` provenance marker, and read by
+#: :func:`sync_installed_seeds` to answer "did the packaged starter move since
+#: this row was installed?".
+#:
+#: The version alone cannot answer "was the row EDITED?" — when a seed's text
+#: moves, an untouched row and an edited one both differ from the packaged
+#: text, so the two are indistinguishable from versions and divergence alone.
+#: That is why :data:`SEED_SHA256_PREFIX` records the fingerprint of what was
+#: actually installed: it is the baseline the cleanliness check compares
+#: against, and without it the required default-apply behaviour on an
+#: unedited update would be unreachable (every update would look "diverged").
+SEED_VERSION_PREFIX = "seed_version:"
+
+#: Tag prefix recording the sha256 fingerprint of the seed-written fields as
+#: they were installed, e.g. ``seed_sha256:9f2c…`` (see
+#: :func:`seed_fingerprint`). Same single writer as the other markers.
+SEED_SHA256_PREFIX = "seed_sha256:"
 
 #: Cap on an instruction body admitted from a profile. A profile is user data
 #: and rides in front of a child's prompt on every turn, so an unbounded body
@@ -300,6 +323,34 @@ def load_seed(name: str) -> AgentProfile | None:
         logger.warning("agent seed %s could not be read", key)
         return None
     return _profile_from_text(key, text)
+
+
+def load_seed_version(name: str) -> str:
+    """The packaged seed's own ``version:`` frontmatter, or "" when absent.
+
+    Read through :func:`_split_frontmatter` — the same parser the loader and
+    the manifest generator use — rather than a second YAML reader beside them,
+    because two parsers is how the two would later disagree about the same
+    bytes. Deliberately a function rather than an ``AgentProfile`` field: the
+    version exists for the published manifest and for the install stamp, and
+    nothing in the resolution or divergence paths reads it (see
+    ``tests/unit/test_agent_seed_manifest.py``, which pins that boundary).
+
+    Unknown name, unreadable file and a missing key all answer "" — install
+    treats that as "no version recorded" rather than refusing, because the
+    fingerprint marker still makes the row updateable.
+    """
+
+    key = (name or "").strip().lower()
+    if not key or key not in set(list_seeds()):
+        return ""
+    try:
+        text = (SEEDS_DIR / f"{key}.md").read_text(encoding="utf-8", errors="replace")
+    except OSError:  # pragma: no cover - unreadable package file
+        logger.warning("agent seed %s could not be read for its version", key)
+        return ""
+    meta, _body = _split_frontmatter(text)
+    return str(meta.get("version") or "").strip()
 
 
 def seed_catalogue() -> list[AgentProfile]:
@@ -611,10 +662,27 @@ def install_seed(
         # edited prompt is what the next delegation will run.
         return profile_from_agent(registry, existing), True
 
-    # The provenance marker rides alongside the profile's own field tags. It is
-    # what later lets ``reset`` tell an installed copy from a role the operator
-    # authored under a name that happens to collide with a starter.
-    tags = [*seed_tags(seed), f"{SEED_ORIGIN_PREFIX}{seed.name}"]
+    # The provenance markers ride alongside the profile's own field tags. The
+    # ``seed:`` marker is what later lets ``reset`` tell an installed copy from
+    # a role the operator authored under a name that happens to collide with a
+    # starter; the version and fingerprint are what ``sync_installed_seeds``
+    # compares against to answer "did the packaged starter move since install,
+    # and has this copy been edited?" — see the constants' docstrings for why
+    # the version alone is not enough. ONE writer, both sync inputs: a second
+    # site that stamped either marker is how the two would quietly disagree.
+    tags = [
+        *seed_tags(seed),
+        f"{SEED_ORIGIN_PREFIX}{seed.name}",
+        f"{SEED_SHA256_PREFIX}{seed_fingerprint(seed)}",
+    ]
+    version = load_seed_version(seed.name)
+    if version:
+        # A seed whose frontmatter has no ``version:`` is a broken package —
+        # the manifest generator refuses to render one — but install is not the
+        # place to raise a user-visible error over it: the fingerprint alone
+        # still proves cleanliness, so the row stays updateable, and sync
+        # reports the version as unknown rather than inventing one.
+        tags.append(f"{SEED_VERSION_PREFIX}{version}")
 
     # One field builder for both paths, so a create and an overwrite cannot
     # drift into writing different subsets of what the seed owns.
@@ -741,6 +809,57 @@ def matches_seed_text(profile: AgentProfile, seed: AgentProfile) -> bool:
     )
 
 
+#: The fields a packaged seed WRITES into a role, in the order divergence
+#: reports them and the fingerprint hashes them. One list so the two cannot
+#: drift: a field added to the comparison but not the fingerprint (or the
+#: reverse) would let sync call an edited row clean or an untouched row edited.
+_SEED_FIELDS: tuple[str, ...] = ("instructions", "description", "tools", "effort", "delegate")
+
+
+def _seed_field_values(profile: AgentProfile) -> tuple[Any, ...]:
+    """The seed-written fields, canonicalized, in ``_SEED_FIELDS`` order.
+
+    ``when_to_use or description`` on both sides, which is the seed side of the
+    historical divergence comparison: a registered profile carries the SAME
+    string in both fields (``profile_from_agent``), so for a row the two
+    spellings are indistinguishable, while a packaged seed's routing text may
+    live only in ``when_to_use``. Normalizing once here is what keeps
+    :func:`seed_divergence` and :func:`seed_fingerprint` from disagreeing about
+    what "the same fields" means.
+    """
+
+    return (
+        (profile.instructions or "").strip(),
+        (profile.when_to_use or profile.description or "").strip(),
+        tuple(profile.tools) if profile.tools else None,
+        profile.effort or None,
+        bool(profile.may_delegate),
+    )
+
+
+def seed_fingerprint(profile: AgentProfile) -> str:
+    """A stable sha256 of the fields :func:`seed_divergence` compares.
+
+    This is the baseline that makes "has this row been EDITED since install?"
+    decidable. Version stamps alone cannot answer it: once the packaged text
+    moves, an untouched row and an edited one both diverge from the package, so
+    a sync keyed on versions and divergence would have to either overwrite
+    unedited installs only-with-``force`` (making the feature useless for its
+    one headline job) or overwrite edits silently. Recording what was actually
+    installed settles it exactly, and covers every field the seed writes — not
+    just the prose — because a widened ``tools:`` allowlist is divergence the
+    restore exists to protect (see :func:`seed_divergence`).
+
+    Deterministic by construction: ``json.dumps`` of a fixed-order list of
+    primitives, non-ASCII kept literal, separators pinned.
+    """
+
+    payload = json.dumps(
+        list(_seed_field_values(profile)), ensure_ascii=False, separators=(",", ":")
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def seed_divergence(profile: AgentProfile, seed: AgentProfile) -> tuple[str, ...]:
     """Which of the seed's own fields an installed role no longer matches.
 
@@ -776,20 +895,11 @@ def seed_divergence(profile: AgentProfile, seed: AgentProfile) -> tuple[str, ...
     a data loss with a friendly message on it.
     """
 
-    diverged: list[str] = []
-    if seed.instructions.strip() != (profile.instructions or "").strip():
-        diverged.append("instructions")
-    if (seed.when_to_use or seed.description or "").strip() != (
-        profile.description or profile.when_to_use or ""
-    ).strip():
-        diverged.append("description")
-    if (profile.tools or None) != (seed.tools or None):
-        diverged.append("tools")
-    if (profile.effort or None) != (seed.effort or None):
-        diverged.append("effort")
-    if bool(profile.may_delegate) != bool(seed.may_delegate):
-        diverged.append("delegate")
-    return tuple(diverged)
+    mine = _seed_field_values(profile)
+    packaged = _seed_field_values(seed)
+    return tuple(
+        field for field, value, expected in zip(_SEED_FIELDS, mine, packaged) if value != expected
+    )
 
 
 def seed_tags(profile: AgentProfile) -> tuple[str, ...]:
@@ -808,6 +918,297 @@ def seed_tags(profile: AgentProfile) -> tuple[str, ...]:
     if profile.may_delegate:
         tags.append("delegate:yes")
     return tuple(tags)
+
+
+# -- update checks -----------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SeedSyncVerdict:
+    """The outcome of checking ONE installed seed-origin row for updates.
+
+    One row per verdict, in the caller's requested order (or by name when
+    nothing was requested), so every surface — the ``agent`` tool, the CLI and
+    the desktop route — renders the same list rather than deriving its own.
+
+    ``applied`` is the part a caller must not infer from ``verdict``: an
+    ``outdated-clean`` row is written on the spot, an ``outdated-diverged`` row
+    is written only when the caller passed ``force``, and a caller that
+    reported "updated" for a refused apply would be this feature's version of
+    every over-claiming receipt this repo has had to fix.
+    """
+
+    name: str
+    verdict: Literal["up-to-date", "outdated-clean", "outdated-diverged", "not-installed"]
+    installed_version: str | None = None
+    packaged_version: str = ""
+    diverged_fields: tuple[str, ...] = ()
+    applied: bool = False
+    #: The instructions REPLACED by an applied update, kept verbatim so the
+    #: overwrite stays recoverable by copy-paste — the same guarantee
+    #: ``op='reset'`` makes, and the reason the clean arm may overwrite at all.
+    replaced_instructions: str | None = None
+    #: ``(field, old value)`` for the non-prose fields an apply replaced, in
+    #: :data:`_SEED_FIELDS` order: the reset echo's second half, so a forced
+    #: overwrite of a widened ``tools:`` allowlist is still recoverable.
+    replaced_fields: tuple[tuple[str, str], ...] = ()
+    detail: str = ""
+
+
+def _field_text(value: Any) -> str:
+    """A replaced field value as one line — ``reset``'s own echo spelling.
+
+    ``None``/empty answer ``(unset)`` rather than a blank, because a blank line
+    beside ``your tools:`` reads as a truncation, and a bool answers yes/no so
+    ``your delegate: False`` cannot be misread as a string field.
+    """
+
+    if value is None or value == "" or value == ():
+        return "(unset)"
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, tuple):
+        return ", ".join(str(item) for item in value)
+    return str(value)
+
+
+#: A recorded install fingerprint: exactly a sha256 hex digest, or it is not
+#: usable as "what was installed" and the row is treated as unprovable rather
+#: than matched against garbage. Same shape check the marker writer produces.
+_SEED_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _marker_value(agent: "AgentData", prefix: str) -> str | None:
+    """The value of the FIRST tag carrying ``prefix`` (case-insensitive), or None.
+
+    Markers are provenance, not authority: the tags array is writable through
+    the desktop routes, agent import and the tool itself, so every reader of a
+    marker treats an absent or malformed value as "not recorded" rather than
+    repairing it into something trusted.
+    """
+
+    for tag in agent.tags or []:
+        text = str(tag).strip()
+        if not text.lower().startswith(prefix):
+            continue
+        value = text[len(prefix) :].strip()
+        return value or None
+    return None
+
+
+def _installed_fingerprint(agent: "AgentData") -> str | None:
+    """The recorded install fingerprint, or None when missing/malformed."""
+
+    value = _marker_value(agent, SEED_SHA256_PREFIX)
+    if value is None or not _SEED_SHA_RE.match(value.lower()):
+        return None
+    return value.lower()
+
+
+def _installed_seed_rows(registry: "AgentRegistry") -> dict[str, "AgentData"]:
+    """Installed seed-origin ROLE rows, keyed by the seed name they fold to.
+
+    ``is_role`` is required on top of :func:`seed_origin` for the same reason
+    ``op='reset'`` checks it before overwriting: an archive can carry a
+    ``seed:`` tag onto a row that is not a role, and an update would then
+    rewrite that row's prompt with role guidance it never asked for. Reads
+    stay tolerant (the caller lists whatever the marker names); writes are
+    what need the guard.
+    """
+
+    rows: dict[str, "AgentData"] = {}
+    for agent in registry.list_agents():
+        if not is_role(agent):
+            continue
+        origin = seed_origin(agent)
+        if origin is None:
+            continue
+        rows[str(origin).strip().lower()] = agent
+    return rows
+
+
+def sync_installed_seeds(
+    registry: "AgentRegistry", *, names: Sequence[str] | None = None, force: bool = False
+) -> list[SeedSyncVerdict]:
+    """Check installed seed-origin roles against the packaged starters; update them.
+
+    The update half of "built-in agents have a way to pull the latest": the
+    package ships an improved prompt, and this is the one call that notices —
+    never automatically on boot (version drift is REPORTED, not applied; the
+    first-run-materialises-on-demand property of seeds is deliberate), and
+    never as a second implementation per surface. The ``agent`` tool, the
+    ``sync`` CLI command and the desktop route all funnel through here.
+
+    ``names=None`` means every installed seed-origin row; a sequence restricts
+    the run to those names (case-folded, the way ``load_seed`` folds) and
+    yields a ``not-installed`` verdict for a name with nothing installable
+    behind it.
+
+    Classification, in order:
+
+    * no divergence from the packaged seed → ``up-to-date`` (nothing to write);
+    * the installed stamp equals the packaged version → ``up-to-date`` with a
+      note when local edits are present: the starter has not moved, so sync
+      has nothing to pull — restoring local edits is ``op='reset'``'s job;
+    * the row still holds EXACTLY what was installed (fingerprint match) while
+      the package moved → ``outdated-clean``, applied immediately through
+      :func:`install_seed` with ``overwrite=True``, echoing what it replaced;
+    * anything else that differs → ``outdated-diverged``, reported with the
+      diverged field list and applied only with ``force=True``.
+
+    Rows installed before the stamps existed have no fingerprint, so they
+    cannot PROVE cleanliness; a moved starter therefore lands in
+    ``outdated-diverged`` and needs ``--force`` once. That is the same safe
+    direction :func:`seed_origin` documents for unmarked rows: withhold the
+    overwrite, never guess it.
+    """
+
+    rows = _installed_seed_rows(registry)
+    requested = None
+    if names is not None:
+        requested = []
+        for raw in names:
+            key = str(raw).strip().lower()
+            if key and key not in requested:
+                requested.append(key)
+
+    verdicts: list[SeedSyncVerdict] = []
+    targets = sorted(rows) if requested is None else requested
+    for key in targets:
+        agent = rows.get(key)
+        if agent is None:
+            verdicts.append(
+                SeedSyncVerdict(
+                    name=key,
+                    verdict="not-installed",
+                    detail=_missing_seed_detail(registry, key),
+                )
+            )
+            continue
+        verdicts.append(_sync_one_seed(registry, key, agent, force=force))
+    return verdicts
+
+
+def _missing_seed_detail(registry: "AgentRegistry", key: str) -> str:
+    """Why a requested name produced no installed seed-origin row.
+
+    Three different situations, and each sends the reader to a different verb:
+    a name nobody installed (the fix is ``op='install'``), a name whose row
+    exists but was authored rather than installed (the fix is ``op='update'``,
+    and the row is NOT a copy of the starter), and a name that is not a
+    starter at all (there is no fix here — the caller asked for the wrong
+    thing). One collapsed sentence would routinely name the wrong one.
+    """
+
+    if _role_named(registry, key) is not None:
+        return "this role was not installed from a packaged starter, so there is nothing to update"
+    if load_seed(key) is not None:
+        return "the packaged starter exists; install it with op='install'"
+    return "no installed role of this name"
+
+
+def _role_named(registry: "AgentRegistry", key: str) -> "AgentData | None":
+    """Any role row whose name folds to ``key``, installed or not."""
+
+    for agent in registry.list_agents():
+        if str(agent.name or "").strip().lower() == key:
+            return agent
+    return None
+
+
+def _sync_one_seed(
+    registry: "AgentRegistry", key: str, agent: "AgentData", *, force: bool
+) -> SeedSyncVerdict:
+    """Classify (and, where allowed, apply) one seed-origin row."""
+
+    seed = load_seed(key)
+    if seed is None:  # pragma: no cover - seed_origin already validated the catalogue
+        return SeedSyncVerdict(
+            name=key,
+            verdict="not-installed",
+            detail="the packaged starter for this row is no longer in the catalogue",
+        )
+
+    profile = profile_from_agent(registry, agent)
+    installed_version = _marker_value(agent, SEED_VERSION_PREFIX)
+    packaged_version = load_seed_version(key)
+    diverged = seed_divergence(profile, seed)
+    baseline = _installed_fingerprint(agent)
+    mine = _seed_field_values(profile)
+
+    def _verdict(**overrides: Any) -> SeedSyncVerdict:
+        base: dict[str, Any] = dict(
+            name=key,
+            installed_version=installed_version,
+            packaged_version=packaged_version,
+            diverged_fields=diverged,
+        )
+        base.update(overrides)
+        return SeedSyncVerdict(**base)
+
+    def _replaced_fields() -> tuple[tuple[str, str], ...]:
+        """``(field, old value)`` for the non-prose fields an apply replaces.
+
+        The reset echo, kept here too: ``your tools: read, grep`` is the line
+        that makes a forced overwrite recoverable, and the instructions (the
+        multi-line part) ride separately in ``replaced_instructions``.
+        """
+
+        values = dict(zip(_SEED_FIELDS, mine))
+        return tuple(
+            (field, _field_text(values.get(field))) for field in diverged if field != "instructions"
+        )
+
+    if not diverged:
+        return _verdict(
+            verdict="up-to-date",
+            detail=f"matches the packaged starter ({packaged_version or 'unversioned'})",
+        )
+
+    if installed_version is not None and installed_version == packaged_version:
+        # The packaged starter has not moved since this row was installed, so
+        # the difference is a local edit and there is nothing to PULL. Sync
+        # reports the row as current rather than nagging: applying would mean
+        # silently reverting someone's work, which is `reset`'s explicit job.
+        return _verdict(
+            verdict="up-to-date",
+            detail=(
+                f"no update to pull (installed {installed_version}); "
+                "this copy has local edits — see op='show'"
+            ),
+        )
+
+    if baseline is not None and seed_fingerprint(profile) == baseline:
+        # Provably untouched since install, and the package moved: apply. This
+        # is the ordinary "user updates local-operator, runs sync" path, and it
+        # is safe precisely because the fingerprint proves no local edit can be
+        # lost — the echo of the replaced text is kept anyway, matching reset.
+        applied = install_seed(key, registry=registry, overwrite=True)
+        return _verdict(
+            verdict="outdated-clean",
+            applied=applied is not None,
+            replaced_instructions=profile.instructions or "",
+            replaced_fields=_replaced_fields() if applied is not None else (),
+            detail="the packaged starter changed; this copy was unedited",
+        )
+
+    # Not provably clean: the row differs from what was installed (or predates
+    # the fingerprint), and the packaged starter has moved. Never overwrite a
+    # possibly-edited prompt without an explicit force — the same refusal
+    # `reset` makes for rows it cannot prove the harness wrote.
+    applied = install_seed(key, registry=registry, overwrite=True) if force else None
+    return _verdict(
+        verdict="outdated-diverged",
+        applied=applied is not None,
+        replaced_instructions=(profile.instructions or "") if applied is not None else None,
+        replaced_fields=_replaced_fields() if applied is not None else (),
+        detail=(
+            "forced over local edits"
+            if applied is not None
+            else "re-run with force to replace it"
+            + (f" (installed {installed_version})" if installed_version else " (no install record)")
+        ),
+    )
 
 
 #: Anything with a ``.name``; the tool types live in ``harness.types`` and
