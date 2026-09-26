@@ -383,6 +383,25 @@ class CreatedSession(BaseModel):
     replayed: bool = False
 
 
+class DraftReceipt(BaseModel):
+    """The id a mint hands the new-chat pane (spec §1.1).
+
+    ``draft_id`` is the ``uuid4().hex[:12]`` session-id shape, and it is the
+    ONLY thing this answer carries: the renderer threads it into its ``/events``
+    subscription, its ``/watch`` beats, its warm and finally its create, and no
+    other fact about the draft is ever exposed on this wire.
+    """
+
+    draft_id: str
+    #: Set by the receipt journal when this answer was replayed rather than
+    #: re-run (``DesktopReceipts.run``), exactly as ``CreatedSession`` does. It
+    #: MUST be declared: FastAPI validates the reply against this model as the
+    #: route's ``response_model``, so an undeclared ``replayed`` is silently
+    #: dropped on the way out, and a StrictMode retry — the very retry this
+    #: receipt exists for — would be indistinguishable from a fresh mint.
+    replayed: bool = False
+
+
 class HistoryEntry(BaseModel):
     id: str
     ts: float

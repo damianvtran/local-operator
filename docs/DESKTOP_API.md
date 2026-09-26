@@ -545,7 +545,8 @@ readings.
 | --- | --- | --- |
 | GET `/v1/desktop/sessions` | `limit` 1..500, default100; `include_archived`; and with the `session_catalogue_page` key `scope_kind`, `scope_name`, `cursor`, `with_counts` | `{sessions:[...],truncated,limit,degraded,next_cursor,cursor_missing,scope,counts}` - canonical rows plus explicit desktop drafts, then any off-page pinned rows (**first page of the head only**) |
 | GET `/v1/desktop/sessions/search` | `q` (<=256 chars), `limit` 1..500, default100 | `{sessions:[{id,name,mtime,forked,rank,body_match}],query,limit}`, best match first |
-| POST `/v1/desktop/sessions` | `{request_id, cwd, target?, model?}` | `{session_id}`; cwd must exist |
+| POST `/v1/desktop/sessions` | `{request_id, cwd, target?, model?, draft_id?}` | `{session_id}`; cwd must exist; a `draft_id` materialises that draft (unknown/expired → a fresh id; already materialised → `422` `draft_already_materialised`) |
+| POST `/v1/desktop/sessions/draft` | `{request_id, cwd, target?, model?}` | `{draft_id, replayed?}`; registers an in-memory warmable draft — no directory, no runtime, no listing row (`session_draft_warm`) |
 | POST `/v1/desktop/sessions/preview` | `{request_id, cwd, target?, model?}` | `{frontend: <wire sync payload>}` for a session that does not exist |
 | POST `.../{id}/working-directory` | `{request_id, cwd}` | `{cwd,label,outcome:cold\|rebound\|unchanged,will_wait}`; gated by `features.session_move >= 2` AND `features.frontend_replace >= 1` |
 | GET `/v1/desktop/sessions/{id}` | — | snapshot frame below (**read envelope**) |
@@ -558,6 +559,49 @@ readings.
 | POST `.../{id}/notified` | `{completion_token}` | `{claimed:bool}`; cold, never marks read |
 | POST `.../{id}/seen` | `{completion_token}` | `AttentionState`; 409 when the token is not this conversation's current completion |
 | POST `/v1/desktop/attention/seen` | `{items:[{session_id,completion_token}]}`, 1..500 items | `{read:[<store state>], superseded:[session_id], unknown:[session_id]}`; cold, 200 even when nothing cleared |
+
+
+### Pre-engaging a new chat (`session_draft_warm: 1`)
+
+A brand-new chat's first send otherwise pays the whole cold engage inline — the
+`/warm` story above, for a conversation that does not exist yet. A renderer that
+sees `session_draft_warm` may move that engage off the send path:
+
+1. On the pane's first keystroke, `POST /v1/desktop/sessions/draft` with the same
+   `{request_id, cwd, target?, model?}` body `create` takes. It runs the SAME
+   admissions, registers an in-memory draft, and answers `{draft_id}`. The mint
+   writes NOTHING: no directory, no marker, no runtime. Its `request_id` IS
+   journalled, so a retry (a StrictMode double-effect, a lost response) returns
+   the same id — two ids for one pane would warm two runtimes.
+2. The pane opens `GET .../{draft_id}/events` and beats `POST .../{draft_id}/watch`
+   with the subscription the stream published, exactly as for a session. THEN it
+   fires `POST .../{draft_id}/warm`. The ordering is a precondition, not advice:
+   a warm whose only bridge user is its own request is cancelled when that
+   request returns (see the `/warm` note below).
+3. On send, it posts the ordinary `create` body with `draft_id` added. A
+   REGISTERED draft is used as the session id and consumed; unknown / expired /
+   evicted / lost (a daemon restart) mints a fresh id — the warm was wasted and
+   the send still works; an id that already became a conversation REFUSES with
+   the typed `422 draft_already_materialised`, because answering it with a
+   different, empty conversation is the one thing this contract must not do.
+
+**What a draft unlocks, and what it does not.** A draft id is not an
+authorization surface: exactly five routes resolve it — `snapshot`, `history`,
+`watch`, `warm` and `events` — and every other door (messages, commands, answers,
+interrupt, move, children, the lifecycle routes) refuses it exactly as it would
+refuse an unknown id, until `create` materialises it and it becomes an ordinary
+session id with every refusal ladder unchanged.
+
+**Lifecycle, stated honestly.** The registry is in memory: a 30-minute TTL, 32
+entries (minting at the cap evicts the oldest), single-use, and LOST on a daemon
+restart. A draft's warm DOES engage a runtime, and the engage leaves exactly two
+bookkeeping files in the draft's own session directory — `.execution-lease` and
+`.session.pid` (measured) — which every listing ignores: the catalogue ranks by
+the transcript and the mail spool, and a row needs the `desktop.json` marker
+that only `create` writes. An abandoned pane therefore leaves no visible row
+anywhere and its runtime exits through the ordinary residency drain; `create`
+tolerates that residue directory, and its marker write is what materialises the
+session.
 
 
 ### Scoping and paging the catalogue (`session_catalogue_page: 1`)
@@ -1948,6 +1992,7 @@ absent.
 | `mcp_catalog` | 1 | `GET|POST /v1/desktop/mcp` and `POST /v1/desktop/mcp/credentials`: MCP list, add, remove, test, sign-in and credentials with NO session and NO configured model, in the catalog vocabulary (`connected`/`needs_sign_in`/`not_started`/`connecting`/`error`, per-row `actions`, bounded refusal codes) — see [DESKTOP_CONTROLS.md](DESKTOP_CONTROLS.md) | the app keeps the session-scoped `/v1/desktop/sessions/{id}/mcp` path verbatim; it must NOT show "update the backend", because that path still works |
 | `tunnel` | 1 | `GET /v1/desktop/tunnel`, and `radient_login`/`tunnel_remedy` on `GET /v1/auth/status` | the app shows no tunnel state and no sign-in callout, and the account section keeps its current wording — it must not read the absent key as "the tunnel is fine" |
 | `subagent_trajectory` | 1 | `POST`/`DELETE /v1/desktop/sessions/{id}/children/{job}/trajectory` and the per-job `job_trajectory_appends`/`job_trajectory_replacements` fields they turn on | the child reader keeps its durable pager, opens no watch, and its session's frames carry the empty pair they always have (the opt-in is per session, so an app that opens no reader for ANY child gets exactly today's frames) |
+| `session_draft_warm` | 1 | `POST /v1/desktop/sessions/draft`, the `draft_id` field on `POST /v1/desktop/sessions`, and the five-door resolution of a registered draft id (`snapshot`, `history`, `watch`, `warm`, `events`) | the app never mints a draft and sends every create exactly as today (`draft_id` omitted), paying the cold engage on a new chat's first send; it must NOT gate any existing surface on this key — the warm is an optimisation on a send path that already works |
 | `session_catalogue_page` | 1 | `scope_kind`/`scope_name`/`cursor`/`with_counts` on `GET `/v1/desktop/sessions``, and `next_cursor`/`cursor_missing`/`scope`/`counts` in its answer | the app keeps today's exact behaviour: one unscoped `limit=500` request is the only shape it may send. It must NOT send a scope or a cursor to a daemon that does not advertise this key -- unknown query parameters are IGNORED rather than refused, so a scope would be answered with the unfiltered listing drawn under that group's name, and a cursor with page one again |
 
 Neither bumps `notification_contract`, which stays 1: the payload is unchanged
