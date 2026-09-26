@@ -2603,7 +2603,40 @@ class RuntimeServer:
             )
             port = self._server.sockets[0].getsockname()[1]
             self._record.control_port = port
-            self._publisher = RecordPublisher(self._record, self._config_root)
+            # INSTALL THE PUBLISHER BEFORE ITS RECORD CAN BE READ, and the
+            # ordering is the guarantee rather than housekeeping: ``_republish``
+            # no-ops while ``self._publisher`` is unset, so a record made
+            # readable before the assignment (which the constructor's own
+            # publish did) leaves a window where a write-through — a drain's
+            # ``note_leaving``, a turn's ``set_record_started`` — lands on the
+            # record object, no-ops against the attribute, and the readable
+            # file keeps its pre-write state until the next 15 s heartbeat.
+            # Thread preemption alone opens it, which is how the CI shards
+            # flaked reading ``leaving == ''`` (test_cold_join_against_drain)
+            # and ``started`` False (test_started_survives_the_republish);
+            # reversing the order gives a reader the invariant the tests
+            # assume — a readable record is one whose write-throughs land.
+            publisher = RecordPublisher(self._record, self._config_root, defer_publish=True)
+            self._publisher = publisher
+            try:
+                publisher.publish()
+            except Exception:
+                # A failed first publish must leave the boot exactly as the
+                # constructor-native failure did — no publisher, so
+                # ``wait_until_published`` still answers False — and no
+                # readable record either. The record half is why the close is
+                # here: a session thread's write-through can COMPLETE a
+                # heartbeat while this publish is in flight, and without the
+                # close that record outlives the rollback (nothing else
+                # unlinks it — ``_shutdown_impl`` unpublishes only behind a
+                # publisher, and thread mode swallows the raise). The close
+                # serialises with the writes (``RecordPublisher.close``), so
+                # it removes whatever raced it and refuses what comes after;
+                # it is best-effort, so it cannot mask the original failure.
+                # (agent review round 1, R1-1.)
+                self._publisher = None
+                publisher.close()
+                raise
             # BOTH BOOT REGISTRATIONS ARE PERFORMED ON THE SESSION'S LOOP. The
             # append itself is thread-tolerant, but the body of the same call is
             # not: ``subscribe`` folds the session's history, reconciles the
@@ -2668,14 +2701,15 @@ class RuntimeServer:
                 self._attention_task = asyncio.create_task(self._attention_loop())
         finally:
             # RELEASE THE DEFERRED MCP WIRING ON EVERY WAY OUT OF THIS PROLOGUE,
-            # not only the happy one. The record is written inside
-            # ``RecordPublisher.__init__``, so on the success path this is
-            # genuinely post-publication; a bind that raises reaches here too,
-            # and that case matters because ``_run`` (thread mode) swallows the
-            # exception and the process lives on — with no record and, without
-            # this, a latch shut for the session's life. MCP late beats MCP
-            # never, and the release cannot mask the failure: the exception
-            # still propagates.
+            # not only the happy one. The record is written by
+            # ``RecordPublisher.publish()`` — from the constructor by default,
+            # explicitly on this deferred boot path — so on the success path
+            # this is genuinely post-publication; a bind that raises reaches
+            # here too, and that case matters because ``_run`` (thread mode)
+            # swallows the exception and the process lives on — with no record
+            # and, without this, a latch shut for the session's life. MCP late
+            # beats MCP never, and the release cannot mask the failure: the
+            # exception still propagates.
             # See ``RuntimeServer._open_mcp_wiring_gate``.
             self._open_mcp_wiring_gate()
             # THE SERVING LATCH OPENS HERE, on every way out and in the same
@@ -4279,6 +4313,11 @@ class RuntimeServer:
         failure costs a marker rather than a session. Called on every
         transition rather than left to the 15 s heartbeat because the value of
         these fields is that they are current when somebody looks.
+
+        The no-op below when the publisher is not installed yet cannot lose
+        anything a reader can see — ``_serve`` publishes the record only AFTER
+        installing the publisher, so a record that exists implies this call
+        finds one to write through.
         """
         publisher = getattr(self, "_publisher", None)
         if publisher is None:
