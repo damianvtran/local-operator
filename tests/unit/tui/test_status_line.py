@@ -2296,3 +2296,107 @@ def test_the_last_rate_segment_is_labelled_and_sheds_before_cost() -> None:
     # contain the word `last`, which would make a substring check pass for the
     # wrong reason (review round 1).
     assert ICON_LAST_RATE not in rendered and "—" not in rendered
+
+
+# --------------------------------------------------------------------------
+# The liveness row (tui/liveness.py): present IFF the reader is not LIVE.
+# --------------------------------------------------------------------------
+
+
+def test_the_connection_row_is_absent_exactly_when_the_reader_is_live(monkeypatch) -> None:
+    """The designer's checkable form, at the widget that paints it.
+
+    `LIVE` renders NOTHING — a live claim is up to a budget stale by
+    construction, so painting one would re-introduce the fresh confident-wrong
+    statement the reader exists to remove. Every other state takes the row.
+    """
+    from local_operator.tui.liveness import LIVENESS_TEXT, OwnerLiveness, liveness_text
+
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_SHIMMER", "1")
+    name = "a conversation whose name is long enough to be clipped at 62 cells"
+    for state in OwnerLiveness:
+        text = liveness_text(state, now=1_000_000.0, verified_at=1_000_000.0 - 240.0)
+        status = StatusLine(_dock(62))
+        status.update(connection=text, conversation_name=name)
+
+        plain = status.render_text(62).plain
+        present = name in plain or any(head in plain for head in (text.split(" · ")[0],) if head)
+        assert present is (
+            state is not OwnerLiveness.LIVE
+        ), f"{state}: connection={text!r} painted {plain!r}"
+        if state is OwnerLiveness.LIVE:
+            assert text == LIVENESS_TEXT[OwnerLiveness.LIVE] == ""
+
+
+def test_a_stale_row_is_muted_without_a_spinner_and_coming_keeps_the_glyph(monkeypatch) -> None:
+    """Designer §5: the words carry the state, and no glyph means "silence".
+
+    `STALE` is provisional, so it takes the row's muted register — `danger` stays
+    the latch's terminal verdict — and it gets NO spinner, because a spinner
+    claims something is arriving while STALE means nothing is. `COMING` is the
+    opposite case and keeps the glyph the connect path already drives.
+    """
+    from local_operator.tui.liveness import LIVENESS_TEXT, OwnerLiveness, liveness_text
+
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_SHIMMER", "1")
+    stale = liveness_text(OwnerLiveness.STALE, now=1_000_000.0, verified_at=1_000_000.0 - 240.0)
+    assert stale == "Not answering · 4m"
+
+    quiet = StatusLine(_dock(62))
+    quiet.update(connection=stale, connection_muted=True)
+    quiet.set_connecting(False)
+    muted = quiet.render_text(62)
+
+    loud = StatusLine(_dock(62))
+    loud.update(connection="Saved · Reconnect failed · Select again to retry")
+    loud.set_connecting(False)
+    loud_plain = loud.render_text(62).plain
+
+    # The STALE word survives at the designer's bound, and the row asks for no
+    # more cells than it has (the band is one row and cannot wrap).
+    assert "Not answering" in muted.plain
+    assert cell_len(muted.plain) <= 62
+    assert "Not answering" not in loud_plain
+
+    # COMING is the opposite case and keeps the glyph the connect path drives.
+    coming = StatusLine(_dock(62))
+    coming.update(connection=LIVENESS_TEXT[OwnerLiveness.COMING], connection_muted=False)
+    coming.set_connecting(True)
+    coming._spinner_index = 2
+    assert LIVENESS_TEXT[OwnerLiveness.COMING].rstrip("…") in coming.render_text(62).plain
+
+
+def test_the_composed_fork_and_liveness_row_fits_and_keeps_the_age_last(monkeypatch) -> None:
+    """The composition, at the sizes the reviewer measured.
+
+    `forking · esc` and `Not answering · 4m` are COMPLEMENTARY: one says what you
+    can still do, the other says why the window will not arrive. Composed they
+    measured 35 of the band's 62 cells, so this is a choice rather than a
+    constraint -- but composing must not move the AGE out of final position, or a
+    narrow terminal starts truncating a word instead of a duration.
+    """
+    from local_operator.tui.liveness import OwnerLiveness, liveness_text
+    from local_operator.tui.widgets.status_line import FORK_PENDING_TEXT
+
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_SHIMMER", "1")
+    name = "Fix sidebar reconnect on session switch"
+    composed = (
+        f"{FORK_PENDING_TEXT} · "
+        f"{liveness_text(OwnerLiveness.STALE, now=1_000_000.0, verified_at=1_000_000.0 - 240.0)}"
+    )
+    assert composed == "forking · esc · Not answering · 4m", composed
+
+    for width in (120, 77, 62, 40):
+        status = StatusLine(_dock(width))
+        status.update(connection=composed, connection_muted=True, conversation_name=name)
+        status.set_connecting(False)
+        row = status.render_text(width).plain
+
+        assert cell_len(row) <= width, (width, row)
+        # Both facts survive at every width, and in that order.
+        assert "forking" in row and "Not answering" in row, (width, row)
+        assert row.index("forking") < row.index("Not answering"), (width, row)
+        # THE AGE IS LAST: whatever the ellipsis eats, it is never the age while
+        # the head is intact.
+        if "Not answering" in row and "4m" not in row:
+            assert row.rstrip().endswith(("\u2026", "…", "reconnec…")), (width, row)

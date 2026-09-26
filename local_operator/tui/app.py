@@ -235,6 +235,13 @@ from local_operator.tui.events import (
 )
 from local_operator.tui.glyphs import display_name
 from local_operator.tui.link_targets import LinkTarget, build_link_targets, is_openable
+from local_operator.tui.liveness import (
+    LIVENESS_PROBE_EVERY_S,
+    LivenessProbe,
+    OwnerLiveness,
+    liveness_text,
+    owner_liveness,
+)
 from local_operator.tui.markdown_theme import (
     brand_markdown_theme,
     install_markdown_theme,
@@ -364,6 +371,9 @@ from local_operator.tui.widgets.settings_view import (
     SettingsPreview,
     SettingsView,
     SettingsViewDismissed,
+)
+from local_operator.tui.widgets.status_line import (
+    FORK_PENDING_TEXT as _FORK_PENDING_TEXT,
 )
 from local_operator.tui.widgets.status_line import (
     ICON_APPROVALS,
@@ -8865,6 +8875,78 @@ class OperatorApp(App[None]):
                 source.draft.scroll_anchor_part = anchor.navigation_anchor_part
                 source.draft.scroll_offset = top - anchor.region.y
 
+    def _probe_foreground_liveness(self) -> None:
+        """Ask the FOREGROUND session's owner, then repaint only if it changed.
+
+        The cadence is checked here rather than trusted to the interval, so a
+        coarse timer cannot probe more often than the budget needs. Nothing is
+        asked of a session that is not a viewer (an owner-side `Session` never
+        dials), and the worker is non-exclusive with ``exit_on_error=False``: a
+        probe is a health check, and a health check that can take the app down is
+        worse than the staleness it reports.
+        """
+        source = self._interaction
+        session = getattr(source, "session", None)
+        if session is None or not _is_viewer(session):
+            return
+        now = time.time()
+        if not self._liveness_probe.due(self._liveness_probe_last, now=now):
+            return
+        self._liveness_probe_last = now
+        self.run_worker(
+            self._reprobe_liveness(source, session),
+            group="liveness-probe",
+            exclusive=False,
+            exit_on_error=False,
+        )
+
+    def _liveness_row_text(self, session: Any, *, now: float | None = None) -> str:
+        """The exact string the row would paint for ``session`` right now.
+
+        THE REPAINT GATE IS ON THIS STRING, NOT ON THE VERDICT ENUM, and the
+        difference is the whole feature. A FAILED probe deliberately touches
+        nothing, so before and after are both STALE and an enum comparison says
+        "nothing changed" — which meant the one verdict the row exists to report
+        was the one that could never be painted: measured on the real app with a
+        silent owner and no other input, six probes over 1800 s produced ZERO
+        repaints and the row only appeared if the operator switched
+        conversations. Comparing the RENDERED text keeps the correct property
+        (a failed probe does not clear the stamp) while letting the failing arm
+        repaint, because the *rendering* changes as the age grows: STALE at 4 m
+        and STALE at 10 m are different rows even though they are one state.
+        """
+        verdict = owner_liveness(session, now=now)
+        if verdict is OwnerLiveness.LIVE:
+            return ""
+        return liveness_text(verdict, now=now, verified_at=getattr(session, "verified_at", None))
+
+    async def _reprobe_liveness(self, source: SessionInteraction, session: Any) -> None:
+        """One bounded probe, and a repaint when the row WOULD DIFFER FROM THE SCREEN.
+
+        THE COMPARISON IS AGAINST WHAT IS PAINTED, not against a snapshot taken at
+        the top of this callback, and that distinction is the whole fix. Comparing
+        before/after AROUND the probe cannot see the transition the row exists to
+        report, because it does not happen during a probe: the owner goes quiet,
+        the stamp expires BETWEEN two ticks, and by the time the next tick runs
+        both its "before" and its "after" are the same stale text -- so an owner
+        that stopped answering produced ZERO repaints over 1800 s and six probes,
+        and the row appeared only if the operator switched conversations.
+
+        Comparing against the painted string catches every case that matters and
+        nothing else: LIVE -> STALE between ticks (painted ``""``, current stale
+        text) repaints; STALE 4m -> STALE 5m repaints; a failed probe that changed
+        nothing does not. The probe still never clears the stamp, so T6 holds --
+        a failure narrows the window instead of resetting it.
+        """
+        await self._liveness_probe.tick(session)
+        if not self._is_current(source):
+            return
+        current = self._liveness_row_text(session)
+        if current == self._liveness_painted:
+            return
+        self._show_sidebar_connection(source)
+        self._liveness_painted = current
+
     def _show_sidebar_connection(self, source: SessionInteraction) -> None:
         if not self._is_current(source):
             return
@@ -8935,6 +9017,61 @@ class OperatorApp(App[None]):
                     status = f"{saved} · Answer the question above"
                 else:
                     status = f"{saved} · Reconnect failed · Select again to retry"
+        # LIVENESS FILLS THE GAP; it does not overwrite a better answer.
+        #
+        # `status` is still empty here only for a source that is neither a saved
+        # excerpt nor unable to bind — the ordinary live session — so the term
+        # enters BELOW every existing sentence rather than beside them (designer
+        # §7.3: `STOPPED_SESSION_NOTICE` and `Reconnect failed · Select again to
+        # retry` are more specific and win). It is also the branch the operator's
+        # own case lands in: a SIGSTOPped owner leaves `is_cold` False, so nothing
+        # above has anything to say, which is exactly the lie this row now
+        # corrects.
+        #
+        # GUARDED TO VIEWERS (§7.2): `owner_liveness` on an owner-side `Session`
+        # is NEVER — it has no stamp because it never dials — and `No owner`
+        # painted about a process that IS the owner would be a new
+        # confident-wrong statement rather than a fix for an old one.
+        # COMPETING VERDICTS SUPPRESS, COMPLEMENTARY VERDICTS COMPOSE.
+        #
+        # The connection row is a whole-row TAKEOVER, so whatever lands in it is
+        # all the band says. CI caught the first cut of this hiding `forking · esc`
+        # on a conversation with a live fork and a silent owner -- but suppressing
+        # there was wrong for a sharper reason than precedence: a pending fork is
+        # DRAINED BY THE OWNER'S OWN LOOP at a TURN BOUNDARY, so a stopped owner
+        # never reaches one and `/fork` never arrives *while the band promises it
+        # will*. `esc` still works (``cancel_fork`` is a local ``_fork_pending =
+        # None``), which is why the fork keeps its place; and the liveness term is
+        # the ONLY thing that explains why the window will not arrive. Dropping it
+        # leaves the operator to read a frozen owner as his own choice -- the
+        # failure mode he reported, on the fork path.
+        #
+        # So the app's own text wins only where it answers the SAME QUESTION ("is
+        # this session being served?"). `STOPPED_SESSION_NOTICE` and `Reconnect
+        # failed · Select again to retry` do, and they already own `status` above,
+        # so this branch never runs for them. A pending fork states a DIFFERENT
+        # fact -- what you can do -- so the two compose, and the AGE STAYS LAST so
+        # the row's ellipsis still eats the age rather than a word.
+        fork_probe = getattr(source.session, "has_pending_fork", None)
+        fork_pending = bool(fork_probe()) if callable(fork_probe) else False
+        if not status and _is_viewer(source.session):
+            verdict = owner_liveness(source.session)
+            if verdict is not OwnerLiveness.LIVE:
+                text = liveness_text(
+                    verdict,
+                    verified_at=getattr(source.session, "verified_at", None),
+                )
+                status = f"{_FORK_PENDING_TEXT} · {text}" if fork_pending else text
+                # STALE is PROVISIONAL — a long turn ends, a SIGCONT lands, a
+                # starved loop catches up — so it takes the muted register and NOT
+                # `danger`, which stays the latch's terminal verdict. The same
+                # holds for NEVER, which is the ORDINARY state of a conversation
+                # nothing is serving and must not read as an error.
+                instruction = verdict is not OwnerLiveness.COMING
+                # AND NO SPINNER ON STALE OR NEVER: a spinner claims something is
+                # arriving, and neither state has anything coming. COMING keeps the
+                # glyph, exactly as the connect path does.
+                connecting = verdict is OwnerLiveness.COMING
         if self._status is not None:
             self._status.update(connection=status, connection_muted=instruction)
             # The glyph is what tells the user the app is working rather than
@@ -10226,6 +10363,20 @@ class OperatorApp(App[None]):
     async def on_mount(self) -> None:
         install_markdown_theme()
         self._sidebar_timer = self.set_interval(2.0, self._refresh_sidebar, pause=True)
+        # THE FOREGROUND OWNER PROBE. `verified_at` is written only on a wire
+        # answer and every one of those surfaces is EVENT-DRIVEN, so without this
+        # a healthy but QUIET session's stamp ages past the budget and the band
+        # would say `Not answering · 4m` about a session that is fine — the age
+        # measuring the absence of questions rather than of answers. Off the paint
+        # path by construction: this ticks on the loop, the probe is bounded, and
+        # the paint itself only ever compares a clock.
+        self._liveness_probe = LivenessProbe()
+        self._liveness_probe_last: float | None = None
+        #: The liveness text the band is currently SHOWING. The repaint gate is a
+        #: comparison against this rather than against a snapshot taken around the
+        #: probe; see ``_reprobe_liveness`` for why that is the whole fix.
+        self._liveness_painted: str = ""
+        self.set_interval(LIVENESS_PROBE_EVERY_S, self._probe_foreground_liveness)
         self._apply_sidebar_settings()
         try:
             self.console.push_theme(brand_markdown_theme())  # D1 markdown ramp
