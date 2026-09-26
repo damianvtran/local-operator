@@ -3984,32 +3984,60 @@ class DesktopSessionBridge:
             # business.
             pending = sys.exc_info()[1]
             if self._closing:
-                reason, level = "bridge dispose", logging.INFO
+                reason = "bridge dispose"
             elif sub.overflow:
-                reason, level = "subscriber overflow", logging.INFO
+                reason = "subscriber overflow"
             elif pending is not None and not isinstance(
                 pending, (GeneratorExit, asyncio.CancelledError)
             ):
-                reason, level = f"relay error: {type(pending).__name__}", logging.WARNING
+                reason = f"relay error: {type(pending).__name__}"
             else:
-                reason, level = "client disconnect", logging.INFO
-            # OBSERVABLE THROUGH THE EXISTING LOG-LEVEL KNOB, and deliberately not
-            # through a switch of this module's own (F-C). The reason vocabulary
-            # is the only thing that can say WHY a stream ended, and it reaches no
-            # log on a default daemon because the app captures WARNING and above
-            # while these are INFO -- measured, 0 ``[INFO] local_operator`` lines
-            # against 9,687 WARNING+ ones. The knob for that is already
-            # first-class: ``LOG_LEVEL=INFO`` (``local_operator/logger.py``,
-            # applied to the root logger by ``configure_console_logging``) and the
-            # line is captured, ONE emission per stream END, never per frame.
+                reason = "client disconnect"
+            # WARNING, NOT INFO, FOR THE REASON ``server/retire.py`` ALREADY
+            # RECORDS: the daemon's console logging runs at ``LOG_LEVEL``'s
+            # default WARNING, so three of these four reasons were written and
+            # never captured -- measured on the operator's daemon, 0 ``[INFO]
+            # local_operator`` lines in ``backend-service.log`` against 9,687
+            # WARNING+ ones. A line nobody sees is not a notice, and there is no
+            # second log to read: the daemon's stdout and stderr both land in that
+            # one file, and ``serve-1111.log`` does not exist.
             #
-            # NOT an environment read here. This package has exactly one reader of
-            # the desktop environment -- ``desktop.desktop_posture`` -- and
+            # WHY NOT THE TWO OTHER ROUTES TO IT. ``LOG_LEVEL=INFO``
+            # (``local_operator/logger.py``, applied to the root logger by
+            # ``configure_console_logging``) would also capture the line, at the
+            # price of capturing every INFO line in the package to answer one
+            # question on a machine nobody reconfigures. A switch of this module's
+            # own is worse (F-C): this package has exactly one reader of the
+            # desktop environment -- ``desktop.desktop_posture`` -- and
             # ``tests/unit/server/test_desktop_claim.py`` asserts it mechanically;
             # a second read beside it, even for a trace flag, is the shape that
-            # guard exists to stop.
-            logger.log(
-                level,
+            # guard exists to stop. Promoting the one line that carries the answer
+            # is the smallest of the three.
+            #
+            # WHAT IT SETTLES. The stream churn has two candidate drivers and on
+            # the operator's machine they are INDISTINGUISHABLE: the relief valve
+            # disconnecting a viewer (``subscriber overflow``) and the
+            # cancelled-teardown ordering that destroyed the facade before the
+            # dwell could arm (``client disconnect`` at the storm's cadence). Both
+            # rotate the epoch through the same ``_detach``, and the shipped client
+            # names the SSE close cause nowhere, so neither leaves a client-side
+            # trace. The words below are that discriminator, and the vocabulary is
+            # deliberately unchanged -- what changes is only whether it survives to
+            # a log.
+            #
+            # ONE LINE PER STREAM END, NEVER PER FRAME, AND DELIBERATELY NOT
+            # DAMPED: the RATE is the signal here -- the answer is a count of
+            # ``client disconnect`` against ``subscriber overflow`` over a window,
+            # so an interval that quieted repeats would sample the ratio this line
+            # exists to report. The rate is bounded by the churn itself (the
+            # measured storm: ~4 stream ends a minute, 60 opens over 14.6 minutes)
+            # and the file by its owner: the desktop app's log transport caps
+            # ``backend-service.log`` at 10 MB and rotates the overflow to
+            # ``backend-service.old.log`` (measured: 10.03 MiB beside the fresh
+            # file). If a future shape ever outran that bound, the pattern to
+            # reach for is the attention poll's transition damping above, not an
+            # interval on this line.
+            logger.warning(
                 "desktop stream ended for %s (sub=%s): %s",
                 self.session_id,
                 sub.id[:8],
