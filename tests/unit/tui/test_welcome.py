@@ -1248,11 +1248,17 @@ def test_the_tip_is_quieter_than_the_hints_it_sits_under() -> None:
     assert _contrast(glyph, ground) < _contrast(body, ground)
 
 
-def test_fork_tips_cover_commands_settings_and_backend_detection() -> None:
+def test_fork_tips_cover_commands_and_settings() -> None:
     """Discovery names the real entry points without promising one backend's UI.
 
-    The cmux-only placement is qualified explicitly; terminal detection stays
-    capability-shaped because not every supported backend has workspaces.
+    The cmux-only placement is qualified explicitly — that qualifier is what
+    keeps the row from reading as "this app is cmux-only", and since the mesh
+    tip took the mechanism clause's slot it is the ONLY place the pool says so:
+    `lop detects terminal or multiplexer, then picks placement` retired for it
+    (see the pool's own note), because it was the pool's one entry whose subject
+    was the mechanism rather than something a person can act on. What a reader
+    can act on is what is still asserted here: where the setting lives, and the
+    multiplexer case that needs the other spelling.
     """
     fork_tips = [
         tip
@@ -1266,9 +1272,31 @@ def test_fork_tips_cover_commands_settings_and_backend_detection() -> None:
     assert "/settings → Fork → Where a fork opens" in joined
     assert "Under cmux, Where it opens" in joined
     assert "workspace or surface" in joined
-    assert "detects terminal or multiplexer" in joined
-    assert "then picks placement" in joined
     assert all(word not in joined.lower() for word in ("always", "unsupported"))
+
+
+def test_the_mesh_tip_names_a_subcommand_the_handler_accepts() -> None:
+    """One word deeper than the generic check can see.
+
+    ``test_every_tip_names_something_this_build_answers`` proves the leading
+    ``/token`` is a real command, which for a tip that spells a SUBCOMMAND is
+    only half the claim: ``/network new`` is accepted or refused by
+    ``NETWORK_SUBCOMMANDS``, a table the registry does not consult. The pool's
+    stated rule — a splash advertising a command the app rejects is worse than a
+    blank row — is therefore asserted against the family's own vocabulary here.
+
+    The word matters in both directions: ``new`` is the CLI's spelling of
+    ``init`` (the verb a user reads is not the verb a shell types), so the token
+    in the pool and the word the handler matches are deliberately different
+    tables, and this is the test that keeps the row pointing at the first one.
+    """
+    from local_operator.slash_commands import NETWORK_SUBCOMMANDS
+
+    mesh_tips = [tip for tip in TIPS if tip.startswith("/network")]
+    assert mesh_tips, "the mesh has no entry in the pool"
+    for tip in mesh_tips:
+        word = tip.split()[1]
+        assert word in NETWORK_SUBCOMMANDS, f"{tip!r} names a refused subcommand: {word}"
 
 
 def test_advancing_the_rotation_changes_the_tip_and_never_the_row_count() -> None:

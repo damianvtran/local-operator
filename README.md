@@ -380,6 +380,14 @@ leave the composer:
 /network log           the recent mesh event trail
 ```
 
+The pairing verbs are here too — `/network new <name>` creates the network and
+`/network invite` mints the token — and on a device that has never paired,
+`/network` on its own opens a screen whose empty state names the whole path in
+order: create, invite, join. **The joining half is the one step a TUI cannot
+host.** Pairing shows a code on each device for a person to check across, so it
+runs in a terminal, and `/network join` typed into the composer says exactly
+that instead of half-starting a pairing that cannot finish.
+
 **Running a session on another device.** `/new remote` creates the session on
 the peer, with a trailing sentence as its first prompt:
 
@@ -435,10 +443,12 @@ that held it is gone.
 login *this* device holds, for a bounded grant
 (`network.credentials.grant_ttl_s`, fifteen minutes by default), and
 `lop network credentials` shows who owns what and what this device borrows.
-`kimi` is the one provider that can never be lent — its grants are signed with the
-fingerprint of the device that made them. The desktop app has no mesh view yet —
-the networks and devices screen would live in `local-operator-ui`, next to the
-sessions it lists. Nothing above documents a command that does not run today.
+`kimi` is the one provider that can never be lent — its grants are signed with
+the fingerprint of the device that made them. The desktop app has no mesh view
+yet: that screen belongs to
+[damianvtran/local-operator-ui](https://github.com/damianvtran/local-operator-ui),
+beside the sessions it lists — that repository, not this one, describes what its
+build carries. Nothing above documents a command that does not run today.
 
 The design set behind all of it is in
 [`docs/design/mesh-network.md`](./docs/design/mesh-network.md) — the spine, with
