@@ -2472,3 +2472,93 @@ async def test_retiring_a_conversation_takes_its_row_off_the_view(monkeypatch, t
             await pilot.pause()
         assert not [n for n in _view_rows(view)[1] if "frozen-1" in n], _view_rows(view)
         assert source.attach_behind_account is None
+
+
+@pytest.mark.asyncio
+async def test_a_standing_failure_survives_the_idle_window_and_releases_once_resolved(
+    monkeypatch,
+    tmp_path,
+):
+    """Sir Knight finding 1 end to end: the idle sweep keeps a standing failure.
+
+    The record (rows, notice, submit-time draft) is in-memory only, so an idle
+    release would DROP the message the boundary rule keeps retryable. Real
+    path: a post-paint failure lands on `frozen-1`; the conversation is parked;
+    its clock is aged past `SIDEBAR_IDLE_RELEASE_S`; the sweep runs and must
+    keep the source. The return then still shows the row and the notice, and
+    `edit` delivers the payload. Once the record resolves, the same sweep
+    releases the source — the clause is bounded by user action, not a pin.
+    """
+    from local_operator.tui import app as app_module
+    from local_operator.tui.session_presentation import SendFailureNotice
+    from local_operator.tui.widgets.editor import Editor
+
+    async with _paint_first_with_sends(monkeypatch, tmp_path) as ctx:
+        app, pilot, owner, sends, _frozen = ctx
+        source_a = app._interaction
+
+        await _compose_and_send(pilot, app, "KEEP-1")
+        assert await _pump(pilot, lambda: len(sends.gates) == 1)
+        sends.refuse_all()
+        assert await _pump(pilot, lambda: len(source_a.turn.failed_sends) == 1), (
+            "the failure never landed",
+            [r.text for r in source_a.turn.failed_sends],
+        )
+        assert await _pump(pilot, lambda: not source_a.active_workers)
+
+        def sweep() -> list:
+            """Run one sweep tick with its release hand-off captured.
+
+            The sweep schedules release work through `run_worker`; capturing
+            the coroutine (and closing it) is how this suite observes the
+            RELEASE decision without disposing the source underneath the
+            assertions — the same shape `test_sidebar_idle_reap.py` uses.
+            """
+            released: list = []
+            original = app.run_worker
+            app.run_worker = lambda coro, **kw: released.append(coro) or coro.close()
+            try:
+                app._sweep_idle_sidebar_sources()
+            finally:
+                app.run_worker = original
+            return released
+
+        await _to_sidebar(app, pilot, _sidebar_remote("side-b"))
+        assert source_a.parked_at is not None, "the switch away never parked it"
+        assert app._sidebar_sources.get("frozen-1") is source_a
+        source_a.parked_at -= app_module.SIDEBAR_IDLE_RELEASE_S + 1
+        assert not sweep(), "the sweep released a source with a standing failure"
+        assert app._sidebar_sources.get("frozen-1") is source_a
+
+        await _back_to(app, pilot, owner)
+        users, notices = _view_rows(app._transcript_view())
+        assert users.count("KEEP-1") == 1, ("the row left with the source", users)
+        assert len(_returned_rows(notices)) == 1, ("the notice left with the source", notices)
+
+        notice = next(
+            b for b in app._transcript_view().blocks() if isinstance(b, SendFailureNotice)
+        )
+        notice.focus()
+        await pilot.pause()
+        await pilot.press("e")
+        assert await _pump(
+            pilot, lambda: app.query_one(Editor).text.startswith("KEEP-1")
+        ), "the payload did not come back"
+        assert source_a.turn.failed_sends == [], "the record did not resolve"
+
+        # SETTLE THE CONNECT FIRST. Switching back into the frozen conversation
+        # leaves a connect attempt pending (`connection_task`) — its own
+        # legitimate retention, and not the clause this test is about. The
+        # owner is thawed (the sibling cells' idiom) and the attempt allowed to
+        # settle before the sweep is asked again, so the second half measures
+        # the failure clause going quiet rather than a stalled connect.
+        _frozen.thaw()
+        assert await _pump(
+            pilot,
+            lambda: source_a.connection_task is None or source_a.connection_task.done(),
+        ), "the connect never settled"
+
+        await _to_sidebar(app, pilot, _sidebar_remote("side-b"))
+        assert source_a.parked_at is not None, "the switch away never parked it"
+        source_a.parked_at -= app_module.SIDEBAR_IDLE_RELEASE_S + 1
+        assert sweep(), "a resolved source must release again"

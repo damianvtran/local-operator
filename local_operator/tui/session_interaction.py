@@ -409,10 +409,12 @@ class SessionInteraction:
 
         Every clause is something only WE hold — an in-flight worker awaiting
         this socket, a shell or loop we started, a held prompt, a gate answer
-        the user typed and has not sent. Disposing the source breaks a live
-        worker or loses that answer, so nothing may drain these. They are also
+        the user typed and has not sent, a failed send the user has not
+        resolved. Disposing the source breaks a live worker or loses that
+        answer or that payload, so nothing may drain these. They are also
         bounded by user action: a turn has to be started before it can be
-        abandoned by switching away.
+        abandoned by switching away, and a failure record lapses when its
+        ``send again`` or ``edit`` resolves it.
         """
         return bool(
             self.active_workers
@@ -421,6 +423,18 @@ class SessionInteraction:
             or self.shell.worker is not None
             or self.compaction.held_prompt
             or self.gate_draft is not None
+            # A STANDING FAILURE IS THE USER'S PAYLOAD. The record (with its
+            # rows, its notice and its submit-time draft) is in-memory only, so
+            # the idle sweep releasing this source would DROP a message the
+            # user can still see and retry — the one state the boundary rule
+            # exists to keep reachable. Bounded by user action exactly like its
+            # siblings: `send again` or `edit` resolves the record and the
+            # clause lapses with it (agent review round 1 addendum, Sir Knight
+            # finding 1 — taken as retention rather than persisting the records
+            # beside the draft: no serialisation, no privacy pass, and restart
+            # durability stays out of scope as the design's T6 disposition
+            # records).
+            or self.turn.failed_sends
         )
 
     @property

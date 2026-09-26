@@ -6526,7 +6526,15 @@ class OperatorApp(App[None]):
         # through the ordinary restore funnel rather than dropping the text
         # (design §4b.8 — this list may not do what the echo buffer does).
         while len(source.turn.failed_sends) > FAILED_SEND_BOUND:
-            self._edit_failed_send(source, source.turn.failed_sends[0], focus=False)
+            # focus=True: the park is a payload LANDING in the composer, so the
+            # composer is where the user acts on it — an unfocused payload
+            # there is a row of text with nothing saying it is now editable.
+            # Grabbing the keyboard from a live claim is what the funnel's own
+            # `_focus_is_claimed` guard refuses (see `_edit_failed_send`), so
+            # the automatic half of this landing is bounded; `focus=False`
+            # before it left the payload dark until the next keystroke
+            # (addendum to agent review round 1, Sir Knight finding 3).
+            self._edit_failed_send(source, source.turn.failed_sends[0], focus=True)
         self._sync_send_failure_notices(source)
 
     @staticmethod
@@ -6669,6 +6677,18 @@ class OperatorApp(App[None]):
         payload's new life would count one send twice — while an
         unknown-delivery row stays as the message's fate statement (design
         §4b.5; the row is the deliverable half, the offer is spent).
+
+        THE FOCUS LANDING IS CLAIM-GUARDED, because two callers with different
+        standing share it: the explicit `e` verb (a gesture aimed at the
+        composer) and the BOUND's park (automatic — it fires when a fifth
+        failure pushes the oldest payload back out, with no gesture at all).
+        The app's rule for automatic focus moves is `_focus_is_claimed` (a live
+        approval, an ask picker, the aside, a pushed screen): a payload landing
+        in the composer must not take the keyboard from a question the user is
+        answering — the same harm the transcript's own click-focus guard
+        refuses. With nothing claiming it (the ordinary case) both callers end
+        with the composer focused, which is where the returned payload is
+        edited.
         """
         if not any(held is record for held in source.turn.failed_sends):
             return
@@ -6677,7 +6697,7 @@ class OperatorApp(App[None]):
             source, record.text, record.images, accepted=record.accepted, seam=True
         )
         self._resolve_send_failure(source, record, returned=not unknown)
-        if focus and self._is_current(source):
+        if focus and self._is_current(source) and not self._focus_is_claimed():
             self._editor().focus()
 
     def _resolve_send_failure(
