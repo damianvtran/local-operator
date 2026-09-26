@@ -35,7 +35,8 @@ project, how should it be classified, and what should happen next?
      note severity and the files where it would be worked. For a feature: is it
      in scope, does it fit the project's direction, is there prior art?
    - **Needs information** — ambiguous or missing reproduction details; ask the
-     minimum set of sharp questions.
+     minimum set of sharp questions (a maintainer can trigger another pass once
+     the author replies).
    - **Not actionable** — out of scope, already fixed, or unreproducible with
      the given information (say why).
    - **Duplicate** — point at the original.
@@ -53,6 +54,7 @@ project, how should it be classified, and what should happen next?
    **Assessment:** Actionable (bug | feature | docs | chore) | Needs information | Not actionable | Duplicate — one sentence.
    **Why:** the reasoning, grounded in the project's scope and the code.
    **Where this would live:** file:line pointers (bugs) or an approach sketch (features); omitted when not actionable.
+
    **Questions:** only when they genuinely block (needs-information cases).
    ```
 6. Finish with a one-paragraph run summary.

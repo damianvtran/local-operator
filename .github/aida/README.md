@@ -16,11 +16,15 @@ and the two agent roles that are not packaged with the harness.
 | PR opened / reopened / marked ready / new push (`synchronize`) | One review comment on the PR's current state |
 | Issue opened | One triage comment, plus fitting existing labels |
 | A comment containing `@aida` on a PR or issue (write-access users) | Another pass in a fresh run |
-| `workflow_dispatch` with a `pr` or `issue` input | Manual run, e.g. `gh workflow run aida.yml -f pr=1234` |
+| `workflow_dispatch` with a `pr` or `issue` input | Manual run, e.g. `gh workflow run aida.yml -f pr=1234`; available once this workflow is on the default branch |
 
 Drafts are skipped until marked ready; fork PRs are excluded on every path
 (see the security model); superseded runs on the same PR are cancelled, so a
-push supersedes the older head's review.
+push supersedes the older head's review. Comments from users without write
+access do not trigger a run, and a comment or dispatch on a closed PR or issue
+is skipped — skipped runs stay silent on the thread (the run log carries the
+reason). Issue triage runs for any non-bot issue author by design — that is
+the feature — and each run spends provider tokens.
 
 Each run is a fresh GitHub-hosted runner that installs the pinned
 [local-operator](https://pypi.org/project/local-operator/) harness, installs
@@ -32,13 +36,16 @@ The session attaches the `aida` team: a manager (the run itself) plus
 `architect`, `scout`, `reviewer`, `qa-tester`, `designer`, `ux-reviewer`. The
 manager delegates what the change warrants and posts one consolidated comment.
 Provider: Radient, model `auto`. GitHub identity: the workflow token
-(`github-actions[bot]`), signed *Aida* in the comment text. An upgrade path to
-a dedicated GitHub App identity is noted below.
+(`github-actions[bot]`); the name is carried by each comment's heading
+(`### Aida — review` / `### Aida — triage`). An upgrade path to a dedicated
+GitHub App identity is noted below.
 
 ## Setup (one-time)
 
 1. Add repository secret `RADIENT_API_KEY` (Settings -> Secrets and variables ->
-   Actions). It is the only secret; the GitHub token is the workflow's own.
+   Actions). It is required for Aida to run; until it is set, runs are skipped
+   with a warning and a run-summary note (no comment, no red check). It is the
+   only secret; the GitHub token is the workflow's own.
 2. Merge the workflow. It takes effect immediately: `pull_request` runs use
    the PR's merge-ref version of this workflow (a PR that adds or edits it runs
    its edited version on itself), while `issue_comment` and `workflow_dispatch`
@@ -61,9 +68,22 @@ a dedicated GitHub App identity is noted below.
 - The agent's tool surface is bounded with `--tools`; under a non-TTY run that
   declaration is also the approval for exactly those tools, and delegated
   children inherit both the bound and the approval.
+- The child-process environment is allowlisted: `setup.sh` writes the runner's
+  `config.yml` with `shell_environment: mode: allowlist`, so a model-authored
+  `bash`/`eval` command starts from the harness's safe set plus an explicit
+  grant — the provider key (`RADIENT_API_KEY`) is not inherited by design, and
+  no environment variable carries it into a prompt-injected command. `GH_TOKEN`
+  is granted because posting the comment needs it. The residual, stated
+  honestly: the child still runs as the same user on the same host, and an
+  in-process filter cannot fully contain same-user host access — another reason
+  the token's scopes are kept minimal and the key rotatable.
 - The prompts instruct the agent to treat everything under review as untrusted
   input and to report prompt-injection attempts as findings. That is a
   mitigation, not a guarantee: treat what Aida writes as advice, not authority.
+- Failure semantics: only an unset provider key is a skip — the run warns,
+  writes a run-summary note and stops with no comment and no red check (setup
+  item 1). Real failures on a configured run — auth, timeouts, crashes — are
+  still red checks and post the run-failure notice on the thread.
 - Nothing here adds a human reviewer or notifies anyone; the bot never writes
   an `@handle` for a person.
 
@@ -89,7 +109,7 @@ a dedicated GitHub App identity is noted below.
 - [anthropics/claude-code-action](https://github.com/anthropics/claude-code-action) — the canonical "agent CLI on GitHub events" pattern (mention-driven and auto-review workflows; the write-access gate).
 - [google-github-actions/run-gemini-cli](https://github.com/google-github-actions/run-gemini-cli) — the same shape for Gemini.
 - [openai/codex-action](https://github.com/openai/codex-action) — Codex CLI in Actions.
-- [qodo-ai/pr-agent](https://github.com/qodo-ai/pr-agent) (Qodo Merge) — the self-hosted PR-agent lineage: workflow-owned, command-driven, bring-your-own LLM.
+- [The-PR-Agent/pr-agent](https://github.com/The-PR-Agent/pr-agent) (Qodo Merge) — the self-hosted PR-agent lineage: workflow-owned, command-driven, bring-your-own LLM.
 - CodeRabbit / Greptile — hosted counterparts for contrast: no repository-owned workflow, no team, vendor-side model choice.
 
 Aida differs by running a full agent harness with a saved team (manager +
