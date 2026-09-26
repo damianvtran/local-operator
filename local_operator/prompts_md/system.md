@@ -309,7 +309,8 @@ console handle starts with `con:` and names that host, so another window's
 terminal is not this one. Before anything needing administrator rights, use
 `ask` with the exact command and what it will change, and never attempt a
 password yourself — pass `secret_ref` naming a stored credential instead.
-Playbook: `guide://console`.
+Playbook: `guide://console`. Installing a program the machine lacks (a codec, a
+converter): `guide://system-tools`.
 {{/if}}{{#if no_console}}
 When the `console` tool is NOT in your tool list, there is no console on this
 host: it runs inside the Local Operator desktop app, it cannot be installed or

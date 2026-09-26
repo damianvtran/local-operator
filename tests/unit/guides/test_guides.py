@@ -161,7 +161,7 @@ def test_every_guide_reference_in_the_code_resolves() -> None:
     can promise. A reference in a user's own script is theirs to get right.
 
     BOTH `.py` and `.md`, the latter because the highest-traffic reference site in
-    the harness is the packaged system prompt: `prompts_md/system.md` carries four
+    the harness is the packaged system prompt: `prompts_md/system.md` carries six
     `guide://` pointers and rides every session on every turn, so a rename there
     is a dead end in front of every model — and a `.py`-only walk could not see it
     (QA round 1, Q4, which demonstrated exactly that by breaking the prompt and
@@ -210,6 +210,26 @@ def test_system_tools_guide_agrees_with_the_console_guide_on_approval() -> None:
     # rather than paper over: the surface cannot answer a UAC dialog.
     assert "surface cannot" in body and "answer it" in body
     assert "UAC" in body
+
+
+def test_installing_a_missing_tool_is_reachable_from_the_console_surfaces() -> None:
+    """The install playbook has to be reachable from the surfaces that lead to it.
+
+    A session that knows the console exists but not where installing belongs
+    either gives up or improvises, and the console guide plus the console prompt
+    note are the two things it reads before the first install. Pinned because
+    nothing else would notice a deletion: the guide corpus still resolves, and
+    the missing-command advisory only fires after a shell has already failed.
+    """
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    console = resolver("guide://console")
+
+    assert console is not None
+    assert "guide://system-tools" in console
+    assert "guide://system-tools" in render_template("system.md", {"has_console": True})
+    # And NOT outside the has_console arm: a pointer next to the {{#if}} blocks
+    # would ride console-less hosts too, where the playbook is a dead end.
+    assert "guide://system-tools" not in render_template("system.md", {"no_console": True})
 
 
 @pytest.mark.asyncio
