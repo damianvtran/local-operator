@@ -32032,6 +32032,30 @@ class OperatorApp(App[None]):
         # report every cold session as a prehistoric runtime.
         if bool(getattr(session, "is_cold", False)):
             return
+        # AN EMPTY STAMP ON A RUNTIME ON ANOTHER DEVICE IS UNOBSERVABLE, NOT OLD.
+        # ``runtime_version`` is read off the RUNTIME'S OWN discovery record on
+        # THIS device (``attached.py``, from ``find_runtime_record``), and a peer's
+        # runtime publishes no such record here: the federated row never carried a
+        # build, so ``RemoteSessionFacts.version`` stays empty for every remote
+        # owner. The ``owner is None`` branch below turns that absence into a
+        # CLAIM OF AGE — measured on the two-device loopback rig (QA-3, both
+        # devices on 0.63.2 from one worktree):
+        #
+        #   "“qa3-live” is running an older version than this window — it will
+        #    switch to the new version when it is next idle."
+        #
+        # Both halves of that are wrong for a peer: it is not older, and the
+        # switch it promises is THIS install's generation reaper, which has no
+        # jurisdiction over another device's runtime. Silence is the honest
+        # answer while the fact is unobtainable. The guard keys on the LOCALITY
+        # with an empty stamp rather than on the locality alone, so a future
+        # change that carries the peer's build across the mesh (the fields exist
+        # and are unread — see ``RemoteSessionFacts.version``) restores the
+        # comparison for free instead of needing this branch removed.
+        if getattr(session, "runtime_locality", "") == "another-machine" and not str(
+            getattr(session, "runtime_version", "") or ""
+        ):
+            return
         runtime_version = str(getattr(session, "runtime_version", "") or "")
         runtime_ref = str(getattr(session, "runtime_source_ref", "") or "")
         # The subject of an owner notice is the SESSION, so the debounce is
