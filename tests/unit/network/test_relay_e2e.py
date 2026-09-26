@@ -34,6 +34,7 @@ from local_operator.network.handshake import (
 )
 from local_operator.paths import config_dir as ambient_config_dir
 from local_operator.session.retention import SESSIONS_DIRNAME
+from tests.unit.network import conftest as net_fixtures
 
 NETWORK_NAME = "home-net"
 
@@ -619,7 +620,16 @@ def test_a_replayed_invite_is_refused(
     refreshed = store.load(record.network_id, server_a.root)
     assert len(refreshed.active_members()) == 2
     assert refreshed.invites[0].state == "consumed"
-    assert "handshake_refused" in _events(server_a)
+    # THE REFUSAL IS SILENT ON THE WIRE BY DESIGN, AND ITS ROW IS LATE. The listener
+    # closes the socket without a frame, which is what the joiner's failure sentence
+    # above describes — and the record of that refusal is written on the listener's own
+    # handshake thread, so it can still be pending when the caller holds the failure.
+    # Measured with a delay injected at ``AuditLog.record``: this cell (and this cell
+    # only, of the ones that read ``_events``) reds on the TRAIL READ at 10 s, with the
+    # events list ending at ``link_closed``.
+    assert net_fixtures.wait_for(
+        lambda: "handshake_refused" in _events(server_a)
+    ), f"the listener recorded no refusal for the replayed invite: {_events(server_a)}"
 
 
 def test_an_admission_does_not_revert_what_landed_during_the_human_step(
@@ -1594,15 +1604,27 @@ def _await_event(server: relay.RelayServer, event: str, *, timeout: float = 5.0)
     * the unanswered confirmation: the inviter records 117-329 ms AFTER the joiner
       gives up, and the cell's read landed ~150 ms after the row.
 
-    So only the first one needs the wait to be honest; the two slower paths are
-    left as they were rather than converted for symmetry.
+    So only the first one needed the wait when this helper was written, and the two
+    slower paths were left alone rather than converted for symmetry.
+
+    THE 2026-09-26 ROUND RE-DERIVED THAT, and the answer held: the decline and the
+    timeout are ORDERED, not lucky. Both cells read the row written by the pairing
+    DECISION (``relay.py``'s ``pairing_refused``/``pairing_confirmed`` record, written
+    before the decision is returned), so the refusal the joiner holds is downstream of
+    it; the invite's own ``outcome`` is written later still (``relay.py``),
+    after the row. The abort-frame ordering this docstring quotes belongs to the
+    ceremony's refusals — a conflict raised while pairing — not to a human's answer,
+    and it is why those two paths measure as slow rather than as racy. One cell DID
+    fail a re-measurement (the replayed invite, on its TRAIL read, at 10 s of delay
+    injected at ``AuditLog.record``) and now calls ``net_fixtures.wait_for`` on the
+    assertion's own condition like the cells above rather than reading through here.
     """
-    deadline = time.time() + timeout
-    events = _events(server)
-    while event not in events and time.time() < deadline:
-        time.sleep(0.02)
-        events = _events(server)
-    return events
+    # The poll loop is the package's one wait implementation, so this module does not
+    # carry a second copy of one that polls at a different cadence. The default stays
+    # 5 s because that is this helper's published contract; the cells that had a real
+    # read race call ``net_fixtures.wait_for`` directly, at the package default.
+    net_fixtures.wait_for(lambda: event in _events(server), timeout_s=timeout)
+    return _events(server)
 
 
 def test_a_stale_peer_record_is_reaped_and_the_relay_reports_its_links(
