@@ -617,12 +617,24 @@ async def test_the_bound_parks_the_oldest_payload_through_the_edit_funnel() -> N
                 [r.text for r in _records(app)],
             )
 
-        await _submit(pilot, editor, "message 5")
+        # THE PARK LANDS THE PAYLOAD ACTIVE (addendum to agent review round 1,
+        # Sir Knight finding 3 follow-on): focus moves to the composer WITH the
+        # payload, or a user looking at their failed sends sees text with no
+        # cue it is now editable. Focus is parked on a STANDING notice first —
+        # the LAST one, because the park resolves the oldest record and retires
+        # its notice with it — so the assertion discriminates: without the
+        # focus landing, focus stays where it was.
+        standing = _notices(app)[-1]
+        standing.focus()
+        await pilot.pause()
+        assert app.focused is standing, "the discriminating focus never landed"
+        app._submit_prompt("message 5")
         assert await _pump(pilot, lambda: len(_records(app)) == 4 and editor.text), (
             "the bound did not park the oldest payload",
             [r.text for r in _records(app)],
             editor.text,
         )
+        assert app.focused is editor, "the parked payload landed in a dark composer"
         assert [record.text for record in _records(app)] == [
             "message 2",
             "message 3",
@@ -633,6 +645,39 @@ async def test_the_bound_parks_the_oldest_payload_through_the_edit_funnel() -> N
         assert app._interaction.unsent == [], "the fast path must not also park an offer"
         assert not any("restore unsent prompt" in text for text in _all_notice_texts(app))
         assert _user_texts(app) == ["message 2", "message 3", "message 4", "message 5"]
+
+
+@pytest.mark.asyncio
+async def test_the_park_yields_the_keyboard_to_a_live_claim() -> None:
+    """The funnel's focus step consults ``_focus_is_claimed`` (the park's bound).
+
+    The `e` verb and the automatic park share ``_edit_failed_send``, so a
+    payload landing while an approval or ask picker is up must not pull the
+    keyboard out of the answer the user is typing — the app's rule for every
+    automatic focus move. The predicate is faked here because the claim
+    surfaces have their own suites; the mutation this cell catches is the
+    guard's removal (the funnel then lands a focused composer under a live
+    prompt).
+    """
+    app = OperatorApp(lambda: _factory(_dead_session()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = await _boot(pilot, app)
+        for index in range(1, 5):
+            await _submit(pilot, editor, f"message {index}")
+            assert await _pump(pilot, lambda n=index: len(_records(app)) == n)
+
+        standing = _notices(app)[-1]
+        standing.focus()
+        await pilot.pause()
+        app._focus_is_claimed = lambda: True  # type: ignore[method-assign]
+        app._submit_prompt("message 5")
+
+        assert await _pump(pilot, lambda: len(_records(app)) == 4 and editor.text), (
+            "the park did not run while claimed",
+            [r.text for r in _records(app)],
+        )
+        assert app.focused is standing, ("the park pulled focus out from under a live claim",)
+        assert editor.text == "message 1" + RESTORE_SEAM, editor.text
 
 
 @pytest.mark.asyncio
