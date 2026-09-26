@@ -13,11 +13,12 @@ half and is deliberately PURE: no Textual import, no I/O of its own beyond the
 registry it is handed, so the whole edge-case table (cycles, depth, missing
 refs, count multiplicity) is unit-testable in isolation.
 
-The resolver renders the *declared* org — the structure the data model
-describes. Whether the delegation RUNTIME that makes a nested team executable
-is wired yet is a separate concern (a follow-up); a team-boundary node is
-tagged ``(declared)`` by the renderer so the chart never implies a capability
-that is not live.
+The resolver renders the org the data model describes, and that org is
+executable: a team slot is launched with ``task(agent="team:<name>")``, which
+starts the sub-team's manager as a child (see
+:mod:`local_operator.harness.subagent`). The renderer used to tag a
+team-boundary node ``(declared)`` to disclaim a runtime that did not exist
+yet; the tag is gone, because it now disclaims a capability that is live.
 
 TOTALITY AND SAFETY
 ===================
