@@ -31,7 +31,11 @@ from local_operator.session.placement import (
     write_handoff_entry,
     write_stamp,
 )
-from tests.unit.network.test_relay_e2e import _pair, devices  # noqa: F401 — fixtures
+from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixtures
+    NETWORK_NAME,
+    _pair,
+    devices,
+)
 
 Devices = tuple[relay.RelayServer, relay.RelayServer, str, int]
 
@@ -446,7 +450,9 @@ def test_an_offload_to_a_peer_that_cannot_move_is_refused_before_the_invite(
     that changes the answer.
     """
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="drive", settings=server_b.settings)
+    record, _pair_host, _pair_port = _pair(
+        pair, monkeypatch, role="drive", settings=server_b.settings
+    )
     _owned_session(server_a)
     invited: list[str] = []
     real = mobility.LinkTransport.ask
@@ -466,7 +472,13 @@ def test_an_offload_to_a_peer_that_cannot_move_is_refused_before_the_invite(
     sentence = str(result["message"])
     assert "device-b may not take sessions from this device" in sentence, sentence
     assert "does not hold the 'move' capability here" in sentence, sentence
-    assert "lop network member grant" in sentence, sentence
+    # THE REMEDY NAMES THE DEVICE BY ID (Aida round 2, finding 1): ``member grant``
+    # matches ``record.member(device_id)`` and does NOT run its argument through the
+    # name/tail resolver, so a sentence printing the display name would hand the user a
+    # command that answers ``… is not an active member of …`` and grants nothing.
+    remedy = f"grant <network> {server_b.identity.device_id} move"
+    assert remedy in sentence, sentence
+    assert "grant <network> device-b move" not in sentence, sentence
     assert result["changed"] is False, result
     # NO INVITE WAS SENT: the refusal is this device's own answer, and the peer was
     # never asked for something it cannot do. Structural, not timed — the clock is
@@ -478,6 +490,48 @@ def test_an_offload_to_a_peer_that_cannot_move_is_refused_before_the_invite(
     from local_operator.network.projection import read_tombstones
 
     assert read_tombstones(server_a.root) == {}
+
+    # AND THE ADVICE RUNS. The command the sentence printed, driven through the real
+    # ``lop network`` parser and handler, has to change this device's row for the peer —
+    # a refusal whose remedy fails is the defect class this round exists to end. The
+    # network name is the fixture's own; the device argument is the id the sentence
+    # printed, which is the point.
+    granted_caps = _grant_via_the_real_cli(
+        server_a, record.network_id, server_b.identity.device_id, monkeypatch
+    )
+    assert "move" in granted_caps, granted_caps
+    # The same move, now that the peer may take it, proceeds.
+    allowed = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+    assert allowed["ok"] is True, allowed
+    assert (server_b.root / "sessions" / SESSION).is_dir()
+
+
+def _grant_via_the_real_cli(
+    server: relay.RelayServer, network_id: str, device_id: str, monkeypatch: pytest.MonkeyPatch
+) -> list[str]:
+    """Run ``lop network member grant <net> <device> move`` as the CLI does; return the row.
+
+    Parsed by the REAL parser and executed by the REAL handler on THIS device's root, so
+    what it proves is that the argument the refusal prints is one the verb accepts —
+    the difference between a sentence that names its remedy and one that names a
+    command which fails (Aida round 2, finding 1).
+    """
+    import argparse
+
+    from local_operator.network import cli as net_cli
+    from local_operator.network import store
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server.root))
+    parser = argparse.ArgumentParser(prog="lop")
+    subparsers = parser.add_subparsers(dest="subcommand")
+    net_cli.add_parser(subparsers)
+    args = parser.parse_args(["network", "member", "grant", NETWORK_NAME, device_id, "move"])
+    rc = net_cli.main(args)
+    assert rc == 0, rc
+    record = store.load(network_id, server.root)
+    member = record.member(device_id)
+    assert member is not None, "the grant did not reach the peer's row"
+    return sorted(member.capabilities, key=str)
 
 
 def test_a_move_already_on_this_device_is_refused_with_a_sentence(
