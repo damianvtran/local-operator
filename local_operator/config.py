@@ -243,11 +243,7 @@ def _report_unmodelled_top_level(path: Path, config_dict: Dict[str, Any]) -> Non
         return
     _UNMODELLED_WARNED.add(seen)
     homes = ", ".join(f"values.{key}" for key in unmodelled)
-    named = (
-        f"key {unmodelled[0]}"
-        if len(unmodelled) == 1
-        else "keys " + ", ".join(unmodelled)
-    )
+    named = f"key {unmodelled[0]}" if len(unmodelled) == 1 else "keys " + ", ".join(unmodelled)
     logger.warning(
         "%s has top-level %s, which this store does not read: every setting lives "
         "under `values:`, so the key does nothing. It is left in place rather than "
