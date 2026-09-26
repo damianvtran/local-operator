@@ -71,7 +71,12 @@ def _consumer_defaults() -> dict[str, object]:
     # ``DEFAULT_MAX_HANDSHAKES``, so a registry default that disagrees with it is a
     # page advertising a number the accept loop will not honour.
     from local_operator.network.credentials import GRANT_TTL_S
-    from local_operator.network.relay import DEFAULT_MAX_HANDSHAKES
+    from local_operator.network.relay import (
+        DEFAULT_ADVERTISE_HOSTS,
+        DEFAULT_LISTEN_ADDRESS,
+        DEFAULT_MAX_HANDSHAKES,
+        DEFAULT_PORT,
+    )
 
     # The mesh sync cadence, from the module whose watcher reads it
     # (``SyncSettings.from_config`` falls back to exactly these).
@@ -175,6 +180,13 @@ def _consumer_defaults() -> dict[str, object]:
         "network.audit.max_bytes": AUDIT_MAX_BYTES,
         "network.audit.generations": AUDIT_GENERATIONS,
         "network.audit.max_age_days": AUDIT_MAX_AGE_DAYS,
+        "network.advertise_hosts": list(DEFAULT_ADVERTISE_HOSTS),
+        # Compared as a LIST because that is how the registry stores a LIST;
+        # ``DEFAULT_ADVERTISE_HOSTS`` is the reader's tuple and ``[] == ()`` is
+        # False, so a bare restatement would fail on the SHAPE rather than on the
+        # value. The other two are the reader's own constants, verbatim.
+        "network.listen_address": DEFAULT_LISTEN_ADDRESS,
+        "network.port": DEFAULT_PORT,
         "network.max_handshakes": DEFAULT_MAX_HANDSHAKES,
         "network.sync.debounce_s": SYNC_DEBOUNCE_S,
         "network.sync.tick_s": SYNC_TICK_S,
