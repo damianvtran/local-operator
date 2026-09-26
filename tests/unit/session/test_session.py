@@ -4858,6 +4858,34 @@ async def test_a_dropped_delivery_turn_does_not_journal_its_row_twice(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_mismatched_message_batch_is_rebuilt_not_truncated(tmp_path):
+    """A caller's pairing error must not silently drop a result (review R1-5).
+
+    ``messages`` is paired with ``results`` positionally; a mismatch used to
+    rely on ``zip``, which TRUNCATES. The guard rebuilds the rows instead, so
+    every result still reaches the turn.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("start a job")
+    await session._deliver_job_results(
+        [("j1", "one", _settled_job("j1")), ("j2", "two", _settled_job("j2"))],
+        messages=[session._job_result_message("j1", "one", _settled_job("j1"))],
+    )
+
+    deadline = asyncio.get_running_loop().time() + 5.0
+    while len(stream.requests) < 2 and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
+    assert len(stream.requests) >= 2, "the delivery turn never reached the provider"
+    rows = _job_result_rows(session)
+    assert [row.payload["details"]["job_id"] for row in rows] == [
+        "j1",
+        "j2",
+    ], "a truncated pairing would deliver only j1"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_job_result_opens_no_turn_on_a_leaving_runtime(tmp_path):
     """A delivery that lands after the departure latch is DURABLE, not run.
 
