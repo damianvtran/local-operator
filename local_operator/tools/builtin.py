@@ -19411,7 +19411,9 @@ def _task_tool_description(model_choice: bool) -> str:
         "Launch background subagents — one, or a whole concurrent batch "
         "('tasks' + shared 'context') in a single call. 'agent' names a "
         "role carrying vetted guidance (reviewer, coder, architect, "
-        f"manager, designer, scout — see the `agent` tool). {effort}"
+        "manager, designer, scout — see the `agent` tool), and "
+        "'team:<name>' starts that team's manager. "
+        f"{effort}"
     )
 
 
@@ -19450,7 +19452,8 @@ class TaskItem(BaseModel):
             "Role for this subagent: 'task' (full child, no role), 'scout' "
             "(read-only research), or any role from the `agent` tool — e.g. "
             "'reviewer', 'coder', 'architect', 'manager', 'designer'. A role "
-            "carries vetted guidance and may restrict tools."
+            "carries vetted guidance and may restrict tools; 'team:<name>' "
+            "starts that team's manager."
         ),
     )
     # A free string, not a Literal: the valid set is whatever the operator has
