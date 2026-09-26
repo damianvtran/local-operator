@@ -118,6 +118,28 @@ REQUESTED_SPINNER_DELAY_S = 0.15
 #: cursor out from under whatever the user is doing by then.
 PENDING_SUBAGENT_JUMP_S = 1.0
 
+#: How long an ARRIVAL reveal stays armed waiting for the row it is for.
+#:
+#: `set_current` fires on every edge where the app takes a session as its own —
+#: boot, `/new`, `/resume`, `/new remote <peer>`, a notification click, a remote
+#: takeover — and the list can be up to one poll behind that edge. `/new remote`
+#: is the shape that makes the lag real rather than theoretical: the session is
+#: minted by the PEER inside the keystroke, so the row the app is now standing in
+#: cannot be in a snapshot a poll took before it, and a reveal that only fires
+#: when the row is already in `entries` would silently do nothing at exactly the
+#: moment it matters most.
+#:
+#: Sized ABOVE the app's 2 s catalog tick (`app.py`, `_sidebar_timer`), which is
+#: the opposite of the `ctrl+o` arm above. That arm lands on the re-poll its own
+#: chord triggered (a local store scan, milliseconds); this one lands on the next
+#: TICK, because the row is delivered by the poll rather than by any read this
+#: gesture started — the peer catalogue is pre-warmed by the create
+#: (`_adopt_created_remote_session`'s `ttl_s=0` read), so one tick carries it and
+#: two and a half ticks mean a slow read cannot lose the arrival. Past the
+#: deadline the intent is dropped, because a row that turns up long after the
+#: user has moved on is not this arrival's business and must not yank the caret.
+PENDING_ARRIVAL_REVEAL_S = 5.0
+
 #: Blank cells between the list and the conversation it sits beside.
 #:
 #: The list's right-hand age column ("6m", "23h", "1d") ended one cell from the
@@ -387,6 +409,10 @@ class SessionSidebar(Widget, can_focus=True):
         #: Monotonic deadline for a `ctrl+o` jump armed before its rows
         #: existed, or 0.0 for none. See `_land_pending_jump`.
         self._pending_jump_until: float = 0.0
+        #: Monotonic deadline for an ARRIVAL reveal armed before the list could
+        #: carry the row, or 0.0 for none. See `set_current`'s `_reveal_current`
+        #: and `_land_pending_reveal`.
+        self._pending_reveal_until: float = 0.0
         self.display = False
 
     @property
@@ -808,6 +834,7 @@ class SessionSidebar(Widget, can_focus=True):
         # cursor that branch sees, or it would restore the pre-chord row over
         # it. See `_land_pending_jump`.
         self._land_pending_jump(ordered)
+        self._land_pending_reveal(ordered)
         if not any(entry.id == self.cursor_id for entry in ordered):
             # `current_id` is adopted only when it is a row in THIS list. The
             # attached session is not necessarily a catalog row, and adopting
@@ -832,6 +859,35 @@ class SessionSidebar(Widget, can_focus=True):
         # and Textual's compositor every two seconds in every open terminal.
         if self._paint_state() != self._painted_state:
             self.refresh()
+
+    def set_current(self, session_id: str) -> None:
+        """Take ``session_id`` as the row the list calls CURRENT, and show it.
+
+        THE EDGE THE LIST WAS MISSING (found by the lane that re-shot the sidebar
+        evidence): the app arrives at a session — boot, `/new`, `/resume`,
+        `/new remote <peer>`, a notification click, a remote takeover — and the
+        list kept whatever scroll position and cursor it had. On a populated
+        store that left the row the pane says the user is in BELOW THE FOLD with
+        the caret on a row they are no longer in. Arriving at a session is a
+        promise to show it, and the list already has one mechanism for that:
+        ``_reveal``, the same call `action_move` and `action_select` make. This is
+        its second caller, not a second mechanism.
+
+        GATED ON THE ID ACTUALLY MOVING, which is load-bearing rather than an
+        optimisation: the app re-publishes `current_id` on every catalog poll and
+        on every sidebar navigation commit, and an unconditional reveal there
+        would drag the caret back to the attached session every two seconds while
+        the user is parked on another row deciding what to open — which is
+        precisely what the arrows are for.
+
+        The app calls this from `_adopt_session` (the one edge every arrival goes
+        through) and from the two places that publish the current session beside
+        it, so the rule has ONE home rather than one per caller.
+        """
+        if session_id == self.current_id:
+            return
+        self.current_id = session_id
+        self._reveal_current()
 
     def set_pins(self, ids: Sequence[str]) -> None:
         """Replace the pinned-id set. Display-only; see `_display_rows`.
@@ -1052,10 +1108,101 @@ class SessionSidebar(Widget, can_focus=True):
         return next((i for i, row in enumerate(self.entries) if row.id == self.cursor_id), 0)
 
     def _reveal(self) -> None:
+        """Scroll so the caret's row is genuinely ON the page.
+
+        THE PAGE SIZE DEPENDS ON THE OFFSET, so `index - page_size + 1` is a
+        first guess and not an answer. `page_size` is the largest window that
+        fits from the CURRENT offset, and a window that reaches into another
+        section pays that section's heading, its blank, the leading break and the
+        row itself — chrome the guess did not charge, because the old offset's
+        window did not contain that section.
+
+        The case that makes it matter, measured on this branch: a populated store
+        with a peer's session below the fold. The guess lands the offset one row
+        short of the peer row and the page still ends above it, so a reveal that
+        "scrolled" leaves the row the user was told about off-screen — and no
+        formula lands it, because the row is on the page only for offsets low
+        enough that its whole section fits (`41 entries / page_size 24-25 / 28-row
+        panel`: offset 16 ends at the local row; the peer row is drawn at 19,
+        where the window is 22 entries plus the section's 5 chrome lines).
+
+        So walk the offset up until the row is in the window. Terminates at
+        `index` at the latest, where the window starts ON the row, and each step
+        is a `page_size` bisection over at most a screen of entries. The walk
+        finds the SMALLEST such offset at or after the guess, which is the
+        smallest scroll that shows the row — the row ends up as low on the page
+        as it can, the same place the old formula aimed for.
+
+        It is not only the arrival that was short: measured on this branch's
+        fixture (41 entries, 28-row panel), `action_move` down to the peer row
+        left the caret off-page for that one step, and `action_edge(True)` — the
+        `end` key — moved the offset to 17 with `page_size` 23 against a row at
+        40. Both land it after the walk, which is why the correction belongs in
+        this one mechanism rather than at the arrival's call site.
+        """
         index = self._cursor_index()
         self._offset = max(min(self._offset, index), index - self.page_size + 1)
+        while self._offset < index and index >= self._offset + self.page_size:
+            self._offset += 1
         self._sync_animation()
         self.refresh()
+
+    def _reveal_current(self) -> None:
+        """Put the caret on the current row and scroll it onto the page.
+
+        The row is not always here yet — that is what the arm below is for, and
+        `_land_pending_reveal` is where it lands — so this either reveals NOW or
+        arms. `current_id` is the target rather than an argument because that is
+        the one value both halves of the contract read; an argument could be
+        stale by the time a poll lands the row.
+        """
+        if not self.current_id:
+            return
+        if any(entry.id == self.current_id for entry in self.entries):
+            # An immediate reveal SATISFIES any arm still outstanding for this
+            # row, so it is dropped here rather than left to fire on a later poll
+            # — which could only move a caret the user has since placed.
+            self._pending_reveal_until = 0.0
+            self.cursor_id = self.current_id
+            self._reveal()
+            return
+        self._pending_reveal_until = time.monotonic() + PENDING_ARRIVAL_REVEAL_S
+
+    def _land_pending_reveal(self, ordered: Sequence[CatalogEntry]) -> None:
+        """Land an arrival reveal armed before the list carried its row.
+
+        The same shape as `_land_pending_jump`, and for the same reason: a row
+        the app names can fail to exist at the moment it names it. There the
+        chord outran a catalog re-poll; here the ARRIVAL outruns the poll, because
+        `/new remote <peer>` mints the session on the peer inside the keystroke
+        and the sidebar learns about it on the next tick.
+
+        Called from `set_entries` AFTER `_land_pending_jump` and BEFORE the
+        membership-safe re-adopt, and that order is the deliberate one: the
+        re-adopt below only fills a cursor that names nothing, so it cannot undo
+        either landing, and the arrival lands SECOND because its contract is the
+        stronger of the two — the app IS in that session now, where a `ctrl+o`
+        jump is a convenience whose rows may have arrived in the same poll. A jump
+        landing second would scroll to the ⌥ section and take the arrived row off
+        the page again.
+        """
+        if not self._pending_reveal_until:
+            return
+        if time.monotonic() >= self._pending_reveal_until:
+            # The window closed, and a row arriving later is not this arrival's
+            # business — see `PENDING_ARRIVAL_REVEAL_S`.
+            self._pending_reveal_until = 0.0
+            return
+        if not any(entry.id == self.current_id for entry in ordered):
+            # Still waiting: this poll crossed the arrival, or carried a read
+            # that predates it. Stay armed until the deadline.
+            return
+        self._pending_reveal_until = 0.0
+        self.cursor_id = self.current_id
+        # Safe before `set_entries`'s own offset clamp, which only lowers the
+        # offset to `len - page_size` and so cannot push the row back out — the
+        # same argument `_land_pending_jump` records for its own reveal.
+        self._reveal()
 
     def action_move(self, delta: int) -> None:
         if self.entries:
