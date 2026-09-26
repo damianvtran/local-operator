@@ -161,7 +161,7 @@ def test_every_guide_reference_in_the_code_resolves() -> None:
     can promise. A reference in a user's own script is theirs to get right.
 
     BOTH `.py` and `.md`, the latter because the highest-traffic reference site in
-    the harness is the packaged system prompt: `prompts_md/system.md` carries four
+    the harness is the packaged system prompt: `prompts_md/system.md` carries six
     `guide://` pointers and rides every session on every turn, so a rename there
     is a dead end in front of every model — and a `.py`-only walk could not see it
     (QA round 1, Q4, which demonstrated exactly that by breaking the prompt and
@@ -227,6 +227,9 @@ def test_installing_a_missing_tool_is_reachable_from_the_console_surfaces() -> N
     assert console is not None
     assert "guide://system-tools" in console
     assert "guide://system-tools" in render_template("system.md", {"has_console": True})
+    # And NOT outside the has_console arm: a pointer next to the {{#if}} blocks
+    # would ride console-less hosts too, where the playbook is a dead end.
+    assert "guide://system-tools" not in render_template("system.md", {"no_console": True})
 
 
 @pytest.mark.asyncio

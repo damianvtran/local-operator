@@ -148,9 +148,10 @@ What to expect, in order:
    can pass it by name (`secret_ref`) and never see the value.
 4. **Prompts the agent cannot answer.** macOS's Command Line Tools dialog and
    Windows's UAC consent dialog are drawn by the OS: the pty cannot see them and
-   the agent cannot click them. An installer's own agreement or licence prompt is
-   the user's consent too. The agent's job in all three cases is to say what is
-   on the screen, hand it to the user, and wait.
+   the agent cannot click them — the macOS half is exercised, the Windows half is
+   only documented (see the provenance note below). An installer's own agreement
+   or licence prompt is the user's consent too. The agent's job in all three
+   cases is to say what is on the screen, hand it to the user, and wait.
 5. **The receipt.** When it finishes the agent reports the package, the command
    that ran, the version now installed, and the undo line
    (`brew uninstall ffmpeg`, `sudo apt remove ffmpeg`, `winget uninstall …`) —
@@ -163,6 +164,16 @@ the developer-tools dialog); the distribution's own manager on Linux, where root
 is granted with `sudo` — or a static build into the user's home directory when it
 is not; `winget` or `scoop` on Windows, where `scoop` needs no elevation and a
 newly installed tool usually appears only in a **new** shell.
+
+**What has been run, and where.** macOS is exercised end to end for everything
+that does not need root — detection, the installer's prompts, an install,
+verify and the undo line, all run for real; the root `sudo` prompt is exercised
+for its mechanics only (an echo-off prompt in a surface, typed by the user),
+never against a real root install. The Linux commands are executed end to end
+in a Debian 13 container, when `guide://system-tools` was written (#1405). Windows
+is **documented, not exercised**: no Windows host has run the UAC dialog,
+`winget`/`scoop`, or the new-shell PATH behaviour, so read those sentences as
+the guide's claim rather than a measured result.
 
 What the agent is told never to do: install anything without the `ask`, type or
 pipe in a password, accept licences on the user's behalf, add package
