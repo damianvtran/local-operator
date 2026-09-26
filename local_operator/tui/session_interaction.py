@@ -35,7 +35,7 @@ class PendingSend:
     points the slot at a different box, leaving the first capture intact.
     """
 
-    blocks: "tuple[Any, list[Any]] | None" = None
+    blocks: "tuple[Any, list[Any]]"
 
 
 @dataclass

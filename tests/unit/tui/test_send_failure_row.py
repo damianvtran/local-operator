@@ -521,7 +521,7 @@ async def test_send_again_on_an_unknown_delivery_supersedes_its_row() -> None:
         await pilot.pause()
         await pilot.press("enter")
         assert await _pump(
-            pilot, lambda: len(session.prompt_calls) == 2
+            pilot, lambda: len(session.prompt_calls) == 2  # type: ignore[attr-defined]
         ), "the resend never reached the session"
         assert await _pump(pilot, lambda: len(_records(app)) == 1 and bool(_notices(app)))
 
