@@ -867,7 +867,7 @@ async def test_both_error_routes_offer_the_same_recovery() -> None:
     # itself died, so its message never left and its notice adds the verbs the
     # failure record owns. The event route's turn was ADMITTED — there is no
     # payload to home, and `send again` there would be a lie about the send.
-    assert from_raise[0].endswith("send again \u23ce · edit e"), from_raise
+    assert " ".join(from_raise[0].split()).endswith("send again enter · edit e"), from_raise
     assert "send again" not in from_event[0], from_event
 
 

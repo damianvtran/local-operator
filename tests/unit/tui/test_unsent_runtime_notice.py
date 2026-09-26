@@ -117,7 +117,7 @@ async def test_a_prompt_on_a_dead_runtime_keeps_its_row_and_names_the_reason() -
         (notice,) = _notice_texts(app)
         assert "this session's runtime stopped" in notice, notice
         assert "your message was not sent" in notice, notice
-        assert "send again \u23ce · edit e" in notice, notice
+        assert "send again enter · edit e" in " ".join(notice.split()), notice
         assert UNSENT_RUNTIME_NOTICE not in notice, notice
 
 

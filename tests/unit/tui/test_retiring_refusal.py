@@ -168,7 +168,11 @@ async def test_a_drain_refusal_keeps_its_row_and_offers_the_two_verbs() -> None:
         # the boundary rule makes true.
         sentence = _retiring_notice_text(RuntimeRetiring())
         assert notices[0]._text.startswith(sentence), notices[0]._text
-        assert notices[0]._text.endswith("send again \u23ce · edit e"), notices[0]._text
+        # The controls are NBSP-joined (D1) and the key is the word (D3), so
+        # the copy is asserted against a space-normalised reading.
+        assert " ".join(notices[0]._text.split()).endswith("send again enter · edit e"), notices[
+            0
+        ]._text
         assert "Your message was not sent" in notices[0]._text
         assert "back in the composer" not in notices[0]._text, notices[0]._text
         # Amber `!`, not the red ✗ of a terminal failure: this state resolves
@@ -202,8 +206,8 @@ async def test_an_uncategorised_refusal_from_an_older_runtime_is_recovered_too()
         ], "the row for a refused message was withdrawn (superseded preference)"
         notices = _notices(app)
         assert [n._text for n in notices] == [
-            f"{_LEGACY_RETIRING_REFUSAL}. Your message was not sent."
-            " — send again \u23ce · edit e"
+            f"{_LEGACY_RETIRING_REFUSAL}. Your message was not sent"
+            " — send\u00a0again\u00a0enter\u00a0·\u00a0edit\u00a0e"
         ], [n._text for n in notices]
 
 
@@ -541,7 +545,7 @@ async def test_the_refusal_face_agrees_with_the_notice_on_a_pre_key_runtime(
         rows = [n._text for n in _notices(app)]
         assert rows[0] == SIGNAL_DRAIN_NOTICE, rows
         assert rows[1].startswith(_retiring_notice_text(refusal)), rows
-        assert rows[1].endswith("send again \u23ce · edit e"), rows
+        assert " ".join(rows[1].split()).endswith("send again enter · edit e"), rows
         assert rows[1].startswith(RuntimeRetiring.HEAD_SIGNALLED), rows
         assert all("newer build" not in text for text in rows), rows
         assert editor.text == "", editor.text

@@ -808,7 +808,7 @@ async def test_a_held_prompt_refused_on_the_wire_keeps_its_row_and_edits_home(tm
         notice = _failure_notice()
         assert notice is not None, "the refusal was stated nowhere"
         assert "image 1 is too large to send" in notice._text, notice._text
-        assert "send again \u23ce · edit e" in notice._text, notice._text
+        assert "send again enter · edit e" in " ".join(notice._text.split()), notice._text
         assert editor.text == "", "the payload returned to the composer by itself"
 
         # `edit` is the way back, and the ATTACHMENT comes home with the words:

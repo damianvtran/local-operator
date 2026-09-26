@@ -2139,12 +2139,20 @@ async def test_the_failure_notices_verbs_survive_an_eighty_column_wrap(monkeypat
         await _compose_and_send(pilot, app, "NARROW-E")
         assert await _pump(pilot, lambda: any("was not sent" in n for n in _notices(app)))
         rows = [row.strip() for row in _rendered_notice_rows(app)]
-        joined = " ".join(rows)
-        # The sentence may wrap; the state and the verbs must survive it as
-        # words. (OQ3: the balance of the two halves is the design round's call;
-        # what is pinned here is that neither half disappears behind a wrap.)
-        assert "your message was not sent" in joined, rows
-        assert "send again \u23ce · edit e" in joined, rows
+        # D1 (design round 1): the ACTIONABLE half may not be split by the
+        # wrap. The previous cell joined the rows before matching, so it passed
+        # on any word-level break — including the two measured ones (the
+        # separator opening a row; the verb itself split at 80 columns). The
+        # control phrase is composed NBSP-joined, so it must appear WHOLE
+        # inside one rendered row; the copy is normalised to spaces for
+        # reading, and the `any(...)` over unjoined rows is what fails on a
+        # split.
+        normalised = [" ".join(row.split()) for row in rows]
+        assert "your message was not sent" in " ".join(normalised), rows
+        assert any("send again enter · edit e" in row for row in normalised), (
+            "the controls split across a wrap",
+            rows,
+        )
         frozen.thaw(fail=ConnectionError("gone"))
         await _pump(pilot, lambda: not app._warm_engage_started)
 

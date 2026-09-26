@@ -309,7 +309,10 @@ class HeldPayloadNotice(NoticeBlock, can_focus=True):
     with the ``interactive-notice`` styling, click stops at the row (a click is
     aimed AT the row, not past it), and Enter is the primary verb — the same
     shape :class:`OlderHistoryNotice` established for a row whose copy would
-    otherwise have to recite its own controls.
+    otherwise have to recite its own controls. The click-ACTIVATES half is the
+    one exception: :class:`SendFailureNotice` carries two verbs and overrides
+    ``on_click`` for them (focus-first, activate-second, UX round 1, U1); a
+    single-offer row has no ambiguity to resolve and keeps click-to-run.
     """
 
     def __init__(self, text: str, kind: NoticeKind, *, source_token: str) -> None:
@@ -437,6 +440,18 @@ class SendFailureNotice(HeldPayloadNotice):
         Binding("e", "edit", "Edit", show=False),
     ]
 
+    #: The verbs as the label spells them. NBSP-joined so the notice's own
+    #: wrapper — ``wrap_cells``, which breaks on the ASCII space only — cannot
+    #: split the actionable half across rows: at 80 columns the old spaced
+    #: phrase wrapped as ``…send again ⏎`` / ``· edit e``, and on the runtime
+    #: class as ``…— send`` / ``again ⏎ · edit e`` (design round 1, D1). The
+    #: key is spelled in words rather than the ``⏎`` glyph this row was born
+    #: with: the glyph occurs nowhere else in the app, while the sibling row
+    #: one screen up spells ``— enter`` and the keymap copy agrees (design
+    #: round 1, D3; UX round 1, U5).
+    _SEND_AGAIN_CONTROLS = "send\u00a0again\u00a0enter\u00a0·\u00a0edit\u00a0e"
+    _EDIT_CONTROLS = "edit\u00a0e"
+
     class Requested(Message):
         """One of the notice's verbs, by name: ``"send_again"`` or ``"edit"``."""
 
@@ -451,16 +466,61 @@ class SendFailureNotice(HeldPayloadNotice):
 
     @staticmethod
     def _label_for(record: Any) -> str:
-        """``<the class's sentence> — send again ⏎ · edit e``.
+        """``<the class's sentence> — send again enter · edit e``.
 
         The sentence states the fate and the cause (it is the class's own copy,
         with no composer claim — the payload is not in the composer under the
         boundary rule); the keys are last because they are the part no user can
         discover from the pixels, the same reason ``DraftRecoveryNotice`` ends
-        its label with ``— enter``.
+        its label with ``— enter``. "enter" is the word, matching that sibling
+        and the keymap (design round 1, D3).
         """
-        controls = "send again ⏎ · edit e" if record.can_send_again else "edit e"
+        controls = (
+            SendFailureNotice._SEND_AGAIN_CONTROLS
+            if record.can_send_again
+            else SendFailureNotice._EDIT_CONTROLS
+        )
         return f"{record.sentence} — {controls}"
+
+    def focus_on_click(self) -> bool:
+        """NO, deliberately — this row is focus-first, activate-second.
+
+        Textual's click-to-focus runs inside ``Screen._forward_event`` BEFORE
+        the press reaches the row (``set_focus`` is called on MouseDown, then
+        the event is forwarded), so a row that let itself be focused there
+        could never tell a first press from a repeat: ``on_click`` would always
+        find itself focused and always run the primary verb. That is the
+        measured harm (UX round 1, U1) — a mouse user who meant ``edit`` had
+        already resent — and it happens on exactly the two-verb shape this row
+        is. Declining the auto-focus hands the discrimination to ``on_click``.
+        """
+        return False
+
+    def on_click(self, event: events.Click) -> None:
+        """Focus first; activate only when the click lands on a focused row.
+
+        ONE CLICK CANNOT MEAN TWO THINGS when the user has not chosen between
+        ``send again`` and ``edit`` yet, so the first click means "this is the
+        row" (the focus tint is the feedback) and the verb fires on a click on
+        the already-focused row — or on Enter, the documented primary. The
+        single-verb sibling (``DraftRecoveryNotice``) keeps click-to-run: with
+        one offer there is no ambiguity to resolve.
+
+        ``prevent_default`` is LOAD-BEARING, not belt-and-braces: Textual runs
+        EVERY ``on_click`` in the class MRO, most derived first
+        (``MessagePump._get_dispatch_methods``), so without it the base
+        ``HeldPayloadNotice`` handler would run ``action_default`` right after
+        this one focused the row — the first click would activate anyway, which
+        is the measured harm this override exists to remove. Found by the
+        click-contract cell in ``test_transcript_focus.py``, whose first run
+        failed exactly this way.
+        """
+        event.stop()
+        event.prevent_default()
+        if self.has_focus:
+            self.action_default()
+        else:
+            self.focus()
 
     def action_resolve(self) -> None:
         if self.record.can_send_again:
