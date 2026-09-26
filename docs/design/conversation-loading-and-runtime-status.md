@@ -1102,6 +1102,63 @@ post-compaction window rather than the file. Wall-clock second:
 `--scenario attach` on xl. Equivalence: the existing whole-file oracle test for
 `build_llm_history` extended to the windowed path.
 
+> **STATUS (revision 2): R2 IS NOT AVAILABLE AT THIS PARSE SITE. Refuted on the
+> mechanism, not on the measurement. Do not re-propose it without answering the
+> three products below.**
+>
+> Step 1 measured the metric it was priced on, on the same rig at n=6, load
+> 45.6-51.3, population **xl = 206.99 MB / 18 301 rows**: first paint
+> **671.2-818.9 ms, p50 ~790** (resolving the 1 768.9-vs-789.0 contradiction in
+> the architect's favour — the 1 768.9 ms was n=1, and **R8 should be re-priced
+> on ~790 ms**), the pid at ~1 420 ms, the control record at ~2 814 ms (**0.3-1.7
+> ms after the bind**, so the plane can answer as soon as it is bound), and
+> **pid → addressable p50 ~1 347 ms** — the boot work this change exists to move.
+> Note what these two facts already say: first paint happens *before* the pid
+> exists, so it never waits for the parse and **R2 cannot improve the durable
+> paint at all**. Its whole effect would be on pid → addressable → attach.
+>
+> Step 2 then read what the boot actually needs, and the window that is sound for
+> **paint** is not sound for **state** — the same loop builds both.
+> `Transcript.__init__` (`session/transcript.py:1141-1170`) is one pass over every
+> line, and per row it appends to `_entries`, calls `_index_entry`, and adds to
+> `_admitted_command_ids`. Three of those products cannot come from a suffix:
+>
+> 1. **`_admitted_command_ids`** — the idempotency admission set, read by
+>    `_is_admitted_command` (`session/transcript.py:1613`) and answered on the
+>    wire as `duplicate: true`. A suffix window misses a re-delivered command
+>    from before the window and admits it a second time: **silent duplicate
+>    execution**, which is precisely the class a green suite does not catch.
+> 2. **`_history_generation`** — incremented in `_index_entry` on every
+>    `ENTRY_COMPACTION`/`ENTRY_PRUNE` row, so it is a count over the WHOLE
+>    journal. A suffix yields a different generation: wrong revision lineage and
+>    wrong `_display_window_cache` invalidation.
+> 3. **`_entries` is the recovery branch's source** — `_write_entries`' rebuild
+>    writes `for row in (*self._entries, *entries)`
+>    (`session/transcript.py:1552-1568`). Partial `_entries` means a rebuild
+>    writes a **truncated journal**: the data-loss-adjacent path, and the reason
+>    `_entries` laziness was never on the table.
+>
+> The first `/snapshot`+`/history` page needs only the newest ≤100 rows, which is
+> the window that would be sound for paint. **The narrow windowed-replay form
+> presupposes that the boot's replay can lag its parse; the parse's products are
+> correctness state, not replay.** Separating them needs either a second full pass
+> (same I/O, no win) or laziness (forbidden). That refutes the premise of the
+> change rather than its implementation, which is why the negative is trustworthy
+> and why the two prerequisites §3(D) lists would not have been sufficient.
+>
+> **What would be sound, and is NOT authorised by this note:** a sidecar index
+> carrying the admission set and the generation, written at append time, so the
+> boot reads a small file instead of decoding the journal — additive, and it
+> leaves `_entries` eager. It is a **new mechanism with its own recovery
+> questions** (missing, truncated, stale, or written by an older version), and
+> the admission set is the member that silently double-executes commands when it
+> is wrong. Design it before building it; it belongs to the architect, not to an
+> implementation PR.
+>
+> Evidence: `boot-phases-xl-n6-fixed.json` and `probe_boot_phases.py` in the
+> task-8 scratchpad (`/Users/damian/.dsh/teams/lopdev/scratch-c1e6608f/`).
+> Recorded by `coder` for task-8, closed as a documented negative.
+
 ### R3 — Warmth, priced and capped inside the envelope
 
 **What.** Do **not** treat the cap as the fix. If any memory is spent, spend it
