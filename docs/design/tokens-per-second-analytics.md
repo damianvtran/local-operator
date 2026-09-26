@@ -657,6 +657,133 @@ than as the session. That is a strictly smaller change than a live counter and
 it is the one to price first; it still needs a frame-budget decision, which is
 why it is a follow-up rather than part of this change.
 
+**That frame-budget decision, priced — and the first pricing was WRONG (2026-09-26).**
+The first version of this paragraph put the fields on `FrontendUsage` and claimed
+they cost the frame "~46 B, once, because `FrontendUsage` appears exactly once".
+Review round 1 measured the claim and refuted it: `FrontendUsage` reaches the wire
+up to **201 times per frame**, so the shape is exactly the one that broke attach
+before.
+
+`FrontendState.last_usage` is one slot, but `FrontendState.usage_components` is a
+**`list[FrontendUsage]`** (`frontend_state.py:2679`) capped at
+`USAGE_COMPONENT_CAP = 200` (`:156`) and serialised in full (`:3248-3250`, `:5787`);
+the calibrated fixture itself fills it with 5,000 receipts, which the wire caps at
+200. Measured through `sync_wire_payload` with both keys set on every
+`FrontendUsage`, using the guard's own `_receipt` shape: 1 receipt 2,061 → 2,157 B
+(+96); 200 receipts 70,318 → 79,966 B (**+9,648**); 5,000 receipts (wire-caps to
+200) 70,518 → 80,166 B (**+9,648**). That is 48 B x 201 objects against 168 B of
+slack — **57x over**, taking the calibrated worst case from 1,048,408 to about
+**1,058,056 B, some 9.5 KB past the 1 MiB line**. The payload carries 201
+`"decode_us"` occurrences.
+
+Two details worth keeping, because they are where the wrong pricing came from:
+the ROSTER is not the multiplier (`jobs[i].usage` and `descendant_usage[j]` are
+declared `Usage` with the default extra policy, so a field declared on the
+subclass is dropped from those slots — verified on a 3-row frame: ten
+usage-shaped dicts, the keys only under `$.snapshot.last_usage`), and the guard's
+200-row fixture is exactly where the multiplier lands, so an implementation would
+go red rather than ship a broken attach. The harm of the wrong pricing was a
+follow-up that could not be built, not a broken frame.
+
+**A second route that does NOT fit, measured the same way (2026-09-26, later the
+same day).** The obvious hook — declare the pair on the base `Usage` and have the
+model seam stamp the object it already relays — was implemented and then
+measured, and it costs the frame **once per roster row**. Two reasons compound:
+the field is in the SCHEMA of every usage on the wire, so nothing drops it from
+`jobs[i].usage` the way a `FrontendUsage`-only field was dropped; and the relay
+assigns the stamped object to the assistant message AFTER the stream loop
+(`loop.py:2641` → `:2835` → `subagent.py:1459` → `:1537`), so the window lands on
+the very object `_accumulate_usage` copies into each job row. Measured through
+`sync_wire_payload`: 1 row +39 B (2 occurrences), 20 rows +780 B (21), **200 rows
++7,800 B (201 occurrences)** — ~46x over the 168 B of slack, i.e. the recorded
+attach failure at `frontend_state.py:132-140`. The omission rule cannot help,
+because an ELIGIBLE call's pair is set by definition: it drops only the unset
+pair, which is the one that was never a cost.
+
+The lesson is worth more than the route: `test_attach_frame_size.py` stayed GREEN
+through that implementation (123 passed) because its 200 rows are built from an
+UNSTAMPED `Usage` — the guard measures the without-column and never the
+with-column. So the follow-up's first test is not "add the fields and see if the
+guard notices"; it is an occurrence assertion **with stamped rows**, added to that
+file, which is the only thing that makes any of the numbers above a guard rather
+than a measurement someone has to remember.
+
+**A third shape, and the first whose frame cost is ZERO (2026-07-26, measured at the
+mechanism level rather than through a frame).** Both falsified routes shared one
+assumption — that the numbers must live in a PYDANTIC FIELD to travel from the seam
+to the frame, which is what put them in the serialised schema and so on every row
+that shares that schema. They do not have to. A ``Usage`` accepts an UNDECLARED
+private attribute (``usage._decode_window = (us, tokens)``) and pydantic keeps it
+out of ``model_dump`` entirely: measured on this tree, the assignment succeeds and
+a dump of the same object carries **no key for it at all**. So the seam can hand the
+window forward through the relay for **0 wire bytes**, and the only public field
+pair in the design is the one the status band reads.
+
+Put together, the shape is: the seam stamps a PRIVATE pair early, where the usage
+event is handled rather than in the stream's ``finally`` (the ordering finding —
+``on_usage`` fires while the seam is suspended at ``yield``); the session copies
+that private pair onto ``FrontendUsage`` — the wire subclass — when it builds the
+frame's usage; and the pair is declared ONLY there, because ``jobs[i].usage`` and
+``descendant_usage[j]`` are declared ``Usage`` and therefore drop a
+``FrontendUsage``-only field (review round 1 verified that drop directly). Net
+frame cost: two integers on ``last_usage``, one occurrence, ~48 B against the 168 B
+of slack — and **nothing at all** on the 200 roster rows, which is the multiplier
+that made the first two routes cost 9,648 B and 7,800 B.
+
+Two spelling traps, both measured (review round 2), because the natural first
+attempt at each fails:
+
+* the wrap cannot be ``FrontendUsage.model_validate(usage)`` — that raises
+  ``ValidationError``. ``last_usage`` is built by ``_usage_wire``
+  (``frontend_state.py:2804-2806``), which DUMPS the live ``Usage``, so the pair has
+  to be injected into the dumped dict after reading the private attribute off the
+  object;
+* and it must be materialised on the ``last_usage`` VALUE alone, never on an object
+  also fed to ``usage_components``. That list is ``list[FrontendUsage]`` — 200
+  ``FrontendUsage`` slots, NOT ``Usage``-typed ones — so a pair set on a receipt
+  WOULD serialise; the receipts are safe only because they are dumped from the live
+  ``Usage``. ``accrue_usage`` builds ``last_usage`` and ``usage_components`` in one
+  call (``:6216-6247``), which is what makes this a one-line mistake.
+
+Measured on the guard's own roster shape through the real ``sync_wire_payload``
+(review round 2): 200 rows plain with a plain last_usage is 186,657 B and **0**
+occurrences; putting the private pair on ALL 201 objects is still 186,657 B —
+**+0 B exactly** — and declaring the pair on the ``last_usage`` value alone is
+186,696 B, **1 occurrence**, +39 B at a two-digit window and 48 B at the 7-digit
+worst case. Stamping EARLY also closes the ordering finding the reverted attempt
+left open: with the pair set before ``on_usage`` fires, the consumer's dump and
+``accrue_usage``'s injection can both read it, so the band's source is populated on
+the live path rather than only on refresh.
+
+That is still a hypothesis with a measured mechanism rather than a measured frame in
+the SHAPE the band would ship, and the difference is exactly what has been wrong
+three times in this section. So the first
+thing the next attempt does is still the SAME test: an occurrence assertion with
+stamped rows in ``tests/unit/session/test_attach_frame_size.py`` — a file that
+builds its 200 rows from an unstamped ``Usage`` and therefore stayed green through
+every wrong implementation above. Only after that assertion exists and counts
+one is this shape worth building on.
+
+**The re-priced form, which fits.** Put the two scalars on
+**`FrontendSessionState`** rather than on the per-receipt type: one occurrence per
+frame, ~48 B against 168 B of slack. That is also the HONEST shape rather than a
+workaround — the band shows the last completed call only, so a per-receipt field
+would be 200 copies of a fact 199 of which nothing reads. Two alternatives were
+priced and are worse: a separate receipt type (a new wire type for a figure the
+band reads once), and re-budgeting ~9.6 KB out of the roster's text budgets, which
+is a much larger decision than this feature.
+
+What remains open is the labelling rather than the cost: a bare `N tok/s` beside a
+live context reading is the misreading §9.3 exists to prevent, so the segment has
+to say it is the last completed call, and that wording is a design-round question.
+The follow-up is therefore: two scalars on `FrontendSessionState`, the seam
+stamping them (`_record_usage` has both numbers in hand), one `StatusLine` segment
+plus its drop-ladder rung — a figure that is NOT re-derivable from the transcript
+belongs near `cost`, which the ladder's own comment calls "the one figure that is
+not a live reading of this turn" — and two tests: the frame delta pinned as an
+assertion in `test_attach_frame_size.py` (the file that would have caught the
+first pricing), and the band's rendering plus shed order.
+
 ### 9.4 Desktop endpoint
 
 **One new op, and no change to the cost of the existing one.**
@@ -814,7 +941,7 @@ the screen's lifetime.
 | Widen `aggregate()`'s `GROUP BY provider` to `(provider, model_id)` | Measured +320 ms on 475k rows for the temp B-tree, and it still cannot serve the rollup path, which has no model dimension — so per-model rows would come from a different source than the headline (§9.5). |
 | Add the decode measures to `usage_daily`/`usage_monthly` too | Nothing reads them (§4.2), and touching them would require an ALTER path plus a new shape guard on tables that currently have neither — new risk for no read (§4.3). |
 | A new analytics store / recorder hook / per-provider instrumentation | The existing wrapper already sees every provider call for every model; a second path is a second thing to keep in sync and a new double-count risk (§3). |
-| A live rate in the status band | Cannot be done cheaply and correctly: the TUI never sees deltas, `last_usage` is per-call and carries no window, the attach frame has 168 bytes of headroom at its worst case, and the band must not do I/O on a repaint (§9.3). |
+| A live rate in the status band | Cannot be done cheaply and correctly: the TUI never sees deltas, `last_usage` is per-call and carries no window, the attach frame has 168 bytes of headroom at its worst case, and the band must not do I/O on a repaint (§9.3). A per-completed-call figure IS affordable, but only on `FrontendSessionState` — the same fields on `FrontendUsage` cost 48 B x 201 objects and miss the frame by ~9.5 KB (§9.3, re-priced after review round 1 refuted the first estimate). |
 
 ---
 

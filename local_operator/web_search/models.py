@@ -11,6 +11,17 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# The defaults themselves live in ``local_operator.web_defaults`` — a module with
+# no third-party imports — and are re-exported here, so this module stays their
+# documented home for every existing consumer
+# (``local_operator.web_search.service``, ``local_operator.config``, the CLI
+# status view) and there is still exactly ONE definition of the values. They
+# moved because ``local_operator.config`` needs this one dict and nothing else
+# from here, and importing it for that dragged pydantic onto every CLI start.
+from local_operator.web_defaults import (  # noqa: F401 — re-export
+    DEFAULT_WEB_SEARCH_CONFIG,
+)
+
 SearchProviderId = Literal[
     "duckduckgo",
     "tavily",
@@ -183,21 +194,3 @@ class WebSearchSettings(BaseModel):
     #: because it costs nothing until it is used, and it degrades to an explicit
     #: "no pages captured, use web_fetch" rather than a silent fetch.
     read_enabled: bool = True
-
-
-DEFAULT_WEB_SEARCH_CONFIG: dict[str, object] = {
-    "enabled": True,
-    "strategy": "round_robin",
-    # A PRIORITY PREFIX: these two credential-free transports are tried first, and
-    # the resolver appends the rest of this install's usable providers in band
-    # order after them (tavily's keyless tier is rate-limited; DDG is the durable
-    # no-account fallback). A fresh install therefore walks
-    # duckduckgo, tavily, exa, parallel, perplexity, deepseek -- free legs first,
-    # the metered tail strictly last.
-    "providers": ["duckduckgo", "tavily"],
-    "excluded_providers": [],
-    "timeout_seconds": 20.0,
-    "searxng_endpoint": "",
-    "deepseek_evidence": False,
-    "read_enabled": True,
-}

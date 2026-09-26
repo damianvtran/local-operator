@@ -1,0 +1,391 @@
+# Sir Knight Lop the Second — the always-on review and triage agent for this repository.
+#
+# Read `.github/helpdesk/README.md` first: it carries the design, the security
+# model, and the maintenance notes. The short version of the choices here:
+#
+# * `pull_request` (NOT `pull_request_target`): a fork PR never gets repository
+#   secrets on its own events. Fork PRs are excluded on EVERY path — the
+#   `pull_request` clause checks the head repo in the payload, and the
+#   comment/dispatch paths run a guard step that resolves the head repo (and
+#   the PR's state) through the API before anything is checked out, because a
+#   mention comment or a dispatch is NOT a fork event and would otherwise run
+#   with secrets while the fork's code sits in the workspace.
+# * The bot reviews a PR once, automatically, when it is opened non-draft or
+#   marked ready for review. Later heads — and a reopened PR, which gets no
+#   automatic pass — are reviewed on demand: a write-access user comments a
+#   mention (see each job's `issue_comment` clause; `@aida` / `@Aida` are
+#   legacy aliases kept so threads from before the rename keep working).
+#   Pushes and reopens do NOT re-trigger by design — the PR's own CI carries
+#   the per-push signal, and every engagement spends provider tokens.
+#   `cancel-in-progress` is true only for `pull_request`-event runs, and the
+#   two lanes carry distinct concurrency groups (`-auto` / `-manual`): a
+#   ready_for_review run supersedes an in-flight opened run on the same PR,
+#   while a comment- or dispatch-triggered run neither cancels nor can be
+#   cancelled by an automatic run. The bot's own comments must not re-trigger
+#   it either: Bot actors (and bot-authored content) never start runs — keep
+#   that invariant on every path, now that comments are posted with the app
+#   token (app-token events CAN start runs where workflow-token events cannot
+#   — which is why the trigger clauses test the event actor's type, not only
+#   the content author's).
+# * The provider key (`RADIENT_API_KEY`) is a deployment switch: with it unset
+#   the run skips the engagement with a warning and a run-summary note — no
+#   comment and no red check — because a repository that has not yet configured
+#   the bot must not fail every PR in it. Once the key is set, real failures
+#   (auth, provider errors, crashes) still fail the run and post the notice
+#   comment.
+# * The jobs install a pinned `local-operator` from PyPI and the team from
+#   `.github/helpdesk/`, then run `lop exec` headless. Approvals: the `--tools`
+#   declaration is the approval for exactly the names it lists where nobody
+#   can be asked — a non-TTY run without `--control`, which is this
+#   environment — and delegated children inherit both the bound and the
+#   approval (harness/subagent.py copies both to child sessions).
+name: Sir Knight Lop the Second
+
+on:
+  pull_request:
+    # Reviewed once at creation/ready; later heads and re-opened PRs on demand
+    # (a mention), because pushes and reopens do not re-trigger by design.
+    types: [opened, ready_for_review]
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number to review
+        required: false
+        type: string
+      issue:
+        description: Issue number to triage
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  # `gh pr checks` reads statusCheckRollup (checks/statuses) and the workflow
+  # behind a run (actions). A scope not listed under an explicit `permissions:`
+  # block is `none`, not "default": on the fallback identity, without these
+  # three the prompts' `gh pr checks` call 403s with "Resource not accessible
+  # by integration". (Under the app token the reads work on public
+  # repositories — see the README's security model.)
+  actions: read
+  checks: read
+  statuses: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  # `-auto` / `-manual` keep the lanes apart so their cancellation rules can
+  # differ: an automatic (`pull_request`) run supersedes an in-flight automatic
+  # run on the same PR, while a comment- or dispatch-triggered run neither
+  # cancels an in-flight review nor can be cancelled by an automatic run.
+  group: helpdesk-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr || inputs.issue || github.run_id }}-${{ github.event_name == 'pull_request' && 'auto' || 'manual' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  review:
+    name: Review pull request
+    # Runs for: a non-draft same-repo PR event (the first review); a mention
+    # comment on a PR by someone with write access; a manual dispatch carrying a
+    # PR number.
+    # Mention aliases: the current trigger is `@sir-knight-lop-the-second`;
+    # `@aida` and `@Aida` stay in the condition as legacy aliases, so threads
+    # from before the rename keep working.
+    if: >-
+      (github.event_name == 'pull_request'
+        && github.event.pull_request.draft == false
+        && github.event.pull_request.head.repo.full_name == github.repository
+        && github.event.pull_request.user.type != 'Bot'
+        && github.event.sender.type != 'Bot')
+      || (github.event_name == 'issue_comment'
+        && github.event.issue.pull_request
+        && (contains(github.event.comment.body, '@sir-knight-lop-the-second')
+          || contains(github.event.comment.body, '@aida')
+          || contains(github.event.comment.body, '@Aida'))
+        && github.event.comment.user.type != 'Bot'
+        && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
+      || (github.event_name == 'workflow_dispatch' && inputs.pr != '')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RADIENT_API_KEY: ${{ secrets.RADIENT_API_KEY }}
+      NO_COLOR: "1"
+    steps:
+      # The key is a deployment switch, not a run failure: an unconfigured
+      # repository skips with a warning and a run-summary note, so it cannot
+      # red-X every PR. Real failures once enabled stay loud — the notice step
+      # below still fires on failure().
+      - name: Check the provider key (skip with a warning when unset)
+        id: key
+        run: |
+          if [ -z "${RADIENT_API_KEY:-}" ]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::RADIENT_API_KEY is not set; Sir Knight Lop the Second is disabled for this repository until it is. Add it under Settings -> Secrets and variables -> Actions (see .github/helpdesk/README.md, setup item 1)."
+            {
+              echo "## Sir Knight Lop the Second is disabled"
+              echo
+              echo "RADIENT_API_KEY is not set for ${GITHUB_REPOSITORY}, so this run did nothing. Add the secret under Settings -> Secrets and variables -> Actions to enable Sir Knight Lop the Second (see \`.github/helpdesk/README.md\`)."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+      # App-token events CAN start new runs (workflow-token ones cannot), so
+      # every trigger path excludes Bot actors and bot-authored content — keep
+      # that invariant.
+      - name: Mint the bot token (posts as the app)
+        id: bot-token
+        if: steps.key.outputs.enabled == 'true'
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3
+        with:
+          # v3 reads `client-id` (the old `app-id` input is deprecated);
+          # BOT_APP_ID holds the app's ID, which this input accepts (the app
+          # JWT `iss` claim takes either the client ID or the app ID).
+          client-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+          # Pin the token to the documented minimum (README, security model)
+          # instead of inheriting every permission the installation holds.
+          permission-contents: read
+          permission-issues: write
+          permission-pull-requests: write
+      - name: Prefer the bot token for gh
+        if: steps.key.outputs.enabled == 'true' && steps.bot-token.outputs.token != ''
+        run: |
+          echo "::add-mask::${{ steps.bot-token.outputs.token }}"
+          echo "GH_TOKEN=${{ steps.bot-token.outputs.token }}" >> "$GITHUB_ENV"
+      # A failed or absent mint falls back to the workflow token (correct),
+      # but must not be silent: a rotated key would otherwise go unnoticed
+      # until someone reads the comment's author.
+      - name: Warn when posting as github-actions[bot]
+        if: steps.key.outputs.enabled == 'true' && steps.bot-token.outputs.token == ''
+        run: echo "::warning::No app token was minted (BOT_APP_ID/BOT_APP_PRIVATE_KEY missing or stale, or the app is not installed) — this run posts as github-actions[bot]. See .github/helpdesk/README.md, setup item 2."
+      # Comment and dispatch runs are not fork events: repository secrets ARE
+      # available and refs/pull/N/merge would deliver the fork's code. Resolve
+      # the head repo, the state and the mergeability through the API, and skip
+      # all of the job's work for anything that is not an open, same-repo,
+      # mergeable PR. (On `pull_request` runs the job-level `if` has already
+      # checked the payload; a skipped step leaves `skip` empty, and empty !=
+      # 'true'.)
+      - name: Guard the target (open, same-repo PR only)
+        if: steps.key.outputs.enabled == 'true' && github.event_name != 'pull_request'
+        id: guard
+        run: |
+          # `|| true`: an empty API response makes `read` return 1 at EOF, and
+          # under `bash -e` that aborts the step with no message — the checks
+          # below must be what name the cause. A conflicted PR (`mergeable` is
+          # "false") has no merge ref to check out, so the run is skipped:
+          # resolve the conflict, then comment a mention to re-run (pushes do
+          # not re-trigger). "null" just means GitHub has not finished
+          # computing mergeability, and must not skip.
+          read -r head state mergeable < <(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '[.head.repo.full_name // "unknown", .state, (.mergeable | tostring)] | @tsv') || true
+          if [ -z "$head" ] || [ -z "$state" ]; then
+            echo "::error::could not resolve pull request #${PR_NUMBER} through the API"
+            exit 1
+          fi
+          if [ "$head" != "$GITHUB_REPOSITORY" ] || [ "$state" != "open" ] || [ "$mergeable" = "false" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Sir Knight Lop the Second skips PR #${PR_NUMBER}: head='${head}', state='${state}', mergeable='${mergeable}'."
+          fi
+      - name: Check out the pull request
+        if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true'
+        uses: actions/checkout@v7
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}/merge
+          # Files, not history: diffs and commit context come from the API
+          # (`gh pr diff`, `gh api compare`); a full fetch of this repo's ~1 GB
+          # history is minutes of runner time for nothing.
+          fetch-depth: 1
+      - name: Set up Python
+        if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true'
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install the pinned harness
+        if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true'
+        run: python -m pip install --disable-pip-version-check "local-operator==0.62.38"
+      - name: Install the helpdesk team and roles into the runner's lop config
+        if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true'
+        run: bash .github/helpdesk/setup.sh
+      - name: Run the review
+        if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true'
+        timeout-minutes: 35
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          {
+            cat .github/helpdesk/prompts/pr-review.md
+            printf '\n\n## This run\n- Repository: %s\n- Pull request: #%s\n- Trigger: %s\n- Run log: %s/%s/actions/runs/%s\n' \
+              "$GITHUB_REPOSITORY" "$PR_NUMBER" "$GITHUB_EVENT_NAME" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            if [ -n "${COMMENT_BODY:-}" ]; then
+              printf '\nThe comment that triggered this run:\n\n%s\n' "$COMMENT_BODY"
+            fi
+          } > "$RUNNER_TEMP/helpdesk-prompt.txt"
+          lop exec \
+            --hosting radient --model auto \
+            --team helpdesk \
+            --tools bash,read,write,glob,grep,eval,todo,web_search,web_read,web_fetch,task,wait,jobs,hub,list_variables,read_variable \
+            --name "Sir Knight Lop the Second review: PR #${PR_NUMBER}" \
+            "$(cat "$RUNNER_TEMP/helpdesk-prompt.txt")"
+      - name: Report a failed run
+        if: failure() && steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true'
+        env:
+          # Step env is merged after the $GITHUB_ENV write the prefer step made
+          # (@actions/runner applies step env last), so the notice still posts
+          # when the app token is what failed.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Heading + sentence, through a body file so the blank line is real
+          # (`--body` would collapse it).
+          printf '%s\n\n%s\n' \
+            "### Sir Knight Lop the Second — review run failed" \
+            "Sir Knight Lop the Second's review run failed on the bot side — the pull request is unaffected. Run log: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            > "$RUNNER_TEMP/helpdesk-notice.md"
+          gh pr comment "${PR_NUMBER}" -R "${GITHUB_REPOSITORY}" --body-file "$RUNNER_TEMP/helpdesk-notice.md"
+
+  triage:
+    name: Triage issue
+    # Runs for: an opened issue (any author except bots); a mention comment on
+    # an issue by someone with write access; a manual dispatch with an issue
+    # number.
+    # Mention aliases: the current trigger is `@sir-knight-lop-the-second`;
+    # `@aida` and `@Aida` stay in the condition as legacy aliases, so threads
+    # from before the rename keep working.
+    if: >-
+      (github.event_name == 'issues'
+        && github.event.issue.user.type != 'Bot'
+        && github.event.sender.type != 'Bot')
+      || (github.event_name == 'issue_comment'
+        && !github.event.issue.pull_request
+        && (contains(github.event.comment.body, '@sir-knight-lop-the-second')
+          || contains(github.event.comment.body, '@aida')
+          || contains(github.event.comment.body, '@Aida'))
+        && github.event.comment.user.type != 'Bot'
+        && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
+      || (github.event_name == 'workflow_dispatch' && inputs.issue != '')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RADIENT_API_KEY: ${{ secrets.RADIENT_API_KEY }}
+      NO_COLOR: "1"
+    steps:
+      # The key is a deployment switch, not a run failure: an unconfigured
+      # repository skips with a warning and a run-summary note, so it cannot
+      # red-X every PR. Real failures once enabled stay loud — the notice step
+      # below still fires on failure().
+      - name: Check the provider key (skip with a warning when unset)
+        id: key
+        run: |
+          if [ -z "${RADIENT_API_KEY:-}" ]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::RADIENT_API_KEY is not set; Sir Knight Lop the Second is disabled for this repository until it is. Add it under Settings -> Secrets and variables -> Actions (see .github/helpdesk/README.md, setup item 1)."
+            {
+              echo "## Sir Knight Lop the Second is disabled"
+              echo
+              echo "RADIENT_API_KEY is not set for ${GITHUB_REPOSITORY}, so this run did nothing. Add the secret under Settings -> Secrets and variables -> Actions to enable Sir Knight Lop the Second (see \`.github/helpdesk/README.md\`)."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+      # App-token events CAN start new runs (workflow-token ones cannot), so
+      # every trigger path excludes Bot actors and bot-authored content — keep
+      # that invariant.
+      - name: Mint the bot token (posts as the app)
+        id: bot-token
+        if: steps.key.outputs.enabled == 'true'
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3
+        with:
+          # v3 reads `client-id` (the old `app-id` input is deprecated);
+          # BOT_APP_ID holds the app's ID, which this input accepts (the app
+          # JWT `iss` claim takes either the client ID or the app ID).
+          client-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+          # Pin the token to the documented minimum (README, security model)
+          # instead of inheriting every permission the installation holds.
+          permission-contents: read
+          permission-issues: write
+          permission-pull-requests: write
+      - name: Prefer the bot token for gh
+        if: steps.key.outputs.enabled == 'true' && steps.bot-token.outputs.token != ''
+        run: |
+          echo "::add-mask::${{ steps.bot-token.outputs.token }}"
+          echo "GH_TOKEN=${{ steps.bot-token.outputs.token }}" >> "$GITHUB_ENV"
+      # A failed or absent mint falls back to the workflow token (correct),
+      # but must not be silent: a rotated key would otherwise go unnoticed
+      # until someone reads the comment's author.
+      - name: Warn when posting as github-actions[bot]
+        if: steps.key.outputs.enabled == 'true' && steps.bot-token.outputs.token == ''
+        run: echo "::warning::No app token was minted (BOT_APP_ID/BOT_APP_PRIVATE_KEY missing or stale, or the app is not installed) — this run posts as github-actions[bot]. See .github/helpdesk/README.md, setup item 2."
+      # A comment or dispatch on a closed issue would triage frozen content;
+      # resolve the state through the API first. (`issues` runs are the opening
+      # itself and need no guard.)
+      - name: Guard the target (open issue only)
+        if: steps.key.outputs.enabled == 'true' && github.event_name != 'issues'
+        id: guard
+        run: |
+          # `|| true`: an empty API response must reach the emptiness check
+          # below instead of aborting the step with no message (see the review
+          # job's guard for the full note).
+          state="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}" --jq '.state')" || true
+          if [ -z "$state" ]; then
+            echo "::error::could not resolve issue #${ISSUE_NUMBER} through the API"
+            exit 1
+          fi
+          if [ "$state" != "open" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Sir Knight Lop the Second skips issue #${ISSUE_NUMBER}: state='${state}'."
+          fi
+      - name: Check out the repository
+        if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true'
+        uses: actions/checkout@v7
+      - name: Set up Python
+        if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true'
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install the pinned harness
+        if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true'
+        run: python -m pip install --disable-pip-version-check "local-operator==0.62.38"
+      - name: Install the helpdesk team and roles into the runner's lop config
+        if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true'
+        run: bash .github/helpdesk/setup.sh
+      - name: Run the triage
+        if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true'
+        timeout-minutes: 20
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          {
+            cat .github/helpdesk/prompts/issue-triage.md
+            printf '\n\n## This run\n- Repository: %s\n- Issue: #%s\n- Trigger: %s\n- Run log: %s/%s/actions/runs/%s\n' \
+              "$GITHUB_REPOSITORY" "$ISSUE_NUMBER" "$GITHUB_EVENT_NAME" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            if [ -n "${COMMENT_BODY:-}" ]; then
+              printf '\nThe comment that triggered this run:\n\n%s\n' "$COMMENT_BODY"
+            fi
+          } > "$RUNNER_TEMP/helpdesk-prompt.txt"
+          lop exec \
+            --hosting radient --model auto \
+            --team helpdesk \
+            --tools bash,read,write,glob,grep,eval,todo,web_search,web_read,web_fetch,task,wait,jobs,hub,list_variables,read_variable \
+            --name "Sir Knight Lop the Second triage: issue #${ISSUE_NUMBER}" \
+            "$(cat "$RUNNER_TEMP/helpdesk-prompt.txt")"
+      - name: Report a failed run
+        if: failure() && steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true'
+        env:
+          # Step env is merged after the $GITHUB_ENV write the prefer step made
+          # (@actions/runner applies step env last), so the notice still posts
+          # when the app token is what failed.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          printf '%s\n\n%s\n' \
+            "### Sir Knight Lop the Second — triage run failed" \
+            "Sir Knight Lop the Second's triage run failed on the bot side — the issue is unaffected. Run log: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            > "$RUNNER_TEMP/helpdesk-notice.md"
+          gh issue comment "${ISSUE_NUMBER}" -R "${GITHUB_REPOSITORY}" --body-file "$RUNNER_TEMP/helpdesk-notice.md"

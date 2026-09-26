@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Install Aida's lop attachments into this runner's config directory:
+# Install the helpdesk team's lop attachments into this runner's config directory:
 #
-#   * the `aida` team (from `.github/aida/teams/aida/`)
+#   * the `helpdesk` team (from `.github/helpdesk/teams/helpdesk/`)
 #   * the two roles the team uses that are NOT packaged with the harness
-#     (`qa-tester`, `ux-reviewer`, from `.github/aida/agents/`)
+#     (`qa-tester`, `ux-reviewer`, from `.github/helpdesk/agents/`)
 #   * a `config.yml` carrying the `shell_environment` allowlist, so the run's
 #     provider key is not inherited by the model's `bash`/`eval` children
 #
@@ -34,10 +34,10 @@ install_row() {
   cp -R "$source" "$config_dir/$family/$id"
 }
 
-for team_src in "$repo_root"/.github/aida/teams/*/; do
+for team_src in "$repo_root"/.github/helpdesk/teams/*/; do
   [ -d "$team_src" ] && install_row teams "$team_src"
 done
-for agent_src in "$repo_root"/.github/aida/agents/*/; do
+for agent_src in "$repo_root"/.github/helpdesk/agents/*/; do
   [ -d "$agent_src" ] && install_row agents "$agent_src"
 done
 
@@ -101,7 +101,7 @@ PY
 
 # Verify with the same resolution the runtime uses, not by re-listing files:
 # `resolve_profile` is what `task(agent=...)` calls, and the team registry
-# lookup is what `--team aida` calls. Both must succeed before a run starts.
+# lookup is what `--team helpdesk` calls. Both must succeed before a run starts.
 LOCAL_OPERATOR_CONFIG_DIR="$config_dir" python -I - <<'PY'
 import os
 from pathlib import Path
@@ -118,14 +118,14 @@ for role in ("qa-tester", "ux-reviewer"):
     if profile is None or getattr(profile, "agent_id", None) is None:
         raise SystemExit(f"setup.sh: role {role!r} does not resolve from the registry")
 
-if TeamRegistry(config_dir).get_team_by_name("aida") is None:
-    raise SystemExit("setup.sh: team 'aida' does not resolve")
+if TeamRegistry(config_dir).get_team_by_name("helpdesk") is None:
+    raise SystemExit("setup.sh: team 'helpdesk' does not resolve")
 
 # `load_policy` reads once per process and freezes, so this fresh interpreter
 # must see exactly what the write above stored: every child the policy governs
 # is allowlisted. If it does not resolve, fail HERE rather than inside a run.
 policy = load_policy()
 assert policy.mode == "allowlist", f"shell_environment.mode resolved to {policy.mode!r}"
-print("setup.sh: team aida and roles qa-tester/ux-reviewer resolve")
+print("setup.sh: team helpdesk and roles qa-tester/ux-reviewer resolve")
 print(f"setup.sh: shell_environment policy resolves: mode={policy.mode!r}")
 PY

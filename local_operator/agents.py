@@ -319,6 +319,20 @@ def _collision_free_name(name: str, suffix: int) -> str:
     return f"{name[: MAX_AGENT_NAME_CHARS - len(tail)]}{tail}"
 
 
+def agents_store_present(config_root: Path) -> bool:
+    """Whether an agents store exists for ``AgentRegistry`` to be built over.
+
+    The reader-side test for launch-path callers that must NOT create one:
+    ``AgentRegistry.__init__`` creates ``config_dir`` and ``config_dir/agents``
+    (and then runs both migrations), so a caller that only resolves a NAME
+    has to decide from what is already on disk. Both store shapes count —
+    the per-agent directory tree, and the legacy single ``agents.json`` the
+    registry reads and migrates — so a legacy root keeps resolving its
+    registered roles instead of being reported as "no declaration".
+    """
+    return (config_root / "agents").exists() or (config_root / "agents.json").exists()
+
+
 class AgentRegistry:
     """
     Registry for managing agents and their conversation histories.

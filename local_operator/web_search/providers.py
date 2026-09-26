@@ -800,11 +800,17 @@ def _deepseek_login_present() -> bool:
     auth store because that is where ``login`` writes it; the store/env tier is
     checked first by the caller — the plaintext ``credentials.env`` leg is GONE
     (PR2a) — so this stays a pure store probe.
+
+    The PROCESS-level store, not a fresh one. This is reached per search-key
+    CHECK — the login probe and the settings surface both call it, and it ran on
+    a path measured at seven connections to one ``auth.db`` per boot. It reads
+    ``list_credentials``, which is a bare SELECT, and it never closes what it is
+    handed (``shared_auth_store`` owns that; see its CLOSING note).
     """
     try:
-        from local_operator.providers.auth_store import AuthStore
+        from local_operator.providers.auth_store import shared_auth_store
 
-        return bool(AuthStore().list_credentials("deepseek"))
+        return bool(shared_auth_store().list_credentials("deepseek"))
     except Exception:  # noqa: BLE001 -- an unreadable store is simply "unknown"
         return False
 
@@ -815,14 +821,18 @@ async def _resolve_deepseek_key(config_dir: Path | None) -> str:
     ``read_only=True`` because a search must never decide model routing: it must
     not consume an OAuth rotation slot, clear session stickiness, or flip the
     auth tier the conversation's next request will resolve from.
+
+    Resolved through the process-level store (see :func:`_deepseek_login_present`)
+    with the same ``read_only`` contract, so this is a read of shared state
+    rather than a connection opened to make one call.
     """
     key = _credential(config_dir, "DEEPSEEK_API_KEY")
     if key:
         return key
     try:
-        from local_operator.providers.auth_store import AuthStore
+        from local_operator.providers.auth_store import shared_auth_store
 
-        return await AuthStore().get_api_key("deepseek", read_only=True) or ""
+        return await shared_auth_store().get_api_key("deepseek", read_only=True) or ""
     except Exception:  # noqa: BLE001 -- resolution failure is "no key"
         return ""
 

@@ -92,7 +92,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple, TypeVar, cast
 
-from local_operator.harness.approval import ApprovalGate, ask_approval
+from local_operator.harness.approval import (
+    ApprovalGate,
+    ApprovalUnavailableError,
+    ask_approval,
+)
 
 # ``media`` is stdlib-only (struct, dataclasses) and is ALREADY imported
 # unconditionally by ``tools.builtin`` below, so naming it here adds zero
@@ -1572,9 +1576,14 @@ async def _expand(
     # remainder and not an estimate of it.
     pending = sum(len(_BLOCK_JOIN) + len(entry.listed) for entry in entries if entry.chargeable)
     seen: set[Path] = set()
-    # Paths the gate DECLINED, so a later spelling of the same path cannot be
-    # named as if it were carried. See the dedupe branch below.
-    declined: set[Path] = set()
+    # Paths the gate DECLINED, mapped to the clause each refusal emitted
+    # ("approval declined", or "approval unavailable (<reason>)"), so a later
+    # spelling of the same path cannot be named as if it were carried AND
+    # cannot be re-described with a cause that was not its own. A bare set
+    # replayed the refusal clause for an unanswerable gate — "declined" for an
+    # approval nobody declined, the copy class this branch exists to avoid
+    # (review round 1, MINOR/D1). See the dedupe branch below.
+    declined: dict[Path, str] = {}
 
     # PASS 2 — carry what fits, name what does not.
     for entry in entries:
@@ -1608,15 +1617,35 @@ async def _expand(
         # element — so the block is silent about the path either way.
         if path in seen:
             if path in declined:
-                notices.append(f"{token.typed} — not included; approval declined")
+                # The cause the first refusal recorded, replayed verbatim: a
+                # duplicate spelling reports the same state as the token that
+                # was actually asked about.
+                notices.append(f"{token.typed} — not included; {declined[path]}")
                 continue
             if not block.list_only(entry.listed):
                 return _too_many(text, notices)
             continue
         seen.add(path)
-        if not await _approved(path, entry.inside, entry.resolvable, request_approval, job_id):
-            declined.add(path)
-            notices.append(f"{token.typed} — not included; approval declined")
+        try:
+            approved = await _approved(
+                path, entry.inside, entry.resolvable, request_approval, job_id
+            )
+        except ApprovalUnavailableError as exc:
+            # A gate that could not ask anyone declines THIS token and nothing
+            # more — the same degradation a refusal gets, plus the reason in
+            # the notice. The exception must never reach
+            # ``expand_references``'s never-raise catch-all: that arm degrades
+            # by ABORTING the whole expansion (``expanded=False``, the raw
+            # message sent, no reference carried), so one outside or sensitive
+            # ``@ref`` silently dropped every other reference in the same
+            # message — the post-merge regression the typed raise introduced
+            # (review of #1597).
+            declined[path] = f"approval unavailable ({exc.reason})"
+            notices.append(f"{token.typed} — not included; {declined[path]}")
+            continue
+        if not approved:
+            declined[path] = "approval declined"
+            notices.append(f"{token.typed} — not included; {declined[path]}")
             continue
         # One display path per reference, resolved once and used by BOTH the
         # element's ``path=`` attribute and every ``read(path=...)`` pointer

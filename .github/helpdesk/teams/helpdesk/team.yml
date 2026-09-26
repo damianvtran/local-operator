@@ -1,9 +1,9 @@
 id: bf638dae-4f51-43e2-a76d-b8a50b1637d7
-name: aida
+name: helpdesk
 created_date: '2026-09-25T22:29:43.401238Z'
-description: "Aida \u2014 the always-on review and triage team for local-operator\
-  \ and local-operator-ui: reviews pull requests for merit and implementation quality,\
-  \ triages issues, and reports on GitHub as Aida."
+description: "Sir Knight Lop the Second \u2014 the always-on review and triage team\
+  \ for local-operator and local-operator-ui: reviews pull requests for merit and\
+  \ implementation quality, triages issues, and reports on GitHub as a comment."
 manager: manager
 members:
 - role: architect

@@ -53,6 +53,7 @@ from local_operator.ecosystem_instructions import (
     log_ecosystem_provenance,
     read_ecosystem_instructions,
 )
+from local_operator.harness.approval import ApprovalUnavailableError
 from local_operator.harness.rows import is_harness_notice_row
 from local_operator.harness.types import AgentMessage, Message
 
@@ -129,11 +130,25 @@ _OVERLAP_MIN_CHARS = 200
 #:
 #: Third-party names sit alongside our own deliberately: the cost is theirs, and
 #: naming only our modules would warm the cheap half of the problem.
+#:
+#: ``tools.registry`` and ``classification`` were the two heaviest groups this
+#: list still omitted, and their absence was measurable rather than theoretical:
+#: with the entries below resident, the factory's own synchronous stretch still
+#: measured a median 135.5 ms of CPU and 127.2 ms of CONTIGUOUS loop stall
+#: (``_prepare``, interleaved arms, a fresh process and a matched idle control
+#: per arm; raw output under ``.perf/bench/lane11/``). Warming these two as well
+#: takes it to 81.6 ms and 77.3 ms — a median 53.9 ms of CPU and 55.8 ms of
+#: stall less, in 4 of 4 interleaved pairs, against 187 and 33 modules left for
+#: the factory to import. They are the same shape of work as every other entry
+#: here — imported lazily by the factory or by something it calls, and never at
+#: module scope (see ``test_import_graph.py``, which pins that importing this
+#: module stays off these stacks).
 _WARM_IMPORTS: tuple[str, ...] = (
     "mcp",
     "httpx",
     "httpcore",
     "truststore",
+    "local_operator.classification",
     "local_operator.compaction.api",
     "local_operator.mcp.manager",
     "local_operator.model.configure",
@@ -141,6 +156,7 @@ _WARM_IMPORTS: tuple[str, ...] = (
     "local_operator.providers.auth_store",
     "local_operator.session.session",
     "local_operator.skills.discovery",
+    "local_operator.tools.registry",
 )
 
 
@@ -774,7 +790,10 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
     is an interactive y/N prompt — which can only happen on a tty; headless
     runs deny, so a background job never hangs waiting for input it will
     never get. A non-tty denial is NEVER silent (CL-04): the user must see
-    why the tool was rejected and how to change it (``--yolo``).
+    why the tool was rejected and how to change it (``--yolo``) — printed to
+    stderr, and raised as :class:`ApprovalUnavailableError` so the transcript
+    names the real cause rather than attributing the refusal to a user who was
+    never asked.
 
     A full-screen front end must REPLACE this gate with its own surface
     (``SessionProtocol.set_approval_handler``); the check below is the safety
@@ -811,7 +830,19 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
                 f"(tool '{tool_name}')",
                 file=sys.stderr,
             )
-            return False
+            # Then REFUSE IN A TYPED WAY rather than returning ``False``.
+            # Every call site renders a ``False`` as "User denied approval ..."
+            # — its copy for a person who answered, which is a lie here: this
+            # gate never reached a person. Only THIS gate raises, because it is
+            # the one that KNOWS there is no terminal to ask on; an interactive
+            # gate keeps returning ``False`` for a real refusal. The call sites
+            # catch this type and render the reason and the remedies instead
+            # (see ``harness/loop.py`` and ``tools/builtin.py``).
+            #
+            # The CL-04 notice above stays exactly as it was, and on purpose:
+            # it is what a stderr reader can act on while the transcript shows
+            # the same refusal, and its spelling is pinned by tests.
+            raise ApprovalUnavailableError(tool_name, "no terminal is attached")
         if _fullscreen_app_owns_terminal():
             # error, not warning: reaching this branch means a front end that owns
             # the terminal did not install an approval handler, which is a wiring

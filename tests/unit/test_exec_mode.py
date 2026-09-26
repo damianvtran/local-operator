@@ -932,6 +932,209 @@ def test_run_exec_background_spawn(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     assert len(lines) == 2
 
 
+# --- exec_mode: the deny-trap launch advisory ----------------------------------
+
+
+def test_a_deny_trapped_background_launch_advertises_the_remedies(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    """A background run with none of the answering flags must say so in its
+    launch receipt — before the first "User denied" line pretends otherwise.
+
+    Nobody can answer a background run's approval calls (the worker's stdin is
+    ``DEVNULL``), so this is the moment the operator can still choose: run
+    ``--control`` and answer the parked cards, pre-approve with ``--yolo`` or
+    ``--tools``, or expect every write/exec call to be denied.
+    """
+    _redirect_logs_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(exec_mode, "resolve_hosting_model_dry", lambda args: ("test", "m"))
+    popen_mock = MagicMock()
+    popen_mock.return_value.pid = 4321
+    monkeypatch.setattr("local_operator.exec_mode.subprocess.Popen", popen_mock)
+    monkeypatch.setattr(exec_mode, "_process_generation", lambda pid: None)
+
+    assert exec_mode.run_exec("task", ExecArgs(background=True)) == 0
+
+    err = capsys.readouterr().err
+    assert "Background job" in err
+    assert "cannot ask for approval" in err
+    assert "any tool call that needs approval will be denied" in err
+    assert "--control" in err and "--yolo" in err and "--tools" in err
+    # The reach bound is half of what --tools does, and the one place the
+    # advisory can say so before a run silently loses its other tools.
+    assert "bounds this run's reach to them" in err
+
+
+def test_a_profile_declared_run_is_not_advertised_as_deny_trapped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    """Review round 1, M2: a role's own allow-list IS a declaration.
+
+    ``--profile reviewer`` resolves the run's inventory from the seed's
+    ``tools:`` list (``exec_startup.declared_tool_inventory``), and in an
+    unattended run that declaration stands as the approval for its members —
+    including ``bash``. The advisory must consult the same source of truth, or
+    it tells a run that will work that it will be denied.
+    """
+    _redirect_logs_dir(monkeypatch, tmp_path)
+    # The dry preflight runs for REAL here — only the model-resolution LEAF is
+    # stubbed, so the ordering this asserts is the production one
+    # (``run_exec → resolve_startup → preflight → advisory``). Stubbing the
+    # whole preflight is what let the launch path's first writer hide from
+    # this test (review round 2, finding 1).
+    resolved = MagicMock(return_value=("test", "m"))
+    monkeypatch.setattr("local_operator.session_factory.resolve_hosting_model", resolved)
+    popen_mock = MagicMock()
+    popen_mock.return_value.pid = 4321
+    monkeypatch.setattr("local_operator.exec_mode.subprocess.Popen", popen_mock)
+    monkeypatch.setattr(exec_mode, "_process_generation", lambda pid: None)
+
+    assert exec_mode.run_exec("task", ExecArgs(background=True, profile="reviewer")) == 0
+    assert resolved.called, "the real dry preflight must have run"
+    assert "cannot ask for approval" not in capsys.readouterr().err
+    # The probe's fresh-root branch is only reachable because the FIRST writer
+    # on this path — resolve_startup's name check — no longer builds a
+    # registry (review round 1, finding 2): a fresh root must still hold no
+    # store once the whole launch-to-advisory ordering has run.
+    root = tmp_path / "config"
+    assert not (root / "agents").exists()
+
+
+def test_the_profile_probe_writes_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The advisory's role probe must not create directories.
+
+    ``_declared_by_profile`` used to construct ``AgentRegistry(config_dir())``
+    unconditionally, and that constructor mkdirs ``config_dir/agents`` — so a
+    best-effort launch-path check wrote to the operator's roots on every run
+    (post-merge review of #1597). A config root with no agents directory has
+    no registered roles to resolve; the packaged seeds — the case this probe
+    exists for — must still resolve without one.
+    """
+    root = tmp_path / "config"
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(root))
+
+    advisory = exec_mode._deny_trapped_advisory(ExecArgs(background=True, profile="reviewer"))
+
+    assert advisory is None, "the reviewer seed declares tools: the run is answerable"
+    assert not (root / "agents").exists()
+
+
+def test_the_preflight_creates_no_agents_store_on_a_fresh_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The hosting/model preflight was the launch path's FIRST writer (R2-1).
+
+    ``resolve_hosting_model_dry`` built ``AgentRegistry`` unconditionally on
+    every call — the foreground ``cli.py`` preflight and the background
+    ``_spawn_background`` preflight alike — so a fresh root held
+    ``config/agents/`` before the deny-trap advisory could ever reach its
+    fresh-root branch. Without a selector the registry's answer was ``None``
+    and unused; the construction is skipped and the run still fails exactly
+    like an empty registry would.
+    """
+    root = tmp_path / "config"
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(root))
+
+    with pytest.raises(ValueError):
+        exec_mode.resolve_hosting_model_dry(ExecArgs())
+
+    assert not (root / "agents").exists()
+
+
+def test_the_preflight_keeps_agent_selector_semantics(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With a selector the registry stays constructed and answers as before.
+
+    ``--agent`` creates the agent on a miss and ``--agent-id`` must fail with
+    the legacy message, so the guard never withholds the registry from
+    either (review round 2, finding 1's preserve-exactly requirement).
+    """
+    root = tmp_path / "config"
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(root))
+
+    with pytest.raises(ValueError, match="No agent found with ID: missing"):
+        exec_mode.resolve_hosting_model_dry(ExecArgs(agent_id="missing"))
+
+
+def test_resolve_startup_creates_no_agents_store_for_a_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A name check must not build a registry — that was the launch-path writer.
+
+    ``run_exec`` calls ``resolve_startup`` BEFORE the advisory probe, and the
+    check used to construct ``AgentRegistry`` unconditionally for
+    ``--profile`` — so a fresh root had ``agents/`` before the probe ran, the
+    probe's fresh-root branch was production-unreachable, and the operator's
+    roots were written on every ``lop exec --profile`` run (review round 1,
+    finding 2). ``registry=None`` resolves the packaged seeds identically;
+    a root with a store present still constructs (see
+    ``test_the_profile_probe_writes_nothing``'s sibling case).
+    """
+    from local_operator.exec_startup import resolve_startup
+
+    root = tmp_path / "config"
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(root))
+
+    assert resolve_startup(ExecArgs(profile="reviewer")) is None
+
+    assert not (root / "agents").exists()
+    assert not root.exists(), "a name check must not create the config root"
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        {"control": True},
+        {"yolo": True},
+        {"tools": "bash"},
+        {"tools": "read,bash"},
+    ],
+)
+def test_an_answerable_background_launch_stays_quiet(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys, flags: dict[str, Any]
+) -> None:
+    """Any of the three flags gives the run an answer, so the advisory must
+    not fire: it describes the run's real state, it does not decorate every
+    headless launch."""
+    _redirect_logs_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(exec_mode, "resolve_hosting_model_dry", lambda args: ("test", "m"))
+    popen_mock = MagicMock()
+    popen_mock.return_value.pid = 4321
+    monkeypatch.setattr("local_operator.exec_mode.subprocess.Popen", popen_mock)
+    monkeypatch.setattr(exec_mode, "_process_generation", lambda pid: None)
+
+    assert exec_mode.run_exec("task", ExecArgs(background=True, **flags)) == 0
+    assert "cannot ask for approval" not in capsys.readouterr().err
+
+
+def test_a_foreground_non_tty_run_advertises_the_deny_trap(
+    fake_factory, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """Foreground without a tty is the same trap as ``--background`` (CL-04
+    denies); the advisory is the half that was missing — before the first
+    denial, not only inside it."""
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    session = FakeSession([_success_script()])
+    fake_factory(session)
+
+    assert exec_mode.run_exec("say hello", ExecArgs()) == 0
+    assert "cannot ask for approval" in capsys.readouterr().err
+
+
+def test_a_foreground_tty_run_keeps_its_prompt_and_silence(
+    fake_factory, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """On a terminal the y/N prompt IS the answer: no advisory, or the copy
+    would describe a missing thing that is present."""
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    session = FakeSession([_success_script()])
+    fake_factory(session)
+
+    assert exec_mode.run_exec("say hello", ExecArgs()) == 0
+    assert "cannot ask for approval" not in capsys.readouterr().err
+
+
 def test_the_background_worker_detaches_through_the_shared_helper(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1056,17 +1259,23 @@ def test_worker_records_exit_in_ledger(monkeypatch, tmp_path: Path, capsys) -> N
 
 
 def test_headless_approval_denial_notice(fake_factory, monkeypatch, capsys) -> None:
-    """CL-04: a non-tty approval denial prints the --yolo notice to stderr."""
+    """CL-04: a non-tty approval denial prints the --yolo notice to stderr.
+
+    And it refuses with ``ApprovalUnavailableError`` rather than ``False``:
+    the call sites render a ``False`` as "User denied", which blamed a user
+    for a call nobody had been asked about (see ``ApprovalUnavailableError``).
+    """
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     import local_operator.session_factory as sf
+    from local_operator.harness.approval import ApprovalUnavailableError
 
     gate = sf._make_request_approval(yolo=False)
 
     async def _gate() -> bool:
         return await gate("exec", "rm -rf /")
 
-    approved = asyncio.run(_gate())
-    assert approved is False
+    with pytest.raises(ApprovalUnavailableError):
+        asyncio.run(_gate())
     err = capsys.readouterr().err
     assert "approval required but no tty; run with --yolo to auto-approve" in err
 
@@ -1084,18 +1293,19 @@ def test_headless_approval_denial_notice_with_fd_0_closed(
     closed), but the user was told "This is a harness fault, not a refusal by
     the user" instead of the actionable notice below. An absent stdin has to
     read the way a pipe does — nobody can be asked — so this asserts the same
-    CL-04 line ``/dev/null`` already produces.
+    typed refusal and the same CL-04 line ``/dev/null`` already produces.
     """
     monkeypatch.setattr(sys, "stdin", None)
     import local_operator.session_factory as sf
+    from local_operator.harness.approval import ApprovalUnavailableError
 
     gate = sf._make_request_approval(yolo=False)
 
     async def _gate() -> bool:
         return await gate("exec", "rm -rf /")
 
-    approved = asyncio.run(_gate())
-    assert approved is False
+    with pytest.raises(ApprovalUnavailableError):
+        asyncio.run(_gate())
     err = capsys.readouterr().err
     assert "approval required but no tty; run with --yolo to auto-approve" in err
 
