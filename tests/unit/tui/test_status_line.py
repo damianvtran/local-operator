@@ -43,6 +43,7 @@ from local_operator.tui.widgets.status_line import (
     ICON_CWD,
     ICON_DURATION,
     ICON_JOBS,
+    ICON_LAST_RATE,
     ICON_MCP,
     ICON_MODEL,
     ICON_TEAM,
@@ -2256,3 +2257,42 @@ def test_weight_tracks_attention_across_every_red_in_the_band() -> None:
         f"a red mark is unweighted while another is bold, which inverts the "
         f"band's attention order: {reds}"
     )
+
+
+def test_the_last_rate_segment_is_labelled_and_sheds_before_cost() -> None:
+    """The band's rate is the SECOND non-live reading, and it says so in words.
+
+    Design round (status-band rate): a bare ``41 tok/s`` beside a live context
+    reading reads as this turn's speed, and this figure is the last COMPLETED
+    call's — so the segment carries the word ``last``. It sheds immediately before
+    ``cost``: both are figures that are not live readings of this turn, and between
+    them the rate is strictly more re-derivable (one scalar about a call that has
+    ended, also on ``/analytics`` and ``/session``; cost is cumulative money that
+    exists only here). It must never cost ``context`` a cell.
+    """
+    for ladder in (
+        _DROP_LADDER,
+        _DROP_LADDER_QUIET,
+        _DROP_LADDER_ESTIMATE,
+        _DROP_LADDER_QUIET_ESTIMATE,
+    ):
+        assert "last-rate" in ladder, ladder
+        assert ladder.index("name") < ladder.index("last-rate") < ladder.index("cost")
+        assert ladder.index("last-rate") < ladder.index("context")
+
+    # Present when the last call measured a window, and LABELLED.
+    clock = FakeClock()
+    line = StatusLine(_dock(200), clock=clock)
+    line.update(model_label="test/model", cwd="/tmp", last_rate="41 tok/s")
+    assert "last 41 tok/s" in line.render_text(200).plain
+
+    # ABSENT, not ``—``, when nothing was measured: the band's own precedent for
+    # an inapplicable reading (an unpriced cost, a zero elapsed duration), and a
+    # dash in a numeric slot reads as a broken reading rather than as an unknown.
+    empty = StatusLine(_dock(200), clock=FakeClock())
+    empty.update(model_label="test/model", cwd="/tmp")
+    rendered = empty.render_text(200).plain
+    # The GLYPH, not the substring: a model label or a conversation title may
+    # contain the word `last`, which would make a substring check pass for the
+    # wrong reason (review round 1).
+    assert ICON_LAST_RATE not in rendered and "—" not in rendered
