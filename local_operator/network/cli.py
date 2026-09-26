@@ -29,6 +29,13 @@ THE TWO REFUSALS THAT ARE FEATURES, NOT FRUSTRATIONS:
   is no flag anywhere that accepts a SAS on the inviter's side, and ``--sas-stdin``
   (the test seam) is refused unless ``LOP_NETWORK_TEST_MODE=1``. An agent therefore
   cannot complete a pairing on its own, which is the property R3 asks for.
+
+  AN AGENT CAN STILL DRIVE ONE, and the two spellings are the same ceremony:
+  ``join @<token> --park`` opens it and prints the code (plus a ``status:
+  awaiting_confirmation`` body, and ``3`` when nobody answers in time), and
+  ``join --confirm <code>`` records what the human read off the other screen. The
+  agent can start a pairing, hand the person their half, and finish it — it can
+  never supply the code, which is the half R3 is about.
 """
 
 from __future__ import annotations
@@ -161,6 +168,22 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     join.add_argument("--host", default="", help="Override the endpoint to dial")
     join.add_argument("--verify", action="store_true", help="Compare the 160-bit fingerprint")
     join.add_argument("--emit-sas", action="store_true", help="Print this device's code, then wait")
+    # THE TWO-PHASE PAIR (design §1.4.3). ``--park`` opens the ceremony and waits for a
+    # second process to transcribe the code; ``--confirm`` is that second process. Both
+    # are needed because a ceremony's code is bound to the socket that derived it: an
+    # invocation that exits cannot be confirmed later, and a re-dial is a DIFFERENT
+    # code. See ``_park_join`` for the whole argument.
+    join.add_argument(
+        "--park",
+        action="store_true",
+        help="Start the pairing and wait for `--confirm <code>` instead of prompting",
+    )
+    join.add_argument(
+        "--confirm",
+        metavar="CODE",
+        default="",
+        help="Answer a parked pairing with the code read off the other device's screen",
+    )
     join.add_argument("--name", default="", help="The name this device will be known by")
     join.add_argument(
         "--sas-stdin",
@@ -559,7 +582,7 @@ def main(args: argparse.Namespace) -> int:
     try:
         return int(handler(args))
     except Exception as exc:  # noqa: BLE001 — a CLI reports, it does not traceback
-        from local_operator.network.types import MeshRefusal
+        from local_operator.network.types import JoinParkUnanswered, MeshRefusal
 
         if isinstance(exc, MeshRefusal):
             # A --json CALLER GETS A BODY, not just a non-zero exit. The refusal
@@ -573,7 +596,10 @@ def main(args: argparse.Namespace) -> int:
             if _json_mode(args):
                 print(json.dumps({"ok": False, "code": exc.code, "message": exc.sentence}))
             print(f"\033[1;31m{exc.sentence}\033[0m", file=sys.stderr)
-            return 1
+            # 3 IS ITS OWN EXIT CODE (the design's "a human decision is required"), and
+            # it is checked BEFORE the generic 1 so a caller can tell "nobody answered
+            # in time" from "the network said no" without matching on English.
+            return 3 if isinstance(exc, JoinParkUnanswered) else 1
         raise
 
 
@@ -1750,7 +1776,29 @@ def _cmd_join(args: argparse.Namespace) -> int:
     shows, and the inviter's human confirms the other way. A mismatch burns the
     invite — refusing rather than warning is what makes pairing resistant to a relay
     in the middle.
+
+    TWO WAYS TO HOLD THE CEREMONY, ONE CEREMONY. A terminal gets the prompt it always
+    had. A caller with no terminal gets the two-phase pair (design §1.4.3): ``--park``
+    opens the ceremony and hands back the code, and ``--confirm <code>`` — a second
+    invocation, wherever the person is — records the transcription the ceremony is
+    waiting for. Neither spelling can complete a pairing without a human reading a
+    code off another screen; see ``_park_join`` for why the confirmation has to reach
+    the process that derived the code rather than starting a second one.
     """
+    confirm = str(getattr(args, "confirm", "") or "").strip()
+    if confirm:
+        return _answer_parked_join(args, confirm)
+    if bool(getattr(args, "park", False)):
+        # USAGE errors, not refusals (the guide's rc 2): each names a flag pair that
+        # cannot mean one thing at the same time, and silently dropping one of the two
+        # would leave the caller believing the other had been honoured.
+        if getattr(args, "sas_stdin", False):
+            print("--park waits for `--confirm`; --sas-stdin answers a prompt", file=sys.stderr)
+            return 2
+        if getattr(args, "emit_sas", False):
+            print("--park prints the code itself; --emit-sas does not park", file=sys.stderr)
+            return 2
+
     from local_operator.network import invite as invite_mod
     from local_operator.network import relay as relay_mod
     from local_operator.network import store, wire
@@ -1791,6 +1839,23 @@ def _cmd_join(args: argparse.Namespace) -> int:
             "mint a fresh one on the other device with `lop network invite` and bring the "
             "new file across.",
         )
+
+    if bool(getattr(args, "park", False)):
+        # ONE PARKED CEREMONY PER INVITE, refused BEFORE the dial rather than overwritten
+        # after it. The record is keyed by the invite, so a second ``--park`` on the same
+        # token would replace the first record and leave THAT process waiting on an
+        # answer nothing would write — two sockets for one invite, and the inviter admits
+        # one. A record whose process is gone is not a ceremony, so taking its place is
+        # allowed. Saying no before the dial also keeps the answer deterministic: asking the
+        # inviter twice would report whichever of the two it happened to notice first.
+        already = store.pending_join(envelope.invite_id)
+        if already is not None and already.is_open() and _process_alive(already.pid):
+            raise MeshRefusal(
+                "pairing_already_parked",
+                f"this device is already pairing with that invite (pid {already.pid}). Answer "
+                "that one with `lop network join --confirm <code>`, or wait for its window "
+                "to close.",
+            )
 
     last_reason = ""
     for host in hosts:
@@ -1896,7 +1961,6 @@ def _join_one(
     import socket
 
     from local_operator.network import wire
-    from local_operator.network.handshake import refusal_from_pairing
     from local_operator.network.identity import mint_instance_id
     from local_operator.network.types import HandshakeRefusal, MeshRefusal
 
@@ -1961,6 +2025,25 @@ def _join_one(
         if args.emit_sas:
             print(json.dumps({"sas": result.sas, "fingerprint": fingerprint}))
             sys.stdout.flush()
+        elif getattr(args, "park", False):
+            # PHASE ONE. Everything above this line is the ceremony a terminal runs;
+            # below it, who answers is the only difference — and that difference is
+            # why this is a branch rather than a prompt with a longer timeout.
+            return _park_join(
+                args=args,
+                store=store,
+                envelope=envelope,
+                result=result,
+                fingerprint=fingerprint,
+                sock=sock,
+                codec=codec,
+                reader=reader,
+                host=host,
+                identity=identity,
+                advertised=advertised,
+                handshake=handshake,
+                helpers=helpers,
+            )
         else:
             print(invite_mod.joiner_prompt(envelope, result.sas, fingerprint))
             sys.stdout.flush()
@@ -1968,58 +2051,19 @@ def _join_one(
         if typed is None:
             sock.sendall(codec.seal(helpers["pair_abort_frame"](req=1, reason="declined_local")))
             raise MeshRefusal("declined", "this device declined the pairing")
-        sock.sendall(codec.seal({"op": "net_pair_ready", "req": 1, "sas": typed}))
-        # The wait is the CONFIRM budget, not the handshake timeout: the other side
-        # now has to reach a human, and timing out at 10 s would fail every honest
-        # pairing on a device whose relay is a daemon. It is also the SAME number the
-        # prompt printed a moment ago — ``invite_mod.remaining_seconds`` is the one owner
-        # of "what is left", so the promise and this wait cannot drift with the token's
-        # age (agent review round 1, MAJOR 2).
-        remaining = invite_mod.remaining_seconds(envelope)
-        answer = codec.open(
-            reader.read_record_payload(wire.deadline_in(helpers["pair_timeout_seconds"](remaining)))
-        )
-        if answer.get("op") == "net_pair_abort":
-            # ``refusal_from_pairing`` OWNS the reason -> sentence map, and it lives
-            # in ``handshake`` beside the frames it describes. This call used to go
-            # through ``invite_mod``, which never had the helper: every wrong-SAS
-            # pairing — a typo in six digits, the normal user path — died with
-            # ``AttributeError: module 'local_operator.network.invite' has no
-            # attribute 'sas_mismatch_sentence'`` instead of refusing (QA round 1,
-            # F-1). Going through the one function also gets the invite-shaped
-            # reasons (``invite_already_used``, ``invite_in_use``) their sentences.
-            # The refusing device's own sentence comes too: it is the only place the
-            # joiner can learn which id was refused and what to do about it (Q-R3-3).
-            raise refusal_from_pairing(
-                str(answer.get("reason") or "aborted"), detail=str(answer.get("detail") or "")
-            )
-        if not answer.get("admit"):
-            raise MeshRefusal("not_admitted", "the other device did not admit this machine")
-        record = _persist_join(
-            answer,
-            envelope,
-            identity,
-            host,
-            store,
-            peer_endpoints=handshake.peer_endpoints,
+        return _finish_pairing(
+            typed=typed,
+            sock=sock,
+            codec=codec,
+            reader=reader,
+            envelope=envelope,
+            host=host,
+            identity=identity,
+            store=store,
+            handshake=handshake,
             advertised=advertised,
-        )
-        return (
-            [
-                f"joined {record.name} ({record.network_id}) at epoch {record.epoch}",
-                f"members: {len(record.active_members())}",
-                "next: lop network peers   ·   lop sessions --all-peers",
-            ],
-            {
-                "network_id": record.network_id,
-                "name": record.name,
-                "epoch": record.epoch,
-                "members": len(record.active_members()),
-                "device_id": identity.device_id,
-                "inviter": envelope.inviter_device_id,
-                "role": record.self_role,
-                "fingerprint": fingerprint,
-            },
+            fingerprint=fingerprint,
+            helpers=helpers,
         )
     except HandshakeRefusal as refusal:
         # NOT named as a peer refusal: the listener closes the socket on a refusal
@@ -2049,8 +2093,16 @@ def _read_code(args: argparse.Namespace, derived: str, fingerprint: str) -> str 
     ``--sas-stdin`` exists for the e2e harness and is refused outside
     ``LOP_NETWORK_TEST_MODE=1``: it is a seam for a script feeding a prompt a human
     would type, not a way for an agent to complete a pairing.
+
+    Without a terminal there is no prompt to answer, so this refuses with a CODE
+    (``join_needs_tty``) rather than a bare ``ValueError``: a ``ValueError`` reached
+    ``--json`` callers as a traceback-shaped non-answer, and the sentence it now
+    carries names the two-phase pair, which is the path a caller with no terminal
+    actually has.
     """
     import os
+
+    from local_operator.network.types import MeshRefusal
 
     if args.sas_stdin:
         if os.environ.get(TEST_MODE_ENV) != "1":
@@ -2064,9 +2116,12 @@ def _read_code(args: argparse.Namespace, derived: str, fingerprint: str) -> str 
         )
         typed = input(prompt).strip()
     else:
-        raise ValueError(
-            "joining needs a person at a keyboard: run this in a terminal (or use "
-            f"{TEST_MODE_ENV}=1 with --sas-stdin from a harness)"
+        raise MeshRefusal(
+            "join_needs_tty",
+            "joining needs a person at a keyboard: run this in a terminal, or start the "
+            "two-phase pair with `lop network join @<token-file> --park --json` and "
+            "finish it with `lop network join --confirm <code>` where the person is. "
+            f"({TEST_MODE_ENV}=1 with --sas-stdin is a harness seam, not a way in.)",
         )
     if not typed:
         return None
@@ -2078,6 +2133,508 @@ def _read_code(args: argparse.Namespace, derived: str, fingerprint: str) -> str 
             return ""
         return derived
     return typed
+
+
+def _finish_pairing(
+    *,
+    typed: str,
+    sock: Any,
+    codec: Any,
+    reader: Any,
+    envelope: Any,
+    host: str,
+    identity: Any,
+    store: Any,
+    handshake: Any,
+    advertised: list[str],
+    fingerprint: str,
+    helpers: dict[str, Any],
+) -> tuple[list[str], dict[str, Any]]:
+    """Send the human's transcription and turn the answer into a receipt.
+
+    ONE COPY OF THE LAST HALF OF A JOIN, because there are now two ways to supply the
+    transcription (a prompt, or ``join --confirm`` answering a parked ceremony) and a
+    second copy of this would be a second place for the wait, the abort map and the
+    persistence to drift. ``typed`` is what the human transcribed: for ``--verify``
+    the caller has already resolved it to this device's own derivation, exactly as the
+    prompt path does.
+    """
+    from local_operator.network import wire
+    from local_operator.network.handshake import pair_ready_frame, refusal_from_pairing
+    from local_operator.network.types import MeshRefusal
+
+    invite_mod = helpers["invite_mod"]
+    sock.sendall(codec.seal(pair_ready_frame(req=1, typed_sas=typed)))
+    # The wait is the CONFIRM budget, not the handshake timeout: the other side
+    # now has to reach a human, and timing out at 10 s would fail every honest
+    # pairing on a device whose relay is a daemon. It is also the SAME number the
+    # prompt printed a moment ago — ``invite_mod.remaining_seconds`` is the one owner
+    # of "what is left", so the promise and this wait cannot drift with the token's
+    # age (agent review round 1, MAJOR 2).
+    remaining = invite_mod.remaining_seconds(envelope)
+    answer = codec.open(
+        reader.read_record_payload(wire.deadline_in(helpers["pair_timeout_seconds"](remaining)))
+    )
+    if answer.get("op") == "net_pair_abort":
+        # ``refusal_from_pairing`` OWNS the reason -> sentence map, and it lives
+        # in ``handshake`` beside the frames it describes. This call used to go
+        # through ``invite_mod``, which never had the helper: every wrong-SAS
+        # pairing — a typo in six digits, the normal user path — died with
+        # ``AttributeError: module 'local_operator.network.invite' has no
+        # attribute 'sas_mismatch_sentence'`` instead of refusing (QA round 1,
+        # F-1). Going through the one function also gets the invite-shaped
+        # reasons (``invite_already_used``, ``invite_in_use``) their sentences.
+        # The refusing device's own sentence comes too: it is the only place the
+        # joiner can learn which id was refused and what to do about it (Q-R3-3).
+        raise refusal_from_pairing(
+            str(answer.get("reason") or "aborted"), detail=str(answer.get("detail") or "")
+        )
+    if not answer.get("admit"):
+        raise MeshRefusal("not_admitted", "the other device did not admit this machine")
+    record = _persist_join(
+        answer,
+        envelope,
+        identity,
+        host,
+        store,
+        peer_endpoints=handshake.peer_endpoints,
+        advertised=advertised,
+    )
+    return (
+        [
+            f"joined {record.name} ({record.network_id}) at epoch {record.epoch}",
+            f"members: {len(record.active_members())}",
+            "next: lop network peers   ·   lop sessions --all-peers",
+        ],
+        {
+            "network_id": record.network_id,
+            "name": record.name,
+            "epoch": record.epoch,
+            "members": len(record.active_members()),
+            "device_id": identity.device_id,
+            "inviter": envelope.inviter_device_id,
+            "role": record.self_role,
+            "fingerprint": fingerprint,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# The two-phase pair: phase one parks the ceremony, phase two answers it
+# ---------------------------------------------------------------------------
+#
+# WHY A PARK AT ALL, when this is one ceremony and the terminal runs it in one
+# process. The code two humans compare is derived from the LIVE transcript, so the
+# confirmation cannot be replayed into a later invocation: a second dial is a
+# different handshake, a different transcript and therefore a DIFFERENT code — and a
+# phase two that accepted the old code against a fresh derivation would have thrown
+# away the one property the code provides (it is a fingerprint of THIS connection,
+# which is what makes a relay in the middle visible). The inviter's half of the same
+# human step already works this way for the same reason: its relay parks the pairing
+# in a record and waits for ``lop network confirm`` to write the answer
+# (``relay._await_pairing_decision``). These are the joining device's mirror of that
+# pair of records, and the poll interval and the window are the same two numbers.
+
+
+#: What phase one says when nobody answered in time. One owner, because the JSON
+#: caller, the terminal caller and the phase-two invocation all have to say it.
+_JOIN_UNANSWERED_SENTENCE = (
+    "nobody confirmed the pairing in time, so it was abandoned and nothing was joined. "
+    "The invite is untouched: start again with `lop network join @<token-file> --park --json`."
+)
+
+
+def _process_alive(pid: int) -> bool:
+    """Whether the process that parked a ceremony is still there to finish it.
+
+    DELEGATED, and the delegation is a correctness fix rather than a tidiness one:
+    ``os.kill(pid, 0)`` is a liveness probe on POSIX and a KILL on Windows — CPython
+    reaches ``TerminateProcess`` there — so probing a live pid would end the very
+    ceremony this asks about. The cross-platform battery's
+    ``static.posix_attributes`` probe caught this exact line when it was written that
+    way (1 fatal, both OSes), and ``procstate.pid_alive`` is the shared probe that
+    asks the right question per platform: it is what ``browser_bridge.state`` and
+    ``mobile.resources`` both delegate to, for this reason. It fails CLOSED (any
+    doubt answers True), which is the direction this caller wants: a ceremony that
+    looks alive is refused as a second park, and a wrong "gone" would let a second
+    socket race the first for the one admission the inviter grants.
+    """
+    from local_operator import procstate
+
+    if pid <= 0:
+        return False
+    return procstate.pid_alive(pid)
+
+
+def _awaiting_payload(pending: Any) -> dict[str, Any]:
+    """Phase one's body: the code, and the sentence that says who must read it.
+
+    THE SENTENCE IS PART OF THE CONTRACT, which is why it is produced here rather
+    than by whichever caller happens to render it (``mesh-ui.md`` §3.2): an agent
+    that shows the user anything other than this sentence is paraphrasing the one
+    instruction that makes the ceremony a human step.
+    """
+    from local_operator.network import wire
+
+    shown = pending.fingerprint if pending.verify else wire.sas_display(pending.sas)
+    what = "fingerprint" if pending.verify else "code"
+    return {
+        "ok": True,
+        "status": "awaiting_confirmation",
+        "sas": pending.sas,
+        "fingerprint": pending.fingerprint,
+        "verify": pending.verify,
+        "shown": shown,
+        "network_id": pending.network_id,
+        "name": pending.network_name,
+        "inviter": pending.inviter_name or pending.inviter_device_id,
+        "invite_id": pending.invite_id,
+        "expires_at": pending.expires_at,
+        "seconds_left": round(pending.seconds_left(), 1),
+        "sentence": (
+            f"Ask the user to read back the {what} {shown} from the other device, then "
+            f"confirm it with `lop network join --confirm <{what}>`."
+        ),
+    }
+
+
+def _await_join_answer(invite_id: str, window: float, store: Any) -> Any:
+    """Poll for the human's answer — one 0.2 s tick and one deadline, the same shape
+    ``relay._await_pairing_decision`` uses for the inviter's half.
+
+    A poll rather than a notification because the answer comes from a different
+    process: a file is the only channel both halves can already write (a socket would
+    be a second protocol, and a signal handler in a CLI that is also a library is a
+    worse one).
+    """
+    deadline = time.monotonic() + max(0.0, window)
+    while time.monotonic() < deadline:
+        answer = store.join_answer(invite_id)
+        if answer is not None:
+            return answer
+        time.sleep(0.2)
+    return None
+
+
+def _parked_outcome(
+    pending: Any,
+    *,
+    status: str,
+    store: Any,
+    error_code: str = "",
+    message: str = "",
+    result: dict[str, Any] | None = None,
+    result_lines: list[str] | None = None,
+) -> None:
+    """Leave the ceremony's outcome where the invocation that answered it can read it.
+
+    WRITTEN EVEN WHEN THE CEREMONY FAILED. The process that supplied the code did not
+    run the ceremony, so without this it could only report its own success at writing
+    a code and nothing about what the code did. The pid is zeroed with the outcome,
+    which is what makes a finished record readable-but-dead to every later reader.
+    """
+    pending.status = status
+    pending.error_code = error_code
+    pending.message = message
+    pending.pid = 0
+    if result is not None:
+        pending.result = dict(result)
+    if result_lines is not None:
+        pending.result_lines = list(result_lines)
+    store.save_pending_join(pending)
+
+
+def _park_join(
+    *,
+    args: argparse.Namespace,
+    store: Any,
+    envelope: Any,
+    result: Any,
+    fingerprint: str,
+    sock: Any,
+    codec: Any,
+    reader: Any,
+    host: str,
+    identity: Any,
+    advertised: list[str],
+    handshake: Any,
+    helpers: dict[str, Any],
+) -> tuple[list[str], dict[str, Any]]:
+    """Phase one: hold the open ceremony and wait for a second invocation's answer.
+
+    THE PROCESS THAT DIALED IS THE PROCESS THAT FINISHES, and everything else here
+    follows from that: the record it writes is the only channel to the person who
+    answers, the answer file is the only channel back, and the exit code distinguishes
+    "nobody answered" (3, a human is still required) from "the network said no" (1, a
+    refusal).
+
+    NOTHING IS SENT TO THE PEER UNTIL AN ANSWER ARRIVES. The derivation is complete —
+    that is what makes the code printable — but ``net_pair_ready`` is the frame that
+    tells the inviter a human transcribed something, so a park that never gets an
+    answer closes the socket without ever claiming one.
+    """
+    import os
+
+    from local_operator.network import types
+    from local_operator.network.types import JoinParkUnanswered, MeshRefusal
+
+    invite_mod = helpers["invite_mod"]
+    # ONE OWNER OF "WHAT IS LEFT", as on every other path: the window the parked
+    # ceremony waits is the number the prompt prints and the inviter's relay waits.
+    window = helpers["pair_timeout_seconds"](invite_mod.remaining_seconds(envelope))
+    pending = types.PendingJoin(
+        invite_id=envelope.invite_id,
+        network_id=envelope.network_id,
+        network_name=envelope.network_name,
+        inviter_device_id=envelope.inviter_device_id,
+        inviter_name=envelope.inviter_name,
+        sas=result.sas,
+        fingerprint=fingerprint,
+        verify=bool(getattr(args, "verify", False)),
+        pid=os.getpid(),
+        expires_at=time.time() + window,
+    )
+    # A leftover answer from an earlier ceremony would answer THIS one: the record is
+    # keyed by invite, and one invite mints one ceremony. Cleared BEFORE the record is
+    # visible, because the reverse order has a window in which an answer that arrives
+    # for the new ceremony is deleted by the park that is waiting for it. A second park
+    # on this invite was already refused by the caller, so what is cleared here is a
+    # leftover and never a live answer.
+    store.clear_join_answer(envelope.invite_id)
+    store.save_pending_join(pending)
+    if _json_mode(args):
+        # FLUSHED, because this body is the whole point of phase one: an agent reads
+        # it to learn the code, and buffered output would arrive after the window it
+        # describes had closed (its reader waits on this pipe, not on our exit).
+        print(json.dumps(_awaiting_payload(pending), indent=2, sort_keys=True, default=str))
+        sys.stdout.flush()
+    else:
+        print(invite_mod.joiner_prompt(envelope, result.sas, fingerprint))
+        print(
+            f"waiting up to {int(window)}s for the code from the other device: answer it with "
+            "`lop network join --confirm <code>`, run wherever the person reading that "
+            "screen is."
+        )
+        sys.stdout.flush()
+
+    answer = _await_join_answer(envelope.invite_id, window, store)
+    if answer is None:
+        store.clear_join_answer(envelope.invite_id)
+        _parked_outcome(
+            pending,
+            status="unanswered",
+            store=store,
+            error_code="pairing_unanswered",
+            message=_JOIN_UNANSWERED_SENTENCE,
+        )
+        raise JoinParkUnanswered("pairing_unanswered", _JOIN_UNANSWERED_SENTENCE)
+    if answer.decision != "admit":
+        sock.sendall(codec.seal(helpers["pair_abort_frame"](req=1, reason="declined_local")))
+        store.clear_join_answer(envelope.invite_id)
+        _parked_outcome(
+            pending,
+            status="refused",
+            store=store,
+            error_code="declined",
+            message="this device declined the pairing",
+        )
+        raise MeshRefusal("declined", "this device declined the pairing")
+    # ``--verify`` asked the human for the FINGERPRINT, which is not what the wire
+    # compares: the six digits are this device's own derivation and travel in the
+    # frame, exactly as the prompt path resolves them. So the answer's text is only
+    # ever the thing that was compared HERE.
+    typed = pending.sas if pending.verify else answer.code
+    try:
+        lines, payload = _finish_pairing(
+            typed=typed,
+            sock=sock,
+            codec=codec,
+            reader=reader,
+            envelope=envelope,
+            host=host,
+            identity=identity,
+            store=store,
+            handshake=handshake,
+            advertised=advertised,
+            fingerprint=fingerprint,
+            helpers=helpers,
+        )
+    except MeshRefusal as refusal:
+        store.clear_join_answer(envelope.invite_id)
+        _parked_outcome(
+            pending,
+            status="refused",
+            store=store,
+            error_code=refusal.code,
+            message=refusal.sentence,
+        )
+        raise
+    store.clear_join_answer(envelope.invite_id)
+    _parked_outcome(
+        pending,
+        status="joined",
+        store=store,
+        result={"ok": True, **payload},
+        result_lines=lines,
+    )
+    return lines, payload
+
+
+def _live_parked_joins(store: Any) -> list[Any]:
+    """The parked ceremonies that could still take an answer, newest last.
+
+    Finished records are dropped here rather than by the store: this is the caller
+    that knows the difference between "that ceremony has an outcome, report it" and
+    "that ceremony is gone", and it is the only place both are asked at once.
+    """
+    return [
+        row
+        for row in store.pending_joins()
+        if row.status == "awaiting_confirmation" and row.is_open() and _process_alive(row.pid)
+    ]
+
+
+def _answer_parked_join(args: argparse.Namespace, typed: str) -> int:
+    """Phase two: record the human's code where the parked ceremony will read it.
+
+    THE CODE IS CHECKED HERE AND ADMITTED THERE. This invocation compares the value
+    with the derivation the ceremony parked — which catches a mistyped digit WITHOUT
+    spending the invite, and leaves the ceremony open to try again — while the inviter
+    still compares what arrives on the wire with its own derivation, and THAT is the
+    check that decides. A local pass is therefore not an admission: what this prints
+    is what the ceremony reported, not what this command caused.
+
+    WHICH CEREMONY, WHEN SEVERAL ARE PARKED: the code chooses. The six digits are
+    compared against each parked derivation, so the value the human read off a screen
+    identifies the ceremony it belongs to without a second argument whose spelling
+    could drift from the file it names. A finished ceremony's record is still readable
+    through its outcome, so answering one twice reports the same receipt instead of
+    inventing a second pairing.
+    """
+    from local_operator.network import store, types
+    from local_operator.network.types import MeshRefusal
+
+    records = store.pending_joins()
+    matches = [row for row in records if _parked_code_matches(row, typed)]
+
+    # 1. A ceremony that already has an outcome: report it, do not answer it again. A
+    #    repeated ``--confirm`` (an agent retrying a call whose process timed out) must
+    #    not mint a second pairing, and the record is what makes that possible.
+    finished = [row for row in matches if row.status != "awaiting_confirmation"]
+    if finished:
+        done = finished[-1]
+        store.clear_pending_join(done.invite_id)
+        store.clear_join_answer(done.invite_id)
+        if done.status == "joined":
+            return _emit(args, dict(done.result), list(done.result_lines))
+        raise MeshRefusal(done.error_code or "pairing_failed", done.message or "the pairing failed")
+
+    # 2. An open ceremony whose own derivation this code matches: answer it. The test
+    #    comes BEFORE the "nothing is parked" branch below, or a mistyped digit would be
+    #    reported as a missing ceremony and the person would be told to start over
+    #    instead of to look at both screens again.
+    live = _live_parked_joins(store)
+    live_ids = {row.invite_id for row in live}
+    chosen = next((row for row in reversed(matches) if row.invite_id in live_ids), None)
+    if chosen is not None:
+        answer = types.JoinAnswer(
+            invite_id=chosen.invite_id,
+            decision="admit",
+            code=typed,
+            answered_by="harness" if getattr(args, "sas_stdin", False) else "human",
+        )
+        store.save_join_answer(answer)
+        outcome = _await_join_result(chosen, store)
+        store.clear_pending_join(chosen.invite_id)
+        store.clear_join_answer(chosen.invite_id)
+        if outcome is None:
+            raise MeshRefusal(
+                "pairing_abandoned",
+                "the pairing process stopped before it reported back, so nothing was joined and "
+                "the invite is untouched. Start again with `lop network join @<token-file> "
+                "--park --json`.",
+            )
+        if outcome.status == "joined":
+            return _emit(args, dict(outcome.result), list(outcome.result_lines))
+        raise MeshRefusal(
+            outcome.error_code or "pairing_failed", outcome.message or "the pairing failed"
+        )
+
+    # 3. Nothing was answered, and each case gets its own name because the remedy
+    #    differs: a dead process and a closed window both mean "start again", a mistyped
+    #    code means "look at the screens" — and the last one is the only case where the
+    #    ceremony is STILL OPEN and nothing has been sent to the peer.
+    if live:
+        raise MeshRefusal(
+            "sas_mismatch",
+            "that code does not match the one THIS device derived for the parked pairing, so "
+            "nothing was sent: compare the two screens again and confirm the value the other "
+            "device is showing.",
+        )
+    lingering = [row for row in matches if row.status == "awaiting_confirmation"]
+    if any(not row.is_open() for row in lingering):
+        raise MeshRefusal(
+            "pairing_expired",
+            "that pairing ran out of time before it was confirmed, so the invitation is spent "
+            "and nothing was joined. Mint a fresh invite and start again.",
+        )
+    if lingering:
+        raise MeshRefusal(
+            "pairing_abandoned",
+            "the process that opened that pairing is gone, so there is nothing left to answer. "
+            "Start again with `lop network join @<token-file> --park --json`.",
+        )
+    if records:
+        raise MeshRefusal(
+            "no_parked_join",
+            "no pairing parked on this device is waiting for that code: the open one, if there "
+            "is one, is the ceremony whose own derivation this device printed. Start again with "
+            "`lop network join @<token-file> --park --json`.",
+        )
+    raise MeshRefusal(
+        "no_parked_join",
+        "no pairing is parked on this device, so there is nothing to confirm. Start one with "
+        "`lop network join @<token-file> --park --json`.",
+    )
+
+
+def _parked_code_matches(pending: Any, typed: str) -> bool:
+    """Whether the human's value is this ceremony's own derivation.
+
+    ``--verify`` compares the 160-bit fingerprint as the prompt path does, and strips
+    the same separators; otherwise it is the six digits through the shared
+    ``sas_matches`` (constant time, and a value that is not six digits is a mismatch
+    rather than a near miss).
+    """
+    import hmac
+
+    from local_operator.network.handshake import sas_matches
+
+    if pending.verify:
+        typed_fp = typed.replace("-", "").replace(" ", "").upper()
+        derived_fp = str(pending.fingerprint).replace("-", "").upper()
+        return bool(typed_fp) and hmac.compare_digest(derived_fp, typed_fp)
+    return sas_matches(str(pending.sas), typed)
+
+
+def _await_join_result(pending: Any, store: Any) -> Any:
+    """Wait for the parked ceremony to say what the answer did.
+
+    The window is the ceremony's own remaining life plus a short grace: the ceremony
+    is the process that has to send the frame and read the admission, and the answer
+    this call just wrote is what releases it.
+    """
+    deadline = time.monotonic() + pending.seconds_left() + 10.0
+    while time.monotonic() < deadline:
+        row = store.pending_join(pending.invite_id)
+        if row is None:
+            return None
+        if row.status != "awaiting_confirmation":
+            return row
+        if not _process_alive(row.pid):
+            return None
+        time.sleep(0.2)
+    return None
 
 
 def _session_protocol() -> int:
