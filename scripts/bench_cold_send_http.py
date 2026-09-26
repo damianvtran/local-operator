@@ -362,7 +362,7 @@ class _DraftStream:
 
 def _read_declaration(
     client: Any, session_id: str, *, allow_live: bool
-) -> tuple[list[str] | None, bool]:
+) -> tuple[list[str] | None, bool, str | None]:
     """One read of the declaration page, as ``(names, known)``.
 
     ``known`` is False when the page is neither shape that can carry a
@@ -382,17 +382,23 @@ def _read_declaration(
         listed.raise_for_status()
         data = listed.json()["result"]["data"]
     except Exception:  # noqa: BLE001 — a record we could not read is not a result
-        return None, False
-    if data.get("cold") is not True and not allow_live:
-        return None, False
+        return None, False, None
+    live = data.get("cold") is not True
+    if live and not allow_live:
+        return None, False, None
     servers = data.get("servers")
     if not isinstance(servers, list):
-        return None, False
-    return sorted(str(server["name"]) for server in servers), True
+        return None, False, None
+    return sorted(str(server["name"]) for server in servers), True, ("live" if live else "cold")
 
 
 def _declared_servers(
-    client: Any, session_id: str, *, settle_s: float = 0.0, allow_live: bool = False
+    client: Any,
+    session_id: str,
+    *,
+    settle_s: float = 0.0,
+    allow_live: bool = False,
+    report: dict[str, Any] | None = None,
 ) -> list[str] | None:
     """The MCP servers the RUNNING session sees declared, asked of the session.
 
@@ -421,8 +427,13 @@ def _declared_servers(
     """
     deadline = time.monotonic() + settle_s
     while True:
-        names, known = _read_declaration(client, session_id, allow_live=allow_live)
+        names, known, page = _read_declaration(client, session_id, allow_live=allow_live)
         if known:
+            if report is not None:
+                # WHICH page the verdict came from (Q-1 attribution): the draft
+                # arms' whole misfire was about the LIVE page, so a run has to
+                # be able to say it read one.
+                report["mcp_declaration_page"] = page
             return names
         if time.monotonic() >= deadline:
             return None
@@ -512,6 +523,7 @@ def _one_run(
         created_body = created.json()
         session_id = created_body["result"]["session_id"]
 
+        declaration_report: dict[str, Any] = {}
         declared = _declared_servers(
             client,
             session_id,
@@ -520,6 +532,7 @@ def _one_run(
             # warm THEY fired may have bound, and refusing that shape graded the
             # runs where the warm worked best as unreadable (QA round 1, Q-1).
             allow_live=pre_engage != "off",
+            report=declaration_report,
         )
         census_before = _runtime_children(daemon_pid)
         started = time.perf_counter()
@@ -544,6 +557,9 @@ def _one_run(
             # on the control arm, which has no warm to attribute.
             "warm_spawned_before_send": (bool(census_before) if pre_engage != "off" else None),
             "mcp_declared_servers": declared,
+            #: Which page the verdict was read from ("cold"/"live"), so a run
+            #: that exercised the Q-1 acceptance says so (draft arms only).
+            "mcp_declaration_page": declaration_report.get("mcp_declaration_page"),
             # TRI-STATE, and that is the Q-1 fix: True (a valid read that
             # matched), False (a VALID read that mismatched), None (unreadable —
             # no verdict). The one-shot `None != []` comparison used to grade an
@@ -789,7 +805,8 @@ def main() -> int:
                         f"  run {index + 1}/{args.runs}: first send = "
                         f"{row['first_send_ms']} ms  (create {row['create_status']}, "
                         f"send {row['send_status']}, load {row['loadavg']}, "
-                        f"mcp declared: {row['mcp_declared_servers'] or 'none'}{detail})",
+                        f"mcp declared: {row['mcp_declared_servers'] or 'none'} "
+                        f"(read: {row.get('mcp_declaration_page') or 'unread'}){detail})",
                         flush=True,
                     )
     finally:
