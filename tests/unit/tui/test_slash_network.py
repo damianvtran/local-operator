@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+from rich.cells import cell_len
 
 from local_operator.session.frontend_state import _FRONTEND_LOCAL_SLASHES
 from local_operator.slash_commands import (
@@ -1287,7 +1288,20 @@ async def test_the_news_row_costs_the_scrolled_body_nothing(
                     row = third.lstrip()
                     assert row.startswith(label.lstrip()), (size, third)
                     value = row[len(label.lstrip()) :]
-                    if len(words) <= len(value):
+                    # AND THE CUT IS AT THE CELL THE BUDGET ENDS ON, not merely inside
+                    # the row (review round 5, NIT): the cells the value may use are
+                    # the panel's own card width minus the label, so an elision that
+                    # cut EARLY and still stayed inside the box would fail here, where
+                    # "some prefix ending in an ellipsis" passed. Both fixtures are
+                    # ASCII, so cells and characters are the same number for them.
+                    budget = screen._card_width() - cell_len(label)
+                    assert cell_len(value) == min(cell_len(words), budget), (
+                        size,
+                        third,
+                        budget,
+                        cell_len(value),
+                    )
+                    if cell_len(words) <= cell_len(value):
                         assert value == words, (size, third, words)
                     else:
                         assert value == words[: len(value) - 1] + "…", (size, third, words)

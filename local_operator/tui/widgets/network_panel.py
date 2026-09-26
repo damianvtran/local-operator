@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
+from rich.cells import cell_len, split_graphemes
 from rich.text import Text
 from textual.binding import Binding
 from textual.containers import Container, VerticalScroll
@@ -163,21 +164,73 @@ def _one_row_value(prefix: str, value: str, width: int) -> str:
     THE CUT IS MARKED, with the ``…`` the footer already uses for the line it had
     to shorten (``_hint_text``): a row that is silently short is the whole defect
     here — the reader cannot tell a writer that published through 12 from one whose
-    sentence was cut mid-number.
+    sentence was cut mid-number. The marker's own cell is RESERVED out of the budget
+    rather than spent on top of it, so ``prefix + value + …`` is inside ``width`` by
+    construction.
 
-    THE CUT IS CELL-EXACT, not word-exact, deliberately. A word boundary can only
-    ever show LESS, it throws the partial word away, and it makes the visible length
-    depend on where the words happen to land — so one field would show a different
-    number of cells at every width with no rule a reader could learn. Eliding at the
-    cell the budget ends on shows the most cells that fit and always cuts in the
-    same place for the same width.
+    THE CUT IS CELL-EXACT — not word-exact, and not character-exact either (review
+    round 5, MINOR 3). Word-exact can only ever show LESS, it throws the partial word
+    away, and it makes the visible length depend on where the words happen to land —
+    so one field would show a different number of cells at every width with no rule a
+    reader could learn. CHARACTER-exact is the defect this function was written with:
+    the value is not a closed set (``_audit_words`` renders ``DEGRADED — {str(exc)}``
+    from an ``OSError`` that carries a PATH, so it can be non-ASCII), and a wide
+    glyph counted as one character builds a row WIDER than the budget — which the
+    pinned three-row block wraps and crops WITHOUT the marker, i.e. the
+    silently-short row this function exists to prevent. Eliding at the cell the
+    budget ends on shows the most cells that fit, cuts in the same place for the same
+    width, and uses the one cell arithmetic the rest of the app's columns use
+    (``_cut_to_cells``).
     """
-    budget = max(1, width - len(prefix))
-    if len(value) <= budget:
+    budget = width - cell_len(prefix)
+    if cell_len(value) <= budget:
         return prefix + value
-    if budget == 1:
-        return "…"
-    return prefix + value[: budget - 1] + "…"
+    marker = "…"
+    # The marker is reserved OUT of the budget, measured rather than assumed to be
+    # one cell, so a value cannot push the row past ``width``.
+    room = budget - cell_len(marker)
+    if room >= 1:
+        return prefix + _cut_to_cells(value, room) + marker
+    # NO ROOM FOR EVEN ONE CELL OF THE VALUE: the LABEL is what is cut, so the row
+    # still names the field it is about and still says it was cut. A bare ``…`` — what
+    # this branch returned before — names neither, and was the one state where the
+    # row's own "one row, one shape" rule did not hold (review round 5, NIT).
+    return _cut_to_cells(prefix, max(0, width - cell_len(marker))) + marker
+
+
+def _cut_to_cells(text: str, budget: int) -> str:
+    """The longest prefix of ``text`` that fits ``budget`` display CELLS.
+
+    A cell bound cannot be a slice: one East-Asian character is two cells, so
+    ``text[:n]`` overshoots by however many wide glyphs it happens to contain. The
+    input that made this necessary is not hypothetical — the audit news value is
+    ``DEGRADED — {str(exc)}``, and ``str(OSError)`` carries a path, so a wide
+    character in a home or a log directory is an input the panel really sees: at the
+    40-cell floor one such glyph made the row one cell wider than the budget, and a
+    row wider than a pinned three-row block WRAPS and is cropped with no marker —
+    the silently-short row ``_one_row_value`` exists to prevent (review round 5,
+    MINOR 3).
+
+    THE UNIT MEASURED IS THE GRAPHEME, via rich's own
+    :func:`rich.cells.split_graphemes`, because that is the unit rich's width rules
+    are built on: a VS16 upgrades the glyph before it to two cells and a ZWJ
+    collapses the emoji it joins, so summing per-character widths mis-measures both
+    classes. ``local_operator/cli.py``'s helper of the same name carries those
+    measurements and this is the same rule rather than a second opinion — it is not
+    imported from there because that module is the CLI ENTRY POINT and this widget
+    sits behind it, so the import would point the dependency the wrong way.
+
+    The prefix is the longest that FITS, not one that FILLS: with all-wide text the
+    final cell can go unused, and padding to reach it would report width the text
+    does not have.
+    """
+    spans, _cells = split_graphemes(text)
+    used = 0
+    for start, _end, cells in spans:
+        if used + cells > budget:
+            return text[:start]
+        used += cells
+    return text
 
 
 def _indented_value(prefix: str, value: str, width: int) -> str:
@@ -528,12 +581,21 @@ class NetworkScreen(ModalScreen[None]):
     # -- rendering ----------------------------------------------------------
 
     def _card_width(self) -> int:
-        """The content cells a row may occupy, MEASURED off the mounted scroll.
+        """The content cells a row may occupy, MEASURED off the box the card is painted in.
 
         Measured rather than recomputed, for the reason ``InfoScreen`` records:
         a formula and a stylesheet drift, and a row built one cell too wide folds
         a value onto a second line — the "one record reads as two" fault these
         screens exist to remove.
+
+        AND THAT BOX IS ``#network-title`` (review round 5, NIT). The card — the rule
+        and the audit sentence — is painted there, so that is the widget whose width
+        is the ceiling; the guard used to read ``#network-scroll``, which is only the
+        same number because of how the stylesheet happens to lay the two out. It IS
+        the same number, verified in both scrollbar states at all fourteen sizes the
+        band is pinned at, which is why nothing moved when this changed — but a bound
+        that reads a different widget is one stylesheet edit away from being wrong
+        about the box it protects.
 
         AND THE MEASUREMENT IS A CEILING, not only a source (review round 4
         MAJOR 1; design round 5, D48). The floor is there so a very narrow
@@ -550,9 +612,9 @@ class NetworkScreen(ModalScreen[None]):
         a 40-cell rule in a 39-cell box only ever PAINTED its first 39 cells, so
         a 39-cell rule paints the same 39 cells and stops wrapping.
         """
-        scroll = getattr(self, "_scroll", None)
-        if scroll is not None and scroll.is_mounted and scroll.size.width:
-            box = scroll.size.width
+        title = getattr(self, "_title", None)
+        if title is not None and title.is_mounted and title.size.width:
+            box = title.size.width
             return max(1, min(box, max(_MIN_CARD_WIDTH, box - 1)))
         try:
             return max(_MIN_CARD_WIDTH, min(140, int(self.app.size.width * 0.9)) - 7)
@@ -596,11 +658,11 @@ class NetworkScreen(ModalScreen[None]):
         IS ELIDED AND MARKED (``_one_row_value``) rather than wrapped, and what the
         reader sees is the most cells that fit and a trailing ``…``. The alternative
         the designer offered — drop the ``audit:`` label when the value cannot fit one
-        row — was measured too: it would show the whole sentence un-labelled from 70
-        to 97 columns, but it makes the row's SHAPE depend on the sentence's length, so
-        one field would read as a labelled row at 100 columns and an unlabelled one at
-        80 with nothing on screen to say the two are the same field. One row, one
-        shape, a marked cut.
+        row — was measured too: it would show the whole sentence un-labelled from 82
+        to 97 columns, an 85-column window if the row kept its 2-cell indent — but it
+        makes the row's SHAPE depend on the sentence's length, so one field would read
+        as a labelled row at 100 columns and an unlabelled one at 80 with nothing on
+        screen to say the two are the same field. One row, one shape, a marked cut.
         """
         width = max(1, self._card_width())
         text = Text(
