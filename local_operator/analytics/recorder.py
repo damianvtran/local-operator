@@ -178,10 +178,19 @@ def maintenance_lock_path(root: Path) -> Path:
 def _try_lock_maintenance(path: Path) -> int | None:
     """Take the election lock, return ``None``, or report it unsupported.
 
-    ``None`` means a PEER owns this hour. :data:`_LOCK_UNSUPPORTED` means nobody
-    can own any hour on this root, which the caller answers by sweeping unowned —
-    the distinction review R1-3 is about, and the reason the two cannot share a
-    return value. NEVER blocks.
+    ``None`` means DO NOT SWEEP, and it has exactly two causes — a PEER owns this
+    hour, or the root will not take the lock file at all. The second is the one
+    case that cannot fall back to an unowned sweep, because the sweep writes
+    through the same root: if ``os.open`` fails on ``<root>/run/``, the store
+    under ``<root>/`` is not writable either, so there is nothing to prune and
+    skipping is the safe direction (the alternative is every process trying).
+
+    :data:`_LOCK_UNSUPPORTED` is the DIFFERENT case: the root IS writable and
+    ``flock`` specifically is refused, so the sweep can proceed and the caller
+    runs it unowned. That is the distinction review R1-3 is about, and the reason
+    ``None`` and the sentinel cannot share a return value. Review R3-1 found this
+    docstring claiming ``None`` had only the peer cause; both causes are named
+    here now. NEVER blocks.
 
     The mechanism is the tree's existing singleton one, copied from
     :func:`local_operator.secrets.client.ensure_broker` rather than invented:

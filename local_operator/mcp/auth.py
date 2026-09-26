@@ -3432,16 +3432,28 @@ def _oauth_discovery_negative_is_fresh(server_url: str) -> bool:
 #: PRM-429 followed by an honest ASM-404 cached an answered negative for the full
 #: TTL — the same false-negative class as review R1-1, reached through a status
 #: code rather than the transport. Reported as review R2-2.
-_RETRYABLE_DISCOVERY_STATUSES = frozenset({408, 429})
+#: ``425`` is in the set by the same argument and was added by review R3-2: RFC
+#: 8470 defines it as "the server is unwilling to risk processing a replayed
+#: request — try again later", which is a transient refusal to ANSWER rather than
+#: an answer of "no".
+_RETRYABLE_DISCOVERY_STATUSES = frozenset({408, 425, 429})
 
 
 def _refuses_metadata(status_code: int) -> bool:
     """Does ``status_code`` say "no metadata HERE", as opposed to "ask again"?
 
-    A 4xx means "not at this URL" — the discovery walk's own semantics, mirrored
-    from the SDK — and ``404`` is the ordinary shape of it. The two RETRYABLE
-    exceptions are carved out because they are transient by definition, and
-    folding them into a definitive negative is what R2-2 found.
+    A 4xx means "not at this URL". That is this module's OWN rule, and it is NOT
+    a mirror of the SDK — an earlier revision of this docstring claimed one, and
+    review R3-3 showed the claim is false in a way that matters: the SDK's ASM
+    bucket is ``300 <= status < 500`` and its PRM handler raises on anything
+    other than 200 or 404, so following that "mirror" would move 3xx into
+    ``refused`` and WEAKEN R1-1's fix. The rule stands on its own reasoning: only
+    a status that says "there is no metadata at this URL" may count, and a 3xx we
+    did not follow says nothing (it is handled as unusable above).
+
+    The RETRYABLE members are carved out because they refuse to ANSWER rather
+    than answering "no", and folding them into a definitive negative is what
+    R2-2 found.
     """
     return 400 <= status_code < 500 and status_code not in _RETRYABLE_DISCOVERY_STATUSES
 

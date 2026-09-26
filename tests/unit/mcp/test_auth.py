@@ -1742,7 +1742,7 @@ class TestOAuthEndpointDiscovery:
         ), "the second probe made no request: a PRM 5xx was cached as an answered negative"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("status", [408, 429])
+    @pytest.mark.parametrize("status", [408, 425, 429])
     async def test_a_retryable_status_is_never_cached_as_an_answered_negative(
         self, monkeypatch: pytest.MonkeyPatch, status: int
     ) -> None:

@@ -190,8 +190,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # prints. ``local_operator.update`` imports ``ssl``/``urllib.request``/
     # ``http.client`` on the way.
     #
-    # A lazy action was written, measured and WITHDRAWN (review R2-3): leaving
-    # ``action.version`` as None until the flag was parsed broke
+    # A lazy action was written, measured and WITHDRAWN — CI's shard 4 caught it
+    # (commit c5731698d); review R2-3 is what asked for THIS comment to stop
+    # describing the retired class. Leaving ``action.version`` as None until the
+    # flag was parsed broke
     # `tests/unit/test_update.py::test_cli_version_flag_reports_the_running_build`,
     # which reads that attribute off the PARSER to pin that the value comes
     # through ``installed_version()`` rather than a raw metadata call — and a raw
