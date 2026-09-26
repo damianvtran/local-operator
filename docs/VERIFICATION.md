@@ -2244,3 +2244,36 @@ foot of the file, driving the real held lock) with
 `eligible: False` refusal and the journal's-latest-marker ordering: all eight
 ladder cases were run against `main`'s own `session.py` and fail there, and pass
 on this branch.
+
+### Tokens per second: the hot path, measured (and one claim falsified)
+
+`scripts/bench_tps_overhead.py` (new, re-runnable; `--root` runs both arms, so
+the same script measures `main` and this branch). Interleaved A/B rounds, min of
+600 samples per point, load average 44-61 during the measured runs, beside this
+host's ~25 concurrent sessions. Fixture: a read-only `VACUUM INTO` copy of the
+operator's real ledger (1 952 729 calls, 43 models, 16 844 `session_daily` rows,
+pre-migration shape), sha256 re-verified unchanged after the runs.
+
+| claim | verdict | measurement |
+|---|---|---|
+| "at most one `time.monotonic()` per output delta" | **SUPPORTED** (counted, exact) | head 1.0006 clock reads per delta at N=5 000; base 0.0008 |
+| "the two per-event `getattr(event, "type", "")` lookups collapse into one" | **FALSIFIED** | base does **3 type lookups per drain**, not per event: both old guards are `x is None and getattr(...)`, so they short-circuit to zero in the steady state. Head does **N per drain**. The change ADDS one dispatch per event. |
+| "the added cost is ~one clock read" | **FALSIFIED as a cost** | measured slope 500→5 000 deltas: base 3 836.8 ns/event, head 4 051.8 ns/event, **+214.9 ns/event** = 2.4-5.7x a bare `time.monotonic()` (37-43 ns best, 68-73 ns median, same host, same moment) |
+| migration is metadata-only | **SUPPORTED** | head first connect within **-8.4 ms** of base's on identical `cp -c` clones (285.5 vs 293.9 ms); all six ALTERs **2.25/2.61/3.59 ms**; `page_count` 154 092 → 154 092, rows 16 844 → 16 844, file **+0.00 MB** |
+| the four pre-existing reads are unchanged | **SUPPORTED within resolution** | `aggregate()` all-time (rollup both arms) 349.4/408.2/298.6 ms base vs 363.7/332.3/311.5 head — the sign flips between runs; `daily_series(30)` and `series_totals(30)` sub-millisecond both arms; `session_report` (busiest, 29 147 calls) 212.5-221.2 vs 223.0-248.9 |
+| the new read is confined to its own endpoint | **SUPPORTED** | `model_rates()` is absent on base; 2 358.7 ms median unbounded and 2 241.8 ms at 30 days on head, and no other read moved outside noise |
+
+What the falsification changes, and what it does not: the *cost* is real but small
+in absolute terms — **~0.2 µs per event, about 1 ms on a 5 000-delta turn**,
+against a generation measured in seconds — so the operator's requirement (no
+significant additional overhead) holds on the numbers. What does not hold is the
+design's *mechanism* sentence, which claimed a saving that the base code's
+short-circuiting guards were already taking. §3.1 of
+`docs/design/tokens-per-second-analytics.md` and the comment beside the loop now
+carry the measured table instead of that claim.
+
+Not measured, and said rather than implied: "no allocation per delta". CPython
+offers no cheap exact transient-allocation counter (`tracemalloc` and
+`getallocatedblocks` measure net or peak, and a per-delta container that is
+dropped nets to zero). "No lock, no I/O, no `await` in the delta branch" is
+confirmed structurally — the branch is four scalar locals and two comparisons.
