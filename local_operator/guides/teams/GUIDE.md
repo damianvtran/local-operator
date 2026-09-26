@@ -74,12 +74,13 @@ naming the chain, and an unknown name with `unknown team`. These are errors,
 never a silent generic child: a launch that cannot run says so instead of
 pretending to delegate.
 
-Every launch below the top carries one line of chain of command: who it reports
-to, that it must not push, merge, deploy, release, delete data or print
-secrets, and that when the work needs one of those it stops that step and
-escalates through `hub` with what it would have run and why. Depth-1 members of
-the top session's own team carry the team brief without that line; the base
-safety rules cover them.
+Every `team:` launch at any depth, and every launch at depth 2 or deeper inside
+a team lineage, carries one line of chain of command: who it reports to, that
+it must not push, merge, deploy, release, delete data or print secrets, and
+that when the work needs one of those it stops that step and escalates through
+`hub` with what it would have run and why. Depth-1 members of the top session's
+own team carry the team brief without that line; the base safety rules cover
+them.
 
 A lead that holds `task` (a sub-team's manager) gets the parent-shaped `hub`
 over **its own** subtree: list, peek, send, ask, steer, pause, cancel and
