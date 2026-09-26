@@ -2130,6 +2130,117 @@ async def test_a_write_through_survives_a_delayed_publisher_install(tmp_path, mo
 
 
 @pytest.mark.asyncio
+async def test_a_failed_first_publish_leaves_no_readable_record_behind(
+    tmp_path, monkeypatch
+) -> None:
+    """The failed-boot rollback unpublishes what a racing write-through wrote,
+    and a closed publisher refuses everything after.
+
+    THE RESIDUAL THIS PINS (agent review round 1, R1-1). Between the install
+    of ``self._publisher`` and the rollback that nulls it, a session thread's
+    write-through finds a publisher and can COMPLETE a record write; if the
+    boot's own ``publish()`` then fails — the transient failure the rollback
+    exists for — the record it wrote outlives the rollback, and nothing else
+    unlinks it (``_shutdown_impl`` unpublishes only behind a publisher, and
+    thread mode swallows the raise). The window needs publish-failure ×
+    concurrent write-through-success, which is why the hold and the injected
+    failure below make it deterministic rather than probable.
+
+    Three marks, in the order the window produces them:
+    * mid-window, the write-through's record is READABLE — the file the
+      rollback must remove really exists before ``publish()`` raises;
+    * a heartbeat ALREADY IN FLIGHT when the rollback closes must not land
+      after the unpublish (writes and close are serialised, and a closed
+      publisher skips);
+    * after the rollback, the record is gone, a stranded writer holding the
+      old publisher can neither heartbeat nor publish it back, and it stays
+      gone through ``server.close()``.
+    """
+    publish_entered = threading.Event()
+    publish_release = threading.Event()
+    staged_entered = threading.Event()
+    staged_release = threading.Event()
+
+    real_publish = registry.RecordPublisher.publish
+    real_staged_write = registry._staged_write
+    failed_once: list[bool] = []
+
+    def failing_first_publish(self):  # noqa: ANN001, ANN202
+        if failed_once:
+            return real_publish(self)
+        failed_once.append(True)
+        publish_entered.set()
+        publish_release.wait(30)
+        raise OSError("injected first-publish failure")
+
+    def holding_staged_write(target, payload, *, prefix):  # noqa: ANN001, ANN202
+        staged_entered.set()
+        staged_release.wait(30)
+        return real_staged_write(target, payload, prefix=prefix)
+
+    monkeypatch.setattr(registry.RecordPublisher, "publish", failing_first_publish)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    server = RuntimeServer(FakeHandle(), kind="tui")
+    server.start()
+    in_flight: threading.Thread | None = None
+    held: registry.RecordPublisher | None = None
+    try:
+        assert await asyncio.to_thread(
+            publish_entered.wait, 30
+        ), "the boot's first publish never ran"
+        held = server._publisher
+        assert held is not None, "the rollback's subject was never installed"
+        # (1) The write-through completes while the boot's publish is parked:
+        # the readable record the rollback has to remove exists.
+        server.set_record_started(True)
+        server.note_leaving(LEAVING_FOR_BUILD)
+        assert held.path.exists(), "the write-through never reached the disk"
+        # (2) A heartbeat already inside its write when the rollback closes.
+        monkeypatch.setattr(registry, "_staged_write", holding_staged_write)
+
+        def in_flight_write() -> None:
+            assert held is not None
+            held.heartbeat(conversation_name="in-flight")
+
+        in_flight = threading.Thread(
+            target=in_flight_write, name="test-in-flight-writer", daemon=True
+        )
+        in_flight.start()
+        assert await asyncio.to_thread(
+            staged_entered.wait, 30
+        ), "the in-flight heartbeat never entered its write"
+        publish_release.set()
+        staged_release.set()
+    finally:
+        publish_release.set()
+        staged_release.set()
+    if in_flight is not None:
+        in_flight.join(30)
+    thread = server._thread
+    assert thread is not None
+    thread.join(30)  # the rollback runs on the boot thread
+    assert held is not None
+    try:
+        assert server._publisher is None, "the rollback kept the publisher installed"
+        assert (
+            await server.wait_until_published(timeout=1) is False
+        ), "a failed first publish must look like a boot that never published"
+        assert not held.path.exists(), (
+            "a record a racing write-through wrote outlived the failed boot's " "rollback"
+        )
+        assert not registry.scan(), "the record is still discoverable"
+        # (3) Stranded writers are refused, not resurrected: neither the
+        # write-through path nor an explicit publish writes through a closed
+        # publisher.
+        held.heartbeat(conversation_name="zombie")
+        held.publish()
+        assert not held.path.exists(), "a closed publisher wrote its record back"
+    finally:
+        server.close()
+    assert not held.path.exists(), "the record survived even the closed server"
+
+
+@pytest.mark.asyncio
 async def test_desktop_watch_lease_separates_visibility_and_notification_delivery() -> None:
     from local_operator.mobile.attach_client import AttachClient
     from local_operator.session.runtime.types import DESKTOP_WATCH_LEASE_S
