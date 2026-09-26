@@ -27,6 +27,10 @@ Deterministic output: fixed table layout, numbers only, no adjectives.
 before/after delta column against a previously saved run, which is how the
 "we cut N%" claim is meant to be reproduced.
 
+Every probe runs under a scratch ``HOME`` and config dir of its own
+(``_child_env``), so the numbers do not depend on the operator's dot-files or
+on which MCP servers happen to be configured on the box.
+
 Run:
     .venv/bin/python scripts/bench_base_overhead.py
     .venv/bin/python scripts/bench_base_overhead.py --save /tmp/before.json
@@ -218,9 +222,31 @@ print(json.dumps({
 """
 
 
-def _child_env(config_dir: Path) -> dict[str, str]:
-    """Environment for every probe: an isolated config dir so the benchmark
-    never reads or writes the developer's real ``~/.local-operator``.
+def _child_env(config_dir: Path, home: Path) -> dict[str, str]:
+    """Environment for every probe: an isolated config dir AND an isolated home,
+    so the benchmark reads and writes neither the developer's real
+    ``~/.local-operator`` nor the dot-directories beside it.
+
+    ``HOME`` is not optional here, and ``LOCAL_OPERATOR_CONFIG_DIR`` does not
+    cover it: MCP discovery imports foreign tool configs from candidates derived
+    from the home directory — ``~/.claude.json``, ``~/.cursor/mcp.json``,
+    ``~/.codex/config.toml`` (``local_operator/mcp/config.py``) — and none of
+    them moves when only the config dir is redirected. Measured on the
+    operator's box: with the config dir isolated and ``HOME`` left alone, every
+    probe child still loaded SIX MCP servers, all six from
+    ``~/.codex/config.toml``.
+
+    That is not a measurement detail, it is what made the TUI cell unusable. A
+    server asking for auth after the startup gate reaches ``OperatorApp``'s
+    auth-notice sink, which is a ``call_later`` callback doing
+    ``query_one(Toast)`` on a boot card that has no Toast node; the ``NoMatches``
+    escapes the callback, out of ``run_test``, and kills the probe child — about
+    one run in three, and upstream of ``--save``, so the run left no report and
+    nothing for ``--baseline`` to compare against. It is the same config-dir /
+    HOME split AGENTS.md documents for the cache and the agent home, and the same
+    shape ``tests/e2e/test_tui_boot_e2e.py`` uses (a scratch ``HOME`` per TUI
+    child). Which MCP servers a benchmark sees is the operator's configuration,
+    not a property of the tree being measured, so the probe gets a home with none.
 
     Bytecode caching is deliberately left ON. Disabling it would make every
     sample pay source compilation for the whole dependency graph, which is not
@@ -238,6 +264,7 @@ def _child_env(config_dir: Path) -> dict[str, str]:
     # measured) and gets the notification gate that keeps a mock completion off
     # the operator's desktop. One helper, one place, so a new bench cannot
     # remember half of it (`agent_shell.harness_child_env`).
+    env["HOME"] = str(home)
     env["LOCAL_OPERATOR_CONFIG_DIR"] = str(config_dir)
     env["LO_BENCH_CONFIG_DIR"] = str(config_dir)
     env["PYTHONPATH"] = str(REPO) + os.pathsep + env.get("PYTHONPATH", "")
@@ -338,8 +365,8 @@ def _importtime_self(
     return rows[:top]
 
 
-def measure(runs: int, top: int, config_dir: Path) -> dict[str, Any]:
-    env = _child_env(config_dir)
+def measure(runs: int, top: int, config_dir: Path, home: Path) -> dict[str, Any]:
+    env = _child_env(config_dir, home)
 
     # Bare interpreter boot: subtracted from RSS so the reported megabytes are
     # the harness's own, not Python's. Import time is already boot-free
@@ -510,8 +537,14 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="lo-bench-overhead-") as tmp:
         config_dir = Path(tmp) / ".local-operator"
         config_dir.mkdir(parents=True, exist_ok=True)
+        # The scratch home beside the config dir: `HOME` is what decides which
+        # dot-directories the probes can see, and hence which MCP servers they
+        # load (`_child_env`). Created up front so the children cannot race to
+        # make it.
+        home = Path(tmp) / "home"
+        home.mkdir(parents=True, exist_ok=True)
         started = time.time()
-        result = measure(args.runs, args.top, config_dir)
+        result = measure(args.runs, args.top, config_dir, home)
         result["wall_seconds"] = time.time() - started
 
     report(result, baseline, args.top)
