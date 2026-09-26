@@ -7,11 +7,23 @@ behaviour is cited to `file:line` **at that revision** or to a command whose
 output is quoted; every number carries the load average it was taken at, because
 on this host a wall time without a load figure is weather, not evidence.
 
+**Revision log.**
+* **Revision 1** — answers the round-1 review on PR #1620 (reviewer, task-4:
+  RR1-1 … RR1-5 plus ten citation findings). It withdraws this document's central
+  recommendation: R1's rank-1 latency billing is refuted (the read path already
+  publishes the cold answer), the ordering is inverted so **R2 is first**, and
+  **§6 rule 1 / R7 is promoted to a precondition**. The withdrawn claim is quoted
+  and answered at §5 and §9 R1 rather than deleted. Citations filed as wrong were
+  re-resolved against the checkout.
+
 Read this first, because it changes what the next phase should build:
 
-> Three design efforts have already been at this surface
+> FOUR design efforts have already been at this surface
 > (`session-load-central-cache.md`, `attached-interface-signal.md`,
-> `full-history-audit-window.md`), and **most of what the operator is asking for
+> `full-history-audit-window.md`, and `docs/design-ownerless-session-attach.md`
+> — whose thesis, "a session attaches without an owner, and a read never needs
+> one", is the direct antecedent of this document's read-path argument), and
+> **most of what the operator is asking for
 > is already built and working**. The measured gap is narrower and more
 > specific than the request implies:
 >
@@ -29,7 +41,7 @@ Read this first, because it changes what the next phase should build:
 >    its switch cache deliberately switches itself OFF while a session is
 >    streaming — i.e. exactly when several runtimes are going — and its
 >    speculative warm-up does 93 ms of synchronous work on the UI event loop,
->    twice per one-second refresh.
+>    twice per 2 s refresh.
 >
 > The single most important correction to the operator's framing: **conversation
 > loading is not being slowed down by runtime compute.** It is slowed down by
@@ -78,7 +90,7 @@ Read this first, because it changes what the next phase should build:
   `docs/evidence/session-load-central-cache/`.
 * **The attach bind is off the owner's workload loop, for every attach.**
   `subscribe_frontend` carries `@_on_session_loop`
-  (`session/runtime/serving.py:363,2413`), the serving plane gives it
+  (`session/runtime/serving.py:2536-2537,2549`), the serving plane gives it
   `_ONLOOP_BIND_GRACE_S = 0.1` (`session/runtime/server.py:215,3194`) and past
   that binds through `subscribe_frontend_nowait`
   (`server.py:3226-3364`, with the `frontend_off_loop_binds` counter). Coder
@@ -386,7 +398,7 @@ The prewarm worker (`tui/app.py:9962-10072`) runs at most
 sessions the catalog polls at `LIVE_REFRESH_INTERVAL_S = 1.0`
 (`tui/widgets/session_picker.py:254`), and it holds up to
 `RETAINED_PRESENTATIONS = 12` parked sources (`:2174`) with live subscriptions
-whose delivery cost is ~0.26 ms/frame (measured, `events.py:668-673`).
+whose delivery cost is ~0.26 ms/frame (measured, `events.py:661-663`).
 
 So on the TUI the operator's observation is literally true and has a mechanism:
 **more live sessions ⇒ more speculative preparation on the UI loop, and more
@@ -410,7 +422,7 @@ of them I initially over-priced — the correction is recorded rather than dropp
 
 | Hole | What it costs | Evidence |
 |---|---|---|
-| **H-1. The TUI's conversation load path bypasses `session/page_cache.py`** — the page cache's only consumers are the desktop `history` route (`server/utils/desktop_sessions.py:82`) and the TUI's **subagent** pager (`tui/widgets/subagent_view.py:75`). The main load path is `read_saved_preview` (`session/saved_preview.py:39`), which reads raw bytes, and the connect path uses `read_replay_suffix` directly (`attached.py:5337`). | **Smaller than it looks, and I am not going to sell it as more.** The read is *bounded* at `PREVIEW_BYTES = 256 * 1024` (`saved_preview.py:29`), so this is a repeat parse of a fixed window, not of the journal. It repeats on every click and every prewarm cycle; it does not scale with the conversation. Coder's measurement: wiring the page cache in "would buy little on this path". | `grep -n 'page_cache' local_operator/**` → 4 hits, none in `saved_preview.py`; the 256 KB bound at `:29,47-52` |
+| **H-1. The TUI's conversation load path bypasses `session/page_cache.py`** — the page cache's only consumers are the desktop `history` route (`server/utils/desktop_sessions.py:82`) and the TUI's **subagent** pager (`tui/widgets/subagent_view.py:75`). The main load path is `read_saved_preview` (`session/saved_preview.py:39`), which reads raw bytes, and the connect path uses `read_replay_suffix` directly (`attached.py:5337`). | **Smaller than it looks, and I am not going to sell it as more.** The read is *bounded* at `PREVIEW_BYTES = 256 * 1024` (`saved_preview.py:29`), so this is a repeat parse of a fixed window, not of the journal. It repeats on every click and every prewarm cycle; it does not scale with the conversation. Coder's measurement: wiring the page cache in "would buy little on this path". | two live consumers of `load_transcript_page`, and neither is this one, none in `saved_preview.py`; the 256 KB bound at `:29,47-52` |
 | **H-2. The presentation cache misses on `streaming`** (and, deliberately, on a moved `replay_revision` and on any pending gate). | A **31.91 ms** prepare on a switch to a busy conversation, against **0.21 ms** on a hit (coder, 29 switches; 19/19 hits on the non-streaming arm). Real, but jank-scale — see §4.4(a). | `tui/app.py:6552-6588` |
 | **H-3. Nothing is durable across a restart.** The caches are in-process: `_ROW_CACHE` in `catalog.py`, `_sidebar_presentations` in the TUI, and the page cache in `page_cache.py`. A new `serve` or a new TUI pays every cold cost again. | The operator restarts `lop` and re-pays the paint; a second interface (desktop + TUI) never shares a warm page. | `session/page_cache.py` (process-wide, byte-budgeted, not persisted) |
 | **H-4. The sidebar's 2 s poll re-pays a whole-store census** (§4.4(b)) — *measured, and deliberately NOT changed*: at the operator's real population it is 1,835 `stat` / 54.1-60.9 ms CPU per 2 s, and **no cheaper change key exists** (an append moves the session directory's mtime, not the sessions root's, and an append is what reorders the listing). | ~3% of one core, continuously, while the sidebar is open. The honest verdict is that this is the price of a store-wide ranked listing. | `tui/app.py:9903`; `resume.py:1953-1985`; the counter-argument in §4.4(b) |
@@ -430,7 +442,7 @@ the SSE snapshot and `/history` share one page-cache key, and the single-flight
 
 The column that matters is "does a **click** pay it". Sources are the tree's own
 route/call structure and the prior audit in
-`docs/design/session-load-central-cache.md` §1 (whose six-row table was the
+`docs/design/session-load-central-cache.md` §1 (whose eight-row table was the
 design input for the shipped page cache).
 
 | Work | When | Paid by a click? | Count / cost |
@@ -506,26 +518,80 @@ measured.**
 | Cold attach (coder) | 1 303-1 470 ms | fail, 4.4-4.9x |
 | Cold attach, xl / 200 MB at load 98-116 (mine) | 5 654-11 800 ms | fail, 19-39x |
 
-**What the target costs, in the two changes that reach it:**
+**The warm/cold split is the one claim everything else here hangs on, and it has
+survived adversarial re-measurement.** The reviewer re-took it with *different*
+fixtures and got cold **1 275.3 / 1 275.5 / 1 481.3 ms** and warm **20.3-78.6 ms**,
+with xl at **6 407.3 ms cold / 77.6 ms warm** — every figure inside the ranges
+above, from an independent rig. Treat "warm attach is tens of milliseconds, cold
+attach is 1.3-1.5 s and 5-11 s on the 200 MB shape" as established rather than as
+one author's numbers.
 
-1. **Publish the runtime's cold answer instead of no answer** (§9 R1). The
-   viewer's first frame then arrives when the pid exists — **127-248 ms**, inside
-   the budget — carrying the durable page and an explicit `attaching` flag, with
-   the live frame following as a `frontend.replace`. This is *not* a new
-   protocol: `cold`, `cold_reason` and `attaching` already exist and the desktop
-   renderer already consumes the late authoritative replacement
-   (`desktop_sessions.py:1446-1460`). Cost: a second state shape on the serving
-   plane, and the discipline that nothing in it may claim liveness it has not
-   observed (§6).
-2. **Remove the whole-journal parse from the boot's critical path** (§9 R2) for
-   the case where a runtime must genuinely be started. This is the deferred (D)
-   of `docs/design/session-load-central-cache.md` §3(D), and its deferral reason
-   survives — see §9 R2.
+### The revised reachability claim (revision 1)
 
-**R1 alone reaches <300 ms for status and attach, including for the operator's
-261 MB conversation, without buying a byte of memory.** It does not make the
-*first prompt* on a cold session instant: a turn needs LLM history, which needs
-the parse. That is R2's job, and it is a bigger change.
+**Warm attach is already inside budget and independently reproduced (20.3-78.6 ms,
+n=6). Cold attach is TWO terms: a fixed spawn + boot of 1 275.3-1 481.3 ms (n=3,
+tiny), plus a size-dependent whole-journal parse that sits INSIDE the boot —
+between a pid existing (2 622.6 ms at xl, 207 MB / 18 301 rows) and the serving
+plane's first addressable instant (5 283.4 ms). The durable first paint waits for
+neither term (26.6-174.4 ms tiny, 1 768.9 ms xl). So the target is reached by
+taking the parse off the boot — **R2** — not by publishing an earlier answer from
+the runtime.**
+
+That paragraph replaces an earlier sentence in this document — *"R1 alone reaches
+<300 ms for status and attach, including for the operator's 261 MB conversation,
+without buying a byte of memory"* — which is **refuted**, for a reason that is
+simpler than the one this document first argued with: **the read path already
+publishes the cold answer.** `DesktopSessionBridge._cold_fields`
+(`server/utils/desktop_sessions.py:1306-1323`) emits `cold` + `cold_reason` +
+`attaching` with **no runtime at all** — measured at **26.6 / 49.7 / 174.4 ms**
+(tiny, n=3) and 1 768.9 ms (xl), and documented in `docs/DESKTOP_API.md`
+"Canonical viewer stream" items 4-6. R1 billed as a rank-1 latency win was
+therefore billing work that already ships. R1's remaining content is re-scoped at
+§9 R1.
+
+**Corroborated three times, independently, by readers who did not compare notes:**
+
+1. the reviewer (task-4) measured it — the runtime is addressable at
+   **254.9-460.2 ms** on tiny and **5 283.4 ms** on xl (pid at 2 622.6 ms, first
+   paint 1 768.9 ms), i.e. nothing is listening at pid time;
+2. the coder (task-5) read the same code for the implementation and agreed:
+   `spawn_owned_session` awaits `create_session` and constructs the
+   `ServingSessionHandle` **from the built session**, and the record "precedes the
+   control socket by construction";
+3. this document's author, reading it a third time: `process.py:4418` constructs
+   `RuntimeServer`, `session/runtime/server.py:2657` is `_serve`, and the publish
+   follows `start()`.
+
+Three independent paths to one conclusion is the strongest form this finding can
+take, which is why the ordering in §9 moved rather than the claim being argued
+with.
+
+**What the target costs, in the changes that reach it, in order:**
+
+1. **R2 — take the whole-journal parse off the boot** (deferred (D) of
+   `docs/design/session-load-central-cache.md` §3(D); its deferral reason
+   survives — see §9 R2). **This is the only change that reaches the operator's
+   261 MB conversation.**
+2. **§6 rule 1 + R7 — truthful liveness, as a PRECONDITION of anything that
+   publishes liveness on the read path**, not as a later correctness pass. It
+   moves no latency, and without it a fast answer is the *lying* answer: status is
+   already inside 300 ms while wrong (reads 170.7-350.6 ms, `/warm` receipt
+   6.3-100.6 ms, owner frozen).
+3. **R3 — warmth**, which converts a cold attach into a 20-80 ms one for the
+   sessions the LRU keeps — bounded by a memory envelope that cannot cover his
+   working set (§4.3), which is why it is a partial and not the answer.
+
+It does not make the *first prompt* on a cold session instant: a turn needs LLM
+history, which needs the parse. That is R2's job.
+
+### The verdict this document carries (reviewer, task-4)
+
+> **"Not fit to drive the serving-plane PR as written; fit to drive the TUI PR."**
+
+Stated here because it is the most useful sentence for whoever picks this up: the
+§4.4/§9 items about the TUI (R5, R4, R6, and the `/resume` store-scale note) and
+the R2/R3/R7 spine are actionable today; the *early-frame* half of R1 is not, and
+the two must not be handed to one implementer as if they were one plan.
 
 ---
 
@@ -593,13 +659,73 @@ AttachView := {
 
 **The five rules.**
 
+0. **RULE 1 IS A PRECONDITION FOR ANY FAST ANSWER, NOT AN ADD-ON (revision 1).**
+   This is the review's RR1-2, adopted. Any change that makes conversation
+   loading or status faster must land **behind** a truthful liveness rule, because
+   without it the fast answer is the *lying* answer and the speed is bought from
+   the user's trust. The reviewer's line states it better than this document did:
+   **status is already inside 300 ms while wrong** — reads at **170.7-350.6 ms**,
+   the `/warm` receipt at **6.3-100.6 ms**, with the owner frozen. The operator's
+   complaint is therefore about *truthfulness as much as speed*, and a design that
+   optimises only the milliseconds makes his position worse. The three surfaces
+   that produce the false-live answer, named so a later change cannot miss them:
+   `_cold_fields` → `remote.is_cold` (a purely local predicate, no round trip,
+   `session/attached.py:2449-2451`), the `/warm` receipt
+   (`server/utils/desktop_sessions.py:3544`), and `HEARTBEAT_TIMEOUT_S = 45.0`
+   (`session/runtime/types.py:370`).
+
 1. **Nothing may report `live` without a `verified_at`.** `cold: false` must be
-   derived from an *answered* subscribe/dial (`verified_at` set in that
-   round trip), never from a resident facade's memory of an earlier one. Today's
-   `reopen_cold: false` with a SIGSTOPped owner is exactly the forbidden state.
+   derived from an *answered* round trip, never from a resident facade's memory of
+   an earlier one. Today's `reopen_cold: false` with a SIGSTOPped owner is exactly
+   the forbidden state.
    *Test:* freeze the owner, wait past one attach round trip, assert the frame
    carries `live: null` (or `live.verified_at` older than its own budget) —
    never `cold: false` with a fresh timestamp.
+
+   **Rule 1 must be defined against the two predicates that already exist, or it
+   regresses an honest classification (review RR1-5, adopted).** `is_cold` is
+   three disjuncts — `self._client is None or not self._client.connected or not
+   self._ready_for_events` (`session/attached.py:2449-2451`) — and its **third is
+   a RESYNC state, not an absent owner**: `_refresh_display_history` and the
+   degraded-delta resync clear `_ready_for_events` while the client stays
+   connected and the runtime keeps serving for a whole frontend sync plus a
+   history page load. The tree separates those on purpose: `owner_reachable`
+   (`session/attached.py:2453-2474`) is "reachability only, no sync state" —
+   `self._client is not None and self._client.connected` — and the file grades
+   the conflation MAJOR (`/move`'s seam; `session/protocol.py:664` records a rung
+   that needed `owner_reachable` for exactly this; the desktop interrupt route
+   read a streaming session as `idle` and stopped nothing).
+
+   So a literal "a fresh round trip or nothing" would clear `verified_at` during
+   a display refresh and **turn a live session cold** — the same class of lie in
+   the opposite direction. The definition:
+
+   * `verified_at` is refreshed by an ANSWERED round trip on the connected dial.
+     **The instrument already exists and is the right one:** the attach protocol's
+     `ping` op, tagged *"list — liveness only"* (`local_operator/network/types.py:290`
+     in `ControlOp`, `:451` in the capability table, and `:503-504` with that exact
+     comment), carried on the wire as `{"op": "ping", "req": …, "locality":
+     "remote"}` (`network/wire.py:672`) and served at `network/relay.py:4872`. A
+     liveness-only read is precisely what a freshness stamp needs; this document's
+     earlier draft proposed the rule without noticing the op existed.
+   * **`owner_reachable` still decides "no owner."** A resync never clears
+     `verified_at` on its own and never makes a session cold.
+   * **`_ready_for_events` is still not a liveness term.** It stays a SYNC term,
+     exactly as `owner_reachable`'s docstring insists.
+   * `_await_frontend` (`session/attached.py:4449`; callers `:1581`, `:3906`,
+     `:7344`) is a *second* legitimate refresh point — it is always a wire answer —
+     but it is not the only one, and it must not be the *definition*.
+   * And **never** in `_finish_sync`, which has seven callers
+     (`:1590, :1646, :1719, :3934, :4035, :5084, :7384`) and two of them are COLD
+     paths (`:1646` `cold()`, epoch `cold-{session_id}`; `:1719` "nothing is
+     queued behind an owner that will never arrive"). Stamping there would hand a
+     facade with **no owner and no round trip** a verification stamp — the exact
+     false-live condition this rule forbids — and it would pass review because the
+     field would be present and set.
+
+   The invariant, in test-holdable form: **a cold facade never carries
+   `verified_at`; it is set only on a path that was a wire answer, and a resync is
+   not a loss of liveness.**
 2. **Age is checked by the reader, not hoped by the writer.** A reader that
    needs "now" compares `now - verified_at` against its own budget. A reader that
    only needs paint uses `durable` and ignores `live`.
@@ -647,6 +773,19 @@ The tree's existing discipline is load-bearing and must not be defeated:
   `snapshot()` (`desktop_sessions.py:2795`) — the pre-open supersession
   proof depends on it. Adding a `verified_at` read must not introduce an await
   between those lines.
+* **The `is_cold` / `owner_reachable` / `_ready_for_events` split** (review
+  RR1-5): `is_cold` is three disjuncts and its third is a RESYNC state;
+  `owner_reachable` (`session/attached.py:2453-2474`) is the only honest "no
+  owner" term; `_ready_for_events` is a SYNC term and must stay one. Any
+  freshness predicate must be defined against that pair, and a resync must never
+  clear `verified_at` or turn a live session cold. A change that folds "not
+  ready for events" into "no owner" is the same class of lie as the false-live
+  this document exists to remove, in the opposite direction.
+* **The `ping` op stays a liveness-only read** (`network/types.py:290,451,503-504`;
+  `network/wire.py:672`; `network/relay.py:4872`). If a freshness stamp is
+  refreshed by it, the op's capability class must not drift: it is `list`, and a
+  protocol change that reclassifies it would move a read onto a mutation's
+  ladder.
 
 ---
 
@@ -660,7 +799,7 @@ every 15 s) carries `snapshot`, `frontend.replace` and `attention` frames; the
 machine-wide feed (`desktop_feed.py`) publishes `notification`/`attention` with a
 100 ms tick and a live-only, never-replayed contract; the TUI holds live
 subscriptions per parked source with an owner-side mute negotiated on the wire
-(`set_event_mute`, `tui/events.py:668-673`). The TUI's own A/B already retired
+(`set_event_mute`, `tui/events.py:675`). The TUI's own A/B already retired
 "viewer-side gating" as a class of fix (`events.py:616-619`), which is evidence
 against adding more filtering machinery here.
 
@@ -720,7 +859,7 @@ rendered capture.
 | **In-memory snapshot store as the source of truth** | DSH's client store is the same process as the gateway and is rebuilt from durable events on reload ("Echoes are Client memory only; reload and reconnect rebuild the conversation from durable events alone"). lop's TUI is one process and *could* do this, but its journal is not the only durable authority — the **runtime holds the LLM context**, and a TUI-side fold can be ahead of what the model has actually been given. Any lop projection must be labelled as *display* state, never as context state. |
 | **WebSocket multiplexed streams** (`/api/remote.mux`) | A transport preference, not an architectural one. lop's SSE + HTTP works and is already push-shaped; swapping transports buys no measured latency and costs a reconnect/lifecycle rewrite on three surfaces. |
 | **`localStorage` persistence** and the browser-only store | No analogue worth copying; lop's durable state is the journal. |
-| **Writer-lock semantics** (`session/writer-held` → "try another blank") | DSH's answer to contention is to make the caller pick a different session. lop's is takeover/adoption with an explicit viewer/owner split (`docs/design/attached-interface-signal.md`), which is a different and *better* contract for a personal harness — copying the refusal would regress "reconnect and reconcile". |
+| **Writer-lock semantics** (`session/writer-held` → "try another blank") | DSH's answer to contention is to make the caller pick a different session. lop's is takeover/adoption with an explicit viewer/owner split (`docs/design-ownerless-session-attach.md`), which is a different and *better* contract for a personal harness — copying the refusal would regress "reconnect and reconcile". |
 
 **The one-line summary of the DSH study:** its *contracts* (watermarks, stale-not-
 ahead, live-preferred-but-non-activating, cached-yields-to-live, identity
@@ -734,44 +873,172 @@ its *mechanisms* assume a single-process in-memory fold and must not be.
 Each entry: expected effect on the 300 ms target, risk, blast radius,
 independence, and **how it is measured**. "Independent" means it can ship alone.
 
-### R1 — Publish the runtime's cold answer instead of no answer ★ rank 1
+### R1 — RE-SCOPED (revision 1): the frame already ships; what remains is its VERACITY (now R7) and its xl COST (now R8)
 
-**What.** Make the runtime's serving plane answer a viewer as soon as the
+> **REVISION 1 — WITHDRAWN BY MEASUREMENT** (reviewer, task-4, interim; full review
+> comment pending). This section is kept rather than deleted, because a silently
+> edited recommendation is worse than a corrected one and the next reader should
+> see *why* the ordering moved.
+>
+> **The premise is unreachable: there is no listener at pid time.** The order in
+> `process.amain` is `create_session` (which contains the whole-journal parse) →
+> drain → `async_init` → `RuntimeServer.start()`, and it is `start()` that binds
+> and only then publishes the record. Measured, the runtime is addressable at
+> **254.9-460.2 ms** on tiny and **5 283.4 ms** on xl (pid at 2 622.6 ms, first
+> paint 1 768.9 ms). The process exists at 127-248 ms; **nothing is listening**.
+> So the parse stays on the attach path, and "answer as soon as the process
+> exists" cannot happen. The only locus before `RuntimeServer.start()` is *before*
+> `create_session` — a serving plane with no session handle, a larger change than
+> this one, whose ceiling is tiny's 254.9-460.2 ms (already ≈budget) while xl
+> stays 5 283.4 ms.
+>
+> **Two further findings killed it.** (a) It would have inherited §6.1's hole
+> rather than closed it: the false-live comes from `_cold_fields` →
+> `remote.is_cold` (`session/attached.py:2449-2451`), the `/warm` receipt, and
+> `HEARTBEAT_TIMEOUT_S = 45`, none of which this section touches — so "R1 reaches
+> <300 ms for status" would have been satisfied *by the lying path*. (b)
+> **`attaching` has no consumer**: in `local-operator-ui` @origin/main the field
+> is declared once (`desktop-session-contract.ts:850`) and read **nowhere**. A
+> published flag informs nobody.
+>
+> **What survives from this section:** the state shape is additive and sound
+> (`cold`/`cold_reason`/`attaching` reused, `verified_at` new, `verified_at` and
+> `LIVE_FRESHNESS_BUDGET_S` have zero hits in the tree), and the *truthfulness*
+> half of the idea is now §9 R7 — where it is the honest fix for a real violation
+> rather than a frame nobody reads. The correct ordering is **R2 first** (§5,
+> revision 1): nothing can be published early until the parse moves.
+
+**What it is now — two items, neither of them a new frame, and neither of them
+tracked under R1.** The read path ALREADY publishes the cold answer: the desktop
+cold facade emits `cold` + `cold_reason` + `attaching` with no runtime
+(`_cold_fields`, `server/utils/desktop_sessions.py:1306-1323`, documented in
+`docs/DESKTOP_API.md` "Canonical viewer stream" items 4-6), measured at
+**26.6 / 49.7 / 174.4 ms** (tiny, n=3) and 1 768.9 ms (xl). So:
+
+* **(i) its veracity** — the frame must not report `cold: false` off a resident
+  facade's memory. That is §6 rule 1 / **R7**, a correctness fix to a frame that
+  ships today, and it is ranked as a *precondition* rather than as a later pass.
+* **(ii) its xl cost** (1 768.9 ms) — which is the boot's parse, i.e. **R2**, and
+  is tracked there.
+
+**Nothing in R1 remains as an independent change.** The section is kept, with the
+banner above, because the reasoning that killed the early-frame billing is worth
+more than a deleted section. **Do not implement an early frame.**
+
+**What it was.** (Historical.) Make the runtime's serving plane answer a viewer as soon as the
 process exists, with a **durable** snapshot from the journal, an explicit
 `attaching: true`, and **no live block**; publish the live frame later as a
-`frontend.replace`. The gate pattern already exists one screen away: MCP wiring
-defers behind `mcp_publication_gate` (`serving.py:723-724,7945`) which
-`RuntimeServer._serve` (`server.py:2641`) sets "the moment the publisher exists",
-precisely so that "no integration configuration can sit between the user and a
-bound session".
+`frontend.replace`. The gate pattern exists one screen away: MCP wiring defers
+behind `mcp_publication_gate` (`serving.py:723-724,7945`) which
+`RuntimeServer._serve` (`server.py:2641`) sets "the moment the publisher exists".
 
-**Effect.** `t_attached` cold: **1 303-1 470 ms → 127-248 ms** (the time to get a
-pid). For the operator's 261 MB conversation this removes the entire 1.8-2.3 s
-parse from the attach path — **the target is met for attach and status with no
-memory cost**. First paint is unchanged (already 200-300 ms) but its *live* leg
-stops being the thing the user waits for.
+#### The reviewer's evidence (RR1-1), kept so this is not re-derived
 
-**Risk: medium-high.** A second state shape on the serving plane. The
-`cold`/`cold_reason`/`attaching` vocabulary exists and the desktop renderer
-already applies the late authoritative `frontend.replace`, so the protocol
-change is smaller than it sounds — but every rule in §6.3 must hold, and "no live
-block before an answer" has to be enforced by construction rather than by
-convention.
+The tree's own words, quoted by the review: `serving.py:7945` — "Everything this
+session does before RecordPublisher runs … is invisible to the viewer, which is
+sitting on the status band's `starting…` with nothing to bind to"; `process.py` —
+"the first thing `_serve` does once it holds a bound socket is publish the
+record"; and `server.py:2657-2670` — `asyncio.start_server(...)` then
+`_record.control_port = port`. Its measurements:
+
+| | pid exists | plane addressable | durable first paint |
+|---|---|---|---|
+| tiny | 127-248 ms | **254.9-460.2 ms** | **26.6-174.4 ms** |
+| xl (207 MB / 18 301 rows, load 68.7) | **2 622.6 ms** | **5 283.4 ms** | 1 768.9 ms |
+
+**The tiny row is the one that ends the argument: the durable first paint already
+arrives at 26.6-174.4 ms — *earlier* than the 127-248 ms this section proposed.**
+The early frame would have been slower than what already ships, on the shape
+where it had the best chance.
+
+#### The reviewer's alternative — "bind before `create_session`" — and why it is rejected as a target
+
+RR1-1's other remedy (re-scope R1, or merge it into R2 by binding before
+`create_session`) deserves a straight answer, because it is the one genuinely new
+idea in the review and it is a *different* change from R2. **Rejected as the
+target; recorded as a possible follow-on for the status half only.** On the merits:
+
+1. **It relocates the wait; it does not remove the cost.** The plane would be
+   addressable at ~pid time, but the operator's 261 MB case still spends the
+   whole parse before the *live* half and before the first *prompt*. R2 deletes
+   that spend outright.
+2. **Its ceiling on the shape he complains about is the pid time itself —
+   2 622.6 ms on xl (reviewer, load 68.7).** No socket ordering gets a session
+   under 300 ms while the *process* takes 2.6 s to appear; that is the spawn term,
+   and R3 (warmth) is its lever.
+3. **On tiny there is nothing left to win** — see the table above.
+4. **Cost and risk are worse and wider.** It is a serving plane with **no session
+   handle**: a second state machine on the wire, and every route that assumes a
+   bound session has to answer for the pre-session phase. R2 is confined to the
+   boot's *input* (the replay window), has a named equivalence oracle (the
+   whole-file replay test), and already exists as a pattern in the same module —
+   `read_replay_suffix` + `replay_entries`, which is exactly what the *viewer* path
+   got at `session/attached.py:5337` for the same reason.
+5. **It would be fast and unverifiable unless R7 lands first**, because a
+   pre-session plane can only report `attaching` — a field with no consumer
+   (RR1-4). So even as a follow-on it is ordered after R7.
+
+**One consequence worth stating: if R2 lands, bind-first's value shrinks
+further** — it exists to hide a parse that R2 removes. If it is ever built, it is
+for *status during a cold boot*, not for latency. **And it is not a cheaper third
+option:** a child-side pre-bind plane means constructing `RuntimeServer` before
+the handle it takes as an argument, which is the same boot inversion R2 already
+implies — the reviewer's point, and it closes the question.
+
+#### Options (a) and (c), and why neither is the outcome
+
+* **(a) "R1 is dead; only R2 carries the latency work" — close, but too strong.**
+  R1's *frame shape* is not dead; only its rank-1 latency billing was. `cold`,
+  `cold_reason` and `attaching` are shipped and documented, and the honest
+  early-answer contract is the right one.
+* **(c) "drop the `attaching`-before-live idea entirely" — REJECTED**, and the
+  reviewer's reason is better than this document's or the manager's: dropping it
+  would remove **the only mechanism by which a viewer can distinguish "coming"
+  from "never."** The token is not useless because it has no consumer; it *needs*
+  a consumer. That is a UI-side remedy (RR1-4), not a deletion.
+* **What actually happened:** the *locus* moved. The frame already exists at the
+  reader's plane, so the surviving work is making that frame honest (R7) and
+  cheap on xl (R2), not publishing a new one from the runtime.
+
+#### Acceptance metric — corrected (RR1-3, adopted)
+
+The metric this section specified cannot show its own claimed gain: `t_attached`
+is defined as the first `cold:false` frame
+(`scripts/bench_desktop_open_attach.py:13`, matcher `:224-230`), and §6.2 rule 4
+forbids an early frame from being that. The corrected metric set, for any future
+early-frame work: **primary** = the first frame carrying the durable page plus
+`attaching: true`; **residual** = `t_attached` (the first `cold:false`), reported
+separately and *not* expected to improve from the early frame.
+
+#### Renderer follow-on (RR1-4, not in this doc)
+
+`attaching` is declared once in `local-operator-ui` @origin/main
+(`desktop-session-contract.ts:850`) and read **nowhere**. If the field is to
+carry meaning, the renderer has to consume it — that is a UI-side item and is
+named as a follow-on rather than added to this document's scope.
+
+**Effect — WITHDRAWN.** The claimed `t_attached` cold 1 303-1 470 ms →
+127-248 ms does not hold: at 127-248 ms the pid exists and nothing is listening,
+so there is no frame to send. The reachable figure is the addressable time the
+reviewer measured — 254.9-460.2 ms on tiny, 5 283.4 ms on xl — and on tiny the
+durable paint already beats it.
+
+**Risk — now moot.** A second state shape on the serving plane, for a frame with
+no consumer.
 
 **Blast radius.** `session/runtime/serving.py`, `session/runtime/process.py`,
-`session/runtime/server.py`, `session/attached.py` (the viewer's early frame),
-`server/utils/desktop_sessions.py` (the cold facade), and the frontend-state
-protocol tests. Not the TUI's in-process path.
+`session/runtime/server.py`, `session/attached.py`,
+`server/utils/desktop_sessions.py`, **and the renderer** (`attaching` has no
+reader today, so R1's original blast radius was incomplete by one repository) —
+a large surface, for a withdrawn effect.
 
-**Independent: yes.**
+**Independent: n/a. Ranked: last, as a record of a refuted idea.**
 
-**Measurement.** `--scenario attach` before/after: `t_attached` on
-tiny/p50/p90/p99/xl, plus a new **structural** assertion — the number of journal
-rows JSON-decoded before the first frame (`== 100`, the page), which is
-load-independent and therefore the real acceptance criterion. Plus coder's
-`probe_warm_reattach.py` for the warm legs, which must not regress (29.6-78.7 ms).
+**Measurement.** The measurement that would have proved it — "first frame within
+300 ms of the `watch` POST once the pid exists" — is the measurement that refuted
+it: the addressable time is 254.9-460.2 ms (tiny) / 5 283.4 ms (xl).
 
-### R2 — Take the whole-journal parse off the boot's critical path ★ rank 2
+### R2 — Take the whole-journal parse off the boot's critical path
 
 **What.** The deferred (D) of `docs/design/session-load-central-cache.md` §3(D),
 whose follow-up shape that doc already names: **not** lazy `Transcript._entries`,
@@ -789,7 +1056,7 @@ sharper than the doc states.** I re-read the hazard at this revision:
 *recovered* into memory and rewritten. With a lazy `_entries` that recovery
 silently becomes "write only the new batch". That is a real regression on a path
 that exists on purpose. Add §3(D)'s own list — ~30 call sites, the `hasattr`
-duck-typing in `session_factory.py:684-686,749-750`, and a `threading.Lock`
+duck-typing in `session_factory.py:904-906,969-972,1022`, and a `threading.Lock`
 guarded load reachable from a loop thread being the #401 freeze shape — and
 **the deferral stands**.
 
@@ -817,7 +1084,7 @@ post-compaction window rather than the file. Wall-clock second:
 `--scenario attach` on xl. Equivalence: the existing whole-file oracle test for
 `build_llm_history` extended to the windowed path.
 
-### R3 — Warmth, priced and capped inside the envelope ★ rank 3
+### R3 — Warmth, priced and capped inside the envelope
 
 **What.** Do **not** treat the cap as the fix. If any memory is spent, spend it
 on the *right* sessions: today's LRU is over "idle clientless runtimes" in detach
@@ -869,7 +1136,7 @@ between them, and counts **cache hits vs prepares and their two costs** — a co
 and two numbers, not a wall time. Plus the existing TUI test battery for reveal
 correctness.
 
-### R5 — Move the speculative warm-up's synchronous work off the event loop ★ rank 5
+### R5 — Move the speculative warm-up's synchronous work off the event loop
 
 **What.** `_prepare_sidebar_session` is measured at **93 ms median on the event
 loop, twice per prewarm refresh** (`tui/events.py:620-622`), and the tree's own
@@ -896,8 +1163,7 @@ N sessions stream. Report at a stated load.
 256 KB read + JSON decode + `replay_entries` + one content read and one
 full-digest re-hash per image reference, on **every** switch and **every** prewarm
 cycle, for a journal that usually has not changed. `session/page_cache.py` exists
-and is consumed by exactly two paths, neither of them this one (`grep -n
-'page_cache' local_operator/**` → 4 hits).
+and is consumed by exactly two paths, neither of them this one (two live consumers of `load_transcript_page`, and neither is this one).
 
 **Effect — and this one I over-priced too, so it is stated as measured.** The
 bypass is real but the read is **bounded at `PREVIEW_BYTES = 256 * 1024`**
@@ -943,37 +1209,63 @@ neighbourhood that *is* on the event loop is `/resume`'s uncapped
 `recent_session_rows(..., limit=None)` (`tui/app.py:15366`) plus a full-store
 `build_index` (`:15417`), recorded in §4.4(b) for the next phase.
 
-### R7 — Make liveness verified, and make the receipts honest ★ rank 6 (correctness, not speed)
+### R7 — Make liveness verified, and make the receipts honest — **rank 2, and a PRECONDITION**
 
-**What.** §6's `verified_at` on the live block; `cold: false` only from an
-answered round trip; and the mutating routes' receipts (starting with `POST
-/warm`, which answered **200 `{"state":"warm"}`** for a `SIGSTOP`ped owner) must
-not assert an outcome they did not observe.
+**What.** §6's `verified_at` on the live block, refreshed by the existing `ping`
+op on a connected dial (§6.2 rule 1); `cold: false` only from an answered round
+trip; `owner_reachable` still deciding "no owner" and `_ready_for_events` staying
+a sync term; and the mutating routes' receipts (starting with `POST /warm`, which
+answered **200 `{"state":"warm"}`** for a `SIGSTOP`ped owner) must not assert an
+outcome they did not observe.
 
-**Effect.** None on latency; it removes the measured false-live window
-(45-60 s by heartbeat, and "immediately and wrongly" for a resident facade). The
-operator's "without being lagged or behind" is this, and it is the difference
-between a design that is fast and one that is trustworthy.
+**Why it ranks 2 and not 6 (revision 1).** The reviewer's line is the reason:
+**status is already inside 300 ms while wrong** — in its busy run the read path
+answered in **170.7-350.6 ms** and the `/warm` receipt in **6.3-100.6 ms** with
+the owner frozen. So the millisecond target is met on the very path that lies, and
+any change that makes loading faster without landing this first makes the
+operator's position worse, not better. **It is a precondition of anything that
+publishes liveness on the read path, not a follow-on correctness pass.** Nothing
+in §6.1's measured violation is touched by R2, R3, R4, R5, R6 or R8.
 
-**Risk: medium** — it changes what a renderer sees for a busy owner, so the
-renderer's `attaching`/`cold_reason` handling has to be exercised against a
-frozen owner (the `--scenario busy` rig already does the freezing).
+**Effect.** None on latency; it removes the measured false-live window (45-60 s by
+heartbeat, and "immediately and wrongly" for a resident facade). The operator's
+"without being lagged or behind" is this, and it is the difference between a
+design that is fast and one that is trustworthy.
 
-**Blast radius:** the frontend-state wire shape + `desktop_sessions.py` +
-`registry.classify` consumers. **Independent: yes.**
+**Risk: medium** — it changes what a renderer sees for a busy owner. **And that
+is the real work, not the field:** RR1-4 measured that `attaching` is declared in
+`local-operator-ui` @origin/main (`src/shared/desktop-session-contract.ts:849-850`)
+and **read nowhere** (7 `attaching` hits, 6 of them prose; the only functional use
+of the triple is a presence test at
+`src/renderer/src/shared/hooks/use-canonical-session.ts:1662`). A stamp nothing
+renders fixes nothing visible, so this change has a **UI half**: either render
+`attaching` (status band → spinner → live) or express the early state in a field
+the shipped renderer already branches on. That UI work is a **named follow-on**,
+not part of this document's scope.
+
+**Blast radius:** the frontend-state wire shape + `server/utils/desktop_sessions.py`
+(`_cold_fields:1306-1323`, the `/warm` receipt `:3544`) + `registry.classify`
+consumers + `session/attached.py` (the freshness refresh at `ping`) — **plus the
+`local-operator-ui` renderer half above**. **Independent: yes — and it ships
+first, alone.**
 
 **Measurement.** `--scenario busy` as the acceptance test: assert the read path
 never reports `cold: false` with a fresh `verified_at` while the owner is
-`SIGSTOP`ped, and that a failure surfaces in **< 2 s** instead of 15.0-15.6 s.
+`SIGSTOP`ped, that `/warm` does not answer 200 `{"state":"warm"}`, and that a
+failure surfaces in **< 2 s** instead of 15.0-15.6 s. Plus a resync test (RR1-5):
+during a display refresh the session must NOT be reported cold.
 
 ### R8 — First-paint headroom in its own right
 
 **What.** First paint is at the budget (200-297 ms p50, p95 over on 3 of 5
-profiles) and `validate` is 84% of it. It is cold-spawn-coupled, so R1/R3 move
-it; the residual items are the 50 ms attention wait
+profiles) and `validate` is 84% of it. It is cold-spawn-coupled, so R3 moves it;
+the residual items are the 50 ms attention wait
 (`ATTENTION_SNAPSHOT_WAIT_S`), the duplicate tail read between snapshot and
-`/history`, and the xl row (738-934 ms cold), which the page cache does not help
-because the journal is cold by construction in every sample.
+`/history`, and the xl row — **now including the cold-facade cost that R1 used to
+claim: 1 768.9 ms on xl (reviewer, n=1) / 738-934 ms (mine)**, which the page
+cache does not help because the journal is cold by construction in every sample.
+The tiny row is the other end and needs nothing: the same frame lands in
+**26.6-174.4 ms** (reviewer, n=3).
 
 **Effect.** ~2x headroom on first paint; the p95 failures close.
 **Risk: low-medium.** **Blast radius:** `server/utils/desktop_sessions.py`.
@@ -986,25 +1278,28 @@ because the journal is cold by construction in every sample.
 
 | rank | change | effect on 300 ms | risk | independent |
 |---|---|---|---|---|
-| 1 | R1 publish the cold answer | cold attach 1 303-1 470 ms → **127-248 ms** | medium-high | yes |
-| 2 | R2 windowed boot replay | −248 ms / 107 MB; **−2 286 ms / 261 MB** | high | yes |
-| 3 | R3 warmth 4 → 6 | one cold attach → 30-80 ms per extra slot | low | yes |
-| 4 | R5 prewarm off the loop | removes 93 ms loop stalls, 2/refresh | medium | yes |
+| **1** | **R2** windowed boot replay — take the parse off the boot | −248 ms / 107 MB; **−2 286 ms / 261 MB**; the only item that reaches xl | high | yes |
+| **2** | **§6 rule 1 + R7** verified liveness — a **PRECONDITION** of anything publishing liveness on the read path | none by itself; it is what stops a fast answer being the *lying* one (status is already <300 ms while wrong) | medium | yes — ships alone, and first |
+| 3 | R3 warmth 4 → 6 | one cold attach → 20-80 ms per extra slot | low | yes |
+| 4 | R5 prewarm off the loop | removes 93 ms loop stalls, twice per 2 s refresh | medium | yes |
 | 5 | R4 TUI cache: the streaming arm | 31.91 ms prepare → 0.21 ms hit | medium | yes |
-| 6 | R7 verified liveness | removes a 45-60 s false-live window | medium | yes |
-| 7 | R8 first-paint headroom | closes the over-budget samples | low-medium | yes |
-| 8 | R6 TUI load path → page cache | bounded repeat parse → **0 rows decoded** | low | yes |
+| 6 | R8 first-paint headroom (incl. the xl cold facade: 1 768.9 ms) | closes the over-budget samples | low-medium | yes |
+| 7 | R6 TUI load path → page cache | bounded repeat parse → **0 rows decoded** | low | yes |
+| — | ~~R1 early frame~~ | **withdrawn** — the frame already ships at the read path (26.6-174.4 ms tiny) | n/a | no |
+| — | ~~R9 store census~~ | **negative result** — ~3% of a core, no sound cheaper key | n/a | no |
 
-**Ordering rationale.** R1 before R2 because R1 reaches the target for the thing
-the user actually does (open, switch, watch) without touching the hazardous
-contract; R2 is bigger, riskier, and only strictly required for the first
-*prompt* on a cold session. R3 before R5/R4 because it is one constant on the
-primary interface. **R9 is not in the table because it is a negative result** —
-the 2 s census looked like the largest recurring cost in an early draft and
-re-measurement at the operator's real user/subagent split made it ~3% of a core
-with no sound cheaper key (§9 R9). R4 and R6 are last on effect and are ranked for
-completeness rather than for expected gain — both were over-priced in my first
-pass and are corrected above rather than quietly dropped.
+**Ordering rationale (revision 1).** **R2 is first because the parse sits between
+the pid and the socket** — nothing else can move the operator's 261 MB case (§5).
+**R7/§6 rule 1 is second and is a PRECONDITION, not a follow-on:** the review's
+sharpest line is that *status is already inside 300 ms while wrong* (reads
+170.7-350.6 ms, `/warm` 6.3-100.6 ms, owner frozen), so a design that optimises
+only milliseconds makes the operator's position worse, not better. R3 is third
+because it is one constant on the primary interface. R8 absorbs the xl cold-facade
+cost that R1 used to claim. **R9 is a recorded negative result** (§9 R9), and
+**R1 is withdrawn** — its frame already ships and its two surviving halves are R7
+(veracity) and R8/R2 (cost). R6 is last on effect and ranked for completeness;
+both it and R4 were over-priced in my first pass and are corrected in place rather
+than quietly dropped.
 
 ---
 
@@ -1019,9 +1314,10 @@ pass and are corrected above rather than quietly dropped.
   journal). R2 is the narrow version.
 * **Do not add a push transport.** §7: pushing an unverified claim faster
   delivers a wrong answer sooner.
-* **Do not raise the keep-alive cap to cover the working set.** §4.3: it costs
-  2-5x the operator's own stated memory envelope, and R1+R2 make the cold path
-  cheap enough that the cap stops being the lever.
+* **Do not raise the keep-alive cap to cover the working set.** §4.3 prices it
+  per cap: cap 6 costs **1.5-2.6x** the operator's stated ~200-300 MB envelope,
+  and larger caps up to ~5x. R2 makes the cold path cheap enough that the cap
+  stops being the lever.
 * **Do not gate anything on a per-session cost that scales with the store.** His
   store is 12 258 sessions / 7.3 GB with 26-28 subagent runs per five minutes; a
   design whose per-open cost is O(store) fails at his scale. Every change above
@@ -1061,7 +1357,7 @@ pass and are corrected above rather than quietly dropped.
    across, say, a month of the operator's own store — which is a read-only
    analysis over `sessions/*/transcript.jsonl` mtimes, and it would also tell us
    whether `keep_alive_seconds = 300` is the right window.
-3. **Does R1's early-cold frame break any renderer assumption?** The desktop
+3. ~~Does R1's early-cold frame break any renderer assumption?~~ **CLOSED by RR1-4** — `attaching` has no reader in `local-operator-ui`, so the question was not "does it break an assumption" but "is there a consumer at all". Named as R7's UI follow-on (§9 R7). The desktop
    renderer is documented to apply the late `frontend.replace`; the TUI's
    in-process path is not affected. The evidence: a headless pilot of the
    desktop stream against a runtime held in the early-cold state, asserting the
