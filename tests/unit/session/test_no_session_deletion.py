@@ -1892,6 +1892,37 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "Removes only its own pid-keyed temp file after a failed atomic replacement",
     ),
+    # -- the projects store (projects primitive, slice 1) --------------------
+    # Every path here is `<config_dir>/projects/<uuid>.json` or this call's own
+    # mkstemp temp in that SAME directory. The id is a uuid4 hex produced by the
+    # store itself, never a caller-chosen component; `_atomic_write_text` has
+    # exactly one caller (``_save_project_locked``, with a path it built from
+    # ``projects_dir``), and none of these four can name anything under
+    # ``sessions/`` — deleting a project row never touches a session directory
+    # by design.
+    (
+        "local_operator/projects.py::_atomic_write_text",
+        "os.replace",
+        "Atomic publish of <config_dir>/projects/<id>.json; both paths are the row's "
+        "own name beside its mkstemp temp in projects/",
+    ),
+    (
+        "local_operator/projects.py::_atomic_write_text",
+        "<path>.unlink",
+        "Clears this call's own mkstemp temp in <config_dir>/projects/ when the "
+        "write or replace fails",
+    ),
+    (
+        "local_operator/projects.py::ProjectRegistry._save_project_locked",
+        "<path>.unlink",
+        "Removes the row THIS call just created when the directory fsync fails — the "
+        "unacknowledged-write path; an update keeps the replaced bytes",
+    ),
+    (
+        "local_operator/projects.py::ProjectRegistry.delete_project",
+        "<path>.unlink",
+        "Removes ONE <config_dir>/projects/<id>.json row; session directories are " "never touched",
+    ),
 )
 
 _ALLOWED: dict[str, str] = {f"{row[0]}::{row[1]}": str(row[2]) for row in _ALLOWED_ROWS}
