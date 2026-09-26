@@ -8891,7 +8891,7 @@ class OperatorApp(App[None]):
             return
         self._liveness_probe_last = now
         self.run_worker(
-            self._reprobe_liveness(source, session, self._liveness_row_text(session, now=now)),
+            self._reprobe_liveness(source, session),
             group="liveness-probe",
             exclusive=False,
             exit_on_error=False,
@@ -8917,22 +8917,32 @@ class OperatorApp(App[None]):
             return ""
         return liveness_text(verdict, now=now, verified_at=getattr(session, "verified_at", None))
 
-    async def _reprobe_liveness(
-        self, source: SessionInteraction, session: Any, before: str
-    ) -> None:
-        """One bounded probe, and a repaint when the ROW WOULD CHANGE.
+    async def _reprobe_liveness(self, source: SessionInteraction, session: Any) -> None:
+        """One bounded probe, and a repaint when the row WOULD DIFFER FROM THE SCREEN.
 
-        The age is why a repaint is owed even when the probe failed: an owner that
-        stays silent makes ``Not answering · 4m`` become ``Not answering · 5m``,
-        and a gate that only watched the state would freeze the row at the budget
-        boundary forever.
+        THE COMPARISON IS AGAINST WHAT IS PAINTED, not against a snapshot taken at
+        the top of this callback, and that distinction is the whole fix. Comparing
+        before/after AROUND the probe cannot see the transition the row exists to
+        report, because it does not happen during a probe: the owner goes quiet,
+        the stamp expires BETWEEN two ticks, and by the time the next tick runs
+        both its "before" and its "after" are the same stale text -- so an owner
+        that stopped answering produced ZERO repaints over 1800 s and six probes,
+        and the row appeared only if the operator switched conversations.
+
+        Comparing against the painted string catches every case that matters and
+        nothing else: LIVE -> STALE between ticks (painted ``""``, current stale
+        text) repaints; STALE 4m -> STALE 5m repaints; a failed probe that changed
+        nothing does not. The probe still never clears the stamp, so T6 holds --
+        a failure narrows the window instead of resetting it.
         """
         await self._liveness_probe.tick(session)
         if not self._is_current(source):
             return
-        if self._liveness_row_text(session) == before:
+        current = self._liveness_row_text(session)
+        if current == self._liveness_painted:
             return
         self._show_sidebar_connection(source)
+        self._liveness_painted = current
 
     def _show_sidebar_connection(self, source: SessionInteraction) -> None:
         if not self._is_current(source):
@@ -10336,6 +10346,10 @@ class OperatorApp(App[None]):
         # the paint itself only ever compares a clock.
         self._liveness_probe = LivenessProbe()
         self._liveness_probe_last: float | None = None
+        #: The liveness text the band is currently SHOWING. The repaint gate is a
+        #: comparison against this rather than against a snapshot taken around the
+        #: probe; see ``_reprobe_liveness`` for why that is the whole fix.
+        self._liveness_painted: str = ""
         self.set_interval(LIVENESS_PROBE_EVERY_S, self._probe_foreground_liveness)
         self._apply_sidebar_settings()
         try:

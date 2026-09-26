@@ -378,3 +378,75 @@ async def test_the_apps_own_row_text_for_a_real_silent_facade(tmp_path, monkeypa
         row = app._liveness_row_text(session)
         assert row.startswith("Not answering"), row
         assert "\u00b7" in row, "STALE always carries its measured tail"
+
+
+async def _drain(app, pilot, *, rounds: int = 6) -> None:
+    """Let a scheduled worker run, then let the screen catch up.
+
+    `pilot.pause()` yields to the event loop WITHOUT draining the app's worker
+    manager, so a `run_worker` callback stays unstarted: measured, everything else
+    green and `_liveness_probe.probes == 0`. `wait_for_complete()` is the drain;
+    the loop is BOUNDED so a genuine regression fails this test instead of
+    hanging it, which matters in a suite whose least-reportable failure is a hang.
+    """
+    for _ in range(rounds):
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_a_silent_owner_makes_the_row_appear_with_no_other_input(tmp_path, monkeypatch):
+    """U1: the app's own probe must be able to PUT THE ROW ON SCREEN.
+
+    Nothing else happens here -- no click, no switch, no keystroke. The call is
+    the interval's own callback, which is what the reviewer drove.
+    """
+    from local_operator.tui.app import OperatorApp
+    from tests.unit.tui.test_app_pilot import _factory
+    from tests.unit.tui.test_sidebar_swap_reset import SidebarRemote
+
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_SHIMMER", "1")
+    app = OperatorApp(lambda: _factory(SidebarRemote("home00000000")))
+    async with app.run_test(size=(120, 36)) as pilot:
+        await _drain(app, pilot)
+        app._interaction.session = await _viewer_facade(tmp_path, quiet_for=60.0)
+        assert not getattr(app._status, "_connection", ""), "the premise: nothing is painted yet"
+
+        app._probe_foreground_liveness()  # exactly what the interval calls
+        await _drain(app, pilot)
+
+        painted = getattr(app._status, "_connection", "")
+        assert painted.startswith("Not answering"), (
+            f"a silent owner painted {painted!r}: the row that exists to report a "
+            "stopped owner never reached the screen"
+        )
+        assert "\u00b7" in painted, f"the age is missing from {painted!r}"
+
+
+@pytest.mark.asyncio
+async def test_a_standing_row_repaints_as_the_age_grows(tmp_path, monkeypatch):
+    """U2: STALE->STALE is not a change, so the gate must be the TEXT."""
+    from local_operator.tui.app import OperatorApp
+    from tests.unit.tui.test_app_pilot import _factory
+    from tests.unit.tui.test_sidebar_swap_reset import SidebarRemote
+
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_SHIMMER", "1")
+    app = OperatorApp(lambda: _factory(SidebarRemote("home00000000")))
+    async with app.run_test(size=(120, 36)) as pilot:
+        await _drain(app, pilot)
+        session = await _viewer_facade(tmp_path, quiet_for=60.0)
+        app._interaction.session = session
+        app._probe_foreground_liveness()
+        await _drain(app, pilot)
+        first = getattr(app._status, "_connection", "")
+
+        # The owner stays silent and time passes: the VERDICT is unchanged, the
+        # ROW is not. This is the assertion that catches a frozen age.
+        session._verified_at = time.time() - 600.0
+        app._liveness_probe_last = None  # as if the cadence came round again
+        app._probe_foreground_liveness()
+        await _drain(app, pilot)
+        second = getattr(app._status, "_connection", "")
+
+        assert first != second, f"the age froze: {first!r} then {second!r}"
+        assert second.startswith("Not answering"), second
