@@ -511,11 +511,50 @@ class NetworkScreen(ModalScreen[None]):
             return _MIN_CARD_WIDTH
 
     def _title_text(self) -> Text:
-        return Text(
-            "Mesh networks\n" + "─" * max(1, self._card_width()),
+        """The title, its rule, and the audit news when there is any.
+
+        THE NEWS ROW LIVES HERE BECAUSE THE FOLD CANNOT REACH IT (design round 4,
+        D46). Round 3 painted it in the Relay block and paid for it out of the
+        block's separator blank, which held only while the content above stayed
+        put: the block is the LAST thing in a region whose height grows with every
+        network and peer row, so two more peers pushed the block — and the row with
+        it — under the fold, and the distinction vanished again in exactly the state
+        the row exists for. ``#network-title`` is outside ``#network-scroll``, so the
+        row is visible in every state the panel can be in; the designer's two
+        measured states (the real payload, and the fixture with two more peers) show
+        it where the block's copy painted nowhere.
+
+        IT COSTS THE BODY NOTHING. The title's third row is the blank padding row that
+        box already held, and the row is only ever content in a state that has news: ``_repaint`` adds the ``audit-news`` class that swaps that padding for
+        the row (``#network-title.audit-news`` in ``local_operator.tcss``). A steady
+        panel therefore paints exactly what it painted before this row existed — same
+        content, same styles, same bytes, which is the frame the committed README figure
+        and every geometry comparison in the round are made against — and the news state
+        is the same three rows with the sentence in the third. The body is the same in
+        every audit state, which is what makes "the row is visible" a fact about the
+        panel rather than about how much table happens to be above it.
+        """
+        width = max(1, self._card_width())
+        text = Text(
+            "Mesh networks\n" + "─" * width,
             no_wrap=True,
             overflow="crop",
         )
+        words = self._audit_words()
+        if words:
+            # THE ROW LOOKS LIKE THE BLOCK'S ROW, NOT LIKE THE TITLE (measured on the
+            # rendered frame): the title block is `text-style: bold`, so an unspanned
+            # sentence came out bold and read as a second heading crowding `This device`
+            # — two headings stacked, where the block's own row is an ordinary `fg`
+            # sentence. Only its PLACE moved; its appearance is the one it had in the
+            # block. The title and the rule keep their own styling untouched, which is
+            # also what leaves the steady frame byte-identical.
+            #
+            # The label and its column are the block's own (cell 14), so a reader moving
+            # between the panel and ``lop network status`` reads the same field twice.
+            text.append("\n")
+            text.append(_indented_value("  audit:      ", words, width), style="not bold")
+        return text
 
     #: The footer's keys, in order, as SEGMENTS rather than one string: every
     #: prefix of this tuple is a valid shorter footer, which is what lets a narrow
@@ -608,16 +647,18 @@ class NetworkScreen(ModalScreen[None]):
         return list(self.local.networks)
 
     def _audit_words(self) -> str:
-        """The Relay block's audit row, or ``""`` when the audit has no news.
+        """The audit news row, or ``""`` when the audit has no news.
 
         ONE PLACE DECIDES, because two things depend on the answer: whether the row is
-        painted at all, and whether the block's own separator blank is spent to pay
-        for it (see :meth:`_report_text`). A second caller computing it again is how
-        the two come to disagree about a row that is either there or not.
+        painted at all, and how many rows the title block needs to hold it (see
+        :meth:`_title_text`). A second caller computing it again is how the two come to
+        disagree about a row that is either there or not.
 
-        ``omit_steady`` is the panel's own rule (design round 3, D40): the block has
-        no room for a row that carries no news, so a steady writer paints exactly what
-        it painted before this existed.
+        ``omit_steady`` is the panel's own rule (design round 3, D40): a row that carries
+        no news still costs a row, and in the steady state — the frame the committed
+        figure and every geometry comparison are made against — it would cost one for
+        nothing. A steady writer therefore paints exactly what it painted before this
+        existed.
         """
         if self.status_run is None:
             return ""
@@ -631,7 +672,6 @@ class NetworkScreen(ModalScreen[None]):
     def _report_text(self, width: int | None = None) -> Text:
         width = self._card_width() if width is None else max(_MIN_CARD_WIDTH, width)
         body = Text()
-        audit_words = self._audit_words()
         if self._focus_relay:
             self._relay_section(body, width)
             body.append("\n")
@@ -644,18 +684,15 @@ class NetworkScreen(ModalScreen[None]):
         body.append("\n")
         self._peers_section(body, width)
         if not self._focus_relay:
-            # THE NEWS IS PAID FOR OUT OF THE SEPARATOR, NOT OUT OF CONTENT. Measured,
-            # because the arithmetic is the whole reason: `#network-scroll` is an 84x16
-            # region over a 17-row body, so the Relay block's rows are the LAST five and
-            # ``log:`` is already the row below the fold. A news row appended after
-            # ``relay:`` therefore lands in the position ``log:`` occupies — painted
-            # nowhere — which is a silence in exactly the state a reader opens the panel
-            # for (design round 3, D40, whose own ``SIGSTOP`` frame is the evidence).
-            # Spending this blank instead keeps the body at 17 rows in EVERY state: the
-            # row is visible, nothing that was on screen leaves it, and ``virtual_size``
-            # does not grow.
-            if not audit_words:
-                body.append("\n")
+            # THE SEPARATOR IS NOT SPENT FOR THE NEWS ANY MORE (design round 4,
+            # D46/D47). Round 3 spent it to keep the body's height constant while the
+            # audit row sat in the Relay block — which held only while the content above
+            # held still, and stopped holding two peers later, when the block and its
+            # row went under the fold together. The news is painted by the title block
+            # now (:meth:`_title_text`), outside this region and out of its budget, so
+            # the blank is the section rhythm it is in every state, and the body is the
+            # same whether the audit has news or not.
+            body.append("\n")
             self._relay_section(body, width)
         # NO TRAILING BLANK INSIDE THE SCROLL REGION (design round 1, D2). Every
         # section ends its last row with a newline, so the body's line count was
@@ -943,18 +980,26 @@ class NetworkScreen(ModalScreen[None]):
         relay = payload.get("relay") or {}
         if payload.get("relay_running"):
             state = "answering" if payload.get("relay_answering") else "NOT answering"
-            body.append(f"  relay:      running, pid {relay.get('pid')} — {state}\n")
+            # TWO SOURCES FOR ONE FACT (design round 4, D45). The pid is on the relay
+            # block when the relay ANSWERS — and that block is null in the wedged case,
+            # which is the state this whole block exists for, so reading it alone painted
+            # the literal ``None`` one row above a sentence saying the process is up. The
+            # record on disk carries the same pid, and the CLI (``network/cli.py``) and
+            # the agent digest (``network/tool.py``) already read the pair in this order;
+            # the panel was the last surface still unable to name the process it was
+            # talking about. Both absent (a payload with neither block) prints the same
+            # sentinel on all three surfaces — that shape is shared, not this one's.
+            pid = relay.get("pid") or (payload.get("record") or {}).get("pid")
+            body.append(f"  relay:      running, pid {pid} — {state}\n")
         else:
             body.append("  relay:      not running\n")
-        # THE AUDIT ROW, AND WHY IT SITS HERE (design round 3, D40). The order is the
-        # block's: `installed:`, `identity:`, `relay:`, then this, then `log:` — the same
-        # order the CLI prints. It is rendered ONLY when it carries news: a steady writer
-        # paints nothing, because the region has no room for a row that says so and the
-        # row it would cost is one that says something (``omit_steady``). Values at cell
-        # 14, the column the four rows around it already use.
-        audit_words = self._audit_words()
-        if audit_words:
-            body.append(_indented_value("  audit:      ", audit_words, width) + "\n")
+        # THE AUDIT ROW IS NOT IN THIS BLOCK ANY MORE (design round 4, D46/D47). It was
+        # round 3's, painted between ``relay:`` and ``log:`` in the CLI's own order, and
+        # it is now the title block's third row: the block is the last thing in a region
+        # that grows, so its rows are the ones the fold takes first — the row has to be
+        # somewhere the fold cannot reach, or the distinction it carries is a distinction
+        # that is only sometimes visible. ``_title_text`` paints it in the same words at
+        # the same cell 14.
         log = str(payload.get("log") or "")
         if log:
             body.append(_indented_value("  log:        ", log, width) + "\n", style="dim")
@@ -976,6 +1021,15 @@ class NetworkScreen(ModalScreen[None]):
         title = getattr(self, "_title", None)
         if title is not None and title.is_mounted:
             title.update(self._title_text())
+            # THE TITLE'S THIRD ROW IS PADDING, OR IT IS THE NEWS (design round 4, D46).
+            # The class is what makes those two the same three rows: with it, the title
+            # block swaps the padding row for the sentence (`#network-title.audit-news`
+            # in ``local_operator.tcss``), so a state with news pushes nothing off the
+            # body and a state without it keeps the styles — and therefore the bytes —
+            # of the frame every comparison in the round is made against. Set from the
+            # same call that sets the content, so the two cannot come to disagree about
+            # whether there is a row.
+            title.set_class(bool(self._audit_words()), "audit-news")
         # THE FOOTER IS WIDTH-SENSITIVE, so it is re-derived here rather than only
         # built once in `compose`: `compose` runs before the first layout, when
         # there is nothing to measure, and a hint fixed at that moment cannot
