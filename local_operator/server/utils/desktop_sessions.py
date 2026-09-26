@@ -281,40 +281,6 @@ RECONNECT_DWELL_S = 20.0
 #: constant with it keeps such a test to a few milliseconds.
 DWELL_TICK_S = 0.25
 
-#: Opt-in switch for the per-stream teardown REASON, which is otherwise invisible.
-#:
-#: The reason vocabulary ("client disconnect" / "subscriber overflow" / "relay
-#: error" / "bridge dispose") is the only thing that can say WHY a stream ended,
-#: and on the operator's machine it reaches no log at all: the module's lines are
-#: INFO and the app captures WARNING and above -- measured, 0 ``[INFO]
-#: local_operator`` lines against 9,687 WARNING+ ones. That is not a defect this
-#: module can fix, because the level is the app's logging configuration.
-#:
-#: So the opt-in is PER EMISSION and bounded to ONE line per stream end, never per
-#: frame: with this set, that line is emitted at WARNING and therefore survives
-#: the app's configuration. Without it the line keeps its own level and the
-#: default is byte-identical to before. Set it for a QA run and unset it after --
-#: a stream ending is a normal event, and promoting it permanently would bury the
-#: WARNINGs that mean something.
-STREAM_REASON_TRACE_ENV = "LOCAL_OPERATOR_DESKTOP_STREAM_TRACE"
-
-#: Truthy spellings for a flag read from the environment. Matches the convention
-#: the rest of the tree uses for an opt-in switch, so an agent does not have to
-#: learn a second one.
-_TRUTHY = frozenset({"1", "true", "yes", "on"})
-
-
-def _stream_reason_trace() -> bool:
-    """Whether the per-stream reason line should be promoted to WARNING.
-
-    Read at each emission rather than captured at import, so a test can set it
-    with ``monkeypatch.setenv`` and a QA run can turn it on for one daemon
-    without a code change. One ``os.environ`` read per stream END, which is a
-    handful per minute even in a storm -- never per frame.
-    """
-    return os.environ.get(STREAM_REASON_TRACE_ENV, "").strip().lower() in _TRUTHY
-
-
 #: Pace of the lease-driven warm, in three parts, because a warm that cannot
 #: succeed must not become a spawn per heartbeat.
 #:
@@ -4027,14 +3993,21 @@ class DesktopSessionBridge:
                 reason, level = f"relay error: {type(pending).__name__}", logging.WARNING
             else:
                 reason, level = "client disconnect", logging.INFO
-            if _stream_reason_trace():
-                # F-C: one line per stream END, promoted only when asked for. The
-                # reason that this is needed at all is upstream of this module --
-                # the app's captured level is WARNING, so the vocabulary never
-                # reaches a log -- and the reason it is per-emission rather than a
-                # logger level is that raising this module's logger would change
-                # every line in it, not just the one that answers the question.
-                level = logging.WARNING
+            # OBSERVABLE THROUGH THE EXISTING LOG-LEVEL KNOB, and deliberately not
+            # through a switch of this module's own (F-C). The reason vocabulary
+            # is the only thing that can say WHY a stream ended, and it reaches no
+            # log on a default daemon because the app captures WARNING and above
+            # while these are INFO -- measured, 0 ``[INFO] local_operator`` lines
+            # against 9,687 WARNING+ ones. The knob for that is already
+            # first-class: ``LOG_LEVEL=INFO`` (``local_operator/logger.py``,
+            # applied to the root logger by ``configure_console_logging``) and the
+            # line is captured, ONE emission per stream END, never per frame.
+            #
+            # NOT an environment read here. This package has exactly one reader of
+            # the desktop environment -- ``desktop.desktop_posture`` -- and
+            # ``tests/unit/server/test_desktop_claim.py`` asserts it mechanically;
+            # a second read beside it, even for a trace flag, is the shape that
+            # guard exists to stop.
             logger.log(
                 level,
                 "desktop stream ended for %s (sub=%s): %s",
