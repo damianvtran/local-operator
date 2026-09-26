@@ -76,7 +76,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
-from local_operator.network import dial as session_dial
+from local_operator.network import addresses, dial as session_dial
 from local_operator.network import projection, store, wire
 from local_operator.network.audit import AuditEvent, AuditLog
 from local_operator.network.authorizer import Authorizer, NetworkState
@@ -1304,17 +1304,16 @@ def advertise_endpoints(settings: NetworkSettings, *, declared: Sequence[str] = 
         # me from another machine" rather than naming an address that only fails.
         add(f"127.0.0.1:{port}")
     else:
-        try:
-            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-                # ``getaddrinfo`` types its sockaddr as a union that includes the
-                # AF_UNIX/AF_INET6 shapes, so the index reads as ``str | int`` even
-                # though AF_INET guarantees a textual address. The cast is the
-                # narrowing, not a coercion.
-                address = str(info[4][0])
-                if not address.startswith("127."):
-                    add(f"{address}:{port}")
-        except OSError:
-            pass
+        # DETECTED LOCALLY, through the INTERFACE TABLE rather than the hostname:
+        # ``getaddrinfo(gethostname())`` returned nothing on macOS (the Bonjour name
+        # is in no resolver), so a Mac with the default ``0.0.0.0`` listener
+        # advertised no address at all and every invite carried an empty ``hosts``.
+        # See ``network/addresses.py`` for why the set comes from ``getifaddrs`` and
+        # the ORDER from the kernel's own default-route choice. ``port`` here is the
+        # LIVE one resolved above, so an enumeration at the config's port cannot
+        # reappear by this route.
+        for address in addresses.local_ipv4_addresses():
+            add(f"{address}:{port}")
     # Bounded by the number a RECEIVER keeps, so nothing published here is dropped
     # at the other end and silently missing from the row `_ensure_link` dials.
     return hosts[:MAX_DECLARED_ENDPOINTS]

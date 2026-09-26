@@ -1052,3 +1052,40 @@ def test_a_failed_audit_write_reads_degraded_before_anything_else_on_the_block(
     out = capsys.readouterr().out
     assert "audit:      DEGRADED" in out, out
     assert log.degraded_reason in out, (log.degraded_reason, out)
+
+
+def test_join_accepts_the_advertise_host_the_config_route_used_to_own() -> None:
+    """``join --advertise-host``: the joiner can name its own address, like ``init`` can.
+
+    The asymmetry was the bug's other face. ``init --advertise-host`` could declare a
+    tunnel or public address at creation, and the mesh docs' remedy for anyone else
+    was to hand-edit ``network.advertise_hosts`` into ``config.yml`` — a key with no
+    registry row that took no effect and was deleted by the next launch. The device
+    that most needs this is the JOINER: it is usually joining precisely because it has
+    no dialable address of its own, and without declaring one its member row carried
+    nothing every peer could dial (``no_endpoint``).
+
+    The parser is asserted here, and ``_join_one``'s use of it is proven end to end by
+    the two-device pairing run on this PR: ``declared_hosts`` is threaded into
+    ``advertise_endpoints``, whose ordering is pinned in ``test_addresses``.
+    """
+    parsed = _parser().parse_args(
+        ["network", "join", "tok", "--advertise-host", "203.0.113.7:4097"]
+    )
+
+    assert parsed.advertise_hosts == ["203.0.113.7:4097"]
+    # REPEATABLE, and the default is empty: an operator with two reachable paths (a
+    # tunnel and a LAN address) declares both, in the order they should be tried.
+    both = _parser().parse_args(
+        [
+            "network",
+            "join",
+            "tok",
+            "--advertise-host",
+            "tunnel.example.com:4100",
+            "--advertise-host",
+            "203.0.113.7:4097",
+        ]
+    )
+    assert both.advertise_hosts == ["tunnel.example.com:4100", "203.0.113.7:4097"]
+    assert _parser().parse_args(["network", "join", "tok"]).advertise_hosts == []
