@@ -3337,6 +3337,23 @@ def _owning_transcript(block: Any) -> "TranscriptView | None":
     return None
 
 
+class _BlockSink:
+    """The `ReplayTarget` seam for collection: appends blocks to a list.
+
+    `append_image_blocks` mounts through ``self._append_block``, so a prepared
+    replay that must not mount yet (the offscreen view is still being built)
+    hands it this sink instead of the app, and the caller appends the collected
+    blocks in its own batch. The same shape `_paint_skipped_live_tool_rows`
+    uses with its ``collect`` argument.
+    """
+
+    def __init__(self, into: list[Any]) -> None:
+        self._into = into
+
+    def _append_block(self, block: Any) -> None:
+        self._into.append(block)
+
+
 class _AttachBehindSend:
     """One message sent while its conversation's paint-first attach was pending.
 
@@ -6633,6 +6650,76 @@ class OperatorApp(App[None]):
             if view is not None:
                 view.remove_block(block)
 
+    def _reseed_pending_user_rows(
+        self, source: SessionInteraction, blocks: list[Any], history: list[Any]
+    ) -> None:
+        """Re-author this conversation's PENDING user rows into a fresh replay.
+
+        THE S3 HOLE (design §4d). A cache-miss rebuild paints from
+        `display_history_window()`, so a message that was submitted but not yet
+        durable — or one whose send FAILED after its row was painted — had no
+        row in the rebuilt view while its failure notice was projected (the
+        notice rides the failure record, which survives the view). A switch
+        back in that window showed a transcript with no row for a send that is
+        still live. The fix is the design's: the pending rows already live on
+        the interaction (`submitted_blocks` for the in-flight send,
+        `failed_sends[].blocks` for failures), so re-author them here, in
+        submission order, at the tail of the replay.
+
+        IDENTITY FOLLOWS `on_user_message_start`. An in-flight row is re-seeded
+        only when its anchor id is ABSENT from the durable history, so the
+        admitted-but-not-yet-announced window cannot double it; an id-less send
+        (a session whose ``prompt`` predates the seam) falls back to the text
+        of the last durable user row, the same fallback the echo consumer
+        uses. A failed send is never durable, so it is re-seeded
+        unconditionally.
+
+        The records take the FRESH rows as their own (`record.blocks`, and
+        `submitted_blocks` for the in-flight send) — the old blocks live in the
+        view being replaced, and a later `edit`/`send again` must retire what is
+        actually on screen.
+        """
+        from local_operator.tui.session_presentation import append_image_blocks
+
+        def reseed(text: str, images: list[Any], marker_text: str) -> tuple[Any, list[Any]]:
+            user_block = UserBlock(text, len(images))
+            blocks.append(user_block)
+            image_blocks = append_image_blocks(_BlockSink(blocks), images, marker_text=marker_text)
+            return user_block, image_blocks
+
+        for record in source.turn.failed_sends:
+            record.blocks = reseed(record.text, list(record.images), record.typed or record.text)
+
+        pending = source.turn.submitted_blocks
+        if pending is None:
+            return
+        user_block, _old_image_blocks = pending
+        anchor = str(getattr(user_block, "navigation_anchor_id", "") or "")
+        row_text = user_block.text()
+        durable_user_ids = {
+            str(getattr(message, "id", "") or "")
+            for message in history
+            if str(getattr(message, "role", "")) == "user"
+        }
+        durable_user_texts = [
+            str(getattr(message, "text", "") or "")
+            for message in history
+            if str(getattr(message, "role", "")) == "user"
+        ]
+        if anchor:
+            already_durable = anchor in durable_user_ids
+        else:
+            already_durable = durable_user_texts[-1:] == [row_text]
+        if already_durable:
+            return
+        accepted = source.turn.submitted_draft
+        images = (
+            [attachment.image for _, attachment in sorted(accepted.attachments.items())]
+            if accepted is not None
+            else []
+        )
+        source.turn.submitted_blocks = reseed(row_text, images, getattr(accepted, "text", ""))
+
     def _register_user_echo_for(
         self, source: SessionInteraction, text: str, *, message_id: str = ""
     ) -> _PendingUserEcho:
@@ -7291,6 +7378,12 @@ class OperatorApp(App[None]):
                 session=session,
                 queued_cards=prepared_queued_cards,
             )
+            # PENDING USER ROWS ride into the fresh replay too (design §4d): a
+            # return can land on a rebuild whose durable history does not yet
+            # contain the send — pre-admission, a cold bind, a stalled ack — or
+            # whose send FAILED after its row was painted, and those rows must
+            # not vanish while their failure notice is projected.
+            self._reseed_pending_user_rows(source, replay.blocks, history)
             replay.view.styles.layer = "session-cache"
             # visibility:hidden removes the compositor map and makes size=0.
             # A screen overlay is excluded from flow/virtual bounds; parking it
