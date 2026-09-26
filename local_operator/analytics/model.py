@@ -233,6 +233,26 @@ class CallSnapshot:
     preparation_ms: float = -1
     outcome: str = "unknown"
     usage_reported: bool = True
+    # The measured GENERATION window: first-to-last output delta in MICROSECONDS,
+    # the output tokens over exactly the calls that produced a window, and how
+    # many calls those were. Chained after ``usage_reported`` rather than
+    # inserted above so the positional writer in ``store.py`` keeps its existing
+    # field order (the same rule ``first_reasoning_ms`` follows).
+    #
+    # Microseconds rather than REAL milliseconds: ``_aggregate_from_row``
+    # coerces every measure with ``int()`` and the rollup upserts accumulate
+    # with ``x = x + excluded.x``, so an integer is the only shape whose sum is
+    # exact and order-independent — and a fast model's whole window can be under
+    # a millisecond, which a millisecond-grained integer would round to 0 or 1.
+    #
+    # 0 is "no window", NOT "-1". ``-1`` is the timing columns' sentinel, and
+    # those are never summed; these three are summed by a plain ``SUM()``, so a
+    # ``-1`` would be folded into the total and corrupt it. ``decode_calls``
+    # disambiguates "unknown" from "measured zero", exactly as
+    # ``cost_known_calls`` does for ``cost_micro``.
+    decode_us: int = 0
+    decode_tokens: int = 0
+    decode_calls: int = 0
 
 
 def price_snapshot(snapshot: "CallSnapshot") -> tuple[int, bool]:
@@ -422,6 +442,14 @@ class UsageAggregate:
     # marks (``$12.30+``) rather than presenting a partial sum as complete.
     cost_micro: int = 0
     cost_known_calls: int = 0
+    # The decode-rate measures (see ``CallSnapshot`` for their shape and why
+    # they are integers). ``decode_tokens`` is NOT ``output_tokens``: a call can
+    # have output tokens and no window (a single-delta response), and dividing
+    # one population by the other inflates the rate. ``decode_calls`` is that
+    # population's count, so every reader can state its coverage.
+    decode_us: int = 0
+    decode_tokens: int = 0
+    decode_calls: int = 0
     components: dict[str, int] = field(default_factory=lambda: {k: 0 for k in COMPONENT_KEYS})
     by_provider: dict[str, "UsageAggregate"] = field(default_factory=dict)
     by_session: dict[str, "UsageAggregate"] = field(default_factory=dict)
@@ -454,6 +482,44 @@ class UsageAggregate:
         run), which the report renders as ``$—`` rather than ``$0.00``.
         """
         return self.cost_known_calls > 0
+
+    @property
+    def decode_tps(self) -> float | None:
+        """Output tokens per second of MEASURED generation, or None.
+
+        ``SUM(decode_tokens) / SUM(decode_us)`` over the calls that produced a
+        window — a sum-weighted rate over a population, never a mean of
+        per-call rates. A mean would weight a 20-token reply and a 20 000-token
+        generation equally, so a scope's headline would be dominated by its
+        shortest calls; and only the summed form composes, so a per-model row
+        folds into a per-provider row folds into the headline with no
+        re-weighting step and no second definition.
+
+        ``None`` — never ``0`` — when no call in scope contributed a window.
+        That is the state of every ledger recorded before this metric shipped,
+        and ``0 tok/s`` would claim every one of those calls decoded instantly.
+        A *measured* slow rate (under 1 tok/s) is a real value and is returned
+        as one; the ``decode_us`` guard is only defence against a hand-built
+        aggregate, since the recording predicate cannot admit ``decode_calls >
+        0`` with a zero window.
+        """
+        if self.decode_calls <= 0 or self.decode_us <= 0:
+            return None
+        return self.decode_tokens / (self.decode_us / 1_000_000.0)
+
+    @property
+    def decode_coverage(self) -> float | None:
+        """The share of ``calls`` the decode rate actually speaks for, or None.
+
+        Partial coverage is the normal case (a pre-release ledger, a provider
+        that answers in one frame, an aborted call with one delta), so a rate
+        must never be presented as if it covered the whole scope. ``None`` when
+        the scope has no calls at all, which is a different fact from ``0.0``:
+        the latter says "none of the calls I can see carry a window".
+        """
+        if self.calls <= 0:
+            return None
+        return self.decode_calls / self.calls
 
     @property
     def total_tokens(self) -> int:
@@ -522,6 +588,12 @@ def sum_aggregates(parts: Iterable[UsageAggregate]) -> UsageAggregate:
     OR-ing the booleans instead would give the second case ``$\u2014`` over a real
     spend. The nested ``by_provider``/``by_session`` maps are deliberately NOT
     merged: this returns a flat scope, and every caller wants one.
+
+    The decode counters are added for the same reason the cost counters are:
+    ``decode_tps``/``decode_coverage`` are derived from them, so summing the
+    counters makes a MIXED subtree (one child with windows, one without) come
+    out right with no special cases, while averaging the children's rates would
+    weight a 20-token call and a 20 000-token one equally.
     """
     total = UsageAggregate()
     for part in parts:
@@ -535,9 +607,74 @@ def sum_aggregates(parts: Iterable[UsageAggregate]) -> UsageAggregate:
         total.context_tokens += part.context_tokens
         total.cost_micro += part.cost_micro
         total.cost_known_calls += part.cost_known_calls
+        total.decode_us += part.decode_us
+        total.decode_tokens += part.decode_tokens
+        total.decode_calls += part.decode_calls
         for key, value in part.components.items():
             total.components[key] = total.components.get(key, 0) + value
     return total
+
+
+@dataclass(frozen=True)
+class ModelRateRow:
+    """One model's throughput, from a grouped scan of the raw ledger.
+
+    TWO RATES, AND THEY ARE DIFFERENT MEASUREMENTS — the field names differ at
+    every layer (Python and the wire) so no surface can pick the wrong one by
+    reading a similarly-named attribute:
+
+    - ``decode_tps`` is the primary metric: ``decode_tokens / decode_us``, over
+      calls that produced a measured first-to-last-output-delta window. It
+      EXCLUDES calls with no window (a single-delta response, an aborted call
+      that never emitted twice, anything recorded before this shipped), so it is
+      forward-fill only.
+    - ``wall_tps`` is ``wall_tokens / wall_us`` over calls with ``duration_ms >
+      0`` and output tokens — both already-stored columns, so it covers the
+      operator's entire existing history with no migration. It includes TTFT,
+      provider queueing and consumer backpressure, so it is a WALL rate and must
+      never be labelled decode speed: a model with a four-second first-token
+      wait and a fast decode shows a low wall rate and a high decode rate, and
+      that difference is the diagnosis rather than a defect.
+
+    ``wall_*`` lives on this type only — ``UsageAggregate`` carries no wall
+    field at all. Accumulating a wall rate into the aggregate would require a
+    column, which would make it forward-fill and destroy the one property that
+    makes it worth having; the cost of that choice is an explicit ledger read
+    (``AnalyticsStore.model_rates``), which is honest about what it is.
+
+    Every count is kept beside its sums so a reader can state coverage rather
+    than imply the rate speaks for every call.
+    """
+
+    provider: str
+    model_id: str
+    calls: int
+    output_tokens: int
+    decode_us: int
+    decode_tokens: int
+    decode_calls: int
+    wall_us: int
+    wall_tokens: int
+    wall_calls: int
+
+    @property
+    def decode_tps(self) -> float | None:
+        """SUM/SUM over decode-timed calls, or None when there are none."""
+        if self.decode_calls <= 0 or self.decode_us <= 0:
+            return None
+        return self.decode_tokens / (self.decode_us / 1_000_000.0)
+
+    @property
+    def wall_tps(self) -> float | None:
+        """SUM/SUM over calls whose duration is a real sample, or None.
+
+        ``None`` rather than ``0`` when no call in this row has both a positive
+        duration and output tokens: ``0 tok/s`` would be a measurement claim
+        about calls nothing was measured on.
+        """
+        if self.wall_calls <= 0 or self.wall_us <= 0:
+            return None
+        return self.wall_tokens / (self.wall_us / 1_000_000.0)
 
 
 #: Depth cap for the per-session forest walk, mirroring the store's own cap on
