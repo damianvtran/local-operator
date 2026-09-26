@@ -1,4 +1,4 @@
-"""Read a scored episode's zero, and say whether the APPARATUS produced it.
+"""Read a scored episode's verdict, and say whether the APPARATUS produced it.
 
 WHY THIS EXISTS, precisely. The campaign of 2026-09-25 scored ``task_017``
 zero while a rendered Google Maps walking-route page -- every stop, the travel
@@ -7,26 +7,64 @@ claim was TRUE. The evaluator's own retained diagnostics show why the score is
 zero anyway: ``get_active_url_from_accessTree`` returned ``None`` on all three
 attempts, the fallback then selected a DIFFERENT open Google Maps tab (a place
 page, which has no directions inputs), and the selector it went on to wait for
-timed out. One of the 32 scored episodes carries that signature. That zero is
-not a capability reading, and counting it as one understates the arm.
+timed out.
+
+FOUR SCORED EPISODES CARRY THE GETTER-AND-FALLBACK PAIR, AND THAT PAIR IS NOT
+BY ITSELF A MIS-GRADE. The audit of all 96 sealed bundles (2026-09-26) found the
+pair on four ``task_017`` episodes -- the Maps task, the one that opens several
+Maps tabs -- across three arms:
+
+    ep-94b968963d3e  cohort7-20260925-002218           binary 0  partial 0
+    ep-9a6876e889e1  gateOFF-task_017-20260925-184401  binary 0  partial 142857
+    ep-b62377fe1ba5  gateON-t017-20260925-181934       binary 1  partial 1000000
+    ep-3dcae8b48633  strong-task_017-20260926-043257   binary 1  partial 1000000
+
+Reading all four properly is what produced the rule below, and it refutes an
+earlier version of this docstring. In EVERY one of the four the fallback's chosen
+URL is byte-identical to the URL the evaluator itself printed as its target page
+-- a selection echo, not agreement: ``chrome.py`` selects the page it prints BY
+the fallback's own URL, so the two lines cannot disagree -- and in three of the
+four the parse then returned REAL content that went on to be scored: the two
+passes matched the expected eight-stop walking route, and ``ep-9a6876e889e1``
+scored a 1/7 partial against the route it did produce. Those three are readings
+of the state the episode produced -- the discriminating evidence is the read that
+followed, not the URL echo. Only ``ep-94b968963d3e`` is a mis-grade: the element
+the task is judged on was not on the graded page, the selector the evaluator
+waited for timed out, and the read it scored came back empty
+(``{'aria-label': []}``) where the check expected content. The classifier keys on
+that shape's three log markers -- a proxy for the read, not a check of it, with
+its residuals stated at ``_WAIT_TIMEOUT_RE`` below.
+
+So the classifier requires ALL THREE markers -- getter failure, open-tab
+fallback, and a timed-out selector -- and the third is load-bearing, not
+corroborative. On this corpus that flags one episode, and the honest figure is
+6/63 = 9.5% against the naive binary rate of 6/64 = 9.4%. The two are close
+because this corpus contains no manufactured PASS: had the fallback graded a page
+whose EMPTY read happened to satisfy an empty expectation, the mis-grade would
+have landed on a pass, which is the case a rule that consults ``binary`` at all
+could not see.
 
 SO THIS IS A READ-SIDE TRIAGE, NOT A HARNESS FIX. The pinned vendor tree's
-getter is deliberately left alone: patching it would make the arm
-non-comparable with the published benchmark (``INFRA.md``'s rule about upstream
-retry policy), and the next reader could not tell the two arms apart from a
-score. The adapter already seals the evaluator's diagnostics into the
-score-details artifact, so the classification is derivable from the sealed
-bundle and nothing about scoring changes.
+getter is deliberately left alone: ``docs/benchmarks/osworld_2/README.md``
+("Comparability") makes a number reportable only when its bundle verifies, its
+reportability is ``reportable`` and its comparability is ``comparable``, so
+changing the apparatus the pin names would move the arm out from under its own
+score rather than fix the score. (``~/worktrees/osworld/INFRA.md`` states the
+same rule for this campaign's runs; it is the campaign's own record and not in
+this repository, so the in-repo document is the citation to check.) The adapter
+already seals the evaluator's diagnostics into the score-details artifact, so the
+classification is derivable from the sealed bundle and nothing about scoring
+changes.
 
 WHAT IT DOES NOT DO. It does not decide that an episode "really" succeeded, and
-it never turns a zero into a one: an apparatus-attributable episode is EXCLUDED
-and NAMED, so the capability rate is computed over the episodes whose score the
-apparatus could actually read. Unscored episodes are excluded and named for the
-same reason and by the same rule (``INFRA.md``: "Exclude them honestly and name
-why; do not count them as zeros"). A campaign reading this rate still has to
-exclude a non-reportable arm -- a scripted or fake-provider run -- by its own
-manifest ``reportability_label``; that is the driver's stamp and not something a
-score can be triaged into.
+it never rewrites a score: an apparatus-attributable episode is EXCLUDED and
+NAMED from BOTH sides of the rate, so the figure is computed over the episodes
+whose score the apparatus could actually read. Unscored episodes are excluded and
+named for the same reason and by the same rule -- a score has to exist before it
+can be a reading of anything. A campaign reading this rate still has to exclude a
+non-reportable arm -- a scripted or fake-provider run -- by its own manifest
+``reportability_label``; that is the driver's stamp (see the comparability rule
+above) and not something a score can be triaged into.
 
 Run it over a run directory (``<run>/evidence/<episode>`` bundles) or over one
 bundle:
@@ -54,7 +92,7 @@ from local_operator.evaluation.evidence.models import (
 )
 from local_operator.evaluation.evidence.verify import verify_bundle
 
-#: The classification this module can add to a zero. A STRING rather than a bool
+#: The classification this module can add to a score. A STRING rather than a bool
 #: so a report can carry the reason, and a closed set so a later classification
 #: (a second apparatus signature) is an addition to it rather than a second
 #: boolean every reader would have to learn.
@@ -64,45 +102,87 @@ UNSCORED = "unscored"
 UNREADABLE = "unreadable"
 
 # The signature, as the pinned getter and its caller spell it in their own log
-# records. Both halves are required: the getter returning ``None`` is what the
-# evaluator tried to recover from, and the open-tab fallback is what it did
-# about it -- a fallback that picked the RIGHT tab would be invisible here (the
-# score would simply be right), so the pair is what makes the reading
-# attributable rather than merely suspicious.
+# records. It takes THREE markers, and the third is the one that does the work.
+#
+# THE FIRST TWO ALONE ARE NOT ATTRIBUTION, and an earlier revision of this module
+# assumed they were on the reasoning that "a fallback that picked the RIGHT tab
+# would be invisible here (the score would simply be right)". That reasoning is
+# false, and the sealed corpus shows it: the getter-failure and the fallback are
+# emitted by the same code path whatever tab the fallback lands on. In all four
+# measured task_017 episodes the fallback's chosen URL is byte-identical to the
+# URL the evaluator itself printed as its target page -- a selection echo, not
+# agreement: ``chrome.py`` selects the page it prints BY the fallback's own URL,
+# so the two lines cannot disagree -- and in three of the four the parse then
+# produced REAL content that went on to be scored (two passes on the expected
+# route, one 1/7 partial). Those three are readings, so classifying them would
+# remove genuine passes from the numerator -- the exact error this module exists
+# to avoid, aimed the other way.
+#
+# What separates the fourth (a genuine mis-grade) is that the element the check
+# asked for was NOT on the graded page, so its read came back empty
+# (``{'aria-label': []}`` against an evaluator that expected content). That
+# emptiness is what ``_WAIT_TIMEOUT_RE`` stands in for, and it is why the
+# corroborator is now a REQUIREMENT.
+#
+# AND THE THIRD MARKER IS A PROXY FOR THAT EMPTY READ, NOT A CHECK OF IT: the
+# classifier keys on the log and never opens the graded content. Two residuals
+# are stated here rather than closed, and neither has an instance in the
+# 96-bundle corpus (so nothing moves today -- they are named so no reader takes
+# the markers as an exact reconstruction of the read). A run whose read was REAL
+# can still carry all three markers -- a wait timeout for one selector while the
+# graded read another path produces stays non-empty, a wait/read race or a
+# multi-selector config -- and classifies identically, the reason saying "came
+# back empty" however the read turned out. And a genuine capability failure with
+# the same geometry (the element truly absent, the fallback on a route-less Maps
+# tab, the timeout fired, the read empty) emits an identical marker set, which
+# only the campaign's finish-frame evidence could separate from
+# ``ep-94b968963d3e``'s shape.
 _ACTIVE_URL_NONE_RE = re.compile(r"get_active_url_from_accessTree[^\n]*\breturned:\s*None")
 _OPEN_TAB_FALLBACK_RE = re.compile(r"Falling back to an open[^\n]*\btab\b")
-# Corroboration, not a requirement: the fallback lands on a page without the
-# element the task is judged on, which is why the read produced nothing. Named
-# in the reason when present, because it is what a reader checks next.
+# Required, not corroborative: the graded page did not carry the element the task
+# is judged on, which is the observable difference between "the fallback graded a
+# page the episode did not produce" and "the fallback recovered the target and the
+# read was real". Named in the reason because it is what a reader checks next.
 _WAIT_TIMEOUT_RE = re.compile(r"wait_for_selector timed out for '([^']*)'")
 
 #: The diagnostics key ``scoring`` wraps a captured block under.
 _DIAGNOSTICS_KEY = "evaluator_diagnostics"
 
 
-def classify_zero(diagnostics_text: str) -> str | None:
-    """Why this zero looks apparatus-attributable, or ``None`` if it does not.
+def classify_apparatus_attribution(diagnostics_text: str) -> str | None:
+    """Why this episode looks apparatus-attributable, or ``None`` if it does not.
+
+    All three markers are required; see the comment above them for why the first
+    two are not enough and what the third buys.
+
+    Deliberately takes the diagnostics and NOT the score. The check is about what
+    the evaluator could READ, and a mis-grade can land on either verdict: a read
+    that came back empty manufactures a zero, and one compared against a
+    mis-selected page could as easily confirm a pass. A caller that only asked
+    about zeros could not see the second case at all.
 
     ``diagnostics_text`` is the evaluator's retained stdout and stderr, joined.
     A capture that was TRUNCATED can hide the signature (the ring drops the head
-    of the stream), which costs a false negative -- an unclassified zero that
-    stays in the rate -- and never a false positive, because both markers have
-    to be present in the bytes that survived.
+    of the stream), which costs a false negative -- an unclassified episode that
+    stays in the rate -- and never a false positive, because every marker has to
+    be present in the bytes that survived.
     """
 
-    active_url = _ACTIVE_URL_NONE_RE.search(diagnostics_text)
-    if active_url is None or _OPEN_TAB_FALLBACK_RE.search(diagnostics_text) is None:
+    if _ACTIVE_URL_NONE_RE.search(diagnostics_text) is None:
         return None
-    reason = (
-        "the evaluator could not read the active tab's URL "
-        "('get_active_url_from_accessTree ... returned: None') and its open-tab "
-        "fallback selected a different tab, so the state it graded was not the "
-        "state the episode produced"
-    )
+    if _OPEN_TAB_FALLBACK_RE.search(diagnostics_text) is None:
+        return None
     timeout = _WAIT_TIMEOUT_RE.search(diagnostics_text)
-    if timeout is not None:
-        reason += f"; the selector it then waited for ({timeout.group(1)!r}) timed out"
-    return reason
+    if timeout is None:
+        return None
+    return (
+        "the evaluator could not read the active tab's URL "
+        "('get_active_url_from_accessTree ... returned: None'), its open-tab "
+        "fallback graded a page that did not carry the element the task is judged "
+        f"on (the selector it waited for, {timeout.group(1)!r}, timed out), and the "
+        "read it scored came back empty -- so the state graded was not the state "
+        "the episode produced"
+    )
 
 
 def _diagnostics_text(details: Any) -> str:
@@ -129,7 +209,7 @@ def _diagnostics_text(details: Any) -> str:
 
 @dataclass(frozen=True)
 class EpisodeTriage:
-    """One bundle's score, and what (if anything) can be said about a zero."""
+    """One bundle's score, and what (if anything) can be said about it."""
 
     episode_id: str
     bundle: Path
@@ -151,9 +231,11 @@ class EpisodeTriage:
     def counts_toward_capability(self) -> bool:
         """Whether this episode is a capability reading at all.
 
-        A zero the apparatus produced is not one, and neither is an episode the
-        evaluator never scored; only the first is what this module classifies,
-        so the two are both excluded and separately named.
+        A score the apparatus produced is not one -- in EITHER direction, a
+        manufactured pass inflating the numerator exactly as a manufactured zero
+        deflates it -- and neither is an episode the evaluator never scored. The
+        first is what this module classifies, so the two are both excluded and
+        separately named.
         """
 
         return self.attribution in (CAPABILITY,)
@@ -171,7 +253,14 @@ class CampaignReadout:
 
     @property
     def correct(self) -> int:
-        return sum(1 for e in self.scored if e.binary == 1)
+        """Passes that are capability readings.
+
+        Not ``sum(binary == 1)``: a pass the apparatus manufactured is excluded
+        from the numerator for the same reason a manufactured zero is excluded
+        from the denominator, so this counts only the episodes that count.
+        """
+
+        return sum(1 for e in self.scored if e.binary == 1 and e.counts_toward_capability)
 
     @property
     def apparatus_attributable(self) -> tuple[EpisodeTriage, ...]:
@@ -263,9 +352,16 @@ def read_bundle(bundle: Path) -> EpisodeTriage:
         )
     score = scores[0]
     episode_id = report.manifest.episode_id if report.manifest is not None else label
-    if score.binary != 0 or score.details is None:
-        # Only a ZERO is triaged: a one is a reading whatever the evaluator's
-        # logs say, and an unscored artifact is already excluded by status.
+    if score.details is None:
+        # Nothing was captured to attribute the score to, so there is nothing to
+        # classify and the score stands as the capability reading it is. The
+        # binary is deliberately NOT consulted: the same evaluator defect
+        # manufactures passes as well as zeros (module docstring), and the binary
+        # cannot say whether a pass is a reading -- a rule of "only a zero is
+        # triaged" could never see a mis-grade that came out as a pass, and a
+        # manufactured pass would leave both sides of the rate. (This corpus's
+        # one apparatus-attributable episode is a zero; the honest rate is
+        # 6/63 = 9.5%.)
         return EpisodeTriage(
             episode_id=episode_id,
             bundle=bundle,
@@ -283,9 +379,9 @@ def read_bundle(bundle: Path) -> EpisodeTriage:
             score=score,
             attribution=CAPABILITY,
             reason=f"score details could not be read ({type(error).__name__}); "
-            "the zero stands unless another reading explains it",
+            "the score stands unless another reading explains it",
         )
-    reason = classify_zero(_diagnostics_text(details))
+    reason = classify_apparatus_attribution(_diagnostics_text(details))
     if reason is None:
         return EpisodeTriage(
             episode_id=episode_id,
@@ -361,14 +457,23 @@ def format_readout(readout: CampaignReadout) -> str:
     if excluded:
         lines.append("  excluded, named:")
         for episode in excluded:
-            lines.append(f"    {episode.episode_id}  [{episode.attribution}] {episode.reason}")
+            # The binary is shown because the exclusion can come off either side
+            # of the rate now: a manufactured pass leaves the numerator exactly as
+            # a manufactured zero leaves the denominator, and a reader checking
+            # the arithmetic needs to see which of the two each line is. An
+            # unscored or unreadable episode has no score to show, and its
+            # attribution already says so.
+            scored = "" if episode.binary is None else f"binary={episode.binary} "
+            lines.append(
+                f"    {episode.episode_id}  [{episode.attribution}] {scored}{episode.reason}"
+            )
     return "\n".join(lines)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m local_operator.evaluation.triage",
-        description="Classify apparatus-attributable zeros out of a capability rate",
+        description="Classify apparatus-attributable episodes out of a capability rate",
     )
     parser.add_argument(
         "paths",
